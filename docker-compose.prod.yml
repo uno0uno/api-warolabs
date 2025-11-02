@@ -1,0 +1,12 @@
+# docker-compose.prod.yml - Production only
+# Use with: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up
+
+version: '3.8'
+
+services:
+  web:
+    environment:
+      - DEBUG=false
+      - ENVIRONMENT=production
+    # No volumes - code is baked into the image
+    restart: unless-stopped

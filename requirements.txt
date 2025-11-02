@@ -1,0 +1,12 @@
+fastapi==0.119.1
+uvicorn==0.38.0
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+python-dotenv==1.1.1
+python-multipart==0.0.20
+PyJWT==2.10.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
+starlette==0.47.3
+SQLAlchemy==2.0.44
+requests==2.32.5

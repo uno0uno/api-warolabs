@@ -1,0 +1,12 @@
+# docker-compose.override.yml - Development only
+# This file is applied automatically when NODE_ENV != production
+
+version: '3.8'
+
+services:
+  web:
+    volumes:
+      - ./app:/code/app  # Hot reload for development
+    environment:
+      - DEBUG=true
+      - ENVIRONMENT=development
