@@ -4,6 +4,7 @@ from app.routers import auth, tenants, financial
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
+from app.core.middleware import tenant_detection_middleware
 
 # Initialize logging
 setup_logging()
@@ -38,8 +39,20 @@ def custom_openapi():
             "name": "session-token"
         }
     }
-    # Apply security to all endpoints
+    # Apply security to endpoints that need authentication
+    # Magic link endpoints don't need auth (they create the auth)
+    public_endpoints = [
+        "/auth/sign-in-magic-link",
+        "/auth/verify-code",
+        "/health",
+        "/"
+    ]
+    
     for path in openapi_schema["paths"]:
+        # Skip public endpoints
+        if path in public_endpoints:
+            continue
+            
         for method in openapi_schema["paths"][path]:
             if method in ["get", "post", "put", "delete", "patch"]:
                 openapi_schema["paths"][path][method]["security"] = [{"cookieAuth": []}]
@@ -64,6 +77,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Tenant detection middleware
+app.middleware("http")(tenant_detection_middleware)
 
 # Include API routers
 app.include_router(auth.router, prefix="/auth", tags=["auth"])

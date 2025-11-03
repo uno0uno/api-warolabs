@@ -33,6 +33,12 @@ class TenantError(APIError):
     def __init__(self, message: str = "Invalid tenant", details: Dict[str, Any] = None):
         super().__init__(message, 404, details)
 
+class ValidationError(APIError):
+    """Validation related errors"""
+    
+    def __init__(self, message: str = "Validation failed", details: Dict[str, Any] = None):
+        super().__init__(message, 400, details)
+
 class DatabaseError(APIError):
     """Database operation errors"""
     

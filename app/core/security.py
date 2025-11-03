@@ -40,6 +40,13 @@ def validate_jwt_token(token: str) -> dict:
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+def get_client_ip(request: Request) -> Optional[str]:
+    """Get client IP address from request headers"""
+    forwarded_for = request.headers.get('x-forwarded-for')
+    if forwarded_for:
+        return forwarded_for.split(',')[0].strip()
+    return request.client.host if request.client else None
+
 def detect_tenant_from_headers(request: Request) -> dict:
     """Port exact tenant detection logic from warolabs.com"""
     return {

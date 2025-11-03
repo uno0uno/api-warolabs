@@ -36,3 +36,22 @@ class SessionResponse(BaseModel):
     
     class Config:
         populate_by_name = True
+
+# New models for magic link authentication
+class MagicLinkRequest(BaseModel):
+    email: str
+    redirect: Optional[str] = None
+
+class MagicLinkResponse(BaseModel):
+    success: bool = True
+    message: str = "Magic link sent successfully"
+
+class VerifyCodeRequest(BaseModel):
+    email: str
+    code: str
+
+class VerifyCodeResponse(BaseModel):
+    success: bool = True
+    message: str = "Verification successful"
+    user: User
+    tenant: Tenant

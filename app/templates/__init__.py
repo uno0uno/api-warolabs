@@ -1,0 +1,1 @@
+# Email templates for FastAPI authentication system

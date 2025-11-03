@@ -12,7 +12,6 @@ class DatabasePool:
     async def create_pool(cls):
         if cls._pool is None:
             try:
-                # Use exact same connection parameters as warolabs.com
                 cls._pool = await asyncpg.create_pool(
                     **settings.db_connection_params,
                     min_size=5,
