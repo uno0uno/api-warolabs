@@ -31,6 +31,8 @@ ENV/
 .env.development
 .env.test
 .env.production
+.env.prod
+!.env.example
 
 # IDE
 .vscode/
