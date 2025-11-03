@@ -79,8 +79,8 @@ async def tenant_detection_middleware(request: Request, call_next):
     Sets request.state.tenant_context for use in endpoints
     """
     try:
-        # Skip tenant detection for health checks and docs
-        if request.url.path in ['/health', '/docs', '/redoc', '/openapi.json']:
+        # Skip tenant detection for health checks, docs and root endpoint
+        if request.url.path in ['/health', '/docs', '/redoc', '/openapi.json', '/']:
             response = await call_next(request)
             return response
         
@@ -123,6 +123,10 @@ async def tenant_detection_middleware(request: Request, call_next):
                     status_code=400,
                     content={"error": f"Unknown development site: {requesting_site}"}
                 )
+        
+        # Handle api subdomain - map api.warolabs.com to warolabs.com
+        if requesting_site == 'api.warolabs.com':
+            requesting_site = 'warolabs.com'
         
         # Query database for tenant site configuration
         async with get_db_connection() as conn:
