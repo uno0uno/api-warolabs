@@ -1,0 +1,393 @@
+{
+	"info": {
+		"_postman_id": "a1b2c3d4-e5f6-4789-a0b1-c2d3e4f5g6h7",
+		"name": "Warolabs API",
+		"description": "Collection to validate Warolabs API endpoints",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Health Check",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/health",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"health"
+					]
+				},
+				"description": "Check API health status"
+			},
+			"response": []
+		},
+		{
+			"name": "Root",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						""
+					]
+				},
+				"description": "Get basic API information"
+			},
+			"response": []
+		},
+		{
+			"name": "Auth",
+			"item": [
+				{
+					"name": "Get Session",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Cookie",
+								"value": "session-token={{session_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/auth/session",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"auth",
+								"session"
+							]
+						},
+						"description": "Get current session data"
+					},
+					"response": []
+				},
+				{
+					"name": "Sign Out",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Cookie",
+								"value": "session-token={{session_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/auth/signout",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"auth",
+								"signout"
+							]
+						},
+						"description": "Sign out (placeholder endpoint)"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Tenants",
+			"item": [
+				{
+					"name": "Get User Tenants",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Cookie",
+								"value": "session-token={{session_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/tenants/user-tenants",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"tenants",
+								"user-tenants"
+							]
+						},
+						"description": "Get tenants for current user"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Financial",
+			"item": [
+				{
+					"name": "TIR Metrics - Monthly",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Cookie",
+								"value": "session-token={{session_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/finance/tir-metrics?period=monthly&limit=12",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"finance",
+								"tir-metrics"
+							],
+							"query": [
+								{
+									"key": "period",
+									"value": "monthly"
+								},
+								{
+									"key": "limit",
+									"value": "12"
+								}
+							]
+						},
+						"description": "Get monthly TIR metrics"
+					},
+					"response": []
+				},
+				{
+					"name": "TIR Metrics - Weekly",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Cookie",
+								"value": "session-token={{session_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/finance/tir-metrics?period=weekly&limit=8",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"finance",
+								"tir-metrics"
+							],
+							"query": [
+								{
+									"key": "period",
+									"value": "weekly"
+								},
+								{
+									"key": "limit",
+									"value": "8"
+								}
+							]
+						},
+						"description": "Get weekly TIR metrics"
+					},
+					"response": []
+				},
+				{
+					"name": "Products Analysis - All",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Cookie",
+								"value": "session-token={{session_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/finance/products-analysis?period=365&sort_by=margin",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"finance",
+								"products-analysis"
+							],
+							"query": [
+								{
+									"key": "period",
+									"value": "365"
+								},
+								{
+									"key": "sort_by",
+									"value": "margin"
+								}
+							]
+						},
+						"description": "Product analysis - all products sorted by margin"
+					},
+					"response": []
+				},
+				{
+					"name": "Products Analysis - By Category",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Cookie",
+								"value": "session-token={{session_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/finance/products-analysis?period=30&category=Pastas&sort_by=sales",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"finance",
+								"products-analysis"
+							],
+							"query": [
+								{
+									"key": "period",
+									"value": "30"
+								},
+								{
+									"key": "category",
+									"value": "Pastas"
+								},
+								{
+									"key": "sort_by",
+									"value": "sales"
+								}
+							]
+						},
+						"description": "Product analysis filtered by category"
+					},
+					"response": []
+				},
+				{
+					"name": "Products Analysis - With Min Margin",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Cookie",
+								"value": "session-token={{session_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/finance/products-analysis?period=90&min_margin=20&sort_by=profit",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"finance",
+								"products-analysis"
+							],
+							"query": [
+								{
+									"key": "period",
+									"value": "90"
+								},
+								{
+									"key": "min_margin",
+									"value": "20"
+								},
+								{
+									"key": "sort_by",
+									"value": "profit"
+								}
+							]
+						},
+						"description": "Product analysis with minimum 20% margin"
+					},
+					"response": []
+				},
+				{
+					"name": "Obstacles Analysis - 30 days",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Cookie",
+								"value": "session-token={{session_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/finance/obstacles-analysis?period=30",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"finance",
+								"obstacles-analysis"
+							],
+							"query": [
+								{
+									"key": "period",
+									"value": "30"
+								}
+							]
+						},
+						"description": "Operational obstacles analysis - last 30 days"
+					},
+					"response": []
+				},
+				{
+					"name": "Obstacles Analysis - 7 days",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Cookie",
+								"value": "session-token={{session_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/finance/obstacles-analysis?period=7",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"finance",
+								"obstacles-analysis"
+							],
+							"query": [
+								{
+									"key": "period",
+									"value": "7"
+								}
+							]
+						},
+						"description": "Operational obstacles analysis - last 7 days"
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:5001",
+			"type": "string"
+		},
+		{
+			"key": "session_token",
+			"value": "",
+			"type": "string"
+		}
+	]
+}
