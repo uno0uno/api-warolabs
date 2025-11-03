@@ -56,3 +56,45 @@ def detect_tenant_from_headers(request: Request) -> dict:
         'forwarded_host': request.headers.get('x-forwarded-host', ''),
         'original_host': request.headers.get('x-original-host', ''),
     }
+
+async def get_session_from_request(request: Request) -> Optional[dict]:
+    """
+    Get session data from request using session token
+    Returns session data with user_id, tenant_id, etc.
+    """
+    from app.database import get_db_connection
+    
+    try:
+        # Get session token from cookies
+        session_token = request.cookies.get("session-token")
+        if not session_token:
+            return None
+        
+        async with get_db_connection() as conn:
+            # Get session data from database
+            session_query = """
+                SELECT s.user_id, s.tenant_id, s.expires_at, s.is_active,
+                       p.email, p.name
+                FROM sessions s
+                JOIN profile p ON s.user_id = p.id
+                WHERE s.id = $1 
+                  AND s.expires_at > NOW()
+                  AND s.is_active = true
+                LIMIT 1
+            """
+            session_result = await conn.fetchrow(session_query, session_token)
+            
+            if not session_result:
+                return None
+            
+            return {
+                'user_id': session_result['user_id'],
+                'tenant_id': session_result['tenant_id'],
+                'email': session_result['email'],
+                'name': session_result['name'],
+                'expires_at': session_result['expires_at'],
+                'is_active': session_result['is_active']
+            }
+            
+    except Exception:
+        return None

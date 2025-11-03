@@ -50,8 +50,31 @@ class VerifyCodeRequest(BaseModel):
     email: str
     code: str
 
+class VerifyTokenRequest(BaseModel):
+    email: str
+    token: str
+
 class VerifyCodeResponse(BaseModel):
     success: bool = True
     message: str = "Verification successful"
     user: User
     tenant: Tenant
+
+class VerifyTokenResponse(BaseModel):
+    success: bool = True
+    message: str = "Login successful"
+    user: User
+
+class UserTenantsResponse(BaseModel):
+    success: bool = True
+    data: list[Tenant]
+    timestamp: Optional[str] = None
+
+class SwitchTenantRequest(BaseModel):
+    tenantSlug: str
+
+class SwitchTenantResponse(BaseModel):
+    success: bool = True
+    message: str = "Tenant switched successfully"
+    tenant: Tenant
+    timestamp: Optional[str] = None

@@ -9,7 +9,7 @@ from app.database import get_db_connection
 from app.core.security import set_session_cookie, get_client_ip
 from app.core.middleware import require_valid_tenant
 from app.core.exceptions import AuthenticationError, ValidationError
-from app.models.auth import User, Tenant, MagicLinkResponse, VerifyCodeResponse
+from app.models.auth import User, Tenant, MagicLinkResponse, VerifyCodeResponse, VerifyTokenResponse
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +156,7 @@ async def verify_code(request: Request, response: Response, email: str, code: st
             
             if not token_data:
                 logger.warning(f"❌ Invalid verification code for {email} on {tenant_context.site}")
-                raise AuthenticationError("Código de verificación inválido o expirado")
+                raise AuthenticationError("Invalid or expired verification code")
             
             logger.info(f"✅ Valid verification code for user: {token_data['user_id']}")
             
@@ -216,3 +216,87 @@ async def verify_code(request: Request, response: Response, email: str, code: st
     except Exception as e:
         logger.error(f"❌ Verification code handler error: {e}", exc_info=True)
         raise AuthenticationError("Verification failed")
+
+
+async def verify_token(request: Request, response: Response, email: str, token: str) -> VerifyTokenResponse:
+    """
+    Verify magic link token using tenant context from middleware
+    """
+    try:
+        # Get validated tenant context from middleware
+        tenant_context = require_valid_tenant(request)
+        
+        logger.info(f"🔍 Token verification request for {email} from {tenant_context.site}")
+        
+        async with get_db_connection() as conn:
+            # Find valid unused magic token with tenant context
+            verify_query = """
+                SELECT mt.*, p.email, p.name, p.id as user_id, p.created_at as user_created_at,
+                       tm.role as user_role
+                FROM magic_tokens mt
+                JOIN profile p ON mt.user_id = p.id
+                LEFT JOIN tenant_members tm ON tm.user_id = p.id AND tm.tenant_id = mt.tenant_id
+                WHERE p.email = $1 AND mt.token = $2 
+                AND mt.tenant_id = $3
+                AND mt.expires_at > NOW() AND mt.used = false
+                LIMIT 1
+            """
+            
+            token_data = await conn.fetchrow(verify_query, email, token, tenant_context.tenant_id)
+            
+            if not token_data:
+                logger.warning(f"❌ Invalid or expired token for {email} on {tenant_context.site}")
+                raise AuthenticationError("Invalid or expired token")
+            
+            logger.info(f"✅ Valid token found for user: {token_data['user_id']}")
+            
+            # Mark token as used
+            await conn.execute(
+                'UPDATE magic_tokens SET used = true, used_at = NOW() WHERE token = $1 AND user_id = $2',
+                token, token_data['user_id']
+            )
+            logger.info("✅ Token marked as used")
+            
+            # Create session with tenant context
+            session_id = secrets.token_hex(16)
+            expires_at = datetime.utcnow() + timedelta(days=30)  # 30 days
+            
+            # Get client info for analytics
+            client_ip = get_client_ip(request)
+            user_agent = request.headers.get('user-agent')
+            
+            session_query = """
+                INSERT INTO sessions (
+                  id, user_id, tenant_id, expires_at, 
+                  created_at, last_activity_at, 
+                  ip_address, user_agent, login_method, is_active
+                )
+                VALUES ($1, $2, $3, $4, NOW(), NOW(), $5, $6, 'magic_link', true)
+                RETURNING id
+            """
+            await conn.execute(session_query, 
+                session_id, token_data['user_id'], tenant_context.tenant_id, 
+                expires_at, client_ip, user_agent
+            )
+            logger.info(f"🎫 Session created: {session_id} for {tenant_context.tenant_name}")
+            
+            # Set session cookie
+            set_session_cookie(response, session_id)
+            
+            # Build response model
+            user = User(
+                id=token_data['user_id'],
+                email=token_data['email'],
+                name=token_data['name'],
+                createdAt=token_data['user_created_at'] or datetime.utcnow()
+            )
+            
+            logger.info(f"✅ Token verification successful for {email} on {tenant_context.site}")
+            
+            return VerifyTokenResponse(user=user)
+            
+    except (ValidationError, AuthenticationError):
+        raise
+    except Exception as e:
+        logger.error(f"❌ Token verification handler error: {e}", exc_info=True)
+        raise AuthenticationError("Token verification failed")

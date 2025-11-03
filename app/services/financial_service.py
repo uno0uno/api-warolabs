@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 from fastapi import Request, Response
 from app.database import get_db_connection
-from app.services.auth_service import get_session_data
+from app.core.middleware import require_valid_session
 
 logger = logging.getLogger(__name__)
 
@@ -11,14 +11,12 @@ async def get_products_analysis(request: Request, response: Response, period: in
     """
     Products analysis - try real data first, fallback to empty response
     """
-    # First validate session and get tenant context
-    session_data = await get_session_data(request, response)
-    tenant_id = session_data.session.tenant_id
+    # Get session context from middleware
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
     
     if not tenant_id:
         raise ValueError("Tenant ID no puede ser null")
-    
-    logger.info(f"Getting products analysis for tenant: {tenant_id}, period: {period}, category: {category}")
     
     async with get_db_connection() as conn:
         # Check if tenant has any orders
@@ -27,8 +25,6 @@ async def get_products_analysis(request: Request, response: Response, period: in
             INNER JOIN tenant_members tm ON o.user_id = tm.user_id
             WHERE tm.tenant_id = $1 AND o.status = 'completed'
         """, tenant_id)
-        
-        logger.info(f"Tenant {tenant_id} has {orders_check['count']} completed orders")
         
         # Use exact same logic as warolabs.com - try real data first
         try:
@@ -131,15 +127,11 @@ async def get_products_analysis(request: Request, response: Response, period: in
             order_clause = order_mapping.get(sort_by, 'real_margin')
             products_query += f" ORDER BY {order_clause} DESC LIMIT 50"
             
-            logger.info("Executing products analysis query...")
             products_data = await conn.fetch(products_query, tenant_id)
-            logger.info(f"Query executed successfully, rows obtained: {len(products_data)}")
             
             if products_data:
-                logger.info(f"Using real data: {len(products_data)} products found")
                 return await process_products_data(conn, products_data, tenant_id, period, category, min_margin, sort_by)
             else:
-                logger.info("No product data found - empty result set")
                 return generate_empty_response(period, category, min_margin, sort_by)
                 
         except Exception as e:
@@ -150,14 +142,13 @@ async def get_obstacles_analysis(request: Request, response: Response, period: i
     """
     Obstacles analysis - try real data first, fallback to empty response
     """
-    # First validate session and get tenant context
-    session_data = await get_session_data(request, response)
-    tenant_id = session_data.session.tenant_id
+    # Get session context from middleware
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
     
     if not tenant_id:
         raise ValueError("Tenant ID no puede ser null")
     
-    logger.info(f"Getting obstacles analysis for tenant: {tenant_id}, period: {period}")
     
     async with get_db_connection() as conn:
         try:
@@ -274,14 +265,11 @@ async def get_obstacles_analysis(request: Request, response: Response, period: i
                 FULL OUTER JOIN financial_metrics fm ON true
             """
             
-            logger.info("Executing obstacles analysis query...")
             obstacles_result = await conn.fetchrow(obstacles_query, tenant_id)
-            logger.info("Obstacles query executed successfully")
             
             if obstacles_result:
                 return process_obstacles_data(dict(obstacles_result), period)
             else:
-                logger.info("No obstacles data found")
                 return generate_empty_obstacles_response(period)
                 
         except Exception as e:
@@ -602,14 +590,13 @@ async def get_tir_metrics(request: Request, response: Response, period: str = "m
     """
     TIR metrics - try real data first, fallback to mock data
     """
-    # First validate session and get tenant context
-    session_data = await get_session_data(request, response)
-    tenant_id = session_data.session.tenant_id
+    # Get session context from middleware
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
     
     if not tenant_id:
         raise ValueError("Tenant ID no puede ser null")
     
-    logger.info(f"Getting TIR metrics for tenant: {tenant_id}, period: {period}, limit: {limit}")
     
     async with get_db_connection() as conn:
         # Check if tenant has any orders
@@ -619,7 +606,6 @@ async def get_tir_metrics(request: Request, response: Response, period: str = "m
             WHERE tm.tenant_id = $1 AND o.status = 'completed'
         """, tenant_id)
         
-        logger.info(f"Tenant {tenant_id} has {orders_check['count']} completed orders")
         
         # Try to get real data first
         if orders_check['count'] > 0:
@@ -646,10 +632,8 @@ async def get_tir_metrics(request: Request, response: Response, period: str = "m
                 """, period, tenant_id, limit)
                 
                 if real_data:
-                    logger.info(f"Using real data: {len(real_data)} months of order data found")
                     historical_data = [dict(row) for row in real_data]
                 else:
-                    logger.info("No monthly data found, using mock data")
                     historical_data = None
             except Exception as e:
                 logger.warning(f"Error fetching real data: {e}, falling back to mock data")
@@ -657,48 +641,25 @@ async def get_tir_metrics(request: Request, response: Response, period: str = "m
         else:
             historical_data = None
         
-        # Generate mock data if no real data available
+        # If no real data available, return empty structure
         if not historical_data:
-            logger.info("Generating mock TIR data for demo")
-        
-        mock_data = []
-        base_date = datetime.now().replace(day=1)
-        
-        for i in range(limit):
-            month_date = base_date - timedelta(days=30 * i)
-            mock_data.append({
-                'period_date': month_date.date(),
-                'period_type': period,
-                'total_revenue': 25000 + (i * 2000),
-                'estimated_costs': 7500 + (i * 600),
-                'gross_profit': 17500 + (i * 1400),
-                'tir_actual': 15.5 + (i * 0.5),
-                'tir_projected': 18.2 + (i * 0.3),
-                'tir_target': 20.0,
-                'initial_investment': 100000,
-                'recovery_months_estimated': 6 - (i * 0.1),
-                'calculated_at': datetime.now()
-            })
+            historical_data = []
         
         # Process results exactly like warolabs.com
-        historical_data = mock_data
         total_revenue_12_months = sum(float(row.get('total_revenue', 0)) for row in historical_data)
         
-        # Usar la inversión más reciente o la máxima inversión encontrada
-        total_investment = 100000  # Mock investment
-        avg_tir_target = 20.0  # Mock target
-        
-        # Calcular TIR actual de forma más realista
+        # If no real data, use zeros
         total_months = len(historical_data)
-        total_revenue = total_revenue_12_months
-        total_profit = total_revenue * 0.7  # 70% ganancia neta estimada
+        total_investment = 0
+        avg_tir_target = 0
+        avg_tir_actual = 0
+        avg_tir_projected = 0
+        recovery_months = 0
         
-        avg_tir_actual = 15.5  # Mock actual TIR
-        avg_tir_projected = 18.2  # Mock projected TIR
-        
-        # Calcular tiempo de recuperación
-        avg_monthly_revenue = total_revenue_12_months / total_months if total_months > 0 else 0
-        recovery_months = total_investment / avg_monthly_revenue if avg_monthly_revenue > 0 else 0
+        if total_months > 0:
+            # Calculate from real data
+            avg_monthly_revenue = total_revenue_12_months / total_months
+            recovery_months = total_investment / avg_monthly_revenue if avg_monthly_revenue > 0 else 0
         
         current_metrics = {
             "tir_actual": round(avg_tir_actual, 2),

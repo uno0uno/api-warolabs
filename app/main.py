@@ -4,7 +4,7 @@ from app.routers import auth, tenants, financial
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
-from app.core.middleware import tenant_detection_middleware
+from app.core.middleware import tenant_detection_middleware, session_validation_middleware, request_logging_middleware
 
 # Initialize logging
 setup_logging()
@@ -78,8 +78,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Request logging middleware (first - runs last)
+app.middleware("http")(request_logging_middleware)
+
 # Tenant detection middleware
 app.middleware("http")(tenant_detection_middleware)
+
+# Session validation middleware
+app.middleware("http")(session_validation_middleware)
 
 # Include API routers
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
