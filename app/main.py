@@ -66,16 +66,10 @@ app.openapi = custom_openapi
 app.add_exception_handler(APIError, api_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
-# CORS middleware for warocol.com compatibility
+# CORS middleware - origins from environment variables
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",  # warocol.com development
-        "https://warocol.com",    # warocol.com production
-        "https://www.warocol.com",  # www subdomain
-        "https://d2t1yug1b6tz6e.cloudfront.net",  # CloudFront domain
-        "https://origin.warocol.com",  # Origin server
-    ],
+    allow_origins=settings.cors_origins.split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -111,3 +105,13 @@ async def health():
         "database": settings.db_name,
         "host": settings.db_host
     }
+
+# Auto-start server if run directly
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "app.main:app",
+        host=settings.host,
+        port=settings.port,
+        reload=settings.debug
+    )

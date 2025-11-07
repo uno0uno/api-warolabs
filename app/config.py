@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0", alias='FASTAPI_HOST')
     debug: bool = Field(default=True, alias='DEBUG')
     
+    # CORS configuration
+    cors_origins: str = Field(alias='CORS_ORIGINS')
+    
+    # Localhost to tenant mapping for development
+    localhost_mapping: str = Field(default="", alias='LOCALHOST_MAPPING')
+    
     class Config:
         env_file = ".env"
         extra = "ignore"  # Ignore extra environment variables

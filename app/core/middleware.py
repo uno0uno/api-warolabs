@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from app.database import get_db_connection
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -151,10 +152,17 @@ async def tenant_detection_middleware(request: Request, call_next):
         
         # Handle development environment - map localhost ports to actual sites
         if 'localhost' in requesting_site or '127.0.0.1' in requesting_site:
-            if ':8080' in requesting_site or requesting_site == 'localhost:8080':
-                requesting_site = 'warocol.com'
-            elif ':4000' in requesting_site or requesting_site == 'localhost:4000':
-                requesting_site = 'warolabs.com'
+            # Parse localhost mapping from environment variables
+            localhost_mappings = {}
+            if settings.localhost_mapping:
+                for mapping in settings.localhost_mapping.split(','):
+                    if '=' in mapping:
+                        localhost, tenant = mapping.strip().split('=')
+                        localhost_mappings[localhost] = tenant
+            
+            # Check if requesting site is in mappings
+            if requesting_site in localhost_mappings:
+                requesting_site = localhost_mappings[requesting_site]
             else:
                 logger.warning(f"Unknown localhost port: {requesting_site}")
                 request.state.tenant_context = TenantContext()
