@@ -72,6 +72,9 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:8080",  # warocol.com development
         "https://warocol.com",    # warocol.com production
+        "https://www.warocol.com",  # www subdomain
+        "https://d2t1yug1b6tz6e.cloudfront.net",  # CloudFront domain
+        "https://origin.warocol.com",  # Origin server
     ],
     allow_credentials=True,
     allow_methods=["*"],

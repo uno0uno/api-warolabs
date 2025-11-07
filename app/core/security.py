@@ -18,8 +18,9 @@ def set_session_cookie(response: Response, session_token: str):
         value=session_token,
         httponly=True,
         secure=not settings.is_development,  # Use property from config
-        samesite="lax",
-        max_age=7 * 24 * 60 * 60  # 7 days
+        samesite="none" if not settings.is_development else "lax",  # Allow cross-site in production
+        max_age=7 * 24 * 60 * 60,  # 7 days
+        domain=".warolabs.com" if not settings.is_development else None  # Share across subdomains
     )
 
 def clear_session_cookie(response: Response):
