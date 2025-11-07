@@ -74,12 +74,16 @@ async def get_session_token(request: Request) -> str:
 
 async def set_session_cookie(response: Response, session_token: str, tenant_site: str = None):
     """Set session cookie with correct domain for the tenant - clears previous cookies first"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
     # Determine cookie domain dynamically from database or parameter
     cookie_domain = None
     if not settings.is_development:
         if tenant_site:
             # Use provided tenant_site
             cookie_domain = f".{tenant_site}"
+            logger.info(f"🍪 Setting cookie for provided site: {tenant_site} → domain: {cookie_domain}")
         else:
             # Fallback: get from database using session
             try:
@@ -96,8 +100,13 @@ async def set_session_cookie(response: Response, session_token: str, tenant_site
                     
                     if site_result and site_result['site']:
                         cookie_domain = f".{site_result['site']}"
-            except Exception:
-                pass  # Silent fallback to no domain
+                        logger.info(f"🍪 Setting cookie from DB lookup: {site_result['site']} → domain: {cookie_domain}")
+                    else:
+                        logger.warning(f"🍪 No site found for session {session_token} in database")
+            except Exception as e:
+                logger.warning(f"🍪 Error getting site from DB: {e}")
+    
+    logger.info(f"🍪 Final cookie settings - domain: {cookie_domain}, token: {session_token[:8]}...")
     
     # Clear any existing session-token cookies first by setting expired ones
     response.delete_cookie("session-token", domain=cookie_domain)
