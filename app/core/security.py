@@ -79,7 +79,7 @@ async def get_session_token(request: Request) -> str:
     return valid_token
 
 def set_session_cookie(response: Response, session_token: str, tenant_site: str = None):
-    """Set session cookie with correct domain for the tenant"""
+    """Set session cookie with correct domain for the tenant - clears previous cookies first"""
     # Determine cookie domain based on tenant site
     cookie_domain = None
     if not settings.is_development and tenant_site:
@@ -88,6 +88,12 @@ def set_session_cookie(response: Response, session_token: str, tenant_site: str 
         elif tenant_site == "warolabs.com":
             cookie_domain = ".warolabs.com"
     
+    # Clear any existing session-token cookies first by setting expired ones
+    response.delete_cookie("session-token", domain=cookie_domain)
+    if cookie_domain:
+        response.delete_cookie("session-token")  # Also clear without domain
+    
+    # Set the new session cookie
     response.set_cookie(
         key="session-token",
         value=session_token,

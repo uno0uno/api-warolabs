@@ -169,6 +169,13 @@ async def verify_code(request: Request, response: Response, email: str, code: st
             )
             logger.info("✅ Verification code marked as used")
             
+            # End all previous active sessions for this user to prevent duplicate cookies
+            await conn.execute(
+                'UPDATE sessions SET is_active = false, ended_at = NOW(), end_reason = $1 WHERE user_id = $2 AND is_active = true',
+                'new_login', token_data['user_id']
+            )
+            logger.info(f"🧹 Ended all previous active sessions for user: {token_data['user_id']}")
+            
             # Create session with tenant context
             session_id = secrets.token_hex(16)
             expires_at = datetime.utcnow() + timedelta(days=30)  # 30 days
@@ -258,6 +265,13 @@ async def verify_token(request: Request, response: Response, email: str, token: 
                 token, token_data['user_id']
             )
             logger.info("✅ Token marked as used")
+            
+            # End all previous active sessions for this user to prevent duplicate cookies
+            await conn.execute(
+                'UPDATE sessions SET is_active = false, ended_at = NOW(), end_reason = $1 WHERE user_id = $2 AND is_active = true',
+                'new_login', token_data['user_id']
+            )
+            logger.info(f"🧹 Ended all previous active sessions for user: {token_data['user_id']}")
             
             # Create session with tenant context
             session_id = secrets.token_hex(16)
