@@ -22,15 +22,12 @@ async def get_session_token(request: Request) -> str:
                 token = cookie_pair.split("=", 1)[1]
                 session_tokens.append(token)
     
-    # Debug: Log all cookies and found session tokens
-    logger.info(f"🍪 Cookies received: {dict(request.cookies)}")
-    logger.info(f"🔍 Found {len(session_tokens)} session-token cookies: {session_tokens}")
-    
     # If no session tokens found, try the standard way as fallback
     if not session_tokens:
         session_token = request.cookies.get("session-token")
         if not session_token:
             raise HTTPException(status_code=401, detail="No session found")
+        logger.info(f"🍪 Using standard cookie method: {session_token}")
         return session_token
     
     # Validate each session token and find the valid one
@@ -50,14 +47,11 @@ async def get_session_token(request: Request) -> str:
                 
                 if session_result:
                     valid_token = token
-                    logger.info(f"✅ Valid session token found: {token}")
                     break
                 else:
                     invalid_tokens.append(token)
-                    logger.warning(f"❌ Invalid/expired session token: {token}")
-            except Exception as e:
+            except Exception:
                 invalid_tokens.append(token)
-                logger.warning(f"❌ Error validating token {token}: {e}")
         
         # Clean up invalid sessions from database
         if invalid_tokens:
@@ -68,8 +62,8 @@ async def get_session_token(request: Request) -> str:
                         "UPDATE sessions SET is_active = false WHERE id = $1",
                         invalid_token
                     )
-                except Exception as e:
-                    logger.warning(f"Failed to deactivate session {invalid_token}: {e}")
+                except Exception:
+                    pass  # Silent cleanup
     
     if not valid_token:
         logger.warning("No valid session tokens found")

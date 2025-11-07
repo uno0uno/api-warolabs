@@ -100,7 +100,7 @@ async def tenant_detection_middleware(request: Request, call_next):
             'cloudfront-viewer-country': request.headers.get('cloudfront-viewer-country', ''),
             'user-agent': request.headers.get('user-agent', '')[:100] + "..." if len(request.headers.get('user-agent', '')) > 100 else request.headers.get('user-agent', '')
         }
-        logger.info(f"🌐 Headers debug: {debug_headers}")
+        # Headers debug removed - keeping logs clean
         
         requesting_site = None
         
@@ -304,6 +304,9 @@ async def request_logging_middleware(request: Request, call_next):
     duration = round((time.time() - start_time) * 1000, 2)  # milliseconds
     
     # Log endpoint call
-    logger.info(f"API {method} {path} | {response.status_code} | {duration}ms | {tenant_name} | {user_id}")
+    # Simple endpoint logging with timestamp
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    logger.info(f"{timestamp} | {method} {path}")
     
     return response
