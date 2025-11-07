@@ -11,16 +11,24 @@ def get_session_token(request: Request) -> str:
         raise HTTPException(status_code=401, detail="No session found")
     return session_token
 
-def set_session_cookie(response: Response, session_token: str):
-    """Set session cookie compatible with warolabs.com"""
+def set_session_cookie(response: Response, session_token: str, tenant_site: str = None):
+    """Set session cookie with correct domain for the tenant"""
+    # Determine cookie domain based on tenant site
+    cookie_domain = None
+    if not settings.is_development and tenant_site:
+        if tenant_site == "warocol.com":
+            cookie_domain = ".warocol.com"
+        elif tenant_site == "warolabs.com":
+            cookie_domain = ".warolabs.com"
+    
     response.set_cookie(
         key="session-token",
         value=session_token,
         httponly=True,
-        secure=not settings.is_development,  # Use property from config
-        samesite="none" if not settings.is_development else "lax",  # Allow cross-site in production
+        secure=not settings.is_development,
+        samesite="none" if not settings.is_development else "lax",
         max_age=7 * 24 * 60 * 60,  # 7 days
-        domain=".warolabs.com" if not settings.is_development else None  # Share across subdomains
+        domain=cookie_domain
     )
 
 def clear_session_cookie(response: Response):

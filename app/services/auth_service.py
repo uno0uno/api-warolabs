@@ -120,11 +120,12 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
             login_method = current_session_result['login_method']
             
             
-            # Validate user has access to requested tenant
+            # Validate user has access to requested tenant and get site info
             tenant_access_query = """
-                SELECT t.id, t.name, t.slug
+                SELECT t.id, t.name, t.slug, ts.site
                 FROM tenants t
                 INNER JOIN tenant_members tm ON t.id = tm.tenant_id
+                LEFT JOIN tenant_sites ts ON t.id = ts.tenant_id AND ts.is_active = true
                 WHERE t.slug = $1 AND tm.user_id = $2
                 LIMIT 1
             """
@@ -136,6 +137,7 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
             
             tenant_id = tenant_access_result['id']
             tenant_name = tenant_access_result['name']
+            tenant_site = tenant_access_result['site']
             
             # End current session
             await conn.execute(
@@ -165,8 +167,8 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
                 login_method
             )
             
-            # Set new session cookie
-            set_session_cookie(response, new_session_id)
+            # Set new session cookie with correct domain
+            set_session_cookie(response, new_session_id, tenant_site)
             
             # Build response
             tenant = Tenant(
