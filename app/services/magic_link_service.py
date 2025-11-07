@@ -74,11 +74,13 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             from app.templates.magic_link_template import get_magic_link_template, get_magic_link_subject
             from app.config import settings
             
-            # Generate magic link URL for development/production
-            base_url = settings.base_url.rstrip('/')
+            # Generate magic link URL based on detected tenant site
             if settings.is_development:
                 # In development, redirect to frontend (warocol.com runs on port 8080)
                 base_url = "http://localhost:8080"
+            else:
+                # In production, use the detected tenant site from middleware
+                base_url = f"https://{tenant_context.site}"
             
             magic_link_url = f"{base_url}/auth/verify?token={token}&email={email}"
             if redirect:
