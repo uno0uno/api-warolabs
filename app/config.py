@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     aws_region: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_AWS_REGION')
     email_from: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_EMAIL_FROM')
     
+    # Encryption - nombres limpios
+    private_key_encrypter: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_PRIVATE_KEY_ENCRYPTER')
+    public_key_encrypter: Optional[str] = Field(default=None, alias='NUXT_PUBLIC_PUBLIC_KEY_ENCRYPTER')
+    
     # App settings
     environment: str = Field(default="development", alias='NODE_ENV')
     base_url: str = Field(default="http://localhost:5000", alias='NUXT_PUBLIC_BASE_URL')

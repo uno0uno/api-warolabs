@@ -97,6 +97,16 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
         session_context = require_valid_session(request)
         current_session_token = await get_session_token(request)
         
+        # Get the target site from encrypted origin header
+        target_site = None
+        encrypted_origin = request.headers.get('x-encrypted-origin')
+        if encrypted_origin:
+            from app.utils.encryption import decrypt_origin
+            target_site = decrypt_origin(encrypted_origin)
+            logger.info(f"🔐 Decrypted target site: {target_site}")
+        else:
+            logger.warning("🔐 No encrypted origin header found")
+        
         
         async with get_db_connection() as conn:
             # Get additional session info for new session creation
@@ -168,8 +178,10 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
                 login_method
             )
             
-            # Set new session cookie with correct domain
-            await set_session_cookie(response, new_session_id, tenant_site)
+            # Set new session cookie with correct domain from encrypted origin or fallback to DB
+            cookie_site = target_site or tenant_site
+            await set_session_cookie(response, new_session_id, cookie_site)
+            logger.info(f"🍪 Setting session cookie for site: {cookie_site} (encrypted: {bool(target_site)})")
             
             # Build response
             tenant = Tenant(
