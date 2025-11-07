@@ -11,3 +11,4 @@ starlette==0.47.3
 SQLAlchemy==2.0.44
 requests==2.32.5
 boto3==1.40.68
+cryptography==46.0.1
