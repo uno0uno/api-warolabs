@@ -89,6 +89,19 @@ async def tenant_detection_middleware(request: Request, call_next):
         origin = request.headers.get('origin', '')
         host = request.headers.get('host', '')
         
+        # Debug: Log all relevant headers for CloudFront troubleshooting
+        debug_headers = {
+            'referer': referer,
+            'origin': origin, 
+            'host': host,
+            'x-forwarded-host': request.headers.get('x-forwarded-host', ''),
+            'x-original-host': request.headers.get('x-original-host', ''),
+            'x-forwarded-for': request.headers.get('x-forwarded-for', ''),
+            'cloudfront-viewer-country': request.headers.get('cloudfront-viewer-country', ''),
+            'user-agent': request.headers.get('user-agent', '')[:100] + "..." if len(request.headers.get('user-agent', '')) > 100 else request.headers.get('user-agent', '')
+        }
+        logger.info(f"🌐 Headers debug: {debug_headers}")
+        
         requesting_site = None
         
         # Try to extract site from referer first
