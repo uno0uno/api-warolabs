@@ -116,12 +116,38 @@ async def tenant_detection_middleware(request: Request, call_next):
             requesting_site = host
         
         if not requesting_site:
-            logger.warning("No requesting site detected from headers")
-            request.state.tenant_context = TenantContext()
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Unable to determine requesting site"}
-            )
+            # Fallback: Try to infer tenant from session token if available
+            session_token = request.cookies.get("session-token")
+            if session_token:
+                logger.info(f"🔍 No origin header, attempting tenant inference from session: {session_token}")
+                try:
+                    async with get_db_connection() as conn:
+                        session_tenant_query = """
+                            SELECT ts.site, ts.tenant_id, ts.brand_name, ts.is_active,
+                                   t.name as tenant_name, t.slug as tenant_slug, t.email as tenant_email
+                            FROM sessions s
+                            JOIN tenant_sites ts ON s.tenant_id = ts.tenant_id
+                            JOIN tenants t ON ts.tenant_id = t.id
+                            WHERE s.id = $1 AND s.expires_at > NOW() AND s.is_active = true
+                              AND ts.is_active = true
+                            LIMIT 1
+                        """
+                        session_tenant_result = await conn.fetchrow(session_tenant_query, session_token)
+                        if session_tenant_result:
+                            logger.info(f"✅ Inferred tenant from session: {session_tenant_result['tenant_name']}")
+                            requesting_site = session_tenant_result['site']
+                        else:
+                            logger.warning("Session not found or expired for tenant inference")
+                except Exception as e:
+                    logger.warning(f"Failed to infer tenant from session: {e}")
+            
+            if not requesting_site:
+                logger.warning("No requesting site detected from headers or session")
+                request.state.tenant_context = TenantContext()
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "Unable to determine requesting site"}
+                )
         
         # Handle development environment - map localhost ports to actual sites
         if 'localhost' in requesting_site or '127.0.0.1' in requesting_site:

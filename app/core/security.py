@@ -7,6 +7,12 @@ from typing import Optional
 def get_session_token(request: Request) -> str:
     """Extract session-token from cookies - compatible with warolabs.com"""
     session_token = request.cookies.get("session-token")
+    
+    # Debug: Log cookies for troubleshooting
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"🍪 Cookies received: {dict(request.cookies)}")
+    
     if not session_token:
         raise HTTPException(status_code=401, detail="No session found")
     return session_token
