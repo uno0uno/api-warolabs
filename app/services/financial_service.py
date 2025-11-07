@@ -610,24 +610,226 @@ async def get_tir_metrics(request: Request, response: Response, period: str = "m
         # Try to get real data first
         if orders_check['count'] > 0:
             try:
+                # Calculate TIR with real cost structure for better accuracy
                 real_data = await conn.fetch("""
+                    WITH investment_base AS (
+                        SELECT 
+                            initial_investment,
+                            investment_date,
+                            target_tir_percentage
+                        FROM tenant_investments 
+                        WHERE tenant_id = $2 AND status = 'active'
+                        LIMIT 1
+                    ),
+                    latest_costs AS (
+                        SELECT 
+                            -- Usar los costos más recientes disponibles
+                            -- Rent: Arriendo/Alquiler
+                            COALESCE(SUM(CASE WHEN ec.category_code = 'RENT' THEN te.amount ELSE 0 END), 0) as rent_costs,
+                            -- Payroll: Nómina y Salarios desde tenant_expenses
+                            COALESCE(SUM(CASE WHEN ec.category_code = 'PAYROLL' THEN te.amount ELSE 0 END), 0) as payroll_costs,
+                            -- Utilities: Servicios Públicos
+                            COALESCE(SUM(CASE WHEN ec.category_code = 'UTILITIES' THEN te.amount ELSE 0 END), 0) as utilities_costs,
+                            -- Marketing: Marketing y Publicidad
+                            COALESCE(SUM(CASE WHEN ec.category_code = 'MARKETING' THEN te.amount ELSE 0 END), 0) as marketing_costs,
+                            -- Professional: Servicios Profesionales
+                            COALESCE(SUM(CASE WHEN ec.category_code = 'PROFESSIONAL' THEN te.amount ELSE 0 END), 0) as office_costs,
+                            -- Insurance: Seguros
+                            COALESCE(SUM(CASE WHEN ec.category_code = 'INSURANCE' THEN te.amount ELSE 0 END), 0) as professional_costs,
+                            -- Maintenance: Mantenimiento
+                            COALESCE(SUM(CASE WHEN ec.category_code = 'MAINTENANCE' THEN te.amount ELSE 0 END), 0) as insurance_costs,
+                            -- Supplies: Suministros Operativos
+                            COALESCE(SUM(CASE WHEN ec.category_code = 'SUPPLIES' THEN te.amount ELSE 0 END), 0) as maintenance_costs,
+                            -- Capital: Capital de Trabajo
+                            COALESCE(SUM(CASE WHEN ec.category_code = 'CAPITAL' THEN te.amount ELSE 0 END), 0) as travel_costs,
+                            -- Contingency: Contingencias
+                            COALESCE(SUM(CASE WHEN ec.category_code = 'CONTINGENCY' THEN te.amount ELSE 0 END), 0) as technology_costs,
+                            -- Total de todos los costos operacionales reales
+                            COALESCE(SUM(te.amount), 0) as total_operational_costs
+                        FROM tenant_expenses te
+                        JOIN expense_categories ec ON te.expense_category_id = ec.id
+                        WHERE te.tenant_id = $2
+                        -- Usar el período de costos más reciente disponible
+                        AND te.month_year = (
+                            SELECT MAX(month_year) 
+                            FROM tenant_expenses 
+                            WHERE tenant_id = $2
+                        )
+                    ),
+                    real_product_costs_by_month AS (
+                        SELECT 
+                            DATE_TRUNC('month', sales_month) as flow_month,
+                            SUM(total_cost) as real_monthly_product_costs
+                        FROM v_product_analysis
+                        WHERE tenant_id = $2
+                        GROUP BY DATE_TRUNC('month', sales_month)
+                    ),
+                    cost_ratio AS (
+                        SELECT 
+                            AVG(total_cost / NULLIF(total_revenue, 0)) as avg_cost_ratio
+                        FROM v_product_analysis
+                        WHERE tenant_id = $2 AND total_revenue > 0
+                    ),
+                    monthly_products_sold AS (
+                        SELECT 
+                            DATE_TRUNC('month', o.order_date) as flow_month,
+                            COALESCE(SUM(oi.quantity), 0) as products_sold_count
+                        FROM orders o
+                        INNER JOIN tenant_members tm ON o.user_id = tm.user_id
+                        INNER JOIN order_items oi ON o.id = oi.order_id
+                        WHERE tm.tenant_id = $2 
+                        AND o.status = 'completed'
+                        AND o.order_date >= (SELECT investment_date FROM investment_base)
+                        GROUP BY DATE_TRUNC('month', o.order_date)
+                    ),
+                    monthly_flows AS (
+                        SELECT 
+                            DATE_TRUNC('month', o.order_date) as flow_month,
+                            SUM(o.total_amount) as monthly_revenue,
+                            -- Usar costos reales cuando estén disponibles, sino el ratio calculado
+                            COALESCE(
+                                rpc.real_monthly_product_costs,
+                                SUM(o.total_amount) * COALESCE(cr.avg_cost_ratio, 0.40)
+                            ) as monthly_product_costs,
+                            COUNT(DISTINCT o.id) as order_count,
+                            COALESCE(mps.products_sold_count, 0) as products_sold_count,
+                            ROW_NUMBER() OVER (ORDER BY DATE_TRUNC('month', o.order_date)) as period_number
+                        FROM orders o
+                        INNER JOIN tenant_members tm ON o.user_id = tm.user_id
+                        LEFT JOIN monthly_products_sold mps ON mps.flow_month = DATE_TRUNC('month', o.order_date)
+                        LEFT JOIN real_product_costs_by_month rpc ON rpc.flow_month = DATE_TRUNC('month', o.order_date)
+                        CROSS JOIN cost_ratio cr
+                        WHERE tm.tenant_id = $2 
+                        AND o.status = 'completed'
+                        AND o.order_date >= (SELECT investment_date FROM investment_base)
+                        GROUP BY DATE_TRUNC('month', o.order_date), mps.products_sold_count, rpc.real_monthly_product_costs, cr.avg_cost_ratio
+                        ORDER BY DATE_TRUNC('month', o.order_date)
+                    ),
+                    combined_flows AS (
+                        SELECT 
+                            ib.initial_investment,
+                            ib.target_tir_percentage,
+                            mf.flow_month as period_date,
+                            mf.period_number,
+                            mf.monthly_revenue as total_revenue,
+                            mf.monthly_product_costs,
+                            mf.order_count,
+                            mf.products_sold_count,
+                            COALESCE(lc.total_operational_costs, 0) as operational_costs,
+                            COALESCE(lc.rent_costs, 0) as rent_costs,
+                            COALESCE(lc.payroll_costs, 0) as payroll_costs,
+                            COALESCE(lc.utilities_costs, 0) as utilities_costs,
+                            COALESCE(lc.marketing_costs, 0) as marketing_costs,
+                            COALESCE(lc.office_costs, 0) as office_costs,
+                            COALESCE(lc.professional_costs, 0) as professional_costs,
+                            COALESCE(lc.insurance_costs, 0) as insurance_costs,
+                            COALESCE(lc.maintenance_costs, 0) as maintenance_costs,
+                            COALESCE(lc.travel_costs, 0) as travel_costs,
+                            COALESCE(lc.technology_costs, 0) as technology_costs,
+                            -- Current Profit = Revenue - Product Costs - Operational Costs
+                            mf.monthly_revenue - mf.monthly_product_costs - COALESCE(lc.total_operational_costs, 0) as current_profit,
+                            -- Net Cash Flow for TIR calculation
+                            CASE 
+                                WHEN mf.period_number = 1 THEN 
+                                    (mf.monthly_revenue - mf.monthly_product_costs - COALESCE(lc.total_operational_costs, 0)) - ib.initial_investment
+                                ELSE 
+                                    mf.monthly_revenue - mf.monthly_product_costs - COALESCE(lc.total_operational_costs, 0)
+                            END as net_cash_flow
+                        FROM investment_base ib
+                        CROSS JOIN monthly_flows mf
+                        CROSS JOIN latest_costs lc
+                    ),
+                    cash_flow_analysis AS (
+                        SELECT 
+                            *,
+                            SUM(net_cash_flow) OVER (ORDER BY period_number) as cumulative_cash_flow,
+                            COUNT(*) OVER () as total_periods
+                        FROM combined_flows
+                    ),
+                    tir_calculation AS (
+                        SELECT 
+                            period_date,
+                            total_revenue,
+                            monthly_product_costs,
+                            products_sold_count,
+                            operational_costs,
+                            current_profit,
+                            rent_costs,
+                            payroll_costs,
+                            utilities_costs,
+                            marketing_costs,
+                            office_costs,
+                            professional_costs,
+                            insurance_costs,
+                            maintenance_costs,
+                            travel_costs,
+                            technology_costs,
+                            initial_investment,
+                            target_tir_percentage,
+                            -- TIR Real acumulado hasta el mes actual (TIR desde inicio hasta este mes)
+                            CASE 
+                                WHEN cumulative_cash_flow > 0 AND period_number > 0 THEN
+                                    (POWER(
+                                        (cumulative_cash_flow + initial_investment) / initial_investment,
+                                        12.0 / period_number
+                                    ) - 1) * 100
+                                WHEN cumulative_cash_flow < 0 AND period_number > 0 THEN
+                                    -- TIR negativo cuando aún no se recupera la inversión
+                                    -1 * (POWER(
+                                        ABS(cumulative_cash_flow) / initial_investment,
+                                        12.0 / period_number
+                                    )) * 100
+                                ELSE 0
+                            END as tir_actual,
+                            -- TIR Proyectada (15% mayor considerando optimización de costos)
+                            CASE 
+                                WHEN cumulative_cash_flow > 0 AND period_number > 0 THEN
+                                    ((POWER(
+                                        (cumulative_cash_flow + initial_investment) / initial_investment,
+                                        12.0 / period_number
+                                    ) - 1) * 100) * 1.15
+                                WHEN cumulative_cash_flow < 0 AND period_number > 0 THEN
+                                    -- TIR proyectada negativa pero mejor que actual
+                                    -1 * (POWER(
+                                        ABS(cumulative_cash_flow) / initial_investment,
+                                        12.0 / period_number
+                                    )) * 100 * 0.85  -- 15% mejor (menos negativa)
+                                ELSE 0
+                            END as tir_projected,
+                            -- Cálculo de recovery months más preciso
+                            CASE 
+                                WHEN current_profit > 0 THEN
+                                    initial_investment / current_profit
+                                ELSE 24
+                            END as recovery_months_estimated
+                        FROM cash_flow_analysis
+                    )
                     SELECT 
-                        DATE_TRUNC('month', o.order_date)::DATE as period_date,
+                        period_date,
                         $1 as period_type,
-                        SUM(o.total_amount) as total_revenue,
-                        SUM(o.total_amount * 0.3) as estimated_costs,
-                        SUM(o.total_amount * 0.7) as gross_profit,
-                        15.5 + (EXTRACT(MONTH FROM NOW()) - EXTRACT(MONTH FROM o.order_date)) * 0.2 as tir_actual,
-                        18.2 + (EXTRACT(MONTH FROM NOW()) - EXTRACT(MONTH FROM o.order_date)) * 0.1 as tir_projected,
-                        20.0 as tir_target,
-                        50000 as initial_investment,
-                        6.0 as recovery_months_estimated,
+                        total_revenue,
+                        monthly_product_costs,
+                        products_sold_count,
+                        operational_costs,
+                        current_profit,
+                        rent_costs,
+                        payroll_costs,
+                        utilities_costs,
+                        marketing_costs,
+                        office_costs,
+                        professional_costs,
+                        insurance_costs,
+                        maintenance_costs,
+                        travel_costs,
+                        technology_costs,
+                        ROUND(tir_actual, 2) as tir_actual,
+                        ROUND(tir_projected, 2) as tir_projected,
+                        target_tir_percentage as tir_target,
+                        initial_investment,
+                        ROUND(recovery_months_estimated, 2) as recovery_months_estimated,
                         NOW() as calculated_at
-                    FROM orders o
-                    INNER JOIN tenant_members tm ON o.user_id = tm.user_id
-                    WHERE tm.tenant_id = $2 AND o.status = 'completed'
-                    GROUP BY DATE_TRUNC('month', o.order_date)
-                    ORDER BY DATE_TRUNC('month', o.order_date) DESC 
+                    FROM tir_calculation
+                    ORDER BY period_date DESC 
                     LIMIT $3
                 """, period, tenant_id, limit)
                 
@@ -645,21 +847,31 @@ async def get_tir_metrics(request: Request, response: Response, period: str = "m
         if not historical_data:
             historical_data = []
         
-        # Process results exactly like warolabs.com
+        # Process results with real cost structure data
         total_revenue_12_months = sum(float(row.get('total_revenue', 0)) for row in historical_data)
+        total_costs_12_months = sum(float(row.get('operational_costs', 0)) for row in historical_data)
+        total_product_costs_12_months = sum(float(row.get('monthly_product_costs', 0)) for row in historical_data)
+        total_products_sold_12_months = sum(int(row.get('products_sold_count', 0)) for row in historical_data)
+        total_profit_12_months = sum(float(row.get('current_profit', 0)) for row in historical_data)
         
-        # If no real data, use zeros
+        # Calculate metrics from real data
         total_months = len(historical_data)
-        total_investment = 0
-        avg_tir_target = 0
-        avg_tir_actual = 0
-        avg_tir_projected = 0
-        recovery_months = 0
         
         if total_months > 0:
-            # Calculate from real data
-            avg_monthly_revenue = total_revenue_12_months / total_months
-            recovery_months = total_investment / avg_monthly_revenue if avg_monthly_revenue > 0 else 0
+            # Calculate from real data with actual costs and profits
+            avg_tir_actual = sum(float(row.get('tir_actual', 0)) for row in historical_data) / total_months
+            avg_tir_projected = sum(float(row.get('tir_projected', 0)) for row in historical_data) / total_months
+            avg_tir_target = float(historical_data[0].get('tir_target', 15.0)) if historical_data else 15.0
+            total_investment = float(historical_data[0].get('initial_investment', 25000000)) if historical_data else 25000000
+            avg_monthly_profit = total_profit_12_months / total_months  # Use actual profit for recovery calculation
+            recovery_months = total_investment / avg_monthly_profit if avg_monthly_profit > 0 else 0
+        else:
+            # If no data, use zeros
+            total_investment = 0
+            avg_tir_target = 0
+            avg_tir_actual = 0
+            avg_tir_projected = 0
+            recovery_months = 0
         
         current_metrics = {
             "tir_actual": round(avg_tir_actual, 2),
@@ -667,13 +879,15 @@ async def get_tir_metrics(request: Request, response: Response, period: str = "m
             "tir_target": round(avg_tir_target, 2),
             "recovery_months": round(recovery_months, 2),
             "total_revenue": round(total_revenue_12_months, 2),
-            "gross_profit": round(total_revenue_12_months * 0.7, 2)
+            "current_profit": round(total_profit_12_months, 2),
+            "operational_costs": round(total_costs_12_months, 2)
         }
         
         # Datos para gráficos
         chart_data = {
             "labels": [
-                datetime.strptime(str(row['period_date']), '%Y-%m-%d').strftime('%b %y')
+                row['period_date'].strftime('%b %y') if hasattr(row['period_date'], 'strftime') 
+                else datetime.strptime(str(row['period_date']).split(' ')[0], '%Y-%m-%d').strftime('%b %y')
                 for row in historical_data
             ],
             "actual_tir": [round(float(row.get('tir_actual', 0)), 2) for row in historical_data],
@@ -681,25 +895,31 @@ async def get_tir_metrics(request: Request, response: Response, period: str = "m
             "target_tir": [round(float(current_metrics['tir_target']), 2) for _ in historical_data]
         }
         
-        # Datos tabulares
+        # Datos tabulares con costos reales y profit actual
         table_data = {
             "actual": [
                 {
-                    "month": datetime.strptime(str(row['period_date']), '%Y-%m-%d').strftime('%B'),
+                    "month": row['period_date'].strftime('%B') if hasattr(row['period_date'], 'strftime') 
+                        else datetime.strptime(str(row['period_date']).split(' ')[0], '%Y-%m-%d').strftime('%B'),
                     "tir": round(float(row.get('tir_actual', 0)), 2),
                     "investment": round(float(row.get('initial_investment', 50000)), 2),
-                    "monthly_revenue": round(float(row.get('total_revenue', 0)), 2),
-                    "return": round(float(row.get('gross_profit', 0)), 2)
+                    "monthlyRevenue": round(float(row.get('total_revenue', 0)), 2),
+                    "monthly_product_costs": round(float(row.get('monthly_product_costs', 0)), 2),
+                    "products_sold_count": int(row.get('products_sold_count', 0)),
+                    "costs": round(float(row.get('operational_costs', 0)), 2),
+                    "profit": round(float(row.get('current_profit', 0)), 2)
                 }
                 for row in historical_data[:limit]
             ],
             "projected": [
                 {
-                    "month": datetime.strptime(str(row['period_date']), '%Y-%m-%d').strftime('%B'),
+                    "month": row['period_date'].strftime('%B') if hasattr(row['period_date'], 'strftime') 
+                        else datetime.strptime(str(row['period_date']).split(' ')[0], '%Y-%m-%d').strftime('%B'),
                     "tir": round(float(row.get('tir_projected', 0)), 2),
                     "investment": round(float(row.get('initial_investment', 50000)), 2),
-                    "monthly_revenue": round(float(row.get('total_revenue', 0)) * 1.1, 2),
-                    "return": round(float(row.get('gross_profit', 0)) * 1.15, 2)
+                    "monthlyRevenue": round(float(row.get('total_revenue', 0)) * 1.1, 2),
+                    "costs": round(float(row.get('operational_costs', 0)) * 0.9, 2),  # Optimización de costos 10%
+                    "profit": round(float(row.get('current_profit', 0)) * 1.25, 2)  # Mejora esperada 25%
                 }
                 for row in historical_data[:limit]
             ],
@@ -708,14 +928,18 @@ async def get_tir_metrics(request: Request, response: Response, period: str = "m
                     "tir_average": round(avg_tir_actual, 2),
                     "total_investment": round(total_investment, 2),
                     "total_revenue": round(total_revenue_12_months, 2),
-                    "total_return": round(total_revenue_12_months * 0.7, 2),
+                    "total_product_costs": round(total_product_costs_12_months, 2),
+                    "total_products_sold": total_products_sold_12_months,
+                    "total_profit": round(total_profit_12_months, 2),
+                    "total_costs": round(total_costs_12_months, 2),
                     "months_count": len(historical_data)
                 },
                 "projected": {
                     "tir_average": round(avg_tir_projected, 2),
                     "total_investment": round(total_investment, 2),
                     "total_revenue": round(total_revenue_12_months * 1.1, 2),
-                    "total_return": round(total_revenue_12_months * 0.7 * 1.15, 2),
+                    "total_profit": round(total_profit_12_months * 1.25, 2),
+                    "total_costs": round(total_costs_12_months * 0.9, 2),
                     "months_count": len(historical_data)
                 }
             }
@@ -728,7 +952,8 @@ async def get_tir_metrics(request: Request, response: Response, period: str = "m
                 "tir_target": float(current_metrics["tir_target"]),
                 "recovery_months": float(current_metrics["recovery_months"]),
                 "total_revenue": float(current_metrics["total_revenue"]),
-                "gross_profit": float(current_metrics["gross_profit"])
+                "current_profit": float(current_metrics["current_profit"]),
+                "operational_costs": float(current_metrics["operational_costs"])
             },
             "charts": chart_data,
             "tables": table_data,
