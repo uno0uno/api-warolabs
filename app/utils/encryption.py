@@ -1,32 +1,32 @@
 """
-Encryption utilities for secure origin verification
+Simple encryption utilities for secure origin verification
 """
 import base64
-from cryptography.fernet import Fernet
+import hashlib
+from datetime import datetime
 from app.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
 
-def get_encryption_key():
-    """Get encryption key from settings"""
+def get_simple_key():
+    """Get simple encryption key from settings"""
     try:
-        # Use the private key from env vars
-        private_key = getattr(settings, 'private_key_encrypter', None)
-        if private_key:
-            # Generate a Fernet key from the private key
-            key = base64.urlsafe_b64encode(private_key.encode()[:32].ljust(32, b'\0'))
-            return key
+        # Use a part of the JWT secret as encryption key (simpler approach)
+        jwt_secret = getattr(settings, 'jwt_secret', None)
+        if jwt_secret:
+            # Create a simple key from JWT secret
+            return jwt_secret[:32].encode().ljust(32, b'0')
         else:
-            logger.warning("No encryption key found in settings")
+            logger.warning("No JWT secret found for simple encryption")
             return None
     except Exception as e:
-        logger.error(f"Error getting encryption key: {e}")
+        logger.error(f"Error getting simple encryption key: {e}")
         return None
 
 def decrypt_origin(encrypted_origin: str) -> str:
     """
-    Decrypt the encrypted origin sent from frontend
+    Decrypt the simple encrypted origin sent from frontend
     
     Args:
         encrypted_origin: Base64 encoded encrypted origin
@@ -35,19 +35,36 @@ def decrypt_origin(encrypted_origin: str) -> str:
         Decrypted origin string or None if decryption fails
     """
     try:
-        key = get_encryption_key()
+        key = get_simple_key()
         if not key:
             return None
+        
+        # Simple decode from base64 (match frontend btoa)
+        try:
+            decoded = base64.b64decode(encrypted_origin.encode()).decode()
             
-        fernet = Fernet(key)
-        
-        # Decode from base64 and decrypt
-        encrypted_bytes = base64.urlsafe_b64decode(encrypted_origin.encode())
-        decrypted_bytes = fernet.decrypt(encrypted_bytes)
-        decrypted_origin = decrypted_bytes.decode()
-        
-        logger.info(f"✅ Successfully decrypted origin: {decrypted_origin}")
-        return decrypted_origin
+            # Parse the payload: origin|timestamp|key_part
+            parts = decoded.split('|')
+            if len(parts) >= 3:
+                origin = parts[0]
+                timestamp = parts[1]
+                sent_key_part = parts[2]
+                
+                # Verify key part matches
+                expected_key_part = key[:8].decode('utf-8', errors='ignore')
+                if sent_key_part == expected_key_part:
+                    logger.info(f"✅ Successfully decrypted origin: {origin}")
+                    return origin
+                else:
+                    logger.warning(f"❌ Key verification failed")
+                    return None
+            else:
+                logger.warning(f"❌ Invalid encrypted payload format")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"❌ Error parsing encrypted origin: {e}")
+            return None
         
     except Exception as e:
         logger.error(f"❌ Error decrypting origin: {e}")
@@ -55,7 +72,7 @@ def decrypt_origin(encrypted_origin: str) -> str:
 
 def encrypt_origin(origin: str) -> str:
     """
-    Encrypt origin for testing purposes
+    Encrypt origin for testing purposes (matches frontend implementation)
     
     Args:
         origin: Plain text origin (e.g., "warocol.com")
@@ -64,17 +81,21 @@ def encrypt_origin(origin: str) -> str:
         Base64 encoded encrypted origin
     """
     try:
-        key = get_encryption_key()
+        key = get_simple_key()
         if not key:
             return None
             
-        fernet = Fernet(key)
+        # Get timestamp and key part (match frontend)
+        timestamp = str(int(datetime.now().timestamp() * 1000))  # JavaScript Date.now() format
+        key_part = key[:8].decode('utf-8', errors='ignore')
         
-        # Encrypt and encode to base64
-        encrypted_bytes = fernet.encrypt(origin.encode())
-        encrypted_origin = base64.urlsafe_b64encode(encrypted_bytes).decode()
+        # Create payload: origin|timestamp|key_part
+        payload = f"{origin}|{timestamp}|{key_part}"
         
-        return encrypted_origin
+        # Simple base64 encoding (match frontend btoa)
+        encoded = base64.b64encode(payload.encode()).decode()
+        
+        return encoded
         
     except Exception as e:
         logger.error(f"❌ Error encrypting origin: {e}")
