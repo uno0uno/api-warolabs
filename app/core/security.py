@@ -4,18 +4,79 @@ from fastapi import Request, HTTPException, Response
 from app.config import settings
 from typing import Optional
 
-def get_session_token(request: Request) -> str:
-    """Extract session-token from cookies - compatible with warolabs.com"""
-    session_token = request.cookies.get("session-token")
-    
-    # Debug: Log cookies for troubleshooting
+async def get_session_token(request: Request) -> str:
+    """Extract valid session-token from cookies - validates and cleans up invalid tokens"""
     import logging
+    from app.database import get_db_connection
     logger = logging.getLogger(__name__)
-    logger.info(f"🍪 Cookies received: {dict(request.cookies)}")
     
-    if not session_token:
-        raise HTTPException(status_code=401, detail="No session found")
-    return session_token
+    # Get raw cookie header to handle multiple session-token cookies
+    cookie_header = request.headers.get("cookie", "")
+    session_tokens = []
+    
+    # Parse all session-token cookies from the header
+    if cookie_header:
+        for cookie_pair in cookie_header.split(";"):
+            cookie_pair = cookie_pair.strip()
+            if cookie_pair.startswith("session-token="):
+                token = cookie_pair.split("=", 1)[1]
+                session_tokens.append(token)
+    
+    # Debug: Log all cookies and found session tokens
+    logger.info(f"🍪 Cookies received: {dict(request.cookies)}")
+    logger.info(f"🔍 Found {len(session_tokens)} session-token cookies: {session_tokens}")
+    
+    # If no session tokens found, try the standard way as fallback
+    if not session_tokens:
+        session_token = request.cookies.get("session-token")
+        if not session_token:
+            raise HTTPException(status_code=401, detail="No session found")
+        return session_token
+    
+    # Validate each session token and find the valid one
+    valid_token = None
+    invalid_tokens = []
+    
+    async with get_db_connection() as conn:
+        for token in session_tokens:
+            try:
+                # Check if session is valid in database
+                session_query = """
+                    SELECT id FROM sessions 
+                    WHERE id = $1 AND expires_at > NOW() AND is_active = true
+                    LIMIT 1
+                """
+                session_result = await conn.fetchrow(session_query, token)
+                
+                if session_result:
+                    valid_token = token
+                    logger.info(f"✅ Valid session token found: {token}")
+                    break
+                else:
+                    invalid_tokens.append(token)
+                    logger.warning(f"❌ Invalid/expired session token: {token}")
+            except Exception as e:
+                invalid_tokens.append(token)
+                logger.warning(f"❌ Error validating token {token}: {e}")
+        
+        # Clean up invalid sessions from database
+        if invalid_tokens:
+            logger.info(f"🧹 Cleaning up {len(invalid_tokens)} invalid session tokens")
+            for invalid_token in invalid_tokens:
+                try:
+                    await conn.execute(
+                        "UPDATE sessions SET is_active = false WHERE id = $1",
+                        invalid_token
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to deactivate session {invalid_token}: {e}")
+    
+    if not valid_token:
+        logger.warning("No valid session tokens found")
+        raise HTTPException(status_code=401, detail="No valid session found")
+    
+    logger.info(f"✅ Using valid session token: {valid_token}")
+    return valid_token
 
 def set_session_cookie(response: Response, session_token: str, tenant_site: str = None):
     """Set session cookie with correct domain for the tenant"""
@@ -80,8 +141,12 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
     from app.database import get_db_connection
     
     try:
-        # Get session token from cookies
-        session_token = request.cookies.get("session-token")
+        # Get session token using improved parsing that handles duplicates
+        try:
+            session_token = await get_session_token(request)
+        except HTTPException:
+            return None
+        
         if not session_token:
             return None
         

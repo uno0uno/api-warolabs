@@ -6,7 +6,7 @@ from app.core.security import get_session_token
 async def get_current_session(request: Request):
     """Dependency to get current session - will implement in Day 3"""
     # Placeholder - will implement actual session validation
-    session_token = get_session_token(request)
+    session_token = await get_session_token(request)
     return {"session_token": session_token, "placeholder": True}
 
 async def get_tenant_context(request: Request):
@@ -16,6 +16,6 @@ async def get_tenant_context(request: Request):
 # Placeholder for now - will implement in Day 3
 async def require_auth(request: Request):
     """Dependency that requires authentication"""
-    session_token = get_session_token(request)
+    session_token = await get_session_token(request)
     # TODO: Validate session against database
     return session_token

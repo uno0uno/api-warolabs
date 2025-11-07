@@ -18,7 +18,7 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
     Port exact session validation logic from warolabs.com/server/api/auth/session.get.js
     """
     try:
-        session_token = get_session_token(request)
+        session_token = await get_session_token(request)
         
         
         async with get_db_connection() as conn:
@@ -95,7 +95,7 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
     try:
         # Get session context from middleware
         session_context = require_valid_session(request)
-        current_session_token = get_session_token(request)
+        current_session_token = await get_session_token(request)
         
         
         async with get_db_connection() as conn:
