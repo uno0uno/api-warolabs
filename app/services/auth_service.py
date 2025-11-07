@@ -139,11 +139,12 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
             tenant_name = tenant_access_result['name']
             tenant_site = tenant_access_result['site']
             
-            # End current session
+            # End ALL active sessions for this user to prevent cookie conflicts
             await conn.execute(
-                'UPDATE sessions SET is_active = false, ended_at = NOW(), end_reason = $1 WHERE id = $2',
-                'tenant_switch', current_session_token
+                'UPDATE sessions SET is_active = false, ended_at = NOW(), end_reason = $1 WHERE user_id = $2 AND is_active = true',
+                'tenant_switch', user_id
             )
+            logger.info(f"🧹 Ended all active sessions for user during tenant switch: {user_id}")
             
             # Create new session with new tenant
             new_session_id = secrets.token_hex(16)

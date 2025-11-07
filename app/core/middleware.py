@@ -246,48 +246,17 @@ async def session_validation_middleware(request: Request, call_next):
             request.state.session_context = SessionContext()
             return await call_next(request)
         
-        # Get session token from cookies
-        session_token = request.cookies.get("session-token")
-        
-        if not session_token:
-            request.state.session_context = SessionContext()
-            return await call_next(request)
-        
-        # Validate session in database
-        async with get_db_connection() as conn:
-            session_query = """
-                SELECT s.user_id, s.tenant_id, s.expires_at, s.is_active,
-                       p.email, p.name
-                FROM sessions s
-                JOIN profile p ON s.user_id = p.id
-                WHERE s.id = $1 
-                  AND s.expires_at > NOW()
-                  AND s.is_active = true
-                LIMIT 1
-            """
-            session_result = await conn.fetchrow(session_query, session_token)
-            
-            if not session_result:
+        # Use improved session validation that handles multiple cookies
+        from app.core.security import get_session_from_request
+        try:
+            session_data = await get_session_from_request(request)
+            if session_data:
+                request.state.session_context = SessionContext(session_data)
+            else:
                 request.state.session_context = SessionContext()
-                return await call_next(request)
-            
-            # Update last activity
-            await conn.execute(
-                'UPDATE sessions SET last_activity_at = NOW() WHERE id = $1',
-                session_token
-            )
-            
-            # Create session context
-            session_data = {
-                'user_id': session_result['user_id'],
-                'tenant_id': session_result['tenant_id'],
-                'email': session_result['email'],
-                'name': session_result['name'],
-                'expires_at': session_result['expires_at'],
-                'is_active': session_result['is_active']
-            }
-            
-            request.state.session_context = SessionContext(session_data)
+        except:
+            # No valid session found
+            request.state.session_context = SessionContext()
             
         return await call_next(request)
         
