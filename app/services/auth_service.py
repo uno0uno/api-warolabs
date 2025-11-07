@@ -109,10 +109,11 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
         
         
         async with get_db_connection() as conn:
-            # Get additional session info for new session creation
+            # Get additional session info including current tenant
             current_session_query = """
-                SELECT s.ip_address, s.user_agent, s.login_method
+                SELECT s.ip_address, s.user_agent, s.login_method, s.tenant_id, t.slug as current_tenant_slug
                 FROM sessions s
+                LEFT JOIN tenants t ON s.tenant_id = t.id
                 WHERE s.id = $1 
                   AND s.expires_at > NOW()
                   AND s.is_active = true
@@ -128,6 +129,29 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
             ip_address = current_session_result['ip_address']
             user_agent = current_session_result['user_agent']
             login_method = current_session_result['login_method']
+            current_tenant_slug = current_session_result['current_tenant_slug']
+            
+            # Check if already on the requested tenant
+            if current_tenant_slug == tenant_slug:
+                logger.info(f"✅ Already on tenant {tenant_slug}, skipping unnecessary switch")
+                
+                # Return current tenant info without creating new session
+                tenant = Tenant(
+                    id=current_session_result['tenant_id'],
+                    name=tenant_slug,  # We'll get the proper name below
+                    slug=tenant_slug
+                )
+                
+                # Get proper tenant name
+                tenant_name_query = "SELECT name FROM tenants WHERE slug = $1"
+                tenant_name_result = await conn.fetchrow(tenant_name_query, tenant_slug)
+                if tenant_name_result:
+                    tenant.name = tenant_name_result['name']
+                
+                return SwitchTenantResponse(
+                    tenant=tenant,
+                    timestamp=datetime.utcnow().isoformat()
+                )
             
             
             # Validate user has access to requested tenant and get site info
