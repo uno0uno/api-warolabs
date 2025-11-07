@@ -200,7 +200,7 @@ async def verify_code(request: Request, response: Response, email: str, code: st
             logger.info(f"🎫 Session created: {session_id} for {tenant_context.tenant_name}")
             
             # Set session cookie with correct domain for tenant
-            set_session_cookie(response, session_id, tenant_context.site)
+            await set_session_cookie(response, session_id, tenant_context.site)
             
             # Build response models
             user = User(
@@ -297,7 +297,7 @@ async def verify_token(request: Request, response: Response, email: str, token: 
             logger.info(f"🎫 Session created: {session_id} for {tenant_context.tenant_name}")
             
             # Set session cookie with correct domain for tenant
-            set_session_cookie(response, session_id, tenant_context.site)
+            await set_session_cookie(response, session_id, tenant_context.site)
             
             # Build response model
             user = User(

@@ -72,35 +72,79 @@ async def get_session_token(request: Request) -> str:
     logger.info(f"✅ Using valid session token: {valid_token}")
     return valid_token
 
-def set_session_cookie(response: Response, session_token: str, tenant_site: str = None):
+async def set_session_cookie(response: Response, session_token: str, tenant_site: str = None):
     """Set session cookie with correct domain for the tenant - clears previous cookies first"""
-    # Determine cookie domain based on tenant site
+    # Determine cookie domain dynamically from database or parameter
     cookie_domain = None
-    if not settings.is_development and tenant_site:
-        if tenant_site == "warocol.com":
-            cookie_domain = ".warocol.com"
-        elif tenant_site == "warolabs.com":
-            cookie_domain = ".warolabs.com"
+    if not settings.is_development:
+        if tenant_site:
+            # Use provided tenant_site
+            cookie_domain = f".{tenant_site}"
+        else:
+            # Fallback: get from database using session
+            try:
+                from app.database import get_db_connection
+                async with get_db_connection() as conn:
+                    site_query = """
+                        SELECT ts.site
+                        FROM sessions s
+                        JOIN tenant_sites ts ON s.tenant_id = ts.tenant_id
+                        WHERE s.id = $1 AND s.is_active = true AND ts.is_active = true
+                        LIMIT 1
+                    """
+                    site_result = await conn.fetchrow(site_query, session_token)
+                    
+                    if site_result and site_result['site']:
+                        cookie_domain = f".{site_result['site']}"
+            except Exception:
+                pass  # Silent fallback to no domain
     
     # Clear any existing session-token cookies first by setting expired ones
     response.delete_cookie("session-token", domain=cookie_domain)
     if cookie_domain:
         response.delete_cookie("session-token")  # Also clear without domain
     
-    # Set the new session cookie
+    # Set the new session cookie with improved proxy compatibility
     response.set_cookie(
         key="session-token",
         value=session_token,
         httponly=True,
         secure=not settings.is_development,
-        samesite="none" if not settings.is_development else "lax",
+        samesite="lax",  # Use lax for better proxy compatibility across environments
         max_age=7 * 24 * 60 * 60,  # 7 days
-        domain=cookie_domain
+        domain=cookie_domain,
+        path="/"  # Ensure cookie is available for all paths
     )
 
-def clear_session_cookie(response: Response):
-    """Clear session cookie"""
-    response.delete_cookie("session-token")
+async def clear_session_cookie(response: Response, session_token: str = None):
+    """Clear session cookie with dynamic domain from database"""
+    cookie_domain = None
+    
+    if session_token and not settings.is_development:
+        try:
+            from app.database import get_db_connection
+            async with get_db_connection() as conn:
+                # Get tenant site from session
+                site_query = """
+                    SELECT ts.site
+                    FROM sessions s
+                    JOIN tenant_sites ts ON s.tenant_id = ts.tenant_id
+                    WHERE s.id = $1 AND s.is_active = true AND ts.is_active = true
+                    LIMIT 1
+                """
+                site_result = await conn.fetchrow(site_query, session_token)
+                
+                if site_result and site_result['site']:
+                    tenant_site = site_result['site']
+                    cookie_domain = f".{tenant_site}"
+        except Exception:
+            pass  # Silent fallback to no domain
+    
+    # Clear cookie with domain if found
+    response.delete_cookie("session-token", domain=cookie_domain, path="/")
+    # Also clear without domain as fallback
+    if cookie_domain:
+        response.delete_cookie("session-token", path="/")
 
 def validate_jwt_token(token: str) -> dict:
     """Validate JWT using same secret as warolabs.com"""

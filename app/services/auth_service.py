@@ -36,7 +36,7 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
             
             if not session_result:
                 logger.warning("Invalid or expired session")
-                clear_session_cookie(response)
+                await clear_session_cookie(response, session_token)
                 raise AuthenticationError("Session expired")
             
             
@@ -169,7 +169,7 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
             )
             
             # Set new session cookie with correct domain
-            set_session_cookie(response, new_session_id, tenant_site)
+            await set_session_cookie(response, new_session_id, tenant_site)
             
             # Build response
             tenant = Tenant(
