@@ -12,10 +12,11 @@ setup_logging()
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 app = FastAPI(
-    title="Warolabs FastAPI Service", 
+    title="Warolabs FastAPI Service",
     version="1.0.0",
     debug=settings.debug,
-    docs_url="/docs"
+    docs_url="/docs",
+    redirect_slashes=True  # Explicitly handle trailing slashes
 )
 
 # Configure cookie authentication for Swagger UI
