@@ -115,11 +115,6 @@ async def get_suppliers_list(
                     updatedAt=row['updated_at']
                 )
                 suppliers.append(supplier)
-            
-            # Set no-cache headers to prevent CloudFront caching
-            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-            response.headers["Pragma"] = "no-cache"
-            response.headers["Expires"] = "0"
 
             response_data = SuppliersListResponse(
                 data=suppliers,
@@ -175,11 +170,6 @@ async def get_supplier_by_id(
             if not supplier_data:
                 raise HTTPException(status_code=404, detail="Supplier not found")
 
-            # Set no-cache headers to prevent CloudFront caching
-            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-            response.headers["Pragma"] = "no-cache"
-            response.headers["Expires"] = "0"
-
             supplier = Supplier(
                 id=supplier_data['id'],
                 tenantId=supplier_data['tenant_id'],
@@ -219,11 +209,6 @@ async def create_supplier(
         
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
-        
-        # Set no-cache headers to prevent CloudFront caching
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
 
         async with get_db_connection() as conn:
             # Insert new supplier
@@ -303,18 +288,13 @@ async def update_supplier(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
-        # Set no-cache headers to prevent CloudFront caching
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
-
         async with get_db_connection() as conn:
             # Verify supplier exists and belongs to tenant
             existing_supplier = await conn.fetchrow("""
-                SELECT id FROM tenant_suppliers 
+                SELECT id FROM tenant_suppliers
                 WHERE id = $1 AND tenant_id = $2
             """, supplier_id, tenant_id)
-            
+
             if not existing_supplier:
                 raise HTTPException(status_code=404, detail="Supplier not found")
             
@@ -394,11 +374,6 @@ async def delete_supplier(
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
-
-        # Set no-cache headers to prevent CloudFront caching
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
 
         async with get_db_connection() as conn:
             # Verify supplier exists and belongs to tenant
