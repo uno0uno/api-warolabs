@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial
+from app.routers import auth, tenants, financial, suppliers
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -88,6 +88,7 @@ app.middleware("http")(session_validation_middleware)
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(tenants.router, prefix="/tenants", tags=["tenants"])
 app.include_router(financial.router, prefix="/finance", tags=["financial"])
+app.include_router(suppliers.router, prefix="/suppliers", tags=["suppliers"])
 
 @app.get("/")
 async def root():
