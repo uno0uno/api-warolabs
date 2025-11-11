@@ -12,3 +12,7 @@ SQLAlchemy==2.0.44
 requests==2.32.5
 boto3==1.40.68
 cryptography==46.0.1
+email-validator
+fastapi==0.119.1
+uvicorn==0.38.0
+asyncpg==0.29.0
