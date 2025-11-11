@@ -260,10 +260,13 @@ async def session_validation_middleware(request: Request, call_next):
             session_data = await get_session_from_request(request)
             if session_data:
                 request.state.session_context = SessionContext(session_data)
+                logger.debug(f"✅ Session context set for user: {session_data.get('user_id')}, tenant: {session_data.get('tenant_id')}")
             else:
+                logger.debug(f"⚠️ No session data returned for path: {path}")
                 request.state.session_context = SessionContext()
-        except:
+        except Exception as e:
             # No valid session found
+            logger.warning(f"❌ Session validation error for path {path}: {e}")
             request.state.session_context = SessionContext()
             
         return await call_next(request)

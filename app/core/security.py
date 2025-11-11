@@ -228,6 +228,7 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
                 'expires_at': session_result['expires_at'],
                 'is_active': session_result['is_active']
             }
-            
-    except Exception:
+
+    except Exception as e:
+        logger.error(f"❌ Error in get_session_from_request: {e}", exc_info=True)
         return None
