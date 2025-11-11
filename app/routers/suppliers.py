@@ -18,7 +18,7 @@ from app.models.supplier import (
 
 router = APIRouter()
 
-@router.get("/", response_model=SuppliersListResponse)
+@router.get("", response_model=SuppliersListResponse)
 async def get_suppliers_endpoint(
     request: Request,
     response: Response,
@@ -47,7 +47,7 @@ async def get_supplier_endpoint(
     """
     return await get_supplier_by_id(request, response, supplier_id)
 
-@router.post("/", response_model=SupplierResponse)
+@router.post("", response_model=SupplierResponse)
 async def create_supplier_endpoint(
     supplier_data: SupplierCreate,
     request: Request,
