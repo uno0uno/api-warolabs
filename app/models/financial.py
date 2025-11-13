@@ -14,9 +14,8 @@ class TirChartData(BaseModel):
     labels: List[str]
     actualTir: List[float] = Field(alias='actual_tir')
     projectedTir: List[float] = Field(alias='projected_tir')
-    targetTir: List[float] = Field(alias='target_tir')
-    
     class Config:
+        from_attributes = True
         populate_by_name = True
 
 class TirTableRow(BaseModel):

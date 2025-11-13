@@ -31,9 +31,6 @@ async def get_suppliers_list(
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
 
-        logger.info(f"📋 Getting suppliers list - tenant_id: {tenant_id}, page: {page}, limit: {limit}")
-        logger.info(f"📋 Filters - search: {search}, is_active: {is_active}, payment_terms: {payment_terms}")
-
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
@@ -91,11 +88,8 @@ async def get_suppliers_list(
             params.extend([limit, offset])
             
             # Execute queries
-            logger.info(f"📋 Executing query with params: {params}")
             suppliers_data = await conn.fetch(base_query, *params)
             count_result = await conn.fetchrow(count_query, *params[:-2])  # Exclude limit and offset
-
-            logger.info(f"📋 Query results - found {len(suppliers_data)} suppliers, total: {count_result['total']}")
 
             # Convert to models
             suppliers = []
@@ -123,11 +117,9 @@ async def get_suppliers_list(
                 limit=limit
             )
 
-            logger.info(f"📋 Returning response - {len(suppliers)} suppliers, total: {count_result['total']}")
             return response_data
 
     except AuthenticationError:
-        logger.error("❌ Authentication error in get_suppliers_list")
         raise
     except Exception as e:
         logger.error(f"❌ Error fetching suppliers: {e}", exc_info=True)

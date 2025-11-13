@@ -33,6 +33,7 @@ class Supplier(SupplierBase):
     updated_at: datetime = Field(alias='updatedAt')
     
     class Config:
+        from_attributes = True
         populate_by_name = True
 
 class SupplierResponse(BaseModel):
