@@ -12,6 +12,7 @@ from app.models.purchase import (
     PurchaseResponse,
     PurchasesListResponse
 )
+from app.services.email_helpers import send_quotation_email
 
 async def get_purchases_list(
     request: Request,
@@ -341,6 +342,11 @@ async def create_purchase(
                             detail=f"Error de conversión: se esperaba '{ingredient['unit']}' pero se recibió '{item_data.unit}'"
                         )
 
+                    # Calculate total_cost only if unit_cost is provided (not for quotations)
+                    total_cost = None
+                    if item_data.unit_cost is not None:
+                        total_cost = item_data.total_cost or (item_data.quantity * item_data.unit_cost)
+
                     new_item = await conn.fetchrow("""
                         INSERT INTO tenant_purchase_items (
                             purchase_id,
@@ -371,7 +377,7 @@ async def create_purchase(
                         item_data.quantity,
                         item_data.unit,
                         item_data.unit_cost,
-                        item_data.total_cost or (item_data.quantity * item_data.unit_cost),
+                        total_cost,
                         item_data.expiry_date,
                         item_data.batch_number,
                         item_data.notes
@@ -395,6 +401,50 @@ async def create_purchase(
                     updated_at=new_purchase['updated_at'],
                     items=items
                 )
+
+                # If this is a quotation, send email to supplier
+                if new_purchase['status'] == 'quotation':
+                    try:
+                        # Fetch tenant site information from tenant_sites
+                        tenant_info = await conn.fetchrow("""
+                            SELECT site FROM tenant_sites WHERE tenant_id = $1 AND is_active = true LIMIT 1
+                        """, tenant_id)
+
+                        # Fetch supplier information including access token
+                        supplier = await conn.fetchrow("""
+                            SELECT name, email, access_token
+                            FROM tenant_suppliers
+                            WHERE id = $1 AND tenant_id = $2
+                        """, purchase_data.supplier_id, tenant_id)
+
+                        if supplier and supplier['email']:
+                            # Fetch ingredient names for email
+                            items_with_names = []
+                            for item in items:
+                                ingredient = await conn.fetchrow("""
+                                    SELECT name FROM ingredients WHERE id = $1
+                                """, item.ingredient_id)
+                                items_with_names.append({
+                                    'ingredient_name': ingredient['name'] if ingredient else 'Producto',
+                                    'quantity': item.quantity,
+                                    'unit': item.unit
+                                })
+
+                            # Send quotation email with portal link
+                            await send_quotation_email(
+                                supplier_email=supplier['email'],
+                                supplier_name=supplier['name'],
+                                purchase_number=new_purchase['purchase_number'],
+                                purchase_date=new_purchase['purchase_date'],
+                                delivery_date=new_purchase['delivery_date'],
+                                items=items_with_names,
+                                notes=purchase_data.notes,
+                                supplier_token=str(supplier['access_token']) if supplier['access_token'] else None,
+                                tenant_site=tenant_info['site'] if tenant_info else None
+                            )
+                    except Exception as email_error:
+                        # Log error but don't fail the purchase creation
+                        print(f"Error sending quotation email: {str(email_error)}")
 
                 return PurchaseResponse(data=purchase)
 
@@ -476,6 +526,11 @@ async def update_purchase(
                                 detail=f"Unidad incorrecta. El ingrediente usa '{ingredient['unit']}' pero se envió '{item_data.unit}'"
                             )
 
+                        # Calculate total_cost only if unit_cost is provided (not for quotations)
+                        total_cost = None
+                        if item_data.unit_cost is not None:
+                            total_cost = item_data.total_cost or (item_data.quantity * item_data.unit_cost)
+
                         await conn.execute("""
                             INSERT INTO tenant_purchase_items (
                                 purchase_id,
@@ -494,7 +549,7 @@ async def update_purchase(
                             item_data.quantity,
                             item_data.unit,
                             item_data.unit_cost,
-                            item_data.total_cost or (item_data.quantity * item_data.unit_cost),
+                            total_cost,
                             item_data.expiry_date,
                             item_data.batch_number,
                             item_data.notes

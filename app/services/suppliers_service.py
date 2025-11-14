@@ -37,7 +37,7 @@ async def get_suppliers_list(
         async with get_db_connection() as conn:
             # Build query with tenant isolation
             base_query = """
-                SELECT 
+                SELECT
                     id,
                     tenant_id,
                     name,
@@ -48,9 +48,10 @@ async def get_suppliers_list(
                     email,
                     payment_terms,
                     is_active,
+                    access_token,
                     created_at,
                     updated_at
-                FROM tenant_suppliers 
+                FROM tenant_suppliers
                 WHERE tenant_id = $1
             """
             
@@ -105,6 +106,7 @@ async def get_suppliers_list(
                     email=row['email'],
                     payment_terms=row['payment_terms'],
                     is_active=row['is_active'],
+                    access_token=row['access_token'],
                     createdAt=row['created_at'],
                     updatedAt=row['updated_at']
                 )
@@ -142,7 +144,7 @@ async def get_supplier_by_id(
         
         async with get_db_connection() as conn:
             supplier_data = await conn.fetchrow("""
-                SELECT 
+                SELECT
                     id,
                     tenant_id,
                     name,
@@ -153,12 +155,13 @@ async def get_supplier_by_id(
                     email,
                     payment_terms,
                     is_active,
+                    access_token,
                     created_at,
                     updated_at
-                FROM tenant_suppliers 
+                FROM tenant_suppliers
                 WHERE id = $1 AND tenant_id = $2
             """, supplier_id, tenant_id)
-            
+
             if not supplier_data:
                 raise HTTPException(status_code=404, detail="Supplier not found")
 
@@ -173,6 +176,7 @@ async def get_supplier_by_id(
                 email=supplier_data['email'],
                 payment_terms=supplier_data['payment_terms'],
                 is_active=supplier_data['is_active'],
+                access_token=supplier_data['access_token'],
                 createdAt=supplier_data['created_at'],
                 updatedAt=supplier_data['updated_at']
             )

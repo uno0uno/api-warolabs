@@ -33,12 +33,12 @@ class AWSSESService:
             self.client = None
     
     async def send_email(
-        self, 
+        self,
         from_email: str,
         from_name: Optional[str] = None,
         to_emails: List[str] = None,
         subject: str = "",
-        html_body: str = "",
+        html_body: Optional[str] = None,
         text_body: Optional[str] = None
     ) -> bool:
         """
@@ -48,29 +48,34 @@ class AWSSESService:
         if not self.client:
             logger.error("❌ AWS SES client not initialized - cannot send email")
             return False
-        
+
         if not to_emails:
             logger.error("❌ No recipient email addresses provided")
             return False
-        
+
+        if not html_body and not text_body:
+            logger.error("❌ Either html_body or text_body must be provided")
+            return False
+
         try:
             # Prepare source field with optional name
             source = f"{from_name} <{from_email}>" if from_name else from_email
-            
-            # Prepare message body
-            message_body = {
-                'Html': {
+
+            # Prepare message body - only include parts that are provided
+            message_body = {}
+
+            if html_body:
+                message_body['Html'] = {
                     'Charset': 'UTF-8',
                     'Data': html_body,
                 }
-            }
-            
+
             if text_body:
                 message_body['Text'] = {
                     'Charset': 'UTF-8',
                     'Data': text_body,
                 }
-            
+
             # Send email
             response = self.client.send_email(
                 Source=source,
@@ -85,19 +90,19 @@ class AWSSESService:
                     'Body': message_body,
                 }
             )
-            
+
             message_id = response['MessageId']
             logger.info(f"✅ Email sent successfully. MessageId: {message_id}")
             logger.info(f"📧 From: {source} | To: {', '.join(to_emails)} | Subject: {subject}")
-            
+
             return True
-            
+
         except ClientError as e:
             error_code = e.response['Error']['Code']
             error_message = e.response['Error']['Message']
             logger.error(f"❌ AWS SES ClientError: {error_code} - {error_message}")
             return False
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to send email: {e}")
             return False

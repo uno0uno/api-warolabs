@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -42,11 +42,13 @@ def custom_openapi():
     }
     # Apply security to endpoints that need authentication
     # Magic link endpoints don't need auth (they create the auth)
+    # Supplier portal endpoints are public (authenticated via token)
     public_endpoints = [
         "/auth/sign-in-magic-link",
         "/auth/verify-code",
         "/health",
-        "/"
+        "/",
+        "/supplier-portal"
     ]
     
     for path in openapi_schema["paths"]:
@@ -92,6 +94,7 @@ app.include_router(financial.router, prefix="/finance", tags=["financial"])
 app.include_router(ingredients.router, prefix="/suppliers/ingredients", tags=["ingredients"])
 app.include_router(purchases.router, prefix="/suppliers/purchases", tags=["purchases"])
 app.include_router(suppliers.router, prefix="/suppliers/providers", tags=["suppliers"])
+app.include_router(supplier_portal.router, prefix="/supplier-portal", tags=["supplier-portal"])
 
 @app.get("/")
 async def root():

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Solicitud de Cotización</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #f5f5f5;">
+    <table role="presentation" style="width: 100%; border-collapse: collapse;">
+        <tr>
+            <td align="center" style="padding: 40px 0;">
+                <table role="presentation" style="width: 600px; border-collapse: collapse; background-color: #ffffff; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                    <!-- Header -->
+                    <tr>
+                        <td style="padding: 40px 40px 30px 40px; background-color: #1a1a1a; color: #ffffff;">
+                            <h1 style="margin: 0; font-size: 28px; font-weight: bold;">Warolabs</h1>
+                            <p style="margin: 10px 0 0 0; font-size: 16px; color: #cccccc;">Solicitud de Cotización</p>
+                        </td>
+                    </tr>
+
+                    <!-- Greeting -->
+                    <tr>
+                        <td style="padding: 40px 40px 20px 40px;">
+                            <p style="margin: 0; font-size: 16px; color: #333333; line-height: 1.6;">
+                                Estimado/a <strong>{{supplier_name}}</strong>,
+                            </p>
+                            <p style="margin: 20px 0 0 0; font-size: 16px; color: #333333; line-height: 1.6;">
+                                Le enviamos la siguiente solicitud de cotización para los productos que necesitamos adquirir.
+                            </p>
+                        </td>
+                    </tr>
+
+                    <!-- Quotation Info -->
+                    <tr>
+                        <td style="padding: 20px 40px;">
+                            <table style="width: 100%; border-collapse: collapse; background-color: #f9f9f9; border: 1px solid #e5e5e5;">
+                                <tr>
+                                    <td style="padding: 15px; border-bottom: 1px solid #e5e5e5;">
+                                        <strong style="color: #666666;">Número de Cotización:</strong>
+                                        <span style="color: #333333; float: right;">{{purchase_number}}</span>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 15px; border-bottom: 1px solid #e5e5e5;">
+                                        <strong style="color: #666666;">Fecha:</strong>
+                                        <span style="color: #333333; float: right;">{{created_date}}</span>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 15px;">
+                                        <strong style="color: #666666;">Fecha Requerida:</strong>
+                                        <span style="color: #333333; float: right;">{{required_date}}</span>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+
+                    <!-- Items Section -->
+                    <tr>
+                        <td style="padding: 30px 40px 20px 40px;">
+                            <h2 style="margin: 0; font-size: 20px; color: #333333; border-bottom: 2px solid #1a1a1a; padding-bottom: 10px;">
+                                Productos Solicitados
+                            </h2>
+                        </td>
+                    </tr>
+
+                    <!-- Items Table -->
+                    <tr>
+                        <td style="padding: 0 40px 30px 40px;">
+                            <table style="width: 100%; border-collapse: collapse;">
+                                <thead>
+                                    <tr style="background-color: #f5f5f5;">
+                                        <th style="padding: 12px; text-align: left; color: #666666; font-size: 14px; border-bottom: 2px solid #e5e5e5;">#</th>
+                                        <th style="padding: 12px; text-align: left; color: #666666; font-size: 14px; border-bottom: 2px solid #e5e5e5;">Producto</th>
+                                        <th style="padding: 12px; text-align: center; color: #666666; font-size: 14px; border-bottom: 2px solid #e5e5e5;">Cantidad</th>
+                                        <th style="padding: 12px; text-align: center; color: #666666; font-size: 14px; border-bottom: 2px solid #e5e5e5;">Unidad</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {{items_rows}}
+                                </tbody>
+                            </table>
+                        </td>
+                    </tr>
+
+                    <!-- Notes (if any) -->
+                    {{notes_section}}
+
+                    <!-- Instructions -->
+                    <tr>
+                        <td style="padding: 30px 40px; background-color: #f9f9f9; border-top: 1px solid #e5e5e5;">
+                            <h3 style="margin: 0 0 15px 0; font-size: 18px; color: #333333;">Próximos Pasos</h3>
+                            <ul style="margin: 0; padding-left: 20px; color: #666666; line-height: 1.8;">
+                                <li>Revise los productos y cantidades solicitadas</li>
+                                <li>Envíenos su cotización con precios y disponibilidad</li>
+                                <li>Indique el tiempo estimado de entrega</li>
+                            </ul>
+                            <p style="margin: 20px 0 0 0; font-size: 14px; color: #666666;">
+                                Por favor, responda a este correo con su cotización o contáctenos si tiene alguna pregunta.
+                            </p>
+                        </td>
+                    </tr>
+
+                    <!-- Footer -->
+                    <tr>
+                        <td style="padding: 30px 40px; background-color: #1a1a1a; color: #cccccc; text-align: center;">
+                            <p style="margin: 0; font-size: 14px;">
+                                <strong style="color: #ffffff;">Warolabs</strong><br>
+                                Sistema de Gestión de Compras
+                            </p>
+                            <p style="margin: 15px 0 0 0; font-size: 12px; color: #999999;">
+                                Este es un correo automático. Por favor, no responda directamente a este mensaje.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
