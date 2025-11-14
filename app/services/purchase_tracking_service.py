@@ -35,13 +35,13 @@ from app.services.email_helpers import send_purchase_status_notification
 STATE_TRANSITIONS = {
     'quotation': ['pending', 'cancelled'],  # Quotation can be completed (with prices) or cancelled
     'pending': ['confirmed', 'cancelled'],
-    'confirmed': ['preparing', 'shipped', 'cancelled'],  # Can skip preparing and go directly to shipped
-    'preparing': ['shipped', 'cancelled'],
+    'confirmed': ['preparing', 'invoiced', 'cancelled'],  # Invoice before shipping
+    'preparing': ['invoiced', 'cancelled'],  # Invoice before shipping
+    'invoiced': ['shipped'],  # Ship after invoicing
     'shipped': ['received', 'partially_received', 'overdue'],
     'partially_received': ['received', 'overdue'],
     'received': ['verified'],
-    'verified': ['invoiced'],
-    'invoiced': ['paid'],
+    'verified': ['paid'],  # Pay after verification (at the end)
     'paid': [],  # Final state
     'cancelled': [],  # Final state
     'overdue': ['shipped', 'received', 'cancelled']  # Can resume flow
