@@ -247,6 +247,7 @@ class Purchase(PurchaseBase):
     """Full purchase order model with all fields"""
     id: UUID
     tenant_id: UUID
+    supplier_name: Optional[str] = Field(None, description="Supplier name (from JOIN)")
     created_by: Optional[UUID] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

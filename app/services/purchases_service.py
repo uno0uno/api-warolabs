@@ -34,31 +34,33 @@ async def get_purchases_list(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
-            # Build query with tenant isolation
+            # Build query with tenant isolation and supplier name
             base_query = """
                 SELECT
-                    id,
-                    tenant_id,
-                    supplier_id,
-                    purchase_number,
-                    purchase_date,
-                    delivery_date,
-                    total_amount,
-                    tax_amount,
-                    status,
-                    invoice_number,
-                    notes,
-                    created_by,
-                    created_at,
-                    updated_at
-                FROM tenant_purchases
-                WHERE tenant_id = $1
+                    tp.id,
+                    tp.tenant_id,
+                    tp.supplier_id,
+                    tp.purchase_number,
+                    tp.purchase_date,
+                    tp.delivery_date,
+                    tp.total_amount,
+                    tp.tax_amount,
+                    tp.status,
+                    tp.invoice_number,
+                    tp.notes,
+                    tp.created_by,
+                    tp.created_at,
+                    tp.updated_at,
+                    ts.name as supplier_name
+                FROM tenant_purchases tp
+                LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
+                WHERE tp.tenant_id = $1
             """
 
             count_query = """
                 SELECT COUNT(*) as total
-                FROM tenant_purchases
-                WHERE tenant_id = $1
+                FROM tenant_purchases tp
+                WHERE tp.tenant_id = $1
             """
 
             params = [tenant_id]
@@ -66,26 +68,26 @@ async def get_purchases_list(
 
             # Add filters
             if search:
-                base_query += f" AND (LOWER(purchase_number) LIKE LOWER(${param_count}) OR LOWER(invoice_number) LIKE LOWER(${param_count}))"
-                count_query += f" AND (LOWER(purchase_number) LIKE LOWER(${param_count}) OR LOWER(invoice_number) LIKE LOWER(${param_count}))"
+                base_query += f" AND (LOWER(tp.purchase_number) LIKE LOWER(${param_count}) OR LOWER(tp.invoice_number) LIKE LOWER(${param_count}))"
+                count_query += f" AND (LOWER(tp.purchase_number) LIKE LOWER(${param_count}) OR LOWER(tp.invoice_number) LIKE LOWER(${param_count}))"
                 params.append(f"%{search}%")
                 param_count += 1
 
             if status:
-                base_query += f" AND LOWER(status) = LOWER(${param_count})"
-                count_query += f" AND LOWER(status) = LOWER(${param_count})"
+                base_query += f" AND LOWER(tp.status) = LOWER(${param_count})"
+                count_query += f" AND LOWER(tp.status) = LOWER(${param_count})"
                 params.append(status)
                 param_count += 1
 
             if supplier_id:
-                base_query += f" AND supplier_id = ${param_count}"
-                count_query += f" AND supplier_id = ${param_count}"
+                base_query += f" AND tp.supplier_id = ${param_count}"
+                count_query += f" AND tp.supplier_id = ${param_count}"
                 params.append(supplier_id)
                 param_count += 1
 
             # Add pagination
             offset = (page - 1) * limit
-            base_query += f" ORDER BY created_at DESC LIMIT ${param_count} OFFSET ${param_count + 1}"
+            base_query += f" ORDER BY tp.created_at DESC LIMIT ${param_count} OFFSET ${param_count + 1}"
             params.extend([limit, offset])
 
             # Execute queries
@@ -119,6 +121,7 @@ async def get_purchases_list(
                     id=row['id'],
                     tenant_id=row['tenant_id'],
                     supplier_id=row['supplier_id'],
+                    supplier_name=row['supplier_name'],  # Include supplier name from JOIN
                     purchase_number=row['purchase_number'],
                     purchase_date=row['purchase_date'],
                     delivery_date=row['delivery_date'],
