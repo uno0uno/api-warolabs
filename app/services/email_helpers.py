@@ -65,7 +65,7 @@ async def send_quotation_email(
 
         portal_link = ""
         if supplier_token:
-            portal_link = f"\n\n🔗 Acceder a mi portal de proveedor:\n{base_url}/proveedor/{supplier_token}\n"
+            portal_link = f"\n\nAcceder a mi portal de proveedor:\n{base_url}/proveedor/{supplier_token}\n"
 
         # Create simple text email
         text_body = f"""¡Hola {supplier_name}!
@@ -104,7 +104,7 @@ Tecnología colombiana para el mundo.
         ses_service = AWSSESService()
         success = await ses_service.send_email(
             from_email="hola@warolabs.com",
-            from_name="Waro Colombia",
+            from_name="Saifer 101 de Waro Colombia",
             to_emails=[supplier_email],
             subject=f"Nueva Solicitud de Cotización - {purchase_number}",
             html_body=None,  # No HTML to avoid spam filters
@@ -158,40 +158,33 @@ async def send_purchase_status_notification(
         status_info = {
             'confirmed': {
                 'title': 'Orden Confirmada',
-                'message': 'Tu cotización ha sido aprobada y confirmada. La orden de compra está lista para ser preparada.',
-                'emoji': '✅'
+                'message': 'Tu cotización ha sido aprobada y confirmada. La orden de compra está lista para ser preparada.'
             },
             'shipped': {
                 'title': 'Orden Enviada por el Restaurante',
-                'message': 'El restaurante ha marcado esta orden como enviada desde su ubicación.',
-                'emoji': '🚚'
+                'message': 'El restaurante ha marcado esta orden como enviada desde su ubicación.'
             },
             'received': {
                 'title': 'Orden Recibida',
-                'message': 'El restaurante ha confirmado la recepción de la orden.',
-                'emoji': '📦'
+                'message': 'El restaurante ha confirmado la recepción de la orden.'
             },
             'verified': {
                 'title': 'Calidad Verificada',
-                'message': 'El restaurante ha verificado la calidad de los productos recibidos.',
-                'emoji': '✓'
+                'message': 'El restaurante ha verificado la calidad de los productos recibidos.'
             },
             'invoiced': {
                 'title': 'Factura Registrada',
-                'message': 'El restaurante ha registrado la factura de esta orden.',
-                'emoji': '📄'
+                'message': 'El restaurante ha registrado la factura de esta orden.'
             },
             'paid': {
                 'title': 'Pago Registrado',
-                'message': 'El restaurante ha registrado el pago de esta orden. ¡Gracias por tu servicio!',
-                'emoji': '💰'
+                'message': 'El restaurante ha registrado el pago de esta orden. ¡Gracias por tu servicio!'
             }
         }
 
         info = status_info.get(status, {
             'title': 'Actualización de Orden',
-            'message': f'Tu orden ha sido actualizada al estado: {status}',
-            'emoji': '📋'
+            'message': f'Tu orden ha sido actualizada al estado: {status}'
         })
 
         # Build metadata section if exists
@@ -228,10 +221,10 @@ async def send_purchase_status_notification(
 
         portal_link = ""
         if supplier_token:
-            portal_link = f"\n\n🔗 Ver detalles en mi portal:\n{base_url}/proveedor/{supplier_token}\n"
+            portal_link = f"\n\nVer detalles en mi portal:\n{base_url}/proveedor/{supplier_token}\n"
 
         # Create text email
-        text_body = f"""{info['emoji']} ¡Hola {supplier_name}!
+        text_body = f"""¡Hola {supplier_name}!
 
 Tu orden de compra ha sido actualizada.
 
@@ -262,9 +255,9 @@ Tecnología colombiana para el mundo.
         ses_service = AWSSESService()
         success = await ses_service.send_email(
             from_email="hola@warolabs.com",
-            from_name="Waro Colombia",
+            from_name="Saifer 101 de Waro Colombia",
             to_emails=[supplier_email],
-            subject=f"{info['emoji']} {info['title']} - {purchase_number}",
+            subject=f"{purchase_number} - {info['title']}",
             html_body=None,
             text_body=text_body
         )
