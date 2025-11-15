@@ -11,6 +11,7 @@ from app.services.supplier_portal_service import (
     verify_supplier_token,
     get_supplier_purchases,
     update_purchase_prices,
+    invoice_purchase_from_portal,
     ship_purchase_from_portal
 )
 
@@ -28,6 +29,16 @@ class ItemPriceUpdate(BaseModel):
 class UpdatePricesRequest(BaseModel):
     items: List[ItemPriceUpdate]
     tax_amount: float
+    notes: Optional[str] = None
+
+class InvoicePurchaseRequest(BaseModel):
+    document_type: str
+    invoice_number: str
+    invoice_date: str
+    invoice_amount: Optional[float] = None
+    tax_amount: Optional[float] = None
+    credit_days: Optional[int] = None
+    payment_due_date: Optional[str] = None
     notes: Optional[str] = None
 
 class ShipPurchaseRequest(BaseModel):
@@ -91,6 +102,39 @@ async def update_prices_endpoint(
         purchase_id=purchase_uuid,
         items_prices=items_dict,
         tax_amount=data.tax_amount,
+        notes=data.notes
+    )
+
+@router.post("/{token}/purchases/{purchase_id}/invoice")
+async def invoice_purchase_endpoint(
+    token: str,
+    purchase_id: str,
+    data: InvoicePurchaseRequest
+):
+    """
+    Allow supplier to register invoice/remision
+    Public endpoint - token is used for identification
+
+    Args:
+        token: Supplier's unique access token
+        purchase_id: Purchase ID to invoice
+        data: Invoice/remision information
+    """
+    try:
+        purchase_uuid = UUID(purchase_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="ID de compra inválido")
+
+    return await invoice_purchase_from_portal(
+        token=token,
+        purchase_id=purchase_uuid,
+        document_type=data.document_type,
+        invoice_number=data.invoice_number,
+        invoice_date=data.invoice_date,
+        invoice_amount=data.invoice_amount,
+        tax_amount=data.tax_amount,
+        credit_days=data.credit_days,
+        payment_due_date=data.payment_due_date,
         notes=data.notes
     )
 

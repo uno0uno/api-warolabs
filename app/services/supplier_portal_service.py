@@ -308,6 +308,138 @@ async def update_purchase_prices(
         raise HTTPException(status_code=500, detail="Error al actualizar precios")
 
 
+async def invoice_purchase_from_portal(
+    token: str,
+    purchase_id: UUID,
+    document_type: str,
+    invoice_number: str,
+    invoice_date: str,
+    invoice_amount: Optional[float] = None,
+    tax_amount: Optional[float] = None,
+    credit_days: Optional[int] = None,
+    payment_due_date: Optional[str] = None,
+    notes: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Allow supplier to register invoice/remision via portal
+
+    Args:
+        token: Supplier's access token
+        purchase_id: Purchase ID to invoice
+        document_type: Type of document (remision, factura_contado, factura_credito)
+        invoice_number: Invoice/remision number
+        invoice_date: Date of invoice/remision
+        invoice_amount: Amount (required for invoices, not for remision)
+        tax_amount: Tax amount
+        credit_days: Credit days for factura_credito
+        payment_due_date: Payment due date
+        notes: Optional notes
+    """
+    try:
+        async with get_db_connection() as conn:
+            # Verify token and that purchase belongs to this supplier
+            supplier = await conn.fetchrow("""
+                SELECT id, tenant_id
+                FROM tenant_suppliers
+                WHERE access_token = $1
+            """, UUID(token))
+
+            if not supplier:
+                raise HTTPException(status_code=404, detail="Token inválido")
+
+            # Verify purchase belongs to supplier
+            purchase = await conn.fetchrow("""
+                SELECT id, status, created_by
+                FROM tenant_purchases
+                WHERE id = $1 AND supplier_id = $2
+            """, purchase_id, supplier['id'])
+
+            if not purchase:
+                raise HTTPException(status_code=404, detail="Compra no encontrada")
+
+            # Validate transition (confirmed/preparing -> invoiced)
+            if purchase['status'] not in ['confirmed', 'preparing']:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No se puede facturar desde el estado '{purchase['status']}'"
+                )
+
+            # Validate document type
+            if document_type not in ['remision', 'factura_contado', 'factura_credito']:
+                raise HTTPException(status_code=400, detail="Tipo de documento inválido")
+
+            # For invoices (not remision), amounts are required
+            if document_type != 'remision' and invoice_amount is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="El monto de factura es requerido para facturas"
+                )
+
+            # Parse dates
+            try:
+                inv_date = datetime.fromisoformat(invoice_date.replace('Z', '+00:00'))
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Fecha de factura inválida")
+
+            due_date = None
+            if payment_due_date:
+                try:
+                    due_date = datetime.fromisoformat(payment_due_date.replace('Z', '+00:00'))
+                except ValueError:
+                    pass
+
+            async with conn.transaction():
+                # Update purchase with invoice info
+                await conn.execute("""
+                    UPDATE tenant_purchases
+                    SET status = 'invoiced',
+                        invoice_number = $1,
+                        invoice_date = $2,
+                        invoice_amount = $3,
+                        tax_amount = $4,
+                        payment_due_date = $5,
+                        updated_at = NOW()
+                    WHERE id = $6
+                """, invoice_number, inv_date, invoice_amount, tax_amount or 0, due_date, purchase_id)
+
+                # Create status history entry
+                metadata = {
+                    "document_type": document_type,
+                    "invoice_number": invoice_number,
+                    "credit_days": credit_days
+                }
+
+                import json
+                doc_label = "Remisión" if document_type == 'remision' else "Factura"
+                history_notes = notes or f'{doc_label} registrada por proveedor'
+
+                await conn.execute("""
+                    INSERT INTO purchase_status_history (
+                        purchase_id,
+                        tenant_id,
+                        from_status,
+                        to_status,
+                        metadata,
+                        notes,
+                        changed_by
+                    ) VALUES ($1, $2, $3, 'invoiced', $4::jsonb, $5, $6)
+                """, purchase_id, supplier['tenant_id'], purchase['status'],
+                    json.dumps(metadata), history_notes, purchase['created_by'])
+
+                return {
+                    "success": True,
+                    "message": f"{doc_label} registrada correctamente"
+                }
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Datos inválidos")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error invoicing purchase from portal: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error al registrar documento")
+
+
 async def ship_purchase_from_portal(
     token: str,
     purchase_id: UUID,
@@ -351,11 +483,11 @@ async def ship_purchase_from_portal(
             if not purchase:
                 raise HTTPException(status_code=404, detail="Compra no encontrada")
 
-            # Validate transition (confirmed -> shipped)
-            if purchase['status'] not in ['confirmed', 'preparing']:
+            # Validate transition (invoiced -> shipped)
+            if purchase['status'] != 'invoiced':
                 raise HTTPException(
                     status_code=400,
-                    detail=f"No se puede marcar como enviado desde el estado '{purchase['status']}'"
+                    detail=f"No se puede marcar como enviado desde el estado '{purchase['status']}'. Debe facturarse primero."
                 )
 
             # Parse estimated delivery date if provided

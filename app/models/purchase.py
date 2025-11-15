@@ -364,10 +364,12 @@ class VerifyPurchaseData(BaseModel):
 
 class InvoicePurchaseData(BaseModel):
     """Data for invoice registration"""
-    invoice_number: str = Field(..., description="Supplier invoice number")
+    document_type: str = Field(default='factura_contado', description="Document type: remision, factura_contado, or factura_credito")
+    invoice_number: str = Field(..., description="Supplier invoice/remision number")
     invoice_date: datetime
-    invoice_amount: Decimal = Field(..., gt=0)
-    tax_amount: Decimal = Field(default=0, ge=0)
+    invoice_amount: Optional[Decimal] = Field(default=None, gt=0, description="Required for invoices, not for remision")
+    tax_amount: Optional[Decimal] = Field(default=0, ge=0)
+    credit_days: Optional[int] = Field(default=None, description="Credit days for factura_credito (15, 30, 45, 60, 90, 120)")
     payment_due_date: Optional[datetime] = None
     notes: Optional[str] = None
 
