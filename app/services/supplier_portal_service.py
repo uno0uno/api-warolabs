@@ -100,7 +100,14 @@ async def get_supplier_purchases(token: str, status_filter: Optional[str] = None
                     p.status,
                     p.notes,
                     p.created_at,
-                    p.updated_at
+                    p.updated_at,
+                    p.payment_type,
+                    p.payment_terms,
+                    p.credit_days,
+                    p.payment_due_date,
+                    p.requires_advance_payment,
+                    p.consolidation_group,
+                    p.payment_balance
                 FROM tenant_purchases p
                 WHERE p.supplier_id = $1
             """
@@ -144,6 +151,13 @@ async def get_supplier_purchases(token: str, status_filter: Optional[str] = None
                     "notes": purchase['notes'],
                     "created_at": purchase['created_at'].isoformat() if purchase['created_at'] else None,
                     "updated_at": purchase['updated_at'].isoformat() if purchase['updated_at'] else None,
+                    "payment_type": purchase['payment_type'],
+                    "payment_terms": purchase['payment_terms'],
+                    "credit_days": purchase['credit_days'],
+                    "payment_due_date": purchase['payment_due_date'].isoformat() if purchase['payment_due_date'] else None,
+                    "requires_advance_payment": purchase['requires_advance_payment'],
+                    "consolidation_group": purchase['consolidation_group'],
+                    "payment_balance": float(purchase['payment_balance']) if purchase['payment_balance'] else None,
                     "items": [
                         {
                             "id": str(item['id']),
