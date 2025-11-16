@@ -5,8 +5,7 @@ from app.services.purchases_service import (
     get_purchases_list,
     get_purchase_by_id,
     create_purchase,
-    update_purchase,
-    delete_purchase
+    update_purchase
 )
 from app.services.purchase_tracking_service import (
     # State transitions
@@ -20,6 +19,7 @@ from app.services.purchase_tracking_service import (
     complete_quotation,
     # History and attachments
     get_purchase_status_history,
+    get_transition_detail,
     get_purchase_attachments,
     create_purchase_attachment
 )
@@ -138,16 +138,6 @@ async def update_purchase_endpoint(
     """
     return await update_purchase(request, response, purchase_id, purchase_data)
 
-@router.delete("/{purchase_id}")
-async def delete_purchase_endpoint(
-    purchase_id: UUID,
-    request: Request,
-    response: Response
-):
-    """
-    Delete a purchase with tenant isolation
-    """
-    return await delete_purchase(request, response, purchase_id)
 
 # =============================================================================
 # STATE TRANSITION ENDPOINTS
@@ -339,6 +329,19 @@ async def get_purchase_history_endpoint(
     Returns all state transitions with timestamps and metadata
     """
     return await get_purchase_status_history(request, response, purchase_id)
+
+@router.get("/{purchase_id}/transitions/{transition_id}")
+async def get_transition_detail_endpoint(
+    purchase_id: UUID,
+    transition_id: UUID,
+    request: Request,
+    response: Response
+):
+    """
+    Get detailed information about a specific transition
+    Includes transition data, purchase number, and related attachments with presigned URLs
+    """
+    return await get_transition_detail(request, response, purchase_id, transition_id)
 
 @router.get("/{purchase_id}/attachments", response_model=AttachmentsResponse)
 async def get_purchase_attachments_endpoint(

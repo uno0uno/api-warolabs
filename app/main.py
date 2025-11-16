@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, attachments
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -95,7 +95,6 @@ app.include_router(ingredients.router, prefix="/suppliers/ingredients", tags=["i
 app.include_router(purchases.router, prefix="/suppliers/purchases", tags=["purchases"])
 app.include_router(suppliers.router, prefix="/suppliers/providers", tags=["suppliers"])
 app.include_router(supplier_portal.router, prefix="/supplier-portal", tags=["supplier-portal"])
-app.include_router(attachments.router, prefix="/api", tags=["attachments"])
 
 @app.get("/")
 async def root():
