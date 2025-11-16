@@ -1053,10 +1053,12 @@ async def transition_to_paid(
                         status = 'paid',
                         payment_method = $1,
                         payment_reference = $2,
+                        payment_amount = $3,
+                        payment_date = $4,
                         paid_at = NOW(),
                         updated_at = NOW()
-                    WHERE id = $3
-                """, payment_method, payment_reference, purchase_id)
+                    WHERE id = $5
+                """, payment_method, payment_reference, payment_amount, payment_dt, purchase_id)
 
                 # Create history entry
                 await create_status_history_entry(
