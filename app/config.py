@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     aws_access_key_id: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_AWS_ACCES_KEY_ID')
     aws_secret_access_key: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_AWS_SECRET_ACCESS_KEY')
     aws_region: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_AWS_REGION')
+    aws_s3_bucket: str = Field(default='warocol-purchase-attachments', alias='NUXT_PRIVATE_AWS_S3_BUCKET')
     email_from: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_EMAIL_FROM')
     
     # Encryption - nombres limpios
