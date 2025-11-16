@@ -51,6 +51,15 @@ async def get_purchases_list(
                     tp.created_by,
                     tp.created_at,
                     tp.updated_at,
+                    tp.payment_type,
+                    tp.payment_terms,
+                    tp.credit_days,
+                    tp.payment_due_date,
+                    tp.requires_advance_payment,
+                    tp.consolidation_group,
+                    tp.payment_balance,
+                    tp.invoice_date,
+                    tp.invoice_amount,
                     ts.name as supplier_name
                 FROM tenant_purchases tp
                 LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
@@ -180,7 +189,16 @@ async def get_purchase_by_id(
                     notes,
                     created_by,
                     created_at,
-                    updated_at
+                    updated_at,
+                    payment_type,
+                    payment_terms,
+                    credit_days,
+                    payment_due_date,
+                    requires_advance_payment,
+                    consolidation_group,
+                    payment_balance,
+                    invoice_date,
+                    invoice_amount
                 FROM tenant_purchases
                 WHERE id = $1 AND tenant_id = $2
             """, purchase_id, tenant_id)
@@ -281,7 +299,7 @@ async def create_purchase(
                 # Use invoice number from request (user entered manually)
                 invoice_number = purchase_data.invoice_number
 
-                # Insert new purchase
+                # Insert new purchase with payment fields
                 new_purchase = await conn.fetchrow("""
                     INSERT INTO tenant_purchases (
                         tenant_id,
@@ -294,8 +312,14 @@ async def create_purchase(
                         status,
                         invoice_number,
                         notes,
-                        created_by
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        created_by,
+                        payment_type,
+                        payment_terms,
+                        credit_days,
+                        requires_advance_payment,
+                        consolidation_group,
+                        payment_balance
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                     RETURNING
                         id,
                         tenant_id,
@@ -310,7 +334,13 @@ async def create_purchase(
                         notes,
                         created_by,
                         created_at,
-                        updated_at
+                        updated_at,
+                        payment_type,
+                        payment_terms,
+                        credit_days,
+                        requires_advance_payment,
+                        consolidation_group,
+                        payment_balance
                 """,
                     tenant_id,
                     purchase_data.supplier_id,
@@ -322,7 +352,13 @@ async def create_purchase(
                     purchase_data.status,
                     invoice_number,  # Auto-generated if not provided
                     purchase_data.notes,
-                    user_id
+                    user_id,
+                    purchase_data.payment_type,
+                    purchase_data.payment_terms,
+                    purchase_data.credit_days,
+                    purchase_data.requires_advance_payment,
+                    purchase_data.consolidation_group,
+                    purchase_data.payment_balance
                 )
 
                 purchase_id = new_purchase['id']

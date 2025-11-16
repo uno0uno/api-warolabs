@@ -711,9 +711,10 @@ async def transition_to_invoiced(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
-                # Get current purchase
+                # Get current purchase with payment info
                 purchase = await conn.fetchrow("""
-                    SELECT id, status FROM tenant_purchases
+                    SELECT id, status, payment_type, credit_days, payment_balance
+                    FROM tenant_purchases
                     WHERE id = $1 AND tenant_id = $2
                 """, purchase_id, tenant_id)
 
@@ -727,18 +728,43 @@ async def transition_to_invoiced(
                         detail=f"Cannot transition from {purchase['status']} to invoiced"
                     )
 
-                # Update purchase
+                # Calculate payment_due_date if credit_days is set
+                from datetime import timedelta
+                payment_due_date = None
+                if purchase['credit_days'] and purchase['credit_days'] > 0:
+                    payment_due_date = data.invoice_date + timedelta(days=purchase['credit_days'])
+                elif data.payment_due_date:
+                    # Use provided payment_due_date if no credit_days
+                    payment_due_date = data.payment_due_date
+
+                # Set payment_balance to invoice_amount for tracking partial payments
+                payment_balance = data.invoice_amount if data.invoice_amount else 0
+
+                # Update purchase with invoice and payment info
                 await conn.execute("""
                     UPDATE tenant_purchases
                     SET
                         status = 'invoiced',
                         invoice_number = $1,
-                        total_amount = $2,
-                        tax_amount = $3,
+                        invoice_date = $2,
+                        invoice_amount = $3,
+                        total_amount = $4,
+                        tax_amount = $5,
+                        payment_due_date = $6,
+                        payment_balance = $7,
                         invoiced_at = NOW(),
                         updated_at = NOW()
-                    WHERE id = $4
-                """, data.invoice_number, data.invoice_amount, data.tax_amount, purchase_id)
+                    WHERE id = $8
+                """,
+                    data.invoice_number,
+                    data.invoice_date,
+                    data.invoice_amount,
+                    data.invoice_amount,  # total_amount = invoice_amount
+                    data.tax_amount,
+                    payment_due_date,
+                    payment_balance,
+                    purchase_id
+                )
 
                 # Create history entry
                 await create_status_history_entry(

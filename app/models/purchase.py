@@ -198,6 +198,15 @@ class PurchaseBase(BaseModel):
     invoice_number: Optional[str] = Field(None, description="Invoice number")
     notes: Optional[str] = Field(None, description="Additional notes")
 
+    # Payment type fields
+    payment_type: Optional[Literal["contado", "credito", "contraentrega", "credito_consolidado"]] = Field(None, description="Payment type")
+    payment_terms: Optional[str] = Field(None, description="Payment terms text")
+    credit_days: Optional[int] = Field(None, ge=0, le=180, description="Credit days (for credito and credito_consolidado)")
+    payment_due_date: Optional[datetime] = Field(None, description="Payment due date (calculated from invoice_date + credit_days)")
+    requires_advance_payment: Optional[bool] = Field(False, description="Requires advance payment (for contraentrega)")
+    consolidation_group: Optional[str] = Field(None, description="Consolidation group for monthly invoicing")
+    payment_balance: Optional[Decimal] = Field(None, ge=0, description="Remaining payment balance (for partial payments)")
+
 class PurchaseCreate(PurchaseBase):
     """Model for creating purchase orders"""
     items: List[PurchaseItemCreate] = Field(default_factory=list, description="Purchase items")
@@ -270,9 +279,13 @@ class Purchase(PurchaseBase):
     paid_at: Optional[datetime] = None
     cancelled_at: Optional[datetime] = None
 
-    # Payment info
+    # Payment info (legacy single payment - deprecated in favor of purchase_payments table)
     payment_method: Optional[PaymentMethod] = None
     payment_reference: Optional[str] = None
+
+    # Invoice details (used for calculating payment_due_date)
+    invoice_date: Optional[datetime] = None
+    invoice_amount: Optional[Decimal] = None
 
     # Additional metadata
     cancellation_reason: Optional[str] = None
@@ -293,6 +306,38 @@ class PurchaseWithDetails(Purchase):
     items_received_count: Optional[int] = None
     items_total_count: Optional[int] = None
     reception_percentage: Optional[float] = None
+
+# =============================================================================
+# PURCHASE PAYMENT MODELS (for tracking multiple payments per purchase)
+# =============================================================================
+
+class PurchasePaymentBase(BaseModel):
+    """Base purchase payment model"""
+    payment_number: str = Field(..., description="Payment number (e.g., PAY-2025-0001)")
+    payment_date: datetime = Field(default_factory=datetime.now, description="Date of payment")
+    payment_amount: Decimal = Field(..., gt=0, description="Amount of this payment")
+    payment_method: Optional[PaymentMethod] = Field(None, description="Payment method")
+    payment_reference: Optional[str] = Field(None, description="Payment transaction reference")
+    payment_receipt_url: Optional[str] = Field(None, description="URL to payment receipt in S3")
+    notes: Optional[str] = Field(None, description="Payment notes")
+
+class PurchasePaymentCreate(PurchasePaymentBase):
+    """Model for creating a purchase payment"""
+    purchase_id: UUID = Field(..., description="Associated purchase order ID")
+
+class PurchasePayment(PurchasePaymentBase):
+    """Full purchase payment model"""
+    id: UUID
+    tenant_id: UUID
+    purchase_id: UUID
+    created_at: datetime
+    updated_at: datetime
+    created_by: Optional[UUID] = None
+    updated_by: Optional[UUID] = None
+
+    class Config:
+        from_attributes = True
+        use_enum_values = True
 
 # =============================================================================
 # RESPONSE MODELS
@@ -325,6 +370,18 @@ class AttachmentsResponse(BaseModel):
     """Attachments list response"""
     success: bool = True
     data: List[PurchaseAttachment]
+
+class PurchasePaymentResponse(BaseModel):
+    """Single payment response"""
+    success: bool = True
+    data: PurchasePayment
+
+class PurchasePaymentsListResponse(BaseModel):
+    """List of payments response"""
+    success: bool = True
+    data: List[PurchasePayment]
+    total_paid: Decimal
+    remaining_balance: Decimal
 
 # =============================================================================
 # STATE TRANSITION MODELS (for wizard forms)
