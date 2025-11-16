@@ -282,6 +282,14 @@ class Purchase(PurchaseBase):
     # Payment info (legacy single payment - deprecated in favor of purchase_payments table)
     payment_method: Optional[PaymentMethod] = None
     payment_reference: Optional[str] = None
+    payment_amount: Optional[Decimal] = None
+    payment_date: Optional[datetime] = None
+
+    # Payment info from history (computed fields)
+    payment_method_final: Optional[str] = Field(None, description="Payment method from table or history")
+    payment_reference_final: Optional[str] = Field(None, description="Payment reference from table or history")
+    payment_date_final: Optional[datetime] = Field(None, description="Payment date from table or history")
+    has_payment: Optional[bool] = Field(None, description="Whether this purchase has been paid (from history)")
 
     # Invoice details (used for calculating payment_due_date)
     invoice_date: Optional[datetime] = None

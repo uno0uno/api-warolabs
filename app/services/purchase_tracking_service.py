@@ -10,6 +10,10 @@ from fastapi import Request, Response, HTTPException, UploadFile
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
+from app.services.aws_s3_service import AWSS3Service
+import logging
+
+logger = logging.getLogger(__name__)
 from app.models.purchase import (
     PurchaseStatusHistory,
     PurchaseStatusHistoryCreate,
@@ -82,7 +86,6 @@ async def upload_purchase_attachments(
     if not files:
         return
 
-    from app.services.aws_s3_service import AWSS3Service
     s3_service = AWSS3Service()
 
     for idx, file in enumerate(files):
@@ -199,6 +202,148 @@ async def get_purchase_status_history(
 
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
+async def get_transition_detail(
+    request: Request,
+    response: Response,
+    purchase_id: UUID,
+    transition_id: UUID
+):
+    """Get detailed information about a specific transition including attachments"""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # Verify purchase belongs to tenant and get purchase info with all details
+            purchase = await conn.fetchrow("""
+                SELECT
+                    tp.id,
+                    tp.purchase_number,
+                    tp.purchase_date,
+                    tp.payment_type,
+                    tp.status,
+                    ts.name as supplier_name
+                FROM tenant_purchases tp
+                LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
+                WHERE tp.id = $1 AND tp.tenant_id = $2
+            """, purchase_id, tenant_id)
+
+            if not purchase:
+                raise HTTPException(status_code=404, detail="Purchase not found")
+
+            # Get specific transition with user info
+            transition_data = await conn.fetchrow("""
+                SELECT
+                    psh.id,
+                    psh.purchase_id,
+                    psh.tenant_id,
+                    psh.from_status,
+                    psh.to_status,
+                    psh.changed_by,
+                    psh.changed_at,
+                    psh.metadata,
+                    psh.notes,
+                    psh.created_at,
+                    p.name as user_name,
+                    p.email as user_email
+                FROM purchase_status_history psh
+                LEFT JOIN profile p ON psh.changed_by = p.id
+                WHERE psh.id = $1 AND psh.purchase_id = $2
+            """, transition_id, purchase_id)
+
+            if not transition_data:
+                raise HTTPException(status_code=404, detail="Transition not found")
+
+            # Get attachments uploaded around this transition (±5 minutes)
+            attachments_data = await conn.fetch("""
+                SELECT
+                    id,
+                    purchase_id,
+                    s3_key,
+                    file_name,
+                    file_size,
+                    mime_type,
+                    attachment_type,
+                    description,
+                    uploaded_at,
+                    created_at
+                FROM purchase_attachments
+                WHERE purchase_id = $1
+                ORDER BY uploaded_at DESC
+            """, purchase_id)
+
+        # Generate presigned URLs for attachments
+        s3_service = AWSS3Service()
+        transition_time = transition_data['changed_at']
+        related_attachments = []
+
+        for att_row in attachments_data:
+            # Filter by timestamp (±5 minutes)
+            upload_time = att_row['created_at']
+            time_diff = abs((upload_time - transition_time).total_seconds())
+
+            if time_diff < 300:  # 5 minutes = 300 seconds
+                att_dict = dict(att_row)
+                if att_dict.get('s3_key'):
+                    try:
+                        presigned_url = await s3_service.get_presigned_url(
+                            att_dict['s3_key'],
+                            expiration=3600
+                        )
+                        att_dict['s3_url'] = presigned_url
+                    except Exception as e:
+                        print(f"Error generating presigned URL: {e}")
+                        att_dict['s3_url'] = None
+                else:
+                    att_dict['s3_url'] = None
+                related_attachments.append(att_dict)
+
+        # Parse transition metadata
+        import json
+        transition_dict = dict(transition_data)
+
+        # Extract user info
+        user_name = transition_dict.pop('user_name', None)
+        user_email = transition_dict.pop('user_email', None)
+
+        if transition_dict.get('metadata') and isinstance(transition_dict['metadata'], str):
+            try:
+                transition_dict['metadata'] = json.loads(transition_dict['metadata'])
+            except json.JSONDecodeError:
+                transition_dict['metadata'] = {}
+
+        # Add user info to transition
+        transition_dict['user_name'] = user_name
+        transition_dict['user_email'] = user_email
+
+        # Build response
+        return {
+            "success": True,
+            "data": {
+                "transition": transition_dict,
+                "purchase": {
+                    "purchase_number": purchase['purchase_number'],
+                    "purchase_date": purchase['purchase_date'].isoformat() if purchase['purchase_date'] else None,
+                    "payment_type": purchase['payment_type'],
+                    "status": purchase['status'],
+                    "supplier_name": purchase['supplier_name']
+                },
+                "attachments": related_attachments
+            }
+        }
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting transition detail: {e}")
+        raise HTTPException(status_code=500, detail="Error getting transition detail")
+
+
 async def create_status_history_entry(
     conn,
     purchase_id: UUID,
@@ -270,13 +415,33 @@ async def get_purchase_attachments(
                     description,
                     uploaded_by,
                     uploaded_at,
-                    created_at
+                    created_at,
+                    s3_key
                 FROM purchase_attachments
                 WHERE purchase_id = $1
                 ORDER BY uploaded_at DESC
             """, purchase_id)
 
-            attachments = [PurchaseAttachment(**dict(row)) for row in attachments_data]
+            # Generate presigned URLs for each attachment
+            s3_service = AWSS3Service()
+            attachments = []
+            for row in attachments_data:
+                row_dict = dict(row)
+                # Generate fresh presigned URL if s3_key exists
+                if row_dict.get('s3_key'):
+                    try:
+                        presigned_url = await s3_service.get_presigned_url(
+                            row_dict['s3_key'],
+                            expiration=3600
+                        )
+                        row_dict['s3_url'] = presigned_url
+                    except Exception as e:
+                        print(f"Error generating presigned URL for attachment {row_dict['id']}: {e}")
+                        row_dict['s3_url'] = None
+                else:
+                    row_dict['s3_url'] = None
+
+                attachments.append(PurchaseAttachment(**row_dict))
 
             return AttachmentsResponse(data=attachments)
 
@@ -1121,8 +1286,8 @@ async def transition_to_paid(
     except HTTPException:
         raise
     except Exception as e:
-
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        logger.error(f"Error in transition_to_paid: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error registrando pago: {str(e)}")
 
 async def cancel_purchase(
     request: Request,

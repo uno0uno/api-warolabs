@@ -34,7 +34,7 @@ async def get_purchases_list(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
-            # Build query with tenant isolation and supplier name
+            # Build query with tenant isolation, supplier name, and payment history
             base_query = """
                 SELECT
                     tp.id,
@@ -60,9 +60,30 @@ async def get_purchases_list(
                     tp.payment_balance,
                     tp.invoice_date,
                     tp.invoice_amount,
-                    ts.name as supplier_name
+                    tp.payment_method,
+                    tp.payment_reference,
+                    tp.payment_amount,
+                    tp.payment_date,
+                    tp.paid_at,
+                    ts.name as supplier_name,
+                    -- Get payment info from history if not in main table
+                    COALESCE(tp.payment_method, psh_paid.metadata->>'payment_method') as payment_method_final,
+                    COALESCE(tp.payment_reference, psh_paid.metadata->>'payment_reference') as payment_reference_final,
+                    COALESCE(tp.payment_date, psh_paid.changed_at) as payment_date_final,
+                    CASE
+                        WHEN tp.paid_at IS NOT NULL OR psh_paid.id IS NOT NULL THEN true
+                        ELSE false
+                    END as has_payment
                 FROM tenant_purchases tp
                 LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
+                LEFT JOIN LATERAL (
+                    SELECT id, changed_at, metadata
+                    FROM purchase_status_history
+                    WHERE purchase_id = tp.id
+                    AND to_status = 'paid'
+                    ORDER BY changed_at DESC
+                    LIMIT 1
+                ) psh_paid ON true
                 WHERE tp.tenant_id = $1
             """
 
@@ -151,6 +172,15 @@ async def get_purchases_list(
                     created_by=row['created_by'],
                     created_at=row['created_at'],
                     updated_at=row['updated_at'],
+                    payment_method=row.get('payment_method'),
+                    payment_reference=row.get('payment_reference'),
+                    payment_amount=row.get('payment_amount'),
+                    payment_date=row.get('payment_date'),
+                    paid_at=row.get('paid_at'),
+                    payment_method_final=row.get('payment_method_final'),
+                    payment_reference_final=row.get('payment_reference_final'),
+                    payment_date_final=row.get('payment_date_final'),
+                    has_payment=row.get('has_payment'),
                     items=items
                 )
                 purchases.append(purchase)
