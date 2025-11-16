@@ -16,12 +16,17 @@ class Settings(BaseSettings):
     auth_secret: str = Field(alias='BETTER_AUTH_SECRET_KEY')
     token_backend: str = Field(alias='NUXT_PRIVATE_TOKEN_BACKEND')
     
-    # AWS - nombres limpios
+    # AWS - nombres limpios (para SES)
     aws_access_key_id: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_AWS_ACCES_KEY_ID')
     aws_secret_access_key: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_AWS_SECRET_ACCESS_KEY')
     aws_region: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_AWS_REGION')
-    aws_s3_bucket: str = Field(default='warocol-purchase-attachments', alias='NUXT_PRIVATE_AWS_S3_BUCKET')
     email_from: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_EMAIL_FROM')
+
+    # Cloudflare R2 - S3-compatible storage
+    r2_access_key_id: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_R2_ACCESS_KEY_ID')
+    r2_secret_access_key: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_R2_SECRET_ACCESS_KEY')
+    r2_endpoint: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_R2_ENDPOINT')
+    r2_bucket: str = Field(default='warocol-purchase-attachments', alias='NUXT_PRIVATE_R2_BUCKET')
     
     # Encryption - nombres limpios
     private_key_encrypter: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_PRIVATE_KEY_ENCRYPTER')
