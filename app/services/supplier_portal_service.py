@@ -4,9 +4,10 @@ Allows suppliers to access their purchases and update statuses using a unique to
 """
 from typing import Optional, Dict, Any, List
 from uuid import UUID
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 from app.database import get_db_connection
 from datetime import datetime
+from app.services.aws_s3_service import AWSS3Service
 
 async def verify_supplier_token(token: str) -> Dict[str, Any]:
     """
@@ -63,7 +64,6 @@ async def verify_supplier_token(token: str) -> Dict[str, Any]:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error al verificar token")
-
 
 async def get_supplier_purchases(token: str, status_filter: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -184,9 +184,8 @@ async def get_supplier_purchases(token: str, status_filter: Optional[str] = None
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error getting supplier purchases: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error al obtener compras")
 
+        raise HTTPException(status_code=500, detail="Error al obtener compras")
 
 async def update_purchase_prices(
     token: str,
@@ -318,9 +317,8 @@ async def update_purchase_prices(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error updating purchase prices: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error al actualizar precios")
 
+        raise HTTPException(status_code=500, detail="Error al actualizar precios")
 
 async def invoice_purchase_from_portal(
     token: str,
@@ -332,7 +330,8 @@ async def invoice_purchase_from_portal(
     tax_amount: Optional[float] = None,
     credit_days: Optional[int] = None,
     payment_due_date: Optional[str] = None,
-    notes: Optional[str] = None
+    notes: Optional[str] = None,
+    files: List[UploadFile] = []
 ) -> Dict[str, Any]:
     """
     Allow supplier to register invoice/remision via portal
@@ -371,8 +370,10 @@ async def invoice_purchase_from_portal(
             if not purchase:
                 raise HTTPException(status_code=404, detail="Compra no encontrada")
 
-            # Validate transition (confirmed/preparing -> invoiced)
-            if purchase['status'] not in ['confirmed', 'preparing']:
+            # Validate transition (confirmed/preparing/paid -> invoiced)
+            # For "contado" payment type: confirmed -> paid -> invoiced
+            # For other types: confirmed/preparing -> invoiced
+            if purchase['status'] not in ['confirmed', 'preparing', 'paid']:
                 raise HTTPException(
                     status_code=400,
                     detail=f"No se puede facturar desde el estado '{purchase['status']}'"
@@ -440,6 +441,55 @@ async def invoice_purchase_from_portal(
                 """, purchase_id, supplier['tenant_id'], purchase['status'],
                     json.dumps(metadata), history_notes, purchase['created_by'])
 
+                # Upload attachments if provided
+                if files:
+                    s3_service = AWSS3Service()
+                    for file in files:
+                        try:
+                            # Upload file to S3/R2
+                            s3_key = await s3_service.upload_file(
+                                file_content=file.file,
+                                filename=file.filename,
+                                folder='purchases/attachments',
+                                content_type=file.content_type
+                            )
+
+                            if s3_key:
+                                # Generate presigned URL
+                                file_url = await s3_service.get_presigned_url(s3_key, expiration=3600)
+
+                                # Save attachment record to database
+                                await conn.execute("""
+                                    INSERT INTO purchase_attachments (
+                                        tenant_id,
+                                        purchase_id,
+                                        path,
+                                        file_name,
+                                        file_size,
+                                        mime_type,
+                                        attachment_type,
+                                        description,
+                                        uploaded_by,
+                                        s3_key,
+                                        s3_url
+                                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                                """,
+                                    supplier['tenant_id'],
+                                    purchase_id,
+                                    s3_key,  # path (required)
+                                    file.filename,
+                                    file.size or 0,
+                                    file.content_type or 'application/octet-stream',
+                                    'invoice',
+                                    f'{doc_label}: {invoice_number}',
+                                    purchase['created_by'],  # Use original creator as uploader
+                                    s3_key,
+                                    file_url
+                                )
+                        except Exception as e:
+                            # Continue with other files even if one fails
+                            pass
+
                 return {
                     "success": True,
                     "message": f"{doc_label} registrada correctamente"
@@ -450,9 +500,8 @@ async def invoice_purchase_from_portal(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error invoicing purchase from portal: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error al registrar documento")
 
+        raise HTTPException(status_code=500, detail="Error al registrar documento")
 
 async def ship_purchase_from_portal(
     token: str,
@@ -461,7 +510,8 @@ async def ship_purchase_from_portal(
     carrier: str,
     estimated_delivery_date: Optional[str] = None,
     package_count: Optional[int] = None,
-    notes: Optional[str] = None
+    notes: Optional[str] = None,
+    files: List[UploadFile] = []
 ) -> Dict[str, Any]:
     """
     Allow supplier to mark purchase as shipped via portal
@@ -514,6 +564,7 @@ async def ship_purchase_from_portal(
 
             async with conn.transaction():
                 # Update purchase with shipping info
+
                 await conn.execute("""
                     UPDATE tenant_purchases
                     SET status = 'shipped',
@@ -527,6 +578,7 @@ async def ship_purchase_from_portal(
                 """, tracking_number, carrier, delivery_date, package_count, purchase_id)
 
                 # Create status history entry
+
                 metadata = {
                     "tracking_number": tracking_number,
                     "carrier": carrier,
@@ -534,6 +586,7 @@ async def ship_purchase_from_portal(
                 }
 
                 import json
+
                 await conn.execute("""
                     INSERT INTO purchase_status_history (
                         purchase_id,
@@ -548,6 +601,59 @@ async def ship_purchase_from_portal(
                     json.dumps(metadata), notes or 'Marcado como enviado por proveedor',
                     purchase['created_by'])
 
+                # Upload attachments if provided
+                if files:
+
+                    s3_service = AWSS3Service()
+                    for idx, file in enumerate(files):
+                        try:
+
+                            # Upload file to S3/R2
+                            s3_key = await s3_service.upload_file(
+                                file_content=file.file,
+                                filename=file.filename,
+                                folder='purchases/attachments',
+                                content_type=file.content_type
+                            )
+
+                            if s3_key:
+                                # Generate presigned URL
+                                file_url = await s3_service.get_presigned_url(s3_key, expiration=3600)
+
+                                # Save attachment record to database
+
+                                await conn.execute("""
+                                    INSERT INTO purchase_attachments (
+                                        tenant_id,
+                                        purchase_id,
+                                        path,
+                                        file_name,
+                                        file_size,
+                                        mime_type,
+                                        attachment_type,
+                                        description,
+                                        uploaded_by,
+                                        s3_key,
+                                        s3_url
+                                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                                """,
+                                    supplier['tenant_id'],
+                                    purchase_id,
+                                    s3_key,  # path (required)
+                                    file.filename,
+                                    file.size or 0,
+                                    file.content_type or 'application/octet-stream',
+                                    'shipping_label',
+                                    f'Envío {tracking_number} - {carrier}',
+                                    purchase['created_by'],  # Use original creator as uploader
+                                    s3_key,
+                                    file_url
+                                )
+
+                        except Exception as e:
+                            # Continue with other files even if one fails
+                            pass
+
                 return {
                     "success": True,
                     "message": "Orden marcada como enviada correctamente"
@@ -558,5 +664,5 @@ async def ship_purchase_from_portal(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error shipping purchase from portal: {str(e)}")
+
         raise HTTPException(status_code=500, detail="Error al marcar como enviado")

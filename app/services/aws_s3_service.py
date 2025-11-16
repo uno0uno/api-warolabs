@@ -12,14 +12,29 @@ import mimetypes
 
 class AWSS3Service:
     def __init__(self):
-        """Initialize S3 client"""
-        self.s3_client = boto3.client(
-            's3',
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-            region_name=settings.aws_region
-        )
-        self.bucket_name = settings.aws_s3_bucket
+        """Initialize S3 client (Cloudflare R2 compatible)"""
+        # Use R2 credentials if available, fallback to AWS
+        access_key = settings.r2_access_key_id or settings.aws_access_key_id
+        secret_key = settings.r2_secret_access_key or settings.aws_secret_access_key
+        endpoint_url = settings.r2_endpoint  # None for AWS S3, URL for R2
+
+        # Configure S3 client
+        client_config = {
+            'aws_access_key_id': access_key,
+            'aws_secret_access_key': secret_key,
+        }
+
+        # Add endpoint for R2 (Cloudflare)
+        if endpoint_url:
+            client_config['endpoint_url'] = endpoint_url
+            # R2 doesn't use regions, but boto3 requires it
+            client_config['region_name'] = 'auto'
+        else:
+            # Use AWS region for standard S3
+            client_config['region_name'] = settings.aws_region
+
+        self.s3_client = boto3.client('s3', **client_config)
+        self.bucket_name = settings.r2_bucket
 
     async def upload_file(
         self,
@@ -69,14 +84,12 @@ class AWSS3Service:
                 }
             )
 
-            print(f"✅ File uploaded successfully to S3: {s3_key}")
             return s3_key
 
         except ClientError as e:
-            print(f"❌ Error uploading file to S3: {str(e)}")
             return None
         except Exception as e:
-            print(f"❌ Unexpected error uploading file: {str(e)}")
+            pass
             return None
 
     async def get_presigned_url(
@@ -105,7 +118,7 @@ class AWSS3Service:
             )
             return url
         except ClientError as e:
-            print(f"❌ Error generating presigned URL: {str(e)}")
+
             return None
 
     async def delete_file(self, s3_key: str) -> bool:
@@ -123,10 +136,10 @@ class AWSS3Service:
                 Bucket=self.bucket_name,
                 Key=s3_key
             )
-            print(f"✅ File deleted successfully from S3: {s3_key}")
+
             return True
         except ClientError as e:
-            print(f"❌ Error deleting file from S3: {str(e)}")
+
             return False
 
     async def get_file_metadata(self, s3_key: str) -> Optional[dict]:
@@ -151,5 +164,5 @@ class AWSS3Service:
                 'metadata': response.get('Metadata', {})
             }
         except ClientError as e:
-            print(f"❌ Error getting file metadata: {str(e)}")
+
             return None

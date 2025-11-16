@@ -6,7 +6,7 @@ Handles status transitions, attachments, and history for purchase orders
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 from datetime import datetime
-from fastapi import Request, Response, HTTPException
+from fastapi import Request, Response, HTTPException, UploadFile
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
@@ -35,14 +35,14 @@ from app.services.email_helpers import send_purchase_status_notification
 STATE_TRANSITIONS = {
     'quotation': ['pending', 'cancelled'],  # Quotation can be completed (with prices) or cancelled
     'pending': ['confirmed', 'cancelled'],
-    'confirmed': ['preparing', 'invoiced', 'cancelled'],  # Invoice before shipping
-    'preparing': ['invoiced', 'cancelled'],  # Invoice before shipping
+    'confirmed': ['preparing', 'paid', 'invoiced', 'cancelled'],  # Can pay before invoice (contado) or invoice first (credito)
+    'preparing': ['paid', 'invoiced', 'cancelled'],  # Can pay before invoice (contado) or invoice first (credito)
+    'paid': ['invoiced'],  # After payment, supplier can invoice (for contado flow)
     'invoiced': ['shipped'],  # Ship after invoicing
     'shipped': ['received', 'partially_received', 'overdue'],
     'partially_received': ['received', 'overdue'],
     'received': ['verified'],
-    'verified': ['paid'],  # Pay after verification (at the end)
-    'paid': [],  # Final state
+    'verified': ['paid'],  # Pay after verification (traditional flow - credito)
     'cancelled': [],  # Final state
     'overdue': ['shipped', 'received', 'cancelled']  # Can resume flow
 }
@@ -51,6 +51,85 @@ def validate_state_transition(from_status: str, to_status: str) -> bool:
     """Validate if a state transition is allowed"""
     allowed_transitions = STATE_TRANSITIONS.get(from_status, [])
     return to_status in allowed_transitions
+
+# =============================================================================
+# ATTACHMENT UPLOAD HELPER
+# =============================================================================
+
+async def upload_purchase_attachments(
+    conn,
+    tenant_id: UUID,
+    purchase_id: UUID,
+    user_id: UUID,
+    files: List[UploadFile],
+    attachment_type: str,
+    description_prefix: str,
+    log_prefix: str = "UPLOAD"
+) -> None:
+    """
+    Helper function to upload purchase attachments to S3/R2 and save to database
+
+    Args:
+        conn: Database connection
+        tenant_id: Tenant UUID
+        purchase_id: Purchase UUID
+        user_id: User UUID who is uploading
+        files: List of UploadFile objects
+        attachment_type: Type of attachment (e.g., 'shipping_label', 'invoice', 'payment_proof')
+        description_prefix: Prefix for attachment description
+        log_prefix: Prefix for log messages
+    """
+    if not files:
+        return
+
+    from app.services.aws_s3_service import AWSS3Service
+    s3_service = AWSS3Service()
+
+    for idx, file in enumerate(files):
+        try:
+            # Upload file to S3/R2
+            s3_key = await s3_service.upload_file(
+                file_content=file.file,
+                filename=file.filename,
+                folder='purchases/attachments',
+                content_type=file.content_type
+            )
+
+            if s3_key:
+                # Generate presigned URL
+                file_url = await s3_service.get_presigned_url(s3_key, expiration=3600)
+
+                # Save attachment record to database
+                await conn.execute("""
+                    INSERT INTO purchase_attachments (
+                        tenant_id,
+                        purchase_id,
+                        path,
+                        file_name,
+                        file_size,
+                        mime_type,
+                        attachment_type,
+                        description,
+                        uploaded_by,
+                        s3_key,
+                        s3_url
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                """,
+                    tenant_id,
+                    purchase_id,
+                    s3_key,  # path (required)
+                    file.filename,
+                    file.size or 0,
+                    file.content_type or 'application/octet-stream',
+                    attachment_type,
+                    description_prefix,
+                    user_id,
+                    s3_key,
+                    file_url
+                )
+        except Exception:
+            pass
+pass
 
 # =============================================================================
 # STATUS HISTORY FUNCTIONS
@@ -117,7 +196,7 @@ async def get_purchase_status_history(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error fetching status history: {e}")
+
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 async def create_status_history_entry(
@@ -206,7 +285,7 @@ async def get_purchase_attachments(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error fetching attachments: {e}")
+
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 async def create_purchase_attachment(
@@ -271,7 +350,7 @@ async def create_purchase_attachment(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error creating attachment: {e}")
+
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 # =============================================================================
@@ -362,7 +441,7 @@ async def transition_to_confirmed(
                             tenant_site=purchase_info['tenant_site']
                         )
                 except Exception as email_error:
-                    print(f"Error sending confirmation email: {str(email_error)}")
+                    pass
 
                 return {"success": True, "message": "Purchase confirmed successfully"}
 
@@ -371,16 +450,21 @@ async def transition_to_confirmed(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error confirming purchase: {e}")
+
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 async def transition_to_shipped(
     request: Request,
     response: Response,
     purchase_id: UUID,
-    data: ShipPurchaseData
+    tracking_number: str,
+    carrier: str,
+    estimated_delivery_date: Optional[str] = None,
+    package_count: Optional[int] = None,
+    notes: Optional[str] = None,
+    files: List[UploadFile] = []
 ) -> Dict[str, Any]:
-    """Transition purchase to shipped state"""
+    """Transition purchase to shipped state with optional file attachments"""
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -388,6 +472,15 @@ async def transition_to_shipped(
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
+
+        # Parse estimated_delivery_date if provided
+        from datetime import datetime
+        estimated_delivery_dt = None
+        if estimated_delivery_date:
+            try:
+                estimated_delivery_dt = datetime.fromisoformat(estimated_delivery_date.replace('Z', '+00:00'))
+            except:
+                pass
 
         async with get_db_connection() as conn:
             async with conn.transaction():
@@ -402,8 +495,6 @@ async def transition_to_shipped(
 
                 # Validate transition
                 current_status = purchase['status']
-                print(f"DEBUG: Attempting transition from '{current_status}' to 'shipped'")
-                print(f"DEBUG: Valid transitions from '{current_status}': {STATE_TRANSITIONS.get(current_status, [])}")
 
                 if not validate_state_transition(current_status, 'shipped'):
                     raise HTTPException(
@@ -423,19 +514,31 @@ async def transition_to_shipped(
                         shipped_at = NOW(),
                         updated_at = NOW()
                     WHERE id = $5
-                """, data.tracking_number, data.carrier, data.estimated_delivery_date,
-                data.package_count, purchase_id)
+                """, tracking_number, carrier, estimated_delivery_dt,
+                package_count, purchase_id)
 
                 # Create history entry
                 await create_status_history_entry(
                     conn, purchase_id, tenant_id,
                     purchase['status'], 'shipped', user_id,
                     {
-                        "tracking_number": data.tracking_number,
-                        "carrier": data.carrier,
-                        "package_count": data.package_count
+                        "tracking_number": tracking_number,
+                        "carrier": carrier,
+                        "package_count": package_count
                     },
-                    data.notes
+                    notes
+                )
+
+                # Upload attachments if provided
+                await upload_purchase_attachments(
+                    conn=conn,
+                    tenant_id=tenant_id,
+                    purchase_id=purchase_id,
+                    user_id=user_id,
+                    files=files,
+                    attachment_type='shipping_label',
+                    description_prefix=f'Envío: {tracking_number}',
+                    log_prefix='SHIP-ADMIN'
                 )
 
                 # Send email notification to supplier
@@ -456,18 +559,18 @@ async def transition_to_shipped(
                             supplier_name=purchase_info['supplier_name'],
                             purchase_number=purchase_info['purchase_number'],
                             status='shipped',
-                            notes=data.notes,
+                            notes=notes,
                             metadata={
-                                "tracking_number": data.tracking_number,
-                                "carrier": data.carrier,
-                                "estimated_delivery_date": data.estimated_delivery_date.strftime('%d de %B de %Y') if data.estimated_delivery_date else None,
-                                "package_count": data.package_count
+                                "tracking_number": tracking_number,
+                                "carrier": carrier,
+                                "estimated_delivery_date": estimated_delivery_dt.strftime('%d de %B de %Y') if estimated_delivery_dt else None,
+                                "package_count": package_count
                             },
                             supplier_token=str(purchase_info['supplier_token']) if purchase_info['supplier_token'] else None,
                             tenant_site=purchase_info['tenant_site']
                         )
                 except Exception as email_error:
-                    print(f"Error sending shipped email: {str(email_error)}")
+                    pass
 
                 return {"success": True, "message": "Purchase marked as shipped"}
 
@@ -476,16 +579,20 @@ async def transition_to_shipped(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error shipping purchase: {e}")
+
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 async def transition_to_received(
     request: Request,
     response: Response,
     purchase_id: UUID,
-    data: ReceivePurchaseData
+    items_data: str,
+    package_condition: str,
+    reception_notes: Optional[str] = None,
+    partial: bool = False,
+    files: List[UploadFile] = []
 ) -> Dict[str, Any]:
-    """Transition purchase to received state"""
+    """Transition purchase to received state with optional file attachments"""
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -493,6 +600,13 @@ async def transition_to_received(
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
+
+        # Parse items data from JSON string
+        import json
+        try:
+            items = json.loads(items_data)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid items data format")
 
         async with get_db_connection() as conn:
             async with conn.transaction():
@@ -506,7 +620,7 @@ async def transition_to_received(
                     raise HTTPException(status_code=404, detail="Purchase not found")
 
                 # Determine target status
-                target_status = 'partially_received' if data.partial else 'received'
+                target_status = 'partially_received' if partial else 'received'
 
                 # Validate transition
                 if not validate_state_transition(purchase['status'], target_status):
@@ -525,11 +639,12 @@ async def transition_to_received(
                         received_at = NOW(),
                         updated_at = NOW()
                     WHERE id = $4
-                """, target_status, data.package_condition, user_id, purchase_id)
+                """, target_status, package_condition, user_id, purchase_id)
 
                 # Update items with received quantities
-                for item in data.items:
-                    if item.quantity_received is not None:
+                for item in items:
+                    quantity_received = item.get('quantity_received')
+                    if quantity_received is not None:
                         await conn.execute("""
                             UPDATE tenant_purchase_items
                             SET
@@ -537,18 +652,30 @@ async def transition_to_received(
                                 item_condition = $2,
                                 received_at = NOW()
                             WHERE purchase_id = $3 AND ingredient_id = $4
-                        """, item.quantity_received, item.item_condition,
-                        purchase_id, item.ingredient_id)
+                        """, quantity_received, item.get('item_condition'),
+                        purchase_id, item.get('ingredient_id'))
 
                 # Create history entry
                 await create_status_history_entry(
                     conn, purchase_id, tenant_id,
                     purchase['status'], target_status, user_id,
                     {
-                        "package_condition": data.package_condition,
-                        "partial_reception": data.partial
+                        "package_condition": package_condition,
+                        "partial_reception": partial
                     },
-                    data.reception_notes
+                    reception_notes
+                )
+
+                # Upload attachments if provided
+                await upload_purchase_attachments(
+                    conn=conn,
+                    tenant_id=tenant_id,
+                    purchase_id=purchase_id,
+                    user_id=user_id,
+                    files=files,
+                    attachment_type='delivery_photo',
+                    description_prefix='Recepción de mercancía',
+                    log_prefix='RECEIVE'
                 )
 
                 # Send email notification to supplier
@@ -569,16 +696,16 @@ async def transition_to_received(
                             supplier_name=purchase_info['supplier_name'],
                             purchase_number=purchase_info['purchase_number'],
                             status='received',
-                            notes=data.reception_notes,
+                            notes=reception_notes,
                             metadata={
-                                "package_condition": data.package_condition,
-                                "partial_reception": data.partial
+                                "package_condition": package_condition,
+                                "partial_reception": partial
                             },
                             supplier_token=str(purchase_info['supplier_token']) if purchase_info['supplier_token'] else None,
                             tenant_site=purchase_info['tenant_site']
                         )
                 except Exception as email_error:
-                    print(f"Error sending received email: {str(email_error)}")
+                    pass
 
                 return {"success": True, "message": f"Purchase {target_status}"}
 
@@ -587,16 +714,19 @@ async def transition_to_received(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error receiving purchase: {e}")
+
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 async def transition_to_verified(
     request: Request,
     response: Response,
     purchase_id: UUID,
-    data: VerifyPurchaseData
+    items_data: str,
+    all_items_approved: bool,
+    verification_notes: Optional[str] = None,
+    files: List[UploadFile] = []
 ) -> Dict[str, Any]:
-    """Transition purchase to verified state"""
+    """Transition purchase to verified state with optional file attachments"""
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -604,6 +734,13 @@ async def transition_to_verified(
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
+
+        # Parse items data from JSON string
+        import json
+        try:
+            items = json.loads(items_data)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid items data format")
 
         async with get_db_connection() as conn:
             async with conn.transaction():
@@ -635,8 +772,9 @@ async def transition_to_verified(
                 """, user_id, purchase_id)
 
                 # Update items with quality assessment
-                for item in data.items:
-                    if item.quality_status is not None:
+                for item in items:
+                    quality_status = item.get('quality_status')
+                    if quality_status is not None:
                         await conn.execute("""
                             UPDATE tenant_purchase_items
                             SET
@@ -645,15 +783,27 @@ async def transition_to_verified(
                                 verification_notes = $3,
                                 verified_at = NOW()
                             WHERE purchase_id = $4 AND ingredient_id = $5
-                        """, item.quality_status, item.quality_notes,
-                        item.verification_notes, purchase_id, item.ingredient_id)
+                        """, quality_status, item.get('quality_notes'),
+                        item.get('verification_notes'), purchase_id, item.get('ingredient_id'))
 
                 # Create history entry
                 await create_status_history_entry(
                     conn, purchase_id, tenant_id,
                     purchase['status'], 'verified', user_id,
-                    {"all_items_approved": data.all_items_approved},
-                    data.verification_notes
+                    {"all_items_approved": all_items_approved},
+                    verification_notes
+                )
+
+                # Upload attachments if provided
+                await upload_purchase_attachments(
+                    conn=conn,
+                    tenant_id=tenant_id,
+                    purchase_id=purchase_id,
+                    user_id=user_id,
+                    files=files,
+                    attachment_type='quality_photo',
+                    description_prefix='Verificación de calidad',
+                    log_prefix='VERIFY'
                 )
 
                 # Send email notification to supplier
@@ -674,15 +824,15 @@ async def transition_to_verified(
                             supplier_name=purchase_info['supplier_name'],
                             purchase_number=purchase_info['purchase_number'],
                             status='verified',
-                            notes=data.verification_notes,
+                            notes=verification_notes,
                             metadata={
-                                "all_items_approved": data.all_items_approved
+                                "all_items_approved": all_items_approved
                             },
                             supplier_token=str(purchase_info['supplier_token']) if purchase_info['supplier_token'] else None,
                             tenant_site=purchase_info['tenant_site']
                         )
                 except Exception as email_error:
-                    print(f"Error sending verified email: {str(email_error)}")
+                    pass
 
                 return {"success": True, "message": "Purchase verified successfully"}
 
@@ -691,16 +841,24 @@ async def transition_to_verified(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error verifying purchase: {e}")
+
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 async def transition_to_invoiced(
     request: Request,
     response: Response,
     purchase_id: UUID,
-    data: InvoicePurchaseData
+    document_type: str,
+    invoice_number: str,
+    invoice_date: str,
+    invoice_amount: Optional[float] = None,
+    tax_amount: Optional[float] = None,
+    credit_days: Optional[int] = None,
+    payment_due_date: Optional[str] = None,
+    notes: Optional[str] = None,
+    files: List[UploadFile] = []
 ) -> Dict[str, Any]:
-    """Transition purchase to invoiced state"""
+    """Transition purchase to invoiced state with optional file attachments"""
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -708,6 +866,20 @@ async def transition_to_invoiced(
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
+
+        # Parse dates
+        from datetime import datetime, timedelta
+        try:
+            invoice_dt = datetime.fromisoformat(invoice_date.replace('Z', '+00:00'))
+        except:
+            invoice_dt = datetime.now()
+
+        payment_due_dt = None
+        if payment_due_date:
+            try:
+                payment_due_dt = datetime.fromisoformat(payment_due_date.replace('Z', '+00:00'))
+            except:
+                pass
 
         async with get_db_connection() as conn:
             async with conn.transaction():
@@ -729,16 +901,14 @@ async def transition_to_invoiced(
                     )
 
                 # Calculate payment_due_date if credit_days is set
-                from datetime import timedelta
-                payment_due_date = None
                 if purchase['credit_days'] and purchase['credit_days'] > 0:
-                    payment_due_date = data.invoice_date + timedelta(days=purchase['credit_days'])
-                elif data.payment_due_date:
-                    # Use provided payment_due_date if no credit_days
-                    payment_due_date = data.payment_due_date
+                    payment_due_dt = invoice_dt + timedelta(days=purchase['credit_days'])
+                elif not payment_due_dt and credit_days:
+                    # Use provided credit_days if no purchase credit_days
+                    payment_due_dt = invoice_dt + timedelta(days=credit_days)
 
                 # Set payment_balance to invoice_amount for tracking partial payments
-                payment_balance = data.invoice_amount if data.invoice_amount else 0
+                payment_balance = invoice_amount if invoice_amount else 0
 
                 # Update purchase with invoice and payment info
                 await conn.execute("""
@@ -756,12 +926,12 @@ async def transition_to_invoiced(
                         updated_at = NOW()
                     WHERE id = $8
                 """,
-                    data.invoice_number,
-                    data.invoice_date,
-                    data.invoice_amount,
-                    data.invoice_amount,  # total_amount = invoice_amount
-                    data.tax_amount,
-                    payment_due_date,
+                    invoice_number,
+                    invoice_dt,
+                    invoice_amount,
+                    invoice_amount,  # total_amount = invoice_amount
+                    tax_amount,
+                    payment_due_dt,
                     payment_balance,
                     purchase_id
                 )
@@ -771,11 +941,23 @@ async def transition_to_invoiced(
                     conn, purchase_id, tenant_id,
                     purchase['status'], 'invoiced', user_id,
                     {
-                        "invoice_number": data.invoice_number,
-                        "invoice_amount": str(data.invoice_amount),
-                        "payment_due_date": data.payment_due_date.isoformat() if data.payment_due_date else None
+                        "invoice_number": invoice_number,
+                        "invoice_amount": str(invoice_amount) if invoice_amount else None,
+                        "payment_due_date": payment_due_dt.isoformat() if payment_due_dt else None
                     },
-                    data.notes
+                    notes
+                )
+
+                # Upload attachments if provided
+                await upload_purchase_attachments(
+                    conn=conn,
+                    tenant_id=tenant_id,
+                    purchase_id=purchase_id,
+                    user_id=user_id,
+                    files=files,
+                    attachment_type='invoice',
+                    description_prefix=f'Factura: {invoice_number}',
+                    log_prefix='INVOICE-ADMIN'
                 )
 
                 # Send email notification to supplier
@@ -796,18 +978,18 @@ async def transition_to_invoiced(
                             supplier_name=purchase_info['supplier_name'],
                             purchase_number=purchase_info['purchase_number'],
                             status='invoiced',
-                            notes=data.notes,
+                            notes=notes,
                             metadata={
-                                "invoice_number": data.invoice_number,
-                                "invoice_total": float(data.invoice_amount),
-                                "invoice_date": datetime.now().strftime('%d de %B de %Y'),
-                                "payment_due_date": data.payment_due_date.strftime('%d de %B de %Y') if data.payment_due_date else None
+                                "invoice_number": invoice_number,
+                                "invoice_total": float(invoice_amount) if invoice_amount else 0,
+                                "invoice_date": invoice_dt.strftime('%d de %B de %Y'),
+                                "payment_due_date": payment_due_dt.strftime('%d de %B de %Y') if payment_due_dt else None
                             },
                             supplier_token=str(purchase_info['supplier_token']) if purchase_info['supplier_token'] else None,
                             tenant_site=purchase_info['tenant_site']
                         )
                 except Exception as email_error:
-                    print(f"Error sending invoiced email: {str(email_error)}")
+                    pass
 
                 return {"success": True, "message": "Invoice registered successfully"}
 
@@ -816,16 +998,21 @@ async def transition_to_invoiced(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error invoicing purchase: {e}")
+
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 async def transition_to_paid(
     request: Request,
     response: Response,
     purchase_id: UUID,
-    data: PayPurchaseData
+    payment_method: str,
+    payment_reference: str,
+    payment_amount: float,
+    payment_date: str,
+    notes: Optional[str] = None,
+    files: List[UploadFile] = []
 ) -> Dict[str, Any]:
-    """Transition purchase to paid state"""
+    """Transition purchase to paid state with optional file attachments"""
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -833,6 +1020,13 @@ async def transition_to_paid(
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
+
+        # Parse payment_date
+        from datetime import datetime
+        try:
+            payment_dt = datetime.fromisoformat(payment_date.replace('Z', '+00:00'))
+        except:
+            payment_dt = datetime.now()
 
         async with get_db_connection() as conn:
             async with conn.transaction():
@@ -862,18 +1056,30 @@ async def transition_to_paid(
                         paid_at = NOW(),
                         updated_at = NOW()
                     WHERE id = $3
-                """, data.payment_method, data.payment_reference, purchase_id)
+                """, payment_method, payment_reference, purchase_id)
 
                 # Create history entry
                 await create_status_history_entry(
                     conn, purchase_id, tenant_id,
                     purchase['status'], 'paid', user_id,
                     {
-                        "payment_method": data.payment_method,
-                        "payment_amount": str(data.payment_amount),
-                        "payment_date": data.payment_date.isoformat()
+                        "payment_method": payment_method,
+                        "payment_amount": str(payment_amount),
+                        "payment_date": payment_dt.isoformat()
                     },
-                    data.notes
+                    notes
+                )
+
+                # Upload attachments if provided
+                await upload_purchase_attachments(
+                    conn=conn,
+                    tenant_id=tenant_id,
+                    purchase_id=purchase_id,
+                    user_id=user_id,
+                    files=files,
+                    attachment_type='payment_proof',
+                    description_prefix=f'Comprobante de pago: {payment_reference}',
+                    log_prefix='PAY'
                 )
 
                 # Send email notification to supplier
@@ -894,17 +1100,17 @@ async def transition_to_paid(
                             supplier_name=purchase_info['supplier_name'],
                             purchase_number=purchase_info['purchase_number'],
                             status='paid',
-                            notes=data.notes,
+                            notes=notes,
                             metadata={
-                                "payment_method": data.payment_method,
-                                "payment_reference": data.payment_reference,
-                                "payment_date": data.payment_date.strftime('%d de %B de %Y')
+                                "payment_method": payment_method,
+                                "payment_reference": payment_reference,
+                                "payment_date": payment_dt.strftime('%d de %B de %Y')
                             },
                             supplier_token=str(purchase_info['supplier_token']) if purchase_info['supplier_token'] else None,
                             tenant_site=purchase_info['tenant_site']
                         )
                 except Exception as email_error:
-                    print(f"Error sending paid email: {str(email_error)}")
+                    pass
 
                 return {"success": True, "message": "Payment registered successfully"}
 
@@ -913,7 +1119,7 @@ async def transition_to_paid(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error recording payment: {e}")
+
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 async def cancel_purchase(
@@ -975,7 +1181,7 @@ async def cancel_purchase(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error cancelling purchase: {e}")
+
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 # =============================================================================
@@ -1058,5 +1264,5 @@ async def complete_quotation(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error completing quotation: {e}")
+
         raise HTTPException(status_code=500, detail="Error interno del servidor")

@@ -137,6 +137,15 @@ async def get_purchases_list(
                     total_amount=row['total_amount'],
                     tax_amount=row['tax_amount'],
                     status=row['status'],
+                    payment_type=row['payment_type'],
+                    payment_terms=row['payment_terms'],
+                    credit_days=row['credit_days'],
+                    payment_due_date=row['payment_due_date'],
+                    requires_advance_payment=row['requires_advance_payment'],
+                    consolidation_group=row['consolidation_group'],
+                    payment_balance=row['payment_balance'],
+                    invoice_date=row['invoice_date'],
+                    invoice_amount=row['invoice_amount'],
                     invoice_number=row['invoice_number'],
                     notes=row['notes'],
                     created_by=row['created_by'],
@@ -241,6 +250,15 @@ async def get_purchase_by_id(
                 created_by=purchase_data['created_by'],
                 created_at=purchase_data['created_at'],
                 updated_at=purchase_data['updated_at'],
+                payment_type=purchase_data['payment_type'],
+                payment_terms=purchase_data['payment_terms'],
+                credit_days=purchase_data['credit_days'],
+                payment_due_date=purchase_data['payment_due_date'],
+                requires_advance_payment=purchase_data['requires_advance_payment'],
+                consolidation_group=purchase_data['consolidation_group'],
+                payment_balance=purchase_data['payment_balance'],
+                invoice_date=purchase_data['invoice_date'],
+                invoice_amount=purchase_data['invoice_amount'],
                 items=items
             )
 
@@ -488,7 +506,7 @@ async def create_purchase(
                             )
                     except Exception as email_error:
                         # Log error but don't fail the purchase creation
-                        print(f"Error sending quotation email: {str(email_error)}")
+                        pass
 
                 return PurchaseResponse(data=purchase)
 

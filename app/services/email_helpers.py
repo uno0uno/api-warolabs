@@ -46,10 +46,6 @@ async def send_quotation_email(
         bool: True if email was sent successfully, False otherwise
     """
     try:
-        print(f"📧 Starting to send quotation email...")
-        print(f"   To: {supplier_email}")
-        print(f"   Supplier: {supplier_name}")
-        print(f"   Quotation: {purchase_number}")
 
         # Format dates (handle None values)
         created_date = purchase_date.strftime('%d de %B de %Y') if purchase_date else 'Pendiente'
@@ -123,7 +119,6 @@ Si no solicitaste esta cotización, puedes ignorar este correo de forma segura.
 
 Saludos desde la nave de Waro Colombia.
 
-
 ----
 Saifer 101 (Anderson Arévalo)
 Fundador Waro Colombia
@@ -135,7 +130,7 @@ Tecnología colombiana para el mundo.
 """
 
         # Send email (text only, no HTML to avoid spam)
-        print(f"📤 Preparing to send email via AWS SES...")
+
         ses_service = AWSSESService()
         success = await ses_service.send_email(
             from_email="hola@warolabs.com",
@@ -147,14 +142,14 @@ Tecnología colombiana para el mundo.
         )
 
         if success:
-            print(f"✅ Email sent successfully to {supplier_email}")
+            pass
         else:
-            print(f"❌ Failed to send email to {supplier_email}")
+            pass
 
         return success
 
     except Exception as e:
-        print(f"❌ Error sending quotation email: {str(e)}")
+        pass
         return False
 
 async def send_purchase_status_notification(
@@ -184,10 +179,6 @@ async def send_purchase_status_notification(
         bool: True if email was sent successfully, False otherwise
     """
     try:
-        print(f"📧 Sending status notification email...")
-        print(f"   To: {supplier_email}")
-        print(f"   Status: {status}")
-        print(f"   Purchase: {purchase_number}")
 
         # Status titles and messages in Spanish
         status_info = {
@@ -274,7 +265,6 @@ Puedes acceder al portal para ver todos los detalles de tu orden.
 
 Saludos desde la nave de Waro Colombia.
 
-
 ----
 Saifer 101 (Anderson Arévalo)
 Fundador Waro Colombia
@@ -286,7 +276,7 @@ Tecnología colombiana para el mundo.
 """
 
         # Send email
-        print(f"📤 Preparing to send notification email via AWS SES...")
+
         ses_service = AWSSESService()
         success = await ses_service.send_email(
             from_email="hola@warolabs.com",
@@ -298,12 +288,12 @@ Tecnología colombiana para el mundo.
         )
 
         if success:
-            print(f"✅ Status notification sent successfully to {supplier_email}")
+            pass
         else:
-            print(f"❌ Failed to send status notification to {supplier_email}")
+            pass
 
         return success
 
     except Exception as e:
-        print(f"❌ Error sending status notification: {str(e)}")
+        pass
         return False

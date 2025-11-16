@@ -14,7 +14,7 @@ from app.models.attachment import (
     FileUploadResponse
 )
 from app.services.aws_s3_service import AWSS3Service
-from app.core.security import get_current_user_from_request
+from app.core.security import get_session_from_request
 from fastapi import Request
 
 async def upload_purchase_attachment(
@@ -38,8 +38,13 @@ async def upload_purchase_attachment(
         FileUploadResponse with upload status
     """
     try:
-        # Get current user
-        user_id, tenant_id = await get_current_user_from_request(request)
+        # Get current user from session
+        session = await get_session_from_request(request)
+        if not session:
+            raise HTTPException(status_code=401, detail="Authentication required")
+
+        user_id = session['user_id']
+        tenant_id = session['tenant_id']
 
         # Verify purchase exists and belongs to tenant
         async with get_db_connection() as conn:
@@ -105,9 +110,8 @@ async def upload_purchase_attachment(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error uploading attachment: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error uploading attachment")
 
+        raise HTTPException(status_code=500, detail="Error uploading attachment")
 
 async def get_purchase_attachments(
     request: Request,
@@ -126,8 +130,13 @@ async def get_purchase_attachments(
         List of attachments
     """
     try:
-        # Get current user
-        user_id, tenant_id = await get_current_user_from_request(request)
+        # Get current user from session
+        session = await get_session_from_request(request)
+        if not session:
+            raise HTTPException(status_code=401, detail="Authentication required")
+
+        user_id = session['user_id']
+        tenant_id = session['tenant_id']
 
         # Build query
         query = """
@@ -177,9 +186,8 @@ async def get_purchase_attachments(
         )
 
     except Exception as e:
-        print(f"Error getting attachments: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error getting attachments")
 
+        raise HTTPException(status_code=500, detail="Error getting attachments")
 
 async def delete_purchase_attachment(
     request: Request,
@@ -196,8 +204,13 @@ async def delete_purchase_attachment(
         Response with deletion status
     """
     try:
-        # Get current user
-        user_id, tenant_id = await get_current_user_from_request(request)
+        # Get current user from session
+        session = await get_session_from_request(request)
+        if not session:
+            raise HTTPException(status_code=401, detail="Authentication required")
+
+        user_id = session['user_id']
+        tenant_id = session['tenant_id']
 
         # Get attachment and verify it belongs to tenant
         async with get_db_connection() as conn:
@@ -227,5 +240,5 @@ async def delete_purchase_attachment(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error deleting attachment: {str(e)}")
+
         raise HTTPException(status_code=500, detail="Error deleting attachment")

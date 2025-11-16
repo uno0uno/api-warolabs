@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Request, Response, Query
+from fastapi import APIRouter, Request, Response, Query, Form, File, UploadFile
 from uuid import UUID
-from typing import Optional
+from typing import Optional, List
 from app.services.purchases_service import (
     get_purchases_list,
     get_purchase_by_id,
@@ -169,67 +169,147 @@ async def confirm_purchase_endpoint(
 @router.post("/{purchase_id}/ship")
 async def ship_purchase_endpoint(
     purchase_id: UUID,
-    data: ShipPurchaseData,
     request: Request,
-    response: Response
+    response: Response,
+    tracking_number: str = Form(...),
+    carrier: str = Form(...),
+    estimated_delivery_date: Optional[str] = Form(None),
+    package_count: Optional[int] = Form(None),
+    notes: Optional[str] = Form(None),
+    files: List[UploadFile] = File(default=[])
 ):
     """
     Transition purchase to SHIPPED state
     Records tracking number, carrier, and package information
+    Accepts file attachments (shipping labels, photos, etc.)
     """
-    return await transition_to_shipped(request, response, purchase_id, data)
+    return await transition_to_shipped(
+        request=request,
+        response=response,
+        purchase_id=purchase_id,
+        tracking_number=tracking_number,
+        carrier=carrier,
+        estimated_delivery_date=estimated_delivery_date,
+        package_count=package_count,
+        notes=notes,
+        files=files
+    )
 
 @router.post("/{purchase_id}/receive")
 async def receive_purchase_endpoint(
     purchase_id: UUID,
-    data: ReceivePurchaseData,
     request: Request,
-    response: Response
+    response: Response,
+    items_data: str = Form(...),
+    package_condition: str = Form(...),
+    reception_notes: Optional[str] = Form(None),
+    partial: bool = Form(False),
+    files: List[UploadFile] = File(default=[])
 ):
     """
     Transition purchase to RECEIVED or PARTIALLY_RECEIVED state
     Records quantities received and package condition
+    Accepts file attachments (delivery photos, condition reports, etc.)
     """
-    return await transition_to_received(request, response, purchase_id, data)
+    return await transition_to_received(
+        request=request,
+        response=response,
+        purchase_id=purchase_id,
+        items_data=items_data,
+        package_condition=package_condition,
+        reception_notes=reception_notes,
+        partial=partial,
+        files=files
+    )
 
 @router.post("/{purchase_id}/verify")
 async def verify_purchase_endpoint(
     purchase_id: UUID,
-    data: VerifyPurchaseData,
     request: Request,
-    response: Response
+    response: Response,
+    items_data: str = Form(...),
+    all_items_approved: bool = Form(...),
+    verification_notes: Optional[str] = Form(None),
+    files: List[UploadFile] = File(default=[])
 ):
     """
     Transition purchase to VERIFIED state
     Records quality assessment and verification notes
+    Accepts file attachments (quality photos, inspection reports, etc.)
     """
-    return await transition_to_verified(request, response, purchase_id, data)
+    return await transition_to_verified(
+        request=request,
+        response=response,
+        purchase_id=purchase_id,
+        items_data=items_data,
+        all_items_approved=all_items_approved,
+        verification_notes=verification_notes,
+        files=files
+    )
 
 @router.post("/{purchase_id}/invoice")
 async def invoice_purchase_endpoint(
     purchase_id: UUID,
-    data: InvoicePurchaseData,
     request: Request,
-    response: Response
+    response: Response,
+    document_type: str = Form(...),
+    invoice_number: str = Form(...),
+    invoice_date: str = Form(...),
+    invoice_amount: Optional[float] = Form(None),
+    tax_amount: Optional[float] = Form(None),
+    credit_days: Optional[int] = Form(None),
+    payment_due_date: Optional[str] = Form(None),
+    notes: Optional[str] = Form(None),
+    files: List[UploadFile] = File(default=[])
 ):
     """
     Transition purchase to INVOICED state
     Records invoice details and payment due date
+    Accepts file attachments (invoices, receipts, etc.)
     """
-    return await transition_to_invoiced(request, response, purchase_id, data)
+    return await transition_to_invoiced(
+        request=request,
+        response=response,
+        purchase_id=purchase_id,
+        document_type=document_type,
+        invoice_number=invoice_number,
+        invoice_date=invoice_date,
+        invoice_amount=invoice_amount,
+        tax_amount=tax_amount,
+        credit_days=credit_days,
+        payment_due_date=payment_due_date,
+        notes=notes,
+        files=files
+    )
 
 @router.post("/{purchase_id}/pay")
 async def pay_purchase_endpoint(
     purchase_id: UUID,
-    data: PayPurchaseData,
     request: Request,
-    response: Response
+    response: Response,
+    payment_method: str = Form(...),
+    payment_reference: str = Form(...),
+    payment_amount: float = Form(...),
+    payment_date: str = Form(...),
+    notes: Optional[str] = Form(None),
+    files: List[UploadFile] = File(default=[])
 ):
     """
     Transition purchase to PAID state
     Records payment method and reference
+    Accepts file attachments (payment proofs, receipts, etc.)
     """
-    return await transition_to_paid(request, response, purchase_id, data)
+    return await transition_to_paid(
+        request=request,
+        response=response,
+        purchase_id=purchase_id,
+        payment_method=payment_method,
+        payment_reference=payment_reference,
+        payment_amount=payment_amount,
+        payment_date=payment_date,
+        notes=notes,
+        files=files
+    )
 
 @router.post("/{purchase_id}/cancel")
 async def cancel_purchase_endpoint(

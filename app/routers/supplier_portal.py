@@ -3,7 +3,7 @@ Supplier Portal Router
 Public endpoints for suppliers to access their portal using a unique token
 No authentication required - token is used for identification
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from uuid import UUID
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
@@ -109,16 +109,32 @@ async def update_prices_endpoint(
 async def invoice_purchase_endpoint(
     token: str,
     purchase_id: str,
-    data: InvoicePurchaseRequest
+    document_type: str = Form(...),
+    invoice_number: str = Form(...),
+    invoice_date: str = Form(...),
+    invoice_amount: Optional[float] = Form(None),
+    tax_amount: Optional[float] = Form(None),
+    credit_days: Optional[int] = Form(None),
+    payment_due_date: Optional[str] = Form(None),
+    notes: Optional[str] = Form(None),
+    files: List[UploadFile] = File(default=[])
 ):
     """
-    Allow supplier to register invoice/remision
+    Allow supplier to register invoice/remision with attachments
     Public endpoint - token is used for identification
 
     Args:
         token: Supplier's unique access token
         purchase_id: Purchase ID to invoice
-        data: Invoice/remision information
+        document_type: Type of document (remision, factura_contado, factura_credito)
+        invoice_number: Invoice/remision number
+        invoice_date: Date of invoice/remision
+        invoice_amount: Amount (required for invoices)
+        tax_amount: Tax amount
+        credit_days: Credit days for factura_credito
+        payment_due_date: Payment due date
+        notes: Optional notes
+        files: Attached files (invoices, receipts, etc.)
     """
     try:
         purchase_uuid = UUID(purchase_id)
@@ -128,30 +144,41 @@ async def invoice_purchase_endpoint(
     return await invoice_purchase_from_portal(
         token=token,
         purchase_id=purchase_uuid,
-        document_type=data.document_type,
-        invoice_number=data.invoice_number,
-        invoice_date=data.invoice_date,
-        invoice_amount=data.invoice_amount,
-        tax_amount=data.tax_amount,
-        credit_days=data.credit_days,
-        payment_due_date=data.payment_due_date,
-        notes=data.notes
+        document_type=document_type,
+        invoice_number=invoice_number,
+        invoice_date=invoice_date,
+        invoice_amount=invoice_amount,
+        tax_amount=tax_amount,
+        credit_days=credit_days,
+        payment_due_date=payment_due_date,
+        notes=notes,
+        files=files
     )
 
 @router.post("/{token}/purchases/{purchase_id}/ship")
 async def ship_purchase_endpoint(
     token: str,
     purchase_id: str,
-    data: ShipPurchaseRequest
+    tracking_number: str = Form(...),
+    carrier: str = Form(...),
+    estimated_delivery_date: Optional[str] = Form(None),
+    package_count: Optional[int] = Form(None),
+    notes: Optional[str] = Form(None),
+    files: List[UploadFile] = File(default=[])
 ):
     """
-    Allow supplier to mark purchase as shipped
+    Allow supplier to mark purchase as shipped with attachments
     Public endpoint - token is used for identification
 
     Args:
         token: Supplier's unique access token
         purchase_id: Purchase ID to ship
-        data: Shipping information (tracking, carrier, etc.)
+        tracking_number: Tracking number from carrier
+        carrier: Shipping carrier name
+        estimated_delivery_date: Optional estimated delivery date
+        package_count: Optional number of packages
+        notes: Optional shipping notes
+        files: Attached files (shipping labels, photos, etc.)
     """
     try:
         purchase_uuid = UUID(purchase_id)
@@ -161,9 +188,10 @@ async def ship_purchase_endpoint(
     return await ship_purchase_from_portal(
         token=token,
         purchase_id=purchase_uuid,
-        tracking_number=data.tracking_number,
-        carrier=data.carrier,
-        estimated_delivery_date=data.estimated_delivery_date,
-        package_count=data.package_count,
-        notes=data.notes
+        tracking_number=tracking_number,
+        carrier=carrier,
+        estimated_delivery_date=estimated_delivery_date,
+        package_count=package_count,
+        notes=notes,
+        files=files
     )
