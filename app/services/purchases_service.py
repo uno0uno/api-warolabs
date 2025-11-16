@@ -479,7 +479,12 @@ async def create_purchase(
                                 items=items_with_names,
                                 notes=purchase_data.notes,
                                 supplier_token=str(supplier['access_token']) if supplier['access_token'] else None,
-                                tenant_site=tenant_info['site'] if tenant_info else None
+                                tenant_site=tenant_info['site'] if tenant_info else None,
+                                payment_type=new_purchase['payment_type'],
+                                payment_terms=new_purchase['payment_terms'],
+                                credit_days=new_purchase['credit_days'],
+                                requires_advance_payment=new_purchase['requires_advance_payment'],
+                                consolidation_group=new_purchase['consolidation_group']
                             )
                     except Exception as email_error:
                         # Log error but don't fail the purchase creation

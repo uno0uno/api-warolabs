@@ -16,7 +16,12 @@ async def send_quotation_email(
     items: List[Dict[str, Any]],
     notes: str = None,
     supplier_token: str = None,
-    tenant_site: str = None
+    tenant_site: str = None,
+    payment_type: str = None,
+    payment_terms: str = None,
+    credit_days: int = None,
+    requires_advance_payment: bool = False,
+    consolidation_group: str = None
 ) -> bool:
     """
     Send a quotation request email to a supplier
@@ -31,6 +36,11 @@ async def send_quotation_email(
         notes: Optional notes for the supplier
         supplier_token: Supplier's access token for portal link
         tenant_site: Tenant's site domain (e.g., 'warocol.com')
+        payment_type: Type of payment (contado, credito, contraentrega, credito_consolidado)
+        payment_terms: Payment terms text
+        credit_days: Credit days for deferred payments
+        requires_advance_payment: Whether advance payment is required
+        consolidation_group: Group for consolidated monthly invoicing
 
     Returns:
         bool: True if email was sent successfully, False otherwise
@@ -50,6 +60,31 @@ async def send_quotation_email(
             f"{idx}. {item.get('ingredient_name', 'Producto')} - Cantidad: {item['quantity']} {item['unit']}"
             for idx, item in enumerate(items, 1)
         ])
+
+        # Build payment information section
+        payment_info_text = ""
+        if payment_type:
+            payment_type_names = {
+                'contado': 'Contado - Pago Inmediato',
+                'credito': 'Crédito - Pago Diferido',
+                'contraentrega': 'Contraentrega - Pago al Recibir',
+                'credito_consolidado': 'Crédito Consolidado - Factura Mensual'
+            }
+            payment_type_display = payment_type_names.get(payment_type, payment_type)
+
+            payment_info_text = f"\n\nCONDICIONES DE PAGO\n--------------------\nTipo de Pago: {payment_type_display}\n"
+
+            if credit_days:
+                payment_info_text += f"Plazo de Crédito: {credit_days} días\n"
+
+            if payment_terms:
+                payment_info_text += f"Términos: {payment_terms}\n"
+
+            if consolidation_group:
+                payment_info_text += f"Grupo de Consolidación: {consolidation_group}\n"
+
+            if requires_advance_payment:
+                payment_info_text += "\n⚠️ IMPORTANTE: Esta orden requiere anticipo antes del envío\n"
 
         # Build notes section if exists
         notes_text = f"\n\nNotas:\n{notes}" if notes else ""
@@ -80,7 +115,7 @@ Fecha Requerida de Entrega: {required_date}
 
 PRODUCTOS SOLICITADOS
 ---------------------
-{items_list}{notes_text}{portal_link}
+{items_list}{payment_info_text}{notes_text}{portal_link}
 
 Por favor, accede al portal para completar los precios de la cotización.
 
