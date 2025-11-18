@@ -23,7 +23,6 @@ from app.models.purchase import (
     ConfirmPurchaseData,
     ShipPurchaseData,
     ReceivePurchaseData,
-    VerifyPurchaseData,
     InvoicePurchaseData,
     PayPurchaseData,
     CancelPurchaseData,
@@ -45,8 +44,7 @@ STATE_TRANSITIONS = {
     'invoiced': ['shipped'],  # Ship after invoicing
     'shipped': ['received', 'partially_received', 'overdue'],
     'partially_received': ['received', 'overdue'],
-    'received': ['verified'],
-    'verified': ['paid'],  # Pay after verification (traditional flow - credito)
+    'received': ['paid'],  # Pay after reception with quality verification (credito flow)
     'cancelled': [],  # Final state
     'overdue': ['shipped', 'received', 'cancelled']  # Can resume flow
 }
@@ -755,6 +753,8 @@ async def transition_to_received(
     package_condition: str,
     reception_notes: Optional[str] = None,
     partial: bool = False,
+    all_items_approved: bool = True,
+    verification_notes: Optional[str] = None,
     files: List[UploadFile] = []
 ) -> Dict[str, Any]:
     """Transition purchase to received state with optional file attachments"""
@@ -806,7 +806,7 @@ async def transition_to_received(
                     WHERE id = $4
                 """, target_status, package_condition, user_id, purchase_id)
 
-                # Update items with received quantities
+                # Update items with received quantities and quality assessment
                 for item in items:
                     quantity_received = item.get('quantity_received')
                     if quantity_received is not None:
@@ -815,20 +815,32 @@ async def transition_to_received(
                             SET
                                 quantity_received = $1,
                                 item_condition = $2,
-                                received_at = NOW()
-                            WHERE purchase_id = $3 AND ingredient_id = $4
-                        """, quantity_received, item.get('item_condition'),
-                        purchase_id, item.get('ingredient_id'))
+                                quality_status = $3,
+                                quality_notes = $4,
+                                verification_notes = $5,
+                                received_at = NOW(),
+                                verified_at = NOW()
+                            WHERE purchase_id = $6 AND ingredient_id = $7
+                        """,
+                        quantity_received,
+                        item.get('item_condition'),
+                        item.get('quality_status'),
+                        item.get('quality_notes'),
+                        item.get('verification_notes'),
+                        purchase_id,
+                        item.get('ingredient_id'))
 
-                # Create history entry
+                # Create history entry with quality information
+                combined_notes = f"{reception_notes or ''}\n{verification_notes or ''}".strip()
                 await create_status_history_entry(
                     conn, purchase_id, tenant_id,
                     purchase['status'], target_status, user_id,
                     {
                         "package_condition": package_condition,
-                        "partial_reception": partial
+                        "partial_reception": partial,
+                        "all_items_approved": all_items_approved
                     },
-                    reception_notes
+                    combined_notes if combined_notes else None
                 )
 
                 # Upload attachments if provided
@@ -882,132 +894,7 @@ async def transition_to_received(
 
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-async def transition_to_verified(
-    request: Request,
-    response: Response,
-    purchase_id: UUID,
-    items_data: str,
-    all_items_approved: bool,
-    verification_notes: Optional[str] = None,
-    files: List[UploadFile] = []
-) -> Dict[str, Any]:
-    """Transition purchase to verified state with optional file attachments"""
-    try:
-        session_context = require_valid_session(request)
-        tenant_id = session_context.tenant_id
-        user_id = session_context.user_id
-
-        if not tenant_id:
-            raise AuthenticationError("Tenant ID is required")
-
-        # Parse items data from JSON string
-        import json
-        try:
-            items = json.loads(items_data)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid items data format")
-
-        async with get_db_connection() as conn:
-            async with conn.transaction():
-                # Get current purchase
-                purchase = await conn.fetchrow("""
-                    SELECT id, status FROM tenant_purchases
-                    WHERE id = $1 AND tenant_id = $2
-                """, purchase_id, tenant_id)
-
-                if not purchase:
-                    raise HTTPException(status_code=404, detail="Purchase not found")
-
-                # Validate transition
-                if not validate_state_transition(purchase['status'], 'verified'):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Cannot transition from {purchase['status']} to verified"
-                    )
-
-                # Update purchase
-                await conn.execute("""
-                    UPDATE tenant_purchases
-                    SET
-                        status = 'verified',
-                        verified_by = $1,
-                        verified_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = $2
-                """, user_id, purchase_id)
-
-                # Update items with quality assessment
-                for item in items:
-                    quality_status = item.get('quality_status')
-                    if quality_status is not None:
-                        await conn.execute("""
-                            UPDATE tenant_purchase_items
-                            SET
-                                quality_status = $1,
-                                quality_notes = $2,
-                                verification_notes = $3,
-                                verified_at = NOW()
-                            WHERE purchase_id = $4 AND ingredient_id = $5
-                        """, quality_status, item.get('quality_notes'),
-                        item.get('verification_notes'), purchase_id, item.get('ingredient_id'))
-
-                # Create history entry
-                await create_status_history_entry(
-                    conn, purchase_id, tenant_id,
-                    purchase['status'], 'verified', user_id,
-                    {"all_items_approved": all_items_approved},
-                    verification_notes
-                )
-
-                # Upload attachments if provided
-                await upload_purchase_attachments(
-                    conn=conn,
-                    tenant_id=tenant_id,
-                    purchase_id=purchase_id,
-                    user_id=user_id,
-                    files=files,
-                    attachment_type='quality_photo',
-                    description_prefix='Verificación de calidad',
-                    log_prefix='VERIFY'
-                )
-
-                # Send email notification to supplier
-                try:
-                    purchase_info = await conn.fetchrow("""
-                        SELECT tp.purchase_number, ts.name as supplier_name, ts.email as supplier_email,
-                               ts.access_token as supplier_token, tsi.site as tenant_site
-                        FROM tenant_purchases tp
-                        JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
-                        LEFT JOIN tenant_sites tsi ON tp.tenant_id = tsi.tenant_id AND tsi.is_active = true
-                        WHERE tp.id = $1
-                        LIMIT 1
-                    """, purchase_id)
-
-                    if purchase_info and purchase_info['supplier_email']:
-                        await send_purchase_status_notification(
-                            supplier_email=purchase_info['supplier_email'],
-                            supplier_name=purchase_info['supplier_name'],
-                            purchase_number=purchase_info['purchase_number'],
-                            status='verified',
-                            notes=verification_notes,
-                            metadata={
-                                "all_items_approved": all_items_approved
-                            },
-                            supplier_token=str(purchase_info['supplier_token']) if purchase_info['supplier_token'] else None,
-                            tenant_site=purchase_info['tenant_site']
-                        )
-                except Exception as email_error:
-                    pass
-
-                return {"success": True, "message": "Purchase verified successfully"}
-
-    except AuthenticationError:
-        raise
-    except HTTPException:
-        raise
-    except Exception as e:
-
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+# Function transition_to_verified removed - verification now happens during reception
 
 async def transition_to_invoiced(
     request: Request,

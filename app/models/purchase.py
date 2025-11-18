@@ -17,8 +17,7 @@ class PurchaseStatus(str, Enum):
     PREPARING = "preparing"
     SHIPPED = "shipped"
     PARTIALLY_RECEIVED = "partially_received"
-    RECEIVED = "received"
-    VERIFIED = "verified"
+    RECEIVED = "received"  # Includes quality verification
     INVOICED = "invoiced"
     PAID = "paid"
     CANCELLED = "cancelled"
@@ -301,6 +300,9 @@ class Purchase(PurchaseBase):
     verified_by: Optional[UUID] = None
     package_condition: Optional[PackageCondition] = None
 
+    # Status history
+    status_history: Optional[List[dict]] = Field(default_factory=list, description="Purchase status change history")
+
     class Config:
         from_attributes = True
         use_enum_values = True
@@ -415,17 +417,15 @@ class ShipPurchaseData(BaseModel):
     notes: Optional[str] = None
 
 class ReceivePurchaseData(BaseModel):
-    """Data for receiving items"""
-    items: List[PurchaseItemUpdate] = Field(..., description="Items with received quantities")
+    """Data for receiving items with quality verification"""
+    items: List[PurchaseItemUpdate] = Field(..., description="Items with received quantities and quality assessment")
     package_condition: PackageCondition
     reception_notes: Optional[str] = None
     partial: bool = Field(False, description="True if partial reception")
-
-class VerifyPurchaseData(BaseModel):
-    """Data for verifying received items"""
-    items: List[PurchaseItemUpdate] = Field(..., description="Items with quality assessment")
-    all_items_approved: bool = Field(..., description="All items meet specifications")
+    all_items_approved: bool = Field(..., description="All items meet quality specifications")
     verification_notes: Optional[str] = None
+
+# VerifyPurchaseData model removed - verification now happens during reception
 
 class InvoicePurchaseData(BaseModel):
     """Data for invoice registration"""

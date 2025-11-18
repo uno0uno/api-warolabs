@@ -21,7 +21,8 @@ async def get_purchases_list(
     limit: int = 50,
     search: Optional[str] = None,
     status: Optional[str] = None,
-    supplier_id: Optional[UUID] = None
+    supplier_id: Optional[UUID] = None,
+    payment_status: Optional[str] = None  # pending, overdue, due_this_week
 ) -> PurchasesListResponse:
     """
     Get purchases list with tenant isolation
@@ -114,6 +115,18 @@ async def get_purchases_list(
                 count_query += f" AND tp.supplier_id = ${param_count}"
                 params.append(supplier_id)
                 param_count += 1
+
+            # Payment status filter
+            if payment_status:
+                if payment_status == 'overdue':
+                    base_query += f" AND tp.payment_due_date < NOW()"
+                    count_query += f" AND tp.payment_due_date < NOW()"
+                elif payment_status == 'due_this_week':
+                    base_query += f" AND tp.payment_due_date >= NOW() AND tp.payment_due_date <= NOW() + INTERVAL '7 days'"
+                    count_query += f" AND tp.payment_due_date >= NOW() AND tp.payment_due_date <= NOW() + INTERVAL '7 days'"
+                elif payment_status == 'pending':
+                    base_query += f" AND (tp.payment_due_date IS NULL OR tp.payment_due_date > NOW() + INTERVAL '7 days')"
+                    count_query += f" AND (tp.payment_due_date IS NULL OR tp.payment_due_date > NOW() + INTERVAL '7 days')"
 
             # Add pagination
             offset = (page - 1) * limit
@@ -265,6 +278,22 @@ async def get_purchase_by_id(
 
             items = [PurchaseItem(**item) for item in items_data]
 
+            # Fetch status history
+            history_data = await conn.fetch("""
+                SELECT
+                    id,
+                    from_status,
+                    to_status,
+                    changed_at,
+                    metadata,
+                    notes
+                FROM purchase_status_history
+                WHERE purchase_id = $1
+                ORDER BY changed_at ASC
+            """, purchase_id)
+
+            status_history = [dict(row) for row in history_data]
+
             purchase = Purchase(
                 id=purchase_data['id'],
                 tenant_id=purchase_data['tenant_id'],
@@ -289,7 +318,8 @@ async def get_purchase_by_id(
                 payment_balance=purchase_data['payment_balance'],
                 invoice_date=purchase_data['invoice_date'],
                 invoice_amount=purchase_data['invoice_amount'],
-                items=items
+                items=items,
+                status_history=status_history
             )
 
             return PurchaseResponse(data=purchase)
