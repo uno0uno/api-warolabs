@@ -198,12 +198,12 @@ class PurchaseBase(BaseModel):
     notes: Optional[str] = Field(None, description="Additional notes")
 
     # Payment type fields
-    payment_type: Optional[Literal["contado", "credito", "contraentrega", "credito_consolidado"]] = Field(None, description="Payment type")
+    payment_type: Optional[Literal["contado", "credito", "contraentrega"]] = Field(None, description="Payment type")
     payment_terms: Optional[str] = Field(None, description="Payment terms text")
-    credit_days: Optional[int] = Field(None, ge=0, le=180, description="Credit days (for credito and credito_consolidado)")
+    credit_days: Optional[int] = Field(None, ge=0, le=180, description="Credit days (for credito)")
     payment_due_date: Optional[datetime] = Field(None, description="Payment due date (calculated from invoice_date + credit_days)")
     requires_advance_payment: Optional[bool] = Field(False, description="Requires advance payment (for contraentrega)")
-    consolidation_group: Optional[str] = Field(None, description="Consolidation group for monthly invoicing")
+    consolidation_group: Optional[str] = Field(None, description="Consolidation group for consolidated invoicing")
     payment_balance: Optional[Decimal] = Field(None, ge=0, description="Remaining payment balance (for partial payments)")
 
 class PurchaseCreate(PurchaseBase):
@@ -419,8 +419,6 @@ class ShipPurchaseData(BaseModel):
 class ReceivePurchaseData(BaseModel):
     """Data for receiving items with quality verification"""
     items: List[PurchaseItemUpdate] = Field(..., description="Items with received quantities and quality assessment")
-    package_condition: PackageCondition
-    reception_notes: Optional[str] = None
     partial: bool = Field(False, description="True if partial reception")
     all_items_approved: bool = Field(..., description="All items meet quality specifications")
     verification_notes: Optional[str] = None

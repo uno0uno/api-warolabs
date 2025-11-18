@@ -750,8 +750,6 @@ async def transition_to_received(
     response: Response,
     purchase_id: UUID,
     items_data: str,
-    package_condition: str,
-    reception_notes: Optional[str] = None,
     partial: bool = False,
     all_items_approved: bool = True,
     verification_notes: Optional[str] = None,
@@ -799,12 +797,11 @@ async def transition_to_received(
                     UPDATE tenant_purchases
                     SET
                         status = $1,
-                        package_condition = $2,
-                        received_by = $3,
+                        received_by = $2,
                         received_at = NOW(),
                         updated_at = NOW()
-                    WHERE id = $4
-                """, target_status, package_condition, user_id, purchase_id)
+                    WHERE id = $3
+                """, target_status, user_id, purchase_id)
 
                 # Update items with received quantities and quality assessment
                 for item in items:
@@ -831,16 +828,14 @@ async def transition_to_received(
                         item.get('ingredient_id'))
 
                 # Create history entry with quality information
-                combined_notes = f"{reception_notes or ''}\n{verification_notes or ''}".strip()
                 await create_status_history_entry(
                     conn, purchase_id, tenant_id,
                     purchase['status'], target_status, user_id,
                     {
-                        "package_condition": package_condition,
                         "partial_reception": partial,
                         "all_items_approved": all_items_approved
                     },
-                    combined_notes if combined_notes else None
+                    verification_notes
                 )
 
                 # Upload attachments if provided
@@ -873,10 +868,10 @@ async def transition_to_received(
                             supplier_name=purchase_info['supplier_name'],
                             purchase_number=purchase_info['purchase_number'],
                             status='received',
-                            notes=reception_notes,
+                            notes=verification_notes,
                             metadata={
-                                "package_condition": package_condition,
-                                "partial_reception": partial
+                                "partial_reception": partial,
+                                "all_items_approved": all_items_approved
                             },
                             supplier_token=str(purchase_info['supplier_token']) if purchase_info['supplier_token'] else None,
                             tenant_site=purchase_info['tenant_site']

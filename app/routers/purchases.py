@@ -190,8 +190,6 @@ async def receive_purchase_endpoint(
     request: Request,
     response: Response,
     items_data: str = Form(...),
-    package_condition: str = Form(...),
-    reception_notes: Optional[str] = Form(None),
     partial: bool = Form(False),
     all_items_approved: bool = Form(True),
     verification_notes: Optional[str] = Form(None),
@@ -199,7 +197,7 @@ async def receive_purchase_endpoint(
 ):
     """
     Transition purchase to RECEIVED or PARTIALLY_RECEIVED state
-    Records quantities received, package condition, and quality verification
+    Records quantities received and quality verification for each item
     Accepts file attachments (delivery photos, quality reports, etc.)
     """
     return await transition_to_received(
@@ -207,8 +205,6 @@ async def receive_purchase_endpoint(
         response=response,
         purchase_id=purchase_id,
         items_data=items_data,
-        package_condition=package_condition,
-        reception_notes=reception_notes,
         partial=partial,
         all_items_approved=all_items_approved,
         verification_notes=verification_notes,

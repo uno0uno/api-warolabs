@@ -436,7 +436,7 @@ async def create_purchase(
                     purchase_data.credit_days,
                     purchase_data.requires_advance_payment,
                     purchase_data.consolidation_group,
-                    purchase_data.payment_balance
+                    purchase_data.payment_balance if purchase_data.payment_balance is not None else None
                 )
 
                 purchase_id = new_purchase['id']
@@ -573,7 +573,10 @@ async def create_purchase(
     except AuthenticationError:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        import traceback
+        print(f"[DEBUG] Error creating purchase: {str(e)}")
+        print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 async def update_purchase(
     request: Request,

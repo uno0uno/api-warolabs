@@ -36,11 +36,10 @@ async def send_quotation_email(
         notes: Optional notes for the supplier
         supplier_token: Supplier's access token for portal link
         tenant_site: Tenant's site domain (e.g., 'warocol.com')
-        payment_type: Type of payment (contado, credito, contraentrega, credito_consolidado)
+        payment_type: Type of payment (contado, credito, contraentrega)
         payment_terms: Payment terms text
         credit_days: Credit days for deferred payments
         requires_advance_payment: Whether advance payment is required
-        consolidation_group: Group for consolidated monthly invoicing
 
     Returns:
         bool: True if email was sent successfully, False otherwise
@@ -63,8 +62,7 @@ async def send_quotation_email(
             payment_type_names = {
                 'contado': 'Contado - Pago Inmediato',
                 'credito': 'Crédito - Pago Diferido',
-                'contraentrega': 'Contraentrega - Pago al Recibir',
-                'credito_consolidado': 'Crédito Consolidado - Factura Mensual'
+                'contraentrega': 'Contraentrega - Pago al Recibir'
             }
             payment_type_display = payment_type_names.get(payment_type, payment_type)
 
