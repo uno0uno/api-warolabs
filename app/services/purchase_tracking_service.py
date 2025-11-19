@@ -255,7 +255,9 @@ async def get_transition_detail(
             if not transition_data:
                 raise HTTPException(status_code=404, detail="Transition not found")
 
-            # Get attachments uploaded around this transition (±5 minutes)
+            # Get attachments related to this transition status
+            # Use related_status to match transition status, or fallback to timestamp for legacy data
+            to_status = transition_data['to_status']
             attachments_data = await conn.fetch("""
                 SELECT
                     id,
@@ -266,12 +268,14 @@ async def get_transition_detail(
                     mime_type,
                     attachment_type,
                     description,
+                    related_status,
                     uploaded_at,
                     created_at
                 FROM purchase_attachments
                 WHERE purchase_id = $1
+                AND (related_status = $2 OR related_status IS NULL)
                 ORDER BY uploaded_at DESC
-            """, purchase_id)
+            """, purchase_id, to_status)
 
         # Generate presigned URLs for attachments
         s3_service = AWSS3Service()
@@ -279,12 +283,20 @@ async def get_transition_detail(
         related_attachments = []
 
         for att_row in attachments_data:
-            # Filter by timestamp (±5 minutes)
-            upload_time = att_row['created_at']
-            time_diff = abs((upload_time - transition_time).total_seconds())
+            att_dict = dict(att_row)
 
-            if time_diff < 300:  # 5 minutes = 300 seconds
-                att_dict = dict(att_row)
+            # If related_status is set, include it (new logic)
+            # If related_status is NULL, filter by timestamp ±5 minutes (legacy logic)
+            if att_dict.get('related_status'):
+                # New attachments with related_status - always include
+                should_include = True
+            else:
+                # Legacy attachments without related_status - filter by timestamp
+                upload_time = att_row['created_at']
+                time_diff = abs((upload_time - transition_time).total_seconds())
+                should_include = time_diff < 300  # 5 minutes = 300 seconds
+
+            if should_include:
                 if att_dict.get('s3_key'):
                     try:
                         presigned_url = await s3_service.get_presigned_url(

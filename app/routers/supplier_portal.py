@@ -10,6 +10,8 @@ from pydantic import BaseModel
 from app.services.supplier_portal_service import (
     verify_supplier_token,
     get_supplier_purchases,
+    get_supplier_invoices,
+    attach_legal_invoice,
     update_purchase_prices,
     invoice_purchase_from_portal,
     ship_purchase_from_portal
@@ -74,6 +76,57 @@ async def get_purchases_endpoint(
         status: Optional status filter (quotation, pending, confirmed, etc.)
     """
     return await get_supplier_purchases(token, status)
+
+@router.get("/{token}/invoices")
+async def get_invoices_endpoint(
+    token: str,
+    document_type: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
+    """
+    Get all invoices/remisiones for a supplier
+    Public endpoint - token is used for identification
+
+    Args:
+        token: Supplier's unique access token
+        document_type: Optional filter by document type (factura, remision)
+        start_date: Optional filter by start date (YYYY-MM-DD)
+        end_date: Optional filter by end date (YYYY-MM-DD)
+    """
+    return await get_supplier_invoices(token, document_type, start_date, end_date)
+
+@router.post("/{token}/invoices/attach-legal")
+async def attach_legal_invoice_endpoint(
+    token: str,
+    purchase_ids: str = Form(...),
+    legal_invoice_number: str = Form(...),
+    legal_invoice_date: str = Form(...),
+    files: List[UploadFile] = File(default=[])
+):
+    """
+    Attach a legal invoice to multiple remisiones
+    Public endpoint - token is used for identification
+
+    Args:
+        token: Supplier's unique access token
+        purchase_ids: Comma-separated list of purchase IDs (remisiones)
+        legal_invoice_number: Legal invoice number
+        legal_invoice_date: Legal invoice date
+        files: Attached invoice files
+    """
+    try:
+        purchase_uuids = [UUID(pid.strip()) for pid in purchase_ids.split(',')]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="IDs de compra inválidos")
+
+    return await attach_legal_invoice(
+        token=token,
+        purchase_ids=purchase_uuids,
+        legal_invoice_number=legal_invoice_number,
+        legal_invoice_date=legal_invoice_date,
+        files=files
+    )
 
 @router.post("/{token}/purchases/{purchase_id}/update-prices")
 async def update_prices_endpoint(

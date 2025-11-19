@@ -92,6 +92,55 @@ class AWSS3Service:
             pass
             return None
 
+    async def upload_file_with_key(
+        self,
+        file_content: bytes,
+        s3_key: str,
+        content_type: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Upload a file to S3 with a specific key (path)
+
+        Args:
+            file_content: File binary content
+            s3_key: Specific S3 key (full path) to use
+            content_type: MIME type of the file
+
+        Returns:
+            S3 key if successful, None if failed
+        """
+        try:
+            # Convert bytes to BytesIO if needed
+            from io import BytesIO
+            if isinstance(file_content, bytes):
+                file_content = BytesIO(file_content)
+
+            # Use provided content type or default
+            if not content_type:
+                content_type = 'application/octet-stream'
+
+            # Upload to S3
+            self.s3_client.upload_fileobj(
+                file_content,
+                self.bucket_name,
+                s3_key,
+                ExtraArgs={
+                    'ContentType': content_type,
+                    'Metadata': {
+                        'uploaded_at': datetime.now().isoformat()
+                    }
+                }
+            )
+
+            return s3_key
+
+        except ClientError as e:
+            print(f"Error uploading file to S3: {e}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error uploading file: {e}")
+            return None
+
     async def get_presigned_url(
         self,
         s3_key: str,

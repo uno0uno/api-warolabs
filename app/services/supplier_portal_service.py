@@ -664,5 +664,303 @@ async def ship_purchase_from_portal(
     except HTTPException:
         raise
     except Exception as e:
-
         raise HTTPException(status_code=500, detail="Error al marcar como enviado")
+
+async def get_supplier_invoices(
+    token: str,
+    document_type: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get all invoices for a supplier with optional filters
+
+    Args:
+        token: The supplier's access token
+        document_type: Optional filter by document type (factura, remision)
+        start_date: Optional filter by start date (YYYY-MM-DD)
+        end_date: Optional filter by end date (YYYY-MM-DD)
+
+    Returns:
+        Dict with list of invoices
+    """
+    try:
+        async with get_db_connection() as conn:
+            # First verify the token and get supplier_id
+            supplier = await conn.fetchrow("""
+                SELECT id, tenant_id
+                FROM tenant_suppliers
+                WHERE access_token = $1
+            """, UUID(token))
+
+            if not supplier:
+                raise HTTPException(status_code=404, detail="Token inválido")
+
+            # Build query with filters
+            query = """
+                SELECT
+                    p.id,
+                    p.purchase_number,
+                    p.purchase_date,
+                    p.invoice_number,
+                    p.invoice_date,
+                    p.invoice_amount,
+                    p.tax_amount,
+                    p.total_amount,
+                    p.status,
+                    p.payment_type,
+                    p.payment_due_date,
+                    p.notes,
+                    p.supplier_id,
+                    s.name as supplier_name,
+                    psh.metadata->>'document_type' as document_type,
+                    psh.metadata->>'numero_factura_legal' as legal_invoice_number,
+                    psh.metadata->>'fecha_factura_legal' as legal_invoice_date
+                FROM tenant_purchases p
+                LEFT JOIN tenant_suppliers s ON p.supplier_id = s.id
+                LEFT JOIN LATERAL (
+                    SELECT metadata
+                    FROM purchase_status_history
+                    WHERE purchase_id = p.id
+                    AND to_status = 'invoiced'
+                    ORDER BY changed_at DESC
+                    LIMIT 1
+                ) psh ON true
+                WHERE p.supplier_id = $1
+                AND p.status IN ('invoiced', 'shipped', 'received', 'paid')
+            """
+
+            params = [supplier['id']]
+            param_count = 2
+
+            # Add document_type filter
+            if document_type:
+                query += f" AND psh.metadata->>'document_type' = ${param_count}"
+                params.append(document_type)
+                param_count += 1
+
+            # Add date filters
+            if start_date:
+                query += f" AND p.invoice_date >= ${param_count}"
+                params.append(start_date)
+                param_count += 1
+
+            if end_date:
+                query += f" AND p.invoice_date <= ${param_count}"
+                params.append(end_date)
+                param_count += 1
+
+            query += " ORDER BY p.invoice_date DESC"
+
+            # Execute query
+            purchases = await conn.fetch(query, *params)
+
+            # Format response
+            invoices = []
+            for purchase in purchases:
+                invoices.append({
+                    "id": str(purchase['id']),
+                    "purchase_number": purchase['purchase_number'],
+                    "purchase_date": purchase['purchase_date'].isoformat() if purchase['purchase_date'] else None,
+                    "invoice_number": purchase['invoice_number'],
+                    "invoice_date": purchase['invoice_date'].isoformat() if purchase['invoice_date'] else None,
+                    "invoice_amount": float(purchase['invoice_amount']) if purchase['invoice_amount'] else None,
+                    "tax_amount": float(purchase['tax_amount']) if purchase['tax_amount'] else 0,
+                    "total_amount": float(purchase['total_amount']) if purchase['total_amount'] else 0,
+                    "status": purchase['status'],
+                    "payment_type": purchase['payment_type'],
+                    "payment_due_date": purchase['payment_due_date'].isoformat() if purchase['payment_due_date'] else None,
+                    "notes": purchase['notes'],
+                    "supplier_id": str(purchase['supplier_id']),
+                    "supplier_name": purchase['supplier_name'],
+                    "document_type": purchase['document_type'],
+                    "legal_invoice_number": purchase['legal_invoice_number'],
+                    "legal_invoice_date": purchase['legal_invoice_date']
+                })
+
+            return {
+                "success": True,
+                "data": invoices,
+                "total": len(invoices)
+            }
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Datos inválidos")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Error al obtener facturas")
+
+async def attach_legal_invoice(
+    token: str,
+    purchase_ids: List[UUID],
+    legal_invoice_number: str,
+    legal_invoice_date: str,
+    files: List[UploadFile]
+) -> Dict[str, Any]:
+    """
+    Attach a legal invoice to multiple remisiones (delivery notes)
+
+    This allows suppliers to link a legal invoice to multiple remisiones
+    that were previously issued. The remisiones maintain their original
+    document_type='remision' but get additional metadata for the legal invoice.
+
+    Args:
+        token: Supplier access token
+        purchase_ids: List of purchase IDs (should be remisiones)
+        legal_invoice_number: Legal invoice number
+        legal_invoice_date: Legal invoice date (ISO format)
+        files: Invoice document files
+
+    Returns:
+        Dict with success status
+    """
+    print(f"DEBUG attach_legal_invoice called with:")
+    print(f"  token: {token}")
+    print(f"  purchase_ids: {purchase_ids}")
+    print(f"  legal_invoice_number: {legal_invoice_number}")
+    print(f"  legal_invoice_date: {legal_invoice_date}")
+    print(f"  files: {len(files) if files else 0}")
+
+    try:
+        async with get_db_connection() as conn:
+            # Verify supplier token
+            supplier = await conn.fetchrow("""
+                SELECT id, tenant_id, name
+                FROM tenant_suppliers
+                WHERE access_token = $1
+            """, UUID(token))
+
+            if not supplier:
+                raise HTTPException(status_code=404, detail="Token inválido")
+
+            # Verify all purchases belong to this supplier and are remisiones
+            purchases_check = await conn.fetch("""
+                SELECT p.id, p.purchase_number, p.created_by, psh.metadata->>'document_type' as document_type
+                FROM tenant_purchases p
+                LEFT JOIN LATERAL (
+                    SELECT metadata
+                    FROM purchase_status_history
+                    WHERE purchase_id = p.id
+                    AND to_status = 'invoiced'
+                    ORDER BY changed_at DESC
+                    LIMIT 1
+                ) psh ON true
+                WHERE p.id = ANY($1)
+                AND p.supplier_id = $2
+            """, purchase_ids, supplier['id'])
+
+            if len(purchases_check) != len(purchase_ids):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Algunas órdenes no pertenecen a este proveedor o no existen"
+                )
+
+            # Check if all are remisiones
+            non_remisiones = [p for p in purchases_check if p['document_type'] != 'remision']
+            if non_remisiones:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Solo se puede adjuntar factura legal a remisiones"
+                )
+
+            # Upload files FIRST (outside transaction) to avoid S3 initialization issues
+            uploaded_files = []
+            if files:
+                s3_service = AWSS3Service()
+                for file in files:
+                    if file.filename:
+                        try:
+                            file_content = await file.read()
+                            file_key = f"invoices/{supplier['tenant_id']}/legal/{legal_invoice_number}/{file.filename}"
+                            # Use the new upload_file_with_key method that accepts a specific key
+                            uploaded_key = await s3_service.upload_file_with_key(
+                                file_content,
+                                file_key,
+                                file.content_type
+                            )
+                            if uploaded_key:
+                                uploaded_files.append({
+                                    'filename': file.filename,
+                                    'key': uploaded_key,
+                                    'content_type': file.content_type,
+                                    'size': len(file_content)
+                                })
+                        except Exception as e:
+                            print(f"Warning: Failed to upload file {file.filename}: {str(e)}")
+                            # Continue with other files even if one fails
+                            pass
+
+            # Now do database transaction
+            async with conn.transaction():
+                # Update metadata in purchase_status_history for each purchase
+                for purchase_id in purchase_ids:
+                    # First check if a status history record exists for 'invoiced'
+                    history_record = await conn.fetchrow("""
+                        SELECT id, metadata
+                        FROM purchase_status_history
+                        WHERE purchase_id = $1
+                        AND to_status = 'invoiced'
+                        ORDER BY changed_at DESC
+                        LIMIT 1
+                    """, purchase_id)
+
+                    if history_record:
+                        # Update existing record
+                        await conn.execute("""
+                            UPDATE purchase_status_history
+                            SET metadata = jsonb_set(
+                                jsonb_set(
+                                    COALESCE(metadata, '{}'::jsonb),
+                                    '{numero_factura_legal}',
+                                    to_jsonb($2::text)
+                                ),
+                                '{fecha_factura_legal}',
+                                to_jsonb($3::text)
+                            )
+                            WHERE id = $1
+                        """, history_record['id'], legal_invoice_number, legal_invoice_date)
+                    else:
+                        # If no history record exists, we need to create one or update the purchase directly
+                        # For now, let's just log a warning and continue
+                        print(f"Warning: No invoiced status history found for purchase {purchase_id}")
+
+                # Create attachment records for uploaded files
+                # Use purchase created_by as uploaded_by (original creator of purchase order)
+                for uploaded_file in uploaded_files:
+                    for purchase_record in purchases_check:
+                        await conn.execute("""
+                            INSERT INTO purchase_attachments
+                            (purchase_id, tenant_id, path, file_name, file_size, s3_key, mime_type, attachment_type, related_status, description, uploaded_by, uploaded_at)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+                        """,
+                            purchase_record['id'],
+                            supplier['tenant_id'],
+                            uploaded_file['key'],  # path (S3 key)
+                            uploaded_file['filename'],
+                            uploaded_file['size'],
+                            uploaded_file['key'],  # s3_key
+                            uploaded_file['content_type'],
+                            'invoice',  # Valid attachment type
+                            'invoiced',
+                            f'Factura Legal {legal_invoice_number}',  # Description to identify it's a legal invoice
+                            purchase_record['created_by']  # Use original purchase creator as uploader
+                        )
+
+            return {
+                "success": True,
+                "message": f"Factura legal {legal_invoice_number} adjuntada a {len(purchase_ids)} remision(es)",
+                "affected_purchases": len(purchase_ids),
+                "files_uploaded": len(uploaded_files)
+            }
+
+    except ValueError as e:
+        print(f"ERROR ValueError: {str(e)}")
+        raise HTTPException(status_code=400, detail="Datos inválidos")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR Exception: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error al adjuntar factura legal: {str(e)}")
