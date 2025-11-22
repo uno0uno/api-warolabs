@@ -150,21 +150,49 @@ async def tenant_detection_middleware(request: Request, call_next):
                     content={"error": "Unable to determine requesting site"}
                 )
         
-        # Handle development environment - map localhost ports to actual sites
-        if 'localhost' in requesting_site or '127.0.0.1' in requesting_site:
+        # Handle development environment - map localhost and local network IPs to actual sites
+        is_local_dev = (
+            'localhost' in requesting_site or
+            '127.0.0.1' in requesting_site or
+            requesting_site.startswith('192.168.') or
+            requesting_site.startswith('10.') or
+            requesting_site.startswith('172.')
+        )
+
+        if is_local_dev:
             # Parse localhost mapping from environment variables
             localhost_mappings = {}
+            port_mappings = {}  # Map ports to tenants
+
             if settings.localhost_mapping:
                 for mapping in settings.localhost_mapping.split(','):
                     if '=' in mapping:
                         localhost, tenant = mapping.strip().split('=')
                         localhost_mappings[localhost] = tenant
-            
-            # Check if requesting site is in mappings
+
+                        # Extract port for local IP mapping
+                        if ':' in localhost:
+                            port = localhost.split(':')[1]
+                            port_mappings[port] = tenant
+
+            # Check if requesting site is in direct mappings
             if requesting_site in localhost_mappings:
                 requesting_site = localhost_mappings[requesting_site]
+            # For local IPs, try to match by port
+            elif ':' in requesting_site:
+                port = requesting_site.split(':')[1]
+                if port in port_mappings:
+                    requesting_site = port_mappings[port]
+                    logger.info(f"Mapped local IP port {port} to {requesting_site}")
+                else:
+                    logger.warning(f"Unknown local network port: {requesting_site}")
+                    request.state.tenant_context = TenantContext()
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": f"Unknown development site port: {requesting_site}"}
+                    )
             else:
-                logger.warning(f"Unknown localhost port: {requesting_site}")
+                logger.warning(f"Unknown localhost configuration: {requesting_site}")
                 request.state.tenant_context = TenantContext()
                 return JSONResponse(
                     status_code=400,

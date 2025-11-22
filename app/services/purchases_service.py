@@ -228,31 +228,33 @@ async def get_purchase_by_id(
         async with get_db_connection() as conn:
             purchase_data = await conn.fetchrow("""
                 SELECT
-                    id,
-                    tenant_id,
-                    supplier_id,
-                    purchase_number,
-                    purchase_date,
-                    delivery_date,
-                    total_amount,
-                    tax_amount,
-                    status,
-                    invoice_number,
-                    notes,
-                    created_by,
-                    created_at,
-                    updated_at,
-                    payment_type,
-                    payment_terms,
-                    credit_days,
-                    payment_due_date,
-                    requires_advance_payment,
-                    consolidation_group,
-                    payment_balance,
-                    invoice_date,
-                    invoice_amount
-                FROM tenant_purchases
-                WHERE id = $1 AND tenant_id = $2
+                    tp.id,
+                    tp.tenant_id,
+                    tp.supplier_id,
+                    ts.name as supplier_name,
+                    tp.purchase_number,
+                    tp.purchase_date,
+                    tp.delivery_date,
+                    tp.total_amount,
+                    tp.tax_amount,
+                    tp.status,
+                    tp.invoice_number,
+                    tp.notes,
+                    tp.created_by,
+                    tp.created_at,
+                    tp.updated_at,
+                    tp.payment_type,
+                    tp.payment_terms,
+                    tp.credit_days,
+                    tp.payment_due_date,
+                    tp.requires_advance_payment,
+                    tp.consolidation_group,
+                    tp.payment_balance,
+                    tp.invoice_date,
+                    tp.invoice_amount
+                FROM tenant_purchases tp
+                LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
+                WHERE tp.id = $1 AND tp.tenant_id = $2
             """, purchase_id, tenant_id)
 
             if not purchase_data:
@@ -298,6 +300,7 @@ async def get_purchase_by_id(
                 id=purchase_data['id'],
                 tenant_id=purchase_data['tenant_id'],
                 supplier_id=purchase_data['supplier_id'],
+                supplier_name=purchase_data['supplier_name'],
                 purchase_number=purchase_data['purchase_number'],
                 purchase_date=purchase_data['purchase_date'],
                 delivery_date=purchase_data['delivery_date'],

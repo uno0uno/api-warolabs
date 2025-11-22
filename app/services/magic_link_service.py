@@ -76,8 +76,11 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             
             # Generate magic link URL based on detected tenant site
             if settings.is_development:
-                # In development, redirect to frontend (warocol.com runs on port 8080)
-                base_url = "http://localhost:8080"
+                # In development, use the requesting site from Origin header
+                # This allows mobile/local network access to work properly
+                origin = request.headers.get('origin', 'http://localhost:8080')
+                base_url = origin
+                logger.info(f"🔗 Using origin URL for magic link: {base_url}")
             else:
                 # In production, use the detected tenant site from middleware
                 base_url = f"https://{tenant_context.site}"
