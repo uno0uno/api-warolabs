@@ -66,6 +66,7 @@ async def upload_purchase_attachments(
     files: List[UploadFile],
     attachment_type: str,
     description_prefix: str,
+    related_status: Optional[str] = None,
     log_prefix: str = "UPLOAD"
 ) -> None:
     """
@@ -79,6 +80,7 @@ async def upload_purchase_attachments(
         files: List of UploadFile objects
         attachment_type: Type of attachment (e.g., 'shipping_label', 'invoice', 'payment_proof')
         description_prefix: Prefix for attachment description
+        related_status: Status of the purchase when attachment was uploaded (e.g., 'shipped', 'invoiced')
         log_prefix: Prefix for log messages
     """
     if not files:
@@ -113,8 +115,9 @@ async def upload_purchase_attachments(
                         description,
                         uploaded_by,
                         s3_key,
-                        s3_url
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        s3_url,
+                        related_status
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 """,
                     tenant_id,
                     purchase_id,
@@ -126,11 +129,11 @@ async def upload_purchase_attachments(
                     description_prefix,
                     user_id,
                     s3_key,
-                    file_url
+                    file_url,
+                    related_status
                 )
         except Exception:
             pass
-pass
 
 # =============================================================================
 # STATUS HISTORY FUNCTIONS
@@ -713,6 +716,7 @@ async def transition_to_shipped(
                     files=files,
                     attachment_type='shipping_label',
                     description_prefix=f'Envío: {tracking_number}',
+                    related_status='shipped',
                     log_prefix='SHIP-ADMIN'
                 )
 
@@ -859,6 +863,7 @@ async def transition_to_received(
                     files=files,
                     attachment_type='delivery_photo',
                     description_prefix='Recepción de mercancía',
+                    related_status=target_status,  # 'received' or 'partially_received'
                     log_prefix='RECEIVE'
                 )
 
@@ -1016,6 +1021,7 @@ async def transition_to_invoiced(
                     files=files,
                     attachment_type='invoice',
                     description_prefix=f'Factura: {invoice_number}',
+                    related_status='invoiced',
                     log_prefix='INVOICE-ADMIN'
                 )
 
@@ -1140,6 +1146,7 @@ async def transition_to_paid(
                     files=files,
                     attachment_type='payment_proof',
                     description_prefix=f'Comprobante de pago: {payment_reference}',
+                    related_status='paid',
                     log_prefix='PAY'
                 )
 
