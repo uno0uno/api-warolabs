@@ -1,9 +1,10 @@
+import logging
 from fastapi import APIRouter, Request, Response
 from app.services.auth_service import get_session_data, switch_tenant
 from app.services.magic_link_service import send_magic_link, verify_code, verify_token
 from app.models.auth import (
-    SessionResponse, 
-    MagicLinkRequest, 
+    SessionResponse,
+    MagicLinkRequest,
     MagicLinkResponse,
     VerifyCodeRequest,
     VerifyCodeResponse,
@@ -13,6 +14,7 @@ from app.models.auth import (
     SwitchTenantResponse
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.get("/session", response_model=SessionResponse)
@@ -55,5 +57,32 @@ async def switch_tenant_endpoint(request: Request, response: Response, payload: 
     return await switch_tenant(request, response, payload.tenantSlug)
 
 @router.post("/signout")
-async def signout_placeholder():
-    return {"message": "Auth signout endpoint - coming soon"}
+async def signout(request: Request, response: Response):
+    """
+    Sign out user by invalidating their current session
+    """
+    try:
+        from app.core.security import get_session_token, clear_session_cookie
+        from app.database import get_db_connection
+
+        # Get session token from cookie
+        session_token = await get_session_token(request)
+
+        if session_token:
+            async with get_db_connection() as conn:
+                # Invalidate the session in database
+                await conn.execute(
+                    'UPDATE sessions SET is_active = false, ended_at = NOW(), end_reason = $1 WHERE id = $2',
+                    'user_logout', session_token
+                )
+                logger.info(f"🚪 Session invalidated: {session_token}")
+
+            # Clear session cookie
+            await clear_session_cookie(response, session_token)
+            logger.info("🍪 Session cookie cleared")
+
+        return {"success": True, "message": "Signed out successfully"}
+
+    except Exception as e:
+        logger.error(f"❌ Signout error: {e}", exc_info=True)
+        return {"success": True, "message": "Signed out"}  # Always return success for security

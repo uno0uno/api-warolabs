@@ -29,29 +29,31 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             token = secrets.token_hex(32)
             verification_code = str(random.randint(100000, 999999))  # 6-digit code
             expires_at = datetime.utcnow() + timedelta(minutes=15)  # 15 minutes
-            
-            # Check if user exists, if not create one
-            user_query = 'SELECT * FROM profile WHERE email = $1 LIMIT 1'
-            user_result = await conn.fetchrow(user_query, email)
-            
+
+            # Check if user exists AND is member of the tenant
+            user_tenant_query = """
+                SELECT p.id as user_id, p.email, p.name, tm.role, tm.tenant_id
+                FROM profile p
+                INNER JOIN tenant_members tm ON p.id = tm.user_id
+                WHERE p.email = $1 AND tm.tenant_id = $2
+                LIMIT 1
+            """
+            user_result = await conn.fetchrow(user_tenant_query, email, tenant_context.tenant_id)
+
             if not user_result:
-                logger.info(f"👤 Creating new user for email: {email}")
-                insert_user_query = """
-                    INSERT INTO profile (email, name, nationality_id, phone_number) 
-                    VALUES ($1, $2, $3, $4) 
-                    RETURNING id
-                """
-                user_result = await conn.fetchrow(insert_user_query, 
-                    email, 
-                    email.split('@')[0], 
-                    1,  # default nationality_id 
-                    '+1234567890'  # default phone_number
-                )
-                user_id = user_result['id']
-                logger.info(f"✅ User created with ID: {user_id}")
-            else:
-                user_id = user_result['id']
-                logger.info(f"👤 User found with ID: {user_id}")
+                # Check if user exists but is not a member
+                user_exists_query = 'SELECT id FROM profile WHERE email = $1 LIMIT 1'
+                user_exists = await conn.fetchrow(user_exists_query, email)
+
+                if user_exists:
+                    logger.warning(f"❌ User {email} exists but is not a member of tenant {tenant_context.tenant_name}")
+                    raise AuthenticationError(f"User is not authorized to access {tenant_context.brand_name}")
+                else:
+                    logger.warning(f"❌ User {email} does not exist")
+                    raise AuthenticationError("User not found. Please contact an administrator.")
+
+            user_id = user_result['user_id']
+            logger.info(f"✅ User found with ID: {user_id}, role: {user_result['role']}")
             
             # Mark old unused magic tokens as expired for this user
             await conn.execute(
