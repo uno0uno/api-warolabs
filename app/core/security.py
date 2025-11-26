@@ -88,7 +88,7 @@ async def set_session_cookie(response: Response, session_token: str, tenant_site
             # Fallback: get from database using session
             try:
                 from app.database import get_db_connection
-                async with get_db_connection() as conn:
+                async with get_db_connection(use_transaction=False) as conn:
                     site_query = """
                         SELECT ts.site
                         FROM sessions s
@@ -132,7 +132,7 @@ async def clear_session_cookie(response: Response, session_token: str = None):
     if session_token and not settings.is_development:
         try:
             from app.database import get_db_connection
-            async with get_db_connection() as conn:
+            async with get_db_connection(use_transaction=False) as conn:
                 # Get tenant site from session
                 site_query = """
                     SELECT ts.site
@@ -203,14 +203,14 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
         if not session_token:
             return None
         
-        async with get_db_connection() as conn:
+        async with get_db_connection(use_transaction=False) as conn:
             # Get session data from database
             session_query = """
                 SELECT s.user_id, s.tenant_id, s.expires_at, s.is_active,
                        p.email, p.name
                 FROM sessions s
                 JOIN profile p ON s.user_id = p.id
-                WHERE s.id = $1 
+                WHERE s.id = $1
                   AND s.expires_at > NOW()
                   AND s.is_active = true
                 LIMIT 1

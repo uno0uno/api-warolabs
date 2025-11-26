@@ -15,8 +15,11 @@ class DatabasePool:
                 cls._pool = await asyncpg.create_pool(
                     **settings.db_connection_params,
                     min_size=5,
-                    max_size=20,
-                    command_timeout=60
+                    max_size=30,  # Increased for better concurrency
+                    max_queries=50000,  # Recycle connection after 50k queries
+                    max_inactive_connection_lifetime=300,  # Close idle connections after 5 minutes
+                    command_timeout=60,  # Command timeout in seconds
+                    timeout=30  # Connection acquisition timeout
                 )
                 logger.info(f" Database pool created: {settings.db_name}@{settings.db_host}")
             except Exception as e:
@@ -32,15 +35,26 @@ class DatabasePool:
             logger.info("Database pool closed")
 
 @asynccontextmanager
-async def get_db_connection():
+async def get_db_connection(use_transaction: bool = True):
     """
     Equivalent to withPostgresClient from warolabs.com
-    
+
+    Args:
+        use_transaction: If True, wraps operations in a transaction.
+                        Set to False for read-only operations to avoid transaction overhead.
+
     Usage:
     async with get_db_connection() as conn:
+        result = await conn.fetchrow("SELECT * FROM table WHERE id = $1", id)
+
+    Read-only usage (no transaction):
+    async with get_db_connection(use_transaction=False) as conn:
         result = await conn.fetchrow("SELECT * FROM table WHERE id = $1", id)
     """
     pool = await DatabasePool.create_pool()
     async with pool.acquire() as connection:
-        async with connection.transaction():
+        if use_transaction:
+            async with connection.transaction():
+                yield connection
+        else:
             yield connection

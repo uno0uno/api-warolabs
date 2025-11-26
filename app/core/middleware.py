@@ -122,7 +122,7 @@ async def tenant_detection_middleware(request: Request, call_next):
             if session_token:
                 logger.info(f"🔍 No origin header, attempting tenant inference from session: {session_token}")
                 try:
-                    async with get_db_connection() as conn:
+                    async with get_db_connection(use_transaction=False) as conn:
                         session_tenant_query = """
                             SELECT ts.site, ts.tenant_id, ts.brand_name, ts.is_active,
                                    t.name as tenant_name, t.slug as tenant_slug, t.email as tenant_email
@@ -203,10 +203,10 @@ async def tenant_detection_middleware(request: Request, call_next):
         if requesting_site == 'api.warolabs.com':
             requesting_site = 'warolabs.com'
         
-        # Query database for tenant site configuration
-        async with get_db_connection() as conn:
+        # Query database for tenant site configuration (read-only, no transaction needed)
+        async with get_db_connection(use_transaction=False) as conn:
             tenant_query = """
-                SELECT 
+                SELECT
                     ts.tenant_id,
                     ts.site,
                     ts.brand_name,
@@ -219,7 +219,7 @@ async def tenant_detection_middleware(request: Request, call_next):
                 WHERE ts.site = $1 AND ts.is_active = true
                 LIMIT 1
             """
-            
+
             tenant_data = await conn.fetchrow(tenant_query, requesting_site)
             
             if not tenant_data:

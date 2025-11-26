@@ -67,4 +67,4 @@ htmlcov/
 *.tmp
 *.temp
 test_db_connection.py
-validate_env.py
+validate_env.pynode_modules/
