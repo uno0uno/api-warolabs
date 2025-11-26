@@ -10,7 +10,8 @@ from app.models.supplier import (
     SupplierCreate,
     SupplierUpdate,
     SupplierResponse,
-    SuppliersListResponse
+    SuppliersListResponse,
+    SupplierStats
 )
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,28 @@ async def get_suppliers_list(
             suppliers_data = await conn.fetch(base_query, *params)
             count_result = await conn.fetchrow(count_query, *params[:-2])  # Exclude limit and offset
 
+            # Calculate stats from ALL suppliers (not just current page)
+            stats_query = """
+                SELECT
+                    COUNT(*) FILTER (WHERE is_active = true) as activos,
+                    COUNT(*) FILTER (WHERE is_active = false) as inactivos,
+                    COALESCE(
+                        ROUND(
+                            AVG(
+                                CASE
+                                    WHEN payment_terms ~ '^[0-9]+'
+                                    THEN CAST(SUBSTRING(payment_terms FROM '^[0-9]+') AS INTEGER)
+                                    ELSE NULL
+                                END
+                            )
+                        ),
+                        0
+                    ) as promedio_pago
+                FROM tenant_suppliers
+                WHERE tenant_id = $1
+            """
+            stats_result = await conn.fetchrow(stats_query, tenant_id)
+
             # Convert to models
             suppliers = []
             for row in suppliers_data:
@@ -112,11 +135,20 @@ async def get_suppliers_list(
                 )
                 suppliers.append(supplier)
 
+            # Create stats object
+            stats = SupplierStats(
+                activos=int(stats_result['activos'] or 0),
+                inactivos=int(stats_result['inactivos'] or 0),
+                promedio_pago=int(stats_result['promedio_pago'] or 0),
+                con_entregas=0  # TODO: Implement delivery tracking
+            )
+
             response_data = SuppliersListResponse(
                 data=suppliers,
                 total=count_result['total'],
                 page=page,
-                limit=limit
+                limit=limit,
+                stats=stats
             )
 
             return response_data

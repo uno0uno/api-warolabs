@@ -41,9 +41,16 @@ class SupplierResponse(BaseModel):
     success: bool = True
     data: Supplier
 
+class SupplierStats(BaseModel):
+    activos: int = Field(description="Number of active suppliers")
+    inactivos: int = Field(description="Number of inactive suppliers")
+    promedio_pago: int = Field(description="Average payment terms in days")
+    con_entregas: int = Field(description="Suppliers with scheduled deliveries")
+
 class SuppliersListResponse(BaseModel):
     success: bool = True
     data: list[Supplier]
     total: int
     page: int = 1
     limit: int = 50
+    stats: Optional[SupplierStats] = None
