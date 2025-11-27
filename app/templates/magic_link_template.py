@@ -41,10 +41,8 @@ def get_magic_link_template(magic_link_url: str, verification_code: str, tenant_
         
         <p><a href="{magic_link_url}" style="color: black; background-color: #f0f0f0; padding: 10px; border-radius: 4px; text-decoration: none; display: inline-block;">🔑 Acceder a mi cuenta</a></p>
 
-        <!-- CÓDIGO DE VERIFICACIÓN - COMENTADO
         <p><strong>O usa este código de verificación:</strong></p>
         <p style="font-size: 28px; font-weight: bold; letter-spacing: 4px; color: #333; background-color: #f8f8f8; padding: 15px; border-radius: 8px; text-align: center; margin: 20px 0;">{verification_code}</p>
-        -->
 
         <p>Este enlace es válido por 15 minutos y solo puede ser usado una vez.</p>
         
