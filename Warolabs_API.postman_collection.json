@@ -1,8 +1,8 @@
 {
 	"info": {
 		"_postman_id": "a1b2c3d4-e5f6-4789-a0b1-c2d3e4f5g6h7",
-		"name": "Warolabs API",
-		"description": "Collection for Warolabs FastAPI backend with session-based authentication. Set session_token variable after login.",
+		"name": "Waro Colombia API",
+		"description": "Collection for Waro Colombia FastAPI backend with session-based authentication. Set session_token variable after login.",
 		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
 	"variable": [

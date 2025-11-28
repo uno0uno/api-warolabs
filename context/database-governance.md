@@ -1,4 +1,4 @@
-# Database Governance Rules - WaroLabs API
+# Database Governance Rules - Waro Colombia API
 
 ## Core Governance Principles
 

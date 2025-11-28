@@ -1,4 +1,4 @@
-# Tenant Isolation Governance - WaroLabs Platform
+# Tenant Isolation Governance - Waro Colombia Platform
 
 ## Core Governance Principles
 

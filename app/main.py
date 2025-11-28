@@ -12,7 +12,7 @@ setup_logging()
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 app = FastAPI(
-    title="Warolabs FastAPI Service",
+    title="Waro Colombia FastAPI Service",
     version="1.0.0",
     debug=settings.debug,
     docs_url="/docs",
@@ -27,7 +27,7 @@ def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
     openapi_schema = get_openapi(
-        title="Warolabs FastAPI Service",
+        title="Waro Colombia FastAPI Service",
         version="1.0.0",
         description="FastAPI service for warocol.com",
         routes=app.routes,
@@ -99,7 +99,7 @@ app.include_router(supplier_portal.router, prefix="/supplier-portal", tags=["sup
 @app.get("/")
 async def root():
     return {
-        "message": "Warolabs FastAPI Service", 
+        "message": "Waro Colombia FastAPI Service", 
         "version": "1.0.0",
         "database": settings.db_name,
         "environment": settings.environment

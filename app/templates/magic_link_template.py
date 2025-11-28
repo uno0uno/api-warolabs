@@ -17,10 +17,10 @@ def get_magic_link_template(magic_link_url: str, verification_code: str, tenant_
         HTML email template string
     """
     # Extract tenant configuration with defaults
-    brand_name = tenant_context.get('brand_name', 'Warolabs')
-    tenant_name = tenant_context.get('tenant_name', 'WaroLabs')
+    brand_name = tenant_context.get('brand_name', 'Waro Colombia')
+    tenant_name = tenant_context.get('tenant_name', 'Waro Colombia')
     admin_name = tenant_context.get('admin_name', 'Saifer 101 (Anderson Arévalo)')
-    admin_email = tenant_context.get('admin_email', 'anderson.arevalo@warolabs.com')
+    admin_email = tenant_context.get('admin_email', 'anderson.arevalo@warocol.com')
     
     # Dynamic footer message based on tenant
     footer_message = 'Tecnología colombiana para el mundo.' if tenant_name == 'Waro Colombia' else 'No olvides mirar al futuro.'

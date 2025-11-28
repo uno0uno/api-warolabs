@@ -1,4 +1,4 @@
-# API WaroLabs
+# API Waro Colombia
 
 FastAPI service for warocol.com providing financial endpoints and authentication.
 
