@@ -291,7 +291,30 @@ async def create_supplier(
                 createdAt=new_supplier['created_at'],
                 updatedAt=new_supplier['updated_at']
             )
-            
+
+            # Send Discord notification (non-blocking)
+            try:
+                from app.services.discord_service import discord_service
+
+                if discord_service:
+                    # Get tenant name for notification
+                    tenant_query = "SELECT name FROM tenants WHERE id = $1"
+                    tenant_data = await conn.fetchrow(tenant_query, tenant_id)
+                    tenant_name = tenant_data['name'] if tenant_data else None
+
+                    # Send notification asynchronously
+                    await discord_service.notify_new_supplier(
+                        supplier_name=supplier.name,
+                        supplier_email=supplier.email,
+                        supplier_phone=supplier.phone,
+                        tax_id=supplier.tax_id,
+                        payment_terms=supplier.payment_terms,
+                        tenant_name=tenant_name
+                    )
+            except Exception as notify_error:
+                # Log error but don't fail the supplier creation
+                logger.warning(f"Failed to send Discord notification: {notify_error}")
+
             return SupplierResponse(data=supplier)
             
     except AuthenticationError:

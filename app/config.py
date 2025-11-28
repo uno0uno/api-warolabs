@@ -46,7 +46,10 @@ class Settings(BaseSettings):
     
     # Localhost to tenant mapping for development
     localhost_mapping: str = Field(default="", alias='LOCALHOST_MAPPING')
-    
+
+    # Discord webhook for notifications
+    discord_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_WEBHOOK_URL')
+
     class Config:
         env_file = ".env"
         extra = "ignore"  # Ignore extra environment variables
