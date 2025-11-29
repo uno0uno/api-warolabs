@@ -30,7 +30,7 @@ async def get_ingredients_list(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
-            # Base query joins ingredients with the latest price from tenant_supplier_prices
+            # Base query joins ingredients (global catalog) with tenant-specific prices
             base_query = """
                 SELECT
                     i.id,
@@ -46,7 +46,7 @@ async def get_ingredients_list(
                     tsp.supplier_id
                 FROM ingredients i
                 LEFT JOIN (
-                    SELECT 
+                    SELECT
                         ingredient_id,
                         supplier_id,
                         unit_price,
@@ -54,41 +54,49 @@ async def get_ingredients_list(
                     FROM tenant_supplier_prices
                     WHERE tenant_id = $1 AND is_active = TRUE
                 ) tsp ON i.id = tsp.ingredient_id AND tsp.rn = 1
-                WHERE i.tenant_id = $1
+                WHERE 1=1
             """
-            
-            count_query = "SELECT COUNT(*) FROM ingredients WHERE tenant_id = $1"
-            
-            params = [tenant_id]
-            param_count = 2
+
+            count_query = "SELECT COUNT(*) FROM ingredients WHERE 1=1"
+
+            # Separate params for base query (includes tenant_id) and count query (no tenant_id)
+            base_params = [tenant_id]
+            count_params = []
+            base_param_count = 2
+            count_param_count = 1
 
             # Add filters
             if search:
-                base_query += f" AND (LOWER(i.name) LIKE LOWER(${param_count}) OR LOWER(i.description) LIKE LOWER(${param_count}))"
-                count_query += f" AND (LOWER(name) LIKE LOWER(${param_count}) OR LOWER(description) LIKE LOWER(${param_count}))"
-                params.append(f"%{search}%")
-                param_count += 1
-            
+                base_query += f" AND (LOWER(i.name) LIKE LOWER(${base_param_count}) OR LOWER(i.description) LIKE LOWER(${base_param_count}))"
+                count_query += f" AND (LOWER(name) LIKE LOWER(${count_param_count}) OR LOWER(description) LIKE LOWER(${count_param_count}))"
+                base_params.append(f"%{search}%")
+                count_params.append(f"%{search}%")
+                base_param_count += 1
+                count_param_count += 1
+
             if category:
-                base_query += f" AND LOWER(i.category) = LOWER(${param_count})"
-                count_query += f" AND LOWER(category) = LOWER(${param_count})"
-                params.append(category)
-                param_count += 1
+                base_query += f" AND LOWER(i.category) = LOWER(${base_param_count})"
+                count_query += f" AND LOWER(category) = LOWER(${count_param_count})"
+                base_params.append(category)
+                count_params.append(category)
+                base_param_count += 1
+                count_param_count += 1
 
             if supplier_id:
-                base_query += f" AND tsp.supplier_id = ${param_count}"
+                base_query += f" AND tsp.supplier_id = ${base_param_count}"
                 # Note: Filtering count by supplier_id would require a join in the count query as well.
                 # For simplicity, we'll count all ingredients and filter the result set.
-                param_count += 1
+                base_params.append(supplier_id)
+                base_param_count += 1
 
             # Add pagination
             offset = (page - 1) * limit
-            base_query += f" ORDER BY i.created_at DESC LIMIT ${param_count} OFFSET ${param_count + 1}"
-            params.extend([limit, offset])
+            base_query += f" ORDER BY i.created_at DESC LIMIT ${base_param_count} OFFSET ${base_param_count + 1}"
+            base_params.extend([limit, offset])
 
             # Execute queries
-            ingredients_data = await conn.fetch(base_query, *params)
-            count_result = await conn.fetchrow(count_query, *params[:-2]) # Exclude limit and offset
+            ingredients_data = await conn.fetch(base_query, *base_params)
+            count_result = await conn.fetchrow(count_query, *count_params)
 
             # Process results into Pydantic models
             ingredients = []

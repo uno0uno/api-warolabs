@@ -62,17 +62,16 @@ class DiscordWebhookService:
                 )
 
                 if response.status_code == 204:
-                    logger.info(f"✅ Discord notification sent: {title}")
                     return True
                 else:
-                    logger.error(f"❌ Discord webhook failed with status {response.status_code}: {response.text}")
+                    logger.error(f"Discord webhook failed with status {response.status_code}: {response.text}")
                     return False
 
         except httpx.TimeoutException:
-            logger.error(f"❌ Discord webhook timeout for: {title}")
+            logger.error(f"Discord webhook timeout for: {title}")
             return False
         except Exception as e:
-            logger.error(f"❌ Discord webhook error: {e}", exc_info=True)
+            logger.error(f"Discord webhook error: {e}")
             return False
 
     async def notify_new_supplier(
@@ -82,7 +81,8 @@ class DiscordWebhookService:
         supplier_phone: Optional[str] = None,
         tax_id: Optional[str] = None,
         payment_terms: Optional[str] = None,
-        tenant_name: Optional[str] = None
+        tenant_name: Optional[str] = None,
+        user_name: Optional[str] = None
     ) -> bool:
         """
         Send notification about new supplier creation
@@ -94,53 +94,30 @@ class DiscordWebhookService:
             tax_id: Tax ID of the supplier
             payment_terms: Payment terms
             tenant_name: Name of the tenant who created the supplier
+            user_name: Name of the user who created the supplier
 
         Returns:
             bool: True if notification sent successfully
         """
-        fields = [
-            {
-                "name": "📦 Proveedor",
-                "value": supplier_name,
-                "inline": False
-            }
-        ]
+        # Build concise description
+        info_parts = [f"**Proveedor:** {supplier_name}"]
 
         if supplier_email:
-            fields.append({
-                "name": "📧 Email",
-                "value": supplier_email,
-                "inline": True
-            })
-
+            info_parts.append(f"**Email:** {supplier_email}")
         if supplier_phone:
-            fields.append({
-                "name": "📞 Teléfono",
-                "value": supplier_phone,
-                "inline": True
-            })
-
+            info_parts.append(f"**Tel:** {supplier_phone}")
         if tax_id:
-            fields.append({
-                "name": "🆔 NIT/RUT",
-                "value": tax_id,
-                "inline": True
-            })
+            info_parts.append(f"**NIT:** {tax_id}")
 
-        if payment_terms:
-            fields.append({
-                "name": "💰 Términos de Pago",
-                "value": payment_terms,
-                "inline": True
-            })
+        description = "\n".join(info_parts)
 
-        footer_text = f"Tenant: {tenant_name}" if tenant_name else "Waro Colombia"
+        footer_text = f"{tenant_name or 'N/A'} • {user_name or 'Usuario desconocido'}"
 
         return await self.send_notification(
-            title="🎉 Nuevo Proveedor Creado",
-            description=f"Se ha registrado un nuevo proveedor en el sistema.",
+            title="Nuevo Proveedor",
+            description=description,
             color=5763719,  # Green color
-            fields=fields,
+            fields=None,
             footer=footer_text
         )
 
@@ -153,4 +130,4 @@ discord_service = None
 if settings.discord_webhook_url:
     discord_service = DiscordWebhookService(settings.discord_webhook_url)
 else:
-    logger.warning("Discord webhook URL not configured. Notifications will be disabled.")
+    logger.warning("Discord webhook URL not configured - notifications disabled")

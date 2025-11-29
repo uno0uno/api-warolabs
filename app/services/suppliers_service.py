@@ -297,10 +297,12 @@ async def create_supplier(
                 from app.services.discord_service import discord_service
 
                 if discord_service:
-                    # Get tenant name for notification
-                    tenant_query = "SELECT name FROM tenants WHERE id = $1"
-                    tenant_data = await conn.fetchrow(tenant_query, tenant_id)
+                    # Get tenant and user info for notification
+                    tenant_data = await conn.fetchrow("SELECT name FROM tenants WHERE id = $1", tenant_id)
+                    user_data = await conn.fetchrow("SELECT name, user_name FROM profile WHERE id = $1", session_context.user_id)
+
                     tenant_name = tenant_data['name'] if tenant_data else None
+                    user_name = user_data['name'] or user_data['user_name'] if user_data else None
 
                     # Send notification asynchronously
                     await discord_service.notify_new_supplier(
@@ -309,7 +311,8 @@ async def create_supplier(
                         supplier_phone=supplier.phone,
                         tax_id=supplier.tax_id,
                         payment_terms=supplier.payment_terms,
-                        tenant_name=tenant_name
+                        tenant_name=tenant_name,
+                        user_name=user_name
                     )
             except Exception as notify_error:
                 # Log error but don't fail the supplier creation
