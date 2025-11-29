@@ -590,8 +590,7 @@ async def create_purchase(
         raise
     except Exception as e:
         import traceback
-        print(f"[DEBUG] Error creating purchase: {str(e)}")
-        print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 async def update_purchase(

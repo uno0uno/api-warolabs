@@ -308,7 +308,7 @@ async def get_transition_detail(
                         )
                         att_dict['s3_url'] = presigned_url
                     except Exception as e:
-                        print(f"Error generating presigned URL: {e}")
+
                         att_dict['s3_url'] = None
                 else:
                     att_dict['s3_url'] = None
@@ -449,7 +449,7 @@ async def get_purchase_attachments(
                         )
                         row_dict['s3_url'] = presigned_url
                     except Exception as e:
-                        print(f"Error generating presigned URL for attachment {row_dict['id']}: {e}")
+
                         row_dict['s3_url'] = None
                 else:
                     row_dict['s3_url'] = None
@@ -1334,3 +1334,63 @@ async def complete_quotation(
     except Exception as e:
 
         raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+async def upload_transition_attachments(
+    request: Request,
+    response: Response,
+    purchase_id: UUID,
+    transition_id: UUID,
+    files: List[UploadFile]
+) -> Dict[str, Any]:
+    """Upload attachments for a specific transition"""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # Verify purchase belongs to tenant
+            purchase = await conn.fetchrow(
+                "SELECT id FROM tenant_purchases WHERE id = $1 AND tenant_id = $2",
+                purchase_id, tenant_id
+            )
+
+            if not purchase:
+                raise HTTPException(status_code=404, detail="Purchase not found")
+
+            # Verify transition exists and belongs to purchase
+            transition = await conn.fetchrow("""
+                SELECT id, to_status 
+                FROM purchase_status_history 
+                WHERE id = $1 AND purchase_id = $2
+            """, transition_id, purchase_id)
+
+            if not transition:
+                raise HTTPException(status_code=404, detail="Transition not found")
+
+            # Upload attachments
+            await upload_purchase_attachments(
+                conn=conn,
+                tenant_id=tenant_id,
+                purchase_id=purchase_id,
+                user_id=user_id,
+                files=files,
+                attachment_type='other', # Generic type for manual uploads
+                description_prefix=f'Adjunto manual a transición',
+                related_status=transition['to_status'],
+                log_prefix='MANUAL-UPLOAD'
+            )
+
+            return {"success": True, "message": "Attachments uploaded successfully"}
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading transition attachments: {e}")
+        raise HTTPException(status_code=500, detail="Error uploading attachments")
+

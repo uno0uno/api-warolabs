@@ -819,12 +819,7 @@ async def attach_legal_invoice(
     Returns:
         Dict with success status
     """
-    print(f"DEBUG attach_legal_invoice called with:")
-    print(f"  token: {token}")
-    print(f"  purchase_ids: {purchase_ids}")
-    print(f"  legal_invoice_number: {legal_invoice_number}")
-    print(f"  legal_invoice_date: {legal_invoice_date}")
-    print(f"  files: {len(files) if files else 0}")
+
 
     try:
         async with get_db_connection() as conn:
@@ -891,7 +886,7 @@ async def attach_legal_invoice(
                                     'size': len(file_content)
                                 })
                         except Exception as e:
-                            print(f"Warning: Failed to upload file {file.filename}: {str(e)}")
+
                             # Continue with other files even if one fails
                             pass
 
@@ -927,7 +922,7 @@ async def attach_legal_invoice(
                     else:
                         # If no history record exists, we need to create one or update the purchase directly
                         # For now, let's just log a warning and continue
-                        print(f"Warning: No invoiced status history found for purchase {purchase_id}")
+                        pass
 
                 # Create attachment records for uploaded files
                 # Use purchase created_by as uploaded_by (original creator of purchase order)
@@ -959,12 +954,84 @@ async def attach_legal_invoice(
             }
 
     except ValueError as e:
-        print(f"ERROR ValueError: {str(e)}")
+
         raise HTTPException(status_code=400, detail="Datos inválidos")
     except HTTPException:
         raise
     except Exception as e:
-        print(f"ERROR Exception: {str(e)}")
-        import traceback
-        traceback.print_exc()
+
         raise HTTPException(status_code=500, detail=f"Error al adjuntar factura legal: {str(e)}")
+
+async def upload_transition_attachments_from_portal(
+    token: str,
+    purchase_id: UUID,
+    transition_id: UUID,
+    files: List[UploadFile]
+) -> Dict[str, Any]:
+    """
+    Upload attachments to a specific transition from supplier portal
+
+    Args:
+        token: Supplier's access token
+        purchase_id: Purchase ID
+        transition_id: Transition ID
+        files: List of files to upload
+    """
+    try:
+        async with get_db_connection() as conn:
+            # Verify token and that purchase belongs to this supplier
+            supplier = await conn.fetchrow("""
+                SELECT id, tenant_id
+                FROM tenant_suppliers
+                WHERE access_token = $1
+            """, UUID(token))
+
+            if not supplier:
+                raise HTTPException(status_code=404, detail="Token inválido")
+
+            # Verify purchase belongs to supplier
+            purchase = await conn.fetchrow("""
+                SELECT id, created_by
+                FROM tenant_purchases
+                WHERE id = $1 AND supplier_id = $2
+            """, purchase_id, supplier['id'])
+
+            if not purchase:
+                raise HTTPException(status_code=404, detail="Compra no encontrada")
+
+            # Verify transition exists and belongs to purchase
+            transition = await conn.fetchrow("""
+                SELECT to_status
+                FROM purchase_status_history
+                WHERE id = $1 AND purchase_id = $2
+            """, transition_id, purchase_id)
+
+            if not transition:
+                raise HTTPException(status_code=404, detail="Transición no encontrada")
+
+            # Use existing service to upload attachments
+            # We use the purchase creator as the uploader since supplier has no user session
+            from app.services.purchase_tracking_service import upload_purchase_attachments
+            
+            # We need to pass the tenant_id from the supplier
+            # The upload_purchase_attachments function expects a user_id for uploaded_by
+            # We'll use the purchase creator's ID
+            
+            return await upload_purchase_attachments(
+                conn=conn,
+                tenant_id=supplier['tenant_id'],
+                purchase_id=purchase_id,
+                files=files,
+                user_id=purchase['created_by'],
+                attachment_type='other',
+                description_prefix='Adjunto manual a transición (Proveedor)',
+                related_status=transition['to_status']
+            )
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Datos inválidos")
+    except HTTPException:
+        raise
+    except Exception as e:
+
+        raise HTTPException(status_code=500, detail="Error al subir archivos")

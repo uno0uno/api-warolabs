@@ -330,6 +330,20 @@ async def get_purchase_attachments_endpoint(
     """
     return await get_purchase_attachments(request, response, purchase_id)
 
+@router.post("/{purchase_id}/transitions/{transition_id}/attachments")
+async def create_transition_attachment_endpoint(
+    purchase_id: UUID,
+    transition_id: UUID,
+    request: Request,
+    response: Response,
+    files: List[UploadFile] = File(...)
+):
+    """
+    Upload attachments for a specific transition
+    """
+    from app.services.purchase_tracking_service import upload_transition_attachments
+    return await upload_transition_attachments(request, response, purchase_id, transition_id, files)
+
 @router.post("/{purchase_id}/attachments")
 async def create_purchase_attachment_endpoint(
     purchase_id: UUID,

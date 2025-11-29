@@ -248,3 +248,28 @@ async def ship_purchase_endpoint(
         notes=notes,
         files=files
     )
+
+@router.post("/{token}/purchases/{purchase_id}/transitions/{transition_id}/attachments")
+async def create_transition_attachment_endpoint(
+    token: str,
+    purchase_id: str,
+    transition_id: str,
+    files: List[UploadFile] = File(...)
+):
+    """
+    Allow supplier to upload attachments to a specific transition
+    Public endpoint - token is used for identification
+    """
+    try:
+        purchase_uuid = UUID(purchase_id)
+        transition_uuid = UUID(transition_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="IDs inválidos")
+
+    from app.services.supplier_portal_service import upload_transition_attachments_from_portal
+    return await upload_transition_attachments_from_portal(
+        token=token,
+        purchase_id=purchase_uuid,
+        transition_id=transition_uuid,
+        files=files
+    )

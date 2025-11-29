@@ -135,10 +135,10 @@ class AWSS3Service:
             return s3_key
 
         except ClientError as e:
-            print(f"Error uploading file to S3: {e}")
+
             return None
         except Exception as e:
-            print(f"Unexpected error uploading file: {e}")
+
             return None
 
     async def get_presigned_url(
