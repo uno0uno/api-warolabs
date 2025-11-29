@@ -584,6 +584,34 @@ async def create_purchase(
                         # Log error but don't fail the purchase creation
                         pass
 
+                # Send Discord notification
+                try:
+                    from app.services.discord_service import discord_purchase_service
+                    if discord_purchase_service:
+                        # Get creator name
+                        creator = await conn.fetchrow("SELECT name FROM profile WHERE id = $1", user_id)
+                        creator_name = creator['name'] if creator else "Usuario Desconocido"
+
+                        # Get tenant name
+                        tenant = await conn.fetchrow("SELECT name FROM tenants WHERE id = $1", tenant_id)
+                        tenant_name = tenant['name'] if tenant else "Tenant Desconocido"
+
+                        # Get supplier name
+                        supplier = await conn.fetchrow("SELECT name FROM tenant_suppliers WHERE id = $1", purchase_data.supplier_id)
+                        supplier_name = supplier['name'] if supplier else "Proveedor Desconocido"
+
+                        await discord_purchase_service.notify_new_purchase(
+                            purchase_number=new_purchase['purchase_number'],
+                            supplier_name=supplier_name,
+                            total_amount=float(new_purchase['total_amount']),
+                            created_by_name=creator_name,
+                            tenant_name=tenant_name,
+                            items_count=len(items)
+                        )
+                except Exception as e:
+                    # Log error but don't fail
+                    print(f"Failed to send Discord notification: {e}")
+
                 return PurchaseResponse(data=purchase)
 
     except AuthenticationError:

@@ -122,6 +122,90 @@ class DiscordWebhookService:
         )
 
 
+    async def notify_new_session(
+        self,
+        user_email: str,
+        user_name: str,
+        tenant_name: str,
+        login_method: str,
+        ip_address: str,
+        user_agent: str
+    ) -> bool:
+        """
+        Send notification about new session creation (login)
+
+        Args:
+            user_email: Email of the user
+            user_name: Name of the user
+            tenant_name: Name of the tenant
+            login_method: Method used for login (magic_link, verification_code)
+            ip_address: IP address of the client
+            user_agent: User agent of the client
+
+        Returns:
+            bool: True if notification sent successfully
+        """
+        description = (
+            f"**Usuario:** {user_name} ({user_email})\n"
+            f"**Tenant:** {tenant_name}\n"
+            f"**Método:** {login_method}\n"
+            f"**IP:** {ip_address}"
+        )
+
+        footer_text = f"User Agent: {user_agent[:50]}..." if user_agent else "N/A"
+
+        return await self.send_notification(
+            title="Nuevo Inicio de Sesión",
+            description=description,
+            color=15105570,  # Orange color
+            fields=None,
+            footer=footer_text
+        )
+
+
+    async def notify_new_purchase(
+        self,
+        purchase_number: str,
+        supplier_name: str,
+        total_amount: float,
+        created_by_name: str,
+        tenant_name: str,
+        items_count: int
+    ) -> bool:
+        """
+        Send notification about new purchase creation
+
+        Args:
+            purchase_number: Purchase number (e.g. WR-2024-0001)
+            supplier_name: Name of the supplier
+            total_amount: Total amount of the purchase
+            created_by_name: Name of the user who created it
+            tenant_name: Name of the tenant
+            items_count: Number of items in the purchase
+
+        Returns:
+            bool: True if notification sent successfully
+        """
+        formatted_amount = "{:,.0f}".format(total_amount).replace(",", ".")
+
+        description = (
+            f"**Orden:** {purchase_number}\n"
+            f"**Proveedor:** {supplier_name}\n"
+            f"**Monto:** ${formatted_amount} COP\n"
+            f"**Items:** {items_count}"
+        )
+
+        footer_text = f"{tenant_name} • Creado por {created_by_name}"
+
+        return await self.send_notification(
+            title="Nueva Orden de Compra",
+            description=description,
+            color=10181046,  # Purple color
+            fields=None,
+            footer=footer_text
+        )
+
+
 # Singleton instance with webhook URL from settings
 from app.config import settings
 
@@ -131,3 +215,17 @@ if settings.discord_webhook_url:
     discord_service = DiscordWebhookService(settings.discord_webhook_url)
 else:
     logger.warning("Discord webhook URL not configured - notifications disabled")
+
+# Separate service for session notifications
+discord_session_service = None
+if settings.discord_session_webhook_url:
+    discord_session_service = DiscordWebhookService(settings.discord_session_webhook_url)
+else:
+    logger.warning("Discord session webhook URL not configured - session notifications disabled")
+
+# Separate service for purchase notifications
+discord_purchase_service = None
+if settings.discord_purchase_webhook_url:
+    discord_purchase_service = DiscordWebhookService(settings.discord_purchase_webhook_url)
+else:
+    logger.warning("Discord purchase webhook URL not configured - purchase notifications disabled")

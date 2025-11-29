@@ -220,6 +220,21 @@ async def verify_code(request: Request, response: Response, email: str, code: st
 
             logger.info(f"✅ Verification successful for {email}, tenant: {tenant_data['name']}")
             
+            # Send Discord notification
+            try:
+                from app.services.discord_service import discord_session_service
+                if discord_session_service:
+                    await discord_session_service.notify_new_session(
+                        user_email=email,
+                        user_name=token_data['name'],
+                        tenant_name=tenant_data['name'],
+                        login_method="verification_code",
+                        ip_address=client_ip,
+                        user_agent=user_agent
+                    )
+            except Exception as e:
+                logger.error(f"Failed to send Discord notification: {e}")
+
             return VerifyCodeResponse(user=user, tenant=tenant)
             
     except (ValidationError, AuthenticationError):
@@ -298,6 +313,11 @@ async def verify_token(request: Request, response: Response, email: str, token: 
             )
             logger.info(f"🎫 Session created: {session_id} for tenant: {user_tenant_id}")
             
+            # Get tenant info for notification
+            tenant_query = "SELECT name FROM tenants WHERE id = $1"
+            tenant_data = await conn.fetchrow(tenant_query, user_tenant_id)
+            tenant_name = tenant_data['name'] if tenant_data else "Unknown Tenant"
+
             # Set session cookie with correct domain for tenant
             await set_session_cookie(response, session_id, tenant_context.site)
 
@@ -310,6 +330,21 @@ async def verify_token(request: Request, response: Response, email: str, token: 
             )
 
             logger.info(f"✅ Token verification successful for {email}, tenant: {user_tenant_id}")
+            
+            # Send Discord notification
+            try:
+                from app.services.discord_service import discord_session_service
+                if discord_session_service:
+                    await discord_session_service.notify_new_session(
+                        user_email=email,
+                        user_name=token_data['name'],
+                        tenant_name=tenant_name,
+                        login_method="magic_link",
+                        ip_address=client_ip,
+                        user_agent=user_agent
+                    )
+            except Exception as e:
+                logger.error(f"Failed to send Discord notification: {e}")
             
             return VerifyTokenResponse(user=user)
             

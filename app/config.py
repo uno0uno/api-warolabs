@@ -49,6 +49,14 @@ class Settings(BaseSettings):
 
     # Discord webhook for notifications
     discord_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_WEBHOOK_URL')
+    discord_session_webhook_url: Optional[str] = Field(
+        default="https://discord.com/api/webhooks/1444177595808878704/jgLKBIFmv8VKIVlniJiQXl1TSCE6hKfEwj40wOSbWJb33NL28N5hbkcZUkH8-S90lojM",
+        alias='DISCORD_SESSION_WEBHOOK_URL'
+    )
+    discord_purchase_webhook_url: Optional[str] = Field(
+        default="https://discord.com/api/webhooks/1444179228563079250/0orSlHydW1ptwsgsTBA4sFf70rqMgZn_WgitKM6bV7qcSAEsb8jZXZKJNGgqLNW2S1ef",
+        alias='DISCORD_PURCHASE_WEBHOOK_URL'
+    )
 
     class Config:
         env_file = ".env"
