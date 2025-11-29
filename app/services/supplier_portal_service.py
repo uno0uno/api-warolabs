@@ -132,6 +132,8 @@ async def get_supplier_purchases(token: str, status_filter: Optional[str] = None
                         ing.name as ingredient_name,
                         i.quantity,
                         i.unit,
+                        i.purchase_quantity,
+                        i.purchase_unit,
                         i.unit_cost,
                         i.total_cost,
                         i.notes
@@ -165,6 +167,8 @@ async def get_supplier_purchases(token: str, status_filter: Optional[str] = None
                             "ingredient_name": item['ingredient_name'],
                             "quantity": float(item['quantity']),
                             "unit": item['unit'],
+                            "purchase_quantity": float(item['purchase_quantity']) if item['purchase_quantity'] else None,
+                            "purchase_unit": item['purchase_unit'],
                             "unit_cost": float(item['unit_cost']) if item['unit_cost'] else None,
                             "total_cost": float(item['total_cost']) if item['total_cost'] else None,
                             "notes": item['notes']

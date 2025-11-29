@@ -148,6 +148,8 @@ async def get_purchases_list(
                         ingredient_id,
                         quantity,
                         unit,
+                        purchase_quantity,
+                        purchase_unit,
                         unit_cost,
                         total_cost,
                         expiry_date,
@@ -268,6 +270,8 @@ async def get_purchase_by_id(
                     ingredient_id,
                     quantity,
                     unit,
+                    purchase_quantity,
+                    purchase_unit,
                     unit_cost,
                     total_cost,
                     expiry_date,
@@ -473,18 +477,22 @@ async def create_purchase(
                             ingredient_id,
                             quantity,
                             unit,
+                            purchase_quantity,
+                            purchase_unit,
                             unit_cost,
                             total_cost,
                             expiry_date,
                             batch_number,
                             notes
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                         RETURNING
                             id,
                             purchase_id,
                             ingredient_id,
                             quantity,
                             unit,
+                            purchase_quantity,
+                            purchase_unit,
                             unit_cost,
                             total_cost,
                             expiry_date,
@@ -496,6 +504,8 @@ async def create_purchase(
                         item_data.ingredient_id,
                         item_data.quantity,
                         item_data.unit,
+                        item_data.purchase_quantity,
+                        item_data.purchase_unit,
                         item_data.unit_cost,
                         total_cost,
                         item_data.expiry_date,
@@ -544,10 +554,13 @@ async def create_purchase(
                                 ingredient = await conn.fetchrow("""
                                     SELECT name FROM ingredients WHERE id = $1
                                 """, item.ingredient_id)
+                                # Use purchase_quantity/purchase_unit if available, otherwise fall back to base quantity/unit
+                                display_quantity = item.purchase_quantity if item.purchase_quantity else item.quantity
+                                display_unit = item.purchase_unit if item.purchase_unit else item.unit
                                 items_with_names.append({
                                     'ingredient_name': ingredient['name'] if ingredient else 'Producto',
-                                    'quantity': item.quantity,
-                                    'unit': item.unit
+                                    'quantity': display_quantity,
+                                    'unit': display_unit
                                 })
 
                             # Send quotation email with portal link
@@ -665,17 +678,21 @@ async def update_purchase(
                                 ingredient_id,
                                 quantity,
                                 unit,
+                                purchase_quantity,
+                                purchase_unit,
                                 unit_cost,
                                 total_cost,
                                 expiry_date,
                                 batch_number,
                                 notes
-                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                         """,
                             purchase_id,
                             item_data.ingredient_id,
                             item_data.quantity,
                             item_data.unit,
+                            item_data.purchase_quantity,
+                            item_data.purchase_unit,
                             item_data.unit_cost,
                             total_cost,
                             item_data.expiry_date,

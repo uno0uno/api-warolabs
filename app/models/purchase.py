@@ -69,8 +69,10 @@ class AttachmentType(str, Enum):
 
 class PurchaseItemBase(BaseModel):
     ingredient_id: UUID = Field(..., description="ID of the ingredient")
-    quantity: Decimal = Field(..., gt=0, description="Quantity purchased")
-    unit: str = Field(..., description="Unit of measure")
+    quantity: Decimal = Field(..., gt=0, description="Quantity in base units (for inventory)")
+    unit: str = Field(..., description="Base unit of measure (for inventory)")
+    purchase_quantity: Optional[Decimal] = Field(None, gt=0, description="Original purchase quantity (for display)")
+    purchase_unit: Optional[str] = Field(None, description="Original purchase unit (for display)")
     unit_cost: Optional[Decimal] = Field(None, ge=0, description="Cost per unit (optional for quotations)")
     total_cost: Optional[Decimal] = Field(None, description="Total cost (calculated)")
     expiry_date: Optional[date] = Field(None, description="Expiry date of the ingredient")
