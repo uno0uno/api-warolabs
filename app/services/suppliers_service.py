@@ -1,6 +1,7 @@
 import logging
 from typing import Optional, Dict, Any, List
 from uuid import UUID
+from datetime import time
 from fastapi import Request, Response, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -35,7 +36,7 @@ async def get_suppliers_list(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
-        async with get_db_connection() as conn:
+        async with get_db_connection(use_transaction=False) as conn:
             # Build query with tenant isolation
             base_query = """
                 SELECT
@@ -173,8 +174,8 @@ async def get_supplier_by_id(
         
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
-        
-        async with get_db_connection() as conn:
+
+        async with get_db_connection(use_transaction=False) as conn:
             supplier_data = await conn.fetchrow("""
                 SELECT
                     id,
@@ -234,10 +235,11 @@ async def create_supplier(
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
-        
+
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
+        # Create supplier and payment agreements in transaction
         async with get_db_connection() as conn:
             # Insert new supplier
             new_supplier = await conn.fetchrow("""
@@ -252,7 +254,7 @@ async def create_supplier(
                     payment_terms,
                     is_active
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                RETURNING 
+                RETURNING
                     id,
                     tenant_id,
                     name,
@@ -265,7 +267,7 @@ async def create_supplier(
                     is_active,
                     created_at,
                     updated_at
-            """, 
+            """,
                 tenant_id,
                 supplier_data.name,
                 supplier_data.contact_info,
@@ -276,7 +278,7 @@ async def create_supplier(
                 supplier_data.payment_terms,
                 supplier_data.is_active
             )
-            
+
             supplier = Supplier(
                 id=new_supplier['id'],
                 tenantId=new_supplier['tenant_id'],
@@ -292,33 +294,91 @@ async def create_supplier(
                 updatedAt=new_supplier['updated_at']
             )
 
-            # Send Discord notification (non-blocking)
-            try:
-                from app.services.discord_service import discord_service
+            # Create payment agreements if provided
+            if supplier_data.payment_agreements:
+                logger.info(f"Creating {len(supplier_data.payment_agreements)} payment agreements for supplier {supplier.id}")
+                user_id = session_context.user_id
 
-                if discord_service:
-                    # Get tenant and user info for notification
+                for agreement_data in supplier_data.payment_agreements:
+                    try:
+                        # Convert payment_hour string to time object if provided
+                        payment_hour = agreement_data.get('payment_hour')
+                        if payment_hour and isinstance(payment_hour, str):
+                            # Parse time string (format: "HH:MM:SS" or "HH:MM")
+                            parts = payment_hour.split(':')
+                            payment_hour = time(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
+                        elif not payment_hour:
+                            payment_hour = time(23, 59, 0)  # Default to 23:59:00
+
+                        await conn.execute(
+                            """
+                            INSERT INTO supplier_payment_agreements (
+                                tenant_id,
+                                supplier_id,
+                                name,
+                                description,
+                                agreement_type,
+                                days_offset,
+                                specific_day,
+                                payment_hour,
+                                valid_from,
+                                valid_until,
+                                auto_apply,
+                                is_active,
+                                priority,
+                                metadata,
+                                created_by
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                            """,
+                            tenant_id,
+                            supplier.id,
+                            agreement_data.get('name'),
+                            agreement_data.get('description'),
+                            agreement_data.get('agreement_type'),
+                            agreement_data.get('days_offset'),
+                            agreement_data.get('specific_day'),
+                            payment_hour,
+                            agreement_data.get('valid_from'),
+                            agreement_data.get('valid_until'),
+                            agreement_data.get('auto_apply', False),
+                            agreement_data.get('is_active', True),
+                            agreement_data.get('priority', 0),
+                            agreement_data.get('metadata'),
+                            user_id
+                        )
+                        logger.info(f"Created payment agreement '{agreement_data.get('name')}' for supplier {supplier.id}")
+                    except Exception as e:
+                        logger.error(f"Error creating payment agreement: {str(e)}", exc_info=True)
+                        # Continue with other agreements even if one fails
+
+        # Send Discord notification outside transaction (non-blocking)
+        try:
+            from app.services.discord_service import discord_service
+
+            if discord_service:
+                # Get tenant and user info for notification using separate connection
+                async with get_db_connection(use_transaction=False) as conn:
                     tenant_data = await conn.fetchrow("SELECT name FROM tenants WHERE id = $1", tenant_id)
                     user_data = await conn.fetchrow("SELECT name, user_name FROM profile WHERE id = $1", session_context.user_id)
 
                     tenant_name = tenant_data['name'] if tenant_data else None
                     user_name = user_data['name'] or user_data['user_name'] if user_data else None
 
-                    # Send notification asynchronously
-                    await discord_service.notify_new_supplier(
-                        supplier_name=supplier.name,
-                        supplier_email=supplier.email,
-                        supplier_phone=supplier.phone,
-                        tax_id=supplier.tax_id,
-                        payment_terms=supplier.payment_terms,
-                        tenant_name=tenant_name,
-                        user_name=user_name
-                    )
-            except Exception as notify_error:
-                # Log error but don't fail the supplier creation
-                logger.warning(f"Failed to send Discord notification: {notify_error}")
+                # Send notification asynchronously
+                await discord_service.notify_new_supplier(
+                    supplier_name=supplier.name,
+                    supplier_email=supplier.email,
+                    supplier_phone=supplier.phone,
+                    tax_id=supplier.tax_id,
+                    payment_terms=supplier.payment_terms,
+                    tenant_name=tenant_name,
+                    user_name=user_name
+                )
+        except Exception as notify_error:
+            # Log error but don't fail the supplier creation
+            logger.warning(f"Failed to send Discord notification: {notify_error}")
 
-            return SupplierResponse(data=supplier)
+        return SupplierResponse(data=supplier)
             
     except AuthenticationError:
         raise

@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, EmailStr
 from datetime import datetime
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 from uuid import UUID
 
 class SupplierBase(BaseModel):
@@ -14,7 +14,7 @@ class SupplierBase(BaseModel):
     is_active: bool = Field(True, description="Whether supplier is active")
 
 class SupplierCreate(SupplierBase):
-    pass
+    payment_agreements: Optional[List[Dict[str, Any]]] = Field(None, description="Payment agreements to create")
 
 class SupplierUpdate(BaseModel):
     name: Optional[str] = None

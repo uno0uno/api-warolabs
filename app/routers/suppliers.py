@@ -8,12 +8,26 @@ from app.services.suppliers_service import (
     update_supplier,
     delete_supplier
 )
+from app.services.payment_agreements_service import (
+    get_payment_agreements_list,
+    get_payment_agreement_by_id,
+    create_payment_agreement,
+    update_payment_agreement,
+    delete_payment_agreement
+)
 from app.models.supplier import (
     Supplier,
     SupplierCreate,
     SupplierUpdate,
     SupplierResponse,
     SuppliersListResponse
+)
+from app.models.payment_agreement import (
+    PaymentAgreement,
+    PaymentAgreementCreate,
+    PaymentAgreementUpdate,
+    PaymentAgreementResponse,
+    PaymentAgreementsListResponse
 )
 
 router = APIRouter()
@@ -80,3 +94,65 @@ async def delete_supplier_endpoint(
     Delete a supplier with tenant isolation
     """
     return await delete_supplier(request, response, supplier_id)
+
+# Payment Agreements Endpoints
+
+@router.get("/{supplier_id}/payment-agreements", response_model=PaymentAgreementsListResponse)
+async def get_payment_agreements_endpoint(
+    supplier_id: UUID,
+    request: Request,
+    response: Response
+):
+    """
+    Get all payment agreements for a supplier with tenant isolation
+    """
+    return await get_payment_agreements_list(request, response, supplier_id)
+
+@router.get("/{supplier_id}/payment-agreements/{agreement_id}", response_model=PaymentAgreementResponse)
+async def get_payment_agreement_endpoint(
+    supplier_id: UUID,
+    agreement_id: UUID,
+    request: Request,
+    response: Response
+):
+    """
+    Get a specific payment agreement by ID with tenant isolation
+    """
+    return await get_payment_agreement_by_id(request, response, supplier_id, agreement_id)
+
+@router.post("/{supplier_id}/payment-agreements", response_model=PaymentAgreementResponse)
+async def create_payment_agreement_endpoint(
+    supplier_id: UUID,
+    agreement_data: PaymentAgreementCreate,
+    request: Request,
+    response: Response
+):
+    """
+    Create a new payment agreement for a supplier with tenant isolation
+    """
+    return await create_payment_agreement(request, response, supplier_id, agreement_data)
+
+@router.put("/{supplier_id}/payment-agreements/{agreement_id}", response_model=PaymentAgreementResponse)
+async def update_payment_agreement_endpoint(
+    supplier_id: UUID,
+    agreement_id: UUID,
+    agreement_data: PaymentAgreementUpdate,
+    request: Request,
+    response: Response
+):
+    """
+    Update an existing payment agreement with tenant isolation
+    """
+    return await update_payment_agreement(request, response, supplier_id, agreement_id, agreement_data)
+
+@router.delete("/{supplier_id}/payment-agreements/{agreement_id}")
+async def delete_payment_agreement_endpoint(
+    supplier_id: UUID,
+    agreement_id: UUID,
+    request: Request,
+    response: Response
+):
+    """
+    Delete a payment agreement with tenant isolation
+    """
+    return await delete_payment_agreement(request, response, supplier_id, agreement_id)
