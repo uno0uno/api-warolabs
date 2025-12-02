@@ -6,6 +6,15 @@ from app.core.logging import log_request_context
 
 logger = logging.getLogger(__name__)
 
+# Import Discord error notifier
+try:
+    from app.services.discord_error_notifier import error_notifier
+    DISCORD_ENABLED = True
+except ImportError:
+    logger.warning("Discord error notifier not available")
+    DISCORD_ENABLED = False
+    error_notifier = None
+
 class APIError(Exception):
     """Base API exception compatible with warolabs.com error patterns"""
     
@@ -47,10 +56,10 @@ class DatabaseError(APIError):
 
 async def api_exception_handler(request: Request, exc: APIError):
     """Handle custom API exceptions with logging"""
-    
+
     # Extract tenant from request if available
     tenant = getattr(request.state, 'tenant', 'unknown')
-    
+
     # Create log context
     context = log_request_context(tenant)
     context.update({
@@ -59,12 +68,39 @@ async def api_exception_handler(request: Request, exc: APIError):
         "path": str(request.url.path),
         "method": request.method
     })
-    
+
     if exc.status_code >= 500:
         logger.error(f"API Error: {exc.message}", extra={"context": context})
+
+        # Send to Discord for server errors (5xx)
+        if DISCORD_ENABLED and error_notifier:
+            try:
+                request_info = {
+                    "method": request.method,
+                    "url": str(request.url),
+                    "client_host": request.client.host if request.client else "unknown",
+                    "user_agent": request.headers.get("user-agent", "unknown")
+                }
+
+                discord_context = {
+                    "tenant": tenant,
+                    "error_type": exc.__class__.__name__,
+                    "status_code": exc.status_code
+                }
+
+                if exc.details:
+                    discord_context["details"] = str(exc.details)
+
+                await error_notifier.send_error(
+                    error=exc,
+                    context=discord_context,
+                    request_info=request_info
+                )
+            except Exception as notify_error:
+                logger.error(f"Failed to send error to Discord: {notify_error}")
     else:
         logger.warning(f"API Error: {exc.message}", extra={"context": context})
-    
+
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -77,7 +113,7 @@ async def api_exception_handler(request: Request, exc: APIError):
 
 async def general_exception_handler(request: Request, exc: Exception):
     """Handle unexpected exceptions"""
-    
+
     tenant = getattr(request.state, 'tenant', 'unknown')
     context = log_request_context(tenant)
     context.update({
@@ -85,9 +121,32 @@ async def general_exception_handler(request: Request, exc: Exception):
         "path": str(request.url.path),
         "method": request.method
     })
-    
+
     logger.error(f"Unexpected error: {str(exc)}", extra={"context": context}, exc_info=True)
-    
+
+    # Send to Discord for all unexpected errors
+    if DISCORD_ENABLED and error_notifier:
+        try:
+            request_info = {
+                "method": request.method,
+                "url": str(request.url),
+                "client_host": request.client.host if request.client else "unknown",
+                "user_agent": request.headers.get("user-agent", "unknown")
+            }
+
+            discord_context = {
+                "tenant": tenant,
+                "error_type": exc.__class__.__name__
+            }
+
+            await error_notifier.send_error(
+                error=exc,
+                context=discord_context,
+                request_info=request_info
+            )
+        except Exception as notify_error:
+            logger.error(f"Failed to send error to Discord: {notify_error}")
+
     return JSONResponse(
         status_code=500,
         content={

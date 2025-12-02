@@ -9,6 +9,9 @@ from datetime import datetime, timedelta
 from app.config import settings
 import uuid
 import mimetypes
+import logging
+
+logger = logging.getLogger(__name__)
 
 class AWSS3Service:
     def __init__(self):
@@ -17,6 +20,15 @@ class AWSS3Service:
         access_key = settings.r2_access_key_id or settings.aws_access_key_id
         secret_key = settings.r2_secret_access_key or settings.aws_secret_access_key
         endpoint_url = settings.r2_endpoint  # None for AWS S3, URL for R2
+
+        # Log configuration (without exposing secrets)
+        logger.info(f"Initializing S3 service with bucket: {settings.r2_bucket}")
+        logger.info(f"Using R2 endpoint: {endpoint_url if endpoint_url else 'AWS S3'}")
+        logger.info(f"Access key configured: {bool(access_key)}")
+        logger.info(f"Secret key configured: {bool(secret_key)}")
+
+        if not access_key or not secret_key:
+            logger.warning("S3/R2 credentials not fully configured!")
 
         # Configure S3 client
         client_config = {
@@ -87,9 +99,12 @@ class AWSS3Service:
             return s3_key
 
         except ClientError as e:
+            logger.error(f"ClientError uploading file {filename} to S3: {str(e)}")
+            logger.exception(e)
             return None
         except Exception as e:
-            pass
+            logger.error(f"Unexpected error uploading file {filename} to S3: {str(e)}")
+            logger.exception(e)
             return None
 
     async def upload_file_with_key(
@@ -135,10 +150,12 @@ class AWSS3Service:
             return s3_key
 
         except ClientError as e:
-
+            logger.error(f"ClientError uploading file with key {s3_key} to S3: {str(e)}")
+            logger.exception(e)
             return None
         except Exception as e:
-
+            logger.error(f"Unexpected error uploading file with key {s3_key} to S3: {str(e)}")
+            logger.exception(e)
             return None
 
     async def get_presigned_url(

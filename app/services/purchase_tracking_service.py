@@ -132,8 +132,9 @@ async def upload_purchase_attachments(
                     file_url,
                     related_status
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"{log_prefix} Error uploading attachment {file.filename}: {str(e)}")
+            logger.exception(e)
 
 # =============================================================================
 # STATUS HISTORY FUNCTIONS
