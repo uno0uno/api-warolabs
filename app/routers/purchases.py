@@ -93,14 +93,15 @@ async def get_purchases_endpoint(
     search: Optional[str] = Query(default=None, description="Search by purchase number or invoice number"),
     status: Optional[str] = Query(default=None, description="Filter by status"),
     supplier_id: Optional[UUID] = Query(default=None, description="Filter by supplier ID"),
-    payment_status: Optional[str] = Query(default=None, description="Filter by payment status (pending, overdue, due_this_week)")
+    payment_status: Optional[str] = Query(default=None, description="Filter by payment status (pending, overdue, due_this_week)"),
+    date_filter: Optional[str] = Query(default=None, description="Filter by date range (today, yesterday, last_week, 15_days, 1_month, 3_months)")
 ):
     """
     Get purchases list with tenant isolation
     Requires valid session with tenant context
     """
     return await get_purchases_list(
-        request, response, page, limit, search, status, supplier_id, payment_status
+        request, response, page, limit, search, status, supplier_id, payment_status, date_filter
     )
 
 @router.get("/{purchase_id}", response_model=PurchaseResponse)
