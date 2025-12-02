@@ -20,6 +20,7 @@ async def get_purchases_list(
     page: int = 1,
     limit: int = 50,
     search: Optional[str] = None,
+    search_field: Optional[str] = None,
     status: Optional[str] = None,
     supplier_id: Optional[UUID] = None,
     payment_status: Optional[str] = None,  # pending, overdue, due_this_week
@@ -92,6 +93,7 @@ async def get_purchases_list(
             count_query = """
                 SELECT COUNT(*) as total
                 FROM tenant_purchases tp
+                LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
                 WHERE tp.tenant_id = $1
             """
 
@@ -100,10 +102,27 @@ async def get_purchases_list(
 
             # Add filters
             if search:
-                base_query += f" AND (LOWER(tp.purchase_number) LIKE LOWER(${param_count}) OR LOWER(tp.invoice_number) LIKE LOWER(${param_count}))"
-                count_query += f" AND (LOWER(tp.purchase_number) LIKE LOWER(${param_count}) OR LOWER(tp.invoice_number) LIKE LOWER(${param_count}))"
-                params.append(f"%{search}%")
-                param_count += 1
+                if search_field == 'supplier_name':
+                    base_query += f" AND LOWER(ts.name) LIKE LOWER(${param_count})"
+                    count_query += f" AND LOWER(ts.name) LIKE LOWER(${param_count})"
+                    params.append(f"%{search}%")
+                    param_count += 1
+                elif search_field == 'invoice_number':
+                    base_query += f" AND LOWER(tp.invoice_number) LIKE LOWER(${param_count})"
+                    count_query += f" AND LOWER(tp.invoice_number) LIKE LOWER(${param_count})"
+                    params.append(f"%{search}%")
+                    param_count += 1
+                elif search_field == 'purchase_number':
+                    base_query += f" AND LOWER(tp.purchase_number) LIKE LOWER(${param_count})"
+                    count_query += f" AND LOWER(tp.purchase_number) LIKE LOWER(${param_count})"
+                    params.append(f"%{search}%")
+                    param_count += 1
+                else:
+                    # Default search behavior
+                    base_query += f" AND (LOWER(tp.purchase_number) LIKE LOWER(${param_count}) OR LOWER(tp.invoice_number) LIKE LOWER(${param_count}) OR LOWER(ts.name) LIKE LOWER(${param_count}))"
+                    count_query += f" AND (LOWER(tp.purchase_number) LIKE LOWER(${param_count}) OR LOWER(tp.invoice_number) LIKE LOWER(${param_count}) OR LOWER(ts.name) LIKE LOWER(${param_count}))"
+                    params.append(f"%{search}%")
+                    param_count += 1
 
             if status:
                 base_query += f" AND LOWER(tp.status) = LOWER(${param_count})"

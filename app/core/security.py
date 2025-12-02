@@ -1,14 +1,15 @@
 import jwt
+import logging
 from datetime import datetime, timedelta
 from fastapi import Request, HTTPException, Response
 from app.config import settings
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
 async def get_session_token(request: Request) -> str:
     """Extract valid session-token from cookies - validates and cleans up invalid tokens"""
-    import logging
     from app.database import get_db_connection
-    logger = logging.getLogger(__name__)
     
     # Get raw cookie header to handle multiple session-token cookies
     cookie_header = request.headers.get("cookie", "")
@@ -74,8 +75,6 @@ async def get_session_token(request: Request) -> str:
 
 async def set_session_cookie(response: Response, session_token: str, tenant_site: str = None):
     """Set session cookie with correct domain for the tenant - clears previous cookies first"""
-    import logging
-    logger = logging.getLogger(__name__)
     
     # Determine cookie domain dynamically from database or parameter
     cookie_domain = None

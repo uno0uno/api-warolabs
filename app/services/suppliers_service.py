@@ -23,6 +23,7 @@ async def get_suppliers_list(
     page: int = 1,
     limit: int = 50,
     search: Optional[str] = None,
+    search_field: Optional[str] = None,
     is_active: Optional[bool] = None,
     payment_terms: Optional[str] = None
 ) -> SuppliersListResponse:
@@ -68,10 +69,18 @@ async def get_suppliers_list(
             
             # Add filters
             if search:
-                base_query += f" AND (LOWER(name) LIKE LOWER(${param_count}) OR LOWER(tax_id) LIKE LOWER(${param_count}))"
-                count_query += f" AND (LOWER(name) LIKE LOWER(${param_count}) OR LOWER(tax_id) LIKE LOWER(${param_count}))"
-                params.append(f"%{search}%")
-                param_count += 1
+                if search_field and search_field in ['name', 'tax_id', 'email', 'phone']:
+                    # Search in specific field
+                    base_query += f" AND LOWER({search_field}) LIKE LOWER(${param_count})"
+                    count_query += f" AND LOWER({search_field}) LIKE LOWER(${param_count})"
+                    params.append(f"%{search}%")
+                    param_count += 1
+                else:
+                    # Default search in name or tax_id
+                    base_query += f" AND (LOWER(name) LIKE LOWER(${param_count}) OR LOWER(tax_id) LIKE LOWER(${param_count}))"
+                    count_query += f" AND (LOWER(name) LIKE LOWER(${param_count}) OR LOWER(tax_id) LIKE LOWER(${param_count}))"
+                    params.append(f"%{search}%")
+                    param_count += 1
             
             if is_active is not None:
                 base_query += f" AND is_active = ${param_count}"

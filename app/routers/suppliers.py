@@ -38,7 +38,8 @@ async def get_suppliers_endpoint(
     response: Response,
     page: int = Query(default=1, ge=1, description="Page number"),
     limit: int = Query(default=50, ge=1, le=250, description="Items per page"),
-    search: Optional[str] = Query(default=None, description="Search by name or tax_id"),
+    search: Optional[str] = Query(default=None, description="Search term"),
+    search_field: Optional[str] = Query(default=None, description="Field to search in (name, tax_id, email, phone)"),
     is_active: Optional[bool] = Query(default=None, description="Filter by active status"),
     payment_terms: Optional[str] = Query(default=None, description="Filter by payment terms")
 ):
@@ -47,7 +48,7 @@ async def get_suppliers_endpoint(
     Requires valid session with tenant context
     """
     return await get_suppliers_list(
-        request, response, page, limit, search, is_active, payment_terms
+        request, response, page, limit, search, search_field, is_active, payment_terms
     )
 
 @router.get("/{supplier_id}", response_model=SupplierResponse)

@@ -91,6 +91,7 @@ async def get_purchases_endpoint(
     page: int = Query(default=1, ge=1, description="Page number"),
     limit: int = Query(default=50, ge=1, le=250, description="Items per page"),
     search: Optional[str] = Query(default=None, description="Search by purchase number or invoice number"),
+    search_field: Optional[str] = Query(default=None, description="Field to search in (supplier_name, invoice_number, purchase_number)"),
     status: Optional[str] = Query(default=None, description="Filter by status"),
     supplier_id: Optional[UUID] = Query(default=None, description="Filter by supplier ID"),
     payment_status: Optional[str] = Query(default=None, description="Filter by payment status (pending, overdue, due_this_week)"),
@@ -101,7 +102,7 @@ async def get_purchases_endpoint(
     Requires valid session with tenant context
     """
     return await get_purchases_list(
-        request, response, page, limit, search, status, supplier_id, payment_status, date_filter
+        request, response, page, limit, search, search_field, status, supplier_id, payment_status, date_filter
     )
 
 @router.get("/{purchase_id}", response_model=PurchaseResponse)
