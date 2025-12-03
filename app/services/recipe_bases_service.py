@@ -58,8 +58,8 @@ async def create_recipe_base_type(
         async with get_db_connection() as conn:
             # Insert product_base_type
             insert_base_query = """
-                INSERT INTO product_base_types (name, description, is_active)
-                VALUES ($1, $2, $3)
+                INSERT INTO product_base_types (name, description, is_active, tenant_id)
+                VALUES ($1, $2, $3, $4)
                 RETURNING id, name, description, is_active, created_at, updated_at
             """
 
@@ -67,7 +67,8 @@ async def create_recipe_base_type(
                 insert_base_query,
                 recipe_data.name,
                 recipe_data.description,
-                recipe_data.is_active
+                recipe_data.is_active,
+                tenant_id
             )
 
             base_type_id = base_type_row['id']
@@ -178,11 +179,11 @@ async def get_recipe_base_types_list(
             base_query = """
                 SELECT id, name, description, is_active, created_at, updated_at
                 FROM product_base_types
-                WHERE 1=1
+                WHERE tenant_id = $1
             """
 
-            params = []
-            param_count = 1
+            params = [tenant_id]
+            param_count = 2
 
             # Apply filters
             if search:
@@ -230,11 +231,11 @@ async def get_recipe_base_types_list(
                             i.name as ingredient_name
                         FROM base_recipe_templates brt
                         LEFT JOIN ingredients i ON brt.ingredient_id = i.id
-                        WHERE brt.product_base_type_id = $1
+                        WHERE brt.product_base_type_id = $1 AND brt.tenant_id = $2
                         ORDER BY brt.created_at
                     """
 
-                    ingredient_rows = await conn.fetch(ingredients_query, row['id'])
+                    ingredient_rows = await conn.fetch(ingredients_query, row['id'], tenant_id)
                     ingredients = [RecipeBaseIngredient(**dict(ing_row)) for ing_row in ingredient_rows]
 
                 recipe_dict['ingredients'] = ingredients
@@ -284,10 +285,10 @@ async def get_recipe_base_type_by_id(
             base_query = """
                 SELECT id, name, description, is_active, created_at, updated_at
                 FROM product_base_types
-                WHERE id = $1
+                WHERE id = $1 AND tenant_id = $2
             """
 
-            row = await conn.fetchrow(base_query, recipe_base_id)
+            row = await conn.fetchrow(base_query, recipe_base_id, tenant_id)
 
             if not row:
                 raise HTTPException(status_code=404, detail="Recipe base type not found")
@@ -308,11 +309,11 @@ async def get_recipe_base_type_by_id(
                     i.name as ingredient_name
                 FROM base_recipe_templates brt
                 LEFT JOIN ingredients i ON brt.ingredient_id = i.id
-                WHERE brt.product_base_type_id = $1
+                WHERE brt.product_base_type_id = $1 AND brt.tenant_id = $2
                 ORDER BY brt.created_at
             """
 
-            ingredient_rows = await conn.fetch(ingredients_query, recipe_base_id)
+            ingredient_rows = await conn.fetch(ingredients_query, recipe_base_id, tenant_id)
             ingredients = [RecipeBaseIngredient(**dict(ing_row)) for ing_row in ingredient_rows]
 
             recipe_dict = dict(row)
@@ -384,11 +385,12 @@ async def update_recipe_base_type(
             if update_fields:
                 update_fields.append(f"updated_at = NOW()")
                 params.append(recipe_base_id)
+                params.append(tenant_id)
 
                 update_query = f"""
                     UPDATE product_base_types
                     SET {', '.join(update_fields)}
-                    WHERE id = ${param_count}
+                    WHERE id = ${param_count} AND tenant_id = ${param_count + 1}
                     RETURNING id, name, description, is_active, created_at, updated_at
                 """
 
@@ -401,9 +403,9 @@ async def update_recipe_base_type(
                 fetch_query = """
                     SELECT id, name, description, is_active, created_at, updated_at
                     FROM product_base_types
-                    WHERE id = $1
+                    WHERE id = $1 AND tenant_id = $2
                 """
-                row = await conn.fetchrow(fetch_query, recipe_base_id)
+                row = await conn.fetchrow(fetch_query, recipe_base_id, tenant_id)
 
                 if not row:
                     raise HTTPException(status_code=404, detail="Recipe base type not found")
@@ -421,9 +423,9 @@ async def update_recipe_base_type(
                 # Delete existing ingredients
                 delete_ingredients_query = """
                     DELETE FROM base_recipe_templates
-                    WHERE product_base_type_id = $1
+                    WHERE product_base_type_id = $1 AND tenant_id = $2
                 """
-                await conn.execute(delete_ingredients_query, recipe_base_id)
+                await conn.execute(delete_ingredients_query, recipe_base_id, tenant_id)
 
                 # Insert new ingredients
                 for ingredient_data in update_data.ingredients:
@@ -466,11 +468,11 @@ async def update_recipe_base_type(
                     i.name as ingredient_name
                 FROM base_recipe_templates brt
                 LEFT JOIN ingredients i ON brt.ingredient_id = i.id
-                WHERE brt.product_base_type_id = $1
+                WHERE brt.product_base_type_id = $1 AND brt.tenant_id = $2
                 ORDER BY brt.created_at
             """
 
-            ingredient_rows = await conn.fetch(ingredients_query, recipe_base_id)
+            ingredient_rows = await conn.fetch(ingredients_query, recipe_base_id, tenant_id)
             ingredients = [RecipeBaseIngredient(**dict(ing_row)) for ing_row in ingredient_rows]
 
             recipe_dict = dict(row)
@@ -519,9 +521,9 @@ async def delete_recipe_base_type(
         async with get_db_connection() as conn:
             # Check if exists
             check_query = """
-                SELECT id FROM product_base_types WHERE id = $1
+                SELECT id FROM product_base_types WHERE id = $1 AND tenant_id = $2
             """
-            exists = await conn.fetchrow(check_query, recipe_base_id)
+            exists = await conn.fetchrow(check_query, recipe_base_id, tenant_id)
 
             if not exists:
                 raise HTTPException(status_code=404, detail="Recipe base type not found")
@@ -529,16 +531,16 @@ async def delete_recipe_base_type(
             # Delete ingredients (cascade should handle this, but being explicit)
             delete_ingredients_query = """
                 DELETE FROM base_recipe_templates
-                WHERE product_base_type_id = $1
+                WHERE product_base_type_id = $1 AND tenant_id = $2
             """
-            await conn.execute(delete_ingredients_query, recipe_base_id)
+            await conn.execute(delete_ingredients_query, recipe_base_id, tenant_id)
 
             # Delete recipe base type
             delete_query = """
                 DELETE FROM product_base_types
-                WHERE id = $1
+                WHERE id = $1 AND tenant_id = $2
             """
-            await conn.execute(delete_query, recipe_base_id)
+            await conn.execute(delete_query, recipe_base_id, tenant_id)
 
             logger.info(f"Deleted recipe base type: {recipe_base_id}")
 
