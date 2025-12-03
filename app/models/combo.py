@@ -8,7 +8,7 @@ from decimal import Decimal
 class ComboItemBase(BaseModel):
     """Base combo item fields"""
     item_product_id: UUID = Field(..., description="Product ID included in combo")
-    quantity: int = Field(default=1, ge=1, description="Quantity of this product in combo")
+    quantity: float = Field(default=1.0, gt=0, description="Quantity of this product in combo")
     is_optional: bool = Field(default=False, description="Can be removed from combo")
     is_customizable: bool = Field(default=False, description="Can be customized")
     sort_order: int = Field(default=0, ge=0, description="Display order")
@@ -23,7 +23,7 @@ class ComboItemCreate(ComboItemBase):
 class ComboItemUpdate(BaseModel):
     """Update combo item fields"""
     item_product_id: Optional[UUID] = None
-    quantity: Optional[int] = Field(None, ge=1)
+    quantity: Optional[float] = Field(None, gt=0)
     is_optional: Optional[bool] = None
     is_customizable: Optional[bool] = None
     sort_order: Optional[int] = Field(None, ge=0)
