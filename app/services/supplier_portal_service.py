@@ -93,6 +93,7 @@ async def get_supplier_purchases(token: str, status_filter: Optional[str] = None
                 SELECT
                     p.id,
                     p.purchase_number,
+                    p.invoice_number,
                     p.purchase_date,
                     p.delivery_date,
                     p.total_amount,
@@ -145,6 +146,7 @@ async def get_supplier_purchases(token: str, status_filter: Optional[str] = None
                 result_purchases.append({
                     "id": str(purchase['id']),
                     "purchase_number": purchase['purchase_number'],
+                    "invoice_number": purchase['invoice_number'],
                     "purchase_date": purchase['purchase_date'].isoformat() if purchase['purchase_date'] else None,
                     "delivery_date": purchase['delivery_date'].isoformat() if purchase['delivery_date'] else None,
                     "total_amount": float(purchase['total_amount']) if purchase['total_amount'] else 0,
