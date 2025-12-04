@@ -137,11 +137,28 @@ async def get_supplier_purchases(token: str, status_filter: Optional[str] = None
                         i.purchase_unit,
                         i.unit_cost,
                         i.total_cost,
-                        i.notes
+                        i.notes,
+                        i.weight_value,
+                        i.weight_unit,
+                        i.weight_per_unit_grams,
+                        -- Get last price for this ingredient from this supplier
+                        (
+                            SELECT tpi_last.unit_cost
+                            FROM tenant_purchase_items tpi_last
+                            JOIN tenant_purchases tp_last ON tpi_last.purchase_id = tp_last.id
+                            WHERE tpi_last.ingredient_id = i.ingredient_id
+                            AND tp_last.supplier_id = $2
+                            AND tpi_last.unit_cost IS NOT NULL
+                            AND tpi_last.unit_cost > 0
+                            AND tp_last.status IN ('pending', 'confirmed', 'preparing', 'invoiced', 'shipped', 'received', 'paid')
+                            AND tp_last.purchase_date < $3
+                            ORDER BY tp_last.purchase_date DESC
+                            LIMIT 1
+                        ) as last_unit_cost
                     FROM tenant_purchase_items i
                     LEFT JOIN ingredients ing ON i.ingredient_id = ing.id
                     WHERE i.purchase_id = $1
-                """, purchase['id'])
+                """, purchase['id'], supplier['id'], purchase['purchase_date'] or purchase['created_at'])
 
                 result_purchases.append({
                     "id": str(purchase['id']),
@@ -173,7 +190,11 @@ async def get_supplier_purchases(token: str, status_filter: Optional[str] = None
                             "purchase_unit": item['purchase_unit'],
                             "unit_cost": float(item['unit_cost']) if item['unit_cost'] else None,
                             "total_cost": float(item['total_cost']) if item['total_cost'] else None,
-                            "notes": item['notes']
+                            "notes": item['notes'],
+                            "weight_value": float(item['weight_value']) if item['weight_value'] else None,
+                            "weight_unit": item['weight_unit'],
+                            "weight_per_unit_grams": float(item['weight_per_unit_grams']) if item['weight_per_unit_grams'] else None,
+                            "last_unit_cost": float(item['last_unit_cost']) if item['last_unit_cost'] else None
                         }
                         for item in items
                     ]
