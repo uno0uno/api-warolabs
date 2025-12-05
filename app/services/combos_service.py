@@ -1,5 +1,6 @@
 from typing import List, Optional
 from uuid import UUID
+from decimal import Decimal
 from fastapi import Request, Response, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -152,10 +153,10 @@ async def get_combo_by_id(
             combo_dict['items'] = [ComboItem(**dict(row)) for row in item_rows]
 
             # Calculate totals
-            total_individual = sum(float(item['individual_price'] or 0) * item['quantity'] for item in item_rows)
-            total_combo = sum(float(item['combo_price'] or 0) * item['quantity'] for item in item_rows)
-            combo_dict['total_individual_price'] = total_individual
-            combo_dict['total_savings'] = total_individual - total_combo if total_combo > 0 else None
+            total_individual = sum(Decimal(str(item['individual_price'] or 0)) * Decimal(str(item['quantity'])) for item in item_rows)
+            total_combo = sum(Decimal(str(item['combo_price'] or 0)) * Decimal(str(item['quantity'])) for item in item_rows)
+            combo_dict['total_individual_price'] = float(total_individual)
+            combo_dict['total_savings'] = float(total_individual - total_combo) if total_combo > 0 else None
 
             return ComboResponse(data=Combo(**combo_dict))
 
@@ -275,10 +276,10 @@ async def get_combos_list(
                 combo_dict['items'] = [ComboItem(**dict(r)) for r in item_rows]
 
                 # Calculate totals
-                total_individual = sum(float(item['individual_price'] or 0) * item['quantity'] for item in item_rows)
-                total_combo = sum(float(item['combo_price'] or 0) * item['quantity'] for item in item_rows)
-                combo_dict['total_individual_price'] = total_individual
-                combo_dict['total_savings'] = total_individual - total_combo if total_combo > 0 else None
+                total_individual = sum(Decimal(str(item['individual_price'] or 0)) * Decimal(str(item['quantity'])) for item in item_rows)
+                total_combo = sum(Decimal(str(item['combo_price'] or 0)) * Decimal(str(item['quantity'])) for item in item_rows)
+                combo_dict['total_individual_price'] = float(total_individual)
+                combo_dict['total_savings'] = float(total_individual - total_combo) if total_combo > 0 else None
 
                 combos.append(Combo(**combo_dict))
 
