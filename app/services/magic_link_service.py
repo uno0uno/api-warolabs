@@ -165,17 +165,34 @@ async def verify_code(request: Request, response: Response, email: str, code: st
                 code, token_data['user_id']
             )
             logger.info("✅ Verification code marked as used")
-            
-            # End all previous active sessions for this user to prevent duplicate cookies
-            await conn.execute(
-                'UPDATE sessions SET is_active = false, ended_at = NOW(), end_reason = $1 WHERE user_id = $2 AND is_active = true',
-                'new_login', token_data['user_id']
-            )
-            logger.info(f"🧹 Ended all previous active sessions for user: {token_data['user_id']}")
-            
+
+            # Limit active sessions to 5 per user (end oldest sessions if limit exceeded)
+            MAX_SESSIONS_PER_USER = 5
+            active_sessions_query = """
+                SELECT id, created_at
+                FROM sessions
+                WHERE user_id = $1 AND is_active = true
+                ORDER BY created_at DESC
+            """
+            active_sessions = await conn.fetch(active_sessions_query, token_data['user_id'])
+
+            if len(active_sessions) >= MAX_SESSIONS_PER_USER:
+                # End the oldest sessions to keep only (MAX_SESSIONS_PER_USER - 1) active
+                sessions_to_keep = MAX_SESSIONS_PER_USER - 1
+                sessions_to_end = active_sessions[sessions_to_keep:]
+
+                for session in sessions_to_end:
+                    await conn.execute(
+                        'UPDATE sessions SET is_active = false, ended_at = NOW(), end_reason = $1 WHERE id = $2',
+                        'session_limit_exceeded', session['id']
+                    )
+                logger.info(f"🧹 Ended {len(sessions_to_end)} old sessions for user: {token_data['user_id']} (limit: {MAX_SESSIONS_PER_USER})")
+            else:
+                logger.info(f"✅ User has {len(active_sessions)} active sessions (limit: {MAX_SESSIONS_PER_USER})")
+
             # Create session with user's tenant from token
             session_id = secrets.token_hex(16)
-            expires_at = datetime.utcnow() + timedelta(days=30)  # 30 days
+            expires_at = datetime.utcnow() + timedelta(hours=24)  # 24 hours
             user_tenant_id = token_data['tenant_id']
 
             # Get client info for analytics
@@ -281,17 +298,34 @@ async def verify_token(request: Request, response: Response, email: str, token: 
                 token, token_data['user_id']
             )
             logger.info("✅ Token marked as used")
-            
-            # End all previous active sessions for this user to prevent duplicate cookies
-            await conn.execute(
-                'UPDATE sessions SET is_active = false, ended_at = NOW(), end_reason = $1 WHERE user_id = $2 AND is_active = true',
-                'new_login', token_data['user_id']
-            )
-            logger.info(f"🧹 Ended all previous active sessions for user: {token_data['user_id']}")
-            
+
+            # Limit active sessions to 5 per user (end oldest sessions if limit exceeded)
+            MAX_SESSIONS_PER_USER = 5
+            active_sessions_query = """
+                SELECT id, created_at
+                FROM sessions
+                WHERE user_id = $1 AND is_active = true
+                ORDER BY created_at DESC
+            """
+            active_sessions = await conn.fetch(active_sessions_query, token_data['user_id'])
+
+            if len(active_sessions) >= MAX_SESSIONS_PER_USER:
+                # End the oldest sessions to keep only (MAX_SESSIONS_PER_USER - 1) active
+                sessions_to_keep = MAX_SESSIONS_PER_USER - 1
+                sessions_to_end = active_sessions[sessions_to_keep:]
+
+                for session in sessions_to_end:
+                    await conn.execute(
+                        'UPDATE sessions SET is_active = false, ended_at = NOW(), end_reason = $1 WHERE id = $2',
+                        'session_limit_exceeded', session['id']
+                    )
+                logger.info(f"🧹 Ended {len(sessions_to_end)} old sessions for user: {token_data['user_id']} (limit: {MAX_SESSIONS_PER_USER})")
+            else:
+                logger.info(f"✅ User has {len(active_sessions)} active sessions (limit: {MAX_SESSIONS_PER_USER})")
+
             # Create session with user's tenant from token
             session_id = secrets.token_hex(16)
-            expires_at = datetime.utcnow() + timedelta(days=30)  # 30 days
+            expires_at = datetime.utcnow() + timedelta(hours=24)  # 24 hours
             user_tenant_id = token_data['tenant_id']
 
             # Get client info for analytics
