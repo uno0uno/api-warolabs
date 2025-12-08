@@ -47,3 +47,62 @@ class IngredientsListResponse(BaseModel):
     success: bool = True
     total: int
     data: List[Ingredient]
+
+
+# =============================================================================
+# INGREDIENT PURCHASE UNITS MODELS
+# =============================================================================
+
+class IngredientPurchaseUnitBase(BaseModel):
+    """Base fields for ingredient purchase unit configuration"""
+    ingredient_id: UUID = Field(..., description="ID of the ingredient")
+    purchase_unit: str = Field(..., min_length=1, max_length=50, description="Purchase unit type (paquete, caja, docena, bulto)")
+    purchase_unit_label: str = Field(..., min_length=1, max_length=100, description="Display label (e.g., 'Paquete x18', 'Caja x144')")
+    conversion_factor: float = Field(..., gt=0, description="Number of base units in 1 purchase unit")
+    unit_cost: Optional[float] = Field(None, ge=0, description="Cost per purchase unit")
+    is_default: bool = Field(default=False, description="Default purchase unit for this ingredient")
+    is_active: bool = Field(default=True, description="Whether this purchase unit is active")
+    notes: Optional[str] = Field(None, description="Additional notes")
+
+
+class IngredientPurchaseUnitCreate(IngredientPurchaseUnitBase):
+    """Create ingredient purchase unit"""
+    pass
+
+
+class IngredientPurchaseUnitUpdate(BaseModel):
+    """Update ingredient purchase unit"""
+    purchase_unit: Optional[str] = Field(None, min_length=1, max_length=50)
+    purchase_unit_label: Optional[str] = Field(None, min_length=1, max_length=100)
+    conversion_factor: Optional[float] = Field(None, gt=0)
+    unit_cost: Optional[float] = Field(None, ge=0)
+    is_default: Optional[bool] = None
+    is_active: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+class IngredientPurchaseUnit(IngredientPurchaseUnitBase):
+    """Complete ingredient purchase unit with metadata"""
+    id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+    # Related data (optional, populated by joins)
+    ingredient_name: Optional[str] = None
+    ingredient_base_unit: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class IngredientPurchaseUnitResponse(BaseModel):
+    """Single purchase unit response"""
+    success: bool = True
+    data: IngredientPurchaseUnit
+
+
+class IngredientPurchaseUnitsListResponse(BaseModel):
+    """List of purchase units response"""
+    success: bool = True
+    total: int
+    data: List[IngredientPurchaseUnit]

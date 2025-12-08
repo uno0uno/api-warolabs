@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -92,6 +92,7 @@ app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(tenants.router, prefix="/tenants", tags=["tenants"])
 app.include_router(financial.router, prefix="/finance", tags=["financial"])
 app.include_router(ingredients.router, prefix="/suppliers/ingredients", tags=["ingredients"])
+app.include_router(ingredient_purchase_units.router, prefix="/suppliers/ingredient-purchase-units", tags=["ingredient-purchase-units"])
 app.include_router(purchases.router, prefix="/suppliers/purchases", tags=["purchases"])
 app.include_router(suppliers.router, prefix="/suppliers/providers", tags=["suppliers"])
 app.include_router(supplier_portal.router, prefix="/supplier-portal", tags=["supplier-portal"])
@@ -100,6 +101,7 @@ app.include_router(categories.router, prefix="/menu/categories", tags=["categori
 app.include_router(recipe_bases.router, prefix="/menu/recipe-bases", tags=["recipe-bases"])
 app.include_router(modifiers.router, prefix="/menu/modifier-groups", tags=["modifiers"])
 app.include_router(combos.router, prefix="/menu/combos", tags=["combos"])
+app.include_router(customers.router, prefix="/customers", tags=["customers"])
 
 @app.get("/")
 async def root():
