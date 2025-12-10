@@ -5,6 +5,31 @@ from uuid import UUID
 from datetime import datetime
 from decimal import Decimal
 
+class Modifier(BaseModel):
+    """Modifier option within a modifier group"""
+    id: UUID
+    name: str
+    price: Decimal
+    is_available: Optional[bool] = True
+    is_default: Optional[bool] = False
+    sort_order: Optional[int] = None
+
+    class Config:
+        from_attributes = True
+
+class ModifierGroup(BaseModel):
+    """Group of modifiers for a product"""
+    id: UUID
+    name: str
+    min_qty: int
+    max_qty: int
+    is_required: bool
+    sort_order: Optional[int] = None
+    modifiers: List[Modifier] = []
+
+    class Config:
+        from_attributes = True
+
 class RecipeIngredientBase(BaseModel):
     """Ingredient in a product recipe"""
     ingredient_id: UUID = Field(..., description="ID of the ingredient")
@@ -70,6 +95,7 @@ class Product(ProductBase):
     category_name: Optional[str] = None
     ingredients: List[RecipeIngredient] = []
     recipe_base_ids: List[UUID] = Field(default=[], description="List of associated recipe base IDs")
+    modifier_groups: List[ModifierGroup] = Field(default=[], description="Modifier groups for this product")
 
     # Calculated fields
     margen_porcentaje: Optional[float] = None  # (price - cost) / cost * 100

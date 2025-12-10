@@ -61,6 +61,8 @@ class Settings(BaseSettings):
         default="https://discord.com/api/webhooks/1445269262515044464/lNHnWUHhUeObE11SOJztvwc8LqrGgLrh4uQtnqxn6lrn4KgdKARPeV7F1Nd-sNlybyaF",
         alias='DISCORD_ERROR_WEBHOOK_URL'
     )
+    discord_supplier_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_SUPPLIER_WEBHOOK_URL')
+    discord_purchase_actions_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_PURCHASE_ACTIONS_WEBHOOK_URL')
 
     class Config:
         env_file = ".env"

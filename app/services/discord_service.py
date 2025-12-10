@@ -206,6 +206,396 @@ class DiscordWebhookService:
         )
 
 
+    async def notify_supplier_quotation_completed(
+        self,
+        purchase_number: str,
+        supplier_name: str,
+        total_amount: float,
+        tax_amount: float,
+        tenant_name: str,
+        items_count: int
+    ) -> bool:
+        """
+        Send notification when supplier completes quotation with prices
+
+        Args:
+            purchase_number: Purchase number (e.g. WR-2024-0001)
+            supplier_name: Name of the supplier
+            total_amount: Total amount of the purchase
+            tax_amount: Tax amount
+            tenant_name: Name of the tenant
+            items_count: Number of items
+
+        Returns:
+            bool: True if notification sent successfully
+        """
+        formatted_total = "{:,.0f}".format(total_amount).replace(",", ".")
+        formatted_tax = "{:,.0f}".format(tax_amount).replace(",", ".")
+
+        description = (
+            f"**Orden:** {purchase_number}\n"
+            f"**Proveedor:** {supplier_name}\n"
+            f"**Subtotal:** ${formatted_total} COP\n"
+            f"**IVA:** ${formatted_tax} COP\n"
+            f"**Items:** {items_count}"
+        )
+
+        footer_text = f"{tenant_name} • Cotización completada por proveedor"
+
+        return await self.send_notification(
+            title="✅ Cotización Completada",
+            description=description,
+            color=3066993,  # Green color
+            fields=None,
+            footer=footer_text
+        )
+
+
+    async def notify_supplier_invoice_registered(
+        self,
+        purchase_number: str,
+        supplier_name: str,
+        document_type: str,
+        invoice_number: str,
+        invoice_amount: Optional[float],
+        tenant_name: str
+    ) -> bool:
+        """
+        Send notification when supplier registers invoice/remision
+
+        Args:
+            purchase_number: Purchase number (e.g. WR-2024-0001)
+            supplier_name: Name of the supplier
+            document_type: Type of document (remision, factura_contado, factura_credito)
+            invoice_number: Invoice/remision number
+            invoice_amount: Invoice amount (if applicable)
+            tenant_name: Name of the tenant
+
+        Returns:
+            bool: True if notification sent successfully
+        """
+        doc_labels = {
+            'remision': 'Remisión',
+            'factura_contado': 'Factura de Contado',
+            'factura_credito': 'Factura a Crédito'
+        }
+        doc_label = doc_labels.get(document_type, 'Documento')
+
+        description = (
+            f"**Orden:** {purchase_number}\n"
+            f"**Proveedor:** {supplier_name}\n"
+            f"**Tipo:** {doc_label}\n"
+            f"**Número:** {invoice_number}"
+        )
+
+        if invoice_amount is not None:
+            formatted_amount = "{:,.0f}".format(invoice_amount).replace(",", ".")
+            description += f"\n**Monto:** ${formatted_amount} COP"
+
+        footer_text = f"{tenant_name} • Registrado por proveedor"
+
+        return await self.send_notification(
+            title=f"📄 {doc_label} Registrada",
+            description=description,
+            color=15844367,  # Gold color
+            fields=None,
+            footer=footer_text
+        )
+
+
+    async def notify_supplier_shipment(
+        self,
+        purchase_number: str,
+        supplier_name: str,
+        tracking_number: str,
+        carrier: str,
+        tenant_name: str,
+        package_count: Optional[int] = None
+    ) -> bool:
+        """
+        Send notification when supplier marks purchase as shipped
+
+        Args:
+            purchase_number: Purchase number (e.g. WR-2024-0001)
+            supplier_name: Name of the supplier
+            tracking_number: Tracking number
+            carrier: Shipping carrier name
+            tenant_name: Name of the tenant
+            package_count: Number of packages
+
+        Returns:
+            bool: True if notification sent successfully
+        """
+        description = (
+            f"**Orden:** {purchase_number}\n"
+            f"**Proveedor:** {supplier_name}\n"
+            f"**Transportadora:** {carrier}\n"
+            f"**Guía:** {tracking_number}"
+        )
+
+        if package_count:
+            description += f"\n**Paquetes:** {package_count}"
+
+        footer_text = f"{tenant_name} • Marcado como enviado por proveedor"
+
+        return await self.send_notification(
+            title="📦 Pedido Enviado",
+            description=description,
+            color=5793266,  # Blue color
+            fields=None,
+            footer=footer_text
+        )
+
+
+    # =============================================================================
+    # PURCHASE ACTIONS NOTIFICATIONS (Internal staff actions)
+    # =============================================================================
+
+    async def notify_purchase_confirmed(
+        self,
+        purchase_number: str,
+        supplier_name: str,
+        confirmation_number: Optional[str],
+        user_name: str,
+        tenant_name: str
+    ) -> bool:
+        """
+        Send notification when purchase is confirmed
+
+        Args:
+            purchase_number: Purchase number
+            supplier_name: Name of the supplier
+            confirmation_number: Confirmation number from supplier
+            user_name: Name of the user who confirmed
+            tenant_name: Name of the tenant
+
+        Returns:
+            bool: True if notification sent successfully
+        """
+        description = (
+            f"**Orden:** {purchase_number}\n"
+            f"**Proveedor:** {supplier_name}"
+        )
+
+        if confirmation_number:
+            description += f"\n**Confirmación:** {confirmation_number}"
+
+        footer_text = f"{tenant_name} • Confirmado por {user_name}"
+
+        return await self.send_notification(
+            title="✅ Orden Confirmada",
+            description=description,
+            color=3066993,  # Green color
+            fields=None,
+            footer=footer_text
+        )
+
+    async def notify_purchase_shipped(
+        self,
+        purchase_number: str,
+        supplier_name: str,
+        tracking_number: str,
+        carrier: str,
+        user_name: str,
+        tenant_name: str
+    ) -> bool:
+        """
+        Send notification when purchase is shipped (internal action)
+
+        Args:
+            purchase_number: Purchase number
+            supplier_name: Name of the supplier
+            tracking_number: Tracking number
+            carrier: Carrier name
+            user_name: Name of the user who shipped
+            tenant_name: Name of the tenant
+
+        Returns:
+            bool: True if notification sent successfully
+        """
+        description = (
+            f"**Orden:** {purchase_number}\n"
+            f"**Proveedor:** {supplier_name}\n"
+            f"**Transportadora:** {carrier}\n"
+            f"**Guía:** {tracking_number}"
+        )
+
+        footer_text = f"{tenant_name} • Registrado por {user_name}"
+
+        return await self.send_notification(
+            title="🚚 Orden Enviada",
+            description=description,
+            color=3447003,  # Blue color
+            fields=None,
+            footer=footer_text
+        )
+
+    async def notify_purchase_received(
+        self,
+        purchase_number: str,
+        supplier_name: str,
+        is_partial: bool,
+        user_name: str,
+        tenant_name: str
+    ) -> bool:
+        """
+        Send notification when purchase is received
+
+        Args:
+            purchase_number: Purchase number
+            supplier_name: Name of the supplier
+            is_partial: True if partial reception
+            user_name: Name of the user who received
+            tenant_name: Name of the tenant
+
+        Returns:
+            bool: True if notification sent successfully
+        """
+        title = "📥 Orden Recibida Parcialmente" if is_partial else "📥 Orden Recibida"
+
+        description = (
+            f"**Orden:** {purchase_number}\n"
+            f"**Proveedor:** {supplier_name}"
+        )
+
+        if is_partial:
+            description += "\n**Tipo:** Recepción parcial"
+
+        footer_text = f"{tenant_name} • Recibido por {user_name}"
+
+        return await self.send_notification(
+            title=title,
+            description=description,
+            color=10181046,  # Purple color
+            fields=None,
+            footer=footer_text
+        )
+
+    async def notify_purchase_invoiced(
+        self,
+        purchase_number: str,
+        supplier_name: str,
+        invoice_number: str,
+        invoice_amount: Optional[float],
+        user_name: str,
+        tenant_name: str
+    ) -> bool:
+        """
+        Send notification when purchase is invoiced (internal action)
+
+        Args:
+            purchase_number: Purchase number
+            supplier_name: Name of the supplier
+            invoice_number: Invoice number
+            invoice_amount: Invoice amount
+            user_name: Name of the user who invoiced
+            tenant_name: Name of the tenant
+
+        Returns:
+            bool: True if notification sent successfully
+        """
+        description = (
+            f"**Orden:** {purchase_number}\n"
+            f"**Proveedor:** {supplier_name}\n"
+            f"**Factura:** {invoice_number}"
+        )
+
+        if invoice_amount is not None:
+            formatted_amount = "{:,.0f}".format(invoice_amount).replace(",", ".")
+            description += f"\n**Monto:** ${formatted_amount} COP"
+
+        footer_text = f"{tenant_name} • Registrado por {user_name}"
+
+        return await self.send_notification(
+            title="📄 Orden Facturada",
+            description=description,
+            color=15844367,  # Gold color
+            fields=None,
+            footer=footer_text
+        )
+
+    async def notify_purchase_paid(
+        self,
+        purchase_number: str,
+        supplier_name: str,
+        payment_method: str,
+        payment_amount: float,
+        user_name: str,
+        tenant_name: str
+    ) -> bool:
+        """
+        Send notification when purchase is paid
+
+        Args:
+            purchase_number: Purchase number
+            supplier_name: Name of the supplier
+            payment_method: Payment method used
+            payment_amount: Amount paid
+            user_name: Name of the user who registered payment
+            tenant_name: Name of the tenant
+
+        Returns:
+            bool: True if notification sent successfully
+        """
+        formatted_amount = "{:,.0f}".format(payment_amount).replace(",", ".")
+
+        description = (
+            f"**Orden:** {purchase_number}\n"
+            f"**Proveedor:** {supplier_name}\n"
+            f"**Método:** {payment_method}\n"
+            f"**Monto:** ${formatted_amount} COP"
+        )
+
+        footer_text = f"{tenant_name} • Pagado por {user_name}"
+
+        return await self.send_notification(
+            title="💰 Orden Pagada",
+            description=description,
+            color=3066993,  # Green color
+            fields=None,
+            footer=footer_text
+        )
+
+    async def notify_purchase_cancelled(
+        self,
+        purchase_number: str,
+        supplier_name: str,
+        reason: Optional[str],
+        user_name: str,
+        tenant_name: str
+    ) -> bool:
+        """
+        Send notification when purchase is cancelled
+
+        Args:
+            purchase_number: Purchase number
+            supplier_name: Name of the supplier
+            reason: Cancellation reason
+            user_name: Name of the user who cancelled
+            tenant_name: Name of the tenant
+
+        Returns:
+            bool: True if notification sent successfully
+        """
+        description = (
+            f"**Orden:** {purchase_number}\n"
+            f"**Proveedor:** {supplier_name}"
+        )
+
+        if reason:
+            description += f"\n**Razón:** {reason}"
+
+        footer_text = f"{tenant_name} • Cancelado por {user_name}"
+
+        return await self.send_notification(
+            title="❌ Orden Cancelada",
+            description=description,
+            color=15158332,  # Red color
+            fields=None,
+            footer=footer_text
+        )
+
+
 # Singleton instance with webhook URL from settings
 from app.config import settings
 
@@ -229,3 +619,17 @@ if settings.discord_purchase_webhook_url:
     discord_purchase_service = DiscordWebhookService(settings.discord_purchase_webhook_url)
 else:
     logger.warning("Discord purchase webhook URL not configured - purchase notifications disabled")
+
+# Separate service for supplier portal notifications
+discord_supplier_service = None
+if settings.discord_supplier_webhook_url:
+    discord_supplier_service = DiscordWebhookService(settings.discord_supplier_webhook_url)
+else:
+    logger.warning("Discord supplier webhook URL not configured - supplier notifications disabled")
+
+# Separate service for purchase actions notifications (confirm, ship, receive, invoice, pay, cancel)
+discord_purchase_actions_service = None
+if settings.discord_purchase_actions_webhook_url:
+    discord_purchase_actions_service = DiscordWebhookService(settings.discord_purchase_actions_webhook_url)
+else:
+    logger.warning("Discord purchase actions webhook URL not configured - purchase actions notifications disabled")

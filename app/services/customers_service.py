@@ -35,7 +35,7 @@ async def search_or_create_customer(
     """
     try:
         session_context = require_valid_session(request)
-        tenant_id = session_context.get('tenant_id')
+        tenant_id = session_context.tenant_id
 
         if not tenant_id:
             raise APIError("No tenant context found", status_code=400)
@@ -81,9 +81,8 @@ async def search_or_create_customer(
                 if not association:
                     await conn.execute(
                         """
-                        INSERT INTO tenant_members (user_id, tenant_id, role, status)
-                        VALUES ($1, $2, 'customer', 'active')
-                        ON CONFLICT (user_id, tenant_id) DO NOTHING
+                        INSERT INTO tenant_members (id, user_id, tenant_id, role)
+                        VALUES (gen_random_uuid(), $1, $2, 'customer')
                         """,
                         existing_customer['id'],
                         tenant_id
@@ -145,8 +144,8 @@ async def search_or_create_customer(
                 # Associate customer with tenant
                 await conn.execute(
                     """
-                    INSERT INTO tenant_members (user_id, tenant_id, role, status)
-                    VALUES ($1, $2, 'customer', 'active')
+                    INSERT INTO tenant_members (id, user_id, tenant_id, role)
+                    VALUES (gen_random_uuid(), $1, $2, 'customer')
                     """,
                     new_customer['id'],
                     tenant_id
@@ -193,7 +192,7 @@ async def search_customer_by_phone(
     """
     try:
         session_context = require_valid_session(request)
-        tenant_id = session_context.get('tenant_id')
+        tenant_id = session_context.tenant_id
 
         # Clean phone number
         phone_number = phone_number.strip().replace(' ', '').replace('-', '')

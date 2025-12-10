@@ -8,6 +8,10 @@ from fastapi import HTTPException, UploadFile
 from app.database import get_db_connection
 from datetime import datetime
 from app.services.aws_s3_service import AWSS3Service
+from app.services.discord_service import discord_supplier_service
+import logging
+
+logger = logging.getLogger(__name__)
 
 async def verify_supplier_token(token: str) -> Dict[str, Any]:
     """
@@ -236,7 +240,7 @@ async def update_purchase_prices(
         async with get_db_connection() as conn:
             # Verify token and that purchase belongs to this supplier
             supplier = await conn.fetchrow("""
-                SELECT id, tenant_id
+                SELECT id, tenant_id, name
                 FROM tenant_suppliers
                 WHERE access_token = $1
             """, UUID(token))
@@ -334,10 +338,35 @@ async def update_purchase_prices(
                 """, purchase_id, supplier['tenant_id'],
                     'Precios completados por proveedor', purchase['created_by'])
 
-                return {
-                    "success": True,
-                    "message": "Precios actualizados correctamente"
-                }
+                # Get purchase details for notification
+                purchase_info = await conn.fetchrow("""
+                    SELECT
+                        p.purchase_number,
+                        t.name as tenant_name,
+                        (SELECT COUNT(*) FROM tenant_purchase_items WHERE purchase_id = p.id) as items_count
+                    FROM tenant_purchases p
+                    LEFT JOIN tenants t ON p.tenant_id = t.id
+                    WHERE p.id = $1
+                """, purchase_id)
+
+        # Send Discord notification (outside transaction)
+        if discord_supplier_service and purchase_info:
+            try:
+                await discord_supplier_service.notify_supplier_quotation_completed(
+                    purchase_number=purchase_info['purchase_number'],
+                    supplier_name=supplier['name'],
+                    total_amount=total_amount,
+                    tax_amount=tax_amount,
+                    tenant_name=purchase_info['tenant_name'] or 'N/A',
+                    items_count=purchase_info['items_count'] or 0
+                )
+            except Exception as e:
+                logger.error(f"Failed to send Discord notification for quotation completion: {e}")
+
+        return {
+            "success": True,
+            "message": "Precios actualizados correctamente"
+        }
 
     except ValueError:
         raise HTTPException(status_code=400, detail="Datos inválidos")
@@ -379,7 +408,7 @@ async def invoice_purchase_from_portal(
         async with get_db_connection() as conn:
             # Verify token and that purchase belongs to this supplier
             supplier = await conn.fetchrow("""
-                SELECT id, tenant_id
+                SELECT id, tenant_id, name
                 FROM tenant_suppliers
                 WHERE access_token = $1
             """, UUID(token))
@@ -517,10 +546,34 @@ async def invoice_purchase_from_portal(
                             # Continue with other files even if one fails
                             pass
 
-                return {
-                    "success": True,
-                    "message": f"{doc_label} registrada correctamente"
-                }
+                # Get purchase details for notification
+                purchase_info = await conn.fetchrow("""
+                    SELECT
+                        p.purchase_number,
+                        t.name as tenant_name
+                    FROM tenant_purchases p
+                    LEFT JOIN tenants t ON p.tenant_id = t.id
+                    WHERE p.id = $1
+                """, purchase_id)
+
+        # Send Discord notification (outside transaction)
+        if discord_supplier_service and purchase_info:
+            try:
+                await discord_supplier_service.notify_supplier_invoice_registered(
+                    purchase_number=purchase_info['purchase_number'],
+                    supplier_name=supplier['name'],
+                    document_type=document_type,
+                    invoice_number=invoice_number,
+                    invoice_amount=invoice_amount,
+                    tenant_name=purchase_info['tenant_name'] or 'N/A'
+                )
+            except Exception as e:
+                logger.error(f"Failed to send Discord notification for invoice registration: {e}")
+
+        return {
+            "success": True,
+            "message": f"{doc_label} registrada correctamente"
+        }
 
     except ValueError:
         raise HTTPException(status_code=400, detail="Datos inválidos")
@@ -556,7 +609,7 @@ async def ship_purchase_from_portal(
         async with get_db_connection() as conn:
             # Verify token and that purchase belongs to this supplier
             supplier = await conn.fetchrow("""
-                SELECT id, tenant_id
+                SELECT id, tenant_id, name
                 FROM tenant_suppliers
                 WHERE access_token = $1
             """, UUID(token))
@@ -681,10 +734,34 @@ async def ship_purchase_from_portal(
                             # Continue with other files even if one fails
                             pass
 
-                return {
-                    "success": True,
-                    "message": "Orden marcada como enviada correctamente"
-                }
+                # Get purchase details for notification
+                purchase_info = await conn.fetchrow("""
+                    SELECT
+                        p.purchase_number,
+                        t.name as tenant_name
+                    FROM tenant_purchases p
+                    LEFT JOIN tenants t ON p.tenant_id = t.id
+                    WHERE p.id = $1
+                """, purchase_id)
+
+        # Send Discord notification (outside transaction)
+        if discord_supplier_service and purchase_info:
+            try:
+                await discord_supplier_service.notify_supplier_shipment(
+                    purchase_number=purchase_info['purchase_number'],
+                    supplier_name=supplier['name'],
+                    tracking_number=tracking_number,
+                    carrier=carrier,
+                    tenant_name=purchase_info['tenant_name'] or 'N/A',
+                    package_count=package_count
+                )
+            except Exception as e:
+                logger.error(f"Failed to send Discord notification for shipment: {e}")
+
+        return {
+            "success": True,
+            "message": "Orden marcada como enviada correctamente"
+        }
 
     except ValueError:
         raise HTTPException(status_code=400, detail="Datos inválidos")
@@ -1004,7 +1081,7 @@ async def upload_transition_attachments_from_portal(
         async with get_db_connection() as conn:
             # Verify token and that purchase belongs to this supplier
             supplier = await conn.fetchrow("""
-                SELECT id, tenant_id
+                SELECT id, tenant_id, name
                 FROM tenant_suppliers
                 WHERE access_token = $1
             """, UUID(token))

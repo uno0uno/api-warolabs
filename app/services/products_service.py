@@ -202,10 +202,68 @@ async def get_product_by_id(
             """
             recipe_base_rows = await connection.fetch(recipe_base_query, product_id)
 
+            # Get modifier groups with modifiers
+            modifier_groups_query = """
+                SELECT
+                    mg.id,
+                    mg.name,
+                    mg.min_qty,
+                    mg.max_qty,
+                    mg.is_required,
+                    mg.sort_order
+                FROM modifier_groups mg
+                WHERE mg.product_id = $1
+                ORDER BY mg.sort_order, mg.name
+            """
+            modifier_groups_rows = await connection.fetch(modifier_groups_query, product_id)
+
+            # Get all modifiers in a single query
+            if modifier_groups_rows:
+                group_ids = [row['id'] for row in modifier_groups_rows]
+                modifiers_query = """
+                    SELECT
+                        m.id,
+                        m.modifier_group_id,
+                        m.name,
+                        m.price,
+                        m.is_available,
+                        m.is_default,
+                        m.sort_order
+                    FROM modifiers m
+                    WHERE m.modifier_group_id = ANY($1::uuid[])
+                    ORDER BY m.sort_order, m.name
+                """
+                modifiers_rows = await connection.fetch(modifiers_query, group_ids)
+
+                # Group modifiers by modifier_group_id
+                modifiers_by_group = {}
+                for mod in modifiers_rows:
+                    group_id = mod['modifier_group_id']
+                    if group_id not in modifiers_by_group:
+                        modifiers_by_group[group_id] = []
+                    modifiers_by_group[group_id].append({
+                        'id': mod['id'],
+                        'name': mod['name'],
+                        'price': mod['price'],
+                        'is_available': mod['is_available'],
+                        'is_default': mod['is_default'],
+                        'sort_order': mod['sort_order']
+                    })
+
+                # Build modifier groups with their modifiers
+                modifier_groups = []
+                for mg_row in modifier_groups_rows:
+                    group_dict = dict(mg_row)
+                    group_dict['modifiers'] = modifiers_by_group.get(mg_row['id'], [])
+                    modifier_groups.append(group_dict)
+            else:
+                modifier_groups = []
+
             # Build product dict
             product_dict = dict(product_row)
             product_dict['ingredients'] = [dict(row) for row in recipe_rows]
             product_dict['recipe_base_ids'] = [row['product_base_type_id'] for row in recipe_base_rows]
+            product_dict['modifier_groups'] = modifier_groups
 
             return ProductResponse(data=Product(**product_dict))
 

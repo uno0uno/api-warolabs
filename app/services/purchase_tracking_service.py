@@ -30,6 +30,7 @@ from app.models.purchase import (
     AttachmentsResponse,
 )
 from app.services.email_helpers import send_purchase_status_notification
+from app.services.discord_service import discord_purchase_actions_service
 
 # =============================================================================
 # STATE TRANSITION RULES
@@ -622,6 +623,23 @@ async def transition_to_confirmed(
                 except Exception as email_error:
                     pass
 
+                # Send Discord notification
+                if discord_purchase_actions_service and purchase_info:
+                    try:
+                        # Get user and tenant names
+                        user_info = await conn.fetchrow("SELECT name FROM profile WHERE id = $1", user_id)
+                        tenant_info = await conn.fetchrow("SELECT name FROM tenants WHERE id = $1", tenant_id)
+
+                        await discord_purchase_actions_service.notify_purchase_confirmed(
+                            purchase_number=purchase_info['purchase_number'],
+                            supplier_name=purchase_info['supplier_name'],
+                            confirmation_number=data.confirmation_number,
+                            user_name=user_info['name'] if user_info else 'Usuario Desconocido',
+                            tenant_name=tenant_info['name'] if tenant_info else 'Tenant Desconocido'
+                        )
+                    except Exception as discord_error:
+                        logger.error(f"Failed to send Discord notification for purchase confirmation: {discord_error}")
+
                 return {"success": True, "message": "Purchase confirmed successfully"}
 
     except AuthenticationError:
@@ -751,6 +769,23 @@ async def transition_to_shipped(
                         )
                 except Exception as email_error:
                     pass
+
+                # Send Discord notification
+                if discord_purchase_actions_service and purchase_info:
+                    try:
+                        user_info = await conn.fetchrow("SELECT name FROM profile WHERE id = $1", user_id)
+                        tenant_info = await conn.fetchrow("SELECT name FROM tenants WHERE id = $1", tenant_id)
+
+                        await discord_purchase_actions_service.notify_purchase_shipped(
+                            purchase_number=purchase_info['purchase_number'],
+                            supplier_name=purchase_info['supplier_name'],
+                            tracking_number=tracking_number,
+                            carrier=carrier,
+                            user_name=user_info['name'] if user_info else 'Usuario Desconocido',
+                            tenant_name=tenant_info['name'] if tenant_info else 'Tenant Desconocido'
+                        )
+                    except Exception as discord_error:
+                        logger.error(f"Failed to send Discord notification for purchase shipment: {discord_error}")
 
                 return {"success": True, "message": "Purchase marked as shipped"}
 
@@ -896,6 +931,22 @@ async def transition_to_received(
                         )
                 except Exception as email_error:
                     pass
+
+                # Send Discord notification
+                if discord_purchase_actions_service and purchase_info:
+                    try:
+                        user_info = await conn.fetchrow("SELECT name FROM profile WHERE id = $1", user_id)
+                        tenant_info = await conn.fetchrow("SELECT name FROM tenants WHERE id = $1", tenant_id)
+
+                        await discord_purchase_actions_service.notify_purchase_received(
+                            purchase_number=purchase_info['purchase_number'],
+                            supplier_name=purchase_info['supplier_name'],
+                            is_partial=partial,
+                            user_name=user_info['name'] if user_info else 'Usuario Desconocido',
+                            tenant_name=tenant_info['name'] if tenant_info else 'Tenant Desconocido'
+                        )
+                    except Exception as discord_error:
+                        logger.error(f"Failed to send Discord notification for purchase reception: {discord_error}")
 
                 return {"success": True, "message": f"Purchase {target_status}"}
 
@@ -1057,6 +1108,23 @@ async def transition_to_invoiced(
                 except Exception as email_error:
                     pass
 
+                # Send Discord notification
+                if discord_purchase_actions_service and purchase_info:
+                    try:
+                        user_info = await conn.fetchrow("SELECT name FROM profile WHERE id = $1", user_id)
+                        tenant_info = await conn.fetchrow("SELECT name FROM tenants WHERE id = $1", tenant_id)
+
+                        await discord_purchase_actions_service.notify_purchase_invoiced(
+                            purchase_number=purchase_info['purchase_number'],
+                            supplier_name=purchase_info['supplier_name'],
+                            invoice_number=invoice_number,
+                            invoice_amount=invoice_amount,
+                            user_name=user_info['name'] if user_info else 'Usuario Desconocido',
+                            tenant_name=tenant_info['name'] if tenant_info else 'Tenant Desconocido'
+                        )
+                    except Exception as discord_error:
+                        logger.error(f"Failed to send Discord notification for purchase invoice: {discord_error}")
+
                 return {"success": True, "message": "Invoice registered successfully"}
 
     except AuthenticationError:
@@ -1181,6 +1249,23 @@ async def transition_to_paid(
                 except Exception as email_error:
                     pass
 
+                # Send Discord notification
+                if discord_purchase_actions_service and purchase_info:
+                    try:
+                        user_info = await conn.fetchrow("SELECT name FROM profile WHERE id = $1", user_id)
+                        tenant_info = await conn.fetchrow("SELECT name FROM tenants WHERE id = $1", tenant_id)
+
+                        await discord_purchase_actions_service.notify_purchase_paid(
+                            purchase_number=purchase_info['purchase_number'],
+                            supplier_name=purchase_info['supplier_name'],
+                            payment_method=payment_method,
+                            payment_amount=payment_amount,
+                            user_name=user_info['name'] if user_info else 'Usuario Desconocido',
+                            tenant_name=tenant_info['name'] if tenant_info else 'Tenant Desconocido'
+                        )
+                    except Exception as discord_error:
+                        logger.error(f"Failed to send Discord notification for purchase payment: {discord_error}")
+
                 return {"success": True, "message": "Payment registered successfully"}
 
     except AuthenticationError:
@@ -1242,6 +1327,31 @@ async def cancel_purchase(
                     {"cancellation_reason": data.cancellation_reason},
                     data.notes
                 )
+
+                # Send Discord notification
+                if discord_purchase_actions_service:
+                    try:
+                        # Get purchase and supplier info
+                        purchase_info = await conn.fetchrow("""
+                            SELECT tp.purchase_number, ts.name as supplier_name
+                            FROM tenant_purchases tp
+                            JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
+                            WHERE tp.id = $1
+                        """, purchase_id)
+
+                        user_info = await conn.fetchrow("SELECT name FROM profile WHERE id = $1", user_id)
+                        tenant_info = await conn.fetchrow("SELECT name FROM tenants WHERE id = $1", tenant_id)
+
+                        if purchase_info:
+                            await discord_purchase_actions_service.notify_purchase_cancelled(
+                                purchase_number=purchase_info['purchase_number'],
+                                supplier_name=purchase_info['supplier_name'],
+                                reason=data.cancellation_reason,
+                                user_name=user_info['name'] if user_info else 'Usuario Desconocido',
+                                tenant_name=tenant_info['name'] if tenant_info else 'Tenant Desconocido'
+                            )
+                    except Exception as discord_error:
+                        logger.error(f"Failed to send Discord notification for purchase cancellation: {discord_error}")
 
                 return {"success": True, "message": "Purchase cancelled successfully"}
 
