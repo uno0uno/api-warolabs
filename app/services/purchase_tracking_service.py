@@ -866,7 +866,27 @@ async def transition_to_received(
                     quantity_received = item.get('quantity_received')
                     ingredient_id = item.get('ingredient_id')
 
+                    # Convert quantity_received to float if it's a string
+                    if quantity_received is not None:
+                        try:
+                            quantity_received = float(quantity_received)
+                        except (ValueError, TypeError):
+                            continue
+
                     if quantity_received is not None and quantity_received > 0:
+                        # Get purchase item details including unit and cost
+                        purchase_item_data = await conn.fetchrow("""
+                            SELECT unit, unit_cost
+                            FROM tenant_purchase_items
+                            WHERE purchase_id = $1 AND ingredient_id = $2
+                        """, purchase_id, ingredient_id)
+
+                        if not purchase_item_data:
+                            continue
+
+                        ingredient_unit = purchase_item_data['unit']
+                        unit_cost = purchase_item_data['unit_cost']
+
                         # Update purchase item
                         await conn.execute("""
                             UPDATE tenant_purchase_items
@@ -905,7 +925,7 @@ async def transition_to_received(
                                 UPDATE tenant_inventory
                                 SET
                                     current_stock = $1,
-                                    updated_at = NOW()
+                                    last_updated = NOW()
                                 WHERE tenant_id = $2 AND ingredient_id = $3
                             """, new_stock, tenant_id, ingredient_id)
                         else:
@@ -917,37 +937,39 @@ async def transition_to_received(
                                     tenant_id,
                                     ingredient_id,
                                     current_stock,
-                                    minimum_stock,
-                                    status
+                                    minimum_stock
                                 )
-                                VALUES ($1, $2, $3, 0, 'ok')
+                                VALUES ($1, $2, $3, 0)
                             """, tenant_id, ingredient_id, new_stock)
 
                         # Create inventory movement record
                         await conn.execute("""
-                            INSERT INTO tenant_inventory_movements (
+                            INSERT INTO tenant_ingredient_movements (
                                 tenant_id,
                                 ingredient_id,
                                 movement_type,
                                 quantity_change,
+                                unit,
                                 previous_stock,
                                 new_stock,
-                                reference_number,
+                                reference_table,
+                                reference_id,
+                                cost_per_unit,
                                 notes,
                                 created_by
                             )
-                            VALUES ($1, $2, 'purchase', $3, $4, $5, $6, $7, $8)
+                            VALUES ($1, $2, 'purchase', $3, $4, $5, $6, 'tenant_purchases', $7, $8, $9, $10)
                         """,
                         tenant_id,
                         ingredient_id,
                         float(quantity_received),
+                        ingredient_unit,
                         previous_stock,
                         new_stock,
-                        purchase_number,
+                        purchase_id,
+                        float(unit_cost) if unit_cost else None,
                         f"Compra recibida - {item.get('quality_status', 'approved')}",
                         user_id)
-
-                        logger.info(f"📦 Inventory updated for ingredient {ingredient_id}: {previous_stock} -> {new_stock} (+{quantity_received})")
 
                 # Create history entry with quality information
                 await create_status_history_entry(
@@ -1025,7 +1047,6 @@ async def transition_to_received(
     except HTTPException:
         raise
     except Exception as e:
-
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 # Function transition_to_verified removed - verification now happens during reception

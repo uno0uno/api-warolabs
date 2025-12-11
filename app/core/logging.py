@@ -43,10 +43,15 @@ def setup_logging():
     console_handler.setFormatter(console_format)
     root_logger.addHandler(console_handler)
     
-    # Suppress verbose third-party logs in production
-    if not settings.debug:
-        logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-        logging.getLogger("asyncpg").setLevel(logging.WARNING)
+    # Suppress verbose third-party logs
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("asyncpg").setLevel(logging.WARNING)
+    logging.getLogger("python_multipart.multipart").setLevel(logging.WARNING)
+    logging.getLogger("botocore").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("boto3").setLevel(logging.WARNING)
     
     return root_logger
 
