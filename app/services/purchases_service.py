@@ -317,6 +317,7 @@ async def get_purchase_by_id(
                     tp.purchase_number,
                     tp.purchase_date,
                     tp.delivery_date,
+                    tp.estimated_delivery_date,
                     tp.total_amount,
                     tp.tax_amount,
                     tp.status,
@@ -333,7 +334,25 @@ async def get_purchase_by_id(
                     tp.consolidation_group,
                     tp.payment_balance,
                     tp.invoice_date,
-                    tp.invoice_amount
+                    tp.invoice_amount,
+                    -- Tracking fields
+                    tp.confirmation_number,
+                    tp.tracking_number,
+                    tp.carrier,
+                    tp.package_count,
+                    -- State timestamps
+                    tp.confirmed_at,
+                    tp.preparing_at,
+                    tp.shipped_at,
+                    tp.received_at,
+                    tp.verified_at,
+                    tp.invoiced_at,
+                    tp.cancelled_at,
+                    -- Additional metadata
+                    tp.cancellation_reason,
+                    tp.received_by,
+                    tp.verified_by,
+                    tp.package_condition
                 FROM tenant_purchases tp
                 LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
                 WHERE tp.id = $1 AND tp.tenant_id = $2
@@ -405,6 +424,25 @@ async def get_purchase_by_id(
                 payment_balance=purchase_data['payment_balance'],
                 invoice_date=purchase_data['invoice_date'],
                 invoice_amount=purchase_data['invoice_amount'],
+                # Tracking fields
+                confirmation_number=purchase_data.get('confirmation_number'),
+                tracking_number=purchase_data.get('tracking_number'),
+                carrier=purchase_data.get('carrier'),
+                estimated_delivery_date=purchase_data.get('estimated_delivery_date'),
+                package_count=purchase_data.get('package_count'),
+                # State timestamps
+                confirmed_at=purchase_data.get('confirmed_at'),
+                preparing_at=purchase_data.get('preparing_at'),
+                shipped_at=purchase_data.get('shipped_at'),
+                received_at=purchase_data.get('received_at'),
+                verified_at=purchase_data.get('verified_at'),
+                invoiced_at=purchase_data.get('invoiced_at'),
+                cancelled_at=purchase_data.get('cancelled_at'),
+                # Additional metadata
+                cancellation_reason=purchase_data.get('cancellation_reason'),
+                received_by=purchase_data.get('received_by'),
+                verified_by=purchase_data.get('verified_by'),
+                package_condition=purchase_data.get('package_condition'),
                 items=items,
                 status_history=status_history
             )

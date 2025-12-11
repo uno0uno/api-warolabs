@@ -100,6 +100,7 @@ async def get_supplier_purchases(token: str, status_filter: Optional[str] = None
                     p.invoice_number,
                     p.purchase_date,
                     p.delivery_date,
+                    p.estimated_delivery_date,
                     p.total_amount,
                     p.tax_amount,
                     p.status,
@@ -112,7 +113,10 @@ async def get_supplier_purchases(token: str, status_filter: Optional[str] = None
                     p.payment_due_date,
                     p.requires_advance_payment,
                     p.consolidation_group,
-                    p.payment_balance
+                    p.payment_balance,
+                    p.tracking_number,
+                    p.carrier,
+                    p.package_count
                 FROM tenant_purchases p
                 WHERE p.supplier_id = $1
             """
@@ -170,6 +174,7 @@ async def get_supplier_purchases(token: str, status_filter: Optional[str] = None
                     "invoice_number": purchase['invoice_number'],
                     "purchase_date": purchase['purchase_date'].isoformat() if purchase['purchase_date'] else None,
                     "delivery_date": purchase['delivery_date'].isoformat() if purchase['delivery_date'] else None,
+                    "estimated_delivery_date": purchase['estimated_delivery_date'].isoformat() if purchase.get('estimated_delivery_date') else None,
                     "total_amount": float(purchase['total_amount']) if purchase['total_amount'] else 0,
                     "tax_amount": float(purchase['tax_amount']) if purchase['tax_amount'] else 0,
                     "status": purchase['status'],
@@ -183,6 +188,9 @@ async def get_supplier_purchases(token: str, status_filter: Optional[str] = None
                     "requires_advance_payment": purchase['requires_advance_payment'],
                     "consolidation_group": purchase['consolidation_group'],
                     "payment_balance": float(purchase['payment_balance']) if purchase['payment_balance'] else None,
+                    "tracking_number": purchase.get('tracking_number'),
+                    "carrier": purchase.get('carrier'),
+                    "package_count": purchase.get('package_count'),
                     "items": [
                         {
                             "id": str(item['id']),
