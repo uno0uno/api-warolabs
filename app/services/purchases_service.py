@@ -46,6 +46,7 @@ async def get_purchases_list(
                     tp.purchase_number,
                     tp.purchase_date,
                     tp.delivery_date,
+                    tp.estimated_delivery_date,
                     tp.total_amount,
                     tp.tax_amount,
                     tp.status,
@@ -68,6 +69,24 @@ async def get_purchases_list(
                     tp.payment_amount,
                     tp.payment_date,
                     tp.paid_at,
+                    -- Tracking fields
+                    tp.confirmation_number,
+                    tp.tracking_number,
+                    tp.carrier,
+                    tp.package_count,
+                    -- State timestamps
+                    tp.confirmed_at,
+                    tp.preparing_at,
+                    tp.shipped_at,
+                    tp.received_at,
+                    tp.verified_at,
+                    tp.invoiced_at,
+                    tp.cancelled_at,
+                    -- Additional metadata
+                    tp.cancellation_reason,
+                    tp.received_by,
+                    tp.verified_by,
+                    tp.package_condition,
                     ts.name as supplier_name,
                     -- Get payment info from history if not in main table
                     COALESCE(tp.payment_method, psh_paid.metadata->>'payment_method') as payment_method_final,
@@ -228,6 +247,21 @@ async def get_purchases_list(
                     created_by=row['created_by'],
                     created_at=row['created_at'],
                     updated_at=row['updated_at'],
+                    # Tracking fields
+                    confirmation_number=row.get('confirmation_number'),
+                    tracking_number=row.get('tracking_number'),
+                    carrier=row.get('carrier'),
+                    estimated_delivery_date=row.get('estimated_delivery_date'),
+                    package_count=row.get('package_count'),
+                    # State timestamps
+                    confirmed_at=row.get('confirmed_at'),
+                    preparing_at=row.get('preparing_at'),
+                    shipped_at=row.get('shipped_at'),
+                    received_at=row.get('received_at'),
+                    verified_at=row.get('verified_at'),
+                    invoiced_at=row.get('invoiced_at'),
+                    cancelled_at=row.get('cancelled_at'),
+                    # Payment fields
                     payment_method=row.get('payment_method'),
                     payment_reference=row.get('payment_reference'),
                     payment_amount=row.get('payment_amount'),
@@ -237,6 +271,11 @@ async def get_purchases_list(
                     payment_reference_final=row.get('payment_reference_final'),
                     payment_date_final=row.get('payment_date_final'),
                     has_payment=row.get('has_payment'),
+                    # Additional fields
+                    cancellation_reason=row.get('cancellation_reason'),
+                    received_by=row.get('received_by'),
+                    verified_by=row.get('verified_by'),
+                    package_condition=row.get('package_condition'),
                     items=items
                 )
                 purchases.append(purchase)

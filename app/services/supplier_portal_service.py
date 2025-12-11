@@ -638,9 +638,14 @@ async def ship_purchase_from_portal(
             delivery_date = None
             if estimated_delivery_date:
                 try:
+                    # Try full datetime format first
                     delivery_date = datetime.fromisoformat(estimated_delivery_date.replace('Z', '+00:00'))
                 except ValueError:
-                    pass
+                    try:
+                        # Try date-only format (YYYY-MM-DD) from HTML input type="date"
+                        delivery_date = datetime.strptime(estimated_delivery_date, '%Y-%m-%d')
+                    except ValueError:
+                        pass
 
             async with conn.transaction():
                 # Update purchase with shipping info

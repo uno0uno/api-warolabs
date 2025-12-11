@@ -675,9 +675,14 @@ async def transition_to_shipped(
         estimated_delivery_dt = None
         if estimated_delivery_date:
             try:
+                # Try full datetime format first
                 estimated_delivery_dt = datetime.fromisoformat(estimated_delivery_date.replace('Z', '+00:00'))
-            except:
-                pass
+            except ValueError:
+                try:
+                    # Try date-only format (YYYY-MM-DD) from HTML input type="date"
+                    estimated_delivery_dt = datetime.strptime(estimated_delivery_date, '%Y-%m-%d')
+                except ValueError:
+                    pass
 
         async with get_db_connection() as conn:
             async with conn.transaction():
