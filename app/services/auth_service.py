@@ -182,7 +182,7 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
 
             # Create new session with new tenant
             new_session_id = secrets.token_hex(16)
-            expires_at = datetime.utcnow() + timedelta(hours=24)  # 24 hours
+            expires_at = datetime.utcnow() + timedelta(days=7)  # 7 days (1 week)
             
             # Use current client info for new session
             current_client_ip = get_client_ip(request)

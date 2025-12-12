@@ -119,7 +119,7 @@ async def set_session_cookie(response: Response, session_token: str, tenant_site
         httponly=True,
         secure=not settings.is_development,
         samesite="lax",  # Use lax for better proxy compatibility across environments
-        max_age=24 * 60 * 60,  # 24 hours
+        max_age=7 * 24 * 60 * 60,  # 7 days (1 week)
         domain=cookie_domain,
         path="/"  # Ensure cookie is available for all paths
     )

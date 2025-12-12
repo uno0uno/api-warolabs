@@ -192,7 +192,7 @@ async def verify_code(request: Request, response: Response, email: str, code: st
 
             # Create session with user's tenant from token
             session_id = secrets.token_hex(16)
-            expires_at = datetime.utcnow() + timedelta(hours=24)  # 24 hours
+            expires_at = datetime.utcnow() + timedelta(days=7)  # 7 days (1 week)
             user_tenant_id = token_data['tenant_id']
 
             # Get client info for analytics
@@ -325,7 +325,7 @@ async def verify_token(request: Request, response: Response, email: str, token: 
 
             # Create session with user's tenant from token
             session_id = secrets.token_hex(16)
-            expires_at = datetime.utcnow() + timedelta(hours=24)  # 24 hours
+            expires_at = datetime.utcnow() + timedelta(days=7)  # 7 days (1 week)
             user_tenant_id = token_data['tenant_id']
 
             # Get client info for analytics
