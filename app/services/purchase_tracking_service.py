@@ -1398,12 +1398,28 @@ async def cancel_purchase(
                 if not purchase:
                     raise HTTPException(status_code=404, detail="Purchase not found")
 
-                # Check if already in final state
-                if purchase['status'] in ['paid', 'cancelled']:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Cannot cancel purchase in {purchase['status']} state"
+                # Define cancellable states (only early stages before payment/shipping)
+                CANCELLABLE_STATES = ['quotation', 'pending', 'confirmed', 'preparing']
+
+                # Check if purchase can be cancelled
+                if purchase['status'] not in CANCELLABLE_STATES:
+                    # Provide specific error messages based on current status
+                    error_messages = {
+                        'paid': 'No se puede cancelar una orden que ya ha sido pagada. Contacte al administrador.',
+                        'invoiced': 'No se puede cancelar una orden que ya ha sido facturada. Contacte al proveedor.',
+                        'shipped': 'No se puede cancelar una orden que ya ha sido enviada. La orden está en tránsito.',
+                        'received': 'No se puede cancelar una orden que ya ha sido recibida. El inventario ya fue actualizado.',
+                        'partially_received': 'No se puede cancelar una orden parcialmente recibida. El inventario ya fue actualizado.',
+                        'cancelled': 'Esta orden ya está cancelada.',
+                        'overdue': 'No se puede cancelar una orden vencida. Contacte al administrador.'
+                    }
+
+                    error_message = error_messages.get(
+                        purchase['status'],
+                        f"No se puede cancelar una orden en estado '{purchase['status']}'. Solo se pueden cancelar órdenes en estados: {', '.join(CANCELLABLE_STATES)}."
                     )
+
+                    raise HTTPException(status_code=400, detail=error_message)
 
                 # Update purchase
                 await conn.execute("""
