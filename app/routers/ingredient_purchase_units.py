@@ -24,7 +24,7 @@ async def list_purchase_units_endpoint(
     request: Request,
     response: Response,
     page: int = Query(default=1, ge=1, description="Page number"),
-    limit: int = Query(default=100, ge=1, le=250, description="Items per page"),
+    limit: int = Query(default=100, ge=1, le=10000, description="Items per page"),
     search: Optional[str] = Query(default=None, description="Search by ingredient name or purchase unit label"),
     ingredient_id: Optional[UUID] = Query(default=None, description="Filter by ingredient ID"),
     active_only: bool = Query(default=True, description="Show only active purchase units")
