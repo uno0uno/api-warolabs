@@ -72,3 +72,49 @@ async def get_inventory_movements(
         start_date=start_date,
         end_date=end_date
     )
+
+
+@router.get("/stock/{ingredient_id}")
+async def get_ingredient_stock(
+    request: Request,
+    response: Response,
+    ingredient_id: UUID
+):
+    """
+    Get current stock for a specific ingredient
+
+    Returns:
+    - Current stock level
+    - Minimum and maximum stock
+    - Unit cost and total value
+    - Location and lot information
+    """
+    return await inventory_service.get_stock_by_ingredient(
+        request,
+        response,
+        ingredient_id
+    )
+
+
+@router.post("/adjustments")
+async def create_inventory_adjustment(
+    request: Request,
+    response: Response
+):
+    """
+    Create a manual inventory adjustment
+
+    Body:
+    - ingredient_id: UUID of the ingredient
+    - quantity_change: Amount to adjust (positive for increment, negative for decrement)
+    - reason: Reason for the adjustment
+    - source: Source of the adjustment (default: manual_adjustment)
+
+    Returns:
+    - Created adjustment record
+    - Updated stock level
+    """
+    return await inventory_service.create_adjustment(
+        request,
+        response
+    )

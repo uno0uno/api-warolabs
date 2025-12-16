@@ -365,3 +365,232 @@ async def get_inventory_movements(
     except Exception as e:
         logger.error(f"Error getting inventory movements: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+
+async def get_stock_by_ingredient(
+    request: Request,
+    response: Response,
+    ingredient_id: UUID
+) -> Dict[str, Any]:
+    """
+    Get current stock for a specific ingredient
+
+    Args:
+        request: FastAPI request
+        response: FastAPI response
+        ingredient_id: ID of the ingredient
+
+    Returns:
+        Dictionary with ingredient stock data
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # Get stock data
+            query = """
+                SELECT
+                    ti.id,
+                    ti.ingredient_id,
+                    i.name as ingredient_name,
+                    i.unit,
+                    i.category,
+                    ti.current_stock,
+                    ti.minimum_stock,
+                    ti.maximum_stock,
+                    ti.last_updated,
+                    ti.location,
+                    ti.lote_actual,
+                    ti.fecha_vencimiento,
+                    -- Get latest cost
+                    (
+                        SELECT tim.cost_per_unit
+                        FROM tenant_ingredient_movements tim
+                        WHERE tim.ingredient_id = ti.ingredient_id
+                          AND tim.tenant_id = ti.tenant_id
+                          AND tim.cost_per_unit IS NOT NULL
+                        ORDER BY tim.created_at DESC
+                        LIMIT 1
+                    ) as unit_cost
+                FROM tenant_inventory ti
+                JOIN ingredients i ON ti.ingredient_id = i.id
+                WHERE ti.tenant_id = $1 AND ti.ingredient_id = $2
+            """
+
+            stock_data = await conn.fetchrow(query, tenant_id, ingredient_id)
+
+            if not stock_data:
+                # If no record exists, create one
+                insert_query = """
+                    INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock)
+                    VALUES ($1, $2, 0, 0)
+                    RETURNING id
+                """
+                await conn.fetchrow(insert_query, tenant_id, ingredient_id)
+
+                # Fetch again
+                stock_data = await conn.fetchrow(query, tenant_id, ingredient_id)
+
+            return {
+                "success": True,
+                "id": str(stock_data['id']),
+                "ingredient_id": str(stock_data['ingredient_id']),
+                "ingredient_name": stock_data['ingredient_name'],
+                "unit": stock_data['unit'],
+                "category": stock_data['category'],
+                "current_stock": float(stock_data['current_stock']) if stock_data['current_stock'] else 0,
+                "minimum_stock": float(stock_data['minimum_stock']) if stock_data['minimum_stock'] else 0,
+                "maximum_stock": float(stock_data['maximum_stock']) if stock_data['maximum_stock'] else None,
+                "last_updated": stock_data['last_updated'].isoformat() if stock_data['last_updated'] else None,
+                "location": stock_data['location'],
+                "lote_actual": stock_data['lote_actual'],
+                "fecha_vencimiento": stock_data['fecha_vencimiento'].isoformat() if stock_data['fecha_vencimiento'] else None,
+                "unit_cost": float(stock_data['unit_cost']) if stock_data['unit_cost'] else None
+            }
+
+    except AuthenticationError:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting ingredient stock: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+
+async def create_adjustment(
+    request: Request,
+    response: Response
+) -> Dict[str, Any]:
+    """
+    Create a manual inventory adjustment
+
+    Args:
+        request: FastAPI request with body containing:
+            - ingredient_id: UUID of the ingredient
+            - quantity_change: Amount to adjust (+ or -)
+            - reason: Reason for adjustment
+            - source: Source of adjustment (default: manual_adjustment)
+        response: FastAPI response
+
+    Returns:
+        Dictionary with created adjustment data
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        # Get request body
+        body = await request.json()
+        ingredient_id = UUID(body.get('ingredient_id'))
+        quantity_change = float(body.get('quantity_change'))
+        reason = body.get('reason', 'Manual adjustment')
+        source = body.get('source', 'manual_adjustment')
+
+        if not ingredient_id or quantity_change == 0:
+            raise HTTPException(status_code=400, detail="ingredient_id and quantity_change are required")
+
+        async with get_db_connection() as conn:
+            # Start transaction
+            async with conn.transaction():
+                # Get ingredient unit
+                ingredient_query = """
+                    SELECT unit
+                    FROM ingredients
+                    WHERE id = $1
+                """
+                ingredient_row = await conn.fetchrow(ingredient_query, ingredient_id)
+
+                if not ingredient_row:
+                    raise HTTPException(status_code=404, detail="Ingrediente no encontrado")
+
+                ingredient_unit = ingredient_row['unit']
+
+                # Get current stock
+                stock_query = """
+                    SELECT current_stock
+                    FROM tenant_inventory
+                    WHERE tenant_id = $1 AND ingredient_id = $2
+                    FOR UPDATE
+                """
+                stock_row = await conn.fetchrow(stock_query, tenant_id, ingredient_id)
+
+                if not stock_row:
+                    # Create inventory record if it doesn't exist
+                    insert_query = """
+                        INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock)
+                        VALUES ($1, $2, 0, 0)
+                    """
+                    await conn.execute(insert_query, tenant_id, ingredient_id)
+                    previous_stock = 0
+                else:
+                    previous_stock = float(stock_row['current_stock']) if stock_row['current_stock'] else 0
+
+                # Calculate new stock
+                new_stock = max(0, previous_stock + quantity_change)
+
+                # Update stock
+                update_query = """
+                    UPDATE tenant_inventory
+                    SET current_stock = $1, last_updated = NOW()
+                    WHERE tenant_id = $2 AND ingredient_id = $3
+                """
+                await conn.execute(update_query, new_stock, tenant_id, ingredient_id)
+
+                # Create movement record
+                movement_query = """
+                    INSERT INTO tenant_ingredient_movements (
+                        tenant_id,
+                        ingredient_id,
+                        movement_type,
+                        quantity_change,
+                        unit,
+                        previous_stock,
+                        new_stock,
+                        reference_table,
+                        reason,
+                        created_by,
+                        created_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+                    RETURNING id, created_at
+                """
+                movement_row = await conn.fetchrow(
+                    movement_query,
+                    tenant_id,
+                    ingredient_id,
+                    'adjustment',
+                    quantity_change,
+                    ingredient_unit,
+                    previous_stock,
+                    new_stock,
+                    source,
+                    reason,
+                    user_id
+                )
+
+                return {
+                    "success": True,
+                    "message": "Ajuste de inventario creado exitosamente",
+                    "data": {
+                        "id": str(movement_row['id']),
+                        "ingredient_id": str(ingredient_id),
+                        "quantity_change": quantity_change,
+                        "previous_stock": previous_stock,
+                        "new_stock": new_stock,
+                        "reason": reason,
+                        "created_at": movement_row['created_at'].isoformat()
+                    }
+                }
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating inventory adjustment: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
