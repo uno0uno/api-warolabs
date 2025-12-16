@@ -310,7 +310,9 @@ async def get_products_list(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
-            # Base query
+            # Base query with DYNAMIC cost calculation
+            # Calculates cost based on WEIGHTED AVERAGE from purchase movements
+            # Uses tenant_ingredient_movements to calculate real acquisition cost per tenant
             base_query = """
                 SELECT
                     p.id,
@@ -324,21 +326,80 @@ async def get_products_list(
                     p.is_available,
                     p.is_combo,
                     p.allow_modifiers,
-                    p.costo_calculado,
+                    -- DYNAMIC cost calculation based on purchase movements (weighted average)
+                    (
+                        -- Direct ingredients cost (using weighted avg from movements)
+                        COALESCE((
+                            SELECT SUM(
+                                pr.quantity * COALESCE(
+                                    (
+                                        -- Calculate weighted average cost from purchase movements
+                                        SELECT
+                                            SUM(ABS(quantity_change) * COALESCE(cost_per_unit, 0)) /
+                                            NULLIF(SUM(ABS(quantity_change)), 0)
+                                        FROM tenant_ingredient_movements
+                                        WHERE ingredient_id = pr.ingredient_id
+                                          AND tenant_id = $1
+                                          AND movement_type = 'purchase'
+                                          AND cost_per_unit IS NOT NULL
+                                          AND quantity_change > 0
+                                    ), 0
+                                )
+                            )
+                            FROM product_recipes pr
+                            WHERE pr.product_id = p.id
+                        ), 0) +
+                        -- Recipe base ingredients cost (using weighted avg from movements)
+                        COALESCE((
+                            SELECT SUM(
+                                brt.base_quantity * COALESCE(
+                                    (
+                                        -- Calculate weighted average cost from purchase movements
+                                        SELECT
+                                            SUM(ABS(quantity_change) * COALESCE(cost_per_unit, 0)) /
+                                            NULLIF(SUM(ABS(quantity_change)), 0)
+                                        FROM tenant_ingredient_movements
+                                        WHERE ingredient_id = brt.ingredient_id
+                                          AND tenant_id = $1
+                                          AND movement_type = 'purchase'
+                                          AND cost_per_unit IS NOT NULL
+                                          AND quantity_change > 0
+                                    ), 0
+                                )
+                            )
+                            FROM product_base_recipes pbr
+                            JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+                            WHERE pbr.product_id = p.id
+                        ), 0)
+                    ) as costo_calculado,
                     p.precio_sugerido,
                     p.margen_objetivo,
                     p.tenant_id,
                     p.created_at,
-                    p.updated_at,
-                    CASE
-                        WHEN p.costo_calculado > 0
-                        THEN ((p.price - p.costo_calculado) / p.costo_calculado * 100)
-                        ELSE NULL
-                    END as margen_porcentaje,
-                    (p.price - COALESCE(p.costo_calculado, 0)) as margen_valor
+                    p.updated_at
                 FROM product p
                 LEFT JOIN categories c ON p.category_id = c.id
                 WHERE p.tenant_id = $1
+            """
+
+            # Add calculated fields after the main query
+            base_query = """
+                SELECT
+                    *,
+                    CASE
+                        WHEN costo_calculado > 0 AND costo_calculado IS NOT NULL
+                        THEN ((price - costo_calculado) / costo_calculado * 100)
+                        ELSE NULL
+                    END as margen_porcentaje,
+                    CASE
+                        WHEN costo_calculado IS NOT NULL
+                        THEN (price - costo_calculado)
+                        ELSE NULL
+                    END as margen_valor
+                FROM (
+            """ + base_query + """
+                ) subquery
+                WHERE 1=1
             """
 
             count_query = "SELECT COUNT(*) FROM product WHERE tenant_id = $1"
@@ -346,34 +407,34 @@ async def get_products_list(
             params = [tenant_id]
             param_count = 2
 
-            # Add filters
+            # Add filters (now applied to subquery)
             if search:
-                base_query += f" AND (LOWER(p.name) LIKE LOWER(${param_count}) OR LOWER(p.description) LIKE LOWER(${param_count}))"
+                base_query += f" AND (LOWER(name) LIKE LOWER(${param_count}) OR LOWER(description) LIKE LOWER(${param_count}))"
                 count_query += f" AND (LOWER(name) LIKE LOWER(${param_count}) OR LOWER(description) LIKE LOWER(${param_count}))"
                 params.append(f"%{search}%")
                 param_count += 1
 
             if category_id:
-                base_query += f" AND p.category_id = ${param_count}"
+                base_query += f" AND category_id = ${param_count}"
                 count_query += f" AND category_id = ${param_count}"
                 params.append(category_id)
                 param_count += 1
 
             if is_available is not None:
-                base_query += f" AND p.is_available = ${param_count}"
+                base_query += f" AND is_available = ${param_count}"
                 count_query += f" AND is_available = ${param_count}"
                 params.append(is_available)
                 param_count += 1
 
             if is_combo is not None:
-                base_query += f" AND p.is_combo = ${param_count}"
+                base_query += f" AND is_combo = ${param_count}"
                 count_query += f" AND is_combo = ${param_count}"
                 params.append(is_combo)
                 param_count += 1
 
             # Add pagination
             offset = (page - 1) * limit
-            base_query += f" ORDER BY p.created_at DESC LIMIT ${param_count} OFFSET ${param_count + 1}"
+            base_query += f" ORDER BY created_at DESC LIMIT ${param_count} OFFSET ${param_count + 1}"
 
             # Execute queries
             products_data = await conn.fetch(base_query, *params, limit, offset)

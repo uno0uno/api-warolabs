@@ -491,6 +491,9 @@ async def create_adjustment(
         quantity_change = float(body.get('quantity_change'))
         reason = body.get('reason', 'Manual adjustment')
         source = body.get('source', 'manual_adjustment')
+        # New fields for enhanced adjustments
+        purchase_unit = body.get('unit')  # Optional: unit selected by user
+        cost_per_unit = body.get('cost_per_unit')  # Optional: cost per unit (only for positive adjustments)
 
         if not ingredient_id or quantity_change == 0:
             raise HTTPException(status_code=400, detail="ingredient_id and quantity_change are required")
@@ -498,7 +501,7 @@ async def create_adjustment(
         async with get_db_connection() as conn:
             # Start transaction
             async with conn.transaction():
-                # Get ingredient unit
+                # Get ingredient base unit
                 ingredient_query = """
                     SELECT unit
                     FROM ingredients
@@ -509,7 +512,30 @@ async def create_adjustment(
                 if not ingredient_row:
                     raise HTTPException(status_code=404, detail="Ingrediente no encontrado")
 
-                ingredient_unit = ingredient_row['unit']
+                base_unit = ingredient_row['unit']
+
+                # If a purchase unit is provided, get conversion factor
+                conversion_factor = 1.0
+                unit_for_movement = base_unit
+
+                if purchase_unit and purchase_unit != base_unit:
+                    conversion_query = """
+                        SELECT conversion_factor, purchase_unit
+                        FROM ingredient_purchase_units
+                        WHERE ingredient_id = $1 AND purchase_unit = $2 AND is_active = TRUE
+                    """
+                    conversion_row = await conn.fetchrow(conversion_query, ingredient_id, purchase_unit)
+
+                    if conversion_row:
+                        conversion_factor = float(conversion_row['conversion_factor'])
+                        unit_for_movement = conversion_row['purchase_unit']
+                    else:
+                        # If no conversion found, use base unit
+                        logger.warning(f"No conversion found for {purchase_unit}, using base unit {base_unit}")
+                        unit_for_movement = base_unit
+
+                # Convert quantity to base unit
+                quantity_in_base_unit = quantity_change * conversion_factor
 
                 # Get current stock
                 stock_query = """
@@ -531,8 +557,8 @@ async def create_adjustment(
                 else:
                     previous_stock = float(stock_row['current_stock']) if stock_row['current_stock'] else 0
 
-                # Calculate new stock
-                new_stock = max(0, previous_stock + quantity_change)
+                # Calculate new stock (using converted quantity)
+                new_stock = max(0, previous_stock + quantity_in_base_unit)
 
                 # Update stock
                 update_query = """
@@ -542,7 +568,14 @@ async def create_adjustment(
                 """
                 await conn.execute(update_query, new_stock, tenant_id, ingredient_id)
 
-                # Create movement record
+                # Convert cost to base unit if provided
+                cost_in_base_unit = None
+                if cost_per_unit:
+                    # If cost is provided with a purchase unit, convert it to base unit cost
+                    # Example: $30,000 per kg → $30 per gr (30000 / 1000)
+                    cost_in_base_unit = float(cost_per_unit) / conversion_factor if conversion_factor > 0 else float(cost_per_unit)
+
+                # Create movement record with optional cost
                 movement_query = """
                     INSERT INTO tenant_ingredient_movements (
                         tenant_id,
@@ -552,11 +585,12 @@ async def create_adjustment(
                         unit,
                         previous_stock,
                         new_stock,
+                        cost_per_unit,
                         reference_table,
                         reason,
                         created_by,
                         created_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
                     RETURNING id, created_at
                 """
                 movement_row = await conn.fetchrow(
@@ -564,13 +598,20 @@ async def create_adjustment(
                     tenant_id,
                     ingredient_id,
                     'adjustment',
-                    quantity_change,
-                    ingredient_unit,
+                    quantity_in_base_unit,  # Use converted quantity
+                    base_unit,  # Always use base unit for storage
                     previous_stock,
                     new_stock,
+                    cost_in_base_unit,  # Use converted cost in base unit
                     source,
                     reason,
                     user_id
+                )
+
+                logger.info(
+                    f"Adjustment created: {ingredient_id} - "
+                    f"{quantity_change}{unit_for_movement} ({quantity_in_base_unit}{base_unit}) "
+                    f"@ ${cost_per_unit}/{unit_for_movement if cost_per_unit else 'N/A'}"
                 )
 
                 return {

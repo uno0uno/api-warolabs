@@ -11,7 +11,7 @@ async def get_ingredients_endpoint(
     request: Request,
     response: Response,
     page: int = Query(default=1, ge=1, description="Page number"),
-    limit: int = Query(default=50, ge=1, le=250, description="Items per page"),
+    limit: int = Query(default=50, ge=1, le=10000, description="Items per page"),
     search: Optional[str] = Query(default=None, description="Search by name or description"),
     category: Optional[str] = Query(default=None, description="Filter by ingredient category"),
     supplier_id: Optional[UUID] = Query(default=None, description="Filter by supplier ID")
