@@ -32,10 +32,18 @@ async def create_product_with_recipe(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
+        # VALIDATION: All products MUST have at least one ingredient since inventory is always controlled
+        if not product_data.ingredients or len(product_data.ingredients) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="El producto debe tener al menos un ingrediente. Todos los productos controlan inventario automáticamente."
+            )
+
         async with get_db_connection() as conn:
             # Start transaction
             async with conn.transaction():
                 # 1. Insert product
+                # NOTE: controla_stock is ALWAYS True - all products control inventory
                 product_query = """
                     INSERT INTO product (
                         name, description, price, category_id, product_base_type_id, preparation_time,
@@ -52,7 +60,7 @@ async def create_product_with_recipe(
                     product_data.category_id,
                     product_data.product_base_type_id,
                     product_data.preparation_time,
-                    product_data.controla_stock,
+                    True,  # ALWAYS True - controla_stock is mandatory
                     product_data.is_available,
                     product_data.is_combo,
                     product_data.allow_modifiers,
@@ -484,15 +492,19 @@ async def update_product_with_recipe(
             # Start transaction
             async with conn.transaction():
                 # 1. Build update query dynamically based on provided fields
+                # NOTE: controla_stock is ALWAYS excluded from updates - it's always True
                 update_fields = []
                 update_values = []
                 param_count = 1
 
-                for field, value in product_data.dict(exclude={'ingredients', 'recipe_base_ids'}, exclude_unset=True).items():
+                for field, value in product_data.dict(exclude={'ingredients', 'recipe_base_ids', 'controla_stock'}, exclude_unset=True).items():
                     if value is not None:
                         update_fields.append(f"{field} = ${param_count}")
                         update_values.append(value)
                         param_count += 1
+
+                # Force controla_stock to always be True
+                update_fields.append(f"controla_stock = TRUE")
 
                 if update_fields:
                     update_fields.append(f"updated_at = NOW()")
@@ -531,6 +543,13 @@ async def update_product_with_recipe(
 
                 # 3. Update recipe if ingredients provided
                 if product_data.ingredients is not None:
+                    # VALIDATION: Cannot remove all ingredients - products must have at least one
+                    if len(product_data.ingredients) == 0:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="El producto debe tener al menos un ingrediente. Todos los productos controlan inventario automáticamente."
+                        )
+
                     # Delete existing recipe
                     delete_recipe_query = "DELETE FROM product_recipes WHERE product_id = $1"
                     await conn.execute(delete_recipe_query, product_id)

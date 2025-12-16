@@ -55,14 +55,21 @@ class ProductBase(BaseModel):
     category_id: UUID = Field(..., description="Category ID")
     product_base_type_id: Optional[UUID] = Field(None, description="Optional recipe base type ID (deprecated, use recipe_base_ids)")
     preparation_time: Optional[int] = Field(None, ge=0, description="Preparation time in minutes")
-    controla_stock: bool = Field(True, description="Whether to control stock")
+    # DEPRECATED: controla_stock is now ALWAYS True. All products control inventory automatically.
+    # This field is kept for database compatibility but is ignored in logic.
+    controla_stock: bool = Field(True, description="DEPRECATED: Always True. All products control inventory")
     is_available: bool = Field(True, description="Whether product is available")
     is_combo: bool = Field(False, description="Whether product is a combo")
     allow_modifiers: bool = Field(True, description="Whether product allows modifiers")
 
 class ProductCreate(ProductBase):
     """Create product with recipe"""
-    ingredients: List[RecipeIngredientBase] = Field(default=[], description="Recipe ingredients")
+    # IMPORTANT: ALL products must have at least one ingredient since inventory is always controlled
+    ingredients: List[RecipeIngredientBase] = Field(
+        ...,
+        min_items=1,
+        description="Recipe ingredients (required - minimum 1 ingredient)"
+    )
     recipe_base_ids: List[UUID] = Field(default=[], description="List of recipe base IDs")
     tenant_id: UUID = Field(..., description="Tenant ID")
 
@@ -75,7 +82,8 @@ class ProductUpdate(BaseModel):
     product_base_type_id: Optional[UUID] = Field(None, description="Optional recipe base type ID (deprecated)")
     recipe_base_ids: Optional[List[UUID]] = Field(None, description="List of recipe base IDs")
     preparation_time: Optional[int] = Field(None, ge=0)
-    controla_stock: Optional[bool] = None
+    # DEPRECATED: controla_stock is ignored - all products always control inventory
+    controla_stock: Optional[bool] = Field(None, description="DEPRECATED: Ignored, always True")
     is_available: Optional[bool] = None
     is_combo: Optional[bool] = None
     allow_modifiers: Optional[bool] = None

@@ -425,35 +425,121 @@ async def complete_pos_order(
                                 modifier['price']
                             )
 
-                    # 6. Update inventory if product controls stock
-                    inventory_check_query = """
-                        SELECT controla_stock FROM product WHERE id = $1
+                    # 6. ALWAYS update inventory for all products (no controla_stock check)
+                    # Get ALL ingredients for this product:
+                    # - Direct ingredients from product_recipes
+                    # - Ingredients from recipe bases (product_base_recipes → base_recipe_templates)
+                    ingredients_query = """
+                        -- Direct product ingredients
+                        SELECT
+                            pr.ingredient_id,
+                            pr.quantity,
+                            pr.unit,
+                            i.name as ingredient_name
+                        FROM product_recipes pr
+                        JOIN ingredients i ON pr.ingredient_id = i.id
+                        WHERE pr.product_id = $1
+
+                        UNION ALL
+
+                        -- Ingredients from recipe bases
+                        SELECT
+                            brt.ingredient_id,
+                            brt.base_quantity as quantity,
+                            brt.unit,
+                            i.name as ingredient_name
+                        FROM product_base_recipes pbr
+                        JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+                        JOIN ingredients i ON brt.ingredient_id = i.id
+                        WHERE pbr.product_id = $1
                     """
-                    product_row = await conn.fetchrow(inventory_check_query, item['product']['id'])
+                    ingredients = await conn.fetch(ingredients_query, item['product']['id'])
 
-                    if product_row and product_row['controla_stock']:
-                        # Get ingredients for this product
-                        ingredients_query = """
-                            SELECT ingredient_id, quantity, unit
-                            FROM product_recipes
-                            WHERE product_id = $1
+                    # Reduce inventory for each ingredient
+                    for ingredient in ingredients:
+                        # Calculate quantity to deduct (convert to float for consistency)
+                        quantity_to_deduct = float(item['quantity']) * float(ingredient['quantity'])
+
+                        # Get current stock before update
+                        current_stock_query = """
+                            SELECT current_stock
+                            FROM tenant_inventory
+                            WHERE ingredient_id = $1 AND tenant_id = $2
                         """
-                        ingredients = await conn.fetch(ingredients_query, item['product']['id'])
+                        stock_row = await conn.fetchrow(
+                            current_stock_query,
+                            ingredient['ingredient_id'],
+                            tenant_id
+                        )
 
-                        # Reduce inventory for each ingredient
-                        for ingredient in ingredients:
+                        previous_stock = float(stock_row['current_stock']) if stock_row else 0.0
+                        new_stock = max(0.0, previous_stock - quantity_to_deduct)
+
+                        # Update inventory
+                        if stock_row:
                             update_inventory_query = """
-                                UPDATE ingredient_inventory
-                                SET current_quantity = current_quantity - ($1 * $2)
-                                WHERE ingredient_id = $3 AND tenant_id = $4
+                                UPDATE tenant_inventory
+                                SET current_stock = $1, last_updated = NOW()
+                                WHERE ingredient_id = $2 AND tenant_id = $3
                             """
                             await conn.execute(
                                 update_inventory_query,
-                                item['quantity'],  # Multiply by order quantity
-                                ingredient['quantity'],  # Recipe quantity
+                                new_stock,
                                 ingredient['ingredient_id'],
                                 tenant_id
                             )
+                        else:
+                            # Create inventory record if it doesn't exist (negative stock)
+                            insert_inventory_query = """
+                                INSERT INTO tenant_inventory (
+                                    tenant_id, ingredient_id, current_stock, minimum_stock, last_updated
+                                )
+                                VALUES ($1, $2, $3, 0, NOW())
+                            """
+                            await conn.execute(
+                                insert_inventory_query,
+                                tenant_id,
+                                ingredient['ingredient_id'],
+                                -quantity_to_deduct
+                            )
+
+                        # Create movement record for consumption
+                        movement_query = """
+                            INSERT INTO tenant_ingredient_movements (
+                                tenant_id,
+                                ingredient_id,
+                                movement_type,
+                                quantity_change,
+                                unit,
+                                previous_stock,
+                                new_stock,
+                                reference_table,
+                                reference_id,
+                                reason,
+                                created_by,
+                                created_at
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+                        """
+                        await conn.execute(
+                            movement_query,
+                            tenant_id,
+                            ingredient['ingredient_id'],
+                            'consumption',
+                            -quantity_to_deduct,
+                            ingredient['unit'],
+                            previous_stock,
+                            new_stock,
+                            'orders',
+                            order_id,
+                            f"Venta de {item['quantity']}x {item['product']['name']} - Orden #{order_number}",
+                            session_context.user_id
+                        )
+
+                        logger.info(
+                            f"Inventory deducted: {ingredient['ingredient_name']} "
+                            f"-{quantity_to_deduct}{ingredient['unit']} "
+                            f"(Order #{order_number})"
+                        )
 
                 # 7. Mark cart as completed
                 complete_cart_query = """
