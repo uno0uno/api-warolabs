@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -50,10 +50,16 @@ def custom_openapi():
         "/",
         "/supplier-portal"
     ]
-    
+
+    # Prefixes that are public (all paths starting with these)
+    public_prefixes = ["/blog"]
+
     for path in openapi_schema["paths"]:
         # Skip public endpoints
         if path in public_endpoints:
+            continue
+        # Skip public prefixes (blog endpoints are public)
+        if any(path.startswith(prefix) for prefix in public_prefixes):
             continue
             
         for method in openapi_schema["paths"][path]:
@@ -105,6 +111,7 @@ app.include_router(customers.router, prefix="/customers", tags=["customers"])
 app.include_router(pos_cart.router)
 app.include_router(orders.router)
 app.include_router(inventory.router)
+app.include_router(articles.router, prefix="/blog", tags=["blog"])
 
 @app.get("/")
 async def root():

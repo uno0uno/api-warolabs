@@ -276,9 +276,12 @@ async def session_validation_middleware(request: Request, call_next):
             '/docs', '/openapi.json', '/health',
             '/auth/sign-in-magic-link', '/auth/verify-code', '/auth/verify'
         ]
-        
+
+        # Public prefixes (no session required)
+        public_prefixes = ['/blog', '/supplier-portal']
+
         # Handle exact root path separately
-        if path == '/' or any(path.startswith(endpoint) for endpoint in public_endpoints):
+        if path == '/' or any(path.startswith(endpoint) for endpoint in public_endpoints) or any(path.startswith(prefix) for prefix in public_prefixes):
             request.state.session_context = SessionContext()
             return await call_next(request)
         
