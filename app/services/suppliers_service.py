@@ -44,6 +44,7 @@ async def get_suppliers_list(
                     id,
                     tenant_id,
                     name,
+                    description,
                     contact_info,
                     tax_id,
                     address,
@@ -132,6 +133,7 @@ async def get_suppliers_list(
                     id=row['id'],
                     tenantId=row['tenant_id'],
                     name=row['name'],
+                    description=row['description'],
                     contact_info=row['contact_info'],
                     tax_id=row['tax_id'],
                     address=row['address'],
@@ -190,6 +192,7 @@ async def get_supplier_by_id(
                     id,
                     tenant_id,
                     name,
+                    description,
                     contact_info,
                     tax_id,
                     address,
@@ -211,6 +214,7 @@ async def get_supplier_by_id(
                 id=supplier_data['id'],
                 tenantId=supplier_data['tenant_id'],
                 name=supplier_data['name'],
+                description=supplier_data['description'],
                 contact_info=supplier_data['contact_info'],
                 tax_id=supplier_data['tax_id'],
                 address=supplier_data['address'],
@@ -222,7 +226,7 @@ async def get_supplier_by_id(
                 createdAt=supplier_data['created_at'],
                 updatedAt=supplier_data['updated_at']
             )
-            
+
             return SupplierResponse(data=supplier)
             
     except AuthenticationError:
@@ -255,6 +259,7 @@ async def create_supplier(
                 INSERT INTO tenant_suppliers (
                     tenant_id,
                     name,
+                    description,
                     contact_info,
                     tax_id,
                     address,
@@ -262,11 +267,12 @@ async def create_supplier(
                     email,
                     payment_terms,
                     is_active
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 RETURNING
                     id,
                     tenant_id,
                     name,
+                    description,
                     contact_info,
                     tax_id,
                     address,
@@ -279,6 +285,7 @@ async def create_supplier(
             """,
                 tenant_id,
                 supplier_data.name,
+                supplier_data.description,
                 supplier_data.contact_info,
                 supplier_data.tax_id,
                 supplier_data.address,
@@ -292,6 +299,7 @@ async def create_supplier(
                 id=new_supplier['id'],
                 tenantId=new_supplier['tenant_id'],
                 name=new_supplier['name'],
+                description=new_supplier['description'],
                 contact_info=new_supplier['contact_info'],
                 tax_id=new_supplier['tax_id'],
                 address=new_supplier['address'],
@@ -438,13 +446,14 @@ async def update_supplier(
             update_fields.append(f"updated_at = NOW()")
             
             update_query = f"""
-                UPDATE tenant_suppliers 
+                UPDATE tenant_suppliers
                 SET {', '.join(update_fields)}
                 WHERE id = $1 AND tenant_id = $2
-                RETURNING 
+                RETURNING
                     id,
                     tenant_id,
                     name,
+                    description,
                     contact_info,
                     tax_id,
                     address,
@@ -457,11 +466,12 @@ async def update_supplier(
             """
             
             updated_supplier = await conn.fetchrow(update_query, *params)
-            
+
             supplier = Supplier(
                 id=updated_supplier['id'],
                 tenantId=updated_supplier['tenant_id'],
                 name=updated_supplier['name'],
+                description=updated_supplier['description'],
                 contact_info=updated_supplier['contact_info'],
                 tax_id=updated_supplier['tax_id'],
                 address=updated_supplier['address'],

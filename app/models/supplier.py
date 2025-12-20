@@ -5,6 +5,7 @@ from uuid import UUID
 
 class SupplierBase(BaseModel):
     name: str = Field(..., description="Supplier name")
+    description: Optional[str] = Field(None, description="Supplier description")
     contact_info: Optional[Dict[str, Any]] = Field(None, description="Contact information as JSON")
     tax_id: Optional[str] = Field(None, description="Tax ID or NIT")
     address: Optional[str] = Field(None, description="Supplier address")
@@ -18,6 +19,7 @@ class SupplierCreate(SupplierBase):
 
 class SupplierUpdate(BaseModel):
     name: Optional[str] = None
+    description: Optional[str] = None
     contact_info: Optional[Dict[str, Any]] = None
     tax_id: Optional[str] = None
     address: Optional[str] = None
