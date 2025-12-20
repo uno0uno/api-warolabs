@@ -185,25 +185,87 @@ def detect_tenant_from_headers(request: Request) -> dict:
         'original_host': request.headers.get('x-original-host', ''),
     }
 
+async def cleanup_zombie_sessions(conn, limit: int = 100) -> int:
+    """
+    Clean up zombie sessions (expired but still marked as active).
+    Called opportunistically during session validation.
+    Returns the number of sessions cleaned up.
+    """
+    try:
+        # Mark expired sessions as inactive with proper end reason
+        result = await conn.execute("""
+            UPDATE sessions
+            SET is_active = false,
+                ended_at = NOW(),
+                end_reason = 'expired_auto_cleanup'
+            WHERE is_active = true
+              AND expires_at < NOW()
+              AND ended_at IS NULL
+            LIMIT $1
+        """, limit)
+
+        # Extract count from result (format: "UPDATE N")
+        count = int(result.split()[-1]) if result else 0
+        if count > 0:
+            logger.info(f"🧹 Cleaned up {count} zombie sessions")
+        return count
+    except Exception as e:
+        logger.warning(f"Failed to cleanup zombie sessions: {e}")
+        return 0
+
+
 async def get_session_from_request(request: Request) -> Optional[dict]:
     """
-    Get session data from request using session token
+    Get session data from request using session token.
     Returns session data with user_id, tenant_id, etc.
+    Also handles cleanup of expired/invalid sessions.
     """
     from app.database import get_db_connection
-    
+
     try:
         # Get session token using improved parsing that handles duplicates
         try:
             session_token = await get_session_token(request)
         except HTTPException:
             return None
-        
+
         if not session_token:
             return None
-        
-        async with get_db_connection(use_transaction=False) as conn:
-            # Get session data from database
+
+        async with get_db_connection() as conn:
+            # First, check if session exists at all
+            session_check = await conn.fetchrow("""
+                SELECT id, expires_at, is_active, ended_at
+                FROM sessions
+                WHERE id = $1
+            """, session_token)
+
+            if session_check:
+                # Session exists, check if it's expired or inactive
+                is_expired = session_check['expires_at'] < datetime.now(session_check['expires_at'].tzinfo)
+                is_inactive = not session_check['is_active']
+
+                if is_expired or is_inactive:
+                    # Mark session as ended if not already
+                    if session_check['ended_at'] is None:
+                        end_reason = 'expired' if is_expired else 'invalidated'
+                        await conn.execute("""
+                            UPDATE sessions
+                            SET is_active = false,
+                                ended_at = NOW(),
+                                end_reason = $2
+                            WHERE id = $1 AND ended_at IS NULL
+                        """, session_token, end_reason)
+                        logger.info(f"🔒 Marked session {session_token[:8]}... as {end_reason}")
+
+                    # Opportunistically clean up other zombie sessions (1 in 10 chance)
+                    import random
+                    if random.random() < 0.1:
+                        await cleanup_zombie_sessions(conn, limit=50)
+
+                    return None
+
+            # Get valid session data
             session_query = """
                 SELECT s.user_id, s.tenant_id, s.expires_at, s.is_active,
                        p.email, p.name
@@ -215,10 +277,17 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
                 LIMIT 1
             """
             session_result = await conn.fetchrow(session_query, session_token)
-            
+
             if not session_result:
                 return None
-            
+
+            # Update last activity timestamp
+            await conn.execute("""
+                UPDATE sessions
+                SET last_activity_at = NOW()
+                WHERE id = $1
+            """, session_token)
+
             return {
                 'user_id': session_result['user_id'],
                 'tenant_id': session_result['tenant_id'],
