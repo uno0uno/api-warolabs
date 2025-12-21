@@ -29,7 +29,6 @@ from app.models.purchase import (
     StatusHistoryResponse,
     AttachmentsResponse,
 )
-from app.services.email_helpers import send_purchase_status_notification
 from app.services.discord_service import discord_purchase_actions_service
 
 # =============================================================================
@@ -606,21 +605,7 @@ async def transition_to_confirmed(
                         LIMIT 1
                     """, purchase_id)
 
-                    if purchase_info and purchase_info['supplier_email']:
-                        await send_purchase_status_notification(
-                            supplier_email=purchase_info['supplier_email'],
-                            supplier_name=purchase_info['supplier_name'],
-                            purchase_number=purchase_info['purchase_number'],
-                            status='confirmed',
-                            notes=data.notes,
-                            metadata={
-                                "confirmation_number": data.confirmation_number,
-                                "estimated_delivery_date": data.estimated_delivery_date.strftime('%d de %B de %Y') if data.estimated_delivery_date else None
-                            },
-                            supplier_token=str(purchase_info['supplier_token']) if purchase_info['supplier_token'] else None,
-                            tenant_site=purchase_info['tenant_site']
-                        )
-                except Exception as email_error:
+                except Exception as query_error:
                     pass
 
                 # Send Discord notification
@@ -756,23 +741,7 @@ async def transition_to_shipped(
                         LIMIT 1
                     """, purchase_id)
 
-                    if purchase_info and purchase_info['supplier_email']:
-                        await send_purchase_status_notification(
-                            supplier_email=purchase_info['supplier_email'],
-                            supplier_name=purchase_info['supplier_name'],
-                            purchase_number=purchase_info['purchase_number'],
-                            status='shipped',
-                            notes=notes,
-                            metadata={
-                                "tracking_number": tracking_number,
-                                "carrier": carrier,
-                                "estimated_delivery_date": estimated_delivery_dt.strftime('%d de %B de %Y') if estimated_delivery_dt else None,
-                                "package_count": package_count
-                            },
-                            supplier_token=str(purchase_info['supplier_token']) if purchase_info['supplier_token'] else None,
-                            tenant_site=purchase_info['tenant_site']
-                        )
-                except Exception as email_error:
+                except Exception as query_error:
                     pass
 
                 # Send Discord notification
@@ -1012,21 +981,7 @@ async def transition_to_received(
                         LIMIT 1
                     """, purchase_id)
 
-                    if purchase_info and purchase_info['supplier_email']:
-                        await send_purchase_status_notification(
-                            supplier_email=purchase_info['supplier_email'],
-                            supplier_name=purchase_info['supplier_name'],
-                            purchase_number=purchase_info['purchase_number'],
-                            status='received',
-                            notes=verification_notes,
-                            metadata={
-                                "partial_reception": partial,
-                                "all_items_approved": all_items_approved
-                            },
-                            supplier_token=str(purchase_info['supplier_token']) if purchase_info['supplier_token'] else None,
-                            tenant_site=purchase_info['tenant_site']
-                        )
-                except Exception as email_error:
+                except Exception as query_error:
                     pass
 
                 # Send Discord notification
@@ -1185,23 +1140,7 @@ async def transition_to_invoiced(
                         LIMIT 1
                     """, purchase_id)
 
-                    if purchase_info and purchase_info['supplier_email']:
-                        await send_purchase_status_notification(
-                            supplier_email=purchase_info['supplier_email'],
-                            supplier_name=purchase_info['supplier_name'],
-                            purchase_number=purchase_info['purchase_number'],
-                            status='invoiced',
-                            notes=notes,
-                            metadata={
-                                "invoice_number": invoice_number,
-                                "invoice_total": float(invoice_amount) if invoice_amount else 0,
-                                "invoice_date": invoice_dt.strftime('%d de %B de %Y'),
-                                "payment_due_date": payment_due_dt.strftime('%d de %B de %Y') if payment_due_dt else None
-                            },
-                            supplier_token=str(purchase_info['supplier_token']) if purchase_info['supplier_token'] else None,
-                            tenant_site=purchase_info['tenant_site']
-                        )
-                except Exception as email_error:
+                except Exception as query_error:
                     pass
 
                 # Send Discord notification
@@ -1327,22 +1266,7 @@ async def transition_to_paid(
                         LIMIT 1
                     """, purchase_id)
 
-                    if purchase_info and purchase_info['supplier_email']:
-                        await send_purchase_status_notification(
-                            supplier_email=purchase_info['supplier_email'],
-                            supplier_name=purchase_info['supplier_name'],
-                            purchase_number=purchase_info['purchase_number'],
-                            status='paid',
-                            notes=notes,
-                            metadata={
-                                "payment_method": payment_method,
-                                "payment_reference": payment_reference,
-                                "payment_date": payment_dt.strftime('%d de %B de %Y')
-                            },
-                            supplier_token=str(purchase_info['supplier_token']) if purchase_info['supplier_token'] else None,
-                            tenant_site=purchase_info['tenant_site']
-                        )
-                except Exception as email_error:
+                except Exception as query_error:
                     pass
 
                 # Send Discord notification
