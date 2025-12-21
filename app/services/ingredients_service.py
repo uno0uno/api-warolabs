@@ -16,7 +16,8 @@ async def get_ingredients_list(
     limit: int = 50,
     search: Optional[str] = None,
     category: Optional[str] = None,
-    supplier_id: Optional[UUID] = None
+    supplier_id: Optional[UUID] = None,
+    type: Optional[str] = None
 ) -> IngredientsListResponse:
     """
     Fetches a list of ingredients from the database with tenant isolation,
@@ -38,6 +39,7 @@ async def get_ingredients_list(
                     i.name,
                     i.unit,
                     i.category,
+                    i.type,
                     i.description,
                     CAST(i.minimum_order_quantity AS float) as minimum_order_quantity,
                     i.created_at,
@@ -79,6 +81,14 @@ async def get_ingredients_list(
                 count_query += f" AND LOWER(category) = LOWER(${count_param_count})"
                 base_params.append(category)
                 count_params.append(category)
+                base_param_count += 1
+                count_param_count += 1
+
+            if type:
+                base_query += f" AND LOWER(i.type) = LOWER(${base_param_count})"
+                count_query += f" AND LOWER(type) = LOWER(${count_param_count})"
+                base_params.append(type)
+                count_params.append(type)
                 base_param_count += 1
                 count_param_count += 1
 

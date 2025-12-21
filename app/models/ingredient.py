@@ -10,6 +10,7 @@ class IngredientBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, description="Name of the ingredient")
     unit: str = Field(..., min_length=1, max_length=50, description="Unit of measure (e.g., kg, liter, unit)")
     category: Optional[str] = Field(None, max_length=255, description="Category of the ingredient")
+    type: Optional[str] = Field('food', max_length=20, description="Type of ingredient: 'food' (alimentos), 'service' (servicios), 'supply' (insumos)")
     description: Optional[str] = Field(None, max_length=1024, description="Detailed description of the ingredient")
     minimum_order_quantity: Optional[float] = Field(None, gt=0, description="Minimum order quantity for the ingredient")
     
@@ -25,6 +26,7 @@ class IngredientUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     unit: Optional[str] = Field(None, min_length=1, max_length=50)
     category: Optional[str] = Field(None, max_length=255)
+    type: Optional[str] = Field(None, max_length=20, description="Type: 'food', 'service', 'supply'")
     description: Optional[str] = Field(None, max_length=1024)
     minimum_order_quantity: Optional[float] = Field(None, gt=0)
     price: Optional[float] = Field(None, gt=0)

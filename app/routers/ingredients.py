@@ -14,12 +14,13 @@ async def get_ingredients_endpoint(
     limit: int = Query(default=50, ge=1, le=10000, description="Items per page"),
     search: Optional[str] = Query(default=None, description="Search by name or description"),
     category: Optional[str] = Query(default=None, description="Filter by ingredient category"),
-    supplier_id: Optional[UUID] = Query(default=None, description="Filter by supplier ID")
+    supplier_id: Optional[UUID] = Query(default=None, description="Filter by supplier ID"),
+    type: Optional[str] = Query(default=None, description="Filter by type: 'food', 'service', 'supply'")
 ):
     """
     Get ingredients list with tenant isolation
     Requires valid session with tenant context
     """
     return await get_ingredients_list(
-        request, response, page, limit, search, category, supplier_id
+        request, response, page, limit, search, category, supplier_id, type
     )
