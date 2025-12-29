@@ -848,9 +848,9 @@ async def transition_to_received(
                             continue
 
                     if quantity_received is not None and quantity_received > 0:
-                        # Get purchase item details including unit and cost
+                        # Get purchase item details including unit, cost, and conversion info
                         purchase_item_data = await conn.fetchrow("""
-                            SELECT unit, unit_cost
+                            SELECT unit, unit_cost, quantity, purchase_quantity, purchase_unit
                             FROM tenant_purchase_items
                             WHERE purchase_id = $1 AND ingredient_id = $2
                         """, purchase_id, ingredient_id)
@@ -861,7 +861,27 @@ async def transition_to_received(
                         ingredient_unit = purchase_item_data['unit']
                         unit_cost = purchase_item_data['unit_cost']
 
-                        # Update purchase item
+                        # Calculate conversion factor from purchase units to base units
+                        # If purchase_quantity exists and is different from quantity,
+                        # we need to convert the received quantity
+                        original_quantity = float(purchase_item_data['quantity']) if purchase_item_data['quantity'] else 0
+                        original_purchase_quantity = float(purchase_item_data['purchase_quantity']) if purchase_item_data['purchase_quantity'] else 0
+
+                        # Determine if conversion is needed
+                        # quantity_received comes in purchase units (e.g., 2 Paquetes)
+                        # We need to convert to base units (e.g., 24 unidades)
+                        if original_purchase_quantity > 0 and original_quantity > 0:
+                            # Calculate conversion factor (base units per purchase unit)
+                            conversion_factor = original_quantity / original_purchase_quantity
+                            # Convert received quantity to base units
+                            quantity_received_base = float(quantity_received) * conversion_factor
+                            logger.info(f"📦 Converting {quantity_received} {purchase_item_data['purchase_unit']} → {quantity_received_base} {ingredient_unit} (factor: {conversion_factor})")
+                        else:
+                            # No conversion needed, quantity is already in base units
+                            quantity_received_base = float(quantity_received)
+                            logger.info(f"📦 No conversion needed: {quantity_received_base} {ingredient_unit}")
+
+                        # Update purchase item with the quantity received (in base units)
                         await conn.execute("""
                             UPDATE tenant_purchase_items
                             SET
@@ -874,7 +894,7 @@ async def transition_to_received(
                                 verified_at = NOW()
                             WHERE purchase_id = $6 AND ingredient_id = $7
                         """,
-                        quantity_received,
+                        quantity_received_base,  # Store in base units
                         item.get('item_condition'),
                         item.get('quality_status'),
                         item.get('quality_notes'),
@@ -882,7 +902,7 @@ async def transition_to_received(
                         purchase_id,
                         ingredient_id)
 
-                        # Update inventory
+                        # Update inventory with base units
                         # Check if ingredient exists in inventory
                         inventory_item = await conn.fetchrow("""
                             SELECT id, current_stock FROM tenant_inventory
@@ -893,7 +913,7 @@ async def transition_to_received(
                         if inventory_item:
                             # Update existing inventory
                             previous_stock = float(inventory_item['current_stock'])
-                            new_stock = previous_stock + float(quantity_received)
+                            new_stock = previous_stock + quantity_received_base
 
                             await conn.execute("""
                                 UPDATE tenant_inventory
@@ -904,7 +924,7 @@ async def transition_to_received(
                             """, new_stock, tenant_id, ingredient_id)
                         else:
                             # Create new inventory entry
-                            new_stock = float(quantity_received)
+                            new_stock = quantity_received_base
 
                             await conn.execute("""
                                 INSERT INTO tenant_inventory (
@@ -916,7 +936,7 @@ async def transition_to_received(
                                 VALUES ($1, $2, $3, 0)
                             """, tenant_id, ingredient_id, new_stock)
 
-                        # Create inventory movement record
+                        # Create inventory movement record with base units
                         await conn.execute("""
                             INSERT INTO tenant_ingredient_movements (
                                 tenant_id,
@@ -936,7 +956,7 @@ async def transition_to_received(
                         """,
                         tenant_id,
                         ingredient_id,
-                        float(quantity_received),
+                        quantity_received_base,  # Use converted quantity
                         ingredient_unit,
                         previous_stock,
                         new_stock,
