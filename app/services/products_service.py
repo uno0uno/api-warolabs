@@ -32,11 +32,14 @@ async def create_product_with_recipe(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
-        # VALIDATION: All products MUST have at least one ingredient since inventory is always controlled
-        if not product_data.ingredients or len(product_data.ingredients) == 0:
+        # VALIDATION: Products must have at least one ingredient OR at least one recipe base
+        has_ingredients = product_data.ingredients and len(product_data.ingredients) > 0
+        has_recipe_bases = product_data.recipe_base_ids and len(product_data.recipe_base_ids) > 0
+
+        if not has_ingredients and not has_recipe_bases:
             raise HTTPException(
                 status_code=400,
-                detail="El producto debe tener al menos un ingrediente. Todos los productos controlan inventario automáticamente."
+                detail="El producto debe tener al menos un ingrediente o una receta base."
             )
 
         async with get_db_connection() as conn:
@@ -604,12 +607,25 @@ async def update_product_with_recipe(
 
                 # 3. Update recipe if ingredients provided
                 if product_data.ingredients is not None:
-                    # VALIDATION: Cannot remove all ingredients - products must have at least one
+                    # VALIDATION: Cannot remove all ingredients unless there are recipe bases
                     if len(product_data.ingredients) == 0:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="El producto debe tener al menos un ingrediente. Todos los productos controlan inventario automáticamente."
-                        )
+                        # Check if product will have recipe bases
+                        has_recipe_bases = False
+                        if product_data.recipe_base_ids is not None:
+                            has_recipe_bases = len(product_data.recipe_base_ids) > 0
+                        else:
+                            # Check existing recipe bases in database
+                            existing_bases = await conn.fetchval(
+                                "SELECT COUNT(*) FROM product_base_recipes WHERE product_id = $1",
+                                product_id
+                            )
+                            has_recipe_bases = existing_bases > 0
+
+                        if not has_recipe_bases:
+                            raise HTTPException(
+                                status_code=400,
+                                detail="El producto debe tener al menos un ingrediente o una receta base."
+                            )
 
                     # Delete existing recipe
                     delete_recipe_query = "DELETE FROM product_recipes WHERE product_id = $1"
