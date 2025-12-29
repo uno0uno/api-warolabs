@@ -3,9 +3,9 @@ from datetime import datetime
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
-from app.core.exceptions import AuthenticationError
+from app.core.exceptions import AuthenticationError, AuthorizationError, ValidationError
 from app.models.auth import Tenant, UserTenantsResponse
-from app.models.tenant import TenantMembersResponse, TenantMemberDetail, TenantMemberProfile
+from app.models.tenant import TenantMembersResponse, TenantMemberDetail, TenantMemberProfile, DeleteMemberResponse
 
 logger = logging.getLogger(__name__)
 
@@ -124,3 +124,64 @@ async def get_tenant_members(request: Request) -> TenantMembersResponse:
     except Exception as e:
         logger.error(f"❌ Error fetching tenant members: {e}", exc_info=True)
         raise AuthenticationError("Error interno del servidor")
+
+
+async def delete_tenant_member(request: Request, member_id: str) -> DeleteMemberResponse:
+    """
+    Remove a member from the current tenant (does not delete their profile)
+    Only admin or superuser can remove members
+    Cannot remove yourself
+    """
+    try:
+        session_context = require_valid_session(request)
+        current_user_id = session_context.user_id
+        current_tenant_id = session_context.tenant_id
+
+        if not current_tenant_id:
+            raise AuthenticationError("No hay un tenant seleccionado")
+
+        async with get_db_connection() as conn:
+            # Check current user's role
+            user_role = await conn.fetchval(
+                "SELECT role FROM tenant_members WHERE user_id = $1 AND tenant_id = $2",
+                current_user_id, current_tenant_id
+            )
+
+            if user_role not in ('admin', 'superuser'):
+                raise AuthorizationError("Solo admin o superuser pueden eliminar miembros")
+
+            # Get member to delete info
+            member_info = await conn.fetchrow(
+                """SELECT tm.id, tm.user_id, p.name, p.email
+                   FROM tenant_members tm
+                   JOIN profile p ON tm.user_id = p.id
+                   WHERE tm.id = $1 AND tm.tenant_id = $2""",
+                member_id, current_tenant_id
+            )
+
+            if not member_info:
+                raise ValidationError("Miembro no encontrado")
+
+            # Cannot delete yourself
+            if str(member_info['user_id']) == str(current_user_id):
+                raise ValidationError("No puedes eliminarte a ti mismo del equipo")
+
+            # Delete from tenant_members only (not from profile)
+            await conn.execute(
+                "DELETE FROM tenant_members WHERE id = $1 AND tenant_id = $2",
+                member_id, current_tenant_id
+            )
+
+            member_name = member_info['name'] or member_info['email']
+            logger.info(f"🗑️ Member {member_name} removed from tenant {current_tenant_id}")
+
+            return DeleteMemberResponse(
+                success=True,
+                message=f"{member_name} ha sido eliminado del equipo"
+            )
+
+    except (AuthenticationError, AuthorizationError, ValidationError):
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error deleting tenant member: {e}", exc_info=True)
+        raise ValidationError("Error al eliminar miembro")

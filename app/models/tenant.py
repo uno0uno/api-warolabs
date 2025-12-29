@@ -45,3 +45,7 @@ class TenantMemberDetail(BaseModel):
 class TenantMembersResponse(BaseModel):
     success: bool = True
     data: List[TenantMemberDetail]
+
+class DeleteMemberResponse(BaseModel):
+    success: bool = True
+    message: str

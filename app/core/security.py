@@ -300,3 +300,9 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
     except Exception as e:
         logger.error(f"❌ Error in get_session_from_request: {e}", exc_info=True)
         return None
+
+
+async def get_current_user_id(request: Request) -> Optional[str]:
+    """Get current user ID from session"""
+    session = await get_session_from_request(request)
+    return session.get('user_id') if session else None
