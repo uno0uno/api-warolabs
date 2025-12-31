@@ -49,3 +49,13 @@ class TenantMembersResponse(BaseModel):
 class DeleteMemberResponse(BaseModel):
     success: bool = True
     message: str
+
+
+class UpdateMemberRoleRequest(BaseModel):
+    role: str = Field(..., description="New role: superuser, admin, employee, member")
+
+
+class UpdateMemberRoleResponse(BaseModel):
+    success: bool = True
+    message: str
+    data: Optional[TenantMemberDetail] = None

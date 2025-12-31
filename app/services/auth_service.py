@@ -8,7 +8,7 @@ from app.database import get_db_connection
 from app.core.security import get_session_token, clear_session_cookie, set_session_cookie, get_client_ip
 from app.core.exceptions import AuthenticationError
 from app.core.middleware import require_valid_session
-from app.models.auth import User, Session, Tenant, SessionResponse, SwitchTenantResponse
+from app.models.auth import User, Session, Tenant, SessionResponse, SwitchTenantResponse, UpdateProfileResponse
 from app.core.logging import log_request_context
 
 logger = logging.getLogger(__name__)
@@ -225,3 +225,81 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
     except Exception as e:
         logger.error(f"❌ Tenant switch error: {e}", exc_info=True)
         raise AuthenticationError("Tenant switch failed")
+
+
+async def update_profile(request: Request, name: Optional[str] = None, user_name: Optional[str] = None,
+                         phone_number: Optional[str] = None, city: Optional[str] = None) -> UpdateProfileResponse:
+    """
+    Update the current user's profile information
+    """
+    try:
+        # Get session context from middleware
+        session_context = require_valid_session(request)
+        user_id = session_context.user_id
+
+        async with get_db_connection() as conn:
+            # Build dynamic update query based on provided fields
+            updates = []
+            values = []
+            param_idx = 1
+
+            if name is not None:
+                updates.append(f"name = ${param_idx}")
+                values.append(name)
+                param_idx += 1
+
+            if user_name is not None:
+                updates.append(f"user_name = ${param_idx}")
+                values.append(user_name)
+                param_idx += 1
+
+            if phone_number is not None:
+                updates.append(f"phone_number = ${param_idx}")
+                values.append(phone_number)
+                param_idx += 1
+
+            if city is not None:
+                updates.append(f"city = ${param_idx}")
+                values.append(city)
+                param_idx += 1
+
+            if not updates:
+                raise AuthenticationError("No fields to update")
+
+            # Add updated_at
+            updates.append(f"updated_at = NOW()")
+
+            # Add user_id as the last parameter
+            values.append(user_id)
+
+            update_query = f"""
+                UPDATE profile
+                SET {', '.join(updates)}
+                WHERE id = ${param_idx}
+                RETURNING id, email, name, created_at
+            """
+
+            result = await conn.fetchrow(update_query, *values)
+
+            if not result:
+                raise AuthenticationError("User not found")
+
+            user = User(
+                id=result['id'],
+                email=result['email'],
+                name=result['name'],
+                createdAt=result['created_at']
+            )
+
+            logger.info(f"✅ Profile updated for user {user_id}")
+
+            return UpdateProfileResponse(
+                user=user,
+                message="Perfil actualizado exitosamente"
+            )
+
+    except AuthenticationError:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Profile update error: {e}", exc_info=True)
+        raise AuthenticationError("Error al actualizar perfil")

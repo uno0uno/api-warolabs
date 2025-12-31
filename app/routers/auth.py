@@ -1,6 +1,6 @@
 import logging
 from fastapi import APIRouter, Request, Response
-from app.services.auth_service import get_session_data, switch_tenant
+from app.services.auth_service import get_session_data, switch_tenant, update_profile
 from app.services.magic_link_service import send_magic_link, verify_code, verify_token
 from app.models.auth import (
     SessionResponse,
@@ -11,7 +11,9 @@ from app.models.auth import (
     VerifyTokenRequest,
     VerifyTokenResponse,
     SwitchTenantRequest,
-    SwitchTenantResponse
+    SwitchTenantResponse,
+    UpdateProfileRequest,
+    UpdateProfileResponse
 )
 
 logger = logging.getLogger(__name__)
@@ -86,3 +88,18 @@ async def signout(request: Request, response: Response):
     except Exception as e:
         logger.error(f"❌ Signout error: {e}", exc_info=True)
         return {"success": True, "message": "Signed out"}  # Always return success for security
+
+
+@router.put("/update-profile", response_model=UpdateProfileResponse)
+async def update_profile_endpoint(request: Request, payload: UpdateProfileRequest):
+    """
+    Update current user's profile information
+    Requires valid session cookie
+    """
+    return await update_profile(
+        request,
+        name=payload.name,
+        user_name=payload.user_name,
+        phone_number=payload.phone_number,
+        city=payload.city
+    )

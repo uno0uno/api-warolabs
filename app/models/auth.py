@@ -78,3 +78,16 @@ class SwitchTenantResponse(BaseModel):
     message: str = "Tenant switched successfully"
     tenant: Tenant
     timestamp: Optional[str] = None
+
+
+class UpdateProfileRequest(BaseModel):
+    name: Optional[str] = None
+    user_name: Optional[str] = None
+    phone_number: Optional[str] = None
+    city: Optional[str] = None
+
+
+class UpdateProfileResponse(BaseModel):
+    success: bool = True
+    message: str = "Profile updated successfully"
+    user: User

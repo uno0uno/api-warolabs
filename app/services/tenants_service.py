@@ -5,7 +5,10 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, AuthorizationError, ValidationError
 from app.models.auth import Tenant, UserTenantsResponse
-from app.models.tenant import TenantMembersResponse, TenantMemberDetail, TenantMemberProfile, DeleteMemberResponse
+from app.models.tenant import (
+    TenantMembersResponse, TenantMemberDetail, TenantMemberProfile,
+    DeleteMemberResponse, UpdateMemberRoleResponse
+)
 
 logger = logging.getLogger(__name__)
 
@@ -185,3 +188,110 @@ async def delete_tenant_member(request: Request, member_id: str) -> DeleteMember
     except Exception as e:
         logger.error(f"❌ Error deleting tenant member: {e}", exc_info=True)
         raise ValidationError("Error al eliminar miembro")
+
+
+async def update_member_role(request: Request, member_id: str, new_role: str) -> UpdateMemberRoleResponse:
+    """
+    Update a member's role in the current tenant
+    Only superuser can change roles
+    Cannot change your own role
+    """
+    VALID_ROLES = ['superuser', 'admin', 'employee', 'member']
+
+    try:
+        session_context = require_valid_session(request)
+        current_user_id = session_context.user_id
+        current_tenant_id = session_context.tenant_id
+
+        if not current_tenant_id:
+            raise AuthenticationError("No hay un tenant seleccionado")
+
+        # Validate role
+        if new_role not in VALID_ROLES:
+            raise ValidationError(f"Rol inválido. Roles válidos: {', '.join(VALID_ROLES)}")
+
+        async with get_db_connection() as conn:
+            # Check current user's role - ONLY superuser can change roles
+            user_role = await conn.fetchval(
+                "SELECT role FROM tenant_members WHERE user_id = $1 AND tenant_id = $2",
+                current_user_id, current_tenant_id
+            )
+
+            if user_role != 'superuser':
+                raise AuthorizationError("Solo el super usuario puede cambiar roles")
+
+            # Get member to update info
+            member_info = await conn.fetchrow(
+                """SELECT tm.id, tm.user_id, tm.role, p.name, p.email
+                   FROM tenant_members tm
+                   JOIN profile p ON tm.user_id = p.id
+                   WHERE tm.id = $1 AND tm.tenant_id = $2""",
+                member_id, current_tenant_id
+            )
+
+            if not member_info:
+                raise ValidationError("Miembro no encontrado")
+
+            # Cannot change your own role
+            if str(member_info['user_id']) == str(current_user_id):
+                raise ValidationError("No puedes cambiar tu propio rol")
+
+            # Check if role is actually changing
+            if member_info['role'] == new_role:
+                raise ValidationError(f"El miembro ya tiene el rol '{new_role}'")
+
+            # Update role
+            await conn.execute(
+                "UPDATE tenant_members SET role = $1 WHERE id = $2 AND tenant_id = $3",
+                new_role, member_id, current_tenant_id
+            )
+
+            # Fetch updated member
+            updated_row = await conn.fetchrow(
+                """SELECT
+                    tm.id,
+                    tm.tenant_id,
+                    tm.user_id,
+                    tm.role,
+                    p.id as profile_id,
+                    p.name,
+                    p.user_name,
+                    p.email,
+                    p.logo_avatar
+                FROM tenant_members tm
+                INNER JOIN profile p ON tm.user_id = p.id
+                WHERE tm.id = $1 AND tm.tenant_id = $2""",
+                member_id, current_tenant_id
+            )
+
+            profile = TenantMemberProfile(
+                id=updated_row['profile_id'],
+                name=updated_row['name'],
+                user_name=updated_row['user_name'],
+                email=updated_row['email'],
+                logo_avatar=updated_row['logo_avatar']
+            )
+
+            updated_member = TenantMemberDetail(
+                id=updated_row['id'],
+                tenant_id=updated_row['tenant_id'],
+                user_id=updated_row['user_id'],
+                role=updated_row['role'],
+                profile=profile
+            )
+
+            member_name = member_info['name'] or member_info['email']
+            old_role = member_info['role']
+            logger.info(f"🔄 Role updated for {member_name}: {old_role} → {new_role}")
+
+            return UpdateMemberRoleResponse(
+                success=True,
+                message=f"Rol de {member_name} actualizado a {new_role}",
+                data=updated_member
+            )
+
+    except (AuthenticationError, AuthorizationError, ValidationError):
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error updating member role: {e}", exc_info=True)
+        raise ValidationError("Error al actualizar rol")

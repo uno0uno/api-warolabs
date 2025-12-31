@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Request
-from app.services.tenants_service import get_user_tenants, get_tenant_members, delete_tenant_member
+from app.services.tenants_service import get_user_tenants, get_tenant_members, delete_tenant_member, update_member_role
 from app.models.auth import UserTenantsResponse
-from app.models.tenant import TenantMembersResponse, DeleteMemberResponse
+from app.models.tenant import TenantMembersResponse, DeleteMemberResponse, UpdateMemberRoleRequest, UpdateMemberRoleResponse
 
 router = APIRouter()
 
@@ -29,3 +29,14 @@ async def delete_tenant_member_endpoint(request: Request, member_id: str):
     Requires admin or superuser role
     """
     return await delete_tenant_member(request, member_id)
+
+
+@router.put("/members/{member_id}/role", response_model=UpdateMemberRoleResponse)
+async def update_member_role_endpoint(request: Request, member_id: str, body: UpdateMemberRoleRequest):
+    """
+    Update a member's role in the current tenant
+    Only superuser can change roles
+    Cannot change your own role
+    Valid roles: superuser, admin, employee, member
+    """
+    return await update_member_role(request, member_id, body.role)
