@@ -78,6 +78,10 @@ class PurchaseItemBase(BaseModel):
     expiry_date: Optional[date] = Field(None, description="Expiry date of the ingredient")
     batch_number: Optional[str] = Field(None, description="Batch or lot number")
     notes: Optional[str] = Field(None, description="Additional notes")
+    # Weight fields for package conversions (Paquetes, Cajas)
+    weight_value: Optional[Decimal] = Field(None, description="Weight value for packages")
+    weight_unit: Optional[str] = Field(None, description="Weight unit (kg, gr, lb)")
+    weight_per_unit_grams: Optional[Decimal] = Field(None, description="Weight per unit in grams")
 
 class PurchaseItemCreate(PurchaseItemBase):
     """Model for creating purchase items"""

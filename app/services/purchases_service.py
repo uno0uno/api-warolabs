@@ -215,7 +215,10 @@ async def get_purchases_list(
                         expiry_date,
                         batch_number,
                         notes,
-                        created_at
+                        created_at,
+                        weight_value,
+                        weight_unit,
+                        weight_per_unit_grams
                     FROM tenant_purchase_items
                     WHERE purchase_id = $1
                 """, row['id'])
@@ -376,7 +379,10 @@ async def get_purchase_by_id(
                     expiry_date,
                     batch_number,
                     notes,
-                    created_at
+                    created_at,
+                    weight_value,
+                    weight_unit,
+                    weight_per_unit_grams
                 FROM tenant_purchase_items
                 WHERE purchase_id = $1
             """, purchase_id)
@@ -601,8 +607,11 @@ async def create_purchase(
                             total_cost,
                             expiry_date,
                             batch_number,
-                            notes
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                            notes,
+                            weight_value,
+                            weight_unit,
+                            weight_per_unit_grams
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                         RETURNING
                             id,
                             purchase_id,
@@ -616,7 +625,10 @@ async def create_purchase(
                             expiry_date,
                             batch_number,
                             notes,
-                            created_at
+                            created_at,
+                            weight_value,
+                            weight_unit,
+                            weight_per_unit_grams
                     """,
                         purchase_id,
                         item_data.ingredient_id,
@@ -628,7 +640,10 @@ async def create_purchase(
                         total_cost,
                         item_data.expiry_date,
                         item_data.batch_number,
-                        item_data.notes
+                        item_data.notes,
+                        item_data.weight_value,
+                        item_data.weight_unit,
+                        item_data.weight_per_unit_grams
                     )
                     items.append(PurchaseItem(**new_item))
 
@@ -829,8 +844,11 @@ async def update_purchase(
                                 total_cost,
                                 expiry_date,
                                 batch_number,
-                                notes
-                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                                notes,
+                                weight_value,
+                                weight_unit,
+                                weight_per_unit_grams
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                         """,
                             purchase_id,
                             item_data.ingredient_id,
@@ -842,7 +860,10 @@ async def update_purchase(
                             total_cost,
                             item_data.expiry_date,
                             item_data.batch_number,
-                            item_data.notes
+                            item_data.notes,
+                            item_data.weight_value,
+                            item_data.weight_unit,
+                            item_data.weight_per_unit_grams
                         )
 
                 # Fetch updated purchase
