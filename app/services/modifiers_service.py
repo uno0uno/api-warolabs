@@ -7,7 +7,7 @@ from app.core.exceptions import AuthenticationError, APIError
 from app.models.modifier import (
     ModifierGroup, ModifierGroupCreate, ModifierGroupUpdate,
     ModifierGroupsListResponse, ModifierGroupResponse, ModifierGroupStats,
-    Modifier, ProductInfo
+    Modifier, ProductInfo, IngredientInfo
 )
 import logging
 
@@ -66,14 +66,15 @@ async def create_modifier_group(
                         tenant_id
                     )
 
-                # 3. Insert modifiers
+                # 3. Insert modifiers (with ingredient linking)
                 if group_data.modifiers:
                     modifier_query = """
                         INSERT INTO modifiers (
                             modifier_group_id, name, price, max_limit,
-                            is_default, is_available, sort_order
+                            is_default, is_available, sort_order,
+                            ingredient_id, ingredient_quantity, ingredient_unit
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     """
 
                     for modifier in group_data.modifiers:
@@ -85,7 +86,10 @@ async def create_modifier_group(
                             modifier.max_limit,
                             modifier.is_default,
                             modifier.is_available,
-                            modifier.sort_order
+                            modifier.sort_order,
+                            modifier.ingredient_id,
+                            modifier.ingredient_quantity,
+                            modifier.ingredient_unit
                         )
 
                 # 4. Get complete group with modifiers and products
@@ -143,22 +147,30 @@ async def get_modifier_group_by_id(
             """
             products_rows = await connection.fetch(products_query, group_id)
 
-            # Get modifiers
+            # Get modifiers with ingredient info
             modifiers_query = """
                 SELECT
-                    id,
-                    modifier_group_id,
-                    name,
-                    price,
-                    max_limit,
-                    is_default,
-                    is_available,
-                    sort_order,
-                    created_at,
-                    updated_at
-                FROM modifiers
-                WHERE modifier_group_id = $1
-                ORDER BY sort_order, name
+                    m.id,
+                    m.modifier_group_id,
+                    m.name,
+                    m.price,
+                    m.max_limit,
+                    m.is_default,
+                    m.is_available,
+                    m.sort_order,
+                    m.created_at,
+                    m.updated_at,
+                    m.ingredient_id,
+                    m.ingredient_quantity,
+                    m.ingredient_unit,
+                    i.name as ingredient_name,
+                    i.unit as ingredient_base_unit,
+                    i.costo_unitario,
+                    i.controla_inventario
+                FROM modifiers m
+                LEFT JOIN ingredients i ON m.ingredient_id = i.id
+                WHERE m.modifier_group_id = $1
+                ORDER BY m.sort_order, m.name
             """
 
             modifier_rows = await connection.fetch(modifiers_query, group_id)
@@ -166,7 +178,37 @@ async def get_modifier_group_by_id(
             # Build group dict
             group_dict = dict(group_row)
             group_dict['products'] = [ProductInfo(id=row['id'], name=row['name']) for row in products_rows]
-            group_dict['modifiers'] = [Modifier(**dict(row)) for row in modifier_rows]
+
+            # Build modifiers with ingredient info
+            modifiers = []
+            for row in modifier_rows:
+                mod_dict = {
+                    'id': row['id'],
+                    'modifier_group_id': row['modifier_group_id'],
+                    'name': row['name'],
+                    'price': row['price'],
+                    'max_limit': row['max_limit'],
+                    'is_default': row['is_default'],
+                    'is_available': row['is_available'],
+                    'sort_order': row['sort_order'],
+                    'created_at': row['created_at'],
+                    'updated_at': row['updated_at'],
+                    'ingredient_id': row['ingredient_id'],
+                    'ingredient_quantity': row['ingredient_quantity'],
+                    'ingredient_unit': row['ingredient_unit'],
+                }
+                # Add ingredient info if linked
+                if row['ingredient_id']:
+                    mod_dict['ingredient'] = IngredientInfo(
+                        id=row['ingredient_id'],
+                        name=row['ingredient_name'],
+                        unit=row['ingredient_base_unit'],
+                        costo_unitario=row['costo_unitario'],
+                        controla_inventario=row['controla_inventario'] or False
+                    )
+                modifiers.append(Modifier(**mod_dict))
+
+            group_dict['modifiers'] = modifiers
 
             return ModifierGroupResponse(data=ModifierGroup(**group_dict))
 
@@ -270,25 +312,62 @@ async def get_modifier_groups_list(
                 products_rows = await conn.fetch(products_query, row['id'])
                 group_dict['products'] = [ProductInfo(id=r['id'], name=r['name']) for r in products_rows]
 
-                # Fetch modifiers for each group
+                # Fetch modifiers for each group with ingredient info
                 modifiers_query = """
                     SELECT
-                        id,
-                        modifier_group_id,
-                        name,
-                        price,
-                        max_limit,
-                        is_default,
-                        is_available,
-                        sort_order,
-                        created_at,
-                        updated_at
-                    FROM modifiers
-                    WHERE modifier_group_id = $1
-                    ORDER BY sort_order, name
+                        m.id,
+                        m.modifier_group_id,
+                        m.name,
+                        m.price,
+                        m.max_limit,
+                        m.is_default,
+                        m.is_available,
+                        m.sort_order,
+                        m.created_at,
+                        m.updated_at,
+                        m.ingredient_id,
+                        m.ingredient_quantity,
+                        m.ingredient_unit,
+                        i.name as ingredient_name,
+                        i.unit as ingredient_base_unit,
+                        i.costo_unitario,
+                        i.controla_inventario
+                    FROM modifiers m
+                    LEFT JOIN ingredients i ON m.ingredient_id = i.id
+                    WHERE m.modifier_group_id = $1
+                    ORDER BY m.sort_order, m.name
                 """
                 modifier_rows = await conn.fetch(modifiers_query, row['id'])
-                group_dict['modifiers'] = [Modifier(**dict(r)) for r in modifier_rows]
+
+                # Build modifiers with ingredient info
+                modifiers = []
+                for r in modifier_rows:
+                    mod_dict = {
+                        'id': r['id'],
+                        'modifier_group_id': r['modifier_group_id'],
+                        'name': r['name'],
+                        'price': r['price'],
+                        'max_limit': r['max_limit'],
+                        'is_default': r['is_default'],
+                        'is_available': r['is_available'],
+                        'sort_order': r['sort_order'],
+                        'created_at': r['created_at'],
+                        'updated_at': r['updated_at'],
+                        'ingredient_id': r['ingredient_id'],
+                        'ingredient_quantity': r['ingredient_quantity'],
+                        'ingredient_unit': r['ingredient_unit'],
+                    }
+                    if r['ingredient_id']:
+                        mod_dict['ingredient'] = IngredientInfo(
+                            id=r['ingredient_id'],
+                            name=r['ingredient_name'],
+                            unit=r['ingredient_base_unit'],
+                            costo_unitario=r['costo_unitario'],
+                            controla_inventario=r['controla_inventario'] or False
+                        )
+                    modifiers.append(Modifier(**mod_dict))
+
+                group_dict['modifiers'] = modifiers
 
                 groups.append(ModifierGroup(**group_dict))
 
@@ -409,14 +488,15 @@ async def update_modifier_group(
 
                     for modifier in group_data.modifiers:
                         if modifier.name in existing_names:
-                            # UPDATE existing modifier
+                            # UPDATE existing modifier (including ingredient fields)
                             mod_id = existing_names[modifier.name]
                             modifiers_to_keep.add(mod_id)
                             await conn.execute(
                                 """
                                 UPDATE modifiers SET
                                     price = $2, max_limit = $3, is_default = $4,
-                                    is_available = $5, sort_order = $6
+                                    is_available = $5, sort_order = $6,
+                                    ingredient_id = $7, ingredient_quantity = $8, ingredient_unit = $9
                                 WHERE id = $1
                                 """,
                                 mod_id,
@@ -424,17 +504,21 @@ async def update_modifier_group(
                                 modifier.max_limit,
                                 modifier.is_default,
                                 modifier.is_available,
-                                modifier.sort_order
+                                modifier.sort_order,
+                                modifier.ingredient_id,
+                                modifier.ingredient_quantity,
+                                modifier.ingredient_unit
                             )
                         else:
-                            # INSERT new modifier
+                            # INSERT new modifier (with ingredient fields)
                             await conn.execute(
                                 """
                                 INSERT INTO modifiers (
                                     modifier_group_id, name, price, max_limit,
-                                    is_default, is_available, sort_order
+                                    is_default, is_available, sort_order,
+                                    ingredient_id, ingredient_quantity, ingredient_unit
                                 )
-                                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                                 """,
                                 group_id,
                                 modifier.name,
@@ -442,7 +526,10 @@ async def update_modifier_group(
                                 modifier.max_limit,
                                 modifier.is_default,
                                 modifier.is_available,
-                                modifier.sort_order
+                                modifier.sort_order,
+                                modifier.ingredient_id,
+                                modifier.ingredient_quantity,
+                                modifier.ingredient_unit
                             )
 
                     # Soft-delete removed modifiers (preserve order history)

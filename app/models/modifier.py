@@ -12,6 +12,15 @@ class ProductInfo(BaseModel):
     name: str
 
 
+class IngredientInfo(BaseModel):
+    """Ingredient info for modifiers linked to inventory"""
+    id: UUID
+    name: str
+    unit: str
+    costo_unitario: Optional[Decimal] = None
+    controla_inventario: bool = False
+
+
 class ModifierBase(BaseModel):
     """Base modifier fields"""
     name: str = Field(..., min_length=1, max_length=255, description="Modifier name")
@@ -20,6 +29,10 @@ class ModifierBase(BaseModel):
     is_default: bool = Field(default=False, description="Selected by default")
     is_available: bool = Field(default=True, description="Available for selection")
     sort_order: int = Field(default=0, ge=0, description="Display order")
+    # Ingredient linking for inventory deduction
+    ingredient_id: Optional[UUID] = Field(None, description="Linked ingredient ID")
+    ingredient_quantity: Optional[Decimal] = Field(None, description="Quantity of ingredient per modifier")
+    ingredient_unit: Optional[str] = Field(None, max_length=20, description="Unit for ingredient quantity")
 
 class ModifierCreate(ModifierBase):
     """Create modifier"""
@@ -33,6 +46,10 @@ class ModifierUpdate(BaseModel):
     is_default: Optional[bool] = None
     is_available: Optional[bool] = None
     sort_order: Optional[int] = Field(None, ge=0)
+    # Ingredient linking
+    ingredient_id: Optional[UUID] = None
+    ingredient_quantity: Optional[Decimal] = None
+    ingredient_unit: Optional[str] = Field(None, max_length=20)
 
 class Modifier(ModifierBase):
     """Complete modifier"""
@@ -40,6 +57,8 @@ class Modifier(ModifierBase):
     modifier_group_id: UUID
     created_at: datetime
     updated_at: datetime
+    # Ingredient info for display (populated from JOIN)
+    ingredient: Optional[IngredientInfo] = None
 
     class Config:
         from_attributes = True
