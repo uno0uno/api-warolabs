@@ -33,6 +33,8 @@ class RecipeBaseIngredient(RecipeBaseIngredientBase):
 
     # Populated from joins
     ingredient_name: Optional[str] = None
+    costo_unitario: Optional[float] = 0
+    controla_inventario: Optional[bool] = False
 
     class Config:
         from_attributes = True

@@ -228,7 +228,21 @@ async def get_recipe_base_types_list(
                             brt.tenant_id,
                             brt.created_at,
                             brt.updated_at,
-                            i.name as ingredient_name
+                            i.name as ingredient_name,
+                            COALESCE(i.controla_inventario, false) as controla_inventario,
+                            COALESCE(
+                                (SELECT pi.unit_cost
+                                 FROM tenant_purchase_items pi
+                                 JOIN tenant_purchases p ON pi.purchase_id = p.id
+                                 WHERE pi.ingredient_id = brt.ingredient_id
+                                 AND p.tenant_id = brt.tenant_id
+                                 AND pi.unit_cost IS NOT NULL
+                                 AND pi.unit_cost > 0
+                                 ORDER BY p.purchase_date DESC
+                                 LIMIT 1),
+                                i.costo_unitario,
+                                0
+                            ) as costo_unitario
                         FROM base_recipe_templates brt
                         LEFT JOIN ingredients i ON brt.ingredient_id = i.id
                         WHERE brt.product_base_type_id = $1 AND brt.tenant_id = $2
@@ -306,7 +320,21 @@ async def get_recipe_base_type_by_id(
                     brt.tenant_id,
                     brt.created_at,
                     brt.updated_at,
-                    i.name as ingredient_name
+                    i.name as ingredient_name,
+                    COALESCE(i.controla_inventario, false) as controla_inventario,
+                    COALESCE(
+                        (SELECT pi.unit_cost
+                         FROM tenant_purchase_items pi
+                         JOIN tenant_purchases p ON pi.purchase_id = p.id
+                         WHERE pi.ingredient_id = brt.ingredient_id
+                         AND p.tenant_id = brt.tenant_id
+                         AND pi.unit_cost IS NOT NULL
+                         AND pi.unit_cost > 0
+                         ORDER BY p.purchase_date DESC
+                         LIMIT 1),
+                        i.costo_unitario,
+                        0
+                    ) as costo_unitario
                 FROM base_recipe_templates brt
                 LEFT JOIN ingredients i ON brt.ingredient_id = i.id
                 WHERE brt.product_base_type_id = $1 AND brt.tenant_id = $2
@@ -465,7 +493,21 @@ async def update_recipe_base_type(
                     brt.tenant_id,
                     brt.created_at,
                     brt.updated_at,
-                    i.name as ingredient_name
+                    i.name as ingredient_name,
+                    COALESCE(i.controla_inventario, false) as controla_inventario,
+                    COALESCE(
+                        (SELECT pi.unit_cost
+                         FROM tenant_purchase_items pi
+                         JOIN tenant_purchases p ON pi.purchase_id = p.id
+                         WHERE pi.ingredient_id = brt.ingredient_id
+                         AND p.tenant_id = brt.tenant_id
+                         AND pi.unit_cost IS NOT NULL
+                         AND pi.unit_cost > 0
+                         ORDER BY p.purchase_date DESC
+                         LIMIT 1),
+                        i.costo_unitario,
+                        0
+                    ) as costo_unitario
                 FROM base_recipe_templates brt
                 LEFT JOIN ingredients i ON brt.ingredient_id = i.id
                 WHERE brt.product_base_type_id = $1 AND brt.tenant_id = $2
