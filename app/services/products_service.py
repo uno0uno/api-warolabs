@@ -213,7 +213,7 @@ async def get_product_by_id(
             """
             recipe_base_rows = await connection.fetch(recipe_base_query, product_id)
 
-            # Get modifier groups with modifiers
+            # Get modifier groups with modifiers (using junction table)
             modifier_groups_query = """
                 SELECT
                     mg.id,
@@ -223,7 +223,8 @@ async def get_product_by_id(
                     mg.is_required,
                     mg.sort_order
                 FROM modifier_groups mg
-                WHERE mg.product_id = $1
+                JOIN product_modifier_groups pmg ON mg.id = pmg.modifier_group_id
+                WHERE pmg.product_id = $1
                 ORDER BY mg.sort_order, mg.name
             """
             modifier_groups_rows = await connection.fetch(modifier_groups_query, product_id)
@@ -473,7 +474,7 @@ async def get_products_list(
                 else:
                     product_dict['ingredients'] = []  # Empty for list view
 
-                # Fetch modifier groups if requested (for POS)
+                # Fetch modifier groups if requested (for POS) - using junction table
                 if include_modifiers:
                     modifier_groups_query = """
                         SELECT
@@ -484,7 +485,8 @@ async def get_products_list(
                             mg.is_required,
                             mg.sort_order
                         FROM modifier_groups mg
-                        WHERE mg.product_id = $1
+                        JOIN product_modifier_groups pmg ON mg.id = pmg.modifier_group_id
+                        WHERE pmg.product_id = $1
                         ORDER BY mg.sort_order, mg.name
                     """
                     modifier_groups_rows = await conn.fetch(modifier_groups_query, row['id'])

@@ -7,7 +7,7 @@ from app.core.exceptions import AuthenticationError, APIError
 from app.models.modifier import (
     ModifierGroup, ModifierGroupCreate, ModifierGroupUpdate,
     ModifierGroupsListResponse, ModifierGroupResponse, ModifierGroupStats,
-    Modifier
+    Modifier, ProductInfo
 )
 import logging
 
@@ -18,7 +18,8 @@ async def create_modifier_group(
     group_data: ModifierGroupCreate
 ) -> ModifierGroupResponse:
     """
-    Creates a modifier group with its modifiers in a single transaction.
+    Creates a modifier group with its modifiers and product associations in a single transaction.
+    Now supports associating with multiple products via junction table.
     """
     try:
         session_context = require_valid_session(request)
@@ -29,18 +30,17 @@ async def create_modifier_group(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
-                # 1. Insert modifier group
+                # 1. Insert modifier group (without product_id)
                 group_query = """
                     INSERT INTO modifier_groups (
-                        product_id, tenant_id, name, min_qty, max_qty,
+                        tenant_id, name, min_qty, max_qty,
                         is_required, sort_order
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     RETURNING id, created_at, updated_at
                 """
                 group_result = await conn.fetchrow(
                     group_query,
-                    group_data.product_id,
                     tenant_id,
                     group_data.name,
                     group_data.min_qty,
@@ -51,7 +51,22 @@ async def create_modifier_group(
 
                 group_id = group_result['id']
 
-                # 2. Insert modifiers
+                # 2. Insert product associations in junction table
+                product_assoc_query = """
+                    INSERT INTO product_modifier_groups (
+                        product_id, modifier_group_id, tenant_id
+                    )
+                    VALUES ($1, $2, $3)
+                """
+                for product_id in group_data.product_ids:
+                    await conn.execute(
+                        product_assoc_query,
+                        product_id,
+                        group_id,
+                        tenant_id
+                    )
+
+                # 3. Insert modifiers
                 if group_data.modifiers:
                     modifier_query = """
                         INSERT INTO modifiers (
@@ -73,7 +88,7 @@ async def create_modifier_group(
                             modifier.sort_order
                         )
 
-                # 3. Get complete group with modifiers
+                # 4. Get complete group with modifiers and products
                 return await get_modifier_group_by_id(request, group_id, conn)
 
     except AuthenticationError as e:
@@ -88,7 +103,7 @@ async def get_modifier_group_by_id(
     group_id: UUID,
     conn=None
 ) -> ModifierGroupResponse:
-    """Get a single modifier group with its modifiers"""
+    """Get a single modifier group with its modifiers and associated products"""
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -97,11 +112,10 @@ async def get_modifier_group_by_id(
             raise AuthenticationError("Tenant ID is required")
 
         async def _fetch_group(connection):
-            # Get group with product name
+            # Get group (without product_id - now using junction table)
             group_query = """
                 SELECT
                     mg.id,
-                    mg.product_id,
                     mg.tenant_id,
                     mg.name,
                     mg.min_qty,
@@ -109,10 +123,8 @@ async def get_modifier_group_by_id(
                     mg.is_required,
                     mg.sort_order,
                     mg.created_at,
-                    mg.updated_at,
-                    p.name as product_name
+                    mg.updated_at
                 FROM modifier_groups mg
-                LEFT JOIN product p ON mg.product_id = p.id
                 WHERE mg.id = $1 AND mg.tenant_id = $2
             """
 
@@ -120,6 +132,16 @@ async def get_modifier_group_by_id(
 
             if not group_row:
                 raise HTTPException(status_code=404, detail="Modifier group not found")
+
+            # Get associated products from junction table
+            products_query = """
+                SELECT p.id, p.name
+                FROM product_modifier_groups pmg
+                JOIN product p ON pmg.product_id = p.id
+                WHERE pmg.modifier_group_id = $1
+                ORDER BY p.name
+            """
+            products_rows = await connection.fetch(products_query, group_id)
 
             # Get modifiers
             modifiers_query = """
@@ -143,6 +165,7 @@ async def get_modifier_group_by_id(
 
             # Build group dict
             group_dict = dict(group_row)
+            group_dict['products'] = [ProductInfo(id=row['id'], name=row['name']) for row in products_rows]
             group_dict['modifiers'] = [Modifier(**dict(row)) for row in modifier_rows]
 
             return ModifierGroupResponse(data=ModifierGroup(**group_dict))
@@ -170,7 +193,7 @@ async def get_modifier_groups_list(
     search: Optional[str] = None,
     product_id: Optional[UUID] = None
 ) -> ModifierGroupsListResponse:
-    """Get list of modifier groups with filters"""
+    """Get list of modifier groups with filters. Now supports multiple products per group."""
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -179,11 +202,10 @@ async def get_modifier_groups_list(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
-            # Base query
+            # Base query - now using junction table for product filtering
             base_query = """
-                SELECT
+                SELECT DISTINCT
                     mg.id,
-                    mg.product_id,
                     mg.tenant_id,
                     mg.name,
                     mg.min_qty,
@@ -191,14 +213,20 @@ async def get_modifier_groups_list(
                     mg.is_required,
                     mg.sort_order,
                     mg.created_at,
-                    mg.updated_at,
-                    p.name as product_name
+                    mg.updated_at
                 FROM modifier_groups mg
-                LEFT JOIN product p ON mg.product_id = p.id
+                LEFT JOIN product_modifier_groups pmg ON mg.id = pmg.modifier_group_id
+                LEFT JOIN product p ON pmg.product_id = p.id
                 WHERE mg.tenant_id = $1
             """
 
-            count_query = "SELECT COUNT(*) FROM modifier_groups WHERE tenant_id = $1"
+            count_query = """
+                SELECT COUNT(DISTINCT mg.id)
+                FROM modifier_groups mg
+                LEFT JOIN product_modifier_groups pmg ON mg.id = pmg.modifier_group_id
+                LEFT JOIN product p ON pmg.product_id = p.id
+                WHERE mg.tenant_id = $1
+            """
 
             params = [tenant_id]
             param_count = 2
@@ -206,13 +234,13 @@ async def get_modifier_groups_list(
             # Add filters
             if search:
                 base_query += f" AND (LOWER(mg.name) LIKE LOWER(${param_count}) OR LOWER(p.name) LIKE LOWER(${param_count}))"
-                count_query += f" AND EXISTS (SELECT 1 FROM modifier_groups mg2 LEFT JOIN product p2 ON mg2.product_id = p2.id WHERE mg2.id = modifier_groups.id AND (LOWER(mg2.name) LIKE LOWER(${param_count}) OR LOWER(p2.name) LIKE LOWER(${param_count})))"
+                count_query += f" AND (LOWER(mg.name) LIKE LOWER(${param_count}) OR LOWER(p.name) LIKE LOWER(${param_count}))"
                 params.append(f"%{search}%")
                 param_count += 1
 
             if product_id:
-                base_query += f" AND mg.product_id = ${param_count}"
-                count_query += f" AND product_id = ${param_count}"
+                base_query += f" AND pmg.product_id = ${param_count}"
+                count_query += f" AND pmg.product_id = ${param_count}"
                 params.append(product_id)
                 param_count += 1
 
@@ -230,6 +258,17 @@ async def get_modifier_groups_list(
             groups = []
             for row in groups_data:
                 group_dict = dict(row)
+
+                # Fetch associated products from junction table
+                products_query = """
+                    SELECT p.id, p.name
+                    FROM product_modifier_groups pmg
+                    JOIN product p ON pmg.product_id = p.id
+                    WHERE pmg.modifier_group_id = $1
+                    ORDER BY p.name
+                """
+                products_rows = await conn.fetch(products_query, row['id'])
+                group_dict['products'] = [ProductInfo(id=r['id'], name=r['name']) for r in products_rows]
 
                 # Fetch modifiers for each group
                 modifiers_query = """
@@ -267,7 +306,7 @@ async def get_modifier_groups_list(
 
 
 async def get_modifier_group_stats(request: Request) -> ModifierGroupStats:
-    """Get modifier group statistics"""
+    """Get modifier group statistics. Now counts products from junction table."""
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -279,10 +318,11 @@ async def get_modifier_group_stats(request: Request) -> ModifierGroupStats:
             stats_query = """
                 SELECT
                     COUNT(DISTINCT mg.id) as total_groups,
-                    COUNT(m.id) as total_modifiers,
-                    COUNT(DISTINCT mg.product_id) as products_with_modifiers
+                    COUNT(DISTINCT m.id) as total_modifiers,
+                    COUNT(DISTINCT pmg.product_id) as products_with_modifiers
                 FROM modifier_groups mg
                 LEFT JOIN modifiers m ON mg.id = m.modifier_group_id
+                LEFT JOIN product_modifier_groups pmg ON mg.id = pmg.modifier_group_id
                 WHERE mg.tenant_id = $1
             """
 
@@ -302,7 +342,7 @@ async def update_modifier_group(
     group_id: UUID,
     group_data: ModifierGroupUpdate
 ) -> ModifierGroupResponse:
-    """Updates a modifier group with its modifiers in a single transaction."""
+    """Updates a modifier group with its modifiers and product associations in a single transaction."""
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -320,12 +360,12 @@ async def update_modifier_group(
 
             # Start transaction
             async with conn.transaction():
-                # 1. Build update query dynamically
+                # 1. Build update query dynamically (excluding product_ids and modifiers)
                 update_fields = []
                 update_values = []
                 param_count = 1
 
-                for field, value in group_data.dict(exclude={'modifiers'}, exclude_unset=True).items():
+                for field, value in group_data.model_dump(exclude={'modifiers', 'product_ids'}, exclude_unset=True).items():
                     if value is not None:
                         update_fields.append(f"{field} = ${param_count}")
                         update_values.append(value)
@@ -341,25 +381,61 @@ async def update_modifier_group(
                     update_values.extend([group_id, tenant_id])
                     await conn.execute(update_query, *update_values)
 
-                # 2. Update modifiers if provided
-                if group_data.modifiers is not None:
-                    # Delete existing modifiers
-                    delete_modifiers_query = "DELETE FROM modifiers WHERE modifier_group_id = $1"
-                    await conn.execute(delete_modifiers_query, group_id)
+                # 2. Update product associations if provided
+                if group_data.product_ids is not None:
+                    # Delete existing associations
+                    delete_assoc_query = "DELETE FROM product_modifier_groups WHERE modifier_group_id = $1"
+                    await conn.execute(delete_assoc_query, group_id)
 
-                    # Insert new modifiers
-                    if group_data.modifiers:
-                        modifier_query = """
-                            INSERT INTO modifiers (
-                                modifier_group_id, name, price, max_limit,
-                                is_default, is_available, sort_order
-                            )
-                            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    # Insert new associations
+                    if group_data.product_ids:
+                        assoc_query = """
+                            INSERT INTO product_modifier_groups (product_id, modifier_group_id, tenant_id)
+                            VALUES ($1, $2, $3)
                         """
+                        for product_id in group_data.product_ids:
+                            await conn.execute(assoc_query, product_id, group_id, tenant_id)
 
-                        for modifier in group_data.modifiers:
+                # 3. Update modifiers if provided (upsert to preserve order history)
+                if group_data.modifiers is not None:
+                    # Get existing modifiers
+                    existing_modifiers = await conn.fetch(
+                        "SELECT id, name FROM modifiers WHERE modifier_group_id = $1",
+                        group_id
+                    )
+                    existing_names = {row['name']: row['id'] for row in existing_modifiers}
+                    existing_ids = set(existing_names.values())
+                    modifiers_to_keep = set()
+
+                    for modifier in group_data.modifiers:
+                        if modifier.name in existing_names:
+                            # UPDATE existing modifier
+                            mod_id = existing_names[modifier.name]
+                            modifiers_to_keep.add(mod_id)
                             await conn.execute(
-                                modifier_query,
+                                """
+                                UPDATE modifiers SET
+                                    price = $2, max_limit = $3, is_default = $4,
+                                    is_available = $5, sort_order = $6
+                                WHERE id = $1
+                                """,
+                                mod_id,
+                                modifier.price,
+                                modifier.max_limit,
+                                modifier.is_default,
+                                modifier.is_available,
+                                modifier.sort_order
+                            )
+                        else:
+                            # INSERT new modifier
+                            await conn.execute(
+                                """
+                                INSERT INTO modifiers (
+                                    modifier_group_id, name, price, max_limit,
+                                    is_default, is_available, sort_order
+                                )
+                                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                """,
                                 group_id,
                                 modifier.name,
                                 modifier.price,
@@ -369,7 +445,15 @@ async def update_modifier_group(
                                 modifier.sort_order
                             )
 
-                # 3. Get complete updated group
+                    # Soft-delete removed modifiers (preserve order history)
+                    modifiers_to_disable = existing_ids - modifiers_to_keep
+                    if modifiers_to_disable:
+                        await conn.execute(
+                            "UPDATE modifiers SET is_available = false WHERE id = ANY($1::uuid[])",
+                            list(modifiers_to_disable)
+                        )
+
+                # 4. Get complete updated group
                 return await get_modifier_group_by_id(request, group_id, conn)
 
     except HTTPException:
