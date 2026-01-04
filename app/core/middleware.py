@@ -216,12 +216,17 @@ async def tenant_detection_middleware(request: Request, call_next):
                     t.email as tenant_email
                 FROM tenant_sites ts
                 JOIN tenants t ON ts.tenant_id = t.id
-                WHERE ts.site = $1 AND ts.is_active = true
+                WHERE ts.site::text = $1 AND ts.is_active = true
                 LIMIT 1
             """
 
-            tenant_data = await conn.fetchrow(tenant_query, requesting_site)
-            
+            try:
+                tenant_data = await conn.fetchrow(tenant_query, requesting_site)
+            except Exception as e:
+                # Handle invalid enum values or other DB errors
+                logger.warning(f"Tenant lookup failed for site '{requesting_site}': {e}")
+                tenant_data = None
+
             if not tenant_data:
                 request.state.tenant_context = TenantContext()
                 return JSONResponse(
@@ -231,7 +236,7 @@ async def tenant_detection_middleware(request: Request, call_next):
                         "message": f"Site '{requesting_site}' is not authorized to access this API"
                     }
                 )
-            
+
             # Create tenant context
             tenant_context = TenantContext(dict(tenant_data))
             request.state.tenant_context = tenant_context
