@@ -838,7 +838,7 @@ async def transition_to_received(
 
                 for item in items:
                     quantity_received = item.get('quantity_received')
-                    ingredient_id = item.get('ingredient_id')
+                    ingredient_id_str = item.get('ingredient_id')
 
                     # Convert quantity_received to float if it's a string
                     if quantity_received is not None:
@@ -846,6 +846,13 @@ async def transition_to_received(
                             quantity_received = float(quantity_received)
                         except (ValueError, TypeError):
                             continue
+
+                    # Convert ingredient_id string to UUID
+                    try:
+                        ingredient_id = UUID(ingredient_id_str) if isinstance(ingredient_id_str, str) else ingredient_id_str
+                    except (ValueError, TypeError) as e:
+                        logger.error(f"Invalid ingredient_id format: {ingredient_id_str} - {e}")
+                        continue
 
                     if quantity_received is not None and quantity_received > 0:
                         # Get purchase item details including unit, cost, and conversion info
@@ -1027,7 +1034,9 @@ async def transition_to_received(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        logger.error(f"Error in transition_to_received: {str(e)}")
+        logger.exception(e)
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 # Function transition_to_verified removed - verification now happens during reception
 
