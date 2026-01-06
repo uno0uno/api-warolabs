@@ -42,9 +42,26 @@ class TenantMemberDetail(BaseModel):
     class Config:
         populate_by_name = True
 
+class PendingInvitation(BaseModel):
+    id: UUID
+    email: str
+    name: Optional[str] = None
+    role: str
+    status: str
+    expires_at: datetime = Field(alias='expiresAt')
+    invited_by_name: Optional[str] = Field(None, alias='invitedByName')
+
+    class Config:
+        populate_by_name = True
+
+
 class TenantMembersResponse(BaseModel):
     success: bool = True
     data: List[TenantMemberDetail]
+    pending_invitations: List[PendingInvitation] = Field(default=[], alias='pendingInvitations')
+
+    class Config:
+        populate_by_name = True
 
 class DeleteMemberResponse(BaseModel):
     success: bool = True

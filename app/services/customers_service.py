@@ -43,20 +43,37 @@ async def search_or_create_customer(
         # Clean phone number (remove spaces, dashes, etc.)
         phone_number = customer_data.phone_number.strip().replace(' ', '').replace('-', '')
 
+        # Check if phone_number is actually an email
+        is_email_input = '@' in phone_number
+
         async with get_db_connection() as conn:
-            # Search for existing customer by phone number
-            search_query = """
-                SELECT
-                    id,
-                    phone_number,
-                    name,
-                    email,
-                    created_at,
-                    updated_at
-                FROM profile
-                WHERE phone_number = $1
-                LIMIT 1
-            """
+            # Search for existing customer by phone number or email
+            if is_email_input:
+                search_query = """
+                    SELECT
+                        id,
+                        phone_number,
+                        name,
+                        email,
+                        created_at,
+                        updated_at
+                    FROM profile
+                    WHERE email = $1
+                    LIMIT 1
+                """
+            else:
+                search_query = """
+                    SELECT
+                        id,
+                        phone_number,
+                        name,
+                        email,
+                        created_at,
+                        updated_at
+                    FROM profile
+                    WHERE phone_number = $1
+                    LIMIT 1
+                """
 
             existing_customer = await conn.fetchrow(search_query, phone_number)
 
@@ -110,7 +127,11 @@ async def search_or_create_customer(
                 logger.info(f"🆕 Creating new customer: {phone_number}")
 
                 # Generate email if not provided
-                email = customer_data.email or f"{phone_number}@customer.temp"
+                # Check if phone_number is actually an email (contains @)
+                if '@' in phone_number and not customer_data.email:
+                    email = phone_number
+                else:
+                    email = customer_data.email or f"{phone_number}@customer.temp"
 
                 create_query = """
                     INSERT INTO profile (

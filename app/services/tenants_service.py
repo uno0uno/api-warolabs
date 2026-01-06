@@ -7,7 +7,7 @@ from app.core.exceptions import AuthenticationError, AuthorizationError, Validat
 from app.models.auth import Tenant, UserTenantsResponse
 from app.models.tenant import (
     TenantMembersResponse, TenantMemberDetail, TenantMemberProfile,
-    DeleteMemberResponse, UpdateMemberRoleResponse
+    DeleteMemberResponse, UpdateMemberRoleResponse, PendingInvitation
 )
 
 logger = logging.getLogger(__name__)
@@ -120,7 +120,34 @@ async def get_tenant_members(request: Request) -> TenantMembersResponse:
                 )
                 members.append(member)
 
-            return TenantMembersResponse(data=members)
+            # Get pending invitations for this tenant
+            invitations_query = """
+                SELECT
+                    ti.id, ti.email, ti.role, ti.status, ti.expires_at,
+                    p.name as invitee_name,
+                    inviter.name as invited_by_name
+                FROM tenant_invitations ti
+                LEFT JOIN profile p ON ti.user_id = p.id
+                LEFT JOIN profile inviter ON ti.invited_by = inviter.id
+                WHERE ti.tenant_id = $1 AND ti.status = 'pending'
+                ORDER BY ti.expires_at DESC
+            """
+            invitation_rows = await conn.fetch(invitations_query, current_tenant_id)
+
+            pending_invitations = [
+                PendingInvitation(
+                    id=row['id'],
+                    email=row['email'],
+                    name=row['invitee_name'],
+                    role=row['role'],
+                    status=row['status'],
+                    expires_at=row['expires_at'],
+                    invited_by_name=row['invited_by_name']
+                )
+                for row in invitation_rows
+            ]
+
+            return TenantMembersResponse(data=members, pending_invitations=pending_invitations)
 
     except AuthenticationError:
         raise

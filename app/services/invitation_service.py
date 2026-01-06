@@ -6,7 +6,7 @@ from uuid import uuid4
 from fastapi import Request, Response
 from app.database import get_db_connection
 from app.core.security import set_session_cookie, get_client_ip, get_current_user_id
-from app.core.middleware import require_valid_tenant
+from app.core.middleware import require_valid_tenant, require_valid_session
 from app.core.exceptions import AuthenticationError, ValidationError, AuthorizationError
 from app.models.invitation import (
     SendInvitationRequest,
@@ -30,23 +30,50 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
     Creates profile if user doesn't exist, then creates invitation
     """
     try:
-        # Get validated tenant context from middleware
-        tenant_context = require_valid_tenant(request)
-        current_user_id = await get_current_user_id(request)
+        # Get session context (this has the ACTUAL tenant the user is working with)
+        session_context = require_valid_session(request)
+        current_user_id = session_context.user_id
+        session_tenant_id = session_context.tenant_id
 
         if not current_user_id:
             raise AuthenticationError("Authentication required")
 
+        if not session_tenant_id:
+            raise ValidationError("No tenant selected in session")
+
+        # Get tenant context from site for email/branding info
+        tenant_context = require_valid_tenant(request)
+
         logger.info(f"📨 Invitation request for {payload.email} from user {current_user_id}")
-        logger.info(f"🏷️ Tenant: {tenant_context.tenant_name} (ID: {tenant_context.tenant_id})")
+        logger.info(f"🏷️ Session Tenant ID: {session_tenant_id}")
 
         async with get_db_connection() as conn:
+            # Get tenant info from database using session tenant_id
+            tenant_info = await conn.fetchrow(
+                """SELECT t.id, t.name, t.slug, t.email as tenant_email, ts.brand_name
+                   FROM tenants t
+                   LEFT JOIN tenant_sites ts ON ts.tenant_id = t.id
+                   WHERE t.id = $1
+                   LIMIT 1""",
+                session_tenant_id
+            )
+
+            if not tenant_info:
+                raise ValidationError("Tenant not found")
+
+            tenant_name = tenant_info['name']
+            # Use site's verified email for sending, fall back to tenant email
+            tenant_email = tenant_context.tenant_email or tenant_info['tenant_email']
+            brand_name = tenant_info['brand_name'] or tenant_name
+
+            logger.info(f"🏷️ Tenant: {tenant_name} (ID: {session_tenant_id})")
+
             # Check if current user has permission (admin or superuser)
             permission_query = """
                 SELECT role FROM tenant_members
                 WHERE user_id = $1 AND tenant_id = $2
             """
-            user_role = await conn.fetchval(permission_query, current_user_id, tenant_context.tenant_id)
+            user_role = await conn.fetchval(permission_query, current_user_id, session_tenant_id)
 
             if user_role not in ('admin', 'superuser'):
                 raise AuthorizationError("Only admin or superuser can send invitations")
@@ -61,7 +88,7 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
                 # Check if already member of this tenant
                 existing_member = await conn.fetchval(
                     "SELECT id FROM tenant_members WHERE user_id = $1 AND tenant_id = $2",
-                    existing_user['id'], tenant_context.tenant_id
+                    existing_user['id'], session_tenant_id
                 )
                 if existing_member:
                     raise ValidationError("User is already a member of this team")
@@ -90,7 +117,7 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
             existing_invitation = await conn.fetchval(
                 """SELECT id FROM tenant_invitations
                    WHERE user_id = $1 AND tenant_id = $2 AND status = 'pending'""",
-                user_id, tenant_context.tenant_id
+                user_id, session_tenant_id
             )
             if existing_invitation:
                 # Cancel old invitation
@@ -117,7 +144,7 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
             invitation = await conn.fetchrow(
                 insert_invitation_query,
                 invitation_id,
-                tenant_context.tenant_id,
+                session_tenant_id,
                 user_id,
                 payload.email,
                 token,
@@ -149,8 +176,8 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
 
             # Prepare template context
             template_context = {
-                'brand_name': tenant_context.brand_name,
-                'tenant_name': tenant_context.tenant_name,
+                'brand_name': brand_name,
+                'tenant_name': tenant_name,
                 'inviter_name': inviter_name or 'Un administrador',
                 'invitee_name': payload.name,
                 'role': 'Administrador' if payload.role.value == 'admin' else 'Super Usuario',
@@ -158,13 +185,13 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
 
             # Generate email content
             html_template = get_invitation_template(invitation_url, template_context)
-            subject = get_invitation_subject(tenant_context.brand_name)
+            subject = get_invitation_subject(brand_name)
 
-            from_name = f"{inviter_name or 'Equipo'} - {tenant_context.brand_name}"
+            from_name = f"{inviter_name or 'Equipo'} - {brand_name}"
 
             # Send email
             email_sent = await ses_service.send_email(
-                from_email=tenant_context.tenant_email,
+                from_email=tenant_email,
                 from_name=from_name,
                 to_emails=[payload.email],
                 subject=subject,
@@ -384,17 +411,22 @@ async def cancel_invitation(request: Request, invitation_id: str) -> CancelInvit
     Cancel a pending invitation
     """
     try:
-        tenant_context = require_valid_tenant(request)
-        current_user_id = await get_current_user_id(request)
+        # Use session tenant, not site tenant
+        session_context = require_valid_session(request)
+        current_user_id = session_context.user_id
+        session_tenant_id = session_context.tenant_id
 
         if not current_user_id:
             raise AuthenticationError("Authentication required")
+
+        if not session_tenant_id:
+            raise ValidationError("No tenant selected in session")
 
         async with get_db_connection() as conn:
             # Check permission
             user_role = await conn.fetchval(
                 "SELECT role FROM tenant_members WHERE user_id = $1 AND tenant_id = $2",
-                current_user_id, tenant_context.tenant_id
+                current_user_id, session_tenant_id
             )
 
             if user_role not in ('admin', 'superuser'):
@@ -405,7 +437,7 @@ async def cancel_invitation(request: Request, invitation_id: str) -> CancelInvit
                 """UPDATE tenant_invitations
                    SET status = 'cancelled'
                    WHERE id = $1 AND tenant_id = $2 AND status = 'pending'""",
-                invitation_id, tenant_context.tenant_id
+                invitation_id, session_tenant_id
             )
 
             if result == "UPDATE 0":
@@ -418,7 +450,7 @@ async def cancel_invitation(request: Request, invitation_id: str) -> CancelInvit
                 message="Invitación cancelada exitosamente"
             )
 
-    except (AuthenticationError, ForbiddenError, ValidationError):
+    except (AuthenticationError, AuthorizationError, ValidationError):
         raise
     except Exception as e:
         logger.error(f"❌ Cancel invitation error: {e}", exc_info=True)
