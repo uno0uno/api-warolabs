@@ -9,10 +9,22 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from app.services.aws_ses_service import ses_service
-from datetime import datetime
+from datetime import datetime, date
 import csv
+
+
 import io
 import logging
+
+
+def parse_date(date_str: Optional[str]) -> Optional[date]:
+    """Convert date string (YYYY-MM-DD) to date object"""
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 logger = logging.getLogger(__name__)
 
@@ -72,15 +84,18 @@ async def get_orders_list(
                 params.append(status)
 
             # Date range filter
-            if date_from:
-                param_count += 1
-                where_conditions.append(f"o.order_date >= ${param_count}::date")
-                params.append(date_from)
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
 
-            if date_to:
+            if parsed_date_from:
                 param_count += 1
-                where_conditions.append(f"o.order_date <= (${param_count}::date + interval '1 day')")
-                params.append(date_to)
+                where_conditions.append(f"o.order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')")
+                params.append(parsed_date_from)
+
+            if parsed_date_to:
+                param_count += 1
+                where_conditions.append(f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')")
+                params.append(parsed_date_to)
 
             where_clause = " AND ".join(where_conditions)
 
@@ -362,15 +377,18 @@ async def get_orders_metrics(
             params = [tenant_id]
             param_count = 1
 
-            if date_from:
-                param_count += 1
-                where_conditions.append(f"order_date >= ${param_count}::date")
-                params.append(date_from)
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
 
-            if date_to:
+            if parsed_date_from:
                 param_count += 1
-                where_conditions.append(f"order_date <= (${param_count}::date + interval '1 day')")
-                params.append(date_to)
+                where_conditions.append(f"order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')")
+                params.append(parsed_date_from)
+
+            if parsed_date_to:
+                param_count += 1
+                where_conditions.append(f"order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')")
+                params.append(parsed_date_to)
 
             where_clause = " AND ".join(where_conditions)
 
@@ -469,15 +487,18 @@ async def export_orders_to_email(
                 params.append(status)
 
             # Date range filter
-            if date_from:
-                param_count += 1
-                where_conditions.append(f"o.order_date >= ${param_count}::date")
-                params.append(date_from)
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
 
-            if date_to:
+            if parsed_date_from:
                 param_count += 1
-                where_conditions.append(f"o.order_date <= (${param_count}::date + interval '1 day')")
-                params.append(date_to)
+                where_conditions.append(f"o.order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')")
+                params.append(parsed_date_from)
+
+            if parsed_date_to:
+                param_count += 1
+                where_conditions.append(f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')")
+                params.append(parsed_date_to)
 
             where_clause = " AND ".join(where_conditions)
 
