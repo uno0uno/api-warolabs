@@ -10,6 +10,22 @@ from app.services import orders_service
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
+@router.get("/metrics")
+async def get_orders_metrics(
+    request: Request,
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None)
+):
+    """
+    Get sales metrics: total sales, average ticket, orders count by status
+
+    Query parameters:
+    - date_from: Start date (YYYY-MM-DD)
+    - date_to: End date (YYYY-MM-DD)
+    """
+    return await orders_service.get_orders_metrics(request, date_from=date_from, date_to=date_to)
+
+
 @router.get("")
 async def get_orders(
     request: Request,
@@ -20,7 +36,9 @@ async def get_orders(
     payment_method: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     sort_field: str = Query("order_date"),
-    sort_direction: str = Query("desc")
+    sort_direction: str = Query("desc"),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None)
 ):
     """
     Get list of orders with filters and pagination
@@ -34,6 +52,8 @@ async def get_orders(
     - status: Filter by status (completed, cancelled)
     - sort_field: Field to sort by (order_number, order_date, total_amount, customer_name, payment_method)
     - sort_direction: Sort direction (asc, desc)
+    - date_from: Start date (YYYY-MM-DD)
+    - date_to: End date (YYYY-MM-DD)
     """
     return await orders_service.get_orders_list(
         request,
@@ -44,7 +64,9 @@ async def get_orders(
         payment_method=payment_method,
         status=status,
         sort_field=sort_field,
-        sort_direction=sort_direction
+        sort_direction=sort_direction,
+        date_from=date_from,
+        date_to=date_to
     )
 
 

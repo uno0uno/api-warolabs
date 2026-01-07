@@ -22,7 +22,9 @@ async def get_orders_list(
     payment_method: Optional[str] = None,
     status: Optional[str] = None,
     sort_field: str = "order_date",
-    sort_direction: str = "desc"
+    sort_direction: str = "desc",
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None
 ) -> dict:
     """
     Get list of POS orders with filters and pagination
@@ -64,6 +66,17 @@ async def get_orders_list(
                 param_count += 1
                 where_conditions.append(f"o.status = ${param_count}")
                 params.append(status)
+
+            # Date range filter
+            if date_from:
+                param_count += 1
+                where_conditions.append(f"o.order_date >= ${param_count}::date")
+                params.append(date_from)
+
+            if date_to:
+                param_count += 1
+                where_conditions.append(f"o.order_date <= (${param_count}::date + interval '1 day')")
+                params.append(date_to)
 
             where_clause = " AND ".join(where_conditions)
 
@@ -321,3 +334,73 @@ async def get_order_items(
     except Exception as e:
         logger.error(f"Error getting order items: {str(e)}")
         raise APIError(f"Error getting order items: {str(e)}", status_code=500)
+
+
+async def get_orders_metrics(
+    request: Request,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None
+) -> dict:
+    """
+    Get sales metrics: total sales, average ticket, orders count by status
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # Build WHERE clause
+            where_conditions = ["tenant_id = $1", "pos_cart_id IS NOT NULL"]
+            params = [tenant_id]
+            param_count = 1
+
+            if date_from:
+                param_count += 1
+                where_conditions.append(f"order_date >= ${param_count}::date")
+                params.append(date_from)
+
+            if date_to:
+                param_count += 1
+                where_conditions.append(f"order_date <= (${param_count}::date + interval '1 day')")
+                params.append(date_to)
+
+            where_clause = " AND ".join(where_conditions)
+
+            metrics_query = f"""
+                SELECT
+                    COUNT(*) as total_orders,
+                    COUNT(*) FILTER (WHERE status = 'completed') as completed_orders,
+                    COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled_orders,
+                    COUNT(*) FILTER (WHERE status = 'pending') as pending_orders,
+                    COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) as total_sales,
+                    COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) as avg_ticket,
+                    COALESCE(SUM(
+                        (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id)
+                    ) FILTER (WHERE status = 'completed'), 0) as total_items
+                FROM orders o
+                WHERE {where_clause}
+            """
+
+            row = await conn.fetchrow(metrics_query, *params)
+
+            return {
+                "success": True,
+                "data": {
+                    "total_sales": float(row['total_sales']),
+                    "total_orders": row['total_orders'],
+                    "completed_orders": row['completed_orders'],
+                    "cancelled_orders": row['cancelled_orders'],
+                    "pending_orders": row['pending_orders'],
+                    "avg_ticket": float(row['avg_ticket']),
+                    "total_items": row['total_items']
+                }
+            }
+
+    except AuthenticationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting orders metrics: {str(e)}")
+        raise APIError(f"Error getting orders metrics: {str(e)}", status_code=500)
