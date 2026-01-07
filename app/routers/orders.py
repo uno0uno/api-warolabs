@@ -128,3 +128,30 @@ async def get_order_items(
     Get order items with modifiers
     """
     return await orders_service.get_order_items(request, order_id)
+
+
+@router.delete("/{order_id}/items/{item_id}")
+async def delete_order_item(
+    request: Request,
+    order_id: UUID,
+    item_id: UUID
+):
+    """
+    Delete an order item and its associated modifiers.
+    Also updates the order total.
+    """
+    return await orders_service.delete_order_item(request, order_id, item_id)
+
+
+@router.delete("/{order_id}/items/{item_id}/modifiers/{modifier_id}")
+async def delete_order_item_modifier(
+    request: Request,
+    order_id: UUID,
+    item_id: UUID,
+    modifier_id: UUID
+):
+    """
+    Delete a modifier from an order item.
+    Also updates the item subtotal and order total.
+    """
+    return await orders_service.delete_order_item_modifier(request, order_id, item_id, modifier_id)

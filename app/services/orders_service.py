@@ -307,7 +307,8 @@ async def get_order_items(
 
                 modifiers = [
                     {
-                        "id": str(mod['modifier_id']) if mod['modifier_id'] else None,
+                        "id": str(mod['id']),  # order_item_modifier ID for deletion
+                        "modifier_id": str(mod['modifier_id']) if mod['modifier_id'] else None,
                         "name": mod['modifier_name'],
                         "price": float(mod['price_at_purchase'])
                     }
@@ -661,3 +662,375 @@ Tecnología colombiana para el mundo.
     except Exception as e:
         logger.error(f"Error exporting orders: {str(e)}")
         raise APIError(f"Error al exportar ventas: {str(e)}", status_code=500)
+
+
+async def delete_order_item(
+    request: Request,
+    order_id: UUID,
+    item_id: UUID
+) -> dict:
+    """
+    Delete an order item and its associated modifiers.
+    Returns ingredients to inventory (reverse of POS consumption).
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # Verify order exists and get order number
+                order_query = """
+                    SELECT id, order_number FROM orders
+                    WHERE id = $1 AND tenant_id = $2 AND pos_cart_id IS NOT NULL
+                """
+                order_row = await conn.fetchrow(order_query, order_id, tenant_id)
+
+                if not order_row:
+                    raise APIError("Order not found", status_code=404)
+
+                order_number = order_row['order_number']
+
+                # Get item details before deletion
+                item_query = """
+                    SELECT oi.id, oi.product_id, oi.quantity, p.name as product_name
+                    FROM order_items oi
+                    JOIN product p ON oi.product_id = p.id
+                    WHERE oi.id = $1 AND oi.order_id = $2
+                """
+                item_row = await conn.fetchrow(item_query, item_id, order_id)
+
+                if not item_row:
+                    raise APIError("Order item not found", status_code=404)
+
+                # Check if this is the last item - don't allow deletion
+                items_count_query = """
+                    SELECT COUNT(*) as count FROM order_items WHERE order_id = $1
+                """
+                items_count_row = await conn.fetchrow(items_count_query, order_id)
+                if items_count_row['count'] <= 1:
+                    raise APIError("No se puede eliminar el único producto de la venta", status_code=400)
+
+                product_id = item_row['product_id']
+                item_quantity = float(item_row['quantity'])
+                product_name = item_row['product_name']
+
+                # 1. Return ingredients from product recipes + base recipes
+                ingredients_query = """
+                    -- Direct product ingredients
+                    SELECT
+                        pr.ingredient_id,
+                        pr.quantity,
+                        pr.unit,
+                        i.name as ingredient_name
+                    FROM product_recipes pr
+                    JOIN ingredients i ON pr.ingredient_id = i.id
+                    WHERE pr.product_id = $1
+
+                    UNION ALL
+
+                    -- Ingredients from recipe bases
+                    SELECT
+                        brt.ingredient_id,
+                        brt.base_quantity as quantity,
+                        brt.unit,
+                        i.name as ingredient_name
+                    FROM product_base_recipes pbr
+                    JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+                    JOIN ingredients i ON brt.ingredient_id = i.id
+                    WHERE pbr.product_id = $1
+                """
+                ingredients = await conn.fetch(ingredients_query, product_id)
+
+                for ingredient in ingredients:
+                    quantity_to_return = item_quantity * float(ingredient['quantity'])
+                    await _return_ingredient_to_stock(
+                        conn, tenant_id, user_id, order_id, order_number,
+                        ingredient['ingredient_id'],
+                        quantity_to_return,
+                        ingredient['unit'],
+                        ingredient['ingredient_name'],
+                        f"Devolución por eliminación de {int(item_quantity)}x {product_name}"
+                    )
+
+                # 2. Return ingredients from modifiers
+                modifiers_query = """
+                    SELECT
+                        oim.modifier_id,
+                        oim.modifier_name,
+                        oim.quantity as modifier_qty,
+                        m.ingredient_id,
+                        m.ingredient_quantity,
+                        m.ingredient_unit,
+                        i.name as ingredient_name
+                    FROM order_item_modifiers oim
+                    LEFT JOIN modifiers m ON oim.modifier_id = m.id
+                    LEFT JOIN ingredients i ON m.ingredient_id = i.id
+                    WHERE oim.order_item_id = $1
+                """
+                modifiers = await conn.fetch(modifiers_query, item_id)
+
+                for modifier in modifiers:
+                    if modifier['ingredient_id'] and modifier['ingredient_quantity']:
+                        modifier_qty = float(modifier['modifier_qty']) if modifier['modifier_qty'] else 1.0
+                        quantity_to_return = item_quantity * modifier_qty * float(modifier['ingredient_quantity'])
+                        await _return_ingredient_to_stock(
+                            conn, tenant_id, user_id, order_id, order_number,
+                            modifier['ingredient_id'],
+                            quantity_to_return,
+                            modifier['ingredient_unit'] or 'und',
+                            modifier['ingredient_name'],
+                            f"Devolución modificador {modifier['modifier_name']} de {product_name}"
+                        )
+
+                # 3. Delete associated modifiers (foreign key constraint)
+                await conn.execute(
+                    "DELETE FROM order_item_modifiers WHERE order_item_id = $1",
+                    item_id
+                )
+
+                # 4. Delete the order item
+                await conn.execute(
+                    "DELETE FROM order_items WHERE id = $1",
+                    item_id
+                )
+
+                # 5. Update order total
+                new_total_query = """
+                    SELECT COALESCE(SUM(subtotal), 0) as new_total
+                    FROM order_items
+                    WHERE order_id = $1
+                """
+                new_total_row = await conn.fetchrow(new_total_query, order_id)
+                new_total = float(new_total_row['new_total'])
+
+                await conn.execute(
+                    "UPDATE orders SET total_amount = $1 WHERE id = $2",
+                    new_total, order_id
+                )
+
+                logger.info(f"Order item deleted and inventory restored for Order #{order_number}")
+
+                return {
+                    "success": True,
+                    "message": "Item eliminado y stock actualizado",
+                    "data": {
+                        "new_total": new_total
+                    }
+                }
+
+    except (AuthenticationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error deleting order item: {str(e)}")
+        raise APIError(f"Error deleting order item: {str(e)}", status_code=500)
+
+
+async def _return_ingredient_to_stock(
+    conn, tenant_id, user_id, order_id, order_number,
+    ingredient_id, quantity, unit, ingredient_name, reason_detail
+):
+    """
+    Helper function to return an ingredient to stock and create movement record.
+    """
+    # Get current stock
+    stock_row = await conn.fetchrow(
+        """
+        SELECT current_stock FROM tenant_inventory
+        WHERE ingredient_id = $1 AND tenant_id = $2
+        FOR UPDATE
+        """,
+        ingredient_id, tenant_id
+    )
+
+    previous_stock = float(stock_row['current_stock']) if stock_row else 0.0
+    new_stock = previous_stock + quantity
+
+    # Update or create inventory record
+    if stock_row:
+        await conn.execute(
+            """
+            UPDATE tenant_inventory
+            SET current_stock = $1, last_updated = NOW()
+            WHERE ingredient_id = $2 AND tenant_id = $3
+            """,
+            new_stock, ingredient_id, tenant_id
+        )
+    else:
+        await conn.execute(
+            """
+            INSERT INTO tenant_inventory (
+                tenant_id, ingredient_id, current_stock, minimum_stock, last_updated
+            ) VALUES ($1, $2, $3, 0, NOW())
+            """,
+            tenant_id, ingredient_id, quantity
+        )
+
+    # Create movement record
+    await conn.execute(
+        """
+        INSERT INTO tenant_ingredient_movements (
+            tenant_id, ingredient_id, movement_type,
+            quantity_change, unit, previous_stock, new_stock,
+            reference_table, reference_id, reason, created_by, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+        """,
+        tenant_id,
+        ingredient_id,
+        'return',  # New movement type for returns
+        quantity,  # Positive = adding back to stock
+        unit,
+        previous_stock,
+        new_stock,
+        'orders',
+        order_id,
+        f"Ajuste Venta #{order_number}: {reason_detail} ({ingredient_name})",
+        user_id
+    )
+
+    logger.info(f"Inventory restored: {ingredient_name} +{quantity}{unit} (Order #{order_number})")
+
+
+async def delete_order_item_modifier(
+    request: Request,
+    order_id: UUID,
+    item_id: UUID,
+    modifier_id: UUID
+) -> dict:
+    """
+    Delete a modifier from an order item.
+    Returns ingredient to inventory if modifier has linked ingredient.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # Verify order exists and get order number
+                order_query = """
+                    SELECT id, order_number FROM orders
+                    WHERE id = $1 AND tenant_id = $2 AND pos_cart_id IS NOT NULL
+                """
+                order_row = await conn.fetchrow(order_query, order_id, tenant_id)
+
+                if not order_row:
+                    raise APIError("Order not found", status_code=404)
+
+                order_number = order_row['order_number']
+
+                # Get item details
+                item_query = """
+                    SELECT oi.id, oi.quantity, p.name as product_name
+                    FROM order_items oi
+                    JOIN product p ON oi.product_id = p.id
+                    WHERE oi.id = $1 AND oi.order_id = $2
+                """
+                item_row = await conn.fetchrow(item_query, item_id, order_id)
+
+                if not item_row:
+                    raise APIError("Order item not found", status_code=404)
+
+                item_quantity = float(item_row['quantity'])
+                product_name = item_row['product_name']
+
+                # Get modifier details with ingredient info
+                modifier_query = """
+                    SELECT
+                        oim.id,
+                        oim.price_at_purchase,
+                        oim.modifier_name,
+                        oim.quantity as modifier_qty,
+                        oim.modifier_id as original_modifier_id,
+                        m.ingredient_id,
+                        m.ingredient_quantity,
+                        m.ingredient_unit,
+                        i.name as ingredient_name
+                    FROM order_item_modifiers oim
+                    LEFT JOIN modifiers m ON oim.modifier_id = m.id
+                    LEFT JOIN ingredients i ON m.ingredient_id = i.id
+                    WHERE oim.id = $1 AND oim.order_item_id = $2
+                """
+                modifier_row = await conn.fetchrow(modifier_query, modifier_id, item_id)
+
+                if not modifier_row:
+                    raise APIError("Modifier not found", status_code=404)
+
+                modifier_name = modifier_row['modifier_name']
+
+                # Return ingredient to stock if modifier has linked ingredient
+                if modifier_row['ingredient_id'] and modifier_row['ingredient_quantity']:
+                    modifier_qty = float(modifier_row['modifier_qty']) if modifier_row['modifier_qty'] else 1.0
+                    quantity_to_return = item_quantity * modifier_qty * float(modifier_row['ingredient_quantity'])
+
+                    await _return_ingredient_to_stock(
+                        conn, tenant_id, user_id, order_id, order_number,
+                        modifier_row['ingredient_id'],
+                        quantity_to_return,
+                        modifier_row['ingredient_unit'] or 'und',
+                        modifier_row['ingredient_name'],
+                        f"Devolución modificador {modifier_name} de {product_name}"
+                    )
+
+                # Delete the modifier
+                await conn.execute(
+                    "DELETE FROM order_item_modifiers WHERE id = $1",
+                    modifier_id
+                )
+
+                # Update item subtotal
+                new_item_subtotal_query = """
+                    SELECT
+                        oi.price_at_purchase * oi.quantity +
+                        COALESCE(SUM(oim.price_at_purchase * oi.quantity), 0) as new_subtotal
+                    FROM order_items oi
+                    LEFT JOIN order_item_modifiers oim ON oim.order_item_id = oi.id
+                    WHERE oi.id = $1
+                    GROUP BY oi.id, oi.price_at_purchase, oi.quantity
+                """
+                new_subtotal_row = await conn.fetchrow(new_item_subtotal_query, item_id)
+                new_item_subtotal = float(new_subtotal_row['new_subtotal']) if new_subtotal_row else 0
+
+                await conn.execute(
+                    "UPDATE order_items SET subtotal = $1 WHERE id = $2",
+                    new_item_subtotal, item_id
+                )
+
+                # Update order total
+                new_total_query = """
+                    SELECT COALESCE(SUM(subtotal), 0) as new_total
+                    FROM order_items
+                    WHERE order_id = $1
+                """
+                new_total_row = await conn.fetchrow(new_total_query, order_id)
+                new_total = float(new_total_row['new_total'])
+
+                await conn.execute(
+                    "UPDATE orders SET total_amount = $1 WHERE id = $2",
+                    new_total, order_id
+                )
+
+                logger.info(f"Modifier {modifier_name} deleted from Order #{order_number}")
+
+                return {
+                    "success": True,
+                    "message": "Modificador eliminado y stock actualizado",
+                    "data": {
+                        "new_item_subtotal": new_item_subtotal,
+                        "new_total": new_total
+                    }
+                }
+
+    except (AuthenticationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error deleting order item modifier: {str(e)}")
+        raise APIError(f"Error deleting order item modifier: {str(e)}", status_code=500)
