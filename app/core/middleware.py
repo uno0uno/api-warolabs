@@ -74,9 +74,32 @@ class TenantContext:
             'is_valid': self.is_valid
         }
 
+
+def extract_api_key(request: Request) -> Optional[str]:
+    """
+    Extract API key from request headers.
+    Supports:
+    - Authorization: Bearer waro_sk_xxx
+    - X-API-Key: waro_sk_xxx
+    """
+    # Try Authorization header first
+    auth_header = request.headers.get('authorization', '')
+    if auth_header.startswith('Bearer '):
+        token = auth_header[7:]  # Remove 'Bearer ' prefix
+        if token.startswith('waro_'):
+            return token
+
+    # Try X-API-Key header
+    api_key_header = request.headers.get('x-api-key', '')
+    if api_key_header.startswith('waro_'):
+        return api_key_header
+
+    return None
+
+
 async def tenant_detection_middleware(request: Request, call_next):
     """
-    Middleware to detect and validate tenant from request origin
+    Middleware to detect and validate tenant from request origin or API key
     Sets request.state.tenant_context for use in endpoints
     """
     try:
@@ -84,7 +107,41 @@ async def tenant_detection_middleware(request: Request, call_next):
         if request.url.path in ['/health', '/docs', '/redoc', '/openapi.json', '/']:
             response = await call_next(request)
             return response
-        
+
+        # Check for API key authentication - if present, get tenant from token
+        api_key = extract_api_key(request)
+        if api_key:
+            try:
+                from app.services.api_tokens_service import validate_api_key
+                api_key_data = await validate_api_key(api_key)
+                if api_key_data:
+                    # Get tenant info from database using token's tenant_id
+                    async with get_db_connection(use_transaction=False) as conn:
+                        tenant_query = """
+                            SELECT
+                                t.id as tenant_id,
+                                t.name as tenant_name,
+                                t.slug as tenant_slug,
+                                t.email as tenant_email,
+                                ts.site,
+                                ts.brand_name,
+                                ts.is_active
+                            FROM tenants t
+                            LEFT JOIN tenant_sites ts ON t.id = ts.tenant_id AND ts.is_active = true
+                            WHERE t.id = $1
+                            LIMIT 1
+                        """
+                        from uuid import UUID
+                        tenant_data = await conn.fetchrow(tenant_query, UUID(api_key_data['tenant_id']))
+                        if tenant_data:
+                            request.state.tenant_context = TenantContext(dict(tenant_data))
+                            logger.debug(f"Tenant context set from API key: {tenant_data['tenant_name']}")
+                            response = await call_next(request)
+                            return response
+            except Exception as e:
+                logger.warning(f"API key tenant detection failed: {e}")
+                # Fall through to header-based detection
+
         # Detect requesting site from headers
         referer = request.headers.get('referer', '')
         origin = request.headers.get('origin', '')
@@ -269,10 +326,42 @@ def require_valid_tenant(request: Request) -> TenantContext:
         raise ValidationError("Valid tenant context required")
     return tenant_context
 
+class ApiKeyContext:
+    """API Key authentication context"""
+    def __init__(self, api_key_data: Optional[Dict[str, Any]] = None):
+        if api_key_data:
+            self.token_id = api_key_data.get('token_id')
+            self.tenant_id = api_key_data.get('tenant_id')
+            self.scopes = api_key_data.get('scopes', [])
+            self.is_valid = True
+        else:
+            self.token_id = None
+            self.tenant_id = None
+            self.scopes = []
+            self.is_valid = False
+
+    def has_scope(self, scope: str) -> bool:
+        """Check if API key has a specific scope"""
+        if 'write' in self.scopes:
+            return True  # write implies all permissions
+        if 'read' in self.scopes and scope.endswith(':read'):
+            return True
+        return scope in self.scopes
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'token_id': self.token_id,
+            'tenant_id': self.tenant_id,
+            'scopes': self.scopes,
+            'is_valid': self.is_valid
+        }
+
+
 async def session_validation_middleware(request: Request, call_next):
     """
-    Middleware to validate session for protected endpoints
+    Middleware to validate session or API key for protected endpoints
     Sets request.state.session_context for use in endpoints
+    Also sets request.state.api_key_context if using API key auth
     """
     try:
         # Skip session validation for public endpoints
@@ -288,9 +377,40 @@ async def session_validation_middleware(request: Request, call_next):
         # Handle exact root path separately
         if path == '/' or any(path.startswith(endpoint) for endpoint in public_endpoints) or any(path.startswith(prefix) for prefix in public_prefixes):
             request.state.session_context = SessionContext()
+            request.state.api_key_context = ApiKeyContext()
             return await call_next(request)
-        
-        # Use improved session validation that handles multiple cookies
+
+        # First, check for API key authentication
+        api_key = extract_api_key(request)
+        if api_key:
+            try:
+                from app.services.api_tokens_service import validate_api_key
+                api_key_data = await validate_api_key(api_key)
+                if api_key_data:
+                    request.state.api_key_context = ApiKeyContext(api_key_data)
+                    # Create a pseudo-session context for API key auth
+                    # This allows existing code to work with API key auth
+                    pseudo_session = {
+                        'user_id': None,  # API keys don't have a user
+                        'tenant_id': api_key_data['tenant_id'],
+                        'email': None,
+                        'name': f"API Key ({api_key[:16]}...)",
+                        'expires_at': None,
+                        'is_active': True
+                    }
+                    request.state.session_context = SessionContext(pseudo_session)
+                    logger.debug(f"✅ API key authenticated: {api_key[:16]}... for tenant {api_key_data['tenant_id']}")
+                    return await call_next(request)
+                else:
+                    logger.warning(f"❌ Invalid API key: {api_key[:16]}...")
+                    request.state.api_key_context = ApiKeyContext()
+            except Exception as e:
+                logger.error(f"❌ API key validation error: {e}")
+                request.state.api_key_context = ApiKeyContext()
+        else:
+            request.state.api_key_context = ApiKeyContext()
+
+        # Fall back to session-based authentication
         from app.core.security import get_session_from_request
         try:
             session_data = await get_session_from_request(request)
@@ -304,12 +424,13 @@ async def session_validation_middleware(request: Request, call_next):
             # No valid session found
             logger.warning(f"❌ Session validation error for path {path}: {e}")
             request.state.session_context = SessionContext()
-            
+
         return await call_next(request)
-        
+
     except Exception as e:
         logger.error(f"Session validation error: {e}")
         request.state.session_context = SessionContext()
+        request.state.api_key_context = ApiKeyContext()
         return await call_next(request)
 
 def get_session_context(request: Request) -> SessionContext:
@@ -327,6 +448,28 @@ def require_valid_session(request: Request) -> SessionContext:
         from app.core.exceptions import AuthenticationError
         raise AuthenticationError("Valid session required")
     return session_context
+
+
+def get_api_key_context(request: Request) -> ApiKeyContext:
+    """
+    Helper function to get API key context from request
+    """
+    return getattr(request.state, 'api_key_context', ApiKeyContext())
+
+
+def require_api_key_scope(request: Request, scope: str) -> ApiKeyContext:
+    """
+    Helper function that raises error if API key doesn't have required scope
+    """
+    api_key_context = get_api_key_context(request)
+    if not api_key_context.is_valid:
+        from app.core.exceptions import AuthenticationError
+        raise AuthenticationError("Valid API key required")
+    if not api_key_context.has_scope(scope):
+        from app.core.exceptions import AuthorizationError
+        raise AuthorizationError(f"API key missing required scope: {scope}")
+    return api_key_context
+
 
 async def request_logging_middleware(request: Request, call_next):
     """

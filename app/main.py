@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -115,6 +115,7 @@ app.include_router(orders.router)
 app.include_router(inventory.router)
 app.include_router(articles.router, prefix="/blog", tags=["blog"])
 app.include_router(invitations.router, prefix="/invitations", tags=["invitations"])
+app.include_router(api_tokens.router, prefix="/api-tokens", tags=["api-tokens"])
 
 @app.get("/")
 async def root():
