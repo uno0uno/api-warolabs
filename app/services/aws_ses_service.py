@@ -2,6 +2,9 @@ import logging
 import boto3
 from botocore.exceptions import ClientError
 from typing import List, Optional
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -105,6 +108,77 @@ class AWSSESService:
 
         except Exception as e:
             logger.error(f"❌ Failed to send email: {e}")
+            return False
+
+    async def send_email_with_attachment(
+        self,
+        from_email: str,
+        from_name: Optional[str] = None,
+        to_emails: List[str] = None,
+        subject: str = "",
+        text_body: Optional[str] = None,
+        attachment_data: bytes = None,
+        attachment_filename: str = "attachment.xml",
+        attachment_type: str = "application/xml"
+    ) -> bool:
+        """
+        Send email with attachment using AWS SES raw email
+        """
+        if not self.client:
+            logger.error("❌ AWS SES client not initialized - cannot send email")
+            return False
+
+        if not to_emails:
+            logger.error("❌ No recipient email addresses provided")
+            return False
+
+        try:
+            # Create multipart message
+            msg = MIMEMultipart('mixed')
+
+            # Set headers
+            source = f"{from_name} <{from_email}>" if from_name else from_email
+            msg['From'] = source
+            msg['To'] = ', '.join(to_emails)
+            msg['Subject'] = subject
+
+            # Add text body
+            if text_body:
+                text_part = MIMEText(text_body, 'plain', 'utf-8')
+                msg.attach(text_part)
+
+            # Add attachment
+            if attachment_data:
+                attachment = MIMEApplication(attachment_data)
+                attachment.add_header(
+                    'Content-Disposition',
+                    'attachment',
+                    filename=attachment_filename
+                )
+                attachment.add_header('Content-Type', attachment_type)
+                msg.attach(attachment)
+
+            # Send raw email
+            response = self.client.send_raw_email(
+                Source=source,
+                Destinations=to_emails,
+                RawMessage={'Data': msg.as_string()}
+            )
+
+            message_id = response['MessageId']
+            logger.info(f"✅ Email with attachment sent successfully. MessageId: {message_id}")
+            logger.info(f"📧 From: {source} | To: {', '.join(to_emails)} | Subject: {subject} | Attachment: {attachment_filename}")
+
+            return True
+
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            error_message = e.response['Error']['Message']
+            logger.error(f"❌ AWS SES ClientError: {error_code} - {error_message}")
+            return False
+
+        except Exception as e:
+            logger.error(f"❌ Failed to send email with attachment: {e}")
             return False
 
 # Global instance

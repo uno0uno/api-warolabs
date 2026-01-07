@@ -26,6 +26,44 @@ async def get_orders_metrics(
     return await orders_service.get_orders_metrics(request, date_from=date_from, date_to=date_to)
 
 
+@router.post("/export")
+async def export_orders(
+    request: Request,
+    search: Optional[str] = Query(None),
+    search_field: Optional[str] = Query(None),
+    payment_method: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    sort_field: str = Query("order_date"),
+    sort_direction: str = Query("desc"),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None)
+):
+    """
+    Export all orders based on filters and send via email to the requesting user
+
+    Query parameters:
+    - search: Search term
+    - search_field: Field to search in (order_number, customer_name, customer_phone)
+    - payment_method: Filter by payment method (cash, card, digital)
+    - status: Filter by status (completed, cancelled, pending)
+    - sort_field: Field to sort by
+    - sort_direction: Sort direction (asc, desc)
+    - date_from: Start date (YYYY-MM-DD)
+    - date_to: End date (YYYY-MM-DD)
+    """
+    return await orders_service.export_orders_to_email(
+        request,
+        search=search,
+        search_field=search_field,
+        payment_method=payment_method,
+        status=status,
+        sort_field=sort_field,
+        sort_direction=sort_direction,
+        date_from=date_from,
+        date_to=date_to
+    )
+
+
 @router.get("")
 async def get_orders(
     request: Request,
