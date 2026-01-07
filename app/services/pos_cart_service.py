@@ -223,6 +223,100 @@ async def add_item_to_cart(
         raise APIError(f"Error adding item to cart: {str(e)}", status_code=500)
 
 
+async def update_cart_item(
+    request: Request,
+    cart_id: UUID,
+    item_id: UUID,
+    quantity: int,
+    unit_price: float,
+    modifiers: List[dict],
+    notes: Optional[str] = None
+) -> dict:
+    """
+    Update a cart item with new quantity, modifiers, and notes.
+    Replaces all modifiers with the new list.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # Verify item exists and belongs to this cart
+                verify_query = """
+                    SELECT id FROM pos_cart_items
+                    WHERE id = $1 AND cart_id = $2
+                """
+                item_exists = await conn.fetchrow(verify_query, item_id, cart_id)
+
+                if not item_exists:
+                    raise APIError("Cart item not found", status_code=404)
+
+                # Calculate new subtotal
+                modifiers_total = sum(mod['price'] for mod in modifiers)
+                subtotal = (unit_price + modifiers_total) * quantity
+
+                # Update cart item
+                update_query = """
+                    UPDATE pos_cart_items
+                    SET quantity = $1, unit_price = $2, subtotal = $3, notes = $4
+                    WHERE id = $5
+                """
+                await conn.execute(
+                    update_query,
+                    quantity,
+                    unit_price,
+                    subtotal,
+                    notes,
+                    item_id
+                )
+
+                # Delete existing modifiers
+                await conn.execute(
+                    "DELETE FROM pos_cart_item_modifiers WHERE cart_item_id = $1",
+                    item_id
+                )
+
+                # Insert new modifiers
+                if modifiers:
+                    modifier_query = """
+                        INSERT INTO pos_cart_item_modifiers (
+                            cart_item_id, modifier_id, modifier_name, price
+                        )
+                        VALUES ($1, $2, $3, $4)
+                    """
+                    for mod in modifiers:
+                        await conn.execute(
+                            modifier_query,
+                            item_id,
+                            mod['id'],
+                            mod['name'],
+                            mod['price']
+                        )
+
+                # Update cart total
+                await update_cart_total(conn, cart_id)
+
+                logger.info(f"Updated item {item_id} in cart {cart_id}")
+
+                return {
+                    "success": True,
+                    "message": "Item updated successfully",
+                    "data": {"item_id": str(item_id)}
+                }
+
+    except AuthenticationError as e:
+        raise e
+    except APIError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating cart item: {str(e)}")
+        raise APIError(f"Error updating cart item: {str(e)}", status_code=500)
+
+
 async def remove_item_from_cart(
     request: Request,
     cart_id: UUID,

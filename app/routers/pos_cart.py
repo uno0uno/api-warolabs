@@ -61,6 +61,34 @@ async def add_item(
     )
 
 
+class UpdateItemRequest(BaseModel):
+    quantity: int = Field(gt=0)
+    unit_price: float
+    modifiers: List[ModifierInput] = []
+    notes: Optional[str] = None
+
+
+@router.put("/{cart_id}/items/{item_id}")
+async def update_item(
+    request: Request,
+    cart_id: UUID,
+    item_id: UUID,
+    item: UpdateItemRequest
+):
+    """
+    Update cart item (quantity, modifiers, notes)
+    """
+    return await pos_cart_service.update_cart_item(
+        request,
+        cart_id,
+        item_id,
+        item.quantity,
+        item.unit_price,
+        [mod.dict() for mod in item.modifiers],
+        item.notes
+    )
+
+
 @router.delete("/{cart_id}/items/{item_id}")
 async def remove_item(
     request: Request,
