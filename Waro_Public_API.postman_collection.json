@@ -1,0 +1,665 @@
+{
+	"info": {
+		"_postman_id": "waro-public-api-v1",
+		"name": "Waro Colombia - Public API (Token Auth)",
+		"description": "Endpoints publicos de Waro Colombia que usan autenticacion por API Token.\n\n## Configuracion\n1. Importa el environment \"Waro Colombia - Local (Puerto 9999)\"\n2. Configura la variable `api_token` con tu token generado en /integraciones\n\n## Scopes requeridos\n- `orders:read` o `read` para endpoints de ventas\n- `menu:read` o `read` para endpoints de menu",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{api_token}}",
+				"type": "string"
+			}
+		]
+	},
+	"item": [
+		{
+			"name": "Sales (Ventas)",
+			"item": [
+				{
+					"name": "Listar Ventas",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"limit\": 50,\n    \"offset\": 0,\n    \"sortField\": \"order_date\",\n    \"sortDirection\": \"desc\",\n    \"timezone\": \"America/Bogota\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/sales",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"sales"
+							]
+						},
+						"description": "Obtiene la lista de ventas del tenant.\n\n**Scope requerido:** `orders:read` o `read`\n\n**Parametros disponibles:**\n- `limit`: 1-250 (default: 50)\n- `offset`: paginacion (default: 0)\n- `search`: termino de busqueda\n- `searchField`: order_number, customer_name, customer_phone\n- `paymentMethod`: cash, card, digital\n- `status`: completed, cancelled, pending\n- `sortField`: order_number, order_date, total_amount, customer_name, payment_method\n- `sortDirection`: asc, desc\n- `dateFrom`: YYYY-MM-DD\n- `dateTo`: YYYY-MM-DD\n- `timezone`: Zona horaria IANA (default: America/Bogota)"
+					},
+					"response": []
+				},
+				{
+					"name": "Listar Ventas - Con Filtros",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"limit\": 100,\n    \"offset\": 0,\n    \"status\": \"completed\",\n    \"dateFrom\": \"2025-01-01\",\n    \"dateTo\": \"2025-12-31\",\n    \"sortField\": \"order_date\",\n    \"sortDirection\": \"desc\",\n    \"timezone\": \"America/Bogota\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/sales",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"sales"
+							]
+						},
+						"description": "Ejemplo con filtro de fechas y estado completado."
+					},
+					"response": []
+				},
+				{
+					"name": "Listar Ventas - Buscar por Cliente",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"search\": \"Juan\",\n    \"searchField\": \"customer_name\",\n    \"limit\": 50\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/sales",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"sales"
+							]
+						},
+						"description": "Ejemplo de busqueda por nombre de cliente."
+					},
+					"response": []
+				},
+				{
+					"name": "Listar Ventas - Por Metodo de Pago",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"paymentMethod\": \"cash\",\n    \"limit\": 20\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/sales",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"sales"
+							]
+						},
+						"description": "Ejemplo de filtro por metodo de pago (efectivo)."
+					},
+					"response": []
+				},
+				{
+					"name": "Listar Ventas - Otra Zona Horaria",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"limit\": 50,\n    \"dateFrom\": \"2025-01-01\",\n    \"dateTo\": \"2025-01-31\",\n    \"timezone\": \"America/Mexico_City\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/sales",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"sales"
+							]
+						},
+						"description": "Ejemplo usando zona horaria de Mexico para filtros de fecha."
+					},
+					"response": []
+				},
+				{
+					"name": "Metricas de Ventas",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"timezone\": \"America/Bogota\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/sales/metrics",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"sales",
+								"metrics"
+							]
+						},
+						"description": "Obtiene metricas agregadas de ventas:\n- `totalSales`: Monto total de ventas completadas\n- `totalOrders`: Numero total de ordenes\n- `completedOrders`: Ordenes completadas\n- `cancelledOrders`: Ordenes canceladas\n- `pendingOrders`: Ordenes pendientes\n- `avgTicket`: Ticket promedio\n\n**Parametros:**\n- `dateFrom`: YYYY-MM-DD (opcional)\n- `dateTo`: YYYY-MM-DD (opcional)\n- `timezone`: Zona horaria IANA (default: America/Bogota)\n\n**Scope requerido:** `orders:read` o `read`"
+					},
+					"response": []
+				},
+				{
+					"name": "Metricas de Ventas - Por Rango de Fechas",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"dateFrom\": \"2025-01-01\",\n    \"dateTo\": \"2025-01-31\",\n    \"timezone\": \"America/Bogota\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/sales/metrics",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"sales",
+								"metrics"
+							]
+						},
+						"description": "Metricas de ventas filtradas por rango de fechas."
+					},
+					"response": []
+				},
+				{
+					"name": "Detalle de Venta",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"orderId\": \"UUID_DE_LA_ORDEN_AQUI\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/sales/detail",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"sales",
+								"detail"
+							]
+						},
+						"description": "Obtiene el detalle completo de una venta incluyendo:\n- Informacion de la orden\n- Cliente\n- Items con productos\n- Modificadores de cada item\n\n**Scope requerido:** `orders:read` o `read`"
+					},
+					"response": []
+				}
+			],
+			"description": "Endpoints para consultar ventas (ordenes) del tenant."
+		},
+		{
+			"name": "Menu",
+			"item": [
+				{
+					"name": "Listar Productos",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"limit\": 50,\n    \"offset\": 0,\n    \"includeIngredients\": true,\n    \"includeRecipeBases\": true,\n    \"includeModifiers\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/menu/products",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"menu",
+								"products"
+							]
+						},
+						"description": "Obtiene la lista de productos del menu con toda su informacion.\n\n**Scope requerido:** `menu:read` o `read`\n\n**Parametros disponibles:**\n- `limit`: 1-250 (default: 50)\n- `offset`: paginacion (default: 0)\n- `search`: buscar por nombre de producto\n- `categoryId`: filtrar por categoria (UUID)\n- `isAvailable`: filtrar por disponibilidad (true/false)\n- `includeIngredients`: incluir ingredientes directos (default: true)\n- `includeRecipeBases`: incluir recetas base asociadas (default: true)\n- `includeModifiers`: incluir grupos de modificadores (default: true)\n\n**Respuesta incluye:**\n- Datos del producto (nombre, precio, disponibilidad, costo calculado)\n- `ingredients[]`: Ingredientes directos con cantidad y unidad\n- `recipeBases[]`: Recetas base con sus ingredientes\n- `modifierGroups[]`: Grupos de modificadores con opciones"
+					},
+					"response": []
+				},
+				{
+					"name": "Listar Productos - Buscar",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"search\": \"pizza\",\n    \"limit\": 20,\n    \"includeIngredients\": true,\n    \"includeRecipeBases\": true,\n    \"includeModifiers\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/menu/products",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"menu",
+								"products"
+							]
+						},
+						"description": "Ejemplo de busqueda de productos por nombre."
+					},
+					"response": []
+				},
+				{
+					"name": "Listar Productos - Solo Disponibles",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"isAvailable\": true,\n    \"limit\": 50,\n    \"includeIngredients\": true,\n    \"includeRecipeBases\": false,\n    \"includeModifiers\": false\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/menu/products",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"menu",
+								"products"
+							]
+						},
+						"description": "Ejemplo filtrando solo productos disponibles, solo con ingredientes."
+					},
+					"response": []
+				},
+				{
+					"name": "Listar Productos - Por Categoria",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"categoryId\": \"UUID_DE_LA_CATEGORIA\",\n    \"limit\": 50\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/menu/products",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"menu",
+								"products"
+							]
+						},
+						"description": "Ejemplo filtrando productos por categoria."
+					},
+					"response": []
+				},
+				{
+					"name": "Listar Recetas Base",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"limit\": 50,\n    \"offset\": 0\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/menu/recipes",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"menu",
+								"recipes"
+							]
+						},
+						"description": "Obtiene la lista de recetas base con sus ingredientes.\n\n**Scope requerido:** `menu:read` o `read`\n\n**Parametros disponibles:**\n- `limit`: 1-250 (default: 50)\n- `offset`: paginacion (default: 0)\n- `search`: buscar por nombre de receta\n- `isActive`: filtrar por estado activo (true/false)\n\n**Respuesta incluye:**\n- Datos de la receta (nombre, descripcion, estado)\n- `ingredients[]`: Lista de ingredientes con cantidad, unidad y notas"
+					},
+					"response": []
+				},
+				{
+					"name": "Listar Recetas Base - Solo Activas",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"isActive\": true,\n    \"limit\": 50\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/menu/recipes",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"menu",
+								"recipes"
+							]
+						},
+						"description": "Ejemplo filtrando solo recetas activas."
+					},
+					"response": []
+				},
+				{
+					"name": "Listar Recetas Base - Buscar",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"search\": \"base\",\n    \"limit\": 20\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/menu/recipes",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"menu",
+								"recipes"
+							]
+						},
+						"description": "Ejemplo de busqueda de recetas por nombre."
+					},
+					"response": []
+				},
+				{
+					"name": "Listar Modificadores",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"limit\": 50,\n    \"offset\": 0\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/menu/modifiers",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"menu",
+								"modifiers"
+							]
+						},
+						"description": "Obtiene la lista de grupos de modificadores con sus opciones.\n\n**Scope requerido:** `menu:read` o `read`\n\n**Parametros disponibles:**\n- `limit`: 1-250 (default: 50)\n- `offset`: paginacion (default: 0)\n- `search`: buscar por nombre del grupo\n\n**Respuesta incluye:**\n- Datos del grupo (nombre, min/max cantidad, requerido)\n- `modifiers[]`: Opciones con precio, disponibilidad e ingrediente asociado\n- `associatedProducts[]`: Productos que usan este grupo"
+					},
+					"response": []
+				},
+				{
+					"name": "Listar Modificadores - Buscar",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"search\": \"adiciones\",\n    \"limit\": 20\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/menu/modifiers",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"menu",
+								"modifiers"
+							]
+						},
+						"description": "Ejemplo de busqueda de grupos de modificadores por nombre."
+					},
+					"response": []
+				}
+			],
+			"description": "Endpoints para consultar el menu: productos, recetas base y modificadores."
+		},
+		{
+			"name": "Tests",
+			"item": [
+				{
+					"name": "Test - Token Invalido",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "waro_sk_token_invalido",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/sales",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"sales"
+							]
+						},
+						"description": "Prueba con un token invalido para verificar que retorna error 401."
+					},
+					"response": []
+				},
+				{
+					"name": "Test - Sin Token",
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/sales",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"sales"
+							]
+						},
+						"description": "Prueba sin token para verificar que retorna error 401."
+					},
+					"response": []
+				},
+				{
+					"name": "Test - Usando X-API-Key Header",
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-API-Key",
+								"value": "{{api_token}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"limit\": 5\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/sales",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"v1",
+								"sales"
+							]
+						},
+						"description": "Prueba usando el header X-API-Key en lugar de Authorization Bearer."
+					},
+					"response": []
+				}
+			],
+			"description": "Requests de prueba para validar autenticacion."
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					"pm.test(\"Response status is valid\", function () {",
+					"    pm.expect(pm.response.code).to.be.oneOf([200, 401, 403, 404, 422]);",
+					"});",
+					"",
+					"pm.test(\"Response is JSON\", function () {",
+					"    pm.response.to.be.json;",
+					"});",
+					"",
+					"if (pm.response.code === 200) {",
+					"    pm.test(\"Response has success field\", function () {",
+					"        var jsonData = pm.response.json();",
+					"        pm.expect(jsonData).to.have.property('success');",
+					"        pm.expect(jsonData.success).to.be.true;",
+					"    });",
+					"}"
+				]
+			}
+		}
+	]
+}
