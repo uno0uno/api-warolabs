@@ -2,7 +2,7 @@
 	"info": {
 		"_postman_id": "waro-public-api-v1",
 		"name": "Waro Colombia - Public API (Token Auth)",
-		"description": "Endpoints publicos de Waro Colombia que usan autenticacion por API Token.\n\n## Configuracion\n1. Importa el environment \"Waro Colombia - Local (Puerto 9999)\"\n2. Configura la variable `api_token` con tu token generado en /integraciones\n\n## Scopes requeridos\n- `orders:read` o `read` para endpoints de ventas\n- `menu:read` o `read` para endpoints de menu",
+		"description": "Public endpoints for Waro Colombia using API Token authentication.\n\n## Setup\n1. Import the environment \"Waro Colombia - Local\"\n2. Configure the `api_token` variable with your token generated in /integraciones\n\n## Required Scopes\n- `orders:read` or `read` for sales endpoints\n- `menu:read` or `read` for menu endpoints",
 		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
 	"auth": {
@@ -17,10 +17,10 @@
 	},
 	"item": [
 		{
-			"name": "Sales (Ventas)",
+			"name": "Sales",
 			"item": [
 				{
-					"name": "Listar Ventas",
+					"name": "List Sales",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -43,12 +43,12 @@
 								"sales"
 							]
 						},
-						"description": "Obtiene la lista de ventas del tenant.\n\n**Scope requerido:** `orders:read` o `read`\n\n**Parametros disponibles:**\n- `limit`: 1-250 (default: 50)\n- `offset`: paginacion (default: 0)\n- `search`: termino de busqueda\n- `searchField`: order_number, customer_name, customer_phone\n- `paymentMethod`: cash, card, digital\n- `status`: completed, cancelled, pending\n- `sortField`: order_number, order_date, total_amount, customer_name, payment_method\n- `sortDirection`: asc, desc\n- `dateFrom`: YYYY-MM-DD\n- `dateTo`: YYYY-MM-DD\n- `timezone`: Zona horaria IANA (default: America/Bogota)"
+						"description": "Get the list of sales for the tenant.\n\n**Required scope:** `orders:read` or `read`\n\n**Available parameters:**\n- `limit`: 1-250 (default: 50)\n- `offset`: pagination (default: 0)\n- `paymentMethod`: cash, card, digital\n- `status`: completed, cancelled, pending\n- `sortField`: order_number, order_date, total_amount, customer_name, payment_method\n- `sortDirection`: asc, desc\n- `dateFrom`: YYYY-MM-DD\n- `dateTo`: YYYY-MM-DD\n- `timezone`: IANA timezone (default: America/Bogota)"
 					},
 					"response": []
 				},
 				{
-					"name": "Listar Ventas - Con Filtros",
+					"name": "List Sales - With Filters",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -71,40 +71,12 @@
 								"sales"
 							]
 						},
-						"description": "Ejemplo con filtro de fechas y estado completado."
+						"description": "Example with date filter and completed status."
 					},
 					"response": []
 				},
 				{
-					"name": "Listar Ventas - Buscar por Cliente",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n    \"search\": \"Juan\",\n    \"searchField\": \"customer_name\",\n    \"limit\": 50\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/v1/sales",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"v1",
-								"sales"
-							]
-						},
-						"description": "Ejemplo de busqueda por nombre de cliente."
-					},
-					"response": []
-				},
-				{
-					"name": "Listar Ventas - Por Metodo de Pago",
+					"name": "List Sales - By Payment Method",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -127,12 +99,12 @@
 								"sales"
 							]
 						},
-						"description": "Ejemplo de filtro por metodo de pago (efectivo)."
+						"description": "Example filtering by payment method (cash)."
 					},
 					"response": []
 				},
 				{
-					"name": "Listar Ventas - Otra Zona Horaria",
+					"name": "List Sales - Different Timezone",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -155,12 +127,12 @@
 								"sales"
 							]
 						},
-						"description": "Ejemplo usando zona horaria de Mexico para filtros de fecha."
+						"description": "Example using Mexico timezone for date filters."
 					},
 					"response": []
 				},
 				{
-					"name": "Metricas de Ventas",
+					"name": "Sales Metrics",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -184,12 +156,12 @@
 								"metrics"
 							]
 						},
-						"description": "Obtiene metricas agregadas de ventas:\n- `totalSales`: Monto total de ventas completadas\n- `totalOrders`: Numero total de ordenes\n- `completedOrders`: Ordenes completadas\n- `cancelledOrders`: Ordenes canceladas\n- `pendingOrders`: Ordenes pendientes\n- `avgTicket`: Ticket promedio\n\n**Parametros:**\n- `dateFrom`: YYYY-MM-DD (opcional)\n- `dateTo`: YYYY-MM-DD (opcional)\n- `timezone`: Zona horaria IANA (default: America/Bogota)\n\n**Scope requerido:** `orders:read` o `read`"
+						"description": "Get aggregated sales metrics:\n- `totalSales`: Total amount of completed sales\n- `totalOrders`: Total number of orders\n- `completedOrders`: Completed orders\n- `cancelledOrders`: Cancelled orders\n- `pendingOrders`: Pending orders\n- `avgTicket`: Average ticket\n\n**Parameters:**\n- `dateFrom`: YYYY-MM-DD (optional)\n- `dateTo`: YYYY-MM-DD (optional)\n- `timezone`: IANA timezone (default: America/Bogota)\n\n**Required scope:** `orders:read` or `read`"
 					},
 					"response": []
 				},
 				{
-					"name": "Metricas de Ventas - Por Rango de Fechas",
+					"name": "Sales Metrics - By Date Range",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -213,12 +185,12 @@
 								"metrics"
 							]
 						},
-						"description": "Metricas de ventas filtradas por rango de fechas."
+						"description": "Sales metrics filtered by date range."
 					},
 					"response": []
 				},
 				{
-					"name": "Detalle de Venta",
+					"name": "Sale Detail",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -229,7 +201,7 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n    \"orderId\": \"UUID_DE_LA_ORDEN_AQUI\"\n}"
+							"raw": "{\n    \"orderId\": \"ORDER_UUID_HERE\"\n}"
 						},
 						"url": {
 							"raw": "{{base_url}}/v1/sales/detail",
@@ -242,18 +214,18 @@
 								"detail"
 							]
 						},
-						"description": "Obtiene el detalle completo de una venta incluyendo:\n- Informacion de la orden\n- Cliente\n- Items con productos\n- Modificadores de cada item\n\n**Scope requerido:** `orders:read` o `read`"
+						"description": "Get complete sale detail including:\n- Order information\n- Customer\n- Items with products\n- Modifiers for each item\n\n**Required scope:** `orders:read` or `read`"
 					},
 					"response": []
 				}
 			],
-			"description": "Endpoints para consultar ventas (ordenes) del tenant."
+			"description": "Endpoints for querying sales (orders) from the tenant."
 		},
 		{
 			"name": "Menu",
 			"item": [
 				{
-					"name": "Listar Productos",
+					"name": "List Products",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -277,41 +249,12 @@
 								"products"
 							]
 						},
-						"description": "Obtiene la lista de productos del menu con toda su informacion.\n\n**Scope requerido:** `menu:read` o `read`\n\n**Parametros disponibles:**\n- `limit`: 1-250 (default: 50)\n- `offset`: paginacion (default: 0)\n- `search`: buscar por nombre de producto\n- `categoryId`: filtrar por categoria (UUID)\n- `isAvailable`: filtrar por disponibilidad (true/false)\n- `includeIngredients`: incluir ingredientes directos (default: true)\n- `includeRecipeBases`: incluir recetas base asociadas (default: true)\n- `includeModifiers`: incluir grupos de modificadores (default: true)\n\n**Respuesta incluye:**\n- Datos del producto (nombre, precio, disponibilidad, costo calculado)\n- `ingredients[]`: Ingredientes directos con cantidad y unidad\n- `recipeBases[]`: Recetas base con sus ingredientes\n- `modifierGroups[]`: Grupos de modificadores con opciones"
+						"description": "Get the list of menu products with all their information.\n\n**Required scope:** `menu:read` or `read`\n\n**Available parameters:**\n- `limit`: 1-250 (default: 50)\n- `offset`: pagination (default: 0)\n- `categoryId`: filter by category (UUID)\n- `isAvailable`: filter by availability (true/false)\n- `includeIngredients`: include direct ingredients (default: true)\n- `includeRecipeBases`: include associated recipe bases (default: true)\n- `includeModifiers`: include modifier groups (default: true)\n\n**Response includes:**\n- Product data (name, price, availability, calculated cost)\n- `ingredients[]`: Direct ingredients with quantity and unit\n- `recipeBases[]`: Recipe bases with their ingredients\n- `modifierGroups[]`: Modifier groups with options"
 					},
 					"response": []
 				},
 				{
-					"name": "Listar Productos - Buscar",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n    \"search\": \"pizza\",\n    \"limit\": 20,\n    \"includeIngredients\": true,\n    \"includeRecipeBases\": true,\n    \"includeModifiers\": true\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/v1/menu/products",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"v1",
-								"menu",
-								"products"
-							]
-						},
-						"description": "Ejemplo de busqueda de productos por nombre."
-					},
-					"response": []
-				},
-				{
-					"name": "Listar Productos - Solo Disponibles",
+					"name": "List Products - Available Only",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -335,12 +278,12 @@
 								"products"
 							]
 						},
-						"description": "Ejemplo filtrando solo productos disponibles, solo con ingredientes."
+						"description": "Example filtering only available products, with ingredients only."
 					},
 					"response": []
 				},
 				{
-					"name": "Listar Productos - Por Categoria",
+					"name": "List Products - By Category",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -351,7 +294,7 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n    \"categoryId\": \"UUID_DE_LA_CATEGORIA\",\n    \"limit\": 50\n}"
+							"raw": "{\n    \"categoryId\": \"CATEGORY_UUID_HERE\",\n    \"limit\": 50\n}"
 						},
 						"url": {
 							"raw": "{{base_url}}/v1/menu/products",
@@ -364,12 +307,12 @@
 								"products"
 							]
 						},
-						"description": "Ejemplo filtrando productos por categoria."
+						"description": "Example filtering products by category."
 					},
 					"response": []
 				},
 				{
-					"name": "Listar Recetas Base",
+					"name": "List Recipe Bases",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -393,12 +336,12 @@
 								"recipes"
 							]
 						},
-						"description": "Obtiene la lista de recetas base con sus ingredientes.\n\n**Scope requerido:** `menu:read` o `read`\n\n**Parametros disponibles:**\n- `limit`: 1-250 (default: 50)\n- `offset`: paginacion (default: 0)\n- `search`: buscar por nombre de receta\n- `isActive`: filtrar por estado activo (true/false)\n\n**Respuesta incluye:**\n- Datos de la receta (nombre, descripcion, estado)\n- `ingredients[]`: Lista de ingredientes con cantidad, unidad y notas"
+						"description": "Get the list of recipe bases with their ingredients.\n\n**Required scope:** `menu:read` or `read`\n\n**Available parameters:**\n- `limit`: 1-250 (default: 50)\n- `offset`: pagination (default: 0)\n- `isActive`: filter by active status (true/false)\n\n**Response includes:**\n- Recipe data (name, description, status)\n- `ingredients[]`: List of ingredients with quantity, unit and notes"
 					},
 					"response": []
 				},
 				{
-					"name": "Listar Recetas Base - Solo Activas",
+					"name": "List Recipe Bases - Active Only",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -422,41 +365,12 @@
 								"recipes"
 							]
 						},
-						"description": "Ejemplo filtrando solo recetas activas."
+						"description": "Example filtering only active recipes."
 					},
 					"response": []
 				},
 				{
-					"name": "Listar Recetas Base - Buscar",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n    \"search\": \"base\",\n    \"limit\": 20\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/v1/menu/recipes",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"v1",
-								"menu",
-								"recipes"
-							]
-						},
-						"description": "Ejemplo de busqueda de recetas por nombre."
-					},
-					"response": []
-				},
-				{
-					"name": "Listar Modificadores",
+					"name": "List Modifiers",
 					"request": {
 						"method": "POST",
 						"header": [
@@ -480,54 +394,25 @@
 								"modifiers"
 							]
 						},
-						"description": "Obtiene la lista de grupos de modificadores con sus opciones.\n\n**Scope requerido:** `menu:read` o `read`\n\n**Parametros disponibles:**\n- `limit`: 1-250 (default: 50)\n- `offset`: paginacion (default: 0)\n- `search`: buscar por nombre del grupo\n\n**Respuesta incluye:**\n- Datos del grupo (nombre, min/max cantidad, requerido)\n- `modifiers[]`: Opciones con precio, disponibilidad e ingrediente asociado\n- `associatedProducts[]`: Productos que usan este grupo"
-					},
-					"response": []
-				},
-				{
-					"name": "Listar Modificadores - Buscar",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n    \"search\": \"adiciones\",\n    \"limit\": 20\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/v1/menu/modifiers",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"v1",
-								"menu",
-								"modifiers"
-							]
-						},
-						"description": "Ejemplo de busqueda de grupos de modificadores por nombre."
+						"description": "Get the list of modifier groups with their options.\n\n**Required scope:** `menu:read` or `read`\n\n**Available parameters:**\n- `limit`: 1-250 (default: 50)\n- `offset`: pagination (default: 0)\n\n**Response includes:**\n- Group data (name, min/max quantity, required)\n- `modifiers[]`: Options with price, availability and associated ingredient\n- `associatedProducts[]`: Products that use this group"
 					},
 					"response": []
 				}
 			],
-			"description": "Endpoints para consultar el menu: productos, recetas base y modificadores."
+			"description": "Endpoints for querying the menu: products, recipe bases and modifiers."
 		},
 		{
 			"name": "Tests",
 			"item": [
 				{
-					"name": "Test - Token Invalido",
+					"name": "Test - Invalid Token",
 					"request": {
 						"auth": {
 							"type": "bearer",
 							"bearer": [
 								{
 									"key": "token",
-									"value": "waro_sk_token_invalido",
+									"value": "waro_sk_invalid_token",
 									"type": "string"
 								}
 							]
@@ -553,12 +438,12 @@
 								"sales"
 							]
 						},
-						"description": "Prueba con un token invalido para verificar que retorna error 401."
+						"description": "Test with invalid token to verify 401 error response."
 					},
 					"response": []
 				},
 				{
-					"name": "Test - Sin Token",
+					"name": "Test - No Token",
 					"request": {
 						"auth": {
 							"type": "noauth"
@@ -584,12 +469,12 @@
 								"sales"
 							]
 						},
-						"description": "Prueba sin token para verificar que retorna error 401."
+						"description": "Test without token to verify 401 error response."
 					},
 					"response": []
 				},
 				{
-					"name": "Test - Usando X-API-Key Header",
+					"name": "Test - Using X-API-Key Header",
 					"request": {
 						"auth": {
 							"type": "noauth"
@@ -620,12 +505,12 @@
 								"sales"
 							]
 						},
-						"description": "Prueba usando el header X-API-Key en lugar de Authorization Bearer."
+						"description": "Test using X-API-Key header instead of Authorization Bearer."
 					},
 					"response": []
 				}
 			],
-			"description": "Requests de prueba para validar autenticacion."
+			"description": "Test requests for authentication validation."
 		}
 	],
 	"event": [

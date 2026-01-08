@@ -67,4 +67,14 @@ htmlcov/
 *.tmp
 *.temp
 test_db_connection.py
-validate_env.pynode_modules/
+validate_env.py
+run_migration.py
+test_discord_notifications.py
+DISCORD_NOTIFICATIONS.md
+node_modules/
+
+# Local Postman environment
+Waro_Local_Environment.postman_environment.json
+
+# SQL migrations (temporary)
+migrations/

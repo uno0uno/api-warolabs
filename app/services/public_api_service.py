@@ -45,8 +45,6 @@ async def get_sales_list(
     request: Request,
     limit: int = 50,
     offset: int = 0,
-    search: Optional[str] = None,
-    search_field: Optional[str] = None,
     payment_method: Optional[str] = None,
     status: Optional[str] = None,
     sort_field: str = "order_date",
@@ -67,19 +65,6 @@ async def get_sales_list(
             where_conditions = ["o.tenant_id = $1", "o.pos_cart_id IS NOT NULL"]
             params = [UUID(tenant_id)]
             param_count = 1
-
-            # Search filter
-            if search and search_field:
-                param_count += 1
-                if search_field == "order_number":
-                    where_conditions.append(f"CAST(o.order_number AS TEXT) ILIKE ${param_count}")
-                    params.append(f"%{search}%")
-                elif search_field == "customer_name":
-                    where_conditions.append(f"p.name ILIKE ${param_count}")
-                    params.append(f"%{search}%")
-                elif search_field == "customer_phone":
-                    where_conditions.append(f"p.phone_number ILIKE ${param_count}")
-                    params.append(f"%{search}%")
 
             # Payment method filter
             if payment_method:
@@ -436,7 +421,6 @@ async def get_menu_products(
     request: Request,
     limit: int = 50,
     offset: int = 0,
-    search: Optional[str] = None,
     category_id: Optional[str] = None,
     is_available: Optional[bool] = None,
     include_ingredients: bool = True,
@@ -455,11 +439,6 @@ async def get_menu_products(
             where_conditions = ["p.tenant_id = $1"]
             params = [UUID(tenant_id)]
             param_count = 1
-
-            if search:
-                param_count += 1
-                where_conditions.append(f"p.name ILIKE ${param_count}")
-                params.append(f"%{search}%")
 
             if category_id:
                 param_count += 1
@@ -678,7 +657,6 @@ async def get_menu_recipes(
     request: Request,
     limit: int = 50,
     offset: int = 0,
-    search: Optional[str] = None,
     is_active: Optional[bool] = None
 ) -> dict:
     """
@@ -693,11 +671,6 @@ async def get_menu_recipes(
             where_conditions = ["pbt.tenant_id = $1"]
             params = [UUID(tenant_id)]
             param_count = 1
-
-            if search:
-                param_count += 1
-                where_conditions.append(f"pbt.name ILIKE ${param_count}")
-                params.append(f"%{search}%")
 
             if is_active is not None:
                 param_count += 1
@@ -795,8 +768,7 @@ async def get_menu_recipes(
 async def get_menu_modifiers(
     request: Request,
     limit: int = 50,
-    offset: int = 0,
-    search: Optional[str] = None
+    offset: int = 0
 ) -> dict:
     """
     Get list of modifier groups with their modifiers and ingredients.
@@ -810,11 +782,6 @@ async def get_menu_modifiers(
             where_conditions = ["mg.tenant_id = $1"]
             params = [UUID(tenant_id)]
             param_count = 1
-
-            if search:
-                param_count += 1
-                where_conditions.append(f"mg.name ILIKE ${param_count}")
-                params.append(f"%{search}%")
 
             where_clause = " AND ".join(where_conditions)
 

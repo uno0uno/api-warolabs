@@ -12,57 +12,52 @@ router = APIRouter(prefix="/v1", tags=["Public API"])
 
 
 class SalesQueryRequest(BaseModel):
-    """Request body para consultar ventas"""
-    limit: int = Field(default=50, ge=1, le=250, description="Numero de resultados (1-250)")
-    offset: int = Field(default=0, ge=0, description="Numero de resultados a saltar")
-    search: Optional[str] = Field(default=None, description="Termino de busqueda")
-    searchField: Optional[str] = Field(default=None, description="Campo de busqueda: order_number, customer_name, customer_phone")
-    paymentMethod: Optional[str] = Field(default=None, description="Metodo de pago: cash, card, digital")
-    status: Optional[str] = Field(default=None, description="Estado: completed, cancelled, pending")
-    sortField: str = Field(default="order_date", description="Campo de ordenamiento")
-    sortDirection: str = Field(default="desc", description="Direccion: asc, desc")
-    dateFrom: Optional[str] = Field(default=None, description="Fecha inicial (YYYY-MM-DD)")
-    dateTo: Optional[str] = Field(default=None, description="Fecha final (YYYY-MM-DD)")
-    timezone: str = Field(default="America/Bogota", description="Zona horaria para filtros de fecha (ej: America/Bogota, America/Mexico_City, America/New_York)")
+    """Request body for sales query"""
+    limit: int = Field(default=50, ge=1, le=250, description="Number of results (1-250)")
+    offset: int = Field(default=0, ge=0, description="Number of results to skip")
+    paymentMethod: Optional[str] = Field(default=None, description="Payment method: cash, card, digital")
+    status: Optional[str] = Field(default=None, description="Status: completed, cancelled, pending")
+    sortField: str = Field(default="order_date", description="Sort field")
+    sortDirection: str = Field(default="desc", description="Direction: asc, desc")
+    dateFrom: Optional[str] = Field(default=None, description="Start date (YYYY-MM-DD)")
+    dateTo: Optional[str] = Field(default=None, description="End date (YYYY-MM-DD)")
+    timezone: str = Field(default="America/Bogota", description="Timezone for date filters (e.g., America/Bogota, America/Mexico_City, America/New_York)")
 
 
 class MetricsQueryRequest(BaseModel):
-    """Request body para consultar metricas"""
-    dateFrom: Optional[str] = Field(default=None, description="Fecha inicial (YYYY-MM-DD)")
-    dateTo: Optional[str] = Field(default=None, description="Fecha final (YYYY-MM-DD)")
-    timezone: str = Field(default="America/Bogota", description="Zona horaria para filtros de fecha (ej: America/Bogota, America/Mexico_City, America/New_York)")
+    """Request body for metrics query"""
+    dateFrom: Optional[str] = Field(default=None, description="Start date (YYYY-MM-DD)")
+    dateTo: Optional[str] = Field(default=None, description="End date (YYYY-MM-DD)")
+    timezone: str = Field(default="America/Bogota", description="Timezone for date filters (e.g., America/Bogota, America/Mexico_City, America/New_York)")
 
 
 class SaleDetailRequest(BaseModel):
-    """Request body para consultar detalle de venta"""
-    orderId: str = Field(description="UUID de la orden")
+    """Request body for sale detail query"""
+    orderId: str = Field(description="Order UUID")
 
 
 class MenuProductsRequest(BaseModel):
-    """Request body para consultar productos del menu"""
-    limit: int = Field(default=50, ge=1, le=250, description="Numero de resultados (1-250)")
-    offset: int = Field(default=0, ge=0, description="Numero de resultados a saltar")
-    search: Optional[str] = Field(default=None, description="Buscar por nombre de producto")
-    categoryId: Optional[str] = Field(default=None, description="Filtrar por categoria (UUID)")
-    isAvailable: Optional[bool] = Field(default=None, description="Filtrar por disponibilidad")
-    includeIngredients: bool = Field(default=True, description="Incluir ingredientes directos del producto")
-    includeRecipeBases: bool = Field(default=True, description="Incluir recetas base asociadas con sus ingredientes")
-    includeModifiers: bool = Field(default=True, description="Incluir grupos de modificadores asociados")
+    """Request body for menu products query"""
+    limit: int = Field(default=50, ge=1, le=250, description="Number of results (1-250)")
+    offset: int = Field(default=0, ge=0, description="Number of results to skip")
+    categoryId: Optional[str] = Field(default=None, description="Filter by category (UUID)")
+    isAvailable: Optional[bool] = Field(default=None, description="Filter by availability")
+    includeIngredients: bool = Field(default=True, description="Include product direct ingredients")
+    includeRecipeBases: bool = Field(default=True, description="Include associated recipe bases with ingredients")
+    includeModifiers: bool = Field(default=True, description="Include associated modifier groups")
 
 
 class MenuRecipesRequest(BaseModel):
-    """Request body para consultar recetas base"""
-    limit: int = Field(default=50, ge=1, le=250, description="Numero de resultados (1-250)")
-    offset: int = Field(default=0, ge=0, description="Numero de resultados a saltar")
-    search: Optional[str] = Field(default=None, description="Buscar por nombre de receta")
-    isActive: Optional[bool] = Field(default=None, description="Filtrar por estado activo")
+    """Request body for recipe bases query"""
+    limit: int = Field(default=50, ge=1, le=250, description="Number of results (1-250)")
+    offset: int = Field(default=0, ge=0, description="Number of results to skip")
+    isActive: Optional[bool] = Field(default=None, description="Filter by active status")
 
 
 class MenuModifiersRequest(BaseModel):
-    """Request body para consultar grupos de modificadores"""
-    limit: int = Field(default=50, ge=1, le=250, description="Numero de resultados (1-250)")
-    offset: int = Field(default=0, ge=0, description="Numero de resultados a saltar")
-    search: Optional[str] = Field(default=None, description="Buscar por nombre del grupo")
+    """Request body for modifier groups query"""
+    limit: int = Field(default=50, ge=1, le=250, description="Number of results (1-250)")
+    offset: int = Field(default=0, ge=0, description="Number of results to skip")
 
 
 @router.post("/sales")
@@ -80,8 +75,6 @@ async def get_sales(request: Request, body: SalesQueryRequest):
         request,
         limit=body.limit,
         offset=body.offset,
-        search=body.search,
-        search_field=body.searchField,
         payment_method=body.paymentMethod,
         status=body.status,
         sort_field=body.sortField,
@@ -140,7 +133,6 @@ async def get_menu_products(request: Request, body: MenuProductsRequest):
         request,
         limit=body.limit,
         offset=body.offset,
-        search=body.search,
         category_id=body.categoryId,
         is_available=body.isAvailable,
         include_ingredients=body.includeIngredients,
@@ -164,7 +156,6 @@ async def get_menu_recipes(request: Request, body: MenuRecipesRequest):
         request,
         limit=body.limit,
         offset=body.offset,
-        search=body.search,
         is_active=body.isActive
     )
 
@@ -183,6 +174,5 @@ async def get_menu_modifiers(request: Request, body: MenuModifiersRequest):
     return await public_api_service.get_menu_modifiers(
         request,
         limit=body.limit,
-        offset=body.offset,
-        search=body.search
+        offset=body.offset
     )
