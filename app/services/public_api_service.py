@@ -497,7 +497,7 @@ async def get_menu_products(
                     p.category_id,
                     c.name as category_name
                 FROM product p
-                LEFT JOIN category c ON p.category_id = c.id
+                LEFT JOIN categories c ON p.category_id = c.id
                 WHERE {where_clause}
                 ORDER BY p.name ASC
                 LIMIT ${limit_param} OFFSET ${offset_param}
