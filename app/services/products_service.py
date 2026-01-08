@@ -8,6 +8,7 @@ from app.models.product import (
     Product, ProductCreate, ProductUpdate, ProductsListResponse,
     ProductResponse, ProductStats, RecipeIngredient
 )
+from app.services import menu_history_service
 from decimal import Decimal
 import logging
 
@@ -123,7 +124,16 @@ async def create_product_with_recipe(
                 """
                 await conn.execute(cost_query, product_id)
 
-                # 4. Get complete product with recipe
+                # 5. Registrar en historial
+                user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+                product_snapshot = await menu_history_service.get_product_snapshot(conn, product_id, tenant_id)
+                if product_snapshot:
+                    await menu_history_service.record_product_create(
+                        conn, tenant_id, product_id, product_data.name,
+                        product_snapshot, user_id
+                    )
+
+                # 6. Get complete product with recipe
                 return await get_product_by_id(request, product_id, conn)
 
     except AuthenticationError as e:
@@ -611,11 +621,16 @@ async def update_product_with_recipe(
 
         async with get_db_connection() as conn:
             # Verify product exists and belongs to tenant
-            verify_query = "SELECT id FROM product WHERE id = $1 AND tenant_id = $2"
+            verify_query = "SELECT id, name FROM product WHERE id = $1 AND tenant_id = $2"
             product_exists = await conn.fetchrow(verify_query, product_id, tenant_id)
 
             if not product_exists:
                 raise HTTPException(status_code=404, detail="Product not found")
+
+            # Obtener snapshot ANTES de actualizar (para historial)
+            old_snapshot = await menu_history_service.get_product_snapshot(conn, product_id, tenant_id)
+            product_name = product_exists['name']
+            user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
 
             # Start transaction
             async with conn.transaction():
@@ -727,7 +742,16 @@ async def update_product_with_recipe(
                     """
                     await conn.execute(cost_query, product_id)
 
-                # 4. Get complete updated product
+                # 5. Registrar cambios en historial
+                if old_snapshot:
+                    new_snapshot = await menu_history_service.get_product_snapshot(conn, product_id, tenant_id)
+                    if new_snapshot:
+                        await menu_history_service.compare_and_record_product_changes(
+                            conn, tenant_id, product_id, product_name,
+                            old_snapshot, new_snapshot, user_id
+                        )
+
+                # 6. Get complete updated product
                 return await get_product_by_id(request, product_id, conn)
 
     except HTTPException:
@@ -756,19 +780,31 @@ async def delete_product(
 
         async with get_db_connection() as conn:
             # Verify product exists and belongs to tenant
-            verify_query = "SELECT id FROM product WHERE id = $1 AND tenant_id = $2"
+            verify_query = "SELECT id, name FROM product WHERE id = $1 AND tenant_id = $2"
             product_exists = await conn.fetchrow(verify_query, product_id, tenant_id)
 
             if not product_exists:
                 raise HTTPException(status_code=404, detail="Product not found")
 
+            # Obtener snapshot ANTES de eliminar (para historial)
+            product_snapshot = await menu_history_service.get_product_snapshot(conn, product_id, tenant_id)
+            product_name = product_exists['name']
+            user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+
             # Start transaction
             async with conn.transaction():
-                # Delete recipe first (foreign key constraint)
+                # 1. Registrar eliminación en historial
+                if product_snapshot:
+                    await menu_history_service.record_product_delete(
+                        conn, tenant_id, product_id, product_name,
+                        product_snapshot, user_id
+                    )
+
+                # 2. Delete recipe first (foreign key constraint)
                 delete_recipe_query = "DELETE FROM product_recipes WHERE product_id = $1"
                 await conn.execute(delete_recipe_query, product_id)
 
-                # Delete product
+                # 3. Delete product
                 delete_product_query = "DELETE FROM product WHERE id = $1 AND tenant_id = $2"
                 await conn.execute(delete_product_query, product_id, tenant_id)
 

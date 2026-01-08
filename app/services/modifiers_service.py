@@ -9,6 +9,7 @@ from app.models.modifier import (
     ModifierGroupsListResponse, ModifierGroupResponse, ModifierGroupStats,
     Modifier, ProductInfo, IngredientInfo
 )
+from app.services import menu_history_service
 import logging
 
 logger = logging.getLogger(__name__)
@@ -92,7 +93,16 @@ async def create_modifier_group(
                             modifier.ingredient_unit
                         )
 
-                # 4. Get complete group with modifiers and products
+                # 4. Registrar en historial
+                user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+                group_snapshot = await menu_history_service.get_modifier_group_snapshot(conn, group_id, tenant_id)
+                if group_snapshot:
+                    await menu_history_service.record_modifier_group_create(
+                        conn, tenant_id, group_id, group_data.name,
+                        group_snapshot, user_id
+                    )
+
+                # 5. Get complete group with modifiers and products
                 return await get_modifier_group_by_id(request, group_id, conn)
 
     except AuthenticationError as e:
@@ -431,11 +441,16 @@ async def update_modifier_group(
 
         async with get_db_connection() as conn:
             # Verify group exists and belongs to tenant
-            verify_query = "SELECT id FROM modifier_groups WHERE id = $1 AND tenant_id = $2"
+            verify_query = "SELECT id, name FROM modifier_groups WHERE id = $1 AND tenant_id = $2"
             group_exists = await conn.fetchrow(verify_query, group_id, tenant_id)
 
             if not group_exists:
                 raise HTTPException(status_code=404, detail="Modifier group not found")
+
+            # Obtener snapshot ANTES de actualizar (para historial)
+            old_snapshot = await menu_history_service.get_modifier_group_snapshot(conn, group_id, tenant_id)
+            group_name = group_exists['name']
+            user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
 
             # Start transaction
             async with conn.transaction():
@@ -540,7 +555,16 @@ async def update_modifier_group(
                             list(modifiers_to_disable)
                         )
 
-                # 4. Get complete updated group
+                # 4. Registrar cambios en historial
+                if old_snapshot:
+                    new_snapshot = await menu_history_service.get_modifier_group_snapshot(conn, group_id, tenant_id)
+                    if new_snapshot:
+                        await menu_history_service.compare_and_record_modifier_group_changes(
+                            conn, tenant_id, group_id, group_name,
+                            old_snapshot, new_snapshot, user_id
+                        )
+
+                # 5. Get complete updated group
                 return await get_modifier_group_by_id(request, group_id, conn)
 
     except HTTPException:
@@ -566,19 +590,35 @@ async def delete_modifier_group(
 
         async with get_db_connection() as conn:
             # Verify group exists and belongs to tenant
-            verify_query = "SELECT id FROM modifier_groups WHERE id = $1 AND tenant_id = $2"
+            verify_query = "SELECT id, name FROM modifier_groups WHERE id = $1 AND tenant_id = $2"
             group_exists = await conn.fetchrow(verify_query, group_id, tenant_id)
 
             if not group_exists:
                 raise HTTPException(status_code=404, detail="Modifier group not found")
 
+            # Obtener snapshot ANTES de eliminar (para historial)
+            group_snapshot = await menu_history_service.get_modifier_group_snapshot(conn, group_id, tenant_id)
+            group_name = group_exists['name']
+            user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+
             # Start transaction
             async with conn.transaction():
-                # Delete modifiers first (foreign key constraint)
+                # 1. Registrar eliminación en historial
+                if group_snapshot:
+                    await menu_history_service.record_modifier_group_delete(
+                        conn, tenant_id, group_id, group_name,
+                        group_snapshot, user_id
+                    )
+
+                # 2. Delete product associations first
+                delete_assoc_query = "DELETE FROM product_modifier_groups WHERE modifier_group_id = $1"
+                await conn.execute(delete_assoc_query, group_id)
+
+                # 3. Delete modifiers (foreign key constraint)
                 delete_modifiers_query = "DELETE FROM modifiers WHERE modifier_group_id = $1"
                 await conn.execute(delete_modifiers_query, group_id)
 
-                # Delete group
+                # 4. Delete group
                 delete_group_query = "DELETE FROM modifier_groups WHERE id = $1 AND tenant_id = $2"
                 await conn.execute(delete_group_query, group_id, tenant_id)
 

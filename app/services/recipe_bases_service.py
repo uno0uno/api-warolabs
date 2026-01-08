@@ -16,6 +16,7 @@ from app.models.recipe_base import (
     RecipeBaseTypeResponse,
     RecipeBaseTypesListResponse
 )
+from app.services import menu_history_service
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,15 @@ async def create_recipe_base_type(
                 updated_at=base_type_row['updated_at'],
                 ingredients=ingredients
             )
+
+            # Registrar en historial
+            user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+            recipe_snapshot = await menu_history_service.get_recipe_base_snapshot(conn, base_type_id, tenant_id)
+            if recipe_snapshot:
+                await menu_history_service.record_recipe_base_create(
+                    conn, tenant_id, base_type_id, recipe_data.name,
+                    recipe_snapshot, user_id
+                )
 
             logger.info(f"Created recipe base type: {base_type_id} for tenant: {tenant_id}")
 
@@ -409,6 +419,10 @@ async def update_recipe_base_type(
             param_count += 1
 
         async with get_db_connection() as conn:
+            # Obtener snapshot ANTES de actualizar (para historial)
+            old_snapshot = await menu_history_service.get_recipe_base_snapshot(conn, recipe_base_id, tenant_id)
+            user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+
             # Update base type fields if provided
             if update_fields:
                 update_fields.append(f"updated_at = NOW()")
@@ -520,6 +534,16 @@ async def update_recipe_base_type(
             recipe_dict = dict(row)
             recipe_dict['ingredients'] = ingredients
 
+            # Registrar cambios en historial
+            if old_snapshot:
+                new_snapshot = await menu_history_service.get_recipe_base_snapshot(conn, recipe_base_id, tenant_id)
+                recipe_name = old_snapshot.get('name', row['name'])
+                if new_snapshot:
+                    await menu_history_service.compare_and_record_recipe_base_changes(
+                        conn, tenant_id, recipe_base_id, recipe_name,
+                        old_snapshot, new_snapshot, user_id
+                    )
+
             logger.info(f"Updated recipe base type: {recipe_base_id}")
 
             return RecipeBaseTypeResponse(
@@ -563,12 +587,24 @@ async def delete_recipe_base_type(
         async with get_db_connection() as conn:
             # Check if exists
             check_query = """
-                SELECT id FROM product_base_types WHERE id = $1 AND tenant_id = $2
+                SELECT id, name FROM product_base_types WHERE id = $1 AND tenant_id = $2
             """
             exists = await conn.fetchrow(check_query, recipe_base_id, tenant_id)
 
             if not exists:
                 raise HTTPException(status_code=404, detail="Recipe base type not found")
+
+            # Obtener snapshot ANTES de eliminar (para historial)
+            recipe_snapshot = await menu_history_service.get_recipe_base_snapshot(conn, recipe_base_id, tenant_id)
+            recipe_name = exists['name']
+            user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+
+            # Registrar eliminación en historial
+            if recipe_snapshot:
+                await menu_history_service.record_recipe_base_delete(
+                    conn, tenant_id, recipe_base_id, recipe_name,
+                    recipe_snapshot, user_id
+                )
 
             # Delete ingredients (cascade should handle this, but being explicit)
             delete_ingredients_query = """
