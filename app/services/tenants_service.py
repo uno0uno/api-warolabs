@@ -73,6 +73,7 @@ async def get_tenant_members(request: Request) -> TenantMembersResponse:
 
         async with get_db_connection() as conn:
             # Get tenant members with their profile information
+            # Exclude 'customer' role - those are POS clients, not team members
             query = """
                 SELECT
                     tm.id,
@@ -87,6 +88,7 @@ async def get_tenant_members(request: Request) -> TenantMembersResponse:
                 FROM tenant_members tm
                 INNER JOIN profile p ON tm.user_id = p.id
                 WHERE tm.tenant_id = $1
+                  AND tm.role IN ('superuser', 'admin', 'employee', 'member')
                 ORDER BY
                     CASE tm.role
                         WHEN 'superuser' THEN 1
