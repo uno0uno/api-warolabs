@@ -115,9 +115,9 @@ async def get_articles_list(
     except Exception as e:
         logger.error(f"Error getting articles list: {e}")
         raise APIError(
+            message=f"Error fetching articles: {str(e)}",
             status_code=500,
-            error_code="ARTICLES_LIST_ERROR",
-            message=f"Error fetching articles: {str(e)}"
+            details={"error_code": "ARTICLES_LIST_ERROR"}
         )
 
 
@@ -179,9 +179,9 @@ async def get_article_by_slug(
 
             if not row:
                 raise APIError(
+                    message=f"Article with slug '{slug}' not found",
                     status_code=404,
-                    error_code="ARTICLE_NOT_FOUND",
-                    message=f"Article with slug '{slug}' not found"
+                    details={"error_code": "ARTICLE_NOT_FOUND"}
                 )
 
             # Increment view count if requested
@@ -240,9 +240,9 @@ async def get_article_by_slug(
     except Exception as e:
         logger.error(f"Error getting article by slug: {e}")
         raise APIError(
+            message=f"Error fetching article: {str(e)}",
             status_code=500,
-            error_code="ARTICLE_FETCH_ERROR",
-            message=f"Error fetching article: {str(e)}"
+            details={"error_code": "ARTICLE_FETCH_ERROR"}
         )
 
 
@@ -321,7 +321,7 @@ async def get_related_articles(
     except Exception as e:
         logger.error(f"Error getting related articles: {e}")
         raise APIError(
+            message=f"Error fetching related articles: {str(e)}",
             status_code=500,
-            error_code="RELATED_ARTICLES_ERROR",
-            message=f"Error fetching related articles: {str(e)}"
+            details={"error_code": "RELATED_ARTICLES_ERROR"}
         )
