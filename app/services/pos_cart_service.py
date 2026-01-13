@@ -98,7 +98,8 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
             ci.unit_price,
             ci.subtotal,
             ci.notes,
-            p.name as product_name
+            p.name as product_name,
+            p.is_resale as product_is_resale
         FROM pos_cart_items ci
         JOIN product p ON ci.product_id = p.id
         WHERE ci.cart_id = $1
@@ -129,6 +130,7 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
                 "price": float(item_row['unit_price'])
             },
             "quantity": item_row['quantity'],
+            "is_resale": item_row['product_is_resale'] or False,
             "modifiers": [
                 {
                     "id": str(mod['id']),

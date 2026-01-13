@@ -48,6 +48,7 @@ async def get_products_endpoint(
     category_id: Optional[UUID] = Query(default=None, description="Filter by category ID"),
     is_available: Optional[bool] = Query(default=None, description="Filter by availability"),
     is_combo: Optional[bool] = Query(default=None, description="Filter combos only"),
+    is_resale: Optional[bool] = Query(default=None, description="Filter resale products only"),
     include_ingredients: bool = Query(default=False, description="Include recipe ingredients in response"),
     include_modifiers: bool = Query(default=False, description="Include modifier groups in response (for POS)")
 ):
@@ -64,7 +65,7 @@ async def get_products_endpoint(
     Requires valid session with tenant context.
     """
     return await get_products_list(
-        request, response, page, limit, search, category_id, is_available, is_combo, include_ingredients, include_modifiers
+        request, response, page, limit, search, category_id, is_available, is_combo, is_resale, include_ingredients, include_modifiers
     )
 
 

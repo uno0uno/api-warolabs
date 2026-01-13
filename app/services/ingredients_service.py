@@ -17,7 +17,8 @@ async def get_ingredients_list(
     search: Optional[str] = None,
     category: Optional[str] = None,
     supplier_id: Optional[UUID] = None,
-    type: Optional[str] = None
+    type: Optional[str] = None,
+    is_resale: Optional[bool] = None
 ) -> IngredientsListResponse:
     """
     Fetches a list of ingredients from the database with tenant isolation,
@@ -98,6 +99,14 @@ async def get_ingredients_list(
                 # For simplicity, we'll count all ingredients and filter the result set.
                 base_params.append(supplier_id)
                 base_param_count += 1
+
+            if is_resale is not None:
+                base_query += f" AND i.is_resale = ${base_param_count}"
+                count_query += f" AND is_resale = ${count_param_count}"
+                base_params.append(is_resale)
+                count_params.append(is_resale)
+                base_param_count += 1
+                count_param_count += 1
 
             # Add pagination
             offset = (page - 1) * limit

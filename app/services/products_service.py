@@ -51,9 +51,9 @@ async def create_product_with_recipe(
                 product_query = """
                     INSERT INTO product (
                         name, description, price, category_id, product_base_type_id, preparation_time,
-                        controla_stock, is_available, is_combo, allow_modifiers, tenant_id
+                        controla_stock, is_available, is_combo, is_resale, allow_modifiers, tenant_id
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     RETURNING id, created_at, updated_at
                 """
                 product_result = await conn.fetchrow(
@@ -67,6 +67,7 @@ async def create_product_with_recipe(
                     True,  # ALWAYS True - controla_stock is mandatory
                     product_data.is_available,
                     product_data.is_combo,
+                    product_data.is_resale,
                     product_data.allow_modifiers,
                     tenant_id
                 )
@@ -313,6 +314,7 @@ async def get_products_list(
     category_id: Optional[UUID] = None,
     is_available: Optional[bool] = None,
     is_combo: Optional[bool] = None,
+    is_resale: Optional[bool] = None,
     include_ingredients: bool = False,
     include_modifiers: bool = False
 ) -> ProductsListResponse:
@@ -340,6 +342,7 @@ async def get_products_list(
                     p.controla_stock,
                     p.is_available,
                     p.is_combo,
+                    p.is_resale,
                     p.allow_modifiers,
                     -- DYNAMIC cost calculation based on purchase movements (weighted average)
                     (
@@ -445,6 +448,21 @@ async def get_products_list(
                 base_query += f" AND is_combo = ${param_count}"
                 count_query += f" AND is_combo = ${param_count}"
                 params.append(is_combo)
+                param_count += 1
+
+            # Filter by is_resale - default to excluding resale products
+            # Resale products have their own section, so by default we exclude them
+            # Exception: POS (include_modifiers=true) should show ALL products
+            if is_resale is None:
+                if not include_modifiers:
+                    # Default for menu list: exclude resale products
+                    base_query += f" AND (is_resale = false OR is_resale IS NULL)"
+                    count_query += f" AND (is_resale = false OR is_resale IS NULL)"
+                # else: POS context - show all products (no filter)
+            else:
+                base_query += f" AND is_resale = ${param_count}"
+                count_query += f" AND is_resale = ${param_count}"
+                params.append(is_resale)
                 param_count += 1
 
             # Add pagination
