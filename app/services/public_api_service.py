@@ -339,18 +339,32 @@ async def get_sales_metrics(
     request: Request,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    timezone: str = "America/Bogota"
+    timezone: str = "America/Bogota",
+    group_by: Optional[str] = None,  # date, weekday, hour, product, payment, ticket
+    limit: int = 20,  # for product grouping
+    sort_by: str = "quantity",  # for product grouping: quantity, revenue
+    ranges: Optional[list] = None  # for ticket grouping
 ) -> dict:
     """
     Get sales metrics for the authenticated tenant via API key.
+
+    groupBy options:
+    - None: Overall metrics (default)
+    - "date": Metrics grouped by specific date (day by day)
+    - "weekday": Metrics grouped by day of week (aggregated)
+    - "hour": Metrics grouped by hour of day
+    - "product": Top selling products
+    - "payment": Breakdown by payment method
+    - "ticket": Distribution by ticket price ranges
+
     Requires scope: orders:read or read
     """
     try:
         tenant_id, token_id = validate_api_key_auth(request, "orders:read")
 
         async with get_db_connection(use_transaction=False) as conn:
-            # Build WHERE clause
-            where_conditions = ["tenant_id = $1", "pos_cart_id IS NOT NULL"]
+            # Build base WHERE clause
+            where_conditions = ["tenant_id = $1", "pos_cart_id IS NOT NULL", "status = 'completed'"]
             params = [UUID(tenant_id)]
             param_count = 1
 
@@ -377,44 +391,323 @@ async def get_sales_metrics(
 
             where_clause = " AND ".join(where_conditions)
 
-            metrics_query = f"""
-                SELECT
-                    COUNT(*) as total_orders,
-                    COUNT(*) FILTER (WHERE status = 'completed') as completed_orders,
-                    COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled_orders,
-                    COUNT(*) FILTER (WHERE status = 'pending') as pending_orders,
-                    COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) as total_sales,
-                    COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) as avg_ticket
-                FROM orders
-                WHERE {where_clause}
-            """
-
-            row = await conn.fetchrow(metrics_query, *params)
-
-            return {
-                "success": True,
-                "data": {
-                    "totalSales": float(row['total_sales']),
-                    "totalOrders": row['total_orders'],
-                    "completedOrders": row['completed_orders'],
-                    "cancelledOrders": row['cancelled_orders'],
-                    "pendingOrders": row['pending_orders'],
-                    "avgTicket": float(row['avg_ticket'])
-                },
-                "meta": {
-                    "tokenId": token_id,
-                    "tenantId": tenant_id,
-                    "dateFrom": date_from,
-                    "dateTo": date_to,
-                    "timezone": timezone
-                }
+            meta = {
+                "tokenId": token_id,
+                "tenantId": tenant_id,
+                "dateFrom": date_from,
+                "dateTo": date_to,
+                "timezone": timezone
             }
+
+            # Route to appropriate grouping
+            if group_by == "date":
+                return await _metrics_by_date(conn, where_clause, params, param_count, timezone, meta)
+            elif group_by == "weekday":
+                return await _metrics_by_weekday(conn, where_clause, params, param_count, timezone, meta)
+            elif group_by == "hour":
+                return await _metrics_by_hour(conn, where_clause, params, param_count, timezone, meta)
+            elif group_by == "product":
+                meta["sortBy"] = sort_by
+                meta["limit"] = limit
+                return await _metrics_by_product(conn, where_clause, params, param_count, timezone, limit, sort_by, meta)
+            elif group_by == "payment":
+                return await _metrics_by_payment(conn, where_clause, params, meta)
+            elif group_by == "ticket":
+                return await _metrics_by_ticket(conn, where_clause, params, timezone, ranges, meta)
+            else:
+                # Default: overall metrics (include all statuses for this)
+                where_conditions_all = ["tenant_id = $1", "pos_cart_id IS NOT NULL"]
+                params_all = [UUID(tenant_id)]
+                pc = 1
+
+                if parsed_date_from:
+                    pc += 1
+                    pc += 1
+                    where_conditions_all.append(f"order_date >= (${pc-1}::timestamp AT TIME ZONE ${pc})")
+                    params_all.append(parsed_date_from)
+                    params_all.append(timezone)
+
+                if parsed_date_to:
+                    pc += 1
+                    pc += 1
+                    where_conditions_all.append(f"order_date < ((${pc-1}::timestamp + interval '1 day') AT TIME ZONE ${pc})")
+                    params_all.append(parsed_date_to)
+                    params_all.append(timezone)
+
+                where_clause_all = " AND ".join(where_conditions_all)
+
+                metrics_query = f"""
+                    SELECT
+                        COUNT(*) as total_orders,
+                        COUNT(*) FILTER (WHERE status = 'completed') as completed_orders,
+                        COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled_orders,
+                        COUNT(*) FILTER (WHERE status = 'pending') as pending_orders,
+                        COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) as total_sales,
+                        COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) as avg_ticket
+                    FROM orders
+                    WHERE {where_clause_all}
+                """
+
+                row = await conn.fetchrow(metrics_query, *params_all)
+
+                return {
+                    "success": True,
+                    "data": {
+                        "totalSales": float(row['total_sales']),
+                        "totalOrders": row['total_orders'],
+                        "completedOrders": row['completed_orders'],
+                        "cancelledOrders": row['cancelled_orders'],
+                        "pendingOrders": row['pending_orders'],
+                        "avgTicket": float(row['avg_ticket'])
+                    },
+                    "meta": meta
+                }
 
     except (AuthenticationError, AuthorizationError) as e:
         raise e
     except Exception as e:
         logger.error(f"Error getting sales metrics via API: {str(e)}")
         raise APIError(f"Error al obtener metricas: {str(e)}", status_code=500)
+
+
+async def _metrics_by_date(conn, where_clause, params, param_count, timezone, meta):
+    """Internal: Get metrics grouped by specific date"""
+    param_count += 1
+    tz_query_param = param_count
+    params.append(timezone)
+
+    query = f"""
+        SELECT
+            DATE(order_date AT TIME ZONE ${tz_query_param}) as order_day,
+            TO_CHAR(order_date AT TIME ZONE ${tz_query_param}, 'Day') as day_name,
+            COUNT(*) as total_orders,
+            COALESCE(SUM(total_amount), 0) as total_sales,
+            COALESCE(AVG(total_amount), 0) as avg_ticket
+        FROM orders
+        WHERE {where_clause}
+        GROUP BY DATE(order_date AT TIME ZONE ${tz_query_param}),
+                 TO_CHAR(order_date AT TIME ZONE ${tz_query_param}, 'Day')
+        ORDER BY order_day
+    """
+
+    rows = await conn.fetch(query, *params)
+
+    data = [{
+        "date": row['order_day'].isoformat(),
+        "dayName": row['day_name'].strip(),
+        "totalOrders": row['total_orders'],
+        "totalSales": float(row['total_sales']),
+        "avgTicket": float(row['avg_ticket'])
+    } for row in rows]
+
+    meta["groupBy"] = "date"
+    return {"success": True, "data": data, "meta": meta}
+
+
+async def _metrics_by_weekday(conn, where_clause, params, param_count, timezone, meta):
+    """Internal: Get metrics grouped by weekday with day count and averages"""
+    param_count += 1
+    tz_query_param = param_count
+    params.append(timezone)
+
+    query = f"""
+        SELECT
+            EXTRACT(DOW FROM order_date AT TIME ZONE ${tz_query_param}) as day_number,
+            COUNT(*) as total_orders,
+            COALESCE(SUM(total_amount), 0) as total_sales,
+            COALESCE(AVG(total_amount), 0) as avg_ticket,
+            COUNT(DISTINCT DATE(order_date AT TIME ZONE ${tz_query_param})) as day_count
+        FROM orders
+        WHERE {where_clause}
+        GROUP BY EXTRACT(DOW FROM order_date AT TIME ZONE ${tz_query_param})
+        ORDER BY day_number
+    """
+
+    rows = await conn.fetch(query, *params)
+    days_map = {0: "Sunday", 1: "Monday", 2: "Tuesday", 3: "Wednesday",
+               4: "Thursday", 5: "Friday", 6: "Saturday"}
+
+    data = []
+    for row in rows:
+        day_count = row['day_count']
+        total_orders = row['total_orders']
+        total_sales = float(row['total_sales'])
+        data.append({
+            "dayNumber": int(row['day_number']),
+            "dayName": days_map.get(int(row['day_number']), ""),
+            "dayCount": day_count,
+            "totalOrders": total_orders,
+            "totalSales": total_sales,
+            "avgTicket": float(row['avg_ticket']),
+            "avgOrdersPerDay": round(total_orders / day_count, 1) if day_count > 0 else 0,
+            "avgSalesPerDay": round(total_sales / day_count, 0) if day_count > 0 else 0
+        })
+
+    meta["groupBy"] = "weekday"
+    return {"success": True, "data": data, "meta": meta}
+
+
+async def _metrics_by_hour(conn, where_clause, params, param_count, timezone, meta):
+    """Internal: Get metrics grouped by hour with day count and averages"""
+    param_count += 1
+    tz_query_param = param_count
+    params.append(timezone)
+
+    query = f"""
+        SELECT
+            EXTRACT(HOUR FROM order_date AT TIME ZONE ${tz_query_param}) as hour,
+            COUNT(*) as total_orders,
+            COALESCE(SUM(total_amount), 0) as total_sales,
+            COALESCE(AVG(total_amount), 0) as avg_ticket,
+            COUNT(DISTINCT DATE(order_date AT TIME ZONE ${tz_query_param})) as day_count
+        FROM orders
+        WHERE {where_clause}
+        GROUP BY EXTRACT(HOUR FROM order_date AT TIME ZONE ${tz_query_param})
+        ORDER BY hour
+    """
+
+    rows = await conn.fetch(query, *params)
+
+    data = []
+    for row in rows:
+        day_count = row['day_count']
+        total_orders = row['total_orders']
+        total_sales = float(row['total_sales'])
+        data.append({
+            "hour": int(row['hour']),
+            "hourLabel": f"{int(row['hour']):02d}:00",
+            "dayCount": day_count,
+            "totalOrders": total_orders,
+            "totalSales": total_sales,
+            "avgTicket": float(row['avg_ticket']),
+            "avgOrdersPerDay": round(total_orders / day_count, 1) if day_count > 0 else 0,
+            "avgSalesPerDay": round(total_sales / day_count, 0) if day_count > 0 else 0
+        })
+
+    meta["groupBy"] = "hour"
+    return {"success": True, "data": data, "meta": meta}
+
+
+async def _metrics_by_product(conn, where_clause, params, param_count, timezone, limit, sort_by, meta):
+    """Internal: Get top products"""
+    # Need to modify where_clause for JOINs
+    where_clause_products = where_clause.replace("tenant_id", "o.tenant_id").replace("pos_cart_id", "o.pos_cart_id").replace("status", "o.status").replace("order_date", "o.order_date")
+
+    sort_column = "total_quantity" if sort_by == "quantity" else "total_revenue"
+
+    param_count += 1
+    limit_param = param_count
+    params.append(limit)
+
+    query = f"""
+        SELECT
+            p.id as product_id,
+            p.name as product_name,
+            c.name as category_name,
+            SUM(oi.quantity) as total_quantity,
+            SUM(oi.subtotal) as total_revenue,
+            COUNT(DISTINCT o.id) as orders_count,
+            AVG(oi.price_at_purchase) as avg_price
+        FROM order_items oi
+        JOIN orders o ON oi.order_id = o.id
+        JOIN product p ON oi.product_id = p.id
+        LEFT JOIN categories c ON p.category_id = c.id
+        WHERE {where_clause_products}
+        GROUP BY p.id, p.name, c.name
+        ORDER BY {sort_column} DESC
+        LIMIT ${limit_param}
+    """
+
+    rows = await conn.fetch(query, *params)
+
+    data = [{
+        "rank": idx,
+        "productId": str(row['product_id']),
+        "productName": row['product_name'],
+        "categoryName": row['category_name'],
+        "totalQuantity": float(row['total_quantity']),
+        "totalRevenue": float(row['total_revenue']),
+        "ordersCount": row['orders_count'],
+        "avgPrice": float(row['avg_price'])
+    } for idx, row in enumerate(rows, 1)]
+
+    meta["groupBy"] = "product"
+    return {"success": True, "data": data, "meta": meta}
+
+
+async def _metrics_by_payment(conn, where_clause, params, meta):
+    """Internal: Get breakdown by payment method"""
+    query = f"""
+        SELECT
+            payment_method,
+            COUNT(*) as orders_count,
+            COALESCE(SUM(total_amount), 0) as total_sales,
+            COALESCE(AVG(total_amount), 0) as avg_ticket
+        FROM orders
+        WHERE {where_clause}
+        GROUP BY payment_method
+        ORDER BY total_sales DESC
+    """
+
+    rows = await conn.fetch(query, *params)
+
+    total_orders = sum(row['orders_count'] for row in rows)
+    total_sales = sum(float(row['total_sales']) for row in rows)
+
+    data = [{
+        "paymentMethod": row['payment_method'],
+        "ordersCount": row['orders_count'],
+        "ordersPercentage": round((row['orders_count'] / total_orders * 100), 1) if total_orders > 0 else 0,
+        "totalSales": float(row['total_sales']),
+        "salesPercentage": round((float(row['total_sales']) / total_sales * 100), 1) if total_sales > 0 else 0,
+        "avgTicket": float(row['avg_ticket'])
+    } for row in rows]
+
+    meta["groupBy"] = "payment"
+    meta["totalOrders"] = total_orders
+    meta["totalSales"] = total_sales
+    return {"success": True, "data": data, "meta": meta}
+
+
+async def _metrics_by_ticket(conn, where_clause, params, timezone, ranges, meta):
+    """Internal: Get ticket distribution"""
+    if not ranges:
+        ranges = [0, 15000, 25000, 40000, 60000, 100000, 999999999]
+
+    case_parts = []
+    for i in range(len(ranges) - 1):
+        low, high = ranges[i], ranges[i + 1]
+        label = f"${low:,}+" if high == 999999999 else f"${low:,} - ${high:,}"
+        case_parts.append(f"WHEN total_amount >= {low} AND total_amount < {high} THEN '{label}'")
+
+    case_statement = "CASE " + " ".join(case_parts) + " END"
+
+    query = f"""
+        SELECT
+            {case_statement} as range_label,
+            COUNT(*) as orders_count,
+            COALESCE(SUM(total_amount), 0) as total_sales,
+            COALESCE(AVG(total_amount), 0) as avg_ticket
+        FROM orders
+        WHERE {where_clause}
+        GROUP BY {case_statement}
+        ORDER BY MIN(total_amount)
+    """
+
+    rows = await conn.fetch(query, *params)
+    total_orders = sum(row['orders_count'] for row in rows)
+
+    data = [{
+        "range": row['range_label'],
+        "ordersCount": row['orders_count'],
+        "percentage": round((row['orders_count'] / total_orders * 100), 1) if total_orders > 0 else 0,
+        "totalSales": float(row['total_sales']),
+        "avgTicket": float(row['avg_ticket'])
+    } for row in rows if row['range_label']]
+
+    meta["groupBy"] = "ticket"
+    meta["totalOrders"] = total_orders
+    return {"success": True, "data": data, "meta": meta}
 
 
 async def get_menu_products(

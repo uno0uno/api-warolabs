@@ -2,7 +2,7 @@
                          WARO PUBLIC API DOCUMENTATION
 ================================================================================
 
-Version: 1.0
+Version: 2.0
 Base URL: https://api.warocol.com/v1
 
 ================================================================================
@@ -69,30 +69,114 @@ Response:
 Required Scope: orders:read or read
 
 --------------------------------------------------------------------------------
-2. GET SALES METRICS
+2. GET SALES METRICS (Consolidated Analytics Endpoint)
 --------------------------------------------------------------------------------
 POST /v1/sales/metrics
 
-Retrieves aggregated sales metrics for the authenticated tenant.
+Retrieves sales metrics with optional grouping for analytics.
 
 Request Body:
 {
     "dateFrom": null,         // Start date filter (YYYY-MM-DD)
     "dateTo": null,           // End date filter (YYYY-MM-DD)
-    "timezone": "America/Bogota" // IANA timezone for date filters
+    "timezone": "America/Bogota", // IANA timezone for date filters
+    "groupBy": null,          // Grouping: null, "weekday", "hour", "product", "payment", "ticket"
+    "limit": 20,              // For "product" grouping: number of results (1-100)
+    "sortBy": "quantity",     // For "product" grouping: "quantity" or "revenue"
+    "ranges": null            // For "ticket" grouping: custom price ranges
 }
 
-Response:
+GROUPBY OPTIONS:
+
+null (default) - Overall metrics:
 {
     "success": true,
     "data": {
-        "totalSales": 1500000,
-        "totalOrders": 150,
-        "averageTicket": 10000,
-        "paymentMethodBreakdown": {...},
-        "statusBreakdown": {...}
+        "totalSales": 12413500,
+        "totalOrders": 532,
+        "completedOrders": 532,
+        "cancelledOrders": 0,
+        "pendingOrders": 0,
+        "avgTicket": 23333.64
     }
 }
+
+"weekday" - Metrics grouped by day of week:
+{
+    "success": true,
+    "data": [
+        {
+            "dayNumber": 0,       // 0=Sunday, 6=Saturday
+            "dayName": "Sunday",
+            "totalOrders": 49,
+            "totalSales": 916000.0,
+            "avgTicket": 18693.87
+        }
+    ]
+}
+
+"hour" - Metrics grouped by hour of day:
+{
+    "success": true,
+    "data": [
+        {
+            "hour": 19,
+            "hourLabel": "19:00",
+            "totalOrders": 98,
+            "totalSales": 2356500.0,
+            "avgTicket": 24045.91
+        }
+    ]
+}
+
+"product" - Top selling products (use limit and sortBy):
+{
+    "success": true,
+    "data": [
+        {
+            "rank": 1,
+            "productId": "uuid",
+            "productName": "COMBO 1 HAMBURGUESA RES",
+            "categoryName": "Combos",
+            "totalQuantity": 141,
+            "totalRevenue": 2150500.0,
+            "ordersCount": 119,
+            "avgPrice": 15252.0
+        }
+    ]
+}
+
+"payment" - Sales breakdown by payment method:
+{
+    "success": true,
+    "data": [
+        {
+            "paymentMethod": "cash",
+            "ordersCount": 308,
+            "ordersPercentage": 57.9,
+            "totalSales": 6942500.0,
+            "salesPercentage": 55.9,
+            "avgTicket": 22540.58
+        }
+    ]
+}
+
+"ticket" - Distribution by ticket price ranges:
+{
+    "success": true,
+    "data": [
+        {
+            "range": "$0 - $15,000",
+            "ordersCount": 185,
+            "percentage": 34.8,
+            "totalSales": 1993500.0,
+            "avgTicket": 10775.67
+        }
+    ]
+}
+
+Default ticket ranges: [0, 15000, 25000, 40000, 60000, 100000]
+Custom ranges example: {"ranges": [0, 10000, 20000, 50000]}
 
 Required Scope: orders:read or read
 

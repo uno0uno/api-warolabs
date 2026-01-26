@@ -25,10 +25,14 @@ class SalesQueryRequest(BaseModel):
 
 
 class MetricsQueryRequest(BaseModel):
-    """Request body for metrics query"""
+    """Request body for metrics query with optional grouping"""
     dateFrom: Optional[str] = Field(default=None, description="Start date (YYYY-MM-DD)")
     dateTo: Optional[str] = Field(default=None, description="End date (YYYY-MM-DD)")
-    timezone: str = Field(default="America/Bogota", description="Timezone for date filters (e.g., America/Bogota, America/Mexico_City, America/New_York)")
+    timezone: str = Field(default="America/Bogota", description="Timezone for date filters")
+    groupBy: Optional[str] = Field(default=None, description="Group metrics by: date, weekday, hour, product, payment, ticket")
+    limit: int = Field(default=20, ge=1, le=100, description="For product grouping: number of products")
+    sortBy: str = Field(default="quantity", description="For product grouping: quantity or revenue")
+    ranges: Optional[list] = Field(default=None, description="For ticket grouping: custom price ranges")
 
 
 class SaleDetailRequest(BaseModel):
@@ -90,6 +94,14 @@ async def get_sales_metrics(request: Request, body: MetricsQueryRequest):
     """
     Obtiene metricas de ventas del tenant autenticado.
 
+    **Parametro groupBy:**
+    - null: Metricas generales (default)
+    - "weekday": Agrupado por dia de la semana
+    - "hour": Agrupado por hora del dia
+    - "product": Top productos vendidos
+    - "payment": Desglose por metodo de pago
+    - "ticket": Distribucion por rangos de precio
+
     **Autenticacion requerida:**
     - Header `Authorization: Bearer waro_sk_xxx`
     - O header `X-API-Key: waro_sk_xxx`
@@ -100,7 +112,11 @@ async def get_sales_metrics(request: Request, body: MetricsQueryRequest):
         request,
         date_from=body.dateFrom,
         date_to=body.dateTo,
-        timezone=body.timezone
+        timezone=body.timezone,
+        group_by=body.groupBy,
+        limit=body.limit,
+        sort_by=body.sortBy,
+        ranges=body.ranges
     )
 
 
@@ -176,3 +192,5 @@ async def get_menu_modifiers(request: Request, body: MenuModifiersRequest):
         limit=body.limit,
         offset=body.offset
     )
+
+
