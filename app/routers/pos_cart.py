@@ -25,6 +25,28 @@ class AddItemRequest(BaseModel):
     notes: Optional[str] = None
 
 
+class BatchAddItemsRequest(BaseModel):
+    items: List[AddItemRequest]
+    customer_id: Optional[UUID] = None  # Opcional - si no se pasa, se crea carrito anónimo
+
+
+@router.post("/batch")
+async def create_cart_with_items_batch(
+    request: Request,
+    batch: BatchAddItemsRequest
+):
+    """
+    Create cart and add all items in batch (single transaction).
+    - If customer_id is provided, cart is linked to customer
+    - If customer_id is None, creates anonymous cart (customer assigned at complete)
+    """
+    return await pos_cart_service.create_cart_with_batch_items(
+        request,
+        batch.customer_id,
+        [item.dict() for item in batch.items]
+    )
+
+
 @router.get("/{customer_id}")
 async def get_cart(
     request: Request,
@@ -118,6 +140,7 @@ async def clear_cart(
 
 class CompleteOrderRequest(BaseModel):
     payment_method: str = Field(..., description="Payment method: cash, card, digital")
+    customer_id: UUID = Field(..., description="Customer ID to associate with the order")
 
 
 @router.post("/{cart_id}/complete")
@@ -128,6 +151,7 @@ async def complete_order(
 ):
     """
     Complete POS order:
+    - Associates customer with cart (if not already)
     - Creates order record
     - Copies cart items to order_items
     - Updates inventory
@@ -136,5 +160,6 @@ async def complete_order(
     return await pos_cart_service.complete_pos_order(
         request,
         cart_id,
-        order_data.payment_method
+        order_data.payment_method,
+        order_data.customer_id
     )

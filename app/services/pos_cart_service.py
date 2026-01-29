@@ -86,6 +86,126 @@ async def get_or_create_active_cart(
         raise APIError(f"Error getting/creating cart: {str(e)}", status_code=500)
 
 
+async def create_cart_with_batch_items(
+    request: Request,
+    customer_id: Optional[UUID],
+    items: List[dict]
+) -> dict:
+    """
+    Create a cart and add all items in a single transaction (batch).
+    customer_id is optional - if None, creates anonymous cart.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        if not items:
+            raise APIError("Cannot create cart without items", status_code=400)
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # Create cart (customer_id can be None)
+                create_cart_query = """
+                    INSERT INTO pos_carts (
+                        tenant_id, user_id, customer_id, status, total_amount
+                    )
+                    VALUES ($1, $2, $3, 'active', 0)
+                    RETURNING id, total_amount, created_at, updated_at
+                """
+                cart_row = await conn.fetchrow(
+                    create_cart_query,
+                    tenant_id,
+                    user_id,
+                    customer_id  # Can be None
+                )
+                cart_id = cart_row['id']
+                logger.info(f"Created cart {cart_id} (customer: {customer_id or 'anonymous'})")
+
+                # Add all items in batch
+                item_ids = []
+                for item in items:
+                    product_id = item['product_id']
+                    quantity = item['quantity']
+                    unit_price = item['unit_price']
+                    modifiers = item.get('modifiers', [])
+                    notes = item.get('notes')
+
+                    # Calculate subtotal
+                    modifiers_total = sum(mod['price'] for mod in modifiers)
+                    subtotal = (unit_price + modifiers_total) * quantity
+
+                    # Insert cart item
+                    item_query = """
+                        INSERT INTO pos_cart_items (
+                            cart_id, product_id, quantity, unit_price, subtotal, notes
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        RETURNING id
+                    """
+                    item_row = await conn.fetchrow(
+                        item_query,
+                        cart_id,
+                        product_id,
+                        quantity,
+                        unit_price,
+                        subtotal,
+                        notes
+                    )
+                    item_id = item_row['id']
+                    item_ids.append(str(item_id))
+
+                    # Insert modifiers
+                    if modifiers:
+                        modifier_query = """
+                            INSERT INTO pos_cart_item_modifiers (
+                                cart_item_id, modifier_id, modifier_name, price
+                            )
+                            VALUES ($1, $2, $3, $4)
+                        """
+                        for mod in modifiers:
+                            await conn.execute(
+                                modifier_query,
+                                item_id,
+                                mod['id'],
+                                mod['name'],
+                                mod['price']
+                            )
+
+                # Update cart total
+                await update_cart_total(conn, cart_id)
+
+                # Get updated total
+                total_row = await conn.fetchrow(
+                    "SELECT total_amount FROM pos_carts WHERE id = $1",
+                    cart_id
+                )
+
+                logger.info(f"Added {len(items)} items to cart {cart_id} in batch")
+
+                return {
+                    "success": True,
+                    "message": f"Cart created with {len(items)} items",
+                    "data": {
+                        "cart_id": str(cart_id),
+                        "item_ids": item_ids,
+                        "total_amount": float(total_row['total_amount']),
+                        "items_count": len(items)
+                    }
+                }
+
+    except AuthenticationError as e:
+        raise e
+    except APIError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error creating cart with batch items: {str(e)}")
+        raise APIError(f"Error creating cart with batch items: {str(e)}", status_code=500)
+
+
 async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
     """
     Get all items in a cart with their modifiers
@@ -424,15 +544,17 @@ async def update_cart_total(conn, cart_id: UUID):
 async def complete_pos_order(
     request: Request,
     cart_id: UUID,
-    payment_method: str
+    payment_method: str,
+    customer_id: UUID
 ) -> dict:
     """
     Complete a POS order:
-    1. Create order record
-    2. Copy cart items to order_items
-    3. Copy modifiers to order_item_modifiers
-    4. Mark cart as completed
-    5. Update inventory if product controls stock
+    1. Associate customer with cart
+    2. Create order record
+    3. Copy cart items to order_items
+    4. Copy modifiers to order_item_modifiers
+    5. Mark cart as completed
+    6. Update inventory if product controls stock
     """
     try:
         session_context = require_valid_session(request)
@@ -455,13 +577,22 @@ async def complete_pos_order(
                 if not cart_row:
                     raise APIError("Cart not found or already completed", status_code=404)
 
+                # 1b. Associate customer with cart (update if different or null)
+                if cart_row['customer_id'] != customer_id:
+                    await conn.execute(
+                        "UPDATE pos_carts SET customer_id = $1 WHERE id = $2",
+                        customer_id,
+                        cart_id
+                    )
+                    logger.info(f"Associated customer {customer_id} with cart {cart_id}")
+
                 # 2. Get cart items
                 items = await get_cart_items(conn, cart_id)
 
                 if not items:
                     raise APIError("Cannot complete order with empty cart", status_code=400)
 
-                # 3. Create order record
+                # 3. Create order record (use customer_id from parameter)
                 order_query = """
                     INSERT INTO orders (
                         user_id, tenant_id, customer_id, payment_method, pos_cart_id,
@@ -474,7 +605,7 @@ async def complete_pos_order(
                     order_query,
                     user_id,
                     tenant_id,
-                    cart_row['customer_id'],
+                    customer_id,  # Use parameter instead of cart_row
                     payment_method,
                     cart_id,
                     cart_row['total_amount']
