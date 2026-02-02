@@ -212,6 +212,9 @@ class PurchaseBase(BaseModel):
     consolidation_group: Optional[str] = Field(None, description="Consolidation group for consolidated invoicing")
     payment_balance: Optional[Decimal] = Field(None, ge=0, description="Remaining payment balance (for partial payments)")
 
+    # Direct entry flag
+    is_direct_entry: Optional[bool] = Field(False, description="True if created via direct purchase flow (immediate stock update)")
+
 class PurchaseCreate(PurchaseBase):
     """Model for creating purchase orders"""
     items: List[PurchaseItemCreate] = Field(default_factory=list, description="Purchase items")
@@ -256,6 +259,9 @@ class PurchaseUpdate(BaseModel):
     received_by: Optional[UUID] = None
     verified_by: Optional[UUID] = None
     package_condition: Optional[PackageCondition] = None
+
+    # Direct entry flag
+    is_direct_entry: Optional[bool] = None
 
 class Purchase(PurchaseBase):
     """Full purchase order model with all fields"""

@@ -1,0 +1,1176 @@
+"""
+Direct Purchase Service
+Handles the simplified flow for immediate stock updates (Compras Directas)
+"""
+
+from typing import Optional, List, Dict, Any
+from uuid import UUID
+from datetime import datetime
+from fastapi import Request, Response, HTTPException, UploadFile
+from decimal import Decimal
+from app.database import get_db_connection
+from app.core.middleware import require_valid_session
+from app.core.exceptions import AuthenticationError
+from app.services.purchase_tracking_service import (
+    create_status_history_entry,
+    upload_purchase_attachments
+)
+import logging
+import json
+from uuid import uuid4
+
+logger = logging.getLogger(__name__)
+
+
+def calculate_changes_summary(before: List[Dict], after: List[Dict]) -> Dict:
+    """
+    Genera resumen legible de cambios entre items antes y después de una edición.
+
+    Args:
+        before: Lista de items antes de la edición
+        after: Lista de items después de la edición
+
+    Returns:
+        Dict con listas de items added, removed, modified
+    """
+    # Crear mapas por ingredient_id para comparación rápida
+    before_map = {str(item['ingredient_id']): item for item in before}
+    after_map = {str(item['ingredient_id']): item for item in after}
+
+    added = []
+    removed = []
+    modified = []
+
+    # Items agregados (están en after pero no en before)
+    for ing_id, item in after_map.items():
+        if ing_id not in before_map:
+            qty = item.get('purchase_quantity') or item.get('quantity', 0)
+            unit = item.get('purchase_unit') or item.get('unit', '')
+            name = item.get('ingredient_name', 'Item')
+            added.append(f"{name} x {qty} {unit}")
+
+    # Items eliminados (están en before pero no en after)
+    for ing_id, item in before_map.items():
+        if ing_id not in after_map:
+            qty = item.get('purchase_quantity') or item.get('quantity', 0)
+            unit = item.get('purchase_unit') or item.get('unit', '')
+            name = item.get('ingredient_name', 'Item')
+            removed.append(f"{name} x {qty} {unit}")
+
+    # Items modificados (están en ambos pero con cambios)
+    for ing_id, item_after in after_map.items():
+        if ing_id in before_map:
+            item_before = before_map[ing_id]
+
+            qty_before = float(item_before.get('purchase_quantity') or item_before.get('quantity', 0))
+            qty_after = float(item_after.get('purchase_quantity') or item_after.get('quantity', 0))
+            cost_before = float(item_before.get('unit_cost', 0))
+            cost_after = float(item_after.get('unit_cost', 0))
+            unit_before = item_before.get('purchase_unit') or item_before.get('unit', '')
+            unit_after = item_after.get('purchase_unit') or item_after.get('unit', '')
+            name = item_after.get('ingredient_name', 'Item')
+
+            # Verificar si hubo cambios significativos
+            if (abs(qty_before - qty_after) > 0.001 or
+                abs(cost_before - cost_after) > 0.001 or
+                unit_before != unit_after):
+
+                changes = []
+                if abs(qty_before - qty_after) > 0.001 or unit_before != unit_after:
+                    changes.append(f"{qty_before} {unit_before} → {qty_after} {unit_after}")
+                if abs(cost_before - cost_after) > 0.001:
+                    changes.append(f"${cost_before:,.0f} → ${cost_after:,.0f}")
+
+                if changes:
+                    modified.append(f"{name}: {', '.join(changes)}")
+
+    return {"added": added, "removed": removed, "modified": modified}
+
+
+async def get_next_direct_purchase_number(conn, tenant_id: UUID) -> str:
+    """Generate the next direct purchase number for the tenant (WR-CD-YYYY-XXXX format)"""
+    current_year = datetime.now().year
+    prefix = f'WR-CD-{current_year}-'
+
+    last_purchase = await conn.fetchrow("""
+        SELECT purchase_number
+        FROM tenant_purchases
+        WHERE tenant_id = $1 AND purchase_number LIKE $2
+        ORDER BY purchase_number DESC
+        LIMIT 1
+    """, tenant_id, f'{prefix}%')
+
+    if last_purchase and last_purchase['purchase_number']:
+        try:
+            last_number = int(last_purchase['purchase_number'].split('-')[-1])
+            next_number = last_number + 1
+        except (ValueError, IndexError):
+            next_number = 1
+    else:
+        next_number = 1
+
+    return f"{prefix}{next_number:04d}"
+
+
+async def create_direct_purchase(
+    request: Request,
+    response: Response,
+    supplier_id: UUID,
+    items_data: str,
+    payment_type: str = "contado",
+    payment_terms: Optional[str] = None,
+    notes: Optional[str] = None,
+    invoice_number: Optional[str] = None,
+    invoice_amount: Optional[float] = None,
+    invoice_date: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    payment_reference: Optional[str] = None,
+    payment_amount: Optional[float] = None,
+    payment_date: Optional[str] = None,
+    invoice_files: List[UploadFile] = [],
+    payment_files: List[UploadFile] = []
+) -> Dict[str, Any]:
+    """
+    Create a direct purchase that immediately updates inventory.
+
+    This is a simplified flow that:
+    1. Creates purchase with status 'received' and is_direct_entry=True
+    2. Inserts items with prices
+    3. Updates inventory immediately
+    4. Records inventory movements
+    5. Optionally attaches invoice and payment proof
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        # Parse items data from JSON string
+        try:
+            items = json.loads(items_data)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid items data format")
+
+        if not items or len(items) == 0:
+            raise HTTPException(status_code=400, detail="At least one item is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # 1. Generate purchase number with WR-CD prefix
+                purchase_number = await get_next_direct_purchase_number(conn, tenant_id)
+
+                # 2. Calculate totals from items
+                total_amount = sum(
+                    float(item.get('quantity', 0)) * float(item.get('unit_cost', 0))
+                    for item in items
+                )
+
+                # Determine final status based on payment info
+                final_status = 'received'
+                if payment_method and payment_amount:
+                    final_status = 'paid'
+                elif invoice_number:
+                    final_status = 'invoiced'
+
+                # 3. Create purchase record
+                purchase_row = await conn.fetchrow("""
+                    INSERT INTO tenant_purchases (
+                        tenant_id,
+                        supplier_id,
+                        purchase_number,
+                        purchase_date,
+                        total_amount,
+                        tax_amount,
+                        status,
+                        invoice_number,
+                        invoice_date,
+                        invoice_amount,
+                        notes,
+                        created_by,
+                        payment_type,
+                        payment_terms,
+                        payment_method,
+                        payment_reference,
+                        payment_amount,
+                        payment_date,
+                        is_direct_entry,
+                        received_at,
+                        received_by,
+                        paid_at
+                    ) VALUES (
+                        $1, $2, $3, NOW(), $4, 0, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13, $14, $15, $16, TRUE, NOW(), $17,
+                        CASE WHEN $18 THEN NOW() ELSE NULL END
+                    )
+                    RETURNING id
+                """,
+                    tenant_id,
+                    supplier_id,
+                    purchase_number,
+                    total_amount,
+                    final_status,
+                    invoice_number,
+                    datetime.fromisoformat(invoice_date) if invoice_date else None,
+                    invoice_amount,
+                    notes,
+                    user_id,
+                    payment_type,
+                    payment_terms,
+                    payment_method,
+                    payment_reference,
+                    payment_amount,
+                    datetime.fromisoformat(payment_date) if payment_date else None,
+                    user_id,
+                    bool(payment_method and payment_amount)
+                )
+
+                purchase_id = purchase_row['id']
+
+                # 4. Insert items and update inventory
+                for item in items:
+                    ingredient_id_str = item.get('ingredient_id')
+
+                    try:
+                        ingredient_id = UUID(ingredient_id_str) if isinstance(ingredient_id_str, str) else ingredient_id_str
+                    except (ValueError, TypeError):
+                        logger.error(f"Invalid ingredient_id format: {ingredient_id_str}")
+                        continue
+
+                    # Get ingredient base unit
+                    ingredient = await conn.fetchrow("""
+                        SELECT unit FROM ingredients WHERE id = $1
+                    """, ingredient_id)
+
+                    if not ingredient:
+                        logger.warning(f"Ingredient not found: {ingredient_id}")
+                        continue
+
+                    base_unit = ingredient['unit']
+                    quantity = float(item.get('quantity', 0))
+                    unit_cost = float(item.get('unit_cost', 0))
+                    purchase_unit = item.get('purchase_unit', base_unit)
+                    purchase_quantity = float(item.get('purchase_quantity', quantity))
+
+                    # Get conversion factor if purchase unit differs from base unit
+                    conversion_factor = 1.0
+                    if purchase_unit and purchase_unit != base_unit:
+                        conversion_row = await conn.fetchrow("""
+                            SELECT conversion_factor
+                            FROM ingredient_purchase_units
+                            WHERE ingredient_id = $1
+                              AND purchase_unit_label = $2
+                              AND is_active = TRUE
+                        """, ingredient_id, purchase_unit)
+
+                        if conversion_row:
+                            conversion_factor = float(conversion_row['conversion_factor'])
+
+                    # Calculate base unit quantity
+                    base_quantity = purchase_quantity * conversion_factor
+                    base_unit_cost = unit_cost / conversion_factor if conversion_factor > 0 else unit_cost
+
+                    logger.info(f"Direct purchase item: {purchase_quantity} {purchase_unit} -> {base_quantity} {base_unit} (factor: {conversion_factor})")
+
+                    # Insert purchase item
+                    await conn.execute("""
+                        INSERT INTO tenant_purchase_items (
+                            purchase_id,
+                            ingredient_id,
+                            quantity,
+                            unit,
+                            purchase_quantity,
+                            purchase_unit,
+                            unit_cost,
+                            total_cost,
+                            quantity_received,
+                            received_at,
+                            quality_status,
+                            item_condition,
+                            notes
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), 'good', 'complete', $10)
+                    """,
+                        purchase_id,
+                        ingredient_id,
+                        base_quantity,
+                        base_unit,
+                        purchase_quantity,
+                        purchase_unit,
+                        base_unit_cost,
+                        purchase_quantity * unit_cost,
+                        base_quantity,  # quantity_received = full quantity
+                        item.get('notes')
+                    )
+
+                    # Update inventory
+                    inventory_row = await conn.fetchrow("""
+                        SELECT id, current_stock
+                        FROM tenant_inventory
+                        WHERE tenant_id = $1 AND ingredient_id = $2
+                        FOR UPDATE
+                    """, tenant_id, ingredient_id)
+
+                    previous_stock = 0
+                    if inventory_row:
+                        previous_stock = float(inventory_row['current_stock'] or 0)
+                        new_stock = previous_stock + base_quantity
+
+                        await conn.execute("""
+                            UPDATE tenant_inventory
+                            SET current_stock = $1, last_updated = NOW()
+                            WHERE tenant_id = $2 AND ingredient_id = $3
+                        """, new_stock, tenant_id, ingredient_id)
+                    else:
+                        new_stock = base_quantity
+                        await conn.execute("""
+                            INSERT INTO tenant_inventory (
+                                tenant_id, ingredient_id, current_stock, minimum_stock
+                            ) VALUES ($1, $2, $3, 0)
+                        """, tenant_id, ingredient_id, new_stock)
+
+                    # Create inventory movement record
+                    await conn.execute("""
+                        INSERT INTO tenant_ingredient_movements (
+                            tenant_id,
+                            ingredient_id,
+                            movement_type,
+                            quantity_change,
+                            unit,
+                            previous_stock,
+                            new_stock,
+                            reference_table,
+                            reference_id,
+                            cost_per_unit,
+                            notes,
+                            created_by
+                        ) VALUES ($1, $2, 'purchase', $3, $4, $5, $6, 'tenant_purchases', $7, $8, $9, $10)
+                    """,
+                        tenant_id,
+                        ingredient_id,
+                        base_quantity,
+                        base_unit,
+                        previous_stock,
+                        new_stock,
+                        purchase_id,
+                        base_unit_cost,
+                        f"Compra directa - {purchase_number}",
+                        user_id
+                    )
+
+                # 5. Create status history
+                await create_status_history_entry(
+                    conn, purchase_id, tenant_id,
+                    None, 'received', user_id,
+                    {"direct_entry": True, "items_count": len(items)},
+                    "Compra directa - entrada inmediata de stock"
+                )
+
+                if final_status == 'invoiced':
+                    await create_status_history_entry(
+                        conn, purchase_id, tenant_id,
+                        'received', 'invoiced', user_id,
+                        {"invoice_number": invoice_number},
+                        None
+                    )
+                elif final_status == 'paid':
+                    await create_status_history_entry(
+                        conn, purchase_id, tenant_id,
+                        'received', 'paid', user_id,
+                        {
+                            "payment_method": payment_method,
+                            "payment_amount": str(payment_amount)
+                        },
+                        None
+                    )
+
+                # 6. Upload attachments if provided
+                if invoice_files:
+                    await upload_purchase_attachments(
+                        conn=conn,
+                        tenant_id=tenant_id,
+                        purchase_id=purchase_id,
+                        user_id=user_id,
+                        files=invoice_files,
+                        attachment_type='invoice',
+                        description_prefix=f'Factura: {invoice_number or "Sin número"}',
+                        related_status='invoiced',
+                        log_prefix='DIRECT-PURCHASE'
+                    )
+
+                if payment_files:
+                    await upload_purchase_attachments(
+                        conn=conn,
+                        tenant_id=tenant_id,
+                        purchase_id=purchase_id,
+                        user_id=user_id,
+                        files=payment_files,
+                        attachment_type='payment_proof',
+                        description_prefix=f'Comprobante: {payment_reference or "Sin referencia"}',
+                        related_status='paid',
+                        log_prefix='DIRECT-PURCHASE'
+                    )
+
+                return {
+                    "success": True,
+                    "message": "Compra directa creada exitosamente",
+                    "data": {
+                        "id": str(purchase_id),
+                        "purchase_number": purchase_number,
+                        "status": final_status,
+                        "total_amount": total_amount,
+                        "items_count": len(items),
+                        "inventory_updated": True
+                    }
+                }
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in create_direct_purchase: {str(e)}")
+        logger.exception(e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error creando compra directa: {str(e)}"
+        )
+
+
+async def get_direct_purchases_list(
+    request: Request,
+    response: Response,
+    page: int = 1,
+    limit: int = 50,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    supplier_id: Optional[UUID] = None,
+    date_filter: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get list of direct purchases (is_direct_entry = TRUE) with tenant isolation
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # Build query with tenant isolation and is_direct_entry filter
+            base_query = """
+                SELECT
+                    tp.id,
+                    tp.tenant_id,
+                    tp.supplier_id,
+                    tp.purchase_number,
+                    tp.purchase_date,
+                    tp.total_amount,
+                    tp.tax_amount,
+                    tp.status,
+                    tp.invoice_number,
+                    tp.notes,
+                    tp.created_by,
+                    tp.created_at,
+                    tp.updated_at,
+                    tp.payment_type,
+                    tp.payment_method,
+                    tp.payment_reference,
+                    tp.payment_amount,
+                    tp.payment_date,
+                    tp.paid_at,
+                    tp.received_at,
+                    tp.is_direct_entry,
+                    ts.name as supplier_name
+                FROM tenant_purchases tp
+                LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
+                WHERE tp.tenant_id = $1 AND tp.is_direct_entry = TRUE
+            """
+
+            count_query = """
+                SELECT COUNT(*) as total
+                FROM tenant_purchases tp
+                LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
+                WHERE tp.tenant_id = $1 AND tp.is_direct_entry = TRUE
+            """
+
+            params = [tenant_id]
+            param_count = 2
+
+            # Add filters
+            if search:
+                base_query += f" AND (LOWER(tp.purchase_number) LIKE LOWER(${param_count}) OR LOWER(tp.invoice_number) LIKE LOWER(${param_count}) OR LOWER(ts.name) LIKE LOWER(${param_count}))"
+                count_query += f" AND (LOWER(tp.purchase_number) LIKE LOWER(${param_count}) OR LOWER(tp.invoice_number) LIKE LOWER(${param_count}) OR LOWER(ts.name) LIKE LOWER(${param_count}))"
+                params.append(f"%{search}%")
+                param_count += 1
+
+            if status:
+                base_query += f" AND LOWER(tp.status) = LOWER(${param_count})"
+                count_query += f" AND LOWER(tp.status) = LOWER(${param_count})"
+                params.append(status)
+                param_count += 1
+
+            if supplier_id:
+                base_query += f" AND tp.supplier_id = ${param_count}"
+                count_query += f" AND tp.supplier_id = ${param_count}"
+                params.append(supplier_id)
+                param_count += 1
+
+            # Date filter
+            if date_filter:
+                if date_filter == 'today':
+                    base_query += f" AND DATE(tp.purchase_date AT TIME ZONE 'America/Bogota') = (NOW() AT TIME ZONE 'America/Bogota')::date"
+                    count_query += f" AND DATE(tp.purchase_date AT TIME ZONE 'America/Bogota') = (NOW() AT TIME ZONE 'America/Bogota')::date"
+                elif date_filter == 'yesterday':
+                    base_query += f" AND DATE(tp.purchase_date AT TIME ZONE 'America/Bogota') = (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '1 day'"
+                    count_query += f" AND DATE(tp.purchase_date AT TIME ZONE 'America/Bogota') = (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '1 day'"
+                elif date_filter == 'last_week':
+                    base_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '7 days'"
+                    count_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '7 days'"
+                elif date_filter == '15_days':
+                    base_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '15 days'"
+                    count_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '15 days'"
+                elif date_filter == '1_month':
+                    base_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '1 month'"
+                    count_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '1 month'"
+                elif date_filter == '3_months':
+                    base_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '3 months'"
+                    count_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '3 months'"
+
+            # Add pagination
+            offset = (page - 1) * limit
+            base_query += f" ORDER BY tp.created_at DESC LIMIT ${param_count} OFFSET ${param_count + 1}"
+            params.extend([limit, offset])
+
+            # Execute queries
+            purchases_data = await conn.fetch(base_query, *params)
+            count_result = await conn.fetchrow(count_query, *params[:-2])
+
+            # Convert to list of dicts
+            purchases = []
+            for row in purchases_data:
+                purchase = dict(row)
+                # Get items count for each purchase
+                items_count = await conn.fetchval("""
+                    SELECT COUNT(*) FROM tenant_purchase_items WHERE purchase_id = $1
+                """, row['id'])
+                purchase['items_count'] = items_count
+                purchases.append(purchase)
+
+            return {
+                "success": True,
+                "data": purchases,
+                "total": count_result['total'] if count_result else 0,
+                "page": page,
+                "limit": limit
+            }
+
+    except AuthenticationError:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_direct_purchases_list: {str(e)}")
+        logger.exception(e)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+
+async def get_direct_purchase_by_id(
+    request: Request,
+    response: Response,
+    purchase_id: UUID
+) -> Dict[str, Any]:
+    """
+    Get a direct purchase by ID with all details
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # Get purchase
+            purchase = await conn.fetchrow("""
+                SELECT
+                    tp.*,
+                    ts.name as supplier_name,
+                    ts.tax_id as supplier_tax_id,
+                    ts.phone as supplier_phone,
+                    ts.email as supplier_email
+                FROM tenant_purchases tp
+                LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
+                WHERE tp.id = $1 AND tp.tenant_id = $2 AND tp.is_direct_entry = TRUE
+            """, purchase_id, tenant_id)
+
+            if not purchase:
+                raise HTTPException(status_code=404, detail="Compra directa no encontrada")
+
+            purchase_dict = dict(purchase)
+
+            # Get items with ingredient details
+            items = await conn.fetch("""
+                SELECT
+                    tpi.*,
+                    i.name as ingredient_name,
+                    i.category as ingredient_category
+                FROM tenant_purchase_items tpi
+                JOIN ingredients i ON tpi.ingredient_id = i.id
+                WHERE tpi.purchase_id = $1
+                ORDER BY i.name
+            """, purchase_id)
+
+            purchase_dict['items'] = [dict(item) for item in items]
+
+            # Get status history
+            history = await conn.fetch("""
+                SELECT
+                    psh.*,
+                    p.name as changed_by_name
+                FROM purchase_status_history psh
+                LEFT JOIN profile p ON psh.changed_by = p.id
+                WHERE psh.purchase_id = $1
+                ORDER BY psh.changed_at DESC
+            """, purchase_id)
+
+            purchase_dict['status_history'] = [dict(h) for h in history]
+
+            # Get attachments
+            attachments = await conn.fetch("""
+                SELECT * FROM purchase_attachments
+                WHERE purchase_id = $1
+                ORDER BY uploaded_at DESC
+            """, purchase_id)
+
+            purchase_dict['attachments'] = [dict(a) for a in attachments]
+
+            return {
+                "success": True,
+                "data": purchase_dict
+            }
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_direct_purchase_by_id: {str(e)}")
+        logger.exception(e)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+
+async def get_supplier_catalog_prices(
+    request: Request,
+    response: Response,
+    supplier_id: UUID
+) -> Dict[str, Any]:
+    """
+    Get catalog prices for a specific supplier.
+    Returns ingredients with their configured prices for this supplier.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # Get all active ingredients with their purchase units
+            ingredients_data = await conn.fetch("""
+                SELECT
+                    i.id as ingredient_id,
+                    i.name as ingredient_name,
+                    i.unit as base_unit,
+                    i.category,
+                    i.type,
+                    i.price as default_price
+                FROM ingredients i
+                WHERE i.tenant_id = $1 AND i.is_active = TRUE
+                ORDER BY i.name
+            """, tenant_id)
+
+            # Get all purchase units for ingredients
+            purchase_units = await conn.fetch("""
+                SELECT
+                    ipu.ingredient_id,
+                    ipu.purchase_unit_label,
+                    ipu.conversion_factor,
+                    ipu.unit_cost,
+                    ipu.is_default
+                FROM ingredient_purchase_units ipu
+                JOIN ingredients i ON ipu.ingredient_id = i.id
+                WHERE i.tenant_id = $1 AND ipu.is_active = TRUE
+                ORDER BY ipu.is_default DESC, ipu.purchase_unit_label
+            """, tenant_id)
+
+            # Group purchase units by ingredient
+            units_by_ingredient = {}
+            for unit in purchase_units:
+                ing_id = str(unit['ingredient_id'])
+                if ing_id not in units_by_ingredient:
+                    units_by_ingredient[ing_id] = []
+                units_by_ingredient[ing_id].append({
+                    "label": unit['purchase_unit_label'],
+                    "conversion_factor": float(unit['conversion_factor']) if unit['conversion_factor'] else 1,
+                    "unit_cost": float(unit['unit_cost']) if unit['unit_cost'] else None,
+                    "is_default": unit['is_default']
+                })
+
+            # Build catalog
+            catalog = []
+            for row in ingredients_data:
+                ing_id = str(row['ingredient_id'])
+                units = units_by_ingredient.get(ing_id, [{
+                    "label": row['base_unit'],
+                    "conversion_factor": 1,
+                    "unit_cost": float(row['default_price']) if row['default_price'] else None,
+                    "is_default": True
+                }])
+
+                catalog.append({
+                    "ingredient_id": ing_id,
+                    "ingredient_name": row['ingredient_name'],
+                    "base_unit": row['base_unit'],
+                    "category": row['category'],
+                    "type": row['type'],
+                    "default_price": float(row['default_price']) if row['default_price'] else None,
+                    "purchase_units": units
+                })
+
+            return {
+                "success": True,
+                "data": catalog,
+                "total": len(catalog)
+            }
+
+    except AuthenticationError:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting supplier catalog: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+
+async def update_direct_purchase(
+    request: Request,
+    response: Response,
+    purchase_id: UUID,
+    items_data: str,
+    notes: Optional[str] = None,
+    invoice_number: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    payment_reference: Optional[str] = None,
+    payment_amount: Optional[float] = None,
+    payment_date: Optional[str] = None,
+    invoice_files: List[UploadFile] = [],
+    payment_files: List[UploadFile] = []
+) -> Dict[str, Any]:
+    """
+    Update a direct purchase.
+
+    This function:
+    1. Updates purchase metadata (notes, invoice_number, payment info)
+    2. Updates items - adjusts inventory for changes
+    3. Uploads new attachments (does not delete existing ones)
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        # Parse items data from JSON string
+        try:
+            items = json.loads(items_data)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid items data format")
+
+        if not items or len(items) == 0:
+            raise HTTPException(status_code=400, detail="At least one item is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # 1. Get existing purchase and verify ownership
+                existing_purchase = await conn.fetchrow("""
+                    SELECT id, status, purchase_number, tenant_id
+                    FROM tenant_purchases
+                    WHERE id = $1 AND tenant_id = $2 AND is_direct_entry = TRUE
+                """, purchase_id, tenant_id)
+
+                if not existing_purchase:
+                    raise HTTPException(status_code=404, detail="Compra directa no encontrada")
+
+                purchase_number = existing_purchase['purchase_number']
+
+                # 2. Get existing items WITH ingredient names for audit trail
+                existing_items = await conn.fetch("""
+                    SELECT
+                        pi.id,
+                        pi.ingredient_id,
+                        pi.quantity,
+                        pi.unit,
+                        pi.purchase_quantity,
+                        pi.purchase_unit,
+                        pi.unit_cost,
+                        pi.total_cost,
+                        i.name as ingredient_name
+                    FROM tenant_purchase_items pi
+                    JOIN ingredients i ON pi.ingredient_id = i.id
+                    WHERE pi.purchase_id = $1
+                """, purchase_id)
+
+                # Store items BEFORE edit for audit trail
+                items_before_list = [dict(row) for row in existing_items]
+                total_before = sum(float(item.get('total_cost') or 0) for item in items_before_list)
+
+                # 3. Reverse inventory for existing items
+                for old_item in existing_items:
+                    ingredient_id = old_item['ingredient_id']
+                    old_quantity = float(old_item['quantity'])
+
+                    # Get current inventory
+                    inventory_row = await conn.fetchrow("""
+                        SELECT id, current_stock
+                        FROM tenant_inventory
+                        WHERE tenant_id = $1 AND ingredient_id = $2
+                        FOR UPDATE
+                    """, tenant_id, ingredient_id)
+
+                    if inventory_row:
+                        current_stock = float(inventory_row['current_stock'] or 0)
+                        new_stock = current_stock - old_quantity
+
+                        await conn.execute("""
+                            UPDATE tenant_inventory
+                            SET current_stock = $1, last_updated = NOW()
+                            WHERE tenant_id = $2 AND ingredient_id = $3
+                        """, max(0, new_stock), tenant_id, ingredient_id)
+
+                        # Record inventory movement (reversal)
+                        await conn.execute("""
+                            INSERT INTO tenant_ingredient_movements (
+                                tenant_id,
+                                ingredient_id,
+                                movement_type,
+                                quantity_change,
+                                unit,
+                                previous_stock,
+                                new_stock,
+                                reference_table,
+                                reference_id,
+                                notes,
+                                created_by
+                            ) VALUES ($1, $2, 'adjustment', $3, $4, $5, $6, 'tenant_purchases', $7, $8, $9)
+                        """,
+                            tenant_id,
+                            ingredient_id,
+                            -old_quantity,
+                            old_item['unit'],
+                            current_stock,
+                            max(0, new_stock),
+                            purchase_id,
+                            f"Ajuste por edición de compra directa - {purchase_number}",
+                            user_id
+                        )
+
+                # 4. Delete existing items
+                await conn.execute("""
+                    DELETE FROM tenant_purchase_items WHERE purchase_id = $1
+                """, purchase_id)
+
+                # 5. Insert new items and update inventory
+                total_amount = 0
+                for item in items:
+                    ingredient_id_str = item.get('ingredient_id')
+
+                    try:
+                        ingredient_id = UUID(ingredient_id_str) if isinstance(ingredient_id_str, str) else ingredient_id_str
+                    except (ValueError, TypeError):
+                        logger.error(f"Invalid ingredient_id format: {ingredient_id_str}")
+                        continue
+
+                    # Get ingredient base unit
+                    ingredient = await conn.fetchrow("""
+                        SELECT unit FROM ingredients WHERE id = $1
+                    """, ingredient_id)
+
+                    if not ingredient:
+                        logger.warning(f"Ingredient not found: {ingredient_id}")
+                        continue
+
+                    base_unit = ingredient['unit']
+                    quantity = float(item.get('quantity', 0))
+                    unit_cost = float(item.get('unit_cost', 0))
+                    purchase_unit = item.get('purchase_unit', base_unit)
+                    purchase_quantity = float(item.get('purchase_quantity', quantity))
+
+                    # Get conversion factor
+                    conversion_factor = 1.0
+                    if purchase_unit and purchase_unit != base_unit:
+                        conversion_row = await conn.fetchrow("""
+                            SELECT conversion_factor
+                            FROM ingredient_purchase_units
+                            WHERE ingredient_id = $1
+                              AND purchase_unit_label = $2
+                              AND is_active = TRUE
+                        """, ingredient_id, purchase_unit)
+
+                        if conversion_row:
+                            conversion_factor = float(conversion_row['conversion_factor'])
+
+                    # Calculate base unit quantity
+                    base_quantity = purchase_quantity * conversion_factor
+                    base_unit_cost = unit_cost / conversion_factor if conversion_factor > 0 else unit_cost
+                    item_total = purchase_quantity * unit_cost
+                    total_amount += item_total
+
+                    # Insert purchase item
+                    await conn.execute("""
+                        INSERT INTO tenant_purchase_items (
+                            purchase_id,
+                            ingredient_id,
+                            quantity,
+                            unit,
+                            purchase_quantity,
+                            purchase_unit,
+                            unit_cost,
+                            total_cost,
+                            quantity_received,
+                            received_at,
+                            quality_status,
+                            item_condition,
+                            notes
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), 'good', 'complete', $10)
+                    """,
+                        purchase_id,
+                        ingredient_id,
+                        base_quantity,
+                        base_unit,
+                        purchase_quantity,
+                        purchase_unit,
+                        base_unit_cost,
+                        item_total,
+                        base_quantity,
+                        item.get('notes')
+                    )
+
+                    # Update inventory
+                    inventory_row = await conn.fetchrow("""
+                        SELECT id, current_stock
+                        FROM tenant_inventory
+                        WHERE tenant_id = $1 AND ingredient_id = $2
+                        FOR UPDATE
+                    """, tenant_id, ingredient_id)
+
+                    previous_stock = 0
+                    if inventory_row:
+                        previous_stock = float(inventory_row['current_stock'] or 0)
+                        new_stock = previous_stock + base_quantity
+
+                        await conn.execute("""
+                            UPDATE tenant_inventory
+                            SET current_stock = $1, last_updated = NOW()
+                            WHERE tenant_id = $2 AND ingredient_id = $3
+                        """, new_stock, tenant_id, ingredient_id)
+                    else:
+                        new_stock = base_quantity
+                        await conn.execute("""
+                            INSERT INTO tenant_inventory (
+                                tenant_id, ingredient_id, current_stock, minimum_stock
+                            ) VALUES ($1, $2, $3, 0)
+                        """, tenant_id, ingredient_id, new_stock)
+
+                    # Create inventory movement record
+                    await conn.execute("""
+                        INSERT INTO tenant_ingredient_movements (
+                            tenant_id,
+                            ingredient_id,
+                            movement_type,
+                            quantity_change,
+                            unit,
+                            previous_stock,
+                            new_stock,
+                            reference_table,
+                            reference_id,
+                            cost_per_unit,
+                            notes,
+                            created_by
+                        ) VALUES ($1, $2, 'purchase', $3, $4, $5, $6, 'tenant_purchases', $7, $8, $9, $10)
+                    """,
+                        tenant_id,
+                        ingredient_id,
+                        base_quantity,
+                        base_unit,
+                        previous_stock,
+                        new_stock,
+                        purchase_id,
+                        base_unit_cost,
+                        f"Compra directa (editada) - {purchase_number}",
+                        user_id
+                    )
+
+                # 6. Get items AFTER edit for audit trail
+                items_after_rows = await conn.fetch("""
+                    SELECT
+                        pi.id,
+                        pi.ingredient_id,
+                        pi.quantity,
+                        pi.unit,
+                        pi.purchase_quantity,
+                        pi.purchase_unit,
+                        pi.unit_cost,
+                        pi.total_cost,
+                        i.name as ingredient_name
+                    FROM tenant_purchase_items pi
+                    JOIN ingredients i ON pi.ingredient_id = i.id
+                    WHERE pi.purchase_id = $1
+                """, purchase_id)
+
+                items_after_list = [dict(row) for row in items_after_rows]
+                total_after = total_amount
+
+                # 7. Calculate changes summary and create audit trail
+                changes_summary = calculate_changes_summary(items_before_list, items_after_list)
+
+                # Create history entry if there were any changes
+                if changes_summary['added'] or changes_summary['removed'] or changes_summary['modified']:
+                    # Serialize items for JSON storage
+                    def serialize_item(item):
+                        return {
+                            'ingredient_id': str(item['ingredient_id']),
+                            'ingredient_name': item.get('ingredient_name', 'N/A'),
+                            'purchase_quantity': float(item.get('purchase_quantity') or item.get('quantity', 0)),
+                            'purchase_unit': item.get('purchase_unit') or item.get('unit', ''),
+                            'unit_cost': float(item.get('unit_cost', 0)),
+                            'total_cost': float(item.get('total_cost', 0))
+                        }
+
+                    audit_metadata = {
+                        "action": "items_edited",
+                        "items_before": [serialize_item(i) for i in items_before_list],
+                        "items_after": [serialize_item(i) for i in items_after_list],
+                        "changes_summary": changes_summary,
+                        "totals": {
+                            "before": float(total_before),
+                            "after": float(total_after),
+                            "difference": float(total_after - total_before)
+                        }
+                    }
+
+                    await conn.execute("""
+                        INSERT INTO purchase_status_history (
+                            id, purchase_id, tenant_id, from_status, to_status,
+                            changed_by, changed_at, metadata, notes
+                        ) VALUES (
+                            $1, $2, $3, 'received', 'received',
+                            $4, NOW(), $5, 'Items editados'
+                        )
+                    """,
+                        uuid4(),
+                        purchase_id,
+                        tenant_id,
+                        user_id,
+                        json.dumps(audit_metadata)
+                    )
+
+                    logger.info(f"Created audit trail for direct purchase {purchase_number}: {len(changes_summary['added'])} added, {len(changes_summary['removed'])} removed, {len(changes_summary['modified'])} modified")
+
+                # 8. Determine new status
+                current_status = existing_purchase['status']
+                new_status = current_status
+                if payment_method and payment_amount:
+                    new_status = 'paid'
+                elif invoice_number:
+                    new_status = 'invoiced'
+
+                # 9. Update purchase record
+                await conn.execute("""
+                    UPDATE tenant_purchases
+                    SET
+                        total_amount = $1,
+                        notes = $2,
+                        invoice_number = $3,
+                        payment_method = $4,
+                        payment_reference = $5,
+                        payment_amount = $6,
+                        payment_date = $7,
+                        status = $8,
+                        updated_at = NOW(),
+                        paid_at = CASE WHEN $9 THEN NOW() ELSE paid_at END
+                    WHERE id = $10
+                """,
+                    total_amount,
+                    notes,
+                    invoice_number,
+                    payment_method,
+                    payment_reference,
+                    payment_amount,
+                    datetime.fromisoformat(payment_date) if payment_date else None,
+                    new_status,
+                    bool(payment_method and payment_amount and current_status != 'paid'),
+                    purchase_id
+                )
+
+                # 10. Create status history if status changed
+                if new_status != current_status:
+                    await create_status_history_entry(
+                        conn, purchase_id, tenant_id,
+                        current_status, new_status, user_id,
+                        {"updated_via": "edit"},
+                        f"Estado actualizado durante edición"
+                    )
+
+                # 11. Upload new attachments if provided
+                if invoice_files:
+                    await upload_purchase_attachments(
+                        conn=conn,
+                        tenant_id=tenant_id,
+                        purchase_id=purchase_id,
+                        user_id=user_id,
+                        files=invoice_files,
+                        attachment_type='invoice',
+                        description_prefix=f'Factura: {invoice_number or "Sin número"}',
+                        related_status='invoiced',
+                        log_prefix='DIRECT-PURCHASE-UPDATE'
+                    )
+
+                if payment_files:
+                    await upload_purchase_attachments(
+                        conn=conn,
+                        tenant_id=tenant_id,
+                        purchase_id=purchase_id,
+                        user_id=user_id,
+                        files=payment_files,
+                        attachment_type='payment_proof',
+                        description_prefix=f'Comprobante: {payment_reference or "Sin referencia"}',
+                        related_status='paid',
+                        log_prefix='DIRECT-PURCHASE-UPDATE'
+                    )
+
+                return {
+                    "success": True,
+                    "message": "Compra directa actualizada exitosamente",
+                    "data": {
+                        "id": str(purchase_id),
+                        "purchase_number": purchase_number,
+                        "status": new_status,
+                        "total_amount": total_amount,
+                        "items_count": len(items),
+                        "inventory_updated": True
+                    }
+                }
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in update_direct_purchase: {str(e)}")
+        logger.exception(e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error actualizando compra directa: {str(e)}"
+        )

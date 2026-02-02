@@ -22,6 +22,13 @@ from app.services.purchase_tracking_service import (
     get_purchase_attachments,
     create_purchase_attachment
 )
+from app.services.direct_purchase_service import (
+    create_direct_purchase,
+    get_direct_purchases_list,
+    get_direct_purchase_by_id,
+    get_supplier_catalog_prices,
+    update_direct_purchase
+)
 from app.models.purchase import (
     Purchase,
     PurchaseCreate,
@@ -83,6 +90,208 @@ async def get_next_purchase_number(
         return {
             "next_number": f"WR-{current_year}-{next_number:04d}"
         }
+
+# =============================================================================
+# DIRECT PURCHASES ENDPOINTS (Compras Directas - WR-CD-XXXX)
+# =============================================================================
+
+@router.get("/direct")
+async def get_direct_purchases_endpoint(
+    request: Request,
+    response: Response,
+    page: int = Query(default=1, ge=1, description="Page number"),
+    limit: int = Query(default=50, ge=1, le=250, description="Items per page"),
+    search: Optional[str] = Query(default=None, description="Search by purchase number, invoice number, or supplier name"),
+    status: Optional[str] = Query(default=None, description="Filter by status"),
+    supplier_id: Optional[UUID] = Query(default=None, description="Filter by supplier ID"),
+    date_filter: Optional[str] = Query(default=None, description="Filter by date range (today, yesterday, last_week, 15_days, 1_month, 3_months)")
+):
+    """
+    Get list of direct purchases (Compras Directas) with tenant isolation.
+    These are purchases created via the simplified flow with immediate stock update.
+    """
+    return await get_direct_purchases_list(
+        request=request,
+        response=response,
+        page=page,
+        limit=limit,
+        search=search,
+        status=status,
+        supplier_id=supplier_id,
+        date_filter=date_filter
+    )
+
+
+@router.post("/direct")
+async def create_direct_purchase_endpoint(
+    request: Request,
+    response: Response,
+    supplier_id: UUID = Form(..., description="Supplier ID"),
+    items_data: str = Form(..., description="JSON string of items with ingredient_id, quantity, unit_cost, etc."),
+    payment_type: str = Form(default="contado", description="Payment type: contado, credito, contraentrega"),
+    payment_terms: Optional[str] = Form(default=None, description="Payment terms text"),
+    notes: Optional[str] = Form(default=None, description="Additional notes"),
+    invoice_number: Optional[str] = Form(default=None, description="Invoice number"),
+    invoice_amount: Optional[float] = Form(default=None, description="Invoice amount"),
+    invoice_date: Optional[str] = Form(default=None, description="Invoice date (ISO format)"),
+    payment_method: Optional[str] = Form(default=None, description="Payment method: transfer, cash, check, credit_card"),
+    payment_reference: Optional[str] = Form(default=None, description="Payment reference"),
+    payment_amount: Optional[float] = Form(default=None, description="Payment amount"),
+    payment_date: Optional[str] = Form(default=None, description="Payment date (ISO format)"),
+    invoice_files: List[UploadFile] = File(default=[]),
+    payment_files: List[UploadFile] = File(default=[])
+):
+    """
+    Create a direct purchase (Compra Directa) with immediate inventory update.
+
+    This endpoint:
+    1. Creates a purchase with status 'received' and is_direct_entry=True
+    2. Updates inventory immediately for all items
+    3. Optionally attaches invoice and payment documents
+    4. Generates purchase number with WR-CD-XXXX format
+    """
+    return await create_direct_purchase(
+        request=request,
+        response=response,
+        supplier_id=supplier_id,
+        items_data=items_data,
+        payment_type=payment_type,
+        payment_terms=payment_terms,
+        notes=notes,
+        invoice_number=invoice_number,
+        invoice_amount=invoice_amount,
+        invoice_date=invoice_date,
+        payment_method=payment_method,
+        payment_reference=payment_reference,
+        payment_amount=payment_amount,
+        payment_date=payment_date,
+        invoice_files=invoice_files,
+        payment_files=payment_files
+    )
+
+
+@router.get("/direct/next-number")
+async def get_next_direct_purchase_number(
+    request: Request,
+    response: Response
+):
+    """
+    Get the next auto-generated direct purchase number (WR-CD-XXXX format)
+    Preview only - actual number is generated on creation
+    """
+    from app.core.middleware import require_valid_session
+    from app.database import get_db_connection
+    from datetime import datetime
+
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    if not tenant_id:
+        return {"next_number": "WR-CD-2025-0001"}
+
+    async with get_db_connection() as conn:
+        current_year = datetime.now().year
+        prefix = f'WR-CD-{current_year}-'
+
+        last_purchase = await conn.fetchrow("""
+            SELECT purchase_number
+            FROM tenant_purchases
+            WHERE tenant_id = $1
+                AND purchase_number LIKE $2
+            ORDER BY purchase_number DESC
+            LIMIT 1
+        """, tenant_id, f'{prefix}%')
+
+        if last_purchase and last_purchase['purchase_number']:
+            try:
+                last_number = int(last_purchase['purchase_number'].split('-')[-1])
+                next_number = last_number + 1
+            except (ValueError, IndexError):
+                next_number = 1
+        else:
+            next_number = 1
+
+        return {
+            "next_number": f"{prefix}{next_number:04d}"
+        }
+
+
+@router.get("/direct/{purchase_id}")
+async def get_direct_purchase_endpoint(
+    purchase_id: UUID,
+    request: Request,
+    response: Response
+):
+    """
+    Get a specific direct purchase by ID with all details (items, history, attachments)
+    """
+    return await get_direct_purchase_by_id(
+        request=request,
+        response=response,
+        purchase_id=purchase_id
+    )
+
+
+@router.put("/direct/{purchase_id}")
+async def update_direct_purchase_endpoint(
+    purchase_id: UUID,
+    request: Request,
+    response: Response,
+    items_data: str = Form(..., description="JSON string of items with ingredient_id, quantity, unit_cost, etc."),
+    notes: Optional[str] = Form(default=None, description="Additional notes"),
+    invoice_number: Optional[str] = Form(default=None, description="Invoice number"),
+    payment_method: Optional[str] = Form(default=None, description="Payment method: transfer, cash, check, credit_card"),
+    payment_reference: Optional[str] = Form(default=None, description="Payment reference"),
+    payment_amount: Optional[float] = Form(default=None, description="Payment amount"),
+    payment_date: Optional[str] = Form(default=None, description="Payment date (ISO format)"),
+    invoice_files: List[UploadFile] = File(default=[]),
+    payment_files: List[UploadFile] = File(default=[])
+):
+    """
+    Update a direct purchase (Compra Directa).
+
+    This endpoint:
+    1. Updates purchase items (may affect inventory)
+    2. Updates invoice and payment information
+    3. Adds new attachments (does not delete existing ones)
+    """
+    return await update_direct_purchase(
+        request=request,
+        response=response,
+        purchase_id=purchase_id,
+        items_data=items_data,
+        notes=notes,
+        invoice_number=invoice_number,
+        payment_method=payment_method,
+        payment_reference=payment_reference,
+        payment_amount=payment_amount,
+        payment_date=payment_date,
+        invoice_files=invoice_files,
+        payment_files=payment_files
+    )
+
+
+@router.get("/suppliers/{supplier_id}/catalog")
+async def get_supplier_catalog_endpoint(
+    supplier_id: UUID,
+    request: Request,
+    response: Response
+):
+    """
+    Get catalog prices for a specific supplier.
+    Returns all ingredients with their purchase units and suggested prices.
+    Used to pre-populate prices in the direct purchase form.
+    """
+    return await get_supplier_catalog_prices(
+        request=request,
+        response=response,
+        supplier_id=supplier_id
+    )
+
+
+# =============================================================================
+# REGULAR PURCHASES ENDPOINTS (Órdenes de Compra - WR-XXXX)
+# =============================================================================
 
 @router.get("", response_model=PurchasesListResponse)
 async def get_purchases_endpoint(

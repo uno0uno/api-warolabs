@@ -107,6 +107,7 @@ async def get_purchases_list(
                     LIMIT 1
                 ) psh_paid ON true
                 WHERE tp.tenant_id = $1
+                AND (tp.is_direct_entry = FALSE OR tp.is_direct_entry IS NULL)
             """
 
             count_query = """
@@ -114,6 +115,7 @@ async def get_purchases_list(
                 FROM tenant_purchases tp
                 LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
                 WHERE tp.tenant_id = $1
+                AND (tp.is_direct_entry = FALSE OR tp.is_direct_entry IS NULL)
             """
 
             params = [tenant_id]
