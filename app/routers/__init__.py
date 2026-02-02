@@ -21,4 +21,5 @@ from app.routers import (
     invitations,
     api_tokens,
     public_api,
+    salaries,
 )
