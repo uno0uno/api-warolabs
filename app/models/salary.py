@@ -14,6 +14,7 @@ class SalaryType(str, Enum):
     """Salary type options"""
     SMMLV = "smmlv"
     FIXED = "fixed"
+    HOURLY = "hourly"
 
 
 class PaymentMethod(str, Enum):
@@ -37,9 +38,10 @@ class PaymentFrequency(str, Enum):
 
 class EmployeeSalaryConfigBase(BaseModel):
     """Base model for employee salary configuration"""
-    salary_type: SalaryType = Field(default=SalaryType.SMMLV, description="Type of salary: smmlv or fixed")
+    salary_type: SalaryType = Field(default=SalaryType.SMMLV, description="Type of salary: smmlv, fixed, or hourly")
     minimum_wage_multiplier: Optional[Decimal] = Field(None, ge=0.5, le=10, description="Multiplier for SMMLV")
     fixed_amount: Optional[Decimal] = Field(None, ge=0, description="Fixed monthly amount")
+    hourly_rate: Optional[Decimal] = Field(None, ge=0, description="Hourly rate amount")
     payment_frequency: PaymentFrequency = Field(default=PaymentFrequency.MONTHLY, description="Payment frequency")
     notes: Optional[str] = Field(None, description="Additional notes")
 
@@ -158,6 +160,7 @@ class EmployeeWithSalary(BaseModel):
     salary_type: Optional[str] = None
     multiplier: Optional[Decimal] = None
     fixed_amount: Optional[Decimal] = None
+    hourly_rate: Optional[Decimal] = None
     payment_frequency: Optional[str] = None
     calculated_salary: Optional[Decimal] = None
     salary_notes: Optional[str] = None

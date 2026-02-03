@@ -99,6 +99,7 @@ async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResp
                 es.salary_type,
                 es.minimum_wage_multiplier as multiplier,
                 es.fixed_amount,
+                es.hourly_rate,
                 es.payment_frequency,
                 es.notes as salary_notes,
                 (SELECT payment_date FROM salary_payments sp
@@ -129,6 +130,8 @@ async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResp
                 calculated_salary = Decimal(str(row['multiplier'])) * smmlv
             elif row['salary_type'] == 'fixed' and row['fixed_amount']:
                 calculated_salary = Decimal(str(row['fixed_amount']))
+            elif row['salary_type'] == 'hourly' and row['hourly_rate']:
+                calculated_salary = Decimal(str(row['hourly_rate']))  # For hourly, display the rate
 
             name = row['name'] or row['email'] or 'Sin nombre'
             employees.append(EmployeeWithSalary(
@@ -143,6 +146,7 @@ async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResp
                 salary_type=row['salary_type'],
                 multiplier=Decimal(str(row['multiplier'])) if row['multiplier'] else None,
                 fixed_amount=Decimal(str(row['fixed_amount'])) if row['fixed_amount'] else None,
+                hourly_rate=Decimal(str(row['hourly_rate'])) if row.get('hourly_rate') else None,
                 calculated_salary=calculated_salary,
                 salary_notes=row['salary_notes'],
                 last_payment_date=row['last_payment_date'],
@@ -178,6 +182,7 @@ async def get_employee_salary_detail(request: Request, employee_id: UUID) -> Emp
                 es.salary_type,
                 es.minimum_wage_multiplier as multiplier,
                 es.fixed_amount,
+                es.hourly_rate,
                 es.notes as salary_notes
             FROM tenant_members tm
             JOIN profile p ON p.id = tm.user_id
@@ -197,6 +202,8 @@ async def get_employee_salary_detail(request: Request, employee_id: UUID) -> Emp
             calculated_salary = Decimal(str(row['multiplier'])) * smmlv
         elif row['salary_type'] == 'fixed' and row['fixed_amount']:
             calculated_salary = Decimal(str(row['fixed_amount']))
+        elif row['salary_type'] == 'hourly' and row['hourly_rate']:
+            calculated_salary = Decimal(str(row['hourly_rate']))  # For hourly, display the rate
 
         # Get payments with attachments
         payments_query = """
@@ -287,6 +294,7 @@ async def get_employee_salary_detail(request: Request, employee_id: UUID) -> Emp
             salary_type=row['salary_type'],
             multiplier=Decimal(str(row['multiplier'])) if row['multiplier'] else None,
             fixed_amount=Decimal(str(row['fixed_amount'])) if row['fixed_amount'] else None,
+            hourly_rate=Decimal(str(row['hourly_rate'])) if row.get('hourly_rate') else None,
             calculated_salary=calculated_salary,
             salary_notes=row['salary_notes'],
             payments=payments,
@@ -329,6 +337,11 @@ async def configure_employee_salary(
                 raise ValidationError("minimum_wage_multiplier is required for SMMLV salary type")
             base_salary = config.minimum_wage_multiplier * smmlv
             total_salary = base_salary
+        elif config.salary_type == 'hourly':
+            if not config.hourly_rate:
+                raise ValidationError("hourly_rate is required for hourly salary type")
+            base_salary = config.hourly_rate
+            total_salary = base_salary
         else:  # fixed
             if not config.fixed_amount:
                 raise ValidationError("fixed_amount is required for fixed salary type")
@@ -339,20 +352,21 @@ async def configure_employee_salary(
         upsert_query = """
             INSERT INTO employee_salaries (
                 id, tenant_member_id, period_month, salary_type,
-                minimum_wage_multiplier, fixed_amount, base_salary,
+                minimum_wage_multiplier, fixed_amount, hourly_rate, base_salary,
                 total_salary, notes, created_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
             ON CONFLICT (tenant_member_id, period_month)
             DO UPDATE SET
                 salary_type = EXCLUDED.salary_type,
                 minimum_wage_multiplier = EXCLUDED.minimum_wage_multiplier,
                 fixed_amount = EXCLUDED.fixed_amount,
+                hourly_rate = EXCLUDED.hourly_rate,
                 base_salary = EXCLUDED.base_salary,
                 total_salary = EXCLUDED.total_salary,
                 notes = EXCLUDED.notes
             RETURNING id, tenant_member_id, period_month, salary_type,
-                      minimum_wage_multiplier, fixed_amount, base_salary,
+                      minimum_wage_multiplier, fixed_amount, hourly_rate, base_salary,
                       total_salary, notes, created_at
         """
 
@@ -364,6 +378,7 @@ async def configure_employee_salary(
             config.salary_type,
             config.minimum_wage_multiplier,
             config.fixed_amount,
+            config.hourly_rate,
             base_salary,
             total_salary,
             config.notes
@@ -376,6 +391,7 @@ async def configure_employee_salary(
             salary_type=row['salary_type'],
             minimum_wage_multiplier=Decimal(str(row['minimum_wage_multiplier'])) if row['minimum_wage_multiplier'] else None,
             fixed_amount=Decimal(str(row['fixed_amount'])) if row['fixed_amount'] else None,
+            hourly_rate=Decimal(str(row['hourly_rate'])) if row.get('hourly_rate') else None,
             base_salary=Decimal(str(row['base_salary'])),
             total_salary=Decimal(str(row['total_salary'])),
             calculated_salary=total_salary,
