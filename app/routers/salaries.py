@@ -169,8 +169,8 @@ async def get_payment_history_endpoint(
 @router.post("/payments/{payment_id}/attachments")
 async def upload_payment_attachments_endpoint(
     payment_id: UUID,
-    files: List[UploadFile] = File(...),
-    request: Request = Depends()
+    request: Request,
+    files: List[UploadFile] = File(...)
 ):
     """
     Upload attachments for a salary payment
