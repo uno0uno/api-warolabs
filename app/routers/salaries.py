@@ -3,7 +3,7 @@ Salary Management Router
 Handles employee salary configuration and payment registration
 """
 import logging
-from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException, Depends
 from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
@@ -170,7 +170,7 @@ async def get_payment_history_endpoint(
 async def upload_payment_attachments_endpoint(
     payment_id: UUID,
     files: List[UploadFile] = File(...),
-    request: Request
+    request: Request = Depends()
 ):
     """
     Upload attachments for a salary payment
