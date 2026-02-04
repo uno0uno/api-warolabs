@@ -162,9 +162,7 @@ async def create_direct_purchase_endpoint(
         payment_method=payment_method,
         payment_reference=payment_reference,
         payment_amount=payment_amount,
-        payment_date=payment_date,
-        invoice_files=invoice_files,
-        payment_files=payment_files
+        payment_date=payment_date
     )
 
 

@@ -126,9 +126,7 @@ async def create_direct_purchase(
     payment_method: Optional[str] = None,
     payment_reference: Optional[str] = None,
     payment_amount: Optional[float] = None,
-    payment_date: Optional[str] = None,
-    invoice_files: List[UploadFile] = [],
-    payment_files: List[UploadFile] = []
+    payment_date: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Create a direct purchase that immediately updates inventory.
@@ -385,32 +383,8 @@ async def create_direct_purchase(
                         None
                     )
 
-                # 6. Upload attachments if provided
-                if invoice_files:
-                    await upload_purchase_attachments(
-                        conn=conn,
-                        tenant_id=tenant_id,
-                        purchase_id=purchase_id,
-                        user_id=user_id,
-                        files=invoice_files,
-                        attachment_type='invoice',
-                        description_prefix=f'Factura: {invoice_number or "Sin número"}',
-                        related_status='invoiced',
-                        log_prefix='DIRECT-PURCHASE'
-                    )
-
-                if payment_files:
-                    await upload_purchase_attachments(
-                        conn=conn,
-                        tenant_id=tenant_id,
-                        purchase_id=purchase_id,
-                        user_id=user_id,
-                        files=payment_files,
-                        attachment_type='payment_proof',
-                        description_prefix=f'Comprobante: {payment_reference or "Sin referencia"}',
-                        related_status='paid',
-                        log_prefix='DIRECT-PURCHASE'
-                    )
+                # 6. Attachments are now uploaded via separate endpoint
+                # POST /suppliers/purchases/{purchase_id}/attachments
 
                 return {
                     "success": True,
@@ -762,9 +736,7 @@ async def update_direct_purchase(
     payment_method: Optional[str] = None,
     payment_reference: Optional[str] = None,
     payment_amount: Optional[float] = None,
-    payment_date: Optional[str] = None,
-    invoice_files: List[UploadFile] = [],
-    payment_files: List[UploadFile] = []
+    payment_date: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Update a direct purchase.
@@ -1123,32 +1095,8 @@ async def update_direct_purchase(
                         f"Estado actualizado durante edición"
                     )
 
-                # 11. Upload new attachments if provided
-                if invoice_files:
-                    await upload_purchase_attachments(
-                        conn=conn,
-                        tenant_id=tenant_id,
-                        purchase_id=purchase_id,
-                        user_id=user_id,
-                        files=invoice_files,
-                        attachment_type='invoice',
-                        description_prefix=f'Factura: {invoice_number or "Sin número"}',
-                        related_status='invoiced',
-                        log_prefix='DIRECT-PURCHASE-UPDATE'
-                    )
-
-                if payment_files:
-                    await upload_purchase_attachments(
-                        conn=conn,
-                        tenant_id=tenant_id,
-                        purchase_id=purchase_id,
-                        user_id=user_id,
-                        files=payment_files,
-                        attachment_type='payment_proof',
-                        description_prefix=f'Comprobante: {payment_reference or "Sin referencia"}',
-                        related_status='paid',
-                        log_prefix='DIRECT-PURCHASE-UPDATE'
-                    )
+                # 11. Attachments are now uploaded via separate endpoint
+                # POST /suppliers/purchases/{purchase_id}/attachments
 
                 return {
                     "success": True,

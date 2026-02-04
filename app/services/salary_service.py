@@ -21,6 +21,7 @@ from app.models.salary import (
     SalaryPaymentResponse,
     SalaryPaymentsListResponse,
     EmployeeSalaryConfigCreate,
+    SalaryPaymentCreate,
     EmployeeWithSalary,
     EmployeeDetailWithPayments,
     EmployeeSalaryConfig,
@@ -406,6 +407,75 @@ async def configure_employee_salary(
         logger.info(f"Salary configured for employee {employee_id}: {config.salary_type}")
 
         return SalaryConfigResponse(success=True, data=salary_config)
+
+
+async def record_salary_payment_json(
+    request: Request,
+    payment_data: 'SalaryPaymentCreate'
+) -> SalaryPaymentResponse:
+    """Record a salary payment from JSON payload (no file attachments)"""
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    user_id = session.user_id
+
+    async with get_db_connection() as conn:
+        # Verify employee belongs to tenant
+        employee = await conn.fetchrow(
+            "SELECT id FROM tenant_members WHERE id = $1 AND tenant_id = $2",
+            payment_data.tenant_member_id, tenant_id
+        )
+        if not employee:
+            raise NotFoundError("Employee not found")
+
+        # Create payment
+        payment_id = uuid4()
+        insert_query = """
+            INSERT INTO salary_payments (
+                id, tenant_id, tenant_member_id, period_month,
+                payment_amount, payment_method, payment_reference,
+                payment_date, notes, status, created_by, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+            RETURNING id, tenant_id, tenant_member_id, period_month,
+                      payment_amount, payment_method, payment_reference,
+                      payment_date, notes, status, created_by, created_at, updated_at
+        """
+
+        row = await conn.fetchrow(
+            insert_query,
+            payment_id,
+            tenant_id,
+            payment_data.tenant_member_id,
+            payment_data.period_month,
+            payment_data.payment_amount,
+            payment_data.payment_method,
+            payment_data.payment_reference,
+            payment_data.payment_date,
+            payment_data.notes,
+            payment_data.status if hasattr(payment_data, 'status') else 'paid',
+            user_id
+        )
+
+        payment = SalaryPayment(
+            id=row['id'],
+            tenant_id=row['tenant_id'],
+            tenant_member_id=row['tenant_member_id'],
+            period_month=row['period_month'],
+            payment_amount=Decimal(str(row['payment_amount'])),
+            payment_method=row['payment_method'],
+            payment_reference=row['payment_reference'],
+            payment_date=row['payment_date'],
+            notes=row['notes'],
+            status=row.get('status', 'paid'),
+            created_by=row['created_by'],
+            created_at=row['created_at'],
+            updated_at=row['updated_at'],
+            attachments=[]
+        )
+
+        logger.info(f"Salary payment recorded for employee {payment_data.tenant_member_id}: {payment_data.payment_amount}")
+
+        return SalaryPaymentResponse(success=True, data=payment)
 
 
 async def record_salary_payment(

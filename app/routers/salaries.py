@@ -13,6 +13,7 @@ from app.services.salary_service import (
     get_employee_salary_detail,
     configure_employee_salary,
     record_salary_payment,
+    record_salary_payment_json,
     get_salary_payments,
     get_payment_detail,
     delete_salary_payment,
@@ -27,7 +28,8 @@ from app.models.salary import (
     SalaryConfigResponse,
     SalaryPaymentResponse,
     SalaryPaymentsListResponse,
-    EmployeeSalaryConfigCreate
+    EmployeeSalaryConfigCreate,
+    SalaryPaymentCreate
 )
 
 logger = logging.getLogger(__name__)
@@ -74,29 +76,13 @@ async def configure_salary_endpoint(
 @router.post("/payments", response_model=SalaryPaymentResponse)
 async def record_payment_endpoint(
     request: Request,
-    tenant_member_id: str = Form(...),
-    payment_amount: float = Form(...),
-    payment_method: str = Form(...),
-    payment_date: str = Form(...),
-    period_month: str = Form(...),
-    payment_reference: Optional[str] = Form(None),
-    notes: Optional[str] = Form(None),
-    attachments: List[UploadFile] = File(None)
+    payment_data: SalaryPaymentCreate
 ):
     """
-    Record a salary payment with optional attachments
+    Record a salary payment (JSON payload, no file attachments)
+    Use POST /salaries/payments/{payment_id}/attachments to upload files after creation
     """
-    return await record_salary_payment(
-        request=request,
-        tenant_member_id=UUID(tenant_member_id),
-        payment_amount=Decimal(str(payment_amount)),
-        payment_method=payment_method,
-        payment_date=datetime.fromisoformat(payment_date.replace('Z', '+00:00')) if 'T' in payment_date else datetime.strptime(payment_date, '%Y-%m-%d'),
-        period_month=period_month,
-        payment_reference=payment_reference,
-        notes=notes,
-        attachments=attachments
-    )
+    return await record_salary_payment_json(request, payment_data)
 
 
 @router.get("/payments", response_model=SalaryPaymentsListResponse)
