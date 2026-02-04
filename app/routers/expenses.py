@@ -64,27 +64,31 @@ async def get_expense_by_id_endpoint(
     """
     return await get_expense_by_id(request, response, expense_id)
 
-@router.post("", response_model=ExpenseResponse)
-async def create_expense_endpoint(
+@router.post("/{expense_id}/attachments")
+async def upload_expense_attachments_endpoint(
+    expense_id: UUID,
     request: Request,
     response: Response,
-    transactionDate: str = Form(...),
-    expenseCategoryId: str = Form(...),
-    description: str = Form(...),
-    amount: float = Form(...),
-    isRecurring: str = Form(default="false"),
-    frequency: Optional[str] = Form(default=None),
-    recurringEndDate: Optional[str] = Form(default=None),
-    files: List[UploadFile] = File(None)
+    files: List[UploadFile] = File(...)
 ):
     """
-    Create a new expense with optional file attachments and recurring settings
+    Upload attachments for an expense after creation
     """
-    return await create_expense(
-        request, response,
-        transactionDate, expenseCategoryId, description, amount,
-        isRecurring, frequency, recurringEndDate, files
-    )
+    from app.services.expenses_service import upload_expense_attachments
+    return await upload_expense_attachments(request, response, expense_id, files)
+
+@router.post("", response_model=ExpenseResponse)
+async def create_expense_endpoint(
+    expense_data: ExpenseCreate,
+    request: Request,
+    response: Response
+):
+    """
+    Create a new expense (JSON payload, no file attachments)
+    Use POST /expenses/{expense_id}/attachments to upload files after creation
+    """
+    from app.services.expenses_service import create_expense_json
+    return await create_expense_json(request, response, expense_data)
 
 @router.put("/{expense_id}", response_model=ExpenseResponse)
 async def update_expense_endpoint(

@@ -126,20 +126,18 @@ async def get_direct_purchases_endpoint(
 async def create_direct_purchase_endpoint(
     request: Request,
     response: Response,
-    supplier_id: UUID = Form(..., description="Supplier ID"),
-    items_data: str = Form(..., description="JSON string of items with ingredient_id, quantity, unit_cost, etc."),
-    payment_type: str = Form(default="contado", description="Payment type: contado, credito, contraentrega"),
-    payment_terms: Optional[str] = Form(default=None, description="Payment terms text"),
-    notes: Optional[str] = Form(default=None, description="Additional notes"),
-    invoice_number: Optional[str] = Form(default=None, description="Invoice number"),
-    invoice_amount: Optional[float] = Form(default=None, description="Invoice amount"),
-    invoice_date: Optional[str] = Form(default=None, description="Invoice date (ISO format)"),
-    payment_method: Optional[str] = Form(default=None, description="Payment method: transfer, cash, check, credit_card"),
-    payment_reference: Optional[str] = Form(default=None, description="Payment reference"),
-    payment_amount: Optional[float] = Form(default=None, description="Payment amount"),
-    payment_date: Optional[str] = Form(default=None, description="Payment date (ISO format)"),
-    invoice_files: List[UploadFile] = File(None),
-    payment_files: List[UploadFile] = File(None)
+    supplier_id: UUID,
+    items_data: str,
+    payment_type: str = "contado",
+    payment_terms: Optional[str] = None,
+    notes: Optional[str] = None,
+    invoice_number: Optional[str] = None,
+    invoice_amount: Optional[float] = None,
+    invoice_date: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    payment_reference: Optional[str] = None,
+    payment_amount: Optional[float] = None,
+    payment_date: Optional[str] = None
 ):
     """
     Create a direct purchase (Compra Directa) with immediate inventory update.

@@ -560,6 +560,135 @@ async def create_expense(
         logger.error(f"Error creating expense: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
+async def create_expense_json(
+    request: Request,
+    response: Response,
+    expense_data: ExpenseCreate
+) -> ExpenseResponse:
+    """
+    Create a new expense from JSON payload (no file attachments)
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        # Validate: if is_recurring is True, frequency must be provided
+        if expense_data.is_recurring and not expense_data.frequency:
+            raise HTTPException(
+                status_code=400,
+                detail="Frequency is required for recurring expenses"
+            )
+
+        # Validate: recurring_end_date must be >= transaction_date
+        if expense_data.recurring_end_date and expense_data.recurring_end_date < expense_data.transaction_date:
+            raise HTTPException(
+                status_code=400,
+                detail="Recurring end date must be on or after the transaction date"
+            )
+
+        month_year = expense_data.transaction_date.strftime("%Y-%m")
+
+        async with get_db_connection() as conn:
+            # Verify category exists
+            category_exists = await conn.fetchval("""
+                SELECT EXISTS(SELECT 1 FROM expense_categories WHERE id = $1)
+            """, expense_data.expense_category_id)
+
+            if not category_exists:
+                raise HTTPException(status_code=400, detail="Invalid expense category")
+
+            # Insert expense
+            row = await conn.fetchrow("""
+                INSERT INTO tenant_expenses (
+                    tenant_id,
+                    expense_category_id,
+                    month_year,
+                    amount,
+                    description,
+                    transaction_date,
+                    source_system,
+                    is_recurring,
+                    frequency,
+                    recurring_end_date
+                ) VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9)
+                RETURNING id, created_at
+            """,
+                tenant_id,
+                expense_data.expense_category_id,
+                month_year,
+                expense_data.amount,
+                expense_data.description,
+                expense_data.transaction_date,
+                expense_data.is_recurring,
+                expense_data.frequency.value if expense_data.frequency else None,
+                expense_data.recurring_end_date
+            )
+
+            expense_id = row['id']
+
+            # Fetch full expense with category
+            full_expense = await conn.fetchrow("""
+                SELECT
+                    e.id,
+                    e.tenant_id,
+                    e.expense_category_id,
+                    e.month_year,
+                    e.amount,
+                    e.description,
+                    e.source_system,
+                    e.created_at,
+                    e.transaction_date,
+                    e.is_recurring,
+                    e.frequency,
+                    e.recurring_end_date,
+                    c.id as cat_id,
+                    c.category_code,
+                    c.category_name,
+                    c.description as cat_description,
+                    c.is_active as cat_active
+                FROM tenant_expenses e
+                JOIN expense_categories c ON e.expense_category_id = c.id
+                WHERE e.id = $1
+            """, expense_id)
+
+            category = ExpenseCategory(
+                id=full_expense['cat_id'],
+                categoryCode=full_expense['category_code'],
+                categoryName=full_expense['category_name'],
+                description=full_expense['cat_description'],
+                isActive=full_expense['cat_active']
+            )
+
+            expense = Expense(
+                id=full_expense['id'],
+                tenantId=full_expense['tenant_id'],
+                expenseCategoryId=full_expense['expense_category_id'],
+                monthYear=full_expense['month_year'],
+                amount=full_expense['amount'],
+                description=full_expense['description'],
+                sourceSystem=full_expense['source_system'],
+                createdAt=full_expense['created_at'],
+                transactionDate=full_expense['transaction_date'],
+                isRecurring=full_expense['is_recurring'],
+                frequency=full_expense['frequency'],
+                recurringEndDate=full_expense['recurring_end_date'],
+                category=category
+            )
+
+            return ExpenseResponse(data=expense)
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating expense: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
 async def _track_change(
     conn,
     tenant_id: UUID,
@@ -908,6 +1037,99 @@ async def delete_expense(
         raise
     except Exception as e:
         logger.error(f"Error deleting expense: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+async def upload_expense_attachments(
+    request: Request,
+    response: Response,
+    expense_id: UUID,
+    files: List[UploadFile]
+) -> Dict[str, Any]:
+    """
+    Upload attachments to an existing expense
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # Verify expense exists and belongs to tenant
+            expense = await conn.fetchrow("""
+                SELECT id, description FROM tenant_expenses
+                WHERE id = $1 AND tenant_id = $2
+            """, expense_id, tenant_id)
+
+            if not expense:
+                raise HTTPException(status_code=404, detail="Expense not found")
+
+            # Upload files
+            uploaded_files = []
+            if files:
+                s3_service = AWSS3Service()
+                for file in files:
+                    try:
+                        # Upload file to S3
+                        s3_key = await s3_service.upload_file(
+                            file_content=file.file,
+                            filename=file.filename,
+                            folder='expenses/attachments',
+                            content_type=file.content_type
+                        )
+
+                        if s3_key:
+                            file_url = s3_service.get_file_url(s3_key)
+
+                            # Insert attachment record
+                            await conn.execute("""
+                                INSERT INTO expense_attachments (
+                                    tenant_id,
+                                    expense_id,
+                                    s3_key,
+                                    filename,
+                                    file_size,
+                                    content_type,
+                                    attachment_type,
+                                    description,
+                                    uploaded_by,
+                                    file_path,
+                                    file_url
+                                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                            """,
+                                tenant_id,
+                                expense_id,
+                                s3_key,
+                                file.filename,
+                                file.size or 0,
+                                file.content_type or 'application/octet-stream',
+                                'invoice',
+                                f'Soporte: {expense["description"][:50]}',
+                                user_id,
+                                s3_key,
+                                file_url
+                            )
+                            uploaded_files.append({
+                                "filename": file.filename,
+                                "url": file_url
+                            })
+                    except Exception as e:
+                        logger.error(f"Error uploading attachment {file.filename}: {str(e)}")
+
+            return {
+                "success": True,
+                "message": f"Se subieron {len(uploaded_files)} archivos correctamente",
+                "files": uploaded_files
+            }
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading expense attachments: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 async def get_expense_history(
