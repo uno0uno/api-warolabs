@@ -93,25 +93,16 @@ async def create_expense_endpoint(
 @router.put("/{expense_id}", response_model=ExpenseResponse)
 async def update_expense_endpoint(
     expense_id: UUID,
+    expense_data: ExpenseUpdate,
     request: Request,
-    response: Response,
-    transactionDate: str = Form(...),
-    expenseCategoryId: str = Form(...),
-    description: str = Form(...),
-    amount: float = Form(...),
-    isRecurring: str = Form(default="false"),
-    frequency: Optional[str] = Form(default=None),
-    recurringEndDate: Optional[str] = Form(default=None),
-    files: List[UploadFile] = File(None)
+    response: Response
 ):
     """
-    Update an existing expense with optional new file attachments and recurring settings
+    Update an existing expense (JSON payload)
+    Use POST /expenses/{expense_id}/attachments to upload files
     """
-    return await update_expense(
-        request, response, expense_id,
-        transactionDate, expenseCategoryId, description, amount,
-        isRecurring, frequency, recurringEndDate, files
-    )
+    from app.services.expenses_service import update_expense_json
+    return await update_expense_json(request, response, expense_id, expense_data)
 
 @router.delete("/{expense_id}")
 async def delete_expense_endpoint(

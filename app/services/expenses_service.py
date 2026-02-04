@@ -1005,6 +1005,131 @@ async def update_expense(
         logger.error(f"Error updating expense: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
+async def update_expense_json(
+    request: Request,
+    response: Response,
+    expense_id: UUID,
+    expense_data: ExpenseUpdate
+) -> ExpenseResponse:
+    """
+    Update an expense from JSON payload (no file attachments)
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # Verify expense exists and belongs to tenant
+            old_expense = await conn.fetchrow("""
+                SELECT * FROM tenant_expenses
+                WHERE id = $1 AND tenant_id = $2
+            """, expense_id, tenant_id)
+
+            if not old_expense:
+                raise HTTPException(status_code=404, detail="Expense not found")
+
+            # Build update fields
+            update_fields = []
+            update_values = []
+            param_count = 1
+
+            if expense_data.transaction_date is not None:
+                update_fields.append(f"transaction_date = ${param_count}")
+                update_values.append(expense_data.transaction_date)
+                param_count += 1
+                update_fields.append(f"month_year = ${param_count}")
+                update_values.append(expense_data.transaction_date.strftime("%Y-%m"))
+                param_count += 1
+
+            if expense_data.expense_category_id is not None:
+                update_fields.append(f"expense_category_id = ${param_count}")
+                update_values.append(expense_data.expense_category_id)
+                param_count += 1
+
+            if expense_data.amount is not None:
+                update_fields.append(f"amount = ${param_count}")
+                update_values.append(expense_data.amount)
+                param_count += 1
+
+            if expense_data.description is not None:
+                update_fields.append(f"description = ${param_count}")
+                update_values.append(expense_data.description)
+                param_count += 1
+
+            if expense_data.is_recurring is not None:
+                update_fields.append(f"is_recurring = ${param_count}")
+                update_values.append(expense_data.is_recurring)
+                param_count += 1
+
+            if expense_data.frequency is not None:
+                update_fields.append(f"frequency = ${param_count}")
+                update_values.append(expense_data.frequency.value if expense_data.frequency else None)
+                param_count += 1
+
+            if expense_data.recurring_end_date is not None:
+                update_fields.append(f"recurring_end_date = ${param_count}")
+                update_values.append(expense_data.recurring_end_date)
+                param_count += 1
+
+            if update_fields:
+                update_values.extend([expense_id, tenant_id])
+                await conn.execute(f"""
+                    UPDATE tenant_expenses
+                    SET {', '.join(update_fields)}
+                    WHERE id = ${param_count} AND tenant_id = ${param_count + 1}
+                """, *update_values)
+
+            # Fetch updated expense
+            full_expense = await conn.fetchrow("""
+                SELECT
+                    e.id, e.tenant_id, e.expense_category_id, e.month_year,
+                    e.amount, e.description, e.source_system, e.created_at,
+                    e.transaction_date, e.is_recurring, e.frequency, e.recurring_end_date,
+                    c.id as cat_id, c.category_code, c.category_name,
+                    c.description as cat_description, c.is_active as cat_active
+                FROM tenant_expenses e
+                JOIN expense_categories c ON e.expense_category_id = c.id
+                WHERE e.id = $1
+            """, expense_id)
+
+            category = ExpenseCategory(
+                id=full_expense['cat_id'],
+                categoryCode=full_expense['category_code'],
+                categoryName=full_expense['category_name'],
+                description=full_expense['cat_description'],
+                isActive=full_expense['cat_active']
+            )
+
+            expense = Expense(
+                id=full_expense['id'],
+                tenantId=full_expense['tenant_id'],
+                expenseCategoryId=full_expense['expense_category_id'],
+                monthYear=full_expense['month_year'],
+                amount=full_expense['amount'],
+                description=full_expense['description'],
+                sourceSystem=full_expense['source_system'],
+                createdAt=full_expense['created_at'],
+                transactionDate=full_expense['transaction_date'],
+                isRecurring=full_expense['is_recurring'],
+                frequency=full_expense['frequency'],
+                recurringEndDate=full_expense['recurring_end_date'],
+                category=category
+            )
+
+            return ExpenseResponse(data=expense)
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating expense: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
 async def delete_expense(
     request: Request,
     response: Response,
