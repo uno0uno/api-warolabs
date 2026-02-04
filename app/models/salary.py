@@ -78,6 +78,7 @@ class SalaryPaymentBase(BaseModel):
     payment_reference: Optional[str] = Field(None, description="Payment reference number")
     payment_date: datetime = Field(..., description="Date of payment")
     notes: Optional[str] = Field(None, description="Additional notes")
+    status: str = Field(default="paid", description="Payment status: pending, paid, cancelled")
 
 
 class SalaryPaymentCreate(SalaryPaymentBase):

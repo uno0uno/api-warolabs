@@ -117,7 +117,7 @@ app.include_router(inventory.router)
 app.include_router(articles.router, prefix="/blog", tags=["blog"])
 app.include_router(invitations.router, prefix="/invitations", tags=["invitations"])
 app.include_router(api_tokens.router, prefix="/api-tokens", tags=["api-tokens"])
-app.include_router(salaries.router, prefix="/salaries", tags=["salaries"])
+app.include_router(salaries.router, prefix="/team/salaries", tags=["salaries"])
 app.include_router(expenses.router, prefix="/finance/expenses", tags=["expenses"])
 app.include_router(public_api.router, tags=["public-api"])
 
