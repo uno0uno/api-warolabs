@@ -624,7 +624,7 @@ async def create_expense_json(
                 expense_data.description,
                 expense_data.transaction_date,
                 expense_data.is_recurring,
-                expense_data.frequency.value if expense_data.frequency else None,
+                expense_data.frequency,
                 expense_data.recurring_end_date
             )
 
@@ -1067,7 +1067,7 @@ async def update_expense_json(
 
             if expense_data.frequency is not None:
                 update_fields.append(f"frequency = ${param_count}")
-                update_values.append(expense_data.frequency.value if expense_data.frequency else None)
+                update_values.append(expense_data.frequency)
                 param_count += 1
 
             if expense_data.recurring_end_date is not None:
