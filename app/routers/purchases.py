@@ -233,39 +233,23 @@ async def get_direct_purchase_endpoint(
 @router.put("/direct/{purchase_id}")
 async def update_direct_purchase_endpoint(
     purchase_id: UUID,
+    purchase_data: 'DirectPurchaseUpdate',
     request: Request,
-    response: Response,
-    items_data: str = Form(..., description="JSON string of items with ingredient_id, quantity, unit_cost, etc."),
-    notes: Optional[str] = Form(default=None, description="Additional notes"),
-    invoice_number: Optional[str] = Form(default=None, description="Invoice number"),
-    payment_method: Optional[str] = Form(default=None, description="Payment method: transfer, cash, check, credit_card"),
-    payment_reference: Optional[str] = Form(default=None, description="Payment reference"),
-    payment_amount: Optional[float] = Form(default=None, description="Payment amount"),
-    payment_date: Optional[str] = Form(default=None, description="Payment date (ISO format)"),
-    invoice_files: List[UploadFile] = File(None),
-    payment_files: List[UploadFile] = File(None)
+    response: Response
 ):
     """
-    Update a direct purchase (Compra Directa).
+    Update a direct purchase (Compra Directa) - JSON payload
 
-    This endpoint:
-    1. Updates purchase items (may affect inventory)
-    2. Updates invoice and payment information
-    3. Adds new attachments (does not delete existing ones)
+    Updates purchase items and metadata. Use separate endpoints for file uploads.
     """
-    return await update_direct_purchase(
+    from app.models.purchase import DirectPurchaseUpdate
+    from app.services.purchase_service import update_direct_purchase_json
+
+    return await update_direct_purchase_json(
         request=request,
         response=response,
         purchase_id=purchase_id,
-        items_data=items_data,
-        notes=notes,
-        invoice_number=invoice_number,
-        payment_method=payment_method,
-        payment_reference=payment_reference,
-        payment_amount=payment_amount,
-        payment_date=payment_date,
-        invoice_files=invoice_files,
-        payment_files=payment_files
+        purchase_data=purchase_data
     )
 
 

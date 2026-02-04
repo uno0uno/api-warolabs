@@ -1873,6 +1873,251 @@ async def update_recurring_instance(
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 
+async def create_recurring_instance_json(
+    request: Request,
+    response: Response,
+    expense_id: UUID,
+    instance_data: 'RecurringExpenseInstanceCreate'
+) -> Dict[str, Any]:
+    """
+    Create a new payment instance for a recurring expense (JSON payload)
+    """
+    from app.models.expense import RecurringExpenseInstanceCreate
+
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        # Parse dates
+        scheduled_date_parsed = datetime.fromisoformat(instance_data.scheduled_date).date() if isinstance(instance_data.scheduled_date, str) else instance_data.scheduled_date
+        payment_date_parsed = None
+        if instance_data.payment_date:
+            payment_date_parsed = datetime.fromisoformat(instance_data.payment_date)
+
+        async with get_db_connection() as conn:
+            # Verify expense is recurring
+            expense = await conn.fetchrow("""
+                SELECT id, is_recurring, amount FROM tenant_expenses
+                WHERE id = $1 AND tenant_id = $2
+            """, expense_id, tenant_id)
+
+            if not expense:
+                raise HTTPException(status_code=404, detail="Expense not found")
+
+            if not expense['is_recurring']:
+                raise HTTPException(status_code=400, detail="Expense is not recurring")
+
+            # Use expense amount if not provided
+            instance_amount = instance_data.amount if instance_data.amount is not None else float(expense['amount'])
+
+            # Insert instance
+            instance_id = await conn.fetchval("""
+                INSERT INTO recurring_expense_instances (
+                    tenant_id,
+                    expense_id,
+                    period_month,
+                    scheduled_date,
+                    amount,
+                    status,
+                    payment_date,
+                    payment_method,
+                    payment_reference,
+                    notes,
+                    created_by
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                RETURNING id
+            """,
+                tenant_id,
+                expense_id,
+                instance_data.period_month,
+                scheduled_date_parsed,
+                instance_amount,
+                instance_data.status,
+                payment_date_parsed,
+                instance_data.payment_method,
+                instance_data.payment_reference,
+                instance_data.notes,
+                user_id
+            )
+
+            # Fetch created instance
+            instance_row = await conn.fetchrow("""
+                SELECT * FROM recurring_expense_instances WHERE id = $1
+            """, instance_id)
+
+            return {
+                'success': True,
+                'data': {
+                    'id': str(instance_row['id']),
+                    'tenantId': str(instance_row['tenant_id']),
+                    'expenseId': str(instance_row['expense_id']),
+                    'periodMonth': instance_row['period_month'],
+                    'scheduledDate': instance_row['scheduled_date'].isoformat(),
+                    'amount': float(instance_row['amount']),
+                    'status': instance_row['status'],
+                    'paymentDate': instance_row['payment_date'].isoformat() if instance_row['payment_date'] else None,
+                    'paymentMethod': instance_row['payment_method'],
+                    'paymentReference': instance_row['payment_reference'],
+                    'notes': instance_row['notes'],
+                    'createdBy': str(instance_row['created_by']) if instance_row['created_by'] else None,
+                    'createdAt': instance_row['created_at'].isoformat(),
+                    'updatedAt': instance_row['updated_at'].isoformat(),
+                    'attachments': []
+                }
+            }
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating recurring instance: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+
+async def update_recurring_instance_json(
+    request: Request,
+    response: Response,
+    instance_id: UUID,
+    instance_data: 'RecurringExpenseInstanceUpdate'
+) -> Dict[str, Any]:
+    """
+    Update a payment instance (JSON payload)
+    """
+    from app.models.expense import RecurringExpenseInstanceUpdate
+
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        # Parse payment_date if provided
+        payment_date_parsed = None
+        if instance_data.payment_date:
+            payment_date_parsed = datetime.fromisoformat(instance_data.payment_date)
+
+        async with get_db_connection() as conn:
+            # Verify instance exists
+            instance = await conn.fetchrow("""
+                SELECT id FROM recurring_expense_instances
+                WHERE id = $1 AND tenant_id = $2
+            """, instance_id, tenant_id)
+
+            if not instance:
+                raise HTTPException(status_code=404, detail="Instance not found")
+
+            # Build dynamic UPDATE query
+            update_fields = []
+            params = []
+            param_count = 1
+
+            if instance_data.status is not None:
+                update_fields.append(f"status = ${param_count}")
+                params.append(instance_data.status)
+                param_count += 1
+
+            if payment_date_parsed is not None:
+                update_fields.append(f"payment_date = ${param_count}")
+                params.append(payment_date_parsed)
+                param_count += 1
+
+            if instance_data.payment_method is not None:
+                update_fields.append(f"payment_method = ${param_count}")
+                params.append(instance_data.payment_method)
+                param_count += 1
+
+            if instance_data.payment_reference is not None:
+                update_fields.append(f"payment_reference = ${param_count}")
+                params.append(instance_data.payment_reference)
+                param_count += 1
+
+            if instance_data.notes is not None:
+                update_fields.append(f"notes = ${param_count}")
+                params.append(instance_data.notes)
+                param_count += 1
+
+            update_fields.append(f"updated_at = NOW()")
+
+            if len(params) == 0:
+                raise HTTPException(status_code=400, detail="No fields to update")
+
+            params.extend([instance_id, tenant_id])
+            query = f"""
+                UPDATE recurring_expense_instances
+                SET {', '.join(update_fields)}
+                WHERE id = ${param_count} AND tenant_id = ${param_count + 1}
+            """
+
+            await conn.execute(query, *params)
+
+            # Fetch updated instance
+            updated_instance = await conn.fetchrow("""
+                SELECT * FROM recurring_expense_instances WHERE id = $1
+            """, instance_id)
+
+            # Get attachments
+            attachments_data = await conn.fetch("""
+                SELECT id, file_name, file_size, mime_type, uploaded_by, uploaded_at, s3_key
+                FROM purchase_attachments
+                WHERE recurring_instance_id = $1
+            """, instance_id)
+
+            s3_service = AWSS3Service()
+            attachments = []
+            for row in attachments_data:
+                att_dict = {
+                    'id': str(row['id']),
+                    'fileName': row['file_name'],
+                    'fileSize': row['file_size'],
+                    'mimeType': row['mime_type'],
+                    'uploadedBy': str(row['uploaded_by']) if row['uploaded_by'] else None,
+                    'uploadedAt': row['uploaded_at'].isoformat() if row['uploaded_at'] else None
+                }
+                if row['s3_key']:
+                    try:
+                        presigned_url = await s3_service.get_presigned_url(row['s3_key'], expiration=3600)
+                        att_dict['s3Url'] = presigned_url
+                    except Exception as e:
+                        logger.error(f"Error generating presigned URL: {e}")
+                        att_dict['s3Url'] = None
+                attachments.append(att_dict)
+
+            return {
+                'success': True,
+                'data': {
+                    'id': str(updated_instance['id']),
+                    'tenantId': str(updated_instance['tenant_id']),
+                    'expenseId': str(updated_instance['expense_id']),
+                    'periodMonth': updated_instance['period_month'],
+                    'scheduledDate': updated_instance['scheduled_date'].isoformat(),
+                    'amount': float(updated_instance['amount']),
+                    'status': updated_instance['status'],
+                    'paymentDate': updated_instance['payment_date'].isoformat() if updated_instance['payment_date'] else None,
+                    'paymentMethod': updated_instance['payment_method'],
+                    'paymentReference': updated_instance['payment_reference'],
+                    'notes': updated_instance['notes'],
+                    'createdBy': str(updated_instance['created_by']) if updated_instance['created_by'] else None,
+                    'createdAt': updated_instance['created_at'].isoformat(),
+                    'updatedAt': updated_instance['updated_at'].isoformat(),
+                    'attachments': attachments
+                }
+            }
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating recurring instance: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+
 async def upload_instance_attachments(
     request: Request,
     response: Response,

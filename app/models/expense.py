@@ -149,6 +149,29 @@ class RecurringExpenseInstance(RecurringExpenseInstanceBase):
         use_enum_values = True
         json_encoders = {datetime: lambda v: v.isoformat(), date: lambda v: v.isoformat()}
 
+class RecurringExpenseInstanceCreate(BaseModel):
+    period_month: str = Field(alias='periodMonth')
+    scheduled_date: date = Field(alias='scheduledDate')
+    amount: Optional[float] = None
+    status: str = 'pending'
+    payment_date: Optional[str] = Field(None, alias='paymentDate')
+    payment_method: Optional[str] = Field(None, alias='paymentMethod')
+    payment_reference: Optional[str] = Field(None, alias='paymentReference')
+    notes: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+class RecurringExpenseInstanceUpdate(BaseModel):
+    status: Optional[str] = None
+    payment_date: Optional[str] = Field(None, alias='paymentDate')
+    payment_method: Optional[str] = Field(None, alias='paymentMethod')
+    payment_reference: Optional[str] = Field(None, alias='paymentReference')
+    notes: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
 class ExpensesListResponse(BaseModel):
     success: bool = True
     data: List[Expense]

@@ -21,7 +21,9 @@ from app.models.expense import (
     ExpenseUpdate,
     ExpenseResponse,
     ExpensesListResponse,
-    ExpenseCategoriesResponse
+    ExpenseCategoriesResponse,
+    RecurringExpenseInstanceCreate,
+    RecurringExpenseInstanceUpdate
 )
 
 router = APIRouter()
@@ -151,44 +153,32 @@ async def get_instance_by_id_endpoint(
 @router.post("/{expense_id}/instances")
 async def create_expense_instance_endpoint(
     expense_id: UUID,
+    instance_data: RecurringExpenseInstanceCreate,
     request: Request,
-    response: Response,
-    periodMonth: str = Form(...),
-    scheduledDate: str = Form(...),
-    amount: Optional[float] = Form(None),
-    status: str = Form(default="pending"),
-    paymentDate: Optional[str] = Form(None),
-    paymentMethod: Optional[str] = Form(None),
-    paymentReference: Optional[str] = Form(None),
-    notes: Optional[str] = Form(None),
-    files: List[UploadFile] = File(None)
+    response: Response
 ):
     """
-    Create a new payment instance for a recurring expense with optional file attachments
+    Create a new payment instance for a recurring expense (JSON payload)
+    Use POST /instances/{instance_id}/attachments to upload files after creation
     """
-    return await create_recurring_instance(
-        request, response, expense_id,
-        periodMonth, scheduledDate, amount, status,
-        paymentDate, paymentMethod, paymentReference, notes, files
+    from app.services.expenses_service import create_recurring_instance_json
+    return await create_recurring_instance_json(
+        request, response, expense_id, instance_data
     )
 
 @router.put("/instances/{instance_id}")
 async def update_expense_instance_endpoint(
     instance_id: UUID,
+    instance_data: RecurringExpenseInstanceUpdate,
     request: Request,
-    response: Response,
-    status: Optional[str] = Form(None),
-    paymentDate: Optional[str] = Form(None),
-    paymentMethod: Optional[str] = Form(None),
-    paymentReference: Optional[str] = Form(None),
-    notes: Optional[str] = Form(None)
+    response: Response
 ):
     """
-    Update a payment instance (e.g., mark as paid)
+    Update a payment instance (e.g., mark as paid) - JSON payload
     """
-    return await update_recurring_instance(
-        request, response, instance_id,
-        status, paymentDate, paymentMethod, paymentReference, notes
+    from app.services.expenses_service import update_recurring_instance_json
+    return await update_recurring_instance_json(
+        request, response, instance_id, instance_data
     )
 
 @router.post("/instances/{instance_id}/attachments")

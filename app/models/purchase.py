@@ -460,3 +460,16 @@ class CancelPurchaseData(BaseModel):
     """Data for cancellation"""
     cancellation_reason: str = Field(..., min_length=10, description="Reason for cancellation")
     notes: Optional[str] = None
+
+class DirectPurchaseUpdate(BaseModel):
+    """Model for updating direct purchases - JSON payload"""
+    items_data: str = Field(..., description="JSON string of items with ingredient_id, quantity, unit_cost, etc.")
+    notes: Optional[str] = None
+    invoice_number: Optional[str] = None
+    payment_method: Optional[str] = None
+    payment_reference: Optional[str] = None
+    payment_amount: Optional[float] = None
+    payment_date: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
