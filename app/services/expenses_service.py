@@ -1206,7 +1206,7 @@ async def upload_expense_attachments(
                         )
 
                         if s3_key:
-                            file_url = s3_service.get_file_url(s3_key)
+                            file_url = await s3_service.get_presigned_url(s3_key, expiration=3600)
 
                             # Insert attachment record
                             await conn.execute("""
