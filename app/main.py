@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, salaries
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, salaries, expenses
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -118,6 +118,7 @@ app.include_router(articles.router, prefix="/blog", tags=["blog"])
 app.include_router(invitations.router, prefix="/invitations", tags=["invitations"])
 app.include_router(api_tokens.router, prefix="/api-tokens", tags=["api-tokens"])
 app.include_router(salaries.router, prefix="/salaries", tags=["salaries"])
+app.include_router(expenses.router, prefix="/finance/expenses", tags=["expenses"])
 app.include_router(public_api.router, tags=["public-api"])
 
 @app.get("/")

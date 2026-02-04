@@ -22,4 +22,5 @@ from app.routers import (
     api_tokens,
     public_api,
     salaries,
+    expenses,
 )
