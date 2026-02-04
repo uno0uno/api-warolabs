@@ -75,7 +75,7 @@ async def create_expense_endpoint(
     isRecurring: str = Form(default="false"),
     frequency: Optional[str] = Form(default=None),
     recurringEndDate: Optional[str] = Form(default=None),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(None)
 ):
     """
     Create a new expense with optional file attachments and recurring settings
@@ -98,7 +98,7 @@ async def update_expense_endpoint(
     isRecurring: str = Form(default="false"),
     frequency: Optional[str] = Form(default=None),
     recurringEndDate: Optional[str] = Form(default=None),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(None)
 ):
     """
     Update an existing expense with optional new file attachments and recurring settings
@@ -166,7 +166,7 @@ async def create_expense_instance_endpoint(
     paymentMethod: Optional[str] = Form(None),
     paymentReference: Optional[str] = Form(None),
     notes: Optional[str] = Form(None),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(None)
 ):
     """
     Create a new payment instance for a recurring expense with optional file attachments

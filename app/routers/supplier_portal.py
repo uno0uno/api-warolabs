@@ -102,7 +102,7 @@ async def attach_legal_invoice_endpoint(
     purchase_ids: str = Form(...),
     legal_invoice_number: str = Form(...),
     legal_invoice_date: str = Form(...),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(None)
 ):
     """
     Attach a legal invoice to multiple remisiones
@@ -170,7 +170,7 @@ async def invoice_purchase_endpoint(
     credit_days: Optional[int] = Form(None),
     payment_due_date: Optional[str] = Form(None),
     notes: Optional[str] = Form(None),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(None)
 ):
     """
     Allow supplier to register invoice/remision with attachments
@@ -217,7 +217,7 @@ async def ship_purchase_endpoint(
     estimated_delivery_date: Optional[str] = Form(None),
     package_count: Optional[int] = Form(None),
     notes: Optional[str] = Form(None),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(None)
 ):
     """
     Allow supplier to mark purchase as shipped with attachments

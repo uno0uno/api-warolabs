@@ -138,8 +138,8 @@ async def create_direct_purchase_endpoint(
     payment_reference: Optional[str] = Form(default=None, description="Payment reference"),
     payment_amount: Optional[float] = Form(default=None, description="Payment amount"),
     payment_date: Optional[str] = Form(default=None, description="Payment date (ISO format)"),
-    invoice_files: List[UploadFile] = File(default=[]),
-    payment_files: List[UploadFile] = File(default=[])
+    invoice_files: List[UploadFile] = File(None),
+    payment_files: List[UploadFile] = File(None)
 ):
     """
     Create a direct purchase (Compra Directa) with immediate inventory update.
@@ -244,8 +244,8 @@ async def update_direct_purchase_endpoint(
     payment_reference: Optional[str] = Form(default=None, description="Payment reference"),
     payment_amount: Optional[float] = Form(default=None, description="Payment amount"),
     payment_date: Optional[str] = Form(default=None, description="Payment date (ISO format)"),
-    invoice_files: List[UploadFile] = File(default=[]),
-    payment_files: List[UploadFile] = File(default=[])
+    invoice_files: List[UploadFile] = File(None),
+    payment_files: List[UploadFile] = File(None)
 ):
     """
     Update a direct purchase (Compra Directa).
@@ -376,7 +376,7 @@ async def ship_purchase_endpoint(
     estimated_delivery_date: Optional[str] = Form(None),
     package_count: Optional[int] = Form(None),
     notes: Optional[str] = Form(None),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(None)
 ):
     """
     Transition purchase to SHIPPED state
@@ -404,7 +404,7 @@ async def receive_purchase_endpoint(
     partial: bool = Form(False),
     all_items_approved: bool = Form(True),
     verification_notes: Optional[str] = Form(None),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(None)
 ):
     """
     Transition purchase to RECEIVED or PARTIALLY_RECEIVED state
@@ -436,7 +436,7 @@ async def invoice_purchase_endpoint(
     credit_days: Optional[int] = Form(None),
     payment_due_date: Optional[str] = Form(None),
     notes: Optional[str] = Form(None),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(None)
 ):
     """
     Transition purchase to INVOICED state
@@ -468,7 +468,7 @@ async def pay_purchase_endpoint(
     payment_amount: float = Form(...),
     payment_date: str = Form(...),
     notes: Optional[str] = Form(None),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(None)
 ):
     """
     Transition purchase to PAID state

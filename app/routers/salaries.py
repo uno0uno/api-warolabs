@@ -81,7 +81,7 @@ async def record_payment_endpoint(
     period_month: str = Form(...),
     payment_reference: Optional[str] = Form(None),
     notes: Optional[str] = Form(None),
-    attachments: List[UploadFile] = File(default=[])
+    attachments: List[UploadFile] = File(None)
 ):
     """
     Record a salary payment with optional attachments
