@@ -1214,14 +1214,14 @@ async def upload_expense_attachments(
                                     tenant_id,
                                     expense_id,
                                     s3_key,
-                                    filename,
+                                    file_name,
                                     file_size,
-                                    content_type,
+                                    mime_type,
                                     attachment_type,
                                     description,
                                     uploaded_by,
-                                    file_path,
-                                    file_url
+                                    path,
+                                    s3_url
                                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                             """,
                                 tenant_id,
