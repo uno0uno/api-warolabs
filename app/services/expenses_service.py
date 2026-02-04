@@ -1210,7 +1210,7 @@ async def upload_expense_attachments(
 
                             # Insert attachment record
                             await conn.execute("""
-                                INSERT INTO expense_attachments (
+                                INSERT INTO purchase_attachments (
                                     tenant_id,
                                     expense_id,
                                     s3_key,
