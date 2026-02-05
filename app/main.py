@@ -75,6 +75,30 @@ def custom_openapi():
 app.openapi = custom_openapi
 
 # Exception handlers
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    """
+    Custom validation exception handler to handle binary data in errors safely.
+    Prevents UnicodeDecodeError when file uploads fail validation.
+    """
+    errors = exc.errors()
+    # Sanitize errors to remove binary data that can't be JSON encoded
+    safe_errors = []
+    for error in errors:
+        safe_error = error.copy()
+        if 'input' in safe_error and isinstance(safe_error['input'], (bytes, bytearray)):
+            safe_error['input'] = '<binary data>'
+        safe_errors.append(safe_error)
+            
+    return JSONResponse(
+        status_code=422,
+        content={"detail": jsonable_encoder(safe_errors)},
+    )
+
 app.add_exception_handler(APIError, api_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 

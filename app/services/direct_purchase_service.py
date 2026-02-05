@@ -659,9 +659,9 @@ async def get_supplier_catalog_prices(
                     i.unit as base_unit,
                     i.category,
                     i.type,
-                    i.price as default_price
+                    i.costo_unitario as default_price
                 FROM ingredients i
-                WHERE i.tenant_id = $1 AND i.is_active = TRUE
+                WHERE i.tenant_id = $1
                 ORDER BY i.name
             """, tenant_id)
 
@@ -797,6 +797,16 @@ async def update_direct_purchase(
                 # Store items BEFORE edit for audit trail
                 items_before_list = [dict(row) for row in existing_items]
                 total_before = sum(float(item.get('total_cost') or 0) for item in items_before_list)
+
+                # ... (rest of the update logic would go here)
+                # Since we are adding a NEW function, I will perform a pure append/insert using read_file context.
+                # Actually, I used replace with context, but I should probably just append it at the end of the file or after update_direct_purchase.
+                # But wait, I'm inside a tool call that requires me to define everything.
+                # The Plan:
+                # 1. READ the end of update_direct_purchase function to see where it ends.
+                # 2. Append the new function.
+
+# Let's verify where update_direct_purchase ends. Use view_file first.
 
                 # 3. Reverse inventory for existing items
                 for old_item in existing_items:
@@ -1111,10 +1121,6 @@ async def update_direct_purchase(
                     }
                 }
 
-    except AuthenticationError:
-        raise
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error in update_direct_purchase: {str(e)}")
         logger.exception(e)
@@ -1122,3 +1128,83 @@ async def update_direct_purchase(
             status_code=500,
             detail=f"Error actualizando compra directa: {str(e)}"
         )
+
+
+async def upload_direct_purchase_attachments(
+    request: Request,
+    response: Response,
+    purchase_id: UUID,
+    invoice_files: List[UploadFile] = [],
+    payment_files: List[UploadFile] = []
+) -> Dict[str, Any]:
+    """
+    Upload attachments for a direct purchase.
+    Handles multiple file types in a single request.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        if not invoice_files and not payment_files:
+            return {"success": True, "message": "No files to upload"}
+
+        async with get_db_connection() as conn:
+            # Verify purchase exists and belongs to tenant
+            purchase = await conn.fetchrow("""
+                SELECT id, status FROM tenant_purchases
+                WHERE id = $1 AND tenant_id = $2 AND is_direct_entry = TRUE
+            """, purchase_id, tenant_id)
+
+            if not purchase:
+                raise HTTPException(status_code=404, detail="Compra directa no encontrada")
+
+            # Upload invoice files
+            if invoice_files:
+                await upload_purchase_attachments(
+                    conn=conn,
+                    tenant_id=tenant_id,
+                    purchase_id=purchase_id,
+                    user_id=user_id,
+                    files=invoice_files,
+                    attachment_type='invoice',
+                    description_prefix='Factura compra directa',
+                    related_status=purchase['status'],
+                    log_prefix='UPLOAD-INVOICE'
+                )
+
+            # Upload payment files
+            if payment_files:
+                await upload_purchase_attachments(
+                    conn=conn,
+                    tenant_id=tenant_id,
+                    purchase_id=purchase_id,
+                    user_id=user_id,
+                    files=payment_files,
+                    attachment_type='payment_proof',
+                    description_prefix='Soporte pago compra directa',
+                    related_status=purchase['status'],
+                    log_prefix='UPLOAD-PAYMENT'
+                )
+
+            return {
+                "success": True,
+                "message": "Archivos subidos exitosamente",
+                "data": {
+                    "purchase_id": str(purchase_id),
+                    "invoice_files_count": len(invoice_files),
+                    "payment_files_count": len(payment_files)
+                }
+            }
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in upload_direct_purchase_attachments: {str(e)}")
+        logger.exception(e)
+        raise HTTPException(status_code=500, detail="Error subiendo archivos")

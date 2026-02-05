@@ -27,7 +27,9 @@ from app.services.direct_purchase_service import (
     get_direct_purchases_list,
     get_direct_purchase_by_id,
     get_supplier_catalog_prices,
-    update_direct_purchase
+    get_supplier_catalog_prices,
+    update_direct_purchase,
+    upload_direct_purchase_attachments
 )
 from app.models.purchase import (
     Purchase,
@@ -45,7 +47,10 @@ from app.models.purchase import (
     # History and attachment models
     StatusHistoryResponse,
     AttachmentsResponse,
-    PurchaseAttachmentCreate
+    PurchaseAttachmentCreate,
+    PurchaseAttachmentCreate,
+    DirectPurchaseCreate,
+    DirectPurchaseUpdate
 )
 
 router = APIRouter()
@@ -124,20 +129,9 @@ async def get_direct_purchases_endpoint(
 
 @router.post("/direct")
 async def create_direct_purchase_endpoint(
+    purchase_data: DirectPurchaseCreate,
     request: Request,
-    response: Response,
-    supplier_id: UUID,
-    items_data: str,
-    payment_type: str = "contado",
-    payment_terms: Optional[str] = None,
-    notes: Optional[str] = None,
-    invoice_number: Optional[str] = None,
-    invoice_amount: Optional[float] = None,
-    invoice_date: Optional[str] = None,
-    payment_method: Optional[str] = None,
-    payment_reference: Optional[str] = None,
-    payment_amount: Optional[float] = None,
-    payment_date: Optional[str] = None
+    response: Response
 ):
     """
     Create a direct purchase (Compra Directa) with immediate inventory update.
@@ -151,18 +145,18 @@ async def create_direct_purchase_endpoint(
     return await create_direct_purchase(
         request=request,
         response=response,
-        supplier_id=supplier_id,
-        items_data=items_data,
-        payment_type=payment_type,
-        payment_terms=payment_terms,
-        notes=notes,
-        invoice_number=invoice_number,
-        invoice_amount=invoice_amount,
-        invoice_date=invoice_date,
-        payment_method=payment_method,
-        payment_reference=payment_reference,
-        payment_amount=payment_amount,
-        payment_date=payment_date
+        supplier_id=purchase_data.supplier_id,
+        items_data=purchase_data.items_data,
+        payment_type=purchase_data.payment_type,
+        payment_terms=purchase_data.payment_terms,
+        notes=purchase_data.notes,
+        invoice_number=purchase_data.invoice_number,
+        invoice_amount=purchase_data.invoice_amount,
+        invoice_date=purchase_data.invoice_date,
+        payment_method=purchase_data.payment_method,
+        payment_reference=purchase_data.payment_reference,
+        payment_amount=purchase_data.payment_amount,
+        payment_date=purchase_data.payment_date
     )
 
 
@@ -231,23 +225,57 @@ async def get_direct_purchase_endpoint(
 @router.put("/direct/{purchase_id}")
 async def update_direct_purchase_endpoint(
     purchase_id: UUID,
-    purchase_data: 'DirectPurchaseUpdate',
+    purchase_data: DirectPurchaseUpdate,
     request: Request,
     response: Response
 ):
     """
     Update a direct purchase (Compra Directa) - JSON payload
-
     Updates purchase items and metadata. Use separate endpoints for file uploads.
     """
-    from app.models.purchase import DirectPurchaseUpdate
-    from app.services.purchase_service import update_direct_purchase_json
-
-    return await update_direct_purchase_json(
+    # Import locally to avoid circular imports if any, keeping with existing pattern
+    from app.services.direct_purchase_service import update_direct_purchase
+    
+    # Map Pydantic model to function arguments
+    return await update_direct_purchase(
         request=request,
         response=response,
         purchase_id=purchase_id,
-        purchase_data=purchase_data
+        items_data=purchase_data.items_data,
+        notes=purchase_data.notes,
+        invoice_number=purchase_data.invoice_number,
+        payment_method=purchase_data.payment_method,
+        payment_reference=purchase_data.payment_reference,
+        payment_amount=purchase_data.payment_amount,
+        payment_date=purchase_data.payment_date
+    )
+
+
+@router.post("/direct/{purchase_id}/attachments")
+async def upload_direct_purchase_attachments_endpoint(
+    purchase_id: UUID,
+    request: Request,
+    response: Response
+):
+    """
+    Upload attachments for a direct purchase (Invoice and Payment Proofs).
+    Expects multipart/form-data.
+    Uses manual form parsing to avoid Pydantic validation errors on binary data.
+    """
+    try:
+        form = await request.form()
+        invoice_files = form.getlist("invoice_files")
+        payment_files = form.getlist("payment_files")
+    except Exception:
+        invoice_files = []
+        payment_files = []
+
+    return await upload_direct_purchase_attachments(
+        request=request,
+        response=response,
+        purchase_id=purchase_id,
+        invoice_files=invoice_files,
+        payment_files=payment_files
     )
 
 
