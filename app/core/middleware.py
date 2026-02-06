@@ -108,6 +108,12 @@ async def tenant_detection_middleware(request: Request, call_next):
             response = await call_next(request)
             return response
 
+        # Skip tenant detection for public restaurant endpoints (they use slug-based lookup)
+        if request.url.path.startswith('/public/restaurant'):
+            request.state.tenant_context = TenantContext()
+            response = await call_next(request)
+            return response
+
         # Check for API key authentication - if present, get tenant from token
         api_key = extract_api_key(request)
         if api_key:
@@ -372,7 +378,7 @@ async def session_validation_middleware(request: Request, call_next):
         ]
 
         # Public prefixes (no session required)
-        public_prefixes = ['/blog', '/supplier-portal']
+        public_prefixes = ['/blog', '/supplier-portal', '/public/restaurant']
 
         # Handle exact root path separately
         if path == '/' or any(path.startswith(endpoint) for endpoint in public_endpoints) or any(path.startswith(prefix) for prefix in public_prefixes):

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, salaries, expenses
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, salaries, expenses, public_restaurant, tenant_config
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -55,7 +55,8 @@ def custom_openapi():
 
     # Prefixes that are public (all paths starting with these)
     # /v1 uses API key authentication instead of cookie
-    public_prefixes = ["/blog", "/v1"]
+    # /public/restaurant is public for customer menu viewing
+    public_prefixes = ["/blog", "/v1", "/public/restaurant"]
 
     for path in openapi_schema["paths"]:
         # Skip public endpoints
@@ -144,6 +145,8 @@ app.include_router(api_tokens.router, prefix="/api-tokens", tags=["api-tokens"])
 app.include_router(salaries.router, prefix="/salaries", tags=["salaries"])
 app.include_router(expenses.router, prefix="/finance/expenses", tags=["expenses"])
 app.include_router(public_api.router, tags=["public-api"])
+app.include_router(public_restaurant.router, prefix="/public/restaurant", tags=["public-restaurant"])
+app.include_router(tenant_config.router, prefix="/api/tenant", tags=["tenant-config"])
 
 @app.get("/")
 async def root():

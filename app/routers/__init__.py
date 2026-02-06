@@ -23,4 +23,6 @@ from app.routers import (
     public_api,
     salaries,
     expenses,
+    public_restaurant,
+    tenant_config,
 )
