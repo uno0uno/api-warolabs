@@ -58,12 +58,15 @@ router = APIRouter()
 
 
 @router.post("/extract-invoice")
-async def extract_invoice(request: Request):
+async def extract_invoice(
+    request: Request,
+    file: UploadFile = File(...)
+):
     """
-    Extract structured data from invoice OCR text using Ollama LLM.
-    Receives raw text, returns structured JSON with invoice fields.
+    Extract structured data from invoice image using Google Gemini 1.5 Flash.
+    Receives an image file, returns structured JSON with invoice fields.
     """
-    return await extract_invoice_data(request)
+    return await extract_invoice_data(request, file)
 
 
 @router.get("/next-number")

@@ -49,6 +49,9 @@ class Settings(BaseSettings):
 
     # Ollama Extract API
     ollama_api_url: str = Field(default="https://chat.warocol.com", alias='OLLAMA_API_URL')
+    
+    # Google Gemini API
+    google_api_key: Optional[str] = Field(default=None, alias='GOOGLE_API_KEY')
 
     # Discord webhook for notifications
     discord_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_WEBHOOK_URL')
