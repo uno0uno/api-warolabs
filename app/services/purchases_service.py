@@ -1,9 +1,14 @@
+import logging
+import httpx
 from typing import Optional, Dict, Any
 from uuid import UUID
 from fastapi import Request, Response, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
+from app.config import settings
+
+logger = logging.getLogger(__name__)
 from app.models.purchase import (
     Purchase,
     PurchaseCreate,
@@ -877,4 +882,98 @@ async def update_purchase(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+
+INVOICE_SCHEMA = {
+    "numero_factura": "string",
+    "fecha": "string",
+    "proveedor": {
+        "nombre": "string",
+        "nit": "string",
+        "direccion": "string",
+        "telefono": "string"
+    },
+    "cliente": {
+        "nombre": "string",
+        "nit": "string"
+    },
+    "items": [
+        {
+            "descripcion": "string",
+            "cantidad": "number",
+            "precio_unitario": "number",
+            "total": "number"
+        }
+    ],
+    "subtotal": "number",
+    "iva": "number",
+    "total": "number",
+    "forma_pago": "string",
+    "observaciones": "string"
+}
+
+
+async def extract_invoice_data(request: Request) -> dict:
+    """
+    Extracts structured invoice data from OCR text using Ollama.
+    Auth: session cookie (the user must be logged in).
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    body = await request.json()
+    text = body.get("text", "")
+
+    if not text or not text.strip():
+        raise HTTPException(status_code=400, detail="Text is required")
+
+    # Forward the session token to Ollama for authentication
+    session_token = request.cookies.get("session-token")
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Session token not found")
+
+    ollama_url = f"{settings.ollama_api_url}/extract"
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        try:
+            res = await client.post(
+                ollama_url,
+                headers={
+                    "Authorization": f"Bearer {session_token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "text": text,
+                    "schema_json": INVOICE_SCHEMA,
+                    "instructions": (
+                        "Esta es una factura colombiana extraída por OCR. Reglas importantes:\n"
+                        "1. PRECIOS: En Colombia se usa punto (.) como separador de miles. "
+                        "Ejemplo: 17.100 significa diecisiete mil cien pesos (17100), NO 17.1. "
+                        "150.000 significa ciento cincuenta mil (150000). Devuelve los números SIN puntos de miles.\n"
+                        "2. NIT: El NIT del proveedor es un número largo (ej: 890900608-9). "
+                        "NO confundir con fechas ni resoluciones DIAN.\n"
+                        "3. ITEMS: Extrae cada producto con su descripción exacta del texto OCR, cantidad, precio unitario y total.\n"
+                        "4. Si un campo no se encuentra en el texto, usa null.\n"
+                        "5. numero_factura: busca patrones como 'NUMERO XX' o 'No. XX' o 'FACTURA XX'.\n"
+                        "6. forma_pago: EFECTIVO, TARJETA, CONTADO, CREDITO, etc."
+                    )
+                },
+            )
+            res.raise_for_status()
+            data = res.json()
+
+            return {
+                "success": data.get("success", False),
+                "data": data.get("data"),
+                "raw": data.get("raw"),
+            }
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Ollama API error: {e.response.status_code} - {e.response.text}")
+            raise HTTPException(status_code=502, detail=f"Ollama service error: {e.response.status_code}")
+        except Exception as e:
+            logger.error(f"Ollama connection error: {str(e)}")
+            raise HTTPException(status_code=502, detail="Could not connect to Ollama service")
 

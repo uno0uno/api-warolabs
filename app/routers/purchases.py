@@ -5,7 +5,8 @@ from app.services.purchases_service import (
     get_purchases_list,
     get_purchase_by_id,
     create_purchase,
-    update_purchase
+    update_purchase,
+    extract_invoice_data
 )
 from app.services.purchase_tracking_service import (
     # State transitions
@@ -54,6 +55,16 @@ from app.models.purchase import (
 )
 
 router = APIRouter()
+
+
+@router.post("/extract-invoice")
+async def extract_invoice(request: Request):
+    """
+    Extract structured data from invoice OCR text using Ollama LLM.
+    Receives raw text, returns structured JSON with invoice fields.
+    """
+    return await extract_invoice_data(request)
+
 
 @router.get("/next-number")
 async def get_next_purchase_number(
