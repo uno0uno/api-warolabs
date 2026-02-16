@@ -26,6 +26,36 @@ async def get_orders_metrics(
     return await orders_service.get_orders_metrics(request, date_from=date_from, date_to=date_to)
 
 
+@router.get("/sales-flow")
+async def get_sales_flow(
+    request: Request,
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    payment_method: Optional[str] = Query(None),
+    status: Optional[str] = Query(None)
+):
+    """
+    Get sales flow data with intelligent comparison period
+
+    - Ranges ≤30 days: Compare with previous period
+    - Ranges >30 days: Compare with same period last year
+    - Auto-grouping: hourly (≤3 days), daily (4-90 days), weekly (>90 days)
+
+    Query parameters:
+    - date_from: Start date (YYYY-MM-DD)
+    - date_to: End date (YYYY-MM-DD)
+    - payment_method: Filter by payment method (cash, card, digital)
+    - status: Filter by status (completed, cancelled, pending)
+    """
+    return await orders_service.get_sales_flow(
+        request,
+        date_from=date_from,
+        date_to=date_to,
+        payment_method=payment_method,
+        status=status
+    )
+
+
 @router.post("/export")
 async def export_orders(
     request: Request,

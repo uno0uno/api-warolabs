@@ -1055,3 +1055,242 @@ async def delete_order_item_modifier(
     except Exception as e:
         logger.error(f"Error deleting order item modifier: {str(e)}")
         raise APIError(f"Error deleting order item modifier: {str(e)}", status_code=500)
+
+
+async def get_sales_flow(
+    request: Request,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    status: Optional[str] = None
+) -> dict:
+    """
+    Get sales flow data with intelligent comparison and grouping
+    - Ranges ≤30 days: Compare with previous period
+    - Ranges >30 days: Compare with same period last year
+    - Auto-grouping: hourly (≤3 days), daily (4-90 days)
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        # Parse dates and calculate periods
+        from datetime import datetime, timedelta
+
+        parsed_date_from = parse_date(date_from)
+        parsed_date_to = parse_date(date_to)
+
+        # Default to year-to-date if no dates provided (same as metrics cards)
+        if not parsed_date_from or not parsed_date_to:
+            today = datetime.now().date()
+            parsed_date_to = today
+            # Start from January 1st of current year
+            parsed_date_from = today.replace(month=1, day=1)
+
+        # Calculate range duration
+        days_diff = (parsed_date_to - parsed_date_from).days + 1
+
+        # Determine comparison period and grouping
+        if days_diff <= 30:
+            # Compare with previous period
+            comparison_date_to = parsed_date_from - timedelta(days=1)
+            comparison_date_from = comparison_date_to - timedelta(days=days_diff - 1)
+            comparison_label = "Período Anterior"
+        else:
+            # Compare with same period last year
+            comparison_date_from = parsed_date_from.replace(year=parsed_date_from.year - 1)
+            comparison_date_to = parsed_date_to.replace(year=parsed_date_to.year - 1)
+            comparison_label = "Año Anterior"
+
+        # Determine grouping: hourly (≤3 days), daily (>3 days)
+        group_by = 'hour' if days_diff <= 3 else 'day'
+
+        async with get_db_connection() as conn:
+            # Build WHERE conditions
+            where_conditions = ["tenant_id = $1", "pos_cart_id IS NOT NULL"]
+            params = [tenant_id]
+            param_count = 1
+
+            # Add filters
+            if payment_method:
+                param_count += 1
+                where_conditions.append(f"payment_method = ${param_count}")
+                params.append(payment_method)
+
+            if status:
+                param_count += 1
+                where_conditions.append(f"status = ${param_count}")
+                params.append(status)
+            else:
+                # Default to completed if no status filter
+                where_conditions.append("status = 'completed'")
+
+            where_clause = " AND ".join(where_conditions)
+
+            # Build query based on grouping
+            if group_by == 'hour':
+                # Hourly grouping
+                param_count += 1
+                date_from_param_idx = param_count
+                param_count += 1
+                date_to_param_idx = param_count
+                param_count += 1
+                comp_from_param_idx = param_count
+                param_count += 1
+                comp_to_param_idx = param_count
+
+                params.extend([parsed_date_from, parsed_date_to, comparison_date_from, comparison_date_to])
+
+                query = f"""
+                    WITH hours AS (
+                        SELECT generate_series(0, 23) AS hour
+                    ),
+                    current_period AS (
+                        SELECT
+                            EXTRACT(HOUR FROM order_date AT TIME ZONE 'America/Bogota') AS hour,
+                            SUM(total_amount) AS sales
+                        FROM orders
+                        WHERE {where_clause}
+                          AND DATE(order_date AT TIME ZONE 'America/Bogota') >= ${date_from_param_idx}
+                          AND DATE(order_date AT TIME ZONE 'America/Bogota') <= ${date_to_param_idx}
+                        GROUP BY EXTRACT(HOUR FROM order_date AT TIME ZONE 'America/Bogota')
+                    ),
+                    comparison_period AS (
+                        SELECT
+                            EXTRACT(HOUR FROM order_date AT TIME ZONE 'America/Bogota') AS hour,
+                            SUM(total_amount) AS sales
+                        FROM orders
+                        WHERE {where_clause}
+                          AND DATE(order_date AT TIME ZONE 'America/Bogota') >= ${comp_from_param_idx}
+                          AND DATE(order_date AT TIME ZONE 'America/Bogota') <= ${comp_to_param_idx}
+                        GROUP BY EXTRACT(HOUR FROM order_date AT TIME ZONE 'America/Bogota')
+                    )
+                    SELECT
+                        h.hour,
+                        COALESCE(cp.sales, 0) AS current_sales,
+                        COALESCE(cmp.sales, 0) AS comparison_sales
+                    FROM hours h
+                    LEFT JOIN current_period cp ON h.hour = cp.hour
+                    LEFT JOIN comparison_period cmp ON h.hour = cmp.hour
+                    WHERE COALESCE(cp.sales, 0) > 0 OR COALESCE(cmp.sales, 0) > 0
+                    ORDER BY h.hour
+                """
+
+                rows = await conn.fetch(query, *params)
+
+                # Format data for hourly
+                data = []
+                for row in rows:
+                    hour = int(row['hour'])
+                    if hour == 0:
+                        label = '12am'
+                    elif hour < 12:
+                        label = f'{hour}am'
+                    elif hour == 12:
+                        label = '12pm'
+                    else:
+                        label = f'{hour-12}pm'
+
+                    data.append({
+                        'name': label,
+                        'sales': round(float(row['current_sales'])),
+                        'salesYesterday': round(float(row['comparison_sales']))
+                    })
+
+            else:  # day grouping
+                # Daily grouping - optimized without recursive CTEs
+                param_count += 1
+                date_from_param_idx = param_count
+                param_count += 1
+                date_to_param_idx = param_count
+                param_count += 1
+                comp_from_param_idx = param_count
+                param_count += 1
+                comp_to_param_idx = param_count
+
+                params.extend([parsed_date_from, parsed_date_to, comparison_date_from, comparison_date_to])
+
+                # Use generate_series directly in the query (more efficient than recursive CTE)
+                query = f"""
+                    WITH date_series AS (
+                        SELECT generate_series(
+                            ${date_from_param_idx}::date,
+                            ${date_to_param_idx}::date,
+                            '1 day'::interval
+                        )::date AS day
+                    ),
+                    current_period AS (
+                        SELECT
+                            DATE(order_date AT TIME ZONE 'America/Bogota') AS day,
+                            SUM(total_amount) AS sales
+                        FROM orders
+                        WHERE {where_clause}
+                          AND DATE(order_date AT TIME ZONE 'America/Bogota') >= ${date_from_param_idx}
+                          AND DATE(order_date AT TIME ZONE 'America/Bogota') <= ${date_to_param_idx}
+                        GROUP BY DATE(order_date AT TIME ZONE 'America/Bogota')
+                    ),
+                    comparison_period AS (
+                        SELECT
+                            DATE(order_date AT TIME ZONE 'America/Bogota') AS day,
+                            SUM(total_amount) AS sales
+                        FROM orders
+                        WHERE {where_clause}
+                          AND DATE(order_date AT TIME ZONE 'America/Bogota') >= ${comp_from_param_idx}
+                          AND DATE(order_date AT TIME ZONE 'America/Bogota') <= ${comp_to_param_idx}
+                        GROUP BY DATE(order_date AT TIME ZONE 'America/Bogota')
+                    )
+                    SELECT
+                        ds.day,
+                        COALESCE(cp.sales, 0) AS current_sales,
+                        COALESCE(cmp.sales, 0) AS comparison_sales
+                    FROM date_series ds
+                    LEFT JOIN current_period cp ON ds.day = cp.day
+                    LEFT JOIN comparison_period cmp ON
+                        cmp.day = (ds.day - (${date_from_param_idx}::date - ${comp_from_param_idx}::date))
+                    ORDER BY ds.day
+                """
+
+                rows = await conn.fetch(query, *params)
+
+                # Format data for daily
+                data = []
+                for row in rows:
+                    day = row['day']
+                    label = day.strftime('%d/%m')
+
+                    data.append({
+                        'name': label,
+                        'sales': round(float(row['current_sales'])),
+                        'salesYesterday': round(float(row['comparison_sales']))
+                    })
+
+            # If no data, return placeholder
+            if not data:
+                data = [
+                    { 'name': '12pm', 'sales': 0, 'salesYesterday': 0 },
+                    { 'name': '2pm', 'sales': 0, 'salesYesterday': 0 },
+                    { 'name': '4pm', 'sales': 0, 'salesYesterday': 0 },
+                    { 'name': '6pm', 'sales': 0, 'salesYesterday': 0 },
+                    { 'name': '8pm', 'sales': 0, 'salesYesterday': 0 },
+                    { 'name': '10pm', 'sales': 0, 'salesYesterday': 0 },
+                ]
+
+            return {
+                "success": True,
+                "data": data,
+                "metadata": {
+                    "grouping": group_by,
+                    "comparison_type": "previous_period" if days_diff <= 30 else "year_over_year",
+                    "comparison_label": comparison_label,
+                    "days_in_range": days_diff
+                }
+            }
+
+    except AuthenticationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting sales flow: {str(e)}")
+        raise APIError(f"Error getting sales flow: {str(e)}", status_code=500)
