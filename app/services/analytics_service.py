@@ -45,25 +45,143 @@ async def get_menu_analysis(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
-        # Default to last 30 days
+        # Default to start of current year
         parsed_date_from = parse_date(date_from)
         parsed_date_to = parse_date(date_to)
 
         if not parsed_date_from or not parsed_date_to:
             today = datetime.now().date()
             parsed_date_to = today
-            parsed_date_from = today - timedelta(days=30)
+            parsed_date_from = today.replace(month=1, day=1)
 
         async with get_db_connection() as conn:
-            # Get product sales with estimated profitability
-            # Since costo_calculado is 0, we estimate cost at 40% of price (industry standard)
+            # Get product sales with REAL profitability based on purchase history
+            # Calculates actual cost from recipe ingredients and their latest purchase costs
             query = """
-                WITH product_sales AS (
+                WITH calculated_costs AS (
+                    SELECT
+                        p.id,
+                        p.price,
+                        (
+                            SELECT SUM(quantity * ingredient_cost)
+                            FROM (
+                                -- Direct recipe ingredients with unit conversion
+                                SELECT
+                                    pr.quantity,
+                                    pr.unit as recipe_unit,
+                                    COALESCE(
+                                        -- Get latest purchase cost with unit normalization
+                                        (SELECT
+                                            CASE
+                                                -- Units match directly or are equivalent aliases (gr=g, u=und, ml=ml)
+                                                WHEN pi.unit = pr.unit
+                                                  OR (pi.unit IN ('g', 'gr') AND pr.unit IN ('g', 'gr'))
+                                                  OR (pi.unit IN ('u', 'und') AND pr.unit IN ('u', 'und'))
+                                                THEN pi.unit_cost
+                                                -- Units differ, try conversion factor from ingredient_purchase_units
+                                                WHEN EXISTS (
+                                                    SELECT 1 FROM ingredient_purchase_units ipu
+                                                    WHERE ipu.ingredient_id = pr.ingredient_id
+                                                      AND ipu.purchase_unit_label = pr.unit
+                                                      AND ipu.is_active = TRUE
+                                                      AND ipu.conversion_factor > 0
+                                                ) THEN
+                                                    pi.unit_cost / (
+                                                        SELECT ipu.conversion_factor
+                                                        FROM ingredient_purchase_units ipu
+                                                        WHERE ipu.ingredient_id = pr.ingredient_id
+                                                          AND ipu.purchase_unit_label = pr.unit
+                                                          AND ipu.is_active = TRUE
+                                                        LIMIT 1
+                                                    )
+                                                ELSE NULL
+                                            END
+                                         FROM tenant_purchase_items pi
+                                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                         WHERE pi.ingredient_id = pr.ingredient_id
+                                           AND tp.tenant_id = $1
+                                           AND pi.unit_cost IS NOT NULL
+                                           AND pi.unit_cost > 0
+                                         ORDER BY tp.purchase_date DESC
+                                         LIMIT 1),
+                                        i.costo_unitario,
+                                        0
+                                    ) as ingredient_cost
+                                FROM product_recipes pr
+                                JOIN ingredients i ON pr.ingredient_id = i.id
+                                WHERE pr.product_id = p.id
+
+                                UNION ALL
+
+                                -- Base recipe ingredients with unit conversion
+                                SELECT
+                                    brt.base_quantity as quantity,
+                                    brt.unit as recipe_unit,
+                                    COALESCE(
+                                        -- Get latest purchase cost with unit normalization
+                                        (SELECT
+                                            CASE
+                                                -- Units match directly or are equivalent aliases (gr=g, u=und)
+                                                WHEN pi.unit = brt.unit
+                                                  OR (pi.unit IN ('g', 'gr') AND brt.unit IN ('g', 'gr'))
+                                                  OR (pi.unit IN ('u', 'und') AND brt.unit IN ('u', 'und'))
+                                                THEN pi.unit_cost
+                                                -- Units differ, try conversion factor from ingredient_purchase_units
+                                                WHEN EXISTS (
+                                                    SELECT 1 FROM ingredient_purchase_units ipu
+                                                    WHERE ipu.ingredient_id = brt.ingredient_id
+                                                      AND ipu.purchase_unit_label = brt.unit
+                                                      AND ipu.is_active = TRUE
+                                                      AND ipu.conversion_factor > 0
+                                                ) THEN
+                                                    pi.unit_cost / (
+                                                        SELECT ipu.conversion_factor
+                                                        FROM ingredient_purchase_units ipu
+                                                        WHERE ipu.ingredient_id = brt.ingredient_id
+                                                          AND ipu.purchase_unit_label = brt.unit
+                                                          AND ipu.is_active = TRUE
+                                                        LIMIT 1
+                                                    )
+                                                ELSE NULL
+                                            END
+                                         FROM tenant_purchase_items pi
+                                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                         WHERE pi.ingredient_id = brt.ingredient_id
+                                           AND tp.tenant_id = $1
+                                           AND pi.unit_cost IS NOT NULL
+                                           AND pi.unit_cost > 0
+                                         ORDER BY tp.purchase_date DESC
+                                         LIMIT 1),
+                                        i.costo_unitario,
+                                        0
+                                    ) as ingredient_cost
+                                FROM product_base_recipes pbr
+                                JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+                                JOIN ingredients i ON brt.ingredient_id = i.id
+                                WHERE pbr.product_id = p.id
+                            ) all_ingredients
+                        ) as calc_cost
+                    FROM product p
+                    WHERE p.tenant_id = $1
+                ),
+                product_real_costs AS (
+                    SELECT
+                        id,
+                        price,
+                        -- Use calculated cost unless it's > price (data error), then use 40% fallback
+                        CASE
+                            WHEN calc_cost IS NULL THEN price * 0.40
+                            WHEN calc_cost > price THEN price * 0.40
+                            ELSE calc_cost
+                        END as real_cost
+                    FROM calculated_costs
+                ),
+                product_sales AS (
                     SELECT
                         p.id,
                         p.name,
                         p.price,
-                        COALESCE(p.costo_calculado, p.price * 0.40) as estimated_cost,
+                        prc.real_cost as estimated_cost,
                         c.name as category_name,
                         COUNT(DISTINCT oi.id) as order_count,
                         SUM(oi.quantity) as total_units_sold,
@@ -71,6 +189,7 @@ async def get_menu_analysis(
                         AVG(oi.price_at_purchase) as avg_price
                     FROM product p
                     LEFT JOIN categories c ON p.category_id = c.id
+                    LEFT JOIN product_real_costs prc ON p.id = prc.id
                     LEFT JOIN order_items oi ON p.id = oi.product_id
                     LEFT JOIN orders o ON oi.order_id = o.id
                     WHERE p.tenant_id = $1
@@ -82,7 +201,7 @@ async def get_menu_analysis(
                                 AND DATE(o.order_date AT TIME ZONE 'America/Bogota') <= $3
                             )
                         )
-                    GROUP BY p.id, p.name, p.price, p.costo_calculado, c.name
+                    GROUP BY p.id, p.name, p.price, prc.real_cost, c.name
                     HAVING COUNT(DISTINCT oi.id) > 0
                 ),
                 sales_stats AS (
@@ -200,15 +319,14 @@ async def get_food_cost(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
-        # Default to current month
+        # Default to start of current year
         parsed_date_from = parse_date(date_from)
         parsed_date_to = parse_date(date_to)
 
         if not parsed_date_from or not parsed_date_to:
             today = datetime.now().date()
             parsed_date_to = today
-            # First day of current month
-            parsed_date_from = today.replace(day=1)
+            parsed_date_from = today.replace(month=1, day=1)
 
         # Calculate previous period (same duration)
         days_diff = (parsed_date_to - parsed_date_from).days + 1
@@ -216,12 +334,129 @@ async def get_food_cost(
         prev_date_from = prev_date_to - timedelta(days=days_diff - 1)
 
         async with get_db_connection() as conn:
-            # Query for current and previous period
+            # Query for current and previous period with REAL costs from purchase history
             query = """
-                WITH period_costs AS (
+                WITH calculated_costs AS (
+                    SELECT
+                        p.id,
+                        p.price,
+                        (
+                            SELECT SUM(quantity * ingredient_cost)
+                            FROM (
+                                -- Direct recipe ingredients with unit conversion
+                                SELECT
+                                    pr.quantity,
+                                    pr.unit as recipe_unit,
+                                    COALESCE(
+                                        -- Get latest purchase cost with unit normalization
+                                        (SELECT
+                                            CASE
+                                                -- Units match directly or are equivalent aliases (gr=g, u=und, ml=ml)
+                                                WHEN pi.unit = pr.unit
+                                                  OR (pi.unit IN ('g', 'gr') AND pr.unit IN ('g', 'gr'))
+                                                  OR (pi.unit IN ('u', 'und') AND pr.unit IN ('u', 'und'))
+                                                THEN pi.unit_cost
+                                                -- Units differ, try conversion factor from ingredient_purchase_units
+                                                WHEN EXISTS (
+                                                    SELECT 1 FROM ingredient_purchase_units ipu
+                                                    WHERE ipu.ingredient_id = pr.ingredient_id
+                                                      AND ipu.purchase_unit_label = pr.unit
+                                                      AND ipu.is_active = TRUE
+                                                      AND ipu.conversion_factor > 0
+                                                ) THEN
+                                                    pi.unit_cost / (
+                                                        SELECT ipu.conversion_factor
+                                                        FROM ingredient_purchase_units ipu
+                                                        WHERE ipu.ingredient_id = pr.ingredient_id
+                                                          AND ipu.purchase_unit_label = pr.unit
+                                                          AND ipu.is_active = TRUE
+                                                        LIMIT 1
+                                                    )
+                                                ELSE NULL
+                                            END
+                                         FROM tenant_purchase_items pi
+                                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                         WHERE pi.ingredient_id = pr.ingredient_id
+                                           AND tp.tenant_id = $1
+                                           AND pi.unit_cost IS NOT NULL
+                                           AND pi.unit_cost > 0
+                                         ORDER BY tp.purchase_date DESC
+                                         LIMIT 1),
+                                        i.costo_unitario,
+                                        0
+                                    ) as ingredient_cost
+                                FROM product_recipes pr
+                                JOIN ingredients i ON pr.ingredient_id = i.id
+                                WHERE pr.product_id = p.id
+
+                                UNION ALL
+
+                                -- Base recipe ingredients with unit conversion
+                                SELECT
+                                    brt.base_quantity as quantity,
+                                    brt.unit as recipe_unit,
+                                    COALESCE(
+                                        -- Get latest purchase cost with unit normalization
+                                        (SELECT
+                                            CASE
+                                                -- Units match directly or are equivalent aliases (gr=g, u=und)
+                                                WHEN pi.unit = brt.unit
+                                                  OR (pi.unit IN ('g', 'gr') AND brt.unit IN ('g', 'gr'))
+                                                  OR (pi.unit IN ('u', 'und') AND brt.unit IN ('u', 'und'))
+                                                THEN pi.unit_cost
+                                                -- Units differ, try conversion factor from ingredient_purchase_units
+                                                WHEN EXISTS (
+                                                    SELECT 1 FROM ingredient_purchase_units ipu
+                                                    WHERE ipu.ingredient_id = brt.ingredient_id
+                                                      AND ipu.purchase_unit_label = brt.unit
+                                                      AND ipu.is_active = TRUE
+                                                      AND ipu.conversion_factor > 0
+                                                ) THEN
+                                                    pi.unit_cost / (
+                                                        SELECT ipu.conversion_factor
+                                                        FROM ingredient_purchase_units ipu
+                                                        WHERE ipu.ingredient_id = brt.ingredient_id
+                                                          AND ipu.purchase_unit_label = brt.unit
+                                                          AND ipu.is_active = TRUE
+                                                        LIMIT 1
+                                                    )
+                                                ELSE NULL
+                                            END
+                                         FROM tenant_purchase_items pi
+                                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                         WHERE pi.ingredient_id = brt.ingredient_id
+                                           AND tp.tenant_id = $1
+                                           AND pi.unit_cost IS NOT NULL
+                                           AND pi.unit_cost > 0
+                                         ORDER BY tp.purchase_date DESC
+                                         LIMIT 1),
+                                        i.costo_unitario,
+                                        0
+                                    ) as ingredient_cost
+                                FROM product_base_recipes pbr
+                                JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+                                JOIN ingredients i ON brt.ingredient_id = i.id
+                                WHERE pbr.product_id = p.id
+                            ) all_ingredients
+                        ) as calc_cost
+                    FROM product p
+                    WHERE p.tenant_id = $1
+                ),
+                product_real_costs AS (
+                    SELECT
+                        id,
+                        -- Use calculated cost unless it's > price (data error), then use 40% fallback
+                        CASE
+                            WHEN calc_cost IS NULL THEN price * 0.40
+                            WHEN calc_cost > price THEN price * 0.40
+                            ELSE calc_cost
+                        END as real_cost
+                    FROM calculated_costs
+                ),
+                period_costs AS (
                     SELECT
                         SUM(oi.subtotal) as revenue,
-                        SUM(oi.quantity * COALESCE(p.costo_calculado, p.price * 0.40)) as total_cost,
+                        SUM(oi.quantity * prc.real_cost) as total_cost,
                         CASE
                             WHEN DATE(o.order_date AT TIME ZONE 'America/Bogota') >= $2
                                 AND DATE(o.order_date AT TIME ZONE 'America/Bogota') <= $3
@@ -231,6 +466,7 @@ async def get_food_cost(
                     FROM order_items oi
                     JOIN orders o ON oi.order_id = o.id
                     JOIN product p ON oi.product_id = p.id
+                    JOIN product_real_costs prc ON p.id = prc.id
                     WHERE o.tenant_id = $1
                         AND o.status = 'completed'
                         AND (

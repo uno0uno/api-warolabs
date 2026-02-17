@@ -14,7 +14,7 @@ async def get_menu_analysis(
     request: Request,
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
-    limit: int = Query(10, ge=1, le=50)
+    limit: int = Query(200, ge=1, le=500)
 ):
     """
     Get menu analysis with profitability and popularity matrix
