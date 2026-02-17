@@ -689,7 +689,7 @@ async def complete_pos_order(
                                 )
 
                                 previous_stock = float(stock_row['current_stock']) if stock_row else 0.0
-                                new_stock = max(0.0, previous_stock - total_deduction)
+                                new_stock = previous_stock - total_deduction
 
                                 # Update or insert inventory
                                 if stock_row:
@@ -792,7 +792,7 @@ async def complete_pos_order(
                         )
 
                         previous_stock = float(stock_row['current_stock']) if stock_row else 0.0
-                        new_stock = max(0.0, previous_stock - quantity_to_deduct)
+                        new_stock = previous_stock - quantity_to_deduct
 
                         # Update inventory
                         if stock_row:
