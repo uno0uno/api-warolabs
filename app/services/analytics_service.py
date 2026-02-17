@@ -323,7 +323,14 @@ async def get_alerts(
     limit: int = 10
 ) -> dict:
     """
-    Get system alerts for inventory, top products, and operational issues
+    Get intelligent system alerts for inventory, products, and operational issues
+
+    Smart alerts include:
+    - Out of stock ingredients with active consumption (POS-only operations)
+    - Top selling products blocked by missing ingredients
+    - Low stock warnings with days remaining
+    - Expiration warnings
+    - Long gaps without purchases
     """
     try:
         session_context = require_valid_session(request)
@@ -335,45 +342,53 @@ async def get_alerts(
         alerts = []
 
         async with get_db_connection() as conn:
-            # 1. Low stock alerts (critical and warning)
-            low_stock_query = """
+            # 1. CRITICAL: Ingredients with zero stock but active consumption (POS-only detection)
+            zero_stock_active_query = """
+                WITH recent_consumption AS (
+                    SELECT
+                        tim.ingredient_id,
+                        SUM(ABS(tim.quantity_change)) as consumed_7d,
+                        (SUM(ABS(tim.quantity_change)) / 7.0) as daily_rate
+                    FROM tenant_ingredient_movements tim
+                    WHERE tim.tenant_id = $1
+                        AND tim.movement_type = 'consumption'
+                        AND tim.created_at >= CURRENT_DATE - INTERVAL '7 days'
+                    GROUP BY tim.ingredient_id
+                )
                 SELECT
                     i.name,
                     i.unit,
                     ti.current_stock,
-                    ti.minimum_stock,
-                    (ti.minimum_stock - ti.current_stock) as deficit,
-                    CASE
-                        WHEN ti.current_stock <= 0 THEN 'critical'
-                        WHEN ti.current_stock <= ti.minimum_stock * 0.5 THEN 'critical'
-                        ELSE 'warning'
-                    END as severity
+                    rc.consumed_7d,
+                    rc.daily_rate,
+                    CEIL(rc.daily_rate * 14) as recommended_14d_order,
+                    (
+                        SELECT COUNT(DISTINCT pr.product_id)
+                        FROM product_recipes pr
+                        WHERE pr.ingredient_id = i.id
+                    ) as products_affected
                 FROM tenant_inventory ti
                 JOIN ingredients i ON ti.ingredient_id = i.id
+                JOIN recent_consumption rc ON rc.ingredient_id = i.id
                 WHERE ti.tenant_id = $1
-                    AND ti.current_stock <= ti.minimum_stock
-                ORDER BY
-                    CASE
-                        WHEN ti.current_stock <= 0 THEN 0
-                        WHEN ti.current_stock <= ti.minimum_stock * 0.5 THEN 1
-                        ELSE 2
-                    END,
-                    deficit DESC
+                    AND ti.current_stock <= 0
+                    AND rc.consumed_7d > 0
+                ORDER BY rc.daily_rate DESC
                 LIMIT 5
             """
-            low_stock_rows = await conn.fetch(low_stock_query, tenant_id)
+            zero_stock_rows = await conn.fetch(zero_stock_active_query, tenant_id)
 
-            for row in low_stock_rows:
-                if row['current_stock'] <= 0:
-                    title = f"Sin stock: {row['name']}"
-                    description = f"El ingrediente está agotado. Stock mínimo: {row['minimum_stock']}{row['unit']}"
-                else:
-                    title = f"Stock bajo: {row['name']}"
-                    description = f"Stock actual: {row['current_stock']}{row['unit']}. Mínimo: {row['minimum_stock']}{row['unit']}"
+            for row in zero_stock_rows:
+                daily_rate = float(row['daily_rate'])
+                recommended = float(row['recommended_14d_order'])
+                products_affected = row['products_affected']
+
+                title = f"⚠️ Sin stock: {row['name']}"
+                description = f"Consumo activo: {daily_rate:.0f}{row['unit']}/día. Orden sugerida: {recommended:.0f}{row['unit']} (14 días). Afecta {products_affected} productos."
 
                 alerts.append({
-                    "id": f"stock_{len(alerts)}",
-                    "type": row['severity'],
+                    "id": f"zero_stock_{len(alerts)}",
+                    "type": "critical",
                     "title": title,
                     "description": description,
                     "action": {
@@ -382,51 +397,205 @@ async def get_alerts(
                     }
                 })
 
-            # 2. Expiration warnings (next 7 days)
-            expiration_query = """
-                SELECT
-                    i.name,
-                    ti.current_stock,
-                    ti.fecha_vencimiento,
-                    ti.lote_actual,
-                    (ti.fecha_vencimiento - CURRENT_DATE) as days_until_expiry
-                FROM tenant_inventory ti
-                JOIN ingredients i ON ti.ingredient_id = i.id
-                WHERE ti.tenant_id = $1
-                    AND ti.fecha_vencimiento IS NOT NULL
-                    AND ti.fecha_vencimiento <= CURRENT_DATE + INTERVAL '7 days'
-                    AND ti.current_stock > 0
-                ORDER BY ti.fecha_vencimiento ASC
-                LIMIT 3
-            """
-            expiration_rows = await conn.fetch(expiration_query, tenant_id)
+            # 2. Top selling products blocked by missing ingredients
+            if len(alerts) < limit:
+                blocked_products_query = """
+                    WITH top_products AS (
+                        SELECT
+                            p.id,
+                            p.name,
+                            COUNT(DISTINCT oi.id) as order_count,
+                            SUM(oi.quantity) as total_units
+                        FROM order_items oi
+                        JOIN orders o ON oi.order_id = o.id
+                        JOIN product p ON oi.product_id = p.id
+                        WHERE o.tenant_id = $1
+                            AND o.status = 'completed'
+                            AND DATE(o.order_date AT TIME ZONE 'America/Bogota') >= CURRENT_DATE - INTERVAL '7 days'
+                        GROUP BY p.id, p.name
+                        ORDER BY order_count DESC
+                        LIMIT 3
+                    ),
+                    missing_ingredients AS (
+                        SELECT
+                            tp.id as product_id,
+                            tp.name as product_name,
+                            tp.order_count,
+                            COUNT(DISTINCT pr.ingredient_id) as total_ingredients,
+                            COUNT(DISTINCT CASE
+                                WHEN ti.current_stock <= 0 THEN pr.ingredient_id
+                                ELSE NULL
+                            END) as out_of_stock_count,
+                            STRING_AGG(DISTINCT
+                                CASE
+                                    WHEN ti.current_stock <= 0 THEN i.name
+                                    ELSE NULL
+                                END, ', '
+                            ) as missing_list
+                        FROM top_products tp
+                        JOIN product_recipes pr ON tp.id = pr.product_id
+                        JOIN ingredients i ON pr.ingredient_id = i.id
+                        LEFT JOIN tenant_inventory ti ON ti.ingredient_id = i.id AND ti.tenant_id = $1
+                        GROUP BY tp.id, tp.name, tp.order_count
+                        HAVING COUNT(DISTINCT CASE WHEN ti.current_stock <= 0 THEN pr.ingredient_id ELSE NULL END) > 0
+                    )
+                    SELECT * FROM missing_ingredients
+                    ORDER BY order_count DESC
+                    LIMIT 2
+                """
+                blocked_rows = await conn.fetch(blocked_products_query, tenant_id)
 
-            for row in expiration_rows:
-                days = row['days_until_expiry']
-                if days <= 0:
-                    title = f"Vencido: {row['name']}"
-                    severity = "critical"
-                elif days <= 2:
-                    title = f"Vence en {days} días: {row['name']}"
-                    severity = "critical"
-                else:
-                    title = f"Vence en {days} días: {row['name']}"
-                    severity = "warning"
+                for row in blocked_rows:
+                    title = f"🔴 Producto bloqueado: {row['product_name']}"
+                    description = f"Vendido {row['order_count']} veces en 7 días. Faltan {row['out_of_stock_count']} ingredientes: {row['missing_list'][:80]}..."
 
-                description = f"Lote {row['lote_actual']} vence el {row['fecha_vencimiento'].strftime('%d/%m/%Y')}. Stock: {row['current_stock']}"
+                    alerts.append({
+                        "id": f"blocked_product_{len(alerts)}",
+                        "type": "critical",
+                        "title": title,
+                        "description": description,
+                        "action": {
+                            "label": "Ver ingredientes",
+                            "url": "/menu/productos"
+                        }
+                    })
 
-                alerts.append({
-                    "id": f"expiry_{len(alerts)}",
-                    "type": severity,
-                    "title": title,
-                    "description": description,
-                    "action": {
-                        "label": "Ver detalle",
-                        "url": "/inventario"
-                    }
-                })
+            # 3. Low stock with days remaining calculation
+            if len(alerts) < limit:
+                low_stock_smart_query = """
+                    WITH consumption_rate AS (
+                        SELECT
+                            tim.ingredient_id,
+                            (SUM(ABS(tim.quantity_change)) / 7.0) as daily_rate
+                        FROM tenant_ingredient_movements tim
+                        WHERE tim.tenant_id = $1
+                            AND tim.movement_type = 'consumption'
+                            AND tim.created_at >= CURRENT_DATE - INTERVAL '7 days'
+                        GROUP BY tim.ingredient_id
+                        HAVING SUM(ABS(tim.quantity_change)) > 0
+                    )
+                    SELECT
+                        i.name,
+                        i.unit,
+                        ti.current_stock,
+                        cr.daily_rate,
+                        (ti.current_stock / NULLIF(cr.daily_rate, 0)) as days_remaining,
+                        CEIL(cr.daily_rate * 14) as recommended_order
+                    FROM tenant_inventory ti
+                    JOIN ingredients i ON ti.ingredient_id = i.id
+                    JOIN consumption_rate cr ON cr.ingredient_id = i.id
+                    WHERE ti.tenant_id = $1
+                        AND ti.current_stock > 0
+                        AND (ti.current_stock / NULLIF(cr.daily_rate, 0)) < 10
+                    ORDER BY days_remaining ASC
+                    LIMIT 3
+                """
+                low_stock_rows = await conn.fetch(low_stock_smart_query, tenant_id)
 
-            # 3. Top selling products (for reordering ingredients)
+                for row in low_stock_rows:
+                    days = float(row['days_remaining'])
+                    if days <= 3:
+                        severity = "critical"
+                        title = f"🔴 Crítico: {row['name']}"
+                    elif days <= 7:
+                        severity = "warning"
+                        title = f"🟡 Stock bajo: {row['name']}"
+                    else:
+                        severity = "warning"
+                        title = f"Stock limitado: {row['name']}"
+
+                    description = f"Quedan {days:.1f} días de stock ({row['current_stock']:.0f}{row['unit']}). Orden sugerida: {float(row['recommended_order']):.0f}{row['unit']}"
+
+                    alerts.append({
+                        "id": f"low_stock_smart_{len(alerts)}",
+                        "type": severity,
+                        "title": title,
+                        "description": description,
+                        "action": {
+                            "label": "Pedir ahora",
+                            "url": "/abastecimiento/compras/crear"
+                        }
+                    })
+
+            # 4. Long gap without purchases (operational warning)
+            if len(alerts) < limit:
+                purchase_gap_query = """
+                    SELECT
+                        MAX(created_at) as last_purchase_date,
+                        CURRENT_DATE - MAX(created_at::date) as days_since_purchase,
+                        COUNT(DISTINCT ingredient_id) as ingredients_purchased
+                    FROM tenant_ingredient_movements
+                    WHERE tenant_id = $1
+                        AND movement_type = 'purchase'
+                """
+                gap_row = await conn.fetchrow(purchase_gap_query, tenant_id)
+
+                if gap_row and gap_row['last_purchase_date']:
+                    days_gap = gap_row['days_since_purchase']
+                    if days_gap >= 14:
+                        severity = "critical" if days_gap >= 21 else "warning"
+                        emoji = "🔴" if days_gap >= 21 else "🟡"
+
+                        title = f"{emoji} Sin compras: {days_gap} días"
+                        description = f"Última compra: {gap_row['last_purchase_date'].strftime('%d/%m/%Y')}. Con POS activo, el stock se agota rápido. Programa una compra pronto."
+
+                        alerts.append({
+                            "id": f"purchase_gap_{len(alerts)}",
+                            "type": severity,
+                            "title": title,
+                            "description": description,
+                            "action": {
+                                "label": "Crear compra",
+                                "url": "/abastecimiento/compras/crear"
+                            }
+                        })
+
+            # 5. Expiration warnings (next 7 days)
+            if len(alerts) < limit:
+                expiration_query = """
+                    SELECT
+                        i.name,
+                        ti.current_stock,
+                        ti.fecha_vencimiento,
+                        ti.lote_actual,
+                        (ti.fecha_vencimiento - CURRENT_DATE) as days_until_expiry
+                    FROM tenant_inventory ti
+                    JOIN ingredients i ON ti.ingredient_id = i.id
+                    WHERE ti.tenant_id = $1
+                        AND ti.fecha_vencimiento IS NOT NULL
+                        AND ti.fecha_vencimiento <= CURRENT_DATE + INTERVAL '7 days'
+                        AND ti.current_stock > 0
+                    ORDER BY ti.fecha_vencimiento ASC
+                    LIMIT 2
+                """
+                expiration_rows = await conn.fetch(expiration_query, tenant_id)
+
+                for row in expiration_rows:
+                    days = row['days_until_expiry']
+                    if days <= 0:
+                        title = f"⚠️ Vencido: {row['name']}"
+                        severity = "critical"
+                    elif days <= 2:
+                        title = f"🔴 Vence en {days} días: {row['name']}"
+                        severity = "critical"
+                    else:
+                        title = f"🟡 Vence en {days} días: {row['name']}"
+                        severity = "warning"
+
+                    description = f"Lote {row['lote_actual']} vence el {row['fecha_vencimiento'].strftime('%d/%m/%Y')}. Stock: {row['current_stock']}"
+
+                    alerts.append({
+                        "id": f"expiry_{len(alerts)}",
+                        "type": severity,
+                        "title": title,
+                        "description": description,
+                        "action": {
+                            "label": "Ver inventario",
+                            "url": "/inventario"
+                        }
+                    })
+
+            # 6. Top selling products (informational)
             if len(alerts) < limit:
                 top_products_query = """
                     SELECT
@@ -441,16 +610,16 @@ async def get_alerts(
                         AND DATE(o.order_date AT TIME ZONE 'America/Bogota') >= CURRENT_DATE - INTERVAL '7 days'
                     GROUP BY p.id, p.name
                     ORDER BY order_count DESC
-                    LIMIT 2
+                    LIMIT 1
                 """
-                top_products_rows = await conn.fetch(top_products_query, tenant_id)
+                top_row = await conn.fetchrow(top_products_query, tenant_id)
 
-                for row in top_products_rows:
+                if top_row:
                     alerts.append({
-                        "id": f"top_{len(alerts)}",
+                        "id": f"top_product_{len(alerts)}",
                         "type": "info",
-                        "title": f"Producto popular: {row['name']}",
-                        "description": f"{row['order_count']} pedidos esta semana ({row['total_units']} unidades). Revisa stock de ingredientes.",
+                        "title": f"⭐ Producto estrella: {top_row['name']}",
+                        "description": f"{top_row['order_count']} pedidos esta semana ({top_row['total_units']} unidades). Asegura stock de ingredientes.",
                         "action": {
                             "label": "Ver receta",
                             "url": "/menu/productos"
