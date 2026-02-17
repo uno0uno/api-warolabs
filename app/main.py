@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, salaries, expenses, public_restaurant, tenant_config
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -56,7 +56,11 @@ def custom_openapi():
     # Prefixes that are public (all paths starting with these)
     # /v1 uses API key authentication instead of cookie
     # /public/restaurant is public for customer menu viewing
-    public_prefixes = ["/blog", "/v1", "/public/restaurant"]
+    # /online/cart is public for online ordering
+    # /online/otp is public for OTP verification
+    # /online/customer is public for customer validation
+    # /online/addresses is public for address management
+    public_prefixes = ["/blog", "/v1", "/public/restaurant", "/online/cart", "/online/otp", "/online/customer", "/online/addresses"]
 
     for path in openapi_schema["paths"]:
         # Skip public endpoints
@@ -137,8 +141,13 @@ app.include_router(modifiers.router, prefix="/menu/modifier-groups", tags=["modi
 app.include_router(combos.router, prefix="/menu/combos", tags=["combos"])
 app.include_router(customers.router, prefix="/customers", tags=["customers"])
 app.include_router(pos_cart.router)
+app.include_router(online_cart.router)  # Public online ordering cart
+app.include_router(online_verification.router)  # Public OTP verification
+app.include_router(online_verification.customer_router)  # Public customer validation
+app.include_router(address_profile.router)  # Public address management
 app.include_router(orders.router)
 app.include_router(inventory.router)
+app.include_router(analytics.router)
 app.include_router(articles.router, prefix="/blog", tags=["blog"])
 app.include_router(invitations.router, prefix="/invitations", tags=["invitations"])
 app.include_router(api_tokens.router, prefix="/api-tokens", tags=["api-tokens"])
