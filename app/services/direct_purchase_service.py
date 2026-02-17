@@ -6,6 +6,13 @@ Handles the simplified flow for immediate stock updates (Compras Directas)
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 from datetime import datetime
+
+
+def _parse_date(date_str: Optional[str]) -> Optional[datetime]:
+    """Parse ISO date string, handling JS-style 'Z' timezone suffix."""
+    if not date_str:
+        return None
+    return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
 from fastapi import Request, Response, HTTPException, UploadFile
 from decimal import Decimal
 from app.database import get_db_connection
@@ -211,7 +218,7 @@ async def create_direct_purchase(
                     total_amount,
                     final_status,
                     invoice_number,
-                    datetime.fromisoformat(invoice_date) if invoice_date else None,
+                    _parse_date(invoice_date),
                     invoice_amount,
                     notes,
                     user_id,
@@ -220,7 +227,7 @@ async def create_direct_purchase(
                     payment_method,
                     payment_reference,
                     payment_amount,
-                    datetime.fromisoformat(payment_date) if payment_date else None,
+                    _parse_date(payment_date),
                     user_id,
                     bool(payment_method and payment_amount)
                 )
@@ -1090,7 +1097,7 @@ async def update_direct_purchase(
                     payment_method,
                     payment_reference,
                     payment_amount,
-                    datetime.fromisoformat(payment_date) if payment_date else None,
+                    _parse_date(payment_date),
                     new_status,
                     bool(payment_method and payment_amount and current_status != 'paid'),
                     purchase_id
