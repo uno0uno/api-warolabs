@@ -64,8 +64,8 @@ async def get_inventory_stock(
                     ti.fecha_vencimiento,
                     -- Calculate status
                     CASE
-                        WHEN ti.current_stock = 0 THEN 'critical'
-                        WHEN ti.current_stock <= ti.minimum_stock THEN 'low'
+                        WHEN ti.current_stock < 0 THEN 'negative'
+                        WHEN ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock THEN 'low'
                         ELSE 'ok'
                     END as status,
                     -- Calculate stock percentage
@@ -98,14 +98,14 @@ async def get_inventory_stock(
                     ) as total_value
                 FROM tenant_inventory ti
                 JOIN ingredients i ON ti.ingredient_id = i.id
-                WHERE ti.tenant_id = $1
+                WHERE ti.tenant_id = $1 AND ti.current_stock != 0
             """
 
             count_query = """
                 SELECT COUNT(*) as total
                 FROM tenant_inventory ti
                 JOIN ingredients i ON ti.ingredient_id = i.id
-                WHERE ti.tenant_id = $1
+                WHERE ti.tenant_id = $1 AND ti.current_stock != 0
             """
 
             params = [tenant_id]
@@ -120,9 +120,9 @@ async def get_inventory_stock(
 
             # Add status filter
             if status_filter and status_filter != 'all':
-                if status_filter == 'critical':
-                    base_query += " AND ti.current_stock = 0"
-                    count_query += " AND ti.current_stock = 0"
+                if status_filter == 'negative':
+                    base_query += " AND ti.current_stock < 0"
+                    count_query += " AND ti.current_stock < 0"
                 elif status_filter == 'low':
                     base_query += " AND ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock"
                     count_query += " AND ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock"
@@ -154,8 +154,8 @@ async def get_inventory_stock(
             # Get stats
             stats_query = """
                 SELECT
-                    COUNT(*) as total_ingredients,
-                    COUNT(*) FILTER (WHERE ti.current_stock = 0) as critical_count,
+                    COUNT(*) FILTER (WHERE ti.current_stock != 0) as total_ingredients,
+                    COUNT(*) FILTER (WHERE ti.current_stock < 0) as critical_count,
                     COUNT(*) FILTER (WHERE ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock) as low_stock_count,
                     COUNT(*) FILTER (WHERE ti.current_stock > ti.minimum_stock) as ok_count,
                     SUM(
