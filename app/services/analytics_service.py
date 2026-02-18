@@ -57,124 +57,90 @@ async def get_menu_analysis(
         async with get_db_connection() as conn:
             # Get product sales with REAL profitability based on purchase history
             # Calculates actual cost from recipe ingredients and their latest purchase costs
+            # Optimized query: Pre-calculate latest ingredient costs first, then join.
+            # This avoids N*M subqueries and uses a single efficient CTE for cost lookup.
             query = """
-                WITH calculated_costs AS (
+                WITH latest_ingredient_costs AS (
+                    -- Get the most recent purchase cost for each ingredient
+                    SELECT DISTINCT ON (pi.ingredient_id)
+                        pi.ingredient_id,
+                        pi.unit as purchase_unit,
+                        pi.unit_cost,
+                        ipu.conversion_factor,
+                        ipu.purchase_unit_label
+                    FROM tenant_purchase_items pi
+                    JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                    LEFT JOIN ingredient_purchase_units ipu ON
+                        pi.ingredient_id = ipu.ingredient_id AND
+                        pi.unit = ipu.purchase_unit
+                    WHERE tp.tenant_id = $1
+                      AND pi.unit_cost IS NOT NULL
+                      AND pi.unit_cost > 0
+                    ORDER BY pi.ingredient_id, tp.purchase_date DESC
+                ),
+                product_ingredients_costs AS (
                     SELECT
-                        p.id,
-                        p.price,
-                        (
-                            SELECT SUM(quantity * ingredient_cost)
-                            FROM (
-                                -- Direct recipe ingredients with unit conversion
-                                SELECT
-                                    pr.quantity,
-                                    pr.unit as recipe_unit,
-                                    COALESCE(
-                                        -- Get latest purchase cost with unit normalization
-                                        (SELECT
-                                            CASE
-                                                -- Units match directly or are equivalent aliases (gr=g, u=und, ml=ml)
-                                                WHEN pi.unit = pr.unit
-                                                  OR (pi.unit IN ('g', 'gr') AND pr.unit IN ('g', 'gr'))
-                                                  OR (pi.unit IN ('u', 'und') AND pr.unit IN ('u', 'und'))
-                                                THEN pi.unit_cost
-                                                -- Units differ, try conversion factor from ingredient_purchase_units
-                                                WHEN EXISTS (
-                                                    SELECT 1 FROM ingredient_purchase_units ipu
-                                                    WHERE ipu.ingredient_id = pr.ingredient_id
-                                                      AND ipu.purchase_unit_label = pr.unit
-                                                      AND ipu.is_active = TRUE
-                                                      AND ipu.conversion_factor > 0
-                                                ) THEN
-                                                    pi.unit_cost / (
-                                                        SELECT ipu.conversion_factor
-                                                        FROM ingredient_purchase_units ipu
-                                                        WHERE ipu.ingredient_id = pr.ingredient_id
-                                                          AND ipu.purchase_unit_label = pr.unit
-                                                          AND ipu.is_active = TRUE
-                                                        LIMIT 1
-                                                    )
-                                                ELSE NULL
-                                            END
-                                         FROM tenant_purchase_items pi
-                                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                                         WHERE pi.ingredient_id = pr.ingredient_id
-                                           AND tp.tenant_id = $1
-                                           AND pi.unit_cost IS NOT NULL
-                                           AND pi.unit_cost > 0
-                                         ORDER BY tp.purchase_date DESC
-                                         LIMIT 1),
-                                        i.costo_unitario,
-                                        0
-                                    ) as ingredient_cost
-                                FROM product_recipes pr
-                                JOIN ingredients i ON pr.ingredient_id = i.id
-                                WHERE pr.product_id = p.id
-
-                                UNION ALL
-
-                                -- Base recipe ingredients with unit conversion
-                                SELECT
-                                    brt.base_quantity as quantity,
-                                    brt.unit as recipe_unit,
-                                    COALESCE(
-                                        -- Get latest purchase cost with unit normalization
-                                        (SELECT
-                                            CASE
-                                                -- Units match directly or are equivalent aliases (gr=g, u=und)
-                                                WHEN pi.unit = brt.unit
-                                                  OR (pi.unit IN ('g', 'gr') AND brt.unit IN ('g', 'gr'))
-                                                  OR (pi.unit IN ('u', 'und') AND brt.unit IN ('u', 'und'))
-                                                THEN pi.unit_cost
-                                                -- Units differ, try conversion factor from ingredient_purchase_units
-                                                WHEN EXISTS (
-                                                    SELECT 1 FROM ingredient_purchase_units ipu
-                                                    WHERE ipu.ingredient_id = brt.ingredient_id
-                                                      AND ipu.purchase_unit_label = brt.unit
-                                                      AND ipu.is_active = TRUE
-                                                      AND ipu.conversion_factor > 0
-                                                ) THEN
-                                                    pi.unit_cost / (
-                                                        SELECT ipu.conversion_factor
-                                                        FROM ingredient_purchase_units ipu
-                                                        WHERE ipu.ingredient_id = brt.ingredient_id
-                                                          AND ipu.purchase_unit_label = brt.unit
-                                                          AND ipu.is_active = TRUE
-                                                        LIMIT 1
-                                                    )
-                                                ELSE NULL
-                                            END
-                                         FROM tenant_purchase_items pi
-                                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                                         WHERE pi.ingredient_id = brt.ingredient_id
-                                           AND tp.tenant_id = $1
-                                           AND pi.unit_cost IS NOT NULL
-                                           AND pi.unit_cost > 0
-                                         ORDER BY tp.purchase_date DESC
-                                         LIMIT 1),
-                                        i.costo_unitario,
-                                        0
-                                    ) as ingredient_cost
-                                FROM product_base_recipes pbr
-                                JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
-                                JOIN ingredients i ON brt.ingredient_id = i.id
-                                WHERE pbr.product_id = p.id
-                            ) all_ingredients
-                        ) as calc_cost
+                        p.id as product_id,
+                        SUM(
+                            CASE
+                                -- Direct match (units are same or aliases)
+                                WHEN (pr.unit = lic.purchase_unit)
+                                  OR (pr.unit IN ('g', 'gr') AND lic.purchase_unit IN ('g', 'gr'))
+                                  OR (pr.unit IN ('u', 'und') AND lic.purchase_unit IN ('u', 'und'))
+                                THEN pr.quantity * lic.unit_cost
+                                -- Conversion needed
+                                WHEN lic.conversion_factor > 0 THEN
+                                    pr.quantity * (lic.unit_cost / lic.conversion_factor)
+                                -- Fallback to current configured cost if no purchase history or funny units
+                                ELSE pr.quantity * i.costo_unitario
+                            END
+                        ) as total_recipe_cost
                     FROM product p
+                    JOIN product_recipes pr ON p.id = pr.product_id
+                    JOIN ingredients i ON pr.ingredient_id = i.id
+                    LEFT JOIN latest_ingredient_costs lic ON pr.ingredient_id = lic.ingredient_id
                     WHERE p.tenant_id = $1
+                    GROUP BY p.id
+                ),
+                base_recipe_costs AS (
+                     SELECT
+                        p.id as product_id,
+                        SUM(
+                            CASE
+                                -- Direct match
+                                WHEN (brt.unit = lic.purchase_unit)
+                                  OR (brt.unit IN ('g', 'gr') AND lic.purchase_unit IN ('g', 'gr'))
+                                  OR (brt.unit IN ('u', 'und') AND lic.purchase_unit IN ('u', 'und'))
+                                THEN brt.base_quantity * lic.unit_cost
+                                -- Conversion
+                                WHEN lic.conversion_factor > 0 THEN
+                                    brt.base_quantity * (lic.unit_cost / lic.conversion_factor)
+                                -- Fallback
+                                ELSE brt.base_quantity * i.costo_unitario
+                            END
+                        ) as total_base_cost
+                    FROM product p
+                    JOIN product_base_recipes pbr ON p.id = pbr.product_id
+                    JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+                    JOIN ingredients i ON brt.ingredient_id = i.id
+                    LEFT JOIN latest_ingredient_costs lic ON brt.ingredient_id = lic.ingredient_id
+                    WHERE p.tenant_id = $1
+                    GROUP BY p.id
                 ),
                 product_real_costs AS (
                     SELECT
-                        id,
-                        price,
-                        -- Use calculated cost unless it's > price (data error), then use 40% fallback
+                        p.id,
+                        p.price,
+                        COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0) as calc_cost,
                         CASE
-                            WHEN calc_cost IS NULL THEN price * 0.40
-                            WHEN calc_cost > price THEN price * 0.40
-                            ELSE calc_cost
+                            WHEN (COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0)) = 0 THEN p.price * 0.40 -- Fallback if no cost info
+                            WHEN (COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0)) > p.price THEN p.price * 0.40 -- Fallback if error
+                            ELSE (COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0))
                         END as real_cost
-                    FROM calculated_costs
+                    FROM product p
+                    LEFT JOIN product_ingredients_costs pic ON p.id = pic.product_id
+                    LEFT JOIN base_recipe_costs brc ON p.id = brc.product_id
+                    WHERE p.tenant_id = $1
                 ),
                 product_sales AS (
                     SELECT
@@ -335,123 +301,90 @@ async def get_food_cost(
 
         async with get_db_connection() as conn:
             # Query for current and previous period with REAL costs from purchase history
+            # Optimized query: Pre-calculate latest ingredient costs first, then join.
+            # This avoids N*M subqueries and uses a single efficient CTE for cost lookup.
             query = """
-                WITH calculated_costs AS (
+                WITH latest_ingredient_costs AS (
+                    -- Get the most recent purchase cost for each ingredient
+                    SELECT DISTINCT ON (pi.ingredient_id)
+                        pi.ingredient_id,
+                        pi.unit as purchase_unit,
+                        pi.unit_cost,
+                        ipu.conversion_factor,
+                        ipu.purchase_unit_label
+                    FROM tenant_purchase_items pi
+                    JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                    LEFT JOIN ingredient_purchase_units ipu ON
+                        pi.ingredient_id = ipu.ingredient_id AND
+                        pi.unit = ipu.purchase_unit
+                    WHERE tp.tenant_id = $1
+                      AND pi.unit_cost IS NOT NULL
+                      AND pi.unit_cost > 0
+                    ORDER BY pi.ingredient_id, tp.purchase_date DESC
+                ),
+                product_ingredients_costs AS (
                     SELECT
-                        p.id,
-                        p.price,
-                        (
-                            SELECT SUM(quantity * ingredient_cost)
-                            FROM (
-                                -- Direct recipe ingredients with unit conversion
-                                SELECT
-                                    pr.quantity,
-                                    pr.unit as recipe_unit,
-                                    COALESCE(
-                                        -- Get latest purchase cost with unit normalization
-                                        (SELECT
-                                            CASE
-                                                -- Units match directly or are equivalent aliases (gr=g, u=und, ml=ml)
-                                                WHEN pi.unit = pr.unit
-                                                  OR (pi.unit IN ('g', 'gr') AND pr.unit IN ('g', 'gr'))
-                                                  OR (pi.unit IN ('u', 'und') AND pr.unit IN ('u', 'und'))
-                                                THEN pi.unit_cost
-                                                -- Units differ, try conversion factor from ingredient_purchase_units
-                                                WHEN EXISTS (
-                                                    SELECT 1 FROM ingredient_purchase_units ipu
-                                                    WHERE ipu.ingredient_id = pr.ingredient_id
-                                                      AND ipu.purchase_unit_label = pr.unit
-                                                      AND ipu.is_active = TRUE
-                                                      AND ipu.conversion_factor > 0
-                                                ) THEN
-                                                    pi.unit_cost / (
-                                                        SELECT ipu.conversion_factor
-                                                        FROM ingredient_purchase_units ipu
-                                                        WHERE ipu.ingredient_id = pr.ingredient_id
-                                                          AND ipu.purchase_unit_label = pr.unit
-                                                          AND ipu.is_active = TRUE
-                                                        LIMIT 1
-                                                    )
-                                                ELSE NULL
-                                            END
-                                         FROM tenant_purchase_items pi
-                                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                                         WHERE pi.ingredient_id = pr.ingredient_id
-                                           AND tp.tenant_id = $1
-                                           AND pi.unit_cost IS NOT NULL
-                                           AND pi.unit_cost > 0
-                                         ORDER BY tp.purchase_date DESC
-                                         LIMIT 1),
-                                        i.costo_unitario,
-                                        0
-                                    ) as ingredient_cost
-                                FROM product_recipes pr
-                                JOIN ingredients i ON pr.ingredient_id = i.id
-                                WHERE pr.product_id = p.id
-
-                                UNION ALL
-
-                                -- Base recipe ingredients with unit conversion
-                                SELECT
-                                    brt.base_quantity as quantity,
-                                    brt.unit as recipe_unit,
-                                    COALESCE(
-                                        -- Get latest purchase cost with unit normalization
-                                        (SELECT
-                                            CASE
-                                                -- Units match directly or are equivalent aliases (gr=g, u=und)
-                                                WHEN pi.unit = brt.unit
-                                                  OR (pi.unit IN ('g', 'gr') AND brt.unit IN ('g', 'gr'))
-                                                  OR (pi.unit IN ('u', 'und') AND brt.unit IN ('u', 'und'))
-                                                THEN pi.unit_cost
-                                                -- Units differ, try conversion factor from ingredient_purchase_units
-                                                WHEN EXISTS (
-                                                    SELECT 1 FROM ingredient_purchase_units ipu
-                                                    WHERE ipu.ingredient_id = brt.ingredient_id
-                                                      AND ipu.purchase_unit_label = brt.unit
-                                                      AND ipu.is_active = TRUE
-                                                      AND ipu.conversion_factor > 0
-                                                ) THEN
-                                                    pi.unit_cost / (
-                                                        SELECT ipu.conversion_factor
-                                                        FROM ingredient_purchase_units ipu
-                                                        WHERE ipu.ingredient_id = brt.ingredient_id
-                                                          AND ipu.purchase_unit_label = brt.unit
-                                                          AND ipu.is_active = TRUE
-                                                        LIMIT 1
-                                                    )
-                                                ELSE NULL
-                                            END
-                                         FROM tenant_purchase_items pi
-                                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                                         WHERE pi.ingredient_id = brt.ingredient_id
-                                           AND tp.tenant_id = $1
-                                           AND pi.unit_cost IS NOT NULL
-                                           AND pi.unit_cost > 0
-                                         ORDER BY tp.purchase_date DESC
-                                         LIMIT 1),
-                                        i.costo_unitario,
-                                        0
-                                    ) as ingredient_cost
-                                FROM product_base_recipes pbr
-                                JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
-                                JOIN ingredients i ON brt.ingredient_id = i.id
-                                WHERE pbr.product_id = p.id
-                            ) all_ingredients
-                        ) as calc_cost
+                        p.id as product_id,
+                        SUM(
+                            CASE
+                                -- Direct match (units are same or aliases)
+                                WHEN (pr.unit = lic.purchase_unit)
+                                  OR (pr.unit IN ('g', 'gr') AND lic.purchase_unit IN ('g', 'gr'))
+                                  OR (pr.unit IN ('u', 'und') AND lic.purchase_unit IN ('u', 'und'))
+                                THEN pr.quantity * lic.unit_cost
+                                -- Conversion needed
+                                WHEN lic.conversion_factor > 0 THEN
+                                    pr.quantity * (lic.unit_cost / lic.conversion_factor)
+                                -- Fallback to current configured cost if no purchase history or funny units
+                                ELSE pr.quantity * i.costo_unitario
+                            END
+                        ) as total_recipe_cost
                     FROM product p
+                    JOIN product_recipes pr ON p.id = pr.product_id
+                    JOIN ingredients i ON pr.ingredient_id = i.id
+                    LEFT JOIN latest_ingredient_costs lic ON pr.ingredient_id = lic.ingredient_id
                     WHERE p.tenant_id = $1
+                    GROUP BY p.id
+                ),
+                base_recipe_costs AS (
+                     SELECT
+                        p.id as product_id,
+                        SUM(
+                            CASE
+                                -- Direct match
+                                WHEN (brt.unit = lic.purchase_unit)
+                                  OR (brt.unit IN ('g', 'gr') AND lic.purchase_unit IN ('g', 'gr'))
+                                  OR (brt.unit IN ('u', 'und') AND lic.purchase_unit IN ('u', 'und'))
+                                THEN brt.base_quantity * lic.unit_cost
+                                -- Conversion
+                                WHEN lic.conversion_factor > 0 THEN
+                                    brt.base_quantity * (lic.unit_cost / lic.conversion_factor)
+                                -- Fallback
+                                ELSE brt.base_quantity * i.costo_unitario
+                            END
+                        ) as total_base_cost
+                    FROM product p
+                    JOIN product_base_recipes pbr ON p.id = pbr.product_id
+                    JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+                    JOIN ingredients i ON brt.ingredient_id = i.id
+                    LEFT JOIN latest_ingredient_costs lic ON brt.ingredient_id = lic.ingredient_id
+                    WHERE p.tenant_id = $1
+                    GROUP BY p.id
                 ),
                 product_real_costs AS (
                     SELECT
-                        id,
-                        -- Use calculated cost unless it's > price (data error), then use 40% fallback
+                        p.id,
+                        p.price,
+                        COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0) as calc_cost,
                         CASE
-                            WHEN calc_cost IS NULL THEN price * 0.40
-                            WHEN calc_cost > price THEN price * 0.40
-                            ELSE calc_cost
+                            WHEN (COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0)) = 0 THEN p.price * 0.40 -- Fallback if no cost info
+                            WHEN (COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0)) > p.price THEN p.price * 0.40 -- Fallback if error
+                            ELSE (COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0))
                         END as real_cost
-                    FROM calculated_costs
+                    FROM product p
+                    LEFT JOIN product_ingredients_costs pic ON p.id = pic.product_id
+                    LEFT JOIN base_recipe_costs brc ON p.id = brc.product_id
+                    WHERE p.tenant_id = $1
                 ),
                 period_costs AS (
                     SELECT
