@@ -33,6 +33,7 @@ async def get_ingredients_list(
 
         async with get_db_connection() as conn:
             # Base query joins ingredients (global catalog) with tenant-specific prices
+            # Falls back to unit_cost from ingredient_purchase_units when no manual price exists
             base_query = """
                 SELECT
                     i.id,
@@ -43,9 +44,10 @@ async def get_ingredients_list(
                     i.type,
                     i.description,
                     CAST(i.minimum_order_quantity AS float) as minimum_order_quantity,
+                    CAST(i.unit_weight_gr AS float) as unit_weight_gr,
                     i.created_at,
                     i.updated_at,
-                    CAST(tsp.unit_price AS float) as price,
+                    CAST(COALESCE(tsp.unit_price, tim.cost_per_unit) AS float) as price,
                     tsp.supplier_id
                 FROM ingredients i
                 LEFT JOIN (
@@ -57,6 +59,15 @@ async def get_ingredients_list(
                     FROM tenant_supplier_prices
                     WHERE tenant_id = $1 AND is_active = TRUE
                 ) tsp ON i.id = tsp.ingredient_id AND tsp.rn = 1
+                LEFT JOIN (
+                    SELECT
+                        ingredient_id,
+                        cost_per_unit,
+                        ROW_NUMBER() OVER(PARTITION BY ingredient_id ORDER BY created_at DESC) as rn
+                    FROM tenant_ingredient_movements
+                    WHERE tenant_id = $1 AND movement_type = 'purchase'
+                      AND cost_per_unit IS NOT NULL AND cost_per_unit > 0
+                ) tim ON i.id = tim.ingredient_id AND tim.rn = 1
                 WHERE 1=1
             """
 
@@ -136,4 +147,48 @@ async def get_ingredients_list(
     except AuthenticationError:
         raise
     except Exception as e:
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+async def update_ingredient_unit_weight(
+    request: Request,
+    response: Response,
+    ingredient_id: UUID,
+    unit_weight_gr: Optional[float]
+) -> dict:
+    """
+    Updates the unit_weight_gr field on an ingredient.
+    Idempotent — safe to call multiple times with the same value.
+    """
+    try:
+        require_valid_session(request)
+
+        async with get_db_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, unit FROM ingredients WHERE id = $1",
+                ingredient_id
+            )
+            if not row:
+                raise HTTPException(status_code=404, detail="Ingredient not found")
+
+            await conn.execute(
+                "UPDATE ingredients SET unit_weight_gr = $1, updated_at = NOW() WHERE id = $2",
+                unit_weight_gr,
+                ingredient_id
+            )
+
+            logger.info(f"Updated unit_weight_gr={unit_weight_gr} for ingredient {ingredient_id}")
+
+            return {
+                "success": True,
+                "ingredient_id": str(ingredient_id),
+                "unit_weight_gr": unit_weight_gr
+            }
+
+    except HTTPException:
+        raise
+    except AuthenticationError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error updating unit_weight_gr: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal Server Error")

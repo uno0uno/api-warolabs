@@ -112,18 +112,29 @@ async def create_product_with_recipe(
                             tenant_id
                         )
 
-                # 4. Calculate and update product cost
+                # 4. Calculate and update product cost (last purchase price)
                 cost_query = """
                     UPDATE product
                     SET costo_calculado = (
-                        SELECT COALESCE(SUM(pr.quantity * i.costo_unitario), 0)
+                        SELECT COALESCE(SUM(
+                            pr.quantity * COALESCE(
+                                (SELECT pi.unit_cost
+                                 FROM tenant_purchase_items pi
+                                 JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                 WHERE pi.ingredient_id = pr.ingredient_id
+                                   AND tp.tenant_id = $2
+                                   AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                                 ORDER BY tp.purchase_date DESC LIMIT 1),
+                                i.costo_unitario, 0
+                            )
+                        ), 0)
                         FROM product_recipes pr
                         JOIN ingredients i ON pr.ingredient_id = i.id
                         WHERE pr.product_id = $1
                     )
                     WHERE id = $1
                 """
-                await conn.execute(cost_query, product_id)
+                await conn.execute(cost_query, product_id, tenant_id)
 
                 # 5. Registrar en historial
                 user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
@@ -205,15 +216,33 @@ async def get_product_by_id(
                     pr.quantity,
                     pr.unit,
                     i.name as ingredient_name,
-                    i.costo_unitario as ingredient_cost_per_unit,
-                    (pr.quantity * i.costo_unitario) as total_cost
+                    COALESCE(
+                        (SELECT pi.unit_cost
+                         FROM tenant_purchase_items pi
+                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                         WHERE pi.ingredient_id = pr.ingredient_id
+                           AND tp.tenant_id = $2
+                           AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                         ORDER BY tp.purchase_date DESC LIMIT 1),
+                        i.costo_unitario, 0
+                    ) as ingredient_cost_per_unit,
+                    pr.quantity * COALESCE(
+                        (SELECT pi.unit_cost
+                         FROM tenant_purchase_items pi
+                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                         WHERE pi.ingredient_id = pr.ingredient_id
+                           AND tp.tenant_id = $2
+                           AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                         ORDER BY tp.purchase_date DESC LIMIT 1),
+                        i.costo_unitario, 0
+                    ) as total_cost
                 FROM product_recipes pr
                 JOIN ingredients i ON pr.ingredient_id = i.id
                 WHERE pr.product_id = $1
                 ORDER BY i.name
             """
 
-            recipe_rows = await connection.fetch(recipe_query, product_id)
+            recipe_rows = await connection.fetch(recipe_query, product_id, tenant_id)
 
             # Get recipe base IDs
             recipe_base_query = """
@@ -344,45 +373,37 @@ async def get_products_list(
                     p.is_combo,
                     p.is_resale,
                     p.allow_modifiers,
-                    -- DYNAMIC cost calculation based on purchase movements (weighted average)
+                    -- DYNAMIC cost calculation based on last purchase price
                     (
-                        -- Direct ingredients cost (using weighted avg from movements)
+                        -- Direct ingredients cost (last purchase price)
                         COALESCE((
                             SELECT SUM(
                                 pr.quantity * COALESCE(
-                                    (
-                                        -- Calculate weighted average cost from purchase movements
-                                        SELECT
-                                            SUM(ABS(quantity_change) * COALESCE(cost_per_unit, 0)) /
-                                            NULLIF(SUM(ABS(quantity_change)), 0)
-                                        FROM tenant_ingredient_movements
-                                        WHERE ingredient_id = pr.ingredient_id
-                                          AND tenant_id = $1
-                                          AND movement_type = 'purchase'
-                                          AND cost_per_unit IS NOT NULL
-                                          AND quantity_change > 0
-                                    ), 0
+                                    (SELECT pi.unit_cost
+                                     FROM tenant_purchase_items pi
+                                     JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                     WHERE pi.ingredient_id = pr.ingredient_id
+                                       AND tp.tenant_id = $1
+                                       AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                                     ORDER BY tp.purchase_date DESC LIMIT 1),
+                                    0
                                 )
                             )
                             FROM product_recipes pr
                             WHERE pr.product_id = p.id
                         ), 0) +
-                        -- Recipe base ingredients cost (using weighted avg from movements)
+                        -- Recipe base ingredients cost (last purchase price)
                         COALESCE((
                             SELECT SUM(
                                 brt.base_quantity * COALESCE(
-                                    (
-                                        -- Calculate weighted average cost from purchase movements
-                                        SELECT
-                                            SUM(ABS(quantity_change) * COALESCE(cost_per_unit, 0)) /
-                                            NULLIF(SUM(ABS(quantity_change)), 0)
-                                        FROM tenant_ingredient_movements
-                                        WHERE ingredient_id = brt.ingredient_id
-                                          AND tenant_id = $1
-                                          AND movement_type = 'purchase'
-                                          AND cost_per_unit IS NOT NULL
-                                          AND quantity_change > 0
-                                    ), 0
+                                    (SELECT pi.unit_cost
+                                     FROM tenant_purchase_items pi
+                                     JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                     WHERE pi.ingredient_id = brt.ingredient_id
+                                       AND tp.tenant_id = $1
+                                       AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                                     ORDER BY tp.purchase_date DESC LIMIT 1),
+                                    0
                                 )
                             )
                             FROM product_base_recipes pbr
@@ -490,14 +511,32 @@ async def get_products_list(
                             pr.quantity,
                             pr.unit,
                             i.name as ingredient_name,
-                            i.costo_unitario as ingredient_cost_per_unit,
-                            (pr.quantity * i.costo_unitario) as total_cost
+                            COALESCE(
+                                (SELECT pi.unit_cost
+                                 FROM tenant_purchase_items pi
+                                 JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                 WHERE pi.ingredient_id = pr.ingredient_id
+                                   AND tp.tenant_id = $2
+                                   AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                                 ORDER BY tp.purchase_date DESC LIMIT 1),
+                                i.costo_unitario, 0
+                            ) as ingredient_cost_per_unit,
+                            pr.quantity * COALESCE(
+                                (SELECT pi.unit_cost
+                                 FROM tenant_purchase_items pi
+                                 JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                 WHERE pi.ingredient_id = pr.ingredient_id
+                                   AND tp.tenant_id = $2
+                                   AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                                 ORDER BY tp.purchase_date DESC LIMIT 1),
+                                i.costo_unitario, 0
+                            ) as total_cost
                         FROM product_recipes pr
                         JOIN ingredients i ON pr.ingredient_id = i.id
                         WHERE pr.product_id = $1
                         ORDER BY i.name
                     """
-                    recipe_rows = await conn.fetch(recipe_query, row['id'])
+                    recipe_rows = await conn.fetch(recipe_query, row['id'], tenant_id)
                     product_dict['ingredients'] = [dict(r) for r in recipe_rows]
                 else:
                     product_dict['ingredients'] = []  # Empty for list view
@@ -747,18 +786,29 @@ async def update_product_with_recipe(
                                 tenant_id
                             )
 
-                    # 4. Recalculate product cost
+                    # 4. Recalculate product cost (last purchase price)
                     cost_query = """
                         UPDATE product
                         SET costo_calculado = (
-                            SELECT COALESCE(SUM(pr.quantity * i.costo_unitario), 0)
+                            SELECT COALESCE(SUM(
+                                pr.quantity * COALESCE(
+                                    (SELECT pi.unit_cost
+                                     FROM tenant_purchase_items pi
+                                     JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                     WHERE pi.ingredient_id = pr.ingredient_id
+                                       AND tp.tenant_id = $2
+                                       AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                                     ORDER BY tp.purchase_date DESC LIMIT 1),
+                                    i.costo_unitario, 0
+                                )
+                            ), 0)
                             FROM product_recipes pr
                             JOIN ingredients i ON pr.ingredient_id = i.id
                             WHERE pr.product_id = $1
                         )
                         WHERE id = $1
                     """
-                    await conn.execute(cost_query, product_id)
+                    await conn.execute(cost_query, product_id, tenant_id)
 
                 # 5. Registrar cambios en historial
                 if old_snapshot:
