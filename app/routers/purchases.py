@@ -161,6 +161,7 @@ async def create_direct_purchase_endpoint(
         response=response,
         supplier_id=purchase_data.supplier_id,
         items_data=purchase_data.items_data,
+        new_units_data=purchase_data.new_units_data,
         payment_type=purchase_data.payment_type,
         payment_terms=purchase_data.payment_terms,
         notes=purchase_data.notes,

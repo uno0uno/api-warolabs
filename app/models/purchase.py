@@ -465,6 +465,7 @@ class DirectPurchaseCreate(BaseModel):
     """Model for creating direct purchases - JSON payload"""
     supplier_id: UUID = Field(..., description="ID of the supplier")
     items_data: str = Field(..., description="JSON string of items with ingredient_id, quantity, unit_cost, etc.")
+    new_units_data: Optional[str] = Field(None, description="JSON string of new purchase units to create alongside the purchase")
     payment_type: str = Field(default="contado", description="Payment type: contado, credito, contraentrega")
     payment_terms: Optional[str] = None
     notes: Optional[str] = None

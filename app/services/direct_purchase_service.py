@@ -124,6 +124,7 @@ async def create_direct_purchase(
     response: Response,
     supplier_id: UUID,
     items_data: str,
+    new_units_data: Optional[str] = None,
     payment_type: str = "contado",
     payment_terms: Optional[str] = None,
     notes: Optional[str] = None,
@@ -234,7 +235,37 @@ async def create_direct_purchase(
 
                 purchase_id = purchase_row['id']
 
-                # 4. Insert items and update inventory
+                # 4. Create any new purchase unit presentations bundled with this purchase
+                if new_units_data:
+                    try:
+                        new_units = json.loads(new_units_data)
+                        for new_unit in new_units:
+                            new_ing_id = UUID(str(new_unit['ingredient_id']))
+                            await conn.execute("""
+                                INSERT INTO ingredient_purchase_units (
+                                    ingredient_id,
+                                    purchase_unit,
+                                    purchase_unit_label,
+                                    conversion_factor,
+                                    is_active,
+                                    is_default
+                                )
+                                SELECT $1::uuid, $2::varchar, $3::varchar, $4::numeric, TRUE, FALSE
+                                WHERE NOT EXISTS (
+                                    SELECT 1 FROM ingredient_purchase_units
+                                    WHERE ingredient_id = $1::uuid AND purchase_unit_label = $3::varchar
+                                )
+                            """,
+                                new_ing_id,
+                                str(new_unit['purchase_unit']),
+                                str(new_unit['purchase_unit_label']),
+                                float(new_unit['conversion_factor'])
+                            )
+                            logger.info(f"Created purchase unit: {new_unit['purchase_unit_label']} for ingredient {new_ing_id}")
+                    except (json.JSONDecodeError, KeyError, ValueError) as e:
+                        logger.warning(f"Error processing new_units_data: {e}")
+
+                # 5. Insert items and update inventory
                 for item in items:
                     ingredient_id_str = item.get('ingredient_id')
 
