@@ -6,7 +6,7 @@ import random
 import string
 from typing import Optional, Tuple
 from uuid import UUID
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 from app.database import get_db_connection
 from app.services.aws_ses_service import AWSSESService
@@ -56,7 +56,7 @@ async def send_otp_email(
 
             # Check cooldown (60 seconds between resends)
             if recent_otp:
-                time_since_last = datetime.now() - recent_otp['created_at'].replace(tzinfo=None)
+                time_since_last = datetime.now(timezone.utc) - recent_otp['created_at']
                 if time_since_last.total_seconds() < OTP_RESEND_COOLDOWN_SECONDS:
                     cooldown_remaining = OTP_RESEND_COOLDOWN_SECONDS - int(time_since_last.total_seconds())
                     raise APIError(
@@ -66,7 +66,7 @@ async def send_otp_email(
 
             # Generate new OTP
             otp_code = generate_otp_code()
-            expires_at = datetime.now() + timedelta(minutes=OTP_EXPIRY_MINUTES)
+            expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
 
             # Save to database
             insert_query = """
@@ -173,7 +173,7 @@ async def verify_otp_code(
                     )
 
                 # Check if expired
-                if otp_row['expires_at'] < datetime.now():
+                if otp_row['expires_at'] < datetime.now(timezone.utc):
                     raise HTTPException(
                         status_code=400,
                         detail="Código expirado. Solicita uno nuevo."
