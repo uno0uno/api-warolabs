@@ -16,6 +16,62 @@ from app.models.ingredient import (
 logger = logging.getLogger(__name__)
 
 
+async def resolve_to_base_unit(
+    conn,
+    ingredient_id: UUID,
+    quantity: float,
+    unit: str
+) -> tuple:
+    """
+    Converts a quantity+unit pair to the ingredient's base unit.
+
+    - If unit == ingredient base unit → returns as-is.
+    - If a matching entry exists in ingredient_purchase_units → applies conversion_factor.
+    - If no conversion found → logs a warning and returns original values unchanged.
+
+    Returns: (base_quantity: float, base_unit: str)
+    """
+    ing_row = await conn.fetchrow(
+        "SELECT unit FROM ingredients WHERE id = $1",
+        ingredient_id
+    )
+    if not ing_row:
+        return float(quantity), unit
+
+    base_unit = ing_row['unit']
+
+    if unit == base_unit:
+        return float(quantity), base_unit
+
+    conv_row = await conn.fetchrow(
+        """
+        SELECT conversion_factor
+        FROM ingredient_purchase_units
+        WHERE ingredient_id = $1
+          AND (purchase_unit_label = $2 OR purchase_unit = $2)
+          AND is_active = TRUE
+        ORDER BY is_default DESC
+        LIMIT 1
+        """,
+        ingredient_id,
+        unit
+    )
+
+    if conv_row and conv_row['conversion_factor']:
+        base_quantity = float(quantity) * float(conv_row['conversion_factor'])
+        logger.info(
+            f"Unit conversion: {quantity} {unit} → {base_quantity} {base_unit} "
+            f"(factor={conv_row['conversion_factor']}, ingredient={ingredient_id})"
+        )
+        return base_quantity, base_unit
+
+    logger.warning(
+        f"No conversion found for unit '{unit}' on ingredient {ingredient_id} "
+        f"(base_unit='{base_unit}'). Saving without conversion."
+    )
+    return float(quantity), unit
+
+
 async def get_purchase_units_by_ingredient(
     request: Request,
     response: Response,

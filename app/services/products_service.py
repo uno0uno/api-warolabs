@@ -9,6 +9,7 @@ from app.models.product import (
     ProductResponse, ProductStats, RecipeIngredient
 )
 from app.services import menu_history_service
+from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 from decimal import Decimal
 import logging
 
@@ -103,12 +104,18 @@ async def create_product_with_recipe(
                     """
 
                     for ingredient in product_data.ingredients:
+                        base_qty, base_unit = await resolve_to_base_unit(
+                            conn,
+                            ingredient.ingredient_id,
+                            ingredient.quantity,
+                            ingredient.unit
+                        )
                         await conn.execute(
                             recipe_query,
                             product_id,
                             ingredient.ingredient_id,
-                            ingredient.quantity,
-                            ingredient.unit,
+                            base_qty,
+                            base_unit,
                             tenant_id
                         )
 
@@ -777,12 +784,18 @@ async def update_product_with_recipe(
                         """
 
                         for ingredient in product_data.ingredients:
+                            base_qty, base_unit = await resolve_to_base_unit(
+                                conn,
+                                ingredient.ingredient_id,
+                                ingredient.quantity,
+                                ingredient.unit
+                            )
                             await conn.execute(
                                 recipe_query,
                                 product_id,
                                 ingredient.ingredient_id,
-                                ingredient.quantity,
-                                ingredient.unit,
+                                base_qty,
+                                base_unit,
                                 tenant_id
                             )
 

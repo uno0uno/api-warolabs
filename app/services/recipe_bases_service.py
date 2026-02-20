@@ -17,6 +17,7 @@ from app.models.recipe_base import (
     RecipeBaseTypesListResponse
 )
 from app.services import menu_history_service
+from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 
 logger = logging.getLogger(__name__)
 
@@ -94,12 +95,18 @@ async def create_recipe_base_type(
                                   tenant_id, created_at, updated_at
                     """
 
+                    base_qty, base_unit = await resolve_to_base_unit(
+                        conn,
+                        ingredient_data.ingredient_id,
+                        ingredient_data.base_quantity,
+                        ingredient_data.unit
+                    )
                     ingredient_row = await conn.fetchrow(
                         insert_ingredient_query,
                         base_type_id,
                         ingredient_data.ingredient_id,
-                        ingredient_data.base_quantity,
-                        ingredient_data.unit,
+                        base_qty,
+                        base_unit,
                         ingredient_data.is_required,
                         ingredient_data.notes,
                         tenant_id
@@ -483,12 +490,18 @@ async def update_recipe_base_type(
                         )
                         VALUES ($1, $2, $3, $4, $5, $6, $7)
                     """
+                    base_qty, base_unit = await resolve_to_base_unit(
+                        conn,
+                        ingredient_data.ingredient_id,
+                        ingredient_data.base_quantity,
+                        ingredient_data.unit
+                    )
                     await conn.execute(
                         insert_ingredient_query,
                         recipe_base_id,
                         ingredient_data.ingredient_id,
-                        ingredient_data.base_quantity,
-                        ingredient_data.unit,
+                        base_qty,
+                        base_unit,
                         ingredient_data.is_required,
                         ingredient_data.notes,
                         tenant_id

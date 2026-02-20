@@ -10,6 +10,7 @@ from app.models.modifier import (
     Modifier, ProductInfo, IngredientInfo
 )
 from app.services import menu_history_service
+from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 import logging
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,15 @@ async def create_modifier_group(
                     """
 
                     for modifier in group_data.modifiers:
+                        ing_qty = modifier.ingredient_quantity
+                        ing_unit = modifier.ingredient_unit
+                        if modifier.ingredient_id and ing_qty is not None and ing_unit:
+                            ing_qty, ing_unit = await resolve_to_base_unit(
+                                conn,
+                                modifier.ingredient_id,
+                                float(ing_qty),
+                                ing_unit
+                            )
                         await conn.execute(
                             modifier_query,
                             group_id,
@@ -89,8 +99,8 @@ async def create_modifier_group(
                             modifier.is_available,
                             modifier.sort_order,
                             modifier.ingredient_id,
-                            modifier.ingredient_quantity,
-                            modifier.ingredient_unit
+                            ing_qty,
+                            ing_unit
                         )
 
                 # 4. Registrar en historial
@@ -502,6 +512,16 @@ async def update_modifier_group(
                     modifiers_to_keep = set()
 
                     for modifier in group_data.modifiers:
+                        ing_qty = modifier.ingredient_quantity
+                        ing_unit = modifier.ingredient_unit
+                        if modifier.ingredient_id and ing_qty is not None and ing_unit:
+                            ing_qty, ing_unit = await resolve_to_base_unit(
+                                conn,
+                                modifier.ingredient_id,
+                                float(ing_qty),
+                                ing_unit
+                            )
+
                         if modifier.name in existing_names:
                             # UPDATE existing modifier (including ingredient fields)
                             mod_id = existing_names[modifier.name]
@@ -521,8 +541,8 @@ async def update_modifier_group(
                                 modifier.is_available,
                                 modifier.sort_order,
                                 modifier.ingredient_id,
-                                modifier.ingredient_quantity,
-                                modifier.ingredient_unit
+                                ing_qty,
+                                ing_unit
                             )
                         else:
                             # INSERT new modifier (with ingredient fields)
@@ -543,8 +563,8 @@ async def update_modifier_group(
                                 modifier.is_available,
                                 modifier.sort_order,
                                 modifier.ingredient_id,
-                                modifier.ingredient_quantity,
-                                modifier.ingredient_unit
+                                ing_qty,
+                                ing_unit
                             )
 
                     # Soft-delete removed modifiers (preserve order history)

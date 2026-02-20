@@ -13,7 +13,8 @@ class IngredientBase(BaseModel):
     type: Optional[str] = Field('food', max_length=20, description="Type of ingredient: 'food' (alimentos), 'service' (servicios), 'supply' (insumos)")
     description: Optional[str] = Field(None, max_length=1024, description="Detailed description of the ingredient")
     minimum_order_quantity: Optional[float] = Field(None, gt=0, description="Minimum order quantity for the ingredient")
-    
+    unit_weight_gr: Optional[float] = Field(None, ge=0, description="Weight in grams of 1 base unit (only for 'und' ingredients). Used for cost calculation in recipes.")
+
     # Assuming price and supplier_id might come from a join or another service
     price: Optional[float] = Field(None, gt=0, description="Current price of the ingredient")
     supplier_id: Optional[UUID] = Field(None, description="ID of the primary supplier for this ingredient")
@@ -29,6 +30,7 @@ class IngredientUpdate(BaseModel):
     type: Optional[str] = Field(None, max_length=20, description="Type: 'food', 'service', 'supply'")
     description: Optional[str] = Field(None, max_length=1024)
     minimum_order_quantity: Optional[float] = Field(None, gt=0)
+    unit_weight_gr: Optional[float] = Field(None, ge=0, description="Weight in grams of 1 base unit (only for 'und' ingredients)")
     price: Optional[float] = Field(None, gt=0)
     supplier_id: Optional[UUID] = None
 
