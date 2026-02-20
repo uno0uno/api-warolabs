@@ -66,3 +66,10 @@ class AddressProfileList(BaseModel):
     addresses: list[AddressProfileResponse]
     total: int
     default_address_id: Optional[UUID] = None
+
+
+class AddressPreviewResponse(BaseModel):
+    """Read-only address preview by email (no auth required)"""
+    customer_id: Optional[UUID]
+    addresses: list[AddressProfileResponse]
+    total: int

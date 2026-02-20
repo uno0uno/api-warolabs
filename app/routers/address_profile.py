@@ -2,13 +2,14 @@
 Address Profile Router
 PUBLIC endpoints for customer delivery address management (online ordering)
 """
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, Query
 from uuid import UUID
 from app.models.address_profile import (
     AddressProfileCreate,
     AddressProfileUpdate,
     AddressProfileResponse,
-    AddressProfileList
+    AddressProfileList,
+    AddressPreviewResponse,
 )
 from app.services import address_profile_service
 
@@ -50,6 +51,24 @@ async def create_address(address: AddressProfileCreate):
         address_type=address.address_type,
         delivery_notes=address.delivery_notes
     )
+
+
+@router.get("/preview", response_model=AddressPreviewResponse)
+async def preview_addresses_by_email(
+    email: str = Query(..., description="Customer email to look up addresses for")
+):
+    """
+    Read-only preview of saved addresses for a given email (PUBLIC - no auth).
+
+    Used at the delivery step before OTP to show returning customers their
+    saved addresses without requiring authentication.
+
+    - **email**: Customer email address
+    - Returns `customer_id` + list of addresses, or empty result if not found
+
+    **Public endpoint - no authentication required**
+    """
+    return await address_profile_service.get_addresses_by_email(email)
 
 
 @router.get("/customer/{customer_id}", response_model=AddressProfileList)

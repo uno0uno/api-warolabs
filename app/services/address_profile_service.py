@@ -274,6 +274,64 @@ async def delete_address(address_id: UUID, customer_id: UUID) -> dict:
         raise APIError(f"Error al eliminar dirección: {str(e)}", status_code=500)
 
 
+async def get_addresses_by_email(email: str) -> dict:
+    """
+    Get address preview for a customer by email (PUBLIC, read-only)
+    Returns customer_id + addresses list, or empty result if not found
+    """
+    try:
+        async with get_db_connection() as conn:
+            query = """
+                SELECT
+                    p.id AS customer_id,
+                    ap.id, ap.customer_id AS ap_customer_id,
+                    ap.address_line1, ap.address_line2, ap.city, ap.state,
+                    ap.postal_code, ap.country, ap.latitude, ap.longitude,
+                    ap.is_default, ap.address_type, ap.delivery_notes,
+                    ap.created_at, ap.updated_at
+                FROM addresses_profile ap
+                JOIN profile p ON ap.customer_id = p.id
+                WHERE p.email = $1
+                ORDER BY ap.is_default DESC, ap.created_at DESC
+            """
+            rows = await conn.fetch(query, email)
+
+            if not rows:
+                return {"customer_id": None, "addresses": [], "total": 0}
+
+            customer_id = rows[0]["customer_id"]
+            addresses = [
+                {
+                    "id": row["id"],
+                    "customer_id": row["ap_customer_id"],
+                    "address_line1": row["address_line1"],
+                    "address_line2": row["address_line2"],
+                    "city": row["city"],
+                    "state": row["state"],
+                    "postal_code": row["postal_code"],
+                    "country": row["country"],
+                    "latitude": row["latitude"],
+                    "longitude": row["longitude"],
+                    "is_default": row["is_default"],
+                    "address_type": row["address_type"],
+                    "delivery_notes": row["delivery_notes"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+                for row in rows
+            ]
+
+            return {
+                "customer_id": customer_id,
+                "addresses": addresses,
+                "total": len(addresses),
+            }
+
+    except Exception as e:
+        logger.error(f"Error fetching addresses by email: {str(e)}")
+        raise APIError(f"Error al obtener direcciones: {str(e)}", status_code=500)
+
+
 async def set_default_address(address_id: UUID, customer_id: UUID) -> dict:
     """
     Set an address as default (PUBLIC)
