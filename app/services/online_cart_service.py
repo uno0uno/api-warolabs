@@ -376,3 +376,150 @@ async def associate_customer_to_cart(cart_id: UUID, customer_id: UUID) -> dict:
     except Exception as e:
         logger.error(f"Error associating customer: {str(e)}")
         raise APIError(f"Error associating customer: {str(e)}", status_code=500)
+
+
+async def checkout_cart(cart_id: UUID) -> dict:
+    """
+    Convert a verified online cart into a confirmed order (PUBLIC).
+
+    Validates cart state, atomically marks it as checked_out, then inserts
+    the order, order_items, and order_item_modifiers in a single transaction.
+
+    Returns order summary with order_number and optional pickup_pin.
+    Returns 409 if the cart was already checked out (double-submit prevention).
+    """
+    try:
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # 1. Fetch cart
+                cart_query = """
+                    SELECT id, tenant_id, customer_id, order_type,
+                           delivery_address_id, pickup_pin, is_verified, status, total_amount
+                    FROM online_carts
+                    WHERE id = $1
+                """
+                cart = await conn.fetchrow(cart_query, cart_id)
+
+                if not cart:
+                    raise HTTPException(status_code=404, detail="Carrito no encontrado")
+
+                # 2. Validate state
+                if not cart['is_verified']:
+                    raise HTTPException(status_code=400, detail="El carrito no ha sido verificado. Completa el proceso de verificación por OTP.")
+
+                if cart['status'] == 'checked_out':
+                    raise HTTPException(status_code=409, detail="Este carrito ya fue procesado. El pedido ya existe.")
+
+                if cart['status'] != 'active':
+                    raise HTTPException(status_code=400, detail=f"El carrito no está activo (estado: {cart['status']})")
+
+                if cart['order_type'] == 'delivery' and not cart['delivery_address_id']:
+                    raise HTTPException(status_code=400, detail="Se requiere una dirección de entrega para pedidos a domicilio.")
+
+                # 3. Fetch items (reuse existing helper)
+                items = await get_cart_items(conn, cart_id)
+
+                if not items:
+                    raise HTTPException(status_code=400, detail="El carrito está vacío")
+
+                # 4. Validate minimum order amount from tenant profile
+                tenant_profile_query = """
+                    SELECT min_order_amount, estimated_preparation_time
+                    FROM tenant_public_profiles
+                    WHERE tenant_id = $1
+                """
+                profile = await conn.fetchrow(tenant_profile_query, cart['tenant_id'])
+                min_order_amount = Decimal('0')
+                estimated_preparation_time = None
+                if profile:
+                    min_order_amount = Decimal(str(profile['min_order_amount'] or '0'))
+                    estimated_preparation_time = profile['estimated_preparation_time']
+
+                cart_total = Decimal(str(cart['total_amount'] or '0'))
+                if cart_total < min_order_amount:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"El monto mínimo del pedido es ${min_order_amount:,.0f} COP. Tu carrito tiene ${cart_total:,.0f} COP."
+                    )
+
+                # 5. Atomically lock cart — prevents double checkout
+                locked = await conn.fetchrow(
+                    "UPDATE online_carts SET status = 'checked_out', completed_at = now(), updated_at = now() WHERE id = $1 AND status = 'active' RETURNING id",
+                    cart_id
+                )
+                if not locked:
+                    raise HTTPException(status_code=409, detail="El pedido ya fue procesado por otra solicitud simultánea.")
+
+                # 6. Create order
+                order_query = """
+                    INSERT INTO orders (
+                        tenant_id, customer_id, online_cart_id,
+                        order_date, total_amount, status
+                    )
+                    VALUES ($1, $2, $3, NOW(), $4, 'pending')
+                    RETURNING id, order_number
+                """
+                order_row = await conn.fetchrow(
+                    order_query,
+                    cart['tenant_id'],
+                    cart['customer_id'],
+                    cart_id,
+                    cart_total
+                )
+                order_id = order_row['id']
+                order_number = order_row['order_number']
+
+                logger.info(f"Created online order #{order_number} from cart {cart_id}")
+
+                # 7. Copy items to order_items
+                for item in items:
+                    order_item_query = """
+                        INSERT INTO order_items (
+                            order_id, product_id, quantity, price_at_purchase, subtotal
+                        )
+                        VALUES ($1, $2, $3, $4, $5)
+                        RETURNING id
+                    """
+                    order_item_row = await conn.fetchrow(
+                        order_item_query,
+                        order_id,
+                        item['product_id'],
+                        item['quantity'],
+                        Decimal(str(item['unit_price'])),
+                        Decimal(str(item['subtotal']))
+                    )
+                    order_item_id = order_item_row['id']
+
+                    # 8. Copy modifiers to order_item_modifiers
+                    for mod in item['modifiers']:
+                        await conn.execute(
+                            """
+                            INSERT INTO order_item_modifiers (
+                                order_item_id, modifier_id, modifier_name, price_at_purchase, quantity
+                            )
+                            VALUES ($1, $2, $3, $4, $5)
+                            """,
+                            order_item_id,
+                            mod['modifier_id'],
+                            mod['modifier_name'],
+                            Decimal(str(mod['price'])),
+                            1
+                        )
+
+                return {
+                    "success": True,
+                    "data": {
+                        "order_id": str(order_id),
+                        "order_number": int(order_number),
+                        "total_amount": float(cart_total),
+                        "order_type": cart['order_type'],
+                        "pickup_pin": cart['pickup_pin'],
+                        "estimated_preparation_time": estimated_preparation_time
+                    }
+                }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during checkout for cart {cart_id}: {str(e)}")
+        raise APIError(f"Error al procesar el pedido: {str(e)}", status_code=500)

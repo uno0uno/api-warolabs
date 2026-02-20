@@ -166,3 +166,22 @@ async def associate_customer(
         cart_id=cart_id,
         customer_id=customer_id
     )
+
+
+@router.post("/{cart_id}/checkout")
+async def checkout_cart(cart_id: UUID):
+    """
+    Finalize cart as a confirmed order (PUBLIC - no auth).
+
+    Validates:
+    - Cart is OTP-verified
+    - Cart has items and meets minimum order amount
+    - Delivery address is set when order_type is 'delivery'
+
+    Returns order_number, total_amount, order_type, and pickup_pin (pickup orders only).
+
+    Returns 409 if the cart was already checked out (double-submit prevention).
+
+    **Public endpoint - no authentication required**
+    """
+    return await online_cart_service.checkout_cart(cart_id=cart_id)

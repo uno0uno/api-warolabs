@@ -80,6 +80,16 @@ class OnlineCartResponse(BaseModel):
     updated_at: datetime
 
 
+class CheckoutResponse(BaseModel):
+    """Checkout response after cart is confirmed as order"""
+    order_id: UUID
+    order_number: int
+    total_amount: Decimal
+    order_type: str
+    pickup_pin: Optional[str] = None
+    estimated_preparation_time: Optional[int] = None
+
+
 class AddressCreate(BaseModel):
     """Create address for delivery"""
     address_line1: str
