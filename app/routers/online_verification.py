@@ -33,7 +33,7 @@ class ResendOTPRequest(BaseModel):
 class ValidateCustomerRequest(BaseModel):
     """Validate customer eligibility"""
     phone_number: str
-    cart_total: float
+    cart_total: float = 0.0
 
 
 @router.post("/send")
