@@ -11,6 +11,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Map Pydantic/API field names → real DB column names (for dynamic UPDATE)
+FIELD_MAP = {
+    "customer_id": "user_id",
+    "address_type": "label",
+}
+
 
 async def create_address(
     customer_id: UUID,
@@ -36,21 +42,21 @@ async def create_address(
                 # If this is set as default, unset all other defaults for this customer
                 if is_default:
                     await conn.execute(
-                        "UPDATE addresses_profile SET is_default = false WHERE customer_id = $1",
+                        "UPDATE addresses_profile SET is_default = false WHERE user_id = $1",
                         customer_id
                     )
 
                 # Insert new address
                 insert_query = """
                     INSERT INTO addresses_profile (
-                        customer_id, address_line1, address_line2, city, state,
+                        user_id, address_line1, address_line2, city, state,
                         postal_code, country, latitude, longitude, is_default,
-                        address_type, delivery_notes
+                        label, delivery_notes
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                    RETURNING id, customer_id, address_line1, address_line2, city, state,
+                    RETURNING id, user_id AS customer_id, address_line1, address_line2, city, state,
                               postal_code, country, latitude, longitude, is_default,
-                              address_type, delivery_notes, created_at, updated_at
+                              label AS address_type, delivery_notes, created_at, updated_at
                 """
                 address_row = await conn.fetchrow(
                     insert_query,
@@ -84,11 +90,11 @@ async def get_customer_addresses(customer_id: UUID) -> dict:
     try:
         async with get_db_connection() as conn:
             query = """
-                SELECT id, customer_id, address_line1, address_line2, city, state,
+                SELECT id, user_id AS customer_id, address_line1, address_line2, city, state,
                        postal_code, country, latitude, longitude, is_default,
-                       address_type, delivery_notes, created_at, updated_at
+                       label AS address_type, delivery_notes, created_at, updated_at
                 FROM addresses_profile
-                WHERE customer_id = $1
+                WHERE user_id = $1
                 ORDER BY is_default DESC, created_at DESC
             """
             rows = await conn.fetch(query, customer_id)
@@ -118,11 +124,11 @@ async def get_address_by_id(address_id: UUID, customer_id: UUID) -> dict:
     try:
         async with get_db_connection() as conn:
             query = """
-                SELECT id, customer_id, address_line1, address_line2, city, state,
+                SELECT id, user_id AS customer_id, address_line1, address_line2, city, state,
                        postal_code, country, latitude, longitude, is_default,
-                       address_type, delivery_notes, created_at, updated_at
+                       label AS address_type, delivery_notes, created_at, updated_at
                 FROM addresses_profile
-                WHERE id = $1 AND customer_id = $2
+                WHERE id = $1 AND user_id = $2
             """
             address_row = await conn.fetchrow(query, address_id, customer_id)
 
@@ -154,7 +160,7 @@ async def update_address(
         async with get_db_connection() as conn:
             async with conn.transaction():
                 # Verify ownership
-                verify_query = "SELECT id FROM addresses_profile WHERE id = $1 AND customer_id = $2"
+                verify_query = "SELECT id FROM addresses_profile WHERE id = $1 AND user_id = $2"
                 address_exists = await conn.fetchrow(verify_query, address_id, customer_id)
 
                 if not address_exists:
@@ -166,7 +172,7 @@ async def update_address(
                 # If setting as default, unset all other defaults
                 if update_data.get('is_default') is True:
                     await conn.execute(
-                        "UPDATE addresses_profile SET is_default = false WHERE customer_id = $1",
+                        "UPDATE addresses_profile SET is_default = false WHERE user_id = $1",
                         customer_id
                     )
 
@@ -177,7 +183,8 @@ async def update_address(
 
                 for key, value in update_data.items():
                     if value is not None:  # Only update fields that are provided
-                        update_fields.append(f"{key} = ${param_counter}")
+                        db_col = FIELD_MAP.get(key, key)
+                        update_fields.append(f"{db_col} = ${param_counter}")
                         update_values.append(value)
                         param_counter += 1
 
@@ -195,10 +202,10 @@ async def update_address(
                 update_query = f"""
                     UPDATE addresses_profile
                     SET {', '.join(update_fields)}
-                    WHERE id = ${param_counter} AND customer_id = ${param_counter + 1}
-                    RETURNING id, customer_id, address_line1, address_line2, city, state,
+                    WHERE id = ${param_counter} AND user_id = ${param_counter + 1}
+                    RETURNING id, user_id AS customer_id, address_line1, address_line2, city, state,
                               postal_code, country, latitude, longitude, is_default,
-                              address_type, delivery_notes, created_at, updated_at
+                              label AS address_type, delivery_notes, created_at, updated_at
                 """
 
                 updated_row = await conn.fetchrow(update_query, *update_values)
@@ -225,7 +232,7 @@ async def delete_address(address_id: UUID, customer_id: UUID) -> dict:
                 check_query = """
                     SELECT id, is_default
                     FROM addresses_profile
-                    WHERE id = $1 AND customer_id = $2
+                    WHERE id = $1 AND user_id = $2
                 """
                 address_row = await conn.fetchrow(check_query, address_id, customer_id)
 
@@ -236,7 +243,7 @@ async def delete_address(address_id: UUID, customer_id: UUID) -> dict:
                     )
 
                 # Count total addresses for customer
-                count_query = "SELECT COUNT(*) as total FROM addresses_profile WHERE customer_id = $1"
+                count_query = "SELECT COUNT(*) as total FROM addresses_profile WHERE user_id = $1"
                 count_row = await conn.fetchrow(count_query, customer_id)
                 total_addresses = count_row['total']
 
@@ -247,7 +254,7 @@ async def delete_address(address_id: UUID, customer_id: UUID) -> dict:
                         """
                         UPDATE addresses_profile
                         SET is_default = true
-                        WHERE customer_id = $1
+                        WHERE user_id = $1
                         AND id != $2
                         ORDER BY created_at DESC
                         LIMIT 1
@@ -257,7 +264,7 @@ async def delete_address(address_id: UUID, customer_id: UUID) -> dict:
                     )
 
                 # Delete address
-                delete_query = "DELETE FROM addresses_profile WHERE id = $1 AND customer_id = $2"
+                delete_query = "DELETE FROM addresses_profile WHERE id = $1 AND user_id = $2"
                 await conn.execute(delete_query, address_id, customer_id)
 
                 logger.info(f"Deleted address {address_id} for customer {customer_id}")
@@ -284,13 +291,13 @@ async def get_addresses_by_email(email: str) -> dict:
             query = """
                 SELECT
                     p.id AS customer_id,
-                    ap.id, ap.customer_id AS ap_customer_id,
+                    ap.id, ap.user_id AS ap_customer_id,
                     ap.address_line1, ap.address_line2, ap.city, ap.state,
                     ap.postal_code, ap.country, ap.latitude, ap.longitude,
-                    ap.is_default, ap.address_type, ap.delivery_notes,
+                    ap.is_default, ap.label AS address_type, ap.delivery_notes,
                     ap.created_at, ap.updated_at
                 FROM addresses_profile ap
-                JOIN profile p ON ap.customer_id = p.id
+                JOIN profile p ON ap.user_id = p.id
                 WHERE p.email = $1
                 ORDER BY ap.is_default DESC, ap.created_at DESC
             """
@@ -341,7 +348,7 @@ async def set_default_address(address_id: UUID, customer_id: UUID) -> dict:
         async with get_db_connection() as conn:
             async with conn.transaction():
                 # Verify ownership
-                verify_query = "SELECT id FROM addresses_profile WHERE id = $1 AND customer_id = $2"
+                verify_query = "SELECT id FROM addresses_profile WHERE id = $1 AND user_id = $2"
                 address_exists = await conn.fetchrow(verify_query, address_id, customer_id)
 
                 if not address_exists:
@@ -352,7 +359,7 @@ async def set_default_address(address_id: UUID, customer_id: UUID) -> dict:
 
                 # Unset all defaults for this customer
                 await conn.execute(
-                    "UPDATE addresses_profile SET is_default = false WHERE customer_id = $1",
+                    "UPDATE addresses_profile SET is_default = false WHERE user_id = $1",
                     customer_id
                 )
 
@@ -360,10 +367,10 @@ async def set_default_address(address_id: UUID, customer_id: UUID) -> dict:
                 update_query = """
                     UPDATE addresses_profile
                     SET is_default = true, updated_at = now()
-                    WHERE id = $1 AND customer_id = $2
-                    RETURNING id, customer_id, address_line1, address_line2, city, state,
+                    WHERE id = $1 AND user_id = $2
+                    RETURNING id, user_id AS customer_id, address_line1, address_line2, city, state,
                               postal_code, country, latitude, longitude, is_default,
-                              address_type, delivery_notes, created_at, updated_at
+                              label AS address_type, delivery_notes, created_at, updated_at
                 """
                 updated_row = await conn.fetchrow(update_query, address_id, customer_id)
 
