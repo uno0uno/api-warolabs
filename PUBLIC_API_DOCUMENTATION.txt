@@ -101,16 +101,33 @@ null (default) - Overall metrics:
     }
 }
 
+"date" - Metrics grouped day by day:
+{
+    "success": true,
+    "data": [
+        {
+            "date": "2026-01-15",
+            "dayName": "Thursday",
+            "totalOrders": 28,
+            "totalSales": 654000.0,
+            "avgTicket": 23357.14
+        }
+    ]
+}
+
 "weekday" - Metrics grouped by day of week:
 {
     "success": true,
     "data": [
         {
-            "dayNumber": 0,       // 0=Sunday, 6=Saturday
+            "dayNumber": 0,             // 0=Sunday, 6=Saturday
             "dayName": "Sunday",
+            "dayCount": 4,              // distinct Sundays in the period
             "totalOrders": 49,
             "totalSales": 916000.0,
-            "avgTicket": 18693.87
+            "avgTicket": 18693.87,
+            "avgOrdersPerDay": 12.3,    // average orders per Sunday
+            "avgSalesPerDay": 229000.0  // average revenue per Sunday
         }
     ]
 }
@@ -122,9 +139,12 @@ null (default) - Overall metrics:
         {
             "hour": 19,
             "hourLabel": "19:00",
+            "dayCount": 30,             // distinct days with activity at this hour
             "totalOrders": 98,
             "totalSales": 2356500.0,
-            "avgTicket": 24045.91
+            "avgTicket": 24045.91,
+            "avgOrdersPerDay": 3.3,     // average orders per day at this hour
+            "avgSalesPerDay": 78550.0   // average revenue per day at this hour
         }
     ]
 }
