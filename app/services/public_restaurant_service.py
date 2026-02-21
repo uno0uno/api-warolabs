@@ -153,6 +153,8 @@ async def get_menu_by_slug(
 
             products_rows = await conn.fetch(products_query, *params)
             products = [dict(row) for row in products_rows]
+            for p in products:
+                p['price'] = float(p['price'])
 
             return {
                 "restaurant_name": restaurant_name,
@@ -211,6 +213,7 @@ async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
                 raise HTTPException(status_code=404, detail="Product not found")
 
             product = dict(product_row)
+            product['price'] = float(product['price'])
 
             # 3. Get modifier groups and modifiers via junction table
             modifiers_query = """
