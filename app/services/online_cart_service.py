@@ -69,6 +69,78 @@ def calculate_item_subtotal(unit_price: float, modifiers: List[dict], quantity: 
     return (unit_price + modifier_total) * quantity
 
 
+async def validate_modifiers_for_item(conn, product_id: UUID, modifiers: List[dict]) -> None:
+    """
+    Validate modifiers submitted for a cart item.
+
+    Checks:
+    1. All modifier IDs exist in the modifiers table and are active (is_available=true)
+    2. Required modifier groups (is_required=true) have at least one modifier selected
+    3. No group exceeds its max_qty limit
+
+    Raises HTTPException(422) with a descriptive message on any violation.
+    """
+    requested_ids = [UUID(str(mod['id'])) for mod in modifiers]
+
+    # 1. Batch-validate existence and availability in one query
+    valid_rows = await conn.fetch(
+        """
+        SELECT id, modifier_group_id
+        FROM modifiers
+        WHERE id = ANY($1::uuid[]) AND is_available = true
+        """,
+        requested_ids
+    )
+    valid_id_set = {row['id'] for row in valid_rows}
+    for mod_id in requested_ids:
+        if mod_id not in valid_id_set:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Modifier '{mod_id}' does not exist or is not available"
+            )
+
+    # Build map: modifier_id → group_id (from validated rows)
+    modifier_to_group = {row['id']: row['modifier_group_id'] for row in valid_rows}
+
+    # 2 & 3. Load the product's modifier groups via junction table
+    group_rows = await conn.fetch(
+        """
+        SELECT mg.id, mg.name, mg.is_required, mg.min_qty, mg.max_qty
+        FROM product_modifier_groups pmg
+        JOIN modifier_groups mg ON mg.id = pmg.modifier_group_id
+        WHERE pmg.product_id = $1
+        """,
+        product_id
+    )
+
+    if not group_rows:
+        # No modifier groups defined for this product — no group-level rules to enforce
+        return
+
+    # Count how many submitted modifiers belong to each group
+    group_selection_count: dict = {}
+    for mod_id in requested_ids:
+        group_id = modifier_to_group.get(mod_id)
+        if group_id:
+            group_selection_count[group_id] = group_selection_count.get(group_id, 0) + 1
+
+    for group in group_rows:
+        group_id = group['id']
+        count = group_selection_count.get(group_id, 0)
+        min_required = max(1, group['min_qty']) if group['is_required'] else group['min_qty']
+
+        if group['is_required'] and count < min_required:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Group '{group['name']}' requires at least {min_required} selection(s), got {count}"
+            )
+        if count > group['max_qty']:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Group '{group['name']}' allows at most {group['max_qty']} selection(s), got {count}"
+            )
+
+
 async def create_cart_with_batch_items(
     tenant_id: UUID,
     items: List[dict],
@@ -107,6 +179,10 @@ async def create_cart_with_batch_items(
                     unit_price = Decimal(str(item_data['unit_price']))
                     modifiers = item_data.get('modifiers', [])
                     notes = item_data.get('notes')
+
+                    # Validate modifiers before insert
+                    if modifiers:
+                        await validate_modifiers_for_item(conn, UUID(str(product_id)), modifiers)
 
                     # Calculate subtotal
                     subtotal = calculate_item_subtotal(
@@ -175,6 +251,8 @@ async def create_cart_with_batch_items(
                     }
                 }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating online cart with batch: {str(e)}")
         raise APIError(f"Error creating cart: {str(e)}", status_code=500)
