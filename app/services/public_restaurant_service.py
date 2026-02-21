@@ -131,8 +131,11 @@ async def get_menu_by_slug(
                     p.is_available, p.preparation_time,
                     p.allow_modifiers,
                     EXISTS(
-                        SELECT 1 FROM modifier_groups mg
-                        WHERE mg.product_id = p.id
+                        SELECT 1
+                        FROM product_modifier_groups pmg
+                        JOIN modifiers m ON m.modifier_group_id = pmg.modifier_group_id
+                        WHERE pmg.product_id = p.id
+                          AND m.is_available = true
                     ) as has_modifiers
                 FROM product p
                 JOIN categories c ON p.category_id = c.id
@@ -209,7 +212,7 @@ async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
 
             product = dict(product_row)
 
-            # 3. Get modifier groups and modifiers
+            # 3. Get modifier groups and modifiers via junction table
             modifiers_query = """
                 SELECT
                     mg.id as group_id,
@@ -222,10 +225,13 @@ async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
                     m.name as modifier_name,
                     m.price as modifier_price,
                     m.is_available as modifier_is_available,
+                    m.is_default as modifier_is_default,
+                    m.max_limit as modifier_max_limit,
                     m.sort_order as modifier_sort_order
-                FROM modifier_groups mg
+                FROM product_modifier_groups pmg
+                JOIN modifier_groups mg ON mg.id = pmg.modifier_group_id
                 LEFT JOIN modifiers m ON m.modifier_group_id = mg.id
-                WHERE mg.product_id = $1
+                WHERE pmg.product_id = $1
                 ORDER BY mg.sort_order, m.sort_order
             """
             modifiers_rows = await conn.fetch(modifiers_query, product_id)
@@ -251,7 +257,9 @@ async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
                         'id': row['modifier_id'],
                         'name': row['modifier_name'],
                         'price': float(row['modifier_price']),
-                        'is_available': row['modifier_is_available']
+                        'is_available': row['modifier_is_available'],
+                        'is_default': row['modifier_is_default'],
+                        'max_limit': row['modifier_max_limit']
                     })
 
             product['modifier_groups'] = list(modifier_groups.values())
