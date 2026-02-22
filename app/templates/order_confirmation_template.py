@@ -1,6 +1,7 @@
 """
 Order confirmation email template.
 Sent to the customer immediately after an online order is placed (status: pending).
+Plain text format — matches the style of other transactional emails in the system.
 """
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -23,8 +24,8 @@ def format_bogota_datetime(dt: datetime) -> str:
     weekday = _DAYS_ES[local.weekday()]
     month = _MONTHS_ES[local.month - 1]
     hour = local.hour % 12 or 12
-    ampm = "a.\u00a0m." if local.hour < 12 else "p.\u00a0m."
-    return f"{weekday}, {local.day} de {month} de {local.year}, {hour}:{local.minute:02d}\u00a0{ampm}"
+    ampm = "a. m." if local.hour < 12 else "p. m."
+    return f"{weekday}, {local.day} de {month} de {local.year}, {hour}:{local.minute:02d} {ampm}"
 
 
 def _format_cop(amount: float) -> str:
@@ -40,36 +41,7 @@ def _order_type_label(order_type: str) -> str:
     }.get(order_type, order_type)
 
 
-def _build_items_rows(items: list) -> str:
-    rows = ""
-    for item in items:
-        mods = ""
-        if item.get("modifiers"):
-            mod_names = ", ".join(m.get("modifier_name") or m.get("name", "") for m in item["modifiers"])
-            mods = f'<div style="font-size:12px;color:#666;margin-top:2px;">+ {mod_names}</div>'
-
-        unit_price = _format_cop(float(item.get("unit_price", 0)))
-        subtotal = _format_cop(float(item.get("subtotal", 0)))
-        qty = item.get("quantity", 1)
-        name = item.get("product_name", "Producto")
-
-        rows += f"""
-        <tr>
-          <td style="padding:8px 0;border-bottom:1px solid #f0f0f0;vertical-align:top;">
-            <span style="font-weight:600;">{qty}×</span> {name}
-            {mods}
-          </td>
-          <td style="padding:8px 0;border-bottom:1px solid #f0f0f0;text-align:right;vertical-align:top;white-space:nowrap;">
-            {unit_price}
-          </td>
-          <td style="padding:8px 8px 8px 16px;border-bottom:1px solid #f0f0f0;text-align:right;vertical-align:top;white-space:nowrap;font-weight:600;">
-            {subtotal}
-          </td>
-        </tr>"""
-    return rows
-
-
-def get_order_confirmation_html(
+def get_order_confirmation_text(
     order_number: int,
     order_type: str,
     order_date: datetime,
@@ -81,7 +53,7 @@ def get_order_confirmation_html(
     pickup_pin: Optional[str],
 ) -> str:
     """
-    Build the HTML body for an order confirmation email.
+    Build the plain text body for an order confirmation email.
 
     Args:
         order_number: The sequential order number.
@@ -99,11 +71,34 @@ def get_order_confirmation_html(
 
     order_date_str = format_bogota_datetime(order_date)
     type_label = _order_type_label(order_type)
-    items_rows = _build_items_rows(items)
 
-    # --- Optional sections ---
+    # Items block
+    items_lines = []
+    for item in items:
+        qty = item.get("quantity", 1)
+        name = item.get("product_name", "Producto")
+        item_subtotal = _format_cop(float(item.get("subtotal", 0)))
+        line = f"  {qty}x {name} — {item_subtotal}"
+        if item.get("modifiers"):
+            mod_names = ", ".join(
+                m.get("modifier_name") or m.get("name", "") for m in item["modifiers"]
+            )
+            line += f"\n     + {mod_names}"
+        items_lines.append(line)
+    items_block = "\n".join(items_lines)
 
-    # Delivery address block
+    # Totals block
+    totals_lines = [f"Subtotal: {_format_cop(subtotal)}"]
+    if delivery_fee > 0:
+        totals_lines.append(f"Domicilio: {_format_cop(delivery_fee)}")
+    totals_lines.append(f"Total: {_format_cop(total)}")
+    totals_block = "\n".join(totals_lines)
+
+    # Optional sections
+    pickup_pin_block = ""
+    if pickup_pin:
+        pickup_pin_block = f"\nTU PIN DE RECOGIDA\n------------------\n{pickup_pin}\nMuestra este PIN al recoger tu pedido.\n"
+
     address_block = ""
     if order_type == "delivery" and delivery_address:
         line1 = delivery_address.get("address_line1", "")
@@ -111,150 +106,49 @@ def get_order_confirmation_html(
         city = delivery_address.get("city", "")
         state = delivery_address.get("state", "")
         notes = delivery_address.get("delivery_notes", "")
-
-        addr_lines = f"{line1}"
+        addr = line1
         if line2:
-            addr_lines += f", {line2}"
-        addr_lines += f"<br>{city}, {state}"
+            addr += f", {line2}"
+        addr += f", {city}, {state}"
         if notes:
-            addr_lines += f'<br><em style="color:#666;">{notes}</em>'
+            addr += f"\nNotas: {notes}"
+        address_block = f"\nDirección de entrega: {addr}\n"
 
-        address_block = f"""
-        <tr>
-          <td style="padding:10px 0;border-bottom:1px solid #f0f0f0;">
-            <span style="color:#888;font-size:12px;text-transform:uppercase;letter-spacing:.5px;">Dirección de entrega</span><br>
-            <span style="font-size:14px;">{addr_lines}</span>
-          </td>
-        </tr>"""
-
-    # Scheduled time block
     scheduled_block = ""
     if scheduled_time:
         scheduled_str = format_bogota_datetime(scheduled_time)
-        scheduled_block = f"""
-        <tr>
-          <td style="padding:10px 0;border-bottom:1px solid #f0f0f0;">
-            <span style="color:#888;font-size:12px;text-transform:uppercase;letter-spacing:.5px;">Hora programada</span><br>
-            <span style="font-size:14px;">{scheduled_str}</span>
-          </td>
-        </tr>"""
+        scheduled_block = f"\nHora programada: {scheduled_str}\n"
 
-    # Instructions block
     instructions_block = ""
     if delivery_instructions:
-        instructions_block = f"""
-        <tr>
-          <td style="padding:10px 0;border-bottom:1px solid #f0f0f0;">
-            <span style="color:#888;font-size:12px;text-transform:uppercase;letter-spacing:.5px;">Instrucciones adicionales</span><br>
-            <span style="font-size:14px;font-style:italic;">{delivery_instructions}</span>
-          </td>
-        </tr>"""
+        instructions_block = f"\nInstrucciones: {delivery_instructions}\n"
 
-    # Pickup PIN block
-    pin_block = ""
-    if pickup_pin:
-        pin_block = f"""
-        <div style="background:#fffbeb;border:2px solid #fbbf24;border-radius:12px;padding:20px;text-align:center;margin:20px 0;">
-          <p style="margin:0 0 6px 0;font-size:11px;font-weight:700;color:#92400e;text-transform:uppercase;letter-spacing:1px;">Tu PIN de recogida</p>
-          <p style="margin:0 0 6px 0;font-size:36px;font-weight:900;color:#78350f;letter-spacing:.2em;">{pickup_pin}</p>
-          <p style="margin:0;font-size:12px;color:#b45309;">Muestra este PIN al recoger tu pedido</p>
-        </div>"""
+    return f"""¡Hola!
 
-    # Delivery fee row
-    delivery_fee_row = ""
-    if delivery_fee > 0:
-        delivery_fee_row = f"""
-        <tr>
-          <td colspan="2" style="padding:6px 0;text-align:right;color:#666;font-size:14px;">Domicilio</td>
-          <td style="padding:6px 8px;text-align:right;font-size:14px;">{_format_cop(delivery_fee)}</td>
-        </tr>"""
+Tu pedido ha sido recibido y está siendo revisado por el restaurante.
 
-    return f"""<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Pedido #{order_number} — WARO</title>
-</head>
-<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif;color:#1a1a1a;">
-  <div style="max-width:600px;margin:32px auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #e5e5e5;">
+RESUMEN DEL PEDIDO
+------------------
+Pedido: #{order_number}
+Tipo: {type_label}
+Fecha: {order_date_str}
+{pickup_pin_block}{address_block}{scheduled_block}{instructions_block}
+PRODUCTOS
+---------
+{items_block}
 
-    <!-- Header -->
-    <div style="background:#1a1a1a;padding:24px 32px;">
-      <p style="margin:0;font-size:22px;font-weight:700;color:#fff;letter-spacing:.5px;">WARO</p>
-      <p style="margin:4px 0 0 0;font-size:13px;color:#999;">Colombia</p>
-    </div>
+TOTAL
+-----
+{totals_block}
 
-    <!-- Body -->
-    <div style="padding:32px;">
+Pago: Efectivo contra entrega
 
-      <h1 style="margin:0 0 4px 0;font-size:22px;font-weight:700;">¡Pedido recibido!</h1>
-      <p style="margin:0 0 24px 0;color:#555;font-size:15px;">
-        Pedido <strong>#{ order_number }</strong> · {type_label} · {order_date_str}
-      </p>
+El restaurante está revisando tu pedido. Te notificaremos cuando esté confirmado.
 
-      {pin_block}
-
-      <!-- Order meta -->
-      <table style="width:100%;border-collapse:collapse;margin-bottom:24px;">
-        {address_block}
-        {scheduled_block}
-        {instructions_block}
-      </table>
-
-      <!-- Items -->
-      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
-        <thead>
-          <tr>
-            <th style="text-align:left;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;padding-bottom:8px;border-bottom:2px solid #e5e5e5;">Producto</th>
-            <th style="text-align:right;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;padding-bottom:8px;border-bottom:2px solid #e5e5e5;">Precio</th>
-            <th style="text-align:right;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;padding-bottom:8px;border-bottom:2px solid #e5e5e5;padding-left:16px;">Total</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items_rows}
-        </tbody>
-      </table>
-
-      <!-- Totals -->
-      <table style="width:100%;border-collapse:collapse;margin-bottom:28px;">
-        <tr>
-          <td colspan="2" style="padding:6px 0;text-align:right;color:#666;font-size:14px;">Subtotal</td>
-          <td style="padding:6px 8px;text-align:right;font-size:14px;">{_format_cop(subtotal)}</td>
-        </tr>
-        {delivery_fee_row}
-        <tr style="border-top:2px solid #1a1a1a;">
-          <td colspan="2" style="padding:10px 0 0 0;text-align:right;font-size:16px;font-weight:700;">Total</td>
-          <td style="padding:10px 8px 0 0;text-align:right;font-size:16px;font-weight:700;">{_format_cop(total)}</td>
-        </tr>
-      </table>
-
-      <!-- Payment note -->
-      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px 16px;margin-bottom:24px;">
-        <p style="margin:0;font-size:13px;color:#92400e;"><strong>Pago:</strong> Efectivo contra entrega</p>
-      </div>
-
-      <!-- Footer message -->
-      <div style="background:#f9f9f9;border-radius:8px;padding:16px;text-align:center;">
-        <p style="margin:0;font-size:14px;color:#555;">
-          El restaurante está revisando tu pedido.<br>
-          <strong>Te notificaremos cuando esté confirmado.</strong>
-        </p>
-      </div>
-
-    </div>
-
-    <!-- Email footer -->
-    <div style="background:#f5f5f5;padding:20px 32px;border-top:1px solid #e5e5e5;">
-      <p style="margin:0;font-size:11px;color:#999;text-align:center;">
-        WARO Colombia · hola@warocol.com<br>
-        Bogotá, D.C., Colombia
-      </p>
-    </div>
-
-  </div>
-</body>
-</html>""".strip()
+Gracias,
+WARO Colombia
+hola@warocol.com
+""".strip()
 
 
 def get_order_confirmation_subject(order_number: int) -> str:

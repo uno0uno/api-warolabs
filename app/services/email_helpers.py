@@ -7,7 +7,7 @@ from pathlib import Path
 from app.services.aws_ses_service import AWSSESService
 from app.config import settings
 from app.templates.order_confirmation_template import (
-    get_order_confirmation_html,
+    get_order_confirmation_text,
     get_order_confirmation_subject,
 )
 import logging
@@ -326,7 +326,7 @@ async def send_order_confirmation_email(
         True if the email was sent successfully, False otherwise.
     """
     try:
-        html_body = get_order_confirmation_html(
+        text_body = get_order_confirmation_text(
             order_number=order_number,
             order_type=order_type,
             order_date=order_date,
@@ -345,8 +345,8 @@ async def send_order_confirmation_email(
             from_name="WARO Colombia",
             to_emails=[customer_email],
             subject=subject,
-            html_body=html_body,
-            text_body=None,
+            html_body=None,
+            text_body=text_body,
         )
 
         if success:
