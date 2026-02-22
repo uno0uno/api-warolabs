@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import HTTPException
 from app.database import get_db_connection
 from app.core.exceptions import APIError
+from app.services.email_helpers import send_order_confirmation_email
 import logging
 from decimal import Decimal
 
@@ -472,7 +473,8 @@ async def checkout_cart(cart_id: UUID) -> dict:
                 # 1. Fetch cart
                 cart_query = """
                     SELECT id, tenant_id, customer_id, order_type,
-                           delivery_address_id, pickup_pin, is_verified, status, total_amount
+                           delivery_address_id, pickup_pin, is_verified, status, total_amount,
+                           verified_email, scheduled_time, delivery_instructions
                     FROM online_carts
                     WHERE id = $1
                 """
@@ -584,7 +586,22 @@ async def checkout_cart(cart_id: UUID) -> dict:
                             1
                         )
 
-                return {
+                # 9. Fetch delivery address for the confirmation email (inside transaction,
+                #    but read-only — does not affect atomicity)
+                delivery_address = None
+                if cart['order_type'] == 'delivery' and cart['delivery_address_id']:
+                    addr_row = await conn.fetchrow(
+                        """
+                        SELECT address_line1, address_line2, city, state, delivery_notes
+                        FROM addresses_profile
+                        WHERE id = $1
+                        """,
+                        cart['delivery_address_id'],
+                    )
+                    if addr_row:
+                        delivery_address = dict(addr_row)
+
+                order_result = {
                     "success": True,
                     "data": {
                         "order_id": str(order_id),
@@ -595,6 +612,36 @@ async def checkout_cart(cart_id: UUID) -> dict:
                         "estimated_preparation_time": estimated_preparation_time
                     }
                 }
+
+        # Transaction committed — send confirmation email outside the transaction
+        # so a failure never rolls back the order.
+        verified_email = cart.get('verified_email') if cart else None
+        if verified_email:
+            try:
+                import datetime as _dt
+                order_date_utc = _dt.datetime.now(_dt.timezone.utc)
+
+                # Reconstruct scheduled_time as timezone-aware if present
+                scheduled_time = cart.get('scheduled_time')
+                if scheduled_time and scheduled_time.tzinfo is None:
+                    scheduled_time = scheduled_time.replace(tzinfo=_dt.timezone.utc)
+
+                await send_order_confirmation_email(
+                    customer_email=verified_email,
+                    order_number=int(order_number),
+                    order_type=cart['order_type'],
+                    order_date=order_date_utc,
+                    items=items,
+                    subtotal=float(cart_total),
+                    delivery_address=delivery_address,
+                    scheduled_time=scheduled_time,
+                    delivery_instructions=cart.get('delivery_instructions'),
+                    pickup_pin=cart.get('pickup_pin'),
+                )
+            except Exception as email_err:
+                logger.error(f"Failed to send order confirmation email for order #{order_number}: {email_err}")
+
+        return order_result
 
     except HTTPException:
         raise

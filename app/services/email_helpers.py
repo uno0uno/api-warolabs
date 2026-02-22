@@ -1,11 +1,18 @@
 """
 Email helper functions for sending formatted emails
 """
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 from pathlib import Path
 from app.services.aws_ses_service import AWSSESService
 from app.config import settings
+from app.templates.order_confirmation_template import (
+    get_order_confirmation_html,
+    get_order_confirmation_subject,
+)
+import logging
+
+logger = logging.getLogger(__name__)
 
 async def send_quotation_email(
     supplier_email: str,
@@ -294,4 +301,61 @@ Tecnología colombiana para el mundo.
 
     except Exception as e:
         pass
+        return False
+
+
+async def send_order_confirmation_email(
+    customer_email: str,
+    order_number: int,
+    order_type: str,
+    order_date: datetime,
+    items: List[Dict[str, Any]],
+    subtotal: float,
+    delivery_address: Optional[Dict[str, Any]] = None,
+    scheduled_time: Optional[datetime] = None,
+    delivery_instructions: Optional[str] = None,
+    pickup_pin: Optional[str] = None,
+) -> bool:
+    """
+    Send a transactional order confirmation email to the customer.
+
+    Called immediately after checkout_cart() commits the order.
+    Never raises — logs on failure so the order is never rolled back.
+
+    Returns:
+        True if the email was sent successfully, False otherwise.
+    """
+    try:
+        html_body = get_order_confirmation_html(
+            order_number=order_number,
+            order_type=order_type,
+            order_date=order_date,
+            items=items,
+            subtotal=subtotal,
+            delivery_address=delivery_address,
+            scheduled_time=scheduled_time,
+            delivery_instructions=delivery_instructions,
+            pickup_pin=pickup_pin,
+        )
+        subject = get_order_confirmation_subject(order_number)
+
+        ses_service = AWSSESService()
+        success = await ses_service.send_email(
+            from_email="hola@warocol.com",
+            from_name="WARO Colombia",
+            to_emails=[customer_email],
+            subject=subject,
+            html_body=html_body,
+            text_body=None,
+        )
+
+        if success:
+            logger.info(f"Order confirmation email sent for order #{order_number} to {customer_email}")
+        else:
+            logger.warning(f"SES returned failure for order confirmation email #{order_number}")
+
+        return success
+
+    except Exception as e:
+        logger.error(f"Error sending order confirmation email for order #{order_number}: {e}")
         return False
