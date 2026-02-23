@@ -25,4 +25,5 @@ from app.routers import (
     expenses,
     public_restaurant,
     tenant_config,
+    online_orders,
 )

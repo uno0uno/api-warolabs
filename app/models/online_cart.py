@@ -121,3 +121,23 @@ class AddressResponse(BaseModel):
     is_default: bool
     label: Optional[str]
     created_at: datetime
+
+
+class OnlineOrderItem(BaseModel):
+    """Single online order row for restaurant management view"""
+    id: str
+    order_number: int
+    order_date: str
+    scheduled_time: Optional[str]
+    total_amount: float
+    status: str
+    order_type: str
+    delivery_instructions: Optional[str]
+    verified_email: Optional[str]
+
+
+class OnlineOrdersResponse(BaseModel):
+    """Paginated response for GET /online/orders/"""
+    success: bool
+    data: List[OnlineOrderItem]
+    pagination: dict
