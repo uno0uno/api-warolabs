@@ -4,6 +4,7 @@ Authenticated endpoints for restaurant operators to manage online orders.
 """
 from fastapi import APIRouter, Request, Query
 from typing import Optional, Literal
+from uuid import UUID
 from app.services import online_orders_service
 
 router = APIRouter(prefix="/online/orders", tags=["Online Orders (Authenticated)"])
@@ -29,3 +30,19 @@ async def list_online_orders(
         request, status=status, limit=limit, offset=offset,
         sort_field=sort_field, sort_direction=sort_direction
     )
+
+
+@router.get("/{order_id}")
+async def get_online_order_detail(
+    request: Request,
+    order_id: UUID,
+):
+    """
+    Get full detail of a single online order by ID.
+
+    Returns order header, items with modifiers, and delivery address.
+    Excludes POS orders.
+
+    **Requires valid session cookie.**
+    """
+    return await online_orders_service.get_online_order_by_id(request, order_id)
