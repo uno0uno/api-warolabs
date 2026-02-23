@@ -38,6 +38,15 @@ async def list_online_orders(
     )
 
 
+@router.get("/{order_id}/status-history")
+async def get_online_order_status_history(
+    request: Request,
+    order_id: UUID,
+):
+    """Return all status transitions for an online order, ordered by change_date ASC."""
+    return await online_orders_service.get_order_status_history(request, order_id)
+
+
 @router.get("/{order_id}")
 async def get_online_order_detail(
     request: Request,

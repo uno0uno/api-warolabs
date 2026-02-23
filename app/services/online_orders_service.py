@@ -337,3 +337,73 @@ async def update_order_status(
     except Exception as e:
         logger.error(f"Error updating status for order {order_id}: {str(e)}")
         raise APIError(f"Error updating order status: {str(e)}", status_code=500)
+
+
+async def get_order_status_history(
+    request: Request,
+    order_id: UUID,
+) -> dict:
+    """
+    Return all status transitions for an online order, ordered by change_date ASC.
+    Tenant-scoped via JOIN to orders table.
+    Returns empty list when order exists but has no transitions yet.
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # 1. Verify order exists and belongs to this tenant (online orders only)
+            row = await conn.fetchrow(
+                """
+                SELECT id FROM orders
+                WHERE id = $1
+                  AND tenant_id = $2
+                  AND online_cart_id IS NOT NULL
+                """,
+                order_id, tenant_id,
+            )
+            if not row:
+                raise NotFoundError(f"Order {order_id} not found")
+
+            # 2. Fetch full status history
+            history_rows = await conn.fetch(
+                """
+                SELECT
+                    osh.id,
+                    osh.old_status,
+                    osh.new_status,
+                    osh.change_date,
+                    osh.reason
+                FROM order_status_history osh
+                JOIN orders o ON o.id = osh.order_id
+                WHERE osh.order_id = $1
+                  AND o.tenant_id = $2
+                  AND o.online_cart_id IS NOT NULL
+                ORDER BY osh.change_date ASC
+                """,
+                order_id, tenant_id,
+            )
+
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "id": str(r["id"]),
+                        "old_status": r["old_status"],
+                        "new_status": r["new_status"],
+                        "change_date": r["change_date"].isoformat(),
+                        "reason": r["reason"],
+                    }
+                    for r in history_rows
+                ],
+            }
+
+    except (AuthenticationError, NotFoundError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting status history for order {order_id}: {str(e)}")
+        raise APIError(f"Error getting order status history: {str(e)}", status_code=500)
