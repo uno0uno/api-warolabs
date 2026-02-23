@@ -5,9 +5,15 @@ Authenticated endpoints for restaurant operators to manage online orders.
 from fastapi import APIRouter, Request, Query
 from typing import Optional, Literal
 from uuid import UUID
+from pydantic import BaseModel
 from app.services import online_orders_service
 
 router = APIRouter(prefix="/online/orders", tags=["Online Orders (Authenticated)"])
+
+
+class UpdateOrderStatusRequest(BaseModel):
+    new_status: Literal["confirmed", "preparing", "delivered", "completed", "cancelled"]
+    reason: Optional[str] = None
 
 
 @router.get("")
@@ -46,3 +52,29 @@ async def get_online_order_detail(
     **Requires valid session cookie.**
     """
     return await online_orders_service.get_online_order_by_id(request, order_id)
+
+
+@router.patch("/{order_id}/status")
+async def update_online_order_status(
+    request: Request,
+    order_id: UUID,
+    body: UpdateOrderStatusRequest,
+):
+    """
+    Update the status of an online order and record the transition in history.
+
+    Enforces allowed state machine transitions:
+    - pending → confirmed, cancelled
+    - confirmed → preparing, cancelled
+    - preparing → delivered, cancelled
+    - delivered → completed
+    - completed → (terminal)
+    - cancelled → (terminal)
+
+    Returns 400 for invalid transitions, 404 if order not found.
+
+    **Requires valid session cookie.**
+    """
+    return await online_orders_service.update_order_status(
+        request, order_id, body.new_status, body.reason
+    )
