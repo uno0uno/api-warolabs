@@ -12,11 +12,22 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+SORT_COLUMNS = {
+    "order_number": "o.order_number",
+    "order_date": "o.order_date",
+    "scheduled_time": "o.scheduled_time",
+    "total_amount": "o.total_amount",
+    "status": "o.status",
+}
+
+
 async def get_online_orders_list(
     request: Request,
     status: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    sort_field: str = "order_date",
+    sort_direction: str = "desc",
 ) -> dict:
     """
     Return paginated list of online orders scoped to the authenticated tenant.
@@ -54,6 +65,9 @@ async def get_online_orders_list(
             param_count += 1
             offset_param = param_count
 
+            sort_col = SORT_COLUMNS.get(sort_field, "o.order_date")
+            sort_dir = "ASC" if sort_direction.lower() == "asc" else "DESC"
+
             rows = await conn.fetch(f"""
                 SELECT
                     o.id,
@@ -68,7 +82,7 @@ async def get_online_orders_list(
                 FROM orders o
                 JOIN online_carts oc ON oc.id = o.online_cart_id
                 WHERE {where_clause}
-                ORDER BY o.order_date DESC
+                ORDER BY {sort_col} {sort_dir}
                 LIMIT ${limit_param} OFFSET ${offset_param}
             """, *params, limit, offset)
 
