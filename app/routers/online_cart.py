@@ -94,7 +94,7 @@ async def update_delivery_info(
         cart_id=cart_id,
         order_type=delivery_info.order_type,
         delivery_address_id=delivery_info.delivery_address_id,
-        scheduled_time=delivery_info.scheduled_time.isoformat() if delivery_info.scheduled_time else None,
+        scheduled_time=delivery_info.scheduled_time if delivery_info.scheduled_time else None,
         delivery_instructions=delivery_info.delivery_instructions
     )
 

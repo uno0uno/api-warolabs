@@ -9,6 +9,7 @@ from app.database import get_db_connection
 from app.core.exceptions import APIError
 from app.services.email_helpers import send_order_confirmation_email
 import logging
+import datetime as _dt
 from decimal import Decimal
 
 logger = logging.getLogger(__name__)
@@ -316,7 +317,7 @@ async def update_delivery_info(
     cart_id: UUID,
     order_type: str,
     delivery_address_id: Optional[UUID] = None,
-    scheduled_time: Optional[str] = None,
+    scheduled_time: Optional[_dt.datetime] = None,
     delivery_instructions: Optional[str] = None
 ) -> dict:
     """Update delivery information for cart (PUBLIC)"""
@@ -534,9 +535,9 @@ async def checkout_cart(cart_id: UUID) -> dict:
                 order_query = """
                     INSERT INTO orders (
                         tenant_id, customer_id, online_cart_id,
-                        order_date, total_amount, status
+                        order_date, total_amount, status, scheduled_time
                     )
-                    VALUES ($1, $2, $3, NOW(), $4, 'pending')
+                    VALUES ($1, $2, $3, NOW(), $4, 'pending', $5)
                     RETURNING id, order_number
                 """
                 order_row = await conn.fetchrow(
@@ -544,7 +545,8 @@ async def checkout_cart(cart_id: UUID) -> dict:
                     cart['tenant_id'],
                     cart['customer_id'],
                     cart_id,
-                    cart_total
+                    cart_total,
+                    cart['scheduled_time']
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']
