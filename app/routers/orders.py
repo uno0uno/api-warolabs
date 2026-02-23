@@ -14,7 +14,9 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
 async def get_orders_metrics(
     request: Request,
     date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None)
+    date_to: Optional[str] = Query(None),
+    payment_method: Optional[str] = Query(None),
+    status: Optional[str] = Query(None)
 ):
     """
     Get sales metrics: total sales, average ticket, orders count by status
@@ -22,8 +24,13 @@ async def get_orders_metrics(
     Query parameters:
     - date_from: Start date (YYYY-MM-DD)
     - date_to: End date (YYYY-MM-DD)
+    - payment_method: Filter by payment method (cash, card, digital)
+    - status: Filter by status (completed, cancelled, pending)
     """
-    return await orders_service.get_orders_metrics(request, date_from=date_from, date_to=date_to)
+    return await orders_service.get_orders_metrics(
+        request, date_from=date_from, date_to=date_to,
+        payment_method=payment_method, status=status
+    )
 
 
 @router.get("/sales-flow")

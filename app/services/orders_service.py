@@ -359,7 +359,9 @@ async def get_order_items(
 async def get_orders_metrics(
     request: Request,
     date_from: Optional[str] = None,
-    date_to: Optional[str] = None
+    date_to: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    status: Optional[str] = None
 ) -> dict:
     """
     Get sales metrics: total sales, average ticket, orders count by status
@@ -389,6 +391,16 @@ async def get_orders_metrics(
                 param_count += 1
                 where_conditions.append(f"order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')")
                 params.append(parsed_date_to)
+
+            if payment_method:
+                param_count += 1
+                where_conditions.append(f"payment_method = ${param_count}")
+                params.append(payment_method)
+
+            if status:
+                param_count += 1
+                where_conditions.append(f"status = ${param_count}")
+                params.append(status)
 
             where_clause = " AND ".join(where_conditions)
 
