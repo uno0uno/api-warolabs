@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
-from app.core.exceptions import AuthenticationError, APIError
+from app.core.exceptions import AuthenticationError, APIError, NotFoundError, ValidationError
 import logging
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,15 @@ SORT_COLUMNS = {
     "scheduled_time": "o.scheduled_time",
     "total_amount": "o.total_amount",
     "status": "o.status",
+}
+
+ALLOWED_TRANSITIONS: dict[str, list[str]] = {
+    "pending":   ["confirmed", "cancelled"],
+    "confirmed": ["preparing", "cancelled"],
+    "preparing": ["delivered", "cancelled"],
+    "delivered": ["completed"],
+    "completed": [],
+    "cancelled": [],
 }
 
 
@@ -242,3 +251,89 @@ async def get_online_order_by_id(
     except Exception as e:
         logger.error(f"Error getting online order by id {order_id}: {str(e)}")
         raise APIError(f"Error getting online order detail: {str(e)}", status_code=500)
+
+
+async def update_order_status(
+    request: Request,
+    order_id: UUID,
+    new_status: str,
+    reason: Optional[str] = None,
+) -> dict:
+    """
+    Validate the status transition, then atomically:
+      1. UPDATE orders SET status, updated_at
+      2. INSERT into order_status_history
+    Returns the transition payload including change_date from history.
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        # user_id may be None for API key auth — column is nullable
+        changed_by = session.user_id
+
+        async with get_db_connection() as conn:
+            # 1. Fetch current order (tenant-scoped, online orders only)
+            row = await conn.fetchrow(
+                """
+                SELECT id, status
+                FROM orders
+                WHERE id = $1
+                  AND tenant_id = $2
+                  AND online_cart_id IS NOT NULL
+                """,
+                order_id, tenant_id,
+            )
+            if not row:
+                raise NotFoundError(f"Order {order_id} not found")
+
+            old_status = row["status"]
+
+            # 2. Validate state machine transition
+            allowed = ALLOWED_TRANSITIONS.get(old_status, [])
+            if new_status not in allowed:
+                raise ValidationError(
+                    f"Invalid transition from '{old_status}' to '{new_status}'. "
+                    f"Allowed: {allowed if allowed else 'none (terminal state)'}"
+                )
+
+            # 3. UPDATE orders.status + updated_at
+            await conn.execute(
+                """
+                UPDATE orders
+                SET status = $1, updated_at = NOW()
+                WHERE id = $2 AND tenant_id = $3
+                """,
+                new_status, order_id, tenant_id,
+            )
+
+            # 4. INSERT order_status_history, RETURNING change_date
+            history_row = await conn.fetchrow(
+                """
+                INSERT INTO order_status_history
+                    (order_id, old_status, new_status, changed_by, reason)
+                VALUES ($1, $2, $3, $4::uuid, $5)
+                RETURNING change_date
+                """,
+                order_id, old_status, new_status, changed_by, reason,
+            )
+
+            return {
+                "success": True,
+                "data": {
+                    "order_id": str(order_id),
+                    "old_status": old_status,
+                    "new_status": new_status,
+                    "changed_at": history_row["change_date"].isoformat(),
+                    "reason": reason,
+                },
+            }
+
+    except (AuthenticationError, NotFoundError, ValidationError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating status for order {order_id}: {str(e)}")
+        raise APIError(f"Error updating order status: {str(e)}", status_code=500)
