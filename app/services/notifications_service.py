@@ -53,7 +53,7 @@ async def get_unread_notifications(request: Request) -> dict:
                         "id": str(r["id"]),
                         "order_id": str(r["order_id"]) if r["order_id"] else None,
                         "type": r["type"],
-                        "payload": dict(r["payload"]),
+                        "payload": json.loads(r["payload"]) if isinstance(r["payload"], str) else dict(r["payload"]),
                         "created_at": r["created_at"].isoformat(),
                     }
                     for r in rows
