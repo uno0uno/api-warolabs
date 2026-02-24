@@ -14,6 +14,7 @@ router = APIRouter(prefix="/online/orders", tags=["Online Orders (Authenticated)
 class UpdateOrderStatusRequest(BaseModel):
     new_status: Literal["confirmed", "preparing", "delivered", "completed", "cancelled"]
     reason: Optional[str] = None
+    auto_complete: bool = False
 
 
 @router.get("")
@@ -85,5 +86,5 @@ async def update_online_order_status(
     **Requires valid session cookie.**
     """
     return await online_orders_service.update_order_status(
-        request, order_id, body.new_status, body.reason
+        request, order_id, body.new_status, body.reason, body.auto_complete
     )

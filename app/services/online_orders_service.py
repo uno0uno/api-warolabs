@@ -258,6 +258,7 @@ async def update_order_status(
     order_id: UUID,
     new_status: str,
     reason: Optional[str] = None,
+    auto_complete: bool = False,
 ) -> dict:
     """
     Validate the status transition, then atomically:
@@ -320,6 +321,55 @@ async def update_order_status(
                 """,
                 order_id, old_status, new_status, changed_by, reason,
             )
+
+            # 5. Auto-complete: if requested and this was a pending → confirmed transition,
+            #    immediately execute a second confirmed → completed transition in the same conn.
+            if auto_complete and old_status == "pending" and new_status == "confirmed":
+                # 5a. UPDATE orders to completed
+                await conn.execute(
+                    """
+                    UPDATE orders
+                    SET status = $1, updated_at = NOW()
+                    WHERE id = $2 AND tenant_id = $3
+                    """,
+                    "completed", order_id, tenant_id,
+                )
+
+                # 5b. INSERT second history row
+                auto_history_row = await conn.fetchrow(
+                    """
+                    INSERT INTO order_status_history
+                        (order_id, old_status, new_status, changed_by, reason)
+                    VALUES ($1, $2, $3, $4::uuid, $5)
+                    RETURNING change_date
+                    """,
+                    order_id, "confirmed", "completed", changed_by, None,
+                )
+
+                # Override the return payload to reflect the final completed state
+                return {
+                    "success": True,
+                    "data": {
+                        "order_id": str(order_id),
+                        "old_status": old_status,           # "pending"
+                        "new_status": "completed",           # final state
+                        "changed_at": auto_history_row["change_date"].isoformat(),
+                        "reason": reason,
+                        "auto_completed": True,
+                        "transitions": [
+                            {
+                                "from": old_status,
+                                "to": "confirmed",
+                                "changed_at": history_row["change_date"].isoformat(),
+                            },
+                            {
+                                "from": "confirmed",
+                                "to": "completed",
+                                "changed_at": auto_history_row["change_date"].isoformat(),
+                            },
+                        ],
+                    },
+                }
 
             return {
                 "success": True,
