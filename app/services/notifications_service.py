@@ -23,6 +23,9 @@ async def create_order_notification(conn, tenant_id, order_id, payload: dict):
            VALUES ($1, $2, 'new_order', $3::jsonb)""",
         tenant_id, order_id, json.dumps(payload)
     )
+    # Real-time push via pg_notify (same conn = same transaction, fires on commit)
+    channel = "tenant_" + str(tenant_id).replace("-", "")
+    await conn.execute("SELECT pg_notify($1, $2)", channel, json.dumps(payload))
 
 
 async def get_unread_notifications(request: Request) -> dict:
