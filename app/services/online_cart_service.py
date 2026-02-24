@@ -603,29 +603,32 @@ async def checkout_cart(cart_id: UUID) -> dict:
                     if addr_row:
                         delivery_address = dict(addr_row)
 
-                # 10. Notify operators of new order (atomic — same transaction)
-                from app.services import notifications_service as _notif_svc  # local import avoids circular dep
-                customer_name = None
-                if cart.get('customer_id'):
-                    name_row = await conn.fetchrow(
-                        "SELECT first_name, last_name FROM profile WHERE id = $1",
-                        cart['customer_id'],
-                    )
-                    if name_row:
-                        customer_name = f"{name_row['first_name'] or ''} {name_row['last_name'] or ''}".strip() or None
+                # 10. Notify operators of new order (best-effort — never fail the checkout)
+                try:
+                    from app.services import notifications_service as _notif_svc  # local import avoids circular dep
+                    customer_name = None
+                    if cart.get('customer_id'):
+                        name_row = await conn.fetchrow(
+                            "SELECT name FROM profile WHERE id = $1",
+                            cart['customer_id'],
+                        )
+                        if name_row:
+                            customer_name = name_row['name'] or None
 
-                await _notif_svc.create_order_notification(
-                    conn=conn,
-                    tenant_id=cart['tenant_id'],
-                    order_id=order_id,
-                    payload={
-                        "order_id": str(order_id),
-                        "order_number": int(order_number),
-                        "customer_name": customer_name or cart.get('verified_email') or 'Cliente',
-                        "total_amount": float(cart_total),
-                        "order_type": cart.get('order_type', 'delivery'),
-                    },
-                )
+                    await _notif_svc.create_order_notification(
+                        conn=conn,
+                        tenant_id=cart['tenant_id'],
+                        order_id=order_id,
+                        payload={
+                            "order_id": str(order_id),
+                            "order_number": int(order_number),
+                            "customer_name": customer_name or cart.get('verified_email') or 'Cliente',
+                            "total_amount": float(cart_total),
+                            "order_type": cart.get('order_type', 'delivery'),
+                        },
+                    )
+                except Exception as notif_err:
+                    logger.warning(f"Notification failed for order {order_id}: {notif_err}")
 
                 order_result = {
                     "success": True,
