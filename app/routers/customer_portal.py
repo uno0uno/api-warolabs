@@ -8,7 +8,7 @@ from typing import Optional
 from uuid import UUID
 from app.dependencies.customer_auth import get_current_customer
 from app.core.security import clear_customer_cookie
-from app.services.customer_orders_service import get_customer_order_detail, get_customer_orders_list
+from app.services.customer_orders_service import cancel_customer_order, get_customer_order_detail, get_customer_orders_list
 
 router = APIRouter(prefix="/api/customer", tags=["Customer Portal"])
 
@@ -63,6 +63,26 @@ async def get_order_detail(
     Returns 401 if no valid session cookie.
     """
     return await get_customer_order_detail(
+        order_id=order_id,
+        customer_id=current_customer["customer_id"],
+    )
+
+
+@router.post("/orders/{order_id}/cancel")
+async def cancel_order(
+    order_id: UUID,
+    current_customer: dict = Depends(get_current_customer),
+):
+    """
+    Cancel an order belonging to the authenticated customer.
+
+    Requires: waro_customer_session cookie
+
+    Returns 404 if order doesn't exist or doesn't belong to this customer.
+    Returns 409 if order is not in a cancellable status (pending or confirmed).
+    Returns 401 if no valid session cookie.
+    """
+    return await cancel_customer_order(
         order_id=order_id,
         customer_id=current_customer["customer_id"],
     )

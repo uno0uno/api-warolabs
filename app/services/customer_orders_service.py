@@ -225,3 +225,65 @@ async def get_customer_order_detail(order_id: UUID, customer_id: str) -> dict:
     except Exception as e:
         logger.error(f"Error getting customer order detail {order_id}: {str(e)}")
         raise APIError(f"Error getting order detail: {str(e)}", status_code=500)
+
+
+CANCELLABLE_STATUSES = {"pending", "confirmed"}
+
+
+async def cancel_customer_order(order_id: UUID, customer_id: str) -> dict:
+    """
+    Cancel an order belonging to the authenticated customer.
+
+    Ownership check: o.customer_id = $customer_id_from_jwt
+    Returns 404 if order doesn't exist OR doesn't belong to this customer.
+    Returns 409 if order status is not cancellable (not pending or confirmed).
+    """
+    try:
+        async with get_db_connection() as conn:
+            # 1. Fetch order — customer-scoped, online orders only
+            row = await conn.fetchrow("""
+                SELECT id, status
+                FROM orders
+                WHERE id = $1
+                  AND customer_id = $2
+                  AND online_cart_id IS NOT NULL
+            """, order_id, customer_id)
+
+            if not row:
+                raise APIError("Order not found", status_code=404)
+
+            current_status = row["status"]
+
+            # 2. Validate cancellable status
+            if current_status not in CANCELLABLE_STATUSES:
+                raise APIError(
+                    f"Order cannot be cancelled (current status: '{current_status}'). "
+                    f"Only orders in {sorted(CANCELLABLE_STATUSES)} can be cancelled.",
+                    status_code=409,
+                )
+
+            # 3. UPDATE orders.status + updated_at
+            await conn.execute("""
+                UPDATE orders
+                SET status = 'cancelled', updated_at = NOW()
+                WHERE id = $1
+            """, order_id)
+
+            # 4. INSERT order_status_history
+            await conn.execute("""
+                INSERT INTO order_status_history
+                    (order_id, old_status, new_status, changed_by, reason)
+                VALUES ($1, $2, 'cancelled', $3::uuid, 'Cancelled by customer')
+            """, order_id, current_status, customer_id)
+
+            return {
+                "success": True,
+                "order_id": str(order_id),
+                "status": "cancelled",
+            }
+
+    except APIError:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling order {order_id} for customer {customer_id}: {str(e)}")
+        raise APIError(f"Error cancelling order: {str(e)}", status_code=500)
