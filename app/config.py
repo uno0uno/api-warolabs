@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     aws_secret_access_key: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_AWS_SECRET_ACCESS_KEY')
     aws_region: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_AWS_REGION')
     email_from: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_EMAIL_FROM')
+    frontend_url: str = Field(default="https://warocol.com", alias='FRONTEND_URL')
 
     # Cloudflare R2 - S3-compatible storage
     r2_access_key_id: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_R2_ACCESS_KEY_ID')
