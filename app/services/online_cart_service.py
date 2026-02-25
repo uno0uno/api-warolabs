@@ -458,6 +458,76 @@ async def associate_customer_to_cart(cart_id: UUID, customer_id: UUID) -> dict:
         raise APIError(f"Error associating customer: {str(e)}", status_code=500)
 
 
+async def verify_cart_with_session(cart_id: UUID, customer_id: UUID, email: str) -> dict:
+    """
+    Link a cart to an already-authenticated customer session (PUBLIC endpoint, JWT-gated).
+
+    Called when the customer has a valid waro_customer_session cookie so the OTP
+    flow was skipped. Sets is_verified = true and customer_id on the cart, and
+    generates a pickup_pin for pickup orders (mirrors verify_otp_code logic).
+    """
+    try:
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                cart_query = """
+                    SELECT id, order_type, customer_id, pickup_pin
+                    FROM online_carts
+                    WHERE id = $1 AND status = 'active'
+                """
+                cart = await conn.fetchrow(cart_query, cart_id)
+
+                if not cart:
+                    raise HTTPException(status_code=404, detail="Carrito no encontrado o ya procesado")
+
+                # Guard: if already linked to a different customer, refuse
+                if cart['customer_id'] and cart['customer_id'] != customer_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="El carrito ya está asociado a otro cliente"
+                    )
+
+                # Update cart with verified session data
+                await conn.execute(
+                    """
+                    UPDATE online_carts
+                    SET is_verified = true,
+                        verified_email = $1,
+                        customer_id = $2,
+                        updated_at = now()
+                    WHERE id = $3
+                    """,
+                    email,
+                    customer_id,
+                    cart_id,
+                )
+
+                # Generate pickup_pin for pickup orders if not already set
+                pickup_pin = cart['pickup_pin']
+                if cart['order_type'] == 'pickup' and not pickup_pin:
+                    from app.services.otp_service import generate_pickup_pin
+                    pickup_pin = generate_pickup_pin()
+                    await conn.execute(
+                        "UPDATE online_carts SET pickup_pin = $1, pin_generated_at = now() WHERE id = $2",
+                        pickup_pin,
+                        cart_id,
+                    )
+
+                logger.info(f"Cart {cart_id} verified via session for customer {customer_id}")
+
+                return {
+                    "success": True,
+                    "customer_id": str(customer_id),
+                    "is_verified": True,
+                    "pickup_pin": pickup_pin,
+                }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error verifying cart with session for cart {cart_id}: {str(e)}")
+        raise APIError(f"Error al verificar el carrito: {str(e)}", status_code=500)
+
+
 async def checkout_cart(cart_id: UUID) -> dict:
     """
     Convert a verified online cart into a confirmed order (PUBLIC).

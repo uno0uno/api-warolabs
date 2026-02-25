@@ -2,11 +2,12 @@
 Online Cart Router
 PUBLIC endpoints for online ordering cart management (NO authentication required)
 """
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, Depends, Query
 from typing import List, Optional
 from uuid import UUID
 from pydantic import BaseModel, Field
 from app.services import online_cart_service
+from app.dependencies.customer_auth import get_current_customer
 from app.models.online_cart import (
     OnlineCartItemCreate,
     DeliveryInfoUpdate,
@@ -165,6 +166,29 @@ async def associate_customer(
     return await online_cart_service.associate_customer_to_cart(
         cart_id=cart_id,
         customer_id=customer_id
+    )
+
+
+@router.post("/{cart_id}/verify-with-session")
+async def verify_cart_with_session(
+    cart_id: UUID,
+    current_customer: dict = Depends(get_current_customer),
+):
+    """
+    Verify a cart using an existing waro_customer_session JWT cookie (no OTP required).
+
+    Used when a returning customer auto-advances past the identity step.
+    Sets is_verified = true and customer_id on the cart.
+    Generates pickup_pin for pickup orders.
+
+    Requires: waro_customer_session HttpOnly cookie
+    Returns 404 if cart not found or not active.
+    Returns 409 if cart is already linked to a different customer.
+    """
+    return await online_cart_service.verify_cart_with_session(
+        cart_id=cart_id,
+        customer_id=UUID(current_customer["customer_id"]),
+        email=current_customer["email"],
     )
 
 
