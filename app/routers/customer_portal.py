@@ -10,7 +10,7 @@ from app.dependencies.customer_auth import get_current_customer
 from app.core.security import clear_customer_cookie
 from app.services.customer_orders_service import cancel_customer_order, get_customer_order_detail, get_customer_orders_list
 
-router = APIRouter(prefix="/api/customer", tags=["Customer Portal"])
+router = APIRouter(prefix="/customer", tags=["Customer Portal"])
 
 
 @router.get("/me")

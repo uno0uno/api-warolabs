@@ -60,7 +60,7 @@ def custom_openapi():
     # /online/otp is public for OTP verification
     # /online/customer is public for customer validation
     # /online/addresses is public for address management
-    public_prefixes = ["/blog", "/v1", "/public/restaurant", "/online/cart", "/online/otp", "/online/customer", "/online/addresses", "/api/customer"]
+    public_prefixes = ["/blog", "/v1", "/public/restaurant", "/online/cart", "/online/otp", "/online/customer", "/online/addresses"]
 
     for path in openapi_schema["paths"]:
         # Skip public endpoints
