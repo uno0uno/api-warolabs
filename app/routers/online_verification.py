@@ -2,11 +2,12 @@
 Online Verification Router
 PUBLIC endpoints for OTP verification and customer validation (NO authentication required)
 """
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, Response
 from typing import Optional
 from uuid import UUID
 from pydantic import BaseModel, EmailStr
 from app.services import otp_service
+from app.core.security import create_customer_jwt, set_customer_cookie
 
 router = APIRouter(prefix="/online/otp", tags=["Online Verification (Public)"])
 
@@ -55,7 +56,7 @@ async def send_otp(request: SendOTPRequest):
 
 
 @router.post("/verify")
-async def verify_otp(request: VerifyOTPRequest):
+async def verify_otp(request: VerifyOTPRequest, response: Response):
     """
     Verify OTP code (PUBLIC - no auth).
 
@@ -64,17 +65,26 @@ async def verify_otp(request: VerifyOTPRequest):
     - otp_code: 6-digit verification code
 
     Returns customer_id and optional pickup_pin if order type is pickup.
+    Also sets a waro_customer_session HttpOnly cookie (7 days) for /mis-pedidos.
 
     Maximum 3 attempts per OTP code.
     Codes expire after 5 minutes.
 
     **Public endpoint - no authentication required**
     """
-    return await otp_service.verify_otp_code(
+    result = await otp_service.verify_otp_code(
         email=request.email,
         cart_id=request.cart_id,
         otp_code=request.otp_code
     )
+    # Set long-lived customer session cookie for /mis-pedidos
+    if result.get("success") and result.get("customer_id"):
+        jwt_token = create_customer_jwt(
+            customer_id=result["customer_id"],
+            email=request.email,
+        )
+        set_customer_cookie(response, jwt_token)
+    return result
 
 
 @router.post("/resend")

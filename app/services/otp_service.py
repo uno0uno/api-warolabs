@@ -273,10 +273,10 @@ async def get_or_create_customer(conn, email: str) -> UUID:
     if customer_row:
         return customer_row['id']
 
-    # Create new customer
+    # Create new customer (phone_number is NOT NULL in schema, use empty string as placeholder)
     create_customer_query = """
-        INSERT INTO profile (email, role)
-        VALUES ($1, 'customer')
+        INSERT INTO profile (email, phone_number)
+        VALUES ($1, '')
         RETURNING id
     """
     new_customer = await conn.fetchrow(create_customer_query, email)

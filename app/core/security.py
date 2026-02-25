@@ -154,6 +154,39 @@ async def clear_session_cookie(response: Response, session_token: str = None):
     if cookie_domain:
         response.delete_cookie("session-token", path="/")
 
+CUSTOMER_COOKIE_NAME = "waro_customer_session"
+CUSTOMER_SESSION_DAYS = 7
+
+
+def create_customer_jwt(customer_id: str, email: str) -> str:
+    """Create a signed JWT for a customer session (stateless, no DB row)"""
+    payload = {
+        "customer_id": customer_id,
+        "email": email,
+        "type": "customer",
+        "exp": datetime.utcnow() + timedelta(days=CUSTOMER_SESSION_DAYS),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+
+
+def set_customer_cookie(response: Response, jwt_token: str) -> None:
+    """Set the waro_customer_session HttpOnly cookie"""
+    response.set_cookie(
+        key=CUSTOMER_COOKIE_NAME,
+        value=jwt_token,
+        httponly=True,
+        secure=not settings.is_development,
+        samesite="lax",
+        max_age=CUSTOMER_SESSION_DAYS * 24 * 60 * 60,
+        path="/",
+    )
+
+
+def clear_customer_cookie(response: Response) -> None:
+    """Delete the waro_customer_session cookie"""
+    response.delete_cookie(key=CUSTOMER_COOKIE_NAME, path="/")
+
+
 def validate_jwt_token(token: str) -> dict:
     """Validate JWT using same secret as warolabs.com"""
     try:
