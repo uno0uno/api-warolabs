@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from app.database import get_db_connection
 from app.services.aws_ses_service import AWSSESService
 from app.core.exceptions import APIError
+from app.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
@@ -105,7 +106,7 @@ WARO Colombia
             """.strip()
 
             email_sent = await ses_service.send_email(
-                from_email="hola@warocol.com",
+                from_email=settings.email_from or "hola@warocol.com",
                 from_name="WARO Colombia",
                 to_emails=[email],
                 subject=subject,
