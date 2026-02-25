@@ -4,7 +4,7 @@ Handles email-based OTP verification for online ordering (NO authentication requ
 """
 import random
 import string
-from typing import Optional, Tuple
+from typing import Optional
 from uuid import UUID
 from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
@@ -29,7 +29,7 @@ def generate_otp_code() -> str:
 
 async def send_otp_email(
     email: str,
-    cart_id: UUID
+    cart_id: Optional[UUID] = None
 ) -> dict:
     """
     Send OTP code via email for cart verification (PUBLIC)
@@ -46,7 +46,7 @@ async def send_otp_email(
                 SELECT id, otp_code, expires_at, created_at
                 FROM otp_verifications
                 WHERE email = $1
-                AND cart_id = $2
+                AND cart_id IS NOT DISTINCT FROM $2
                 AND is_verified = false
                 AND expires_at > now()
                 ORDER BY created_at DESC
@@ -133,7 +133,7 @@ WARO Colombia
 
 async def verify_otp_code(
     email: str,
-    cart_id: UUID,
+    cart_id: Optional[UUID],
     otp_code: str
 ) -> dict:
     """
@@ -153,7 +153,7 @@ async def verify_otp_code(
                     SELECT id, otp_code, is_verified, attempts, max_attempts, expires_at
                     FROM otp_verifications
                     WHERE email = $1
-                    AND cart_id = $2
+                    AND cart_id IS NOT DISTINCT FROM $2
                     ORDER BY created_at DESC
                     LIMIT 1
                 """
@@ -215,30 +215,31 @@ async def verify_otp_code(
                 # Get or create customer
                 customer_id = await get_or_create_customer(conn, email)
 
-                # Update cart with verification
-                cart_update_query = """
-                    UPDATE online_carts
-                    SET is_verified = true,
-                        verified_email = $1,
-                        customer_id = $2,
-                        updated_at = now()
-                    WHERE id = $3
-                    RETURNING id, order_type
-                """
-                cart_row = await conn.fetchrow(cart_update_query, email, customer_id, cart_id)
-
-                if not cart_row:
-                    raise HTTPException(status_code=404, detail="Carrito no encontrado")
-
-                # Generate pickup PIN if order_type = pickup
                 pickup_pin = None
-                if cart_row['order_type'] == 'pickup':
-                    pickup_pin = generate_pickup_pin()
-                    await conn.execute(
-                        "UPDATE online_carts SET pickup_pin = $1, pin_generated_at = now() WHERE id = $2",
-                        pickup_pin,
-                        cart_id
-                    )
+                if cart_id is not None:
+                    # Update cart with verification
+                    cart_update_query = """
+                        UPDATE online_carts
+                        SET is_verified = true,
+                            verified_email = $1,
+                            customer_id = $2,
+                            updated_at = now()
+                        WHERE id = $3
+                        RETURNING id, order_type
+                    """
+                    cart_row = await conn.fetchrow(cart_update_query, email, customer_id, cart_id)
+
+                    if not cart_row:
+                        raise HTTPException(status_code=404, detail="Carrito no encontrado")
+
+                    # Generate pickup PIN if order_type = pickup
+                    if cart_row['order_type'] == 'pickup':
+                        pickup_pin = generate_pickup_pin()
+                        await conn.execute(
+                            "UPDATE online_carts SET pickup_pin = $1, pin_generated_at = now() WHERE id = $2",
+                            pickup_pin,
+                            cart_id
+                        )
 
                 logger.info(f"OTP verified for email {email}, cart {cart_id}")
 

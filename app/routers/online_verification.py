@@ -2,7 +2,7 @@
 Online Verification Router
 PUBLIC endpoints for OTP verification and customer validation (NO authentication required)
 """
-from fastapi import APIRouter, Body, Response
+from fastapi import APIRouter, Response
 from typing import Optional
 from uuid import UUID
 from pydantic import BaseModel, EmailStr
@@ -15,20 +15,20 @@ router = APIRouter(prefix="/online/otp", tags=["Online Verification (Public)"])
 class SendOTPRequest(BaseModel):
     """Send OTP to email"""
     email: EmailStr
-    cart_id: UUID
+    cart_id: Optional[UUID] = None
 
 
 class VerifyOTPRequest(BaseModel):
     """Verify OTP code"""
     email: EmailStr
-    cart_id: UUID
+    cart_id: Optional[UUID] = None
     otp_code: str
 
 
 class ResendOTPRequest(BaseModel):
     """Resend OTP"""
     email: EmailStr
-    cart_id: UUID
+    cart_id: Optional[UUID] = None
 
 
 class ValidateCustomerRequest(BaseModel):
