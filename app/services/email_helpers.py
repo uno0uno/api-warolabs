@@ -138,7 +138,7 @@ Tecnología colombiana para el mundo.
 
         ses_service = AWSSESService()
         success = await ses_service.send_email(
-            from_email="hola@warocol.com",
+            from_email=settings.email_from or "hola@warocol.com",
             from_name="Saifer 101 de Waro Colombia",
             to_emails=[supplier_email],
             subject=f"Nueva Solicitud de Cotización - {purchase_number}",
@@ -284,7 +284,7 @@ Tecnología colombiana para el mundo.
 
         ses_service = AWSSESService()
         success = await ses_service.send_email(
-            from_email="hola@warocol.com",
+            from_email=settings.email_from or "hola@warocol.com",
             from_name="Saifer 101 de Waro Colombia",
             to_emails=[supplier_email],
             subject=f"{purchase_number} - {info['title']}",
@@ -343,7 +343,7 @@ async def send_order_confirmation_email(
 
         ses_service = AWSSESService()
         success = await ses_service.send_email(
-            from_email="hola@warocol.com",
+            from_email=settings.email_from or "hola@warocol.com",
             from_name="WARO Colombia",
             to_emails=[customer_email],
             subject=subject,
