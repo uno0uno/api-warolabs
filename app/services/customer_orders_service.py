@@ -3,12 +3,78 @@ Customer Orders Service
 Customer-scoped order queries for /api/customer/orders/* endpoints.
 Authentication is handled by the get_current_customer dependency.
 """
+from typing import Optional
 from uuid import UUID
 from app.database import get_db_connection
 from app.core.exceptions import APIError
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+async def get_customer_orders_list(
+    customer_id: str,
+    status_filter: Optional[str] = None,
+) -> dict:
+    """
+    Return all orders for the authenticated customer, sorted newest-first.
+
+    Args:
+        customer_id: UUID string from the waro_customer_session JWT
+        status_filter: Optional comma-separated statuses e.g. "pending,confirmed"
+
+    Returns empty data list (never 404) when customer has no orders.
+    """
+    try:
+        async with get_db_connection() as conn:
+            params: list = [customer_id]
+            where_extra = ""
+
+            if status_filter:
+                statuses = [s.strip() for s in status_filter.split(",") if s.strip()]
+                if statuses:
+                    params.append(statuses)
+                    where_extra = f" AND o.status = ANY(${len(params)}::text[])"
+
+            rows = await conn.fetch(f"""
+                SELECT
+                    o.id,
+                    o.order_number,
+                    o.order_date,
+                    o.total_amount,
+                    o.status,
+                    oc.order_type,
+                    t.name  AS restaurant_name,
+                    t.slug  AS tenant_slug,
+                    (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) AS item_count
+                FROM orders o
+                JOIN online_carts oc ON oc.id = o.online_cart_id
+                JOIN tenants t ON t.id = o.tenant_id
+                WHERE o.customer_id = $1
+                  AND o.online_cart_id IS NOT NULL{where_extra}
+                ORDER BY o.order_date DESC
+            """, *params)
+
+            return {
+                "data": [
+                    {
+                        "order_id": str(r['id']),
+                        "order_number": int(r['order_number']),
+                        "order_type": r['order_type'],
+                        "status": r['status'],
+                        "restaurant_name": r['restaurant_name'],
+                        "tenant_slug": r['tenant_slug'],
+                        "total_amount": float(r['total_amount']),
+                        "created_at": r['order_date'].isoformat(),
+                        "item_count": int(r['item_count']),
+                    }
+                    for r in rows
+                ]
+            }
+
+    except Exception as e:
+        logger.error(f"Error getting orders list for customer {customer_id}: {str(e)}")
+        raise APIError(f"Error getting orders list: {str(e)}", status_code=500)
 
 
 async def get_customer_order_detail(order_id: UUID, customer_id: str) -> dict:

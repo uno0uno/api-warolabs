@@ -3,11 +3,12 @@ Customer Portal Router
 Authenticated endpoints for customers to manage their own data.
 Authentication: waro_customer_session JWT cookie (set by POST /online/otp/verify)
 """
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Response, Query
+from typing import Optional
 from uuid import UUID
 from app.dependencies.customer_auth import get_current_customer
 from app.core.security import clear_customer_cookie
-from app.services.customer_orders_service import get_customer_order_detail
+from app.services.customer_orders_service import get_customer_order_detail, get_customer_orders_list
 
 router = APIRouter(prefix="/api/customer", tags=["Customer Portal"])
 
@@ -27,6 +28,25 @@ async def get_customer_me(current_customer: dict = Depends(get_current_customer)
         "customer_id": current_customer["customer_id"],
         "email": current_customer["email"],
     }
+
+
+@router.get("/orders")
+async def list_orders(
+    current_customer: dict = Depends(get_current_customer),
+    status: Optional[str] = Query(None, description="Comma-separated statuses: pending,confirmed,preparing,delivered,completed,cancelled"),
+):
+    """
+    List all orders for the authenticated customer, sorted newest-first.
+
+    Requires: waro_customer_session cookie
+
+    Optional query param:
+    - status: comma-separated filter e.g. ?status=pending,confirmed
+    """
+    return await get_customer_orders_list(
+        customer_id=current_customer["customer_id"],
+        status_filter=status,
+    )
 
 
 @router.get("/orders/{order_id}")
