@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -143,6 +143,7 @@ app.include_router(customers.router, prefix="/customers", tags=["customers"])
 app.include_router(pos_cart.router)
 app.include_router(online_cart.router)  # Public online ordering cart
 app.include_router(online_orders.router)  # Authenticated online orders management
+app.include_router(notifications.router)  # Authenticated notifications management
 app.include_router(online_verification.router)  # Public OTP verification
 app.include_router(online_verification.customer_router)  # Public customer validation
 app.include_router(address_profile.router)  # Public address management
