@@ -208,7 +208,7 @@ async def get_customer_order_detail(order_id: UUID, customer_id: str) -> dict:
                     "subtotal": subtotal,
                     "delivery_fee": delivery_fee,
                     "total_amount": total_amount,
-                    "can_cancel": row['status'] == 'pending',
+                    "can_cancel": row['status'] in CANCELLABLE_STATUSES,
                     "status_history": [
                         {
                             "status": h['new_status'],
