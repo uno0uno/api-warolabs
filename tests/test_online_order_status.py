@@ -364,3 +364,130 @@ class TestUpdateOrderStatusStateMachine:
                 f"/online/orders/{order_id}/status",
                 json={"new_status": "cancelled", "reason": "test rollback"},
             )
+
+
+class TestAutoComplete:
+    """Tests for auto_complete flag on pending → confirmed transition."""
+
+    @pytest.mark.asyncio
+    async def test_auto_complete_pending_to_completed(self, auth_client: AsyncClient):
+        """
+        auto_complete=True on pending → confirmed should leave the order as
+        completed and produce two history rows.
+        """
+        from app.database import get_db_connection
+
+        async with get_db_connection(use_transaction=False) as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id FROM orders
+                WHERE tenant_id = $1
+                  AND status = 'pending'
+                  AND online_cart_id IS NOT NULL
+                LIMIT 1
+                """,
+                TENANT_ID,
+            )
+
+        if not row:
+            pytest.skip("No pending online orders found in test DB")
+
+        order_id = str(row["id"])
+
+        with patch(
+            "app.services.online_orders_service.require_valid_session",
+            return_value=_mock_session_context(),
+        ):
+            response = await auth_client.patch(
+                f"/online/orders/{order_id}/status",
+                json={"new_status": "confirmed", "auto_complete": True},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["data"]["new_status"] == "completed"
+        assert data["data"]["old_status"] == "pending"
+        assert data["data"]["auto_completed"] is True
+        assert len(data["data"]["transitions"]) == 2
+        assert data["data"]["transitions"][0]["from"] == "pending"
+        assert data["data"]["transitions"][0]["to"] == "confirmed"
+        assert data["data"]["transitions"][1]["from"] == "confirmed"
+        assert data["data"]["transitions"][1]["to"] == "completed"
+
+        # Verify DB state
+        from app.database import get_db_connection
+        async with get_db_connection(use_transaction=False) as conn:
+            db_row = await conn.fetchrow(
+                "SELECT status FROM orders WHERE id = $1", row["id"]
+            )
+            history_rows = await conn.fetch(
+                """
+                SELECT old_status, new_status FROM order_status_history
+                WHERE order_id = $1
+                ORDER BY change_date ASC
+                """,
+                row["id"],
+            )
+
+        assert db_row["status"] == "completed"
+        transitions = [(r["old_status"], r["new_status"]) for r in history_rows]
+        assert ("pending", "confirmed") in transitions
+        assert ("confirmed", "completed") in transitions
+
+        # Rollback: force back to pending for other tests
+        async with get_db_connection() as conn:
+            await conn.execute(
+                "UPDATE orders SET status = 'pending', updated_at = NOW() WHERE id = $1",
+                row["id"],
+            )
+
+    @pytest.mark.asyncio
+    async def test_auto_complete_false_leaves_confirmed(self, auth_client: AsyncClient):
+        """
+        auto_complete=False (default) on pending → confirmed should leave the
+        order as confirmed — unchanged from existing behavior.
+        """
+        from app.database import get_db_connection
+
+        async with get_db_connection(use_transaction=False) as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id FROM orders
+                WHERE tenant_id = $1
+                  AND status = 'pending'
+                  AND online_cart_id IS NOT NULL
+                LIMIT 1
+                """,
+                TENANT_ID,
+            )
+
+        if not row:
+            pytest.skip("No pending online orders found in test DB")
+
+        order_id = str(row["id"])
+
+        with patch(
+            "app.services.online_orders_service.require_valid_session",
+            return_value=_mock_session_context(),
+        ):
+            response = await auth_client.patch(
+                f"/online/orders/{order_id}/status",
+                json={"new_status": "confirmed", "auto_complete": False},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["data"]["new_status"] == "confirmed"
+        assert data["data"].get("auto_completed") is not True
+
+        # Rollback: confirmed → cancelled to leave DB in a clean state
+        with patch(
+            "app.services.online_orders_service.require_valid_session",
+            return_value=_mock_session_context(),
+        ):
+            await auth_client.patch(
+                f"/online/orders/{order_id}/status",
+                json={"new_status": "cancelled", "reason": "test rollback"},
+            )
