@@ -51,6 +51,7 @@ def get_order_confirmation_text(
     scheduled_time: Optional[datetime],
     delivery_instructions: Optional[str],
     pickup_pin: Optional[str],
+    order_id: Optional[str] = None,
 ) -> str:
     """
     Build the plain text body for an order confirmation email.
@@ -123,6 +124,10 @@ def get_order_confirmation_text(
     if delivery_instructions:
         instructions_block = f"\nInstrucciones: {delivery_instructions}\n"
 
+    tracking_block = ""
+    if order_id:
+        tracking_block = f"\nVER TU PEDIDO\n-------------\nPuedes seguir el estado de tu pedido en:\nhttps://warocol.com/mis-pedidos/{order_id}\n"
+
     return f"""¡Hola!
 
 Tu pedido ha sido recibido y está siendo revisado por el restaurante.
@@ -144,7 +149,7 @@ TOTAL
 Pago: Efectivo contra entrega
 
 El restaurante está revisando tu pedido. Te notificaremos cuando esté confirmado.
-
+{tracking_block}
 Gracias,
 WARO Colombia
 hola@warocol.com

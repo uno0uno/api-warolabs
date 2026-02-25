@@ -315,6 +315,7 @@ async def send_order_confirmation_email(
     scheduled_time: Optional[datetime] = None,
     delivery_instructions: Optional[str] = None,
     pickup_pin: Optional[str] = None,
+    order_id: Optional[str] = None,
 ) -> bool:
     """
     Send a transactional order confirmation email to the customer.
@@ -336,6 +337,7 @@ async def send_order_confirmation_email(
             scheduled_time=scheduled_time,
             delivery_instructions=delivery_instructions,
             pickup_pin=pickup_pin,
+            order_id=order_id,
         )
         subject = get_order_confirmation_subject(order_number)
 

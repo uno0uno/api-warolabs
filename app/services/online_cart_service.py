@@ -666,6 +666,7 @@ async def checkout_cart(cart_id: UUID) -> dict:
                     scheduled_time=scheduled_time,
                     delivery_instructions=cart.get('delivery_instructions'),
                     pickup_pin=cart.get('pickup_pin'),
+                    order_id=str(order_id),
                 )
             except Exception as email_err:
                 logger.error(f"Failed to send order confirmation email for order #{order_number}: {email_err}")
