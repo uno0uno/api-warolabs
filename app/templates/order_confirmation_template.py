@@ -6,6 +6,7 @@ Plain text format — matches the style of other transactional emails in the sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional
+from app.config import settings
 
 BOGOTA_TZ = ZoneInfo("America/Bogota")
 
@@ -126,7 +127,7 @@ def get_order_confirmation_text(
 
     tracking_block = ""
     if order_id:
-        tracking_block = f"\nVER TU PEDIDO\n-------------\nPuedes seguir el estado de tu pedido en:\nhttps://warocol.com/mis-pedidos/{order_id}\n"
+        tracking_block = f"\nVER TU PEDIDO\n-------------\nPuedes seguir el estado de tu pedido en:\n{settings.frontend_url}/mis-pedidos/{order_id}\n"
 
     return f"""¡Hola!
 
@@ -152,7 +153,7 @@ El restaurante está revisando tu pedido. Te notificaremos cuando esté confirma
 {tracking_block}
 Gracias,
 WARO Colombia
-hola@warocol.com
+{settings.email_from or "hola@warocol.com"}
 """.strip()
 
 
