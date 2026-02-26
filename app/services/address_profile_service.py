@@ -39,6 +39,17 @@ async def create_address(
     try:
         async with get_db_connection() as conn:
             async with conn.transaction():
+                # Enforce 5-address limit per customer
+                count_row = await conn.fetchrow(
+                    "SELECT COUNT(*) AS total FROM addresses_profile WHERE user_id = $1",
+                    customer_id
+                )
+                if count_row['total'] >= 5:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Has alcanzado el límite de 5 direcciones. Elimina una antes de agregar otra."
+                    )
+
                 # If this is set as default, unset all other defaults for this customer
                 if is_default:
                     await conn.execute(
@@ -77,6 +88,8 @@ async def create_address(
                 logger.info(f"Created address {address_row['id']} for customer {customer_id}")
                 return dict(address_row)
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating address: {str(e)}")
         raise APIError(f"Error al crear dirección: {str(e)}", status_code=500)
