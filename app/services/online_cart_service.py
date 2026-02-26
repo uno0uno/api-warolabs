@@ -517,6 +517,7 @@ async def verify_cart_with_session(cart_id: UUID, customer_id: UUID, email: str)
                 return {
                     "success": True,
                     "customer_id": str(customer_id),
+                    "email": email,
                     "is_verified": True,
                     "pickup_pin": pickup_pin,
                 }
