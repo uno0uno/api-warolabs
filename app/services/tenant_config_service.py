@@ -2,6 +2,7 @@
 Tenant configuration service - handles tenant public profile management
 Requires authentication - these are admin endpoints
 """
+import json
 from typing import Optional, Dict, Any
 from uuid import UUID
 from fastapi import Request, HTTPException
@@ -317,7 +318,22 @@ async def get_own_public_profile(request: Request) -> Optional[TenantPublicProfi
             if not result:
                 return None
 
-            profile = TenantPublicProfile(**dict(result))
+            profile_data = dict(result)
+
+            # asyncpg returns JSONB columns as strings — parse them
+            if isinstance(profile_data.get('business_hours'), str):
+                try:
+                    profile_data['business_hours'] = json.loads(profile_data['business_hours'])
+                except Exception:
+                    profile_data['business_hours'] = None
+
+            if isinstance(profile_data.get('social_media'), str):
+                try:
+                    profile_data['social_media'] = json.loads(profile_data['social_media'])
+                except Exception:
+                    profile_data['social_media'] = None
+
+            profile = TenantPublicProfile(**profile_data)
 
             return TenantPublicProfileResponse(
                 success=True,
