@@ -2,7 +2,8 @@
 Tenant configuration router - admin endpoints for managing public profiles
 Authentication required
 """
-from fastapi import APIRouter, Request, Body
+from fastapi import APIRouter, Request, Body, HTTPException
+from fastapi.responses import JSONResponse
 from app.services import tenant_config_service
 from app.models.tenant_public_profile import (
     TenantPublicProfileCreate,
@@ -11,6 +12,7 @@ from app.models.tenant_public_profile import (
     ToggleProfileRequest,
     ToggleProfileResponse
 )
+from app.core.exceptions import AuthenticationError
 from typing import Optional
 
 router = APIRouter()
@@ -102,3 +104,66 @@ async def toggle_public_profile_endpoint(
         request,
         toggle_data.is_active
     )
+
+
+ALLOWED_IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/webp'}
+MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB
+
+
+@router.post("/upload-image")
+async def upload_tenant_image_endpoint(request: Request):
+    """
+    Upload a logo or banner image for the tenant public profile.
+
+    Accepts multipart/form-data with:
+    - file: image file (JPEG, PNG, WebP only, max 5MB)
+    - image_type: 'logo' or 'banner'
+
+    Returns:
+    {
+        "url": "https://pub-....r2.dev/tenant-profiles/..."
+    }
+
+    The returned URL is permanent (no expiry) via Cloudflare R2 Public Development URL.
+
+    **Requires authentication**
+    """
+    try:
+        form = await request.form()
+        file = form.get("file")
+        image_type = form.get("image_type", "logo")
+
+        if not file or not hasattr(file, 'read'):
+            raise HTTPException(status_code=400, detail="No file provided")
+
+        if image_type not in ('logo', 'banner'):
+            raise HTTPException(status_code=400, detail="image_type must be 'logo' or 'banner'")
+
+        content_type = getattr(file, 'content_type', None) or 'application/octet-stream'
+        if content_type not in ALLOWED_IMAGE_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File type not allowed. Use JPEG, PNG, or WebP. Got: {content_type}"
+            )
+
+        file_bytes = await file.read()
+
+        if len(file_bytes) > MAX_IMAGE_SIZE:
+            raise HTTPException(status_code=400, detail="File too large. Maximum size is 5MB.")
+
+        public_url = await tenant_config_service.upload_tenant_image(
+            request=request,
+            file_bytes=file_bytes,
+            filename=getattr(file, 'filename', 'image.jpg') or 'image.jpg',
+            content_type=content_type,
+            image_type=image_type,
+        )
+
+        return JSONResponse({"url": public_url})
+
+    except HTTPException:
+        raise
+    except AuthenticationError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")

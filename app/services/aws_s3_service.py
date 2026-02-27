@@ -4,8 +4,9 @@ Handles uploading, downloading, and deleting files from S3
 """
 import boto3
 from botocore.exceptions import ClientError
-from typing import Optional, BinaryIO
-from datetime import datetime, timedelta
+from typing import Optional, BinaryIO, Literal
+from datetime import datetime
+from io import BytesIO
 from app.config import settings
 import uuid
 import mimetypes
@@ -183,7 +184,7 @@ class AWSS3Service:
                 ExpiresIn=expiration
             )
             return url
-        except ClientError as e:
+        except ClientError:
 
             return None
 
@@ -204,9 +205,72 @@ class AWSS3Service:
             )
 
             return True
-        except ClientError as e:
+        except ClientError:
 
             return False
+
+    async def upload_public_image(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        tenant_id: str,
+        image_type: Literal['logo', 'banner'],
+        content_type: str = 'image/jpeg'
+    ) -> Optional[str]:
+        """
+        Upload an image to the public R2 bucket and return a permanent public URL.
+
+        Uses a dedicated public bucket (warocol-public-assets) with Cloudflare
+        Public Development URL enabled. The returned URL is permanent (no expiry).
+
+        Args:
+            file_bytes: Raw image bytes (already compressed by the client)
+            filename: Original filename (used to extract extension)
+            tenant_id: Tenant UUID (used to namespace the key)
+            image_type: 'logo' or 'banner'
+            content_type: MIME type of the image
+
+        Returns:
+            Full permanent public URL if successful, None if failed
+        """
+        if not settings.r2_public_url:
+            logger.error("r2_public_url not configured — cannot generate permanent image URL")
+            return None
+
+        try:
+            access_key = settings.r2_access_key_id or settings.aws_access_key_id
+            secret_key = settings.r2_secret_access_key or settings.aws_secret_access_key
+
+            public_client = boto3.client(
+                's3',
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
+                endpoint_url=settings.r2_endpoint,
+                region_name='auto',
+            )
+
+            ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else 'jpg'
+            s3_key = f"tenant-profiles/{tenant_id}/{image_type}/{uuid.uuid4()}.{ext}"
+
+            public_client.upload_fileobj(
+                BytesIO(file_bytes),
+                settings.r2_public_bucket,
+                s3_key,
+                ExtraArgs={'ContentType': content_type},
+            )
+
+            public_url = f"{settings.r2_public_url.rstrip('/')}/{s3_key}"
+            logger.info(f"Uploaded public image for tenant {tenant_id}: {public_url}")
+            return public_url
+
+        except ClientError as e:
+            logger.error(f"ClientError uploading public image for tenant {tenant_id}: {str(e)}")
+            logger.exception(e)
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error uploading public image for tenant {tenant_id}: {str(e)}")
+            logger.exception(e)
+            return None
 
     async def get_file_metadata(self, s3_key: str) -> Optional[dict]:
         """
@@ -229,6 +293,6 @@ class AWSS3Service:
                 'last_modified': response.get('LastModified'),
                 'metadata': response.get('Metadata', {})
             }
-        except ClientError as e:
+        except ClientError:
 
             return None

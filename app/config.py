@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     r2_secret_access_key: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_R2_SECRET_ACCESS_KEY')
     r2_endpoint: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_R2_ENDPOINT')
     r2_bucket: str = Field(default='warocol-purchase-attachments', alias='NUXT_PRIVATE_R2_BUCKET')
+    # Public R2 bucket for logos, banners, and other public-facing images
+    r2_public_bucket: str = Field(default='warocol-public-assets', alias='NUXT_PRIVATE_R2_PUBLIC_BUCKET')
+    r2_public_url: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_R2_PUBLIC_URL')
     
     # Encryption - nombres limpios
     private_key_encrypter: Optional[str] = Field(default=None, alias='NUXT_PRIVATE_PRIVATE_KEY_ENCRYPTER')

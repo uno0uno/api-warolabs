@@ -3,8 +3,7 @@ Tenant configuration service - handles tenant public profile management
 Requires authentication - these are admin endpoints
 """
 import json
-from typing import Optional, Dict, Any
-from uuid import UUID
+from typing import Optional, Literal
 from fastapi import Request, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -17,6 +16,7 @@ from app.models.tenant_public_profile import (
     ToggleProfileResponse
 )
 from app.services import public_restaurant_service
+from app.services.aws_s3_service import AWSS3Service
 import logging
 
 logger = logging.getLogger(__name__)
@@ -254,7 +254,7 @@ async def update_public_profile(
                 )
 
             # Always update updated_at
-            update_fields.append(f"updated_at = CURRENT_TIMESTAMP")
+            update_fields.append("updated_at = CURRENT_TIMESTAMP")
 
             # Add tenant_id as last parameter for WHERE clause
             params.append(tenant_id)
@@ -396,3 +396,55 @@ async def get_own_public_profile(request: Request) -> Optional[TenantPublicProfi
     except Exception as e:
         logger.error(f"Error getting own public profile: {e}")
         raise HTTPException(status_code=500, detail="Error fetching public profile")
+
+
+async def upload_tenant_image(
+    request: Request,
+    file_bytes: bytes,
+    filename: str,
+    content_type: str,
+    image_type: Literal['logo', 'banner'],
+) -> str:
+    """
+    Upload a tenant profile image (logo or banner) to the public R2 bucket.
+
+    Args:
+        request: FastAPI request (for session validation)
+        file_bytes: Raw image bytes (already compressed client-side)
+        filename: Original filename
+        content_type: MIME type of the image
+        image_type: 'logo' or 'banner'
+
+    Returns:
+        Permanent public URL of the uploaded image
+
+    Raises:
+        HTTPException 503 if public R2 bucket is not configured
+        HTTPException 500 if upload fails
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    s3_service = AWSS3Service()
+
+    public_url = await s3_service.upload_public_image(
+        file_bytes=file_bytes,
+        filename=filename,
+        tenant_id=str(tenant_id),
+        image_type=image_type,
+        content_type=content_type,
+    )
+
+    if public_url is None:
+        from app.config import settings
+        if not settings.r2_public_url:
+            raise HTTPException(
+                status_code=503,
+                detail="Public image storage not configured. Set NUXT_PRIVATE_R2_PUBLIC_URL and create the warocol-public-assets bucket."
+            )
+        raise HTTPException(status_code=500, detail="Failed to upload image")
+
+    return public_url
