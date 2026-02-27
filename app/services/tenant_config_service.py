@@ -166,10 +166,61 @@ async def update_public_profile(
             exists = await conn.fetchrow(exists_query, tenant_id)
 
             if not exists:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Public profile not found. Please create one first."
+                # First-time creation: auto-generate slug from tenant's own slug
+                tenant_row = await conn.fetchrow(
+                    "SELECT slug, name FROM tenants WHERE id = $1", tenant_id
                 )
+                if not tenant_row:
+                    raise HTTPException(status_code=404, detail="Tenant not found")
+
+                data_dict = profile_data.model_dump(exclude_unset=True)
+                display_name = data_dict.get('display_name') or tenant_row['name']
+
+                insert_query = """
+                    INSERT INTO tenant_public_profiles (
+                        tenant_id, slug, display_name, is_active,
+                        description, logo_url, banner_url,
+                        phone_number, email, address, city, neighborhood,
+                        business_hours, social_media,
+                        accepts_online_orders, min_order_amount, estimated_preparation_time
+                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    RETURNING *
+                """
+                result = await conn.fetchrow(
+                    insert_query,
+                    tenant_id,
+                    tenant_row['slug'],
+                    display_name,
+                    data_dict.get('description'),
+                    data_dict.get('logo_url'),
+                    data_dict.get('banner_url'),
+                    data_dict.get('phone_number'),
+                    data_dict.get('email'),
+                    data_dict.get('address'),
+                    data_dict.get('city'),
+                    data_dict.get('neighborhood'),
+                    data_dict.get('business_hours'),
+                    data_dict.get('social_media'),
+                    data_dict.get('accepts_online_orders', False),
+                    data_dict.get('min_order_amount', 0),
+                    data_dict.get('estimated_preparation_time', 30),
+                )
+
+                profile_data_dict = dict(result)
+                if isinstance(profile_data_dict.get('business_hours'), str):
+                    try:
+                        profile_data_dict['business_hours'] = json.loads(profile_data_dict['business_hours'])
+                    except Exception:
+                        profile_data_dict['business_hours'] = None
+                if isinstance(profile_data_dict.get('social_media'), str):
+                    try:
+                        profile_data_dict['social_media'] = json.loads(profile_data_dict['social_media'])
+                    except Exception:
+                        profile_data_dict['social_media'] = None
+
+                profile = TenantPublicProfile(**profile_data_dict)
+                logger.info(f"Created new public profile for tenant {tenant_id} via PATCH upsert")
+                return TenantPublicProfileResponse(success=True, data=profile)
 
             # Build dynamic update query
             update_fields = []
