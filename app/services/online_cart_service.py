@@ -633,7 +633,24 @@ async def checkout_cart(cart_id: UUID) -> dict:
                         detail=f"El monto mínimo del pedido es ${min_order_amount:,.0f} COP. Tu carrito tiene ${cart_total:,.0f} COP."
                     )
 
-                # 5. Atomically lock cart — prevents double checkout
+                # 5. Validate all cart products are still available online
+                product_ids = [UUID(item['product_id']) for item in items]
+                offline_rows = await conn.fetch(
+                    """
+                    SELECT name FROM product
+                    WHERE id = ANY($1::uuid[])
+                      AND (is_available_online = false OR is_available = false)
+                    """,
+                    product_ids
+                )
+                if offline_rows:
+                    names = ", ".join(r['name'] for r in offline_rows)
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Los siguientes productos ya no están disponibles para domicilios: {names}. Por favor actualiza tu carrito."
+                    )
+
+                # 7. Atomically lock cart — prevents double checkout
                 locked = await conn.fetchrow(
                     "UPDATE online_carts SET status = 'checked_out', completed_at = now(), updated_at = now() WHERE id = $1 AND status = 'active' RETURNING id",
                     cart_id
@@ -641,7 +658,7 @@ async def checkout_cart(cart_id: UUID) -> dict:
                 if not locked:
                     raise HTTPException(status_code=409, detail="El pedido ya fue procesado por otra solicitud simultánea.")
 
-                # 6. Create order
+                # 8. Create order
                 order_query = """
                     INSERT INTO orders (
                         tenant_id, customer_id, online_cart_id,
