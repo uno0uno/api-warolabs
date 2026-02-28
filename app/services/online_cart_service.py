@@ -574,9 +574,9 @@ async def checkout_cart(cart_id: UUID) -> dict:
                 if not items:
                     raise HTTPException(status_code=400, detail="El carrito está vacío")
 
-                # 4. Validate minimum order amount and manual open status from tenant profile
+                # 4. Validate open status and minimum order amount from tenant profile
                 tenant_profile_query = """
-                    SELECT min_order_amount, estimated_preparation_time, is_manually_open
+                    SELECT min_order_amount, estimated_preparation_time, is_manually_open, business_hours
                     FROM tenant_public_profiles
                     WHERE tenant_id = $1
                 """
@@ -584,7 +584,12 @@ async def checkout_cart(cart_id: UUID) -> dict:
                 min_order_amount = Decimal('0')
                 estimated_preparation_time = None
                 if profile:
-                    if profile['is_manually_open'] is False:
+                    from app.services.public_restaurant_service import is_currently_open
+                    import json as _json
+                    bh = profile['business_hours']
+                    if isinstance(bh, str):
+                        bh = _json.loads(bh)
+                    if not is_currently_open(bh, profile['is_manually_open']):
                         raise HTTPException(
                             status_code=409,
                             detail="El restaurante está cerrado en este momento. No se pueden procesar pedidos."
