@@ -39,6 +39,7 @@ async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
                     business_hours, social_media,
                     seo_title, seo_description,
                     accepts_online_orders, min_order_amount, estimated_preparation_time,
+                    is_manually_open,
                     created_at, updated_at
                 FROM tenant_public_profiles
                 WHERE slug = $1 AND is_active = true
@@ -65,8 +66,11 @@ async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
                 except (json.JSONDecodeError, TypeError):
                     profile['social_media'] = {}
 
-            # Calculate if currently open
-            profile['is_currently_open'] = is_currently_open(profile.get('business_hours'))
+            # Calculate if currently open — manual toggle takes priority
+            profile['is_currently_open'] = is_currently_open(
+                profile.get('business_hours'),
+                profile.get('is_manually_open', True)
+            )
 
             return profile
 
@@ -276,19 +280,24 @@ async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Error fetching product details")
 
 
-def is_currently_open(business_hours: Optional[Dict[str, Any]]) -> bool:
+def is_currently_open(business_hours: Optional[Dict[str, Any]], is_manually_open: bool = True) -> bool:
     """
-    Calculate if restaurant is currently open based on business hours
+    Calculate if restaurant is currently open based on business hours and manual toggle.
 
     Args:
         business_hours: Dict with format {
             "monday": {"open": "09:00", "close": "22:00", "closed": false},
             ...
         }
+        is_manually_open: Operator manual override. False = closed regardless of schedule.
 
     Returns:
         True if currently open, False otherwise
     """
+    # Manual override takes priority over schedule
+    if not is_manually_open:
+        return False
+
     if not business_hours:
         return False
 
@@ -378,6 +387,7 @@ async def list_restaurants(city: Optional[str] = None) -> List[Dict[str, Any]]:
                     display_name, description, logo_url, banner_url,
                     phone_number, email, address,
                     city, neighborhood,
+                    is_manually_open, business_hours,
                     created_at, updated_at
                 FROM tenant_public_profiles
                 WHERE is_active = true
@@ -395,6 +405,14 @@ async def list_restaurants(city: Optional[str] = None) -> List[Dict[str, Any]]:
 
             restaurants = []
             for row in rows:
+                # Parse business_hours JSONB if stored as string
+                business_hours = row["business_hours"]
+                if isinstance(business_hours, str):
+                    try:
+                        business_hours = json.loads(business_hours)
+                    except (json.JSONDecodeError, TypeError):
+                        business_hours = {}
+
                 restaurants.append({
                     "id": str(row["id"]),
                     "tenant_id": str(row["tenant_id"]),
@@ -409,6 +427,7 @@ async def list_restaurants(city: Optional[str] = None) -> List[Dict[str, Any]]:
                     "address": row["address"],
                     "city": row["city"],
                     "neighborhood": row["neighborhood"],
+                    "is_currently_open": is_currently_open(business_hours, row["is_manually_open"]),
                     "created_at": row["created_at"].isoformat() if row["created_at"] else None,
                     "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None
                 })
