@@ -143,6 +143,31 @@ async def validate_modifiers_for_item(conn, product_id: UUID, modifiers: List[di
             )
 
 
+async def validate_products_belong_to_tenant(conn, product_ids: List[UUID], tenant_id: UUID) -> None:
+    """
+    Ensure all product_ids belong to the given tenant.
+
+    Uses a single bulk query against the product.tenant_id index.
+    Raises HTTPException(422) if any product is from a different tenant or has no tenant set.
+    """
+    if not product_ids:
+        return
+    rows = await conn.fetch(
+        """
+        SELECT id FROM product
+        WHERE id = ANY($1::uuid[])
+          AND (tenant_id != $2 OR tenant_id IS NULL)
+        """,
+        product_ids,
+        tenant_id
+    )
+    if rows:
+        raise HTTPException(
+            status_code=422,
+            detail="One or more products do not belong to this restaurant."
+        )
+
+
 async def create_cart_with_batch_items(
     tenant_id: UUID,
     items: List[dict],
@@ -172,6 +197,10 @@ async def create_cart_with_batch_items(
                 )
                 cart_id = cart_row['id']
                 logger.info(f"Created online cart: {cart_id}")
+
+                # Validate all products belong to this tenant before inserting
+                product_ids = [UUID(str(item['product_id'])) for item in items]
+                await validate_products_belong_to_tenant(conn, product_ids, tenant_id)
 
                 # Add all items
                 cart_total = Decimal('0')
