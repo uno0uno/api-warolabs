@@ -132,9 +132,7 @@ async def get_menu_by_slug(
                     EXISTS(
                         SELECT 1
                         FROM product_modifier_groups pmg
-                        JOIN modifiers m ON m.modifier_group_id = pmg.modifier_group_id
                         WHERE pmg.product_id = p.id
-                          AND m.is_available = true
                     ) as has_modifiers
                 FROM product p
                 JOIN categories c ON p.category_id = c.id
@@ -181,13 +179,17 @@ async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
     """
     try:
         async with get_db_connection() as conn:
-            # 1. Verify tenant owns this product
+            # 1. Verify tenant owns this product and it exists in the POS
+            # Note: is_available_online is NOT checked here — the detail endpoint
+            # returns the product regardless, with is_available_online in the payload
+            # so the frontend can show an appropriate message. Only is_available = false
+            # (product removed from POS) warrants a 404.
             verification_query = """
                 SELECT p.id
                 FROM product p
                 JOIN tenant_public_profiles tpp ON tpp.tenant_id = p.tenant_id
                 WHERE tpp.slug = $1 AND tpp.is_active = true AND p.id = $2
-                  AND p.is_available = true AND p.is_available_online = true
+                  AND p.is_available = true
             """
             verification = await conn.fetchrow(verification_query, slug, product_id)
 
@@ -202,7 +204,7 @@ async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
                 SELECT
                     p.id, p.name, p.description, p.price,
                     c.name as category_name,
-                    p.is_available, p.preparation_time
+                    p.is_available, p.is_available_online, p.preparation_time
                 FROM product p
                 JOIN categories c ON p.category_id = c.id
                 WHERE p.id = $1
