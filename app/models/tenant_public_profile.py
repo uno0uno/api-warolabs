@@ -59,6 +59,9 @@ class TenantPublicProfileBase(BaseModel):
     min_order_amount: Decimal = Field(Decimal('0'), description="Minimum order amount (future)")
     estimated_preparation_time: int = Field(30, description="Estimated preparation time in minutes")
 
+    # Manual open/close toggle (operator override)
+    is_manually_open: bool = Field(True, description="Operator manual toggle: False = closed regardless of business_hours")
+
 class TenantPublicProfileCreate(TenantPublicProfileBase):
     """Create tenant public profile"""
     tenant_id: UUID = Field(..., description="Tenant ID")
@@ -91,6 +94,7 @@ class TenantPublicProfileUpdate(BaseModel):
     accepts_online_orders: Optional[bool] = None
     min_order_amount: Optional[Decimal] = None
     estimated_preparation_time: Optional[int] = None
+    is_manually_open: Optional[bool] = None
 
 class TenantPublicProfile(TenantPublicProfileBase):
     """Complete tenant public profile with all fields"""
