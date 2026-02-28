@@ -574,9 +574,9 @@ async def checkout_cart(cart_id: UUID) -> dict:
                 if not items:
                     raise HTTPException(status_code=400, detail="El carrito está vacío")
 
-                # 4. Validate minimum order amount from tenant profile
+                # 4. Validate minimum order amount and manual open status from tenant profile
                 tenant_profile_query = """
-                    SELECT min_order_amount, estimated_preparation_time
+                    SELECT min_order_amount, estimated_preparation_time, is_manually_open
                     FROM tenant_public_profiles
                     WHERE tenant_id = $1
                 """
@@ -584,6 +584,11 @@ async def checkout_cart(cart_id: UUID) -> dict:
                 min_order_amount = Decimal('0')
                 estimated_preparation_time = None
                 if profile:
+                    if profile['is_manually_open'] is False:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="El restaurante está cerrado en este momento. No se pueden procesar pedidos."
+                        )
                     min_order_amount = Decimal(str(profile['min_order_amount'] or '0'))
                     estimated_preparation_time = profile['estimated_preparation_time']
 
