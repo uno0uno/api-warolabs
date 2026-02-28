@@ -59,6 +59,7 @@ class ProductBase(BaseModel):
     # This field is kept for database compatibility but is ignored in logic.
     controla_stock: bool = Field(True, description="DEPRECATED: Always True. All products control inventory")
     is_available: bool = Field(True, description="Whether product is available")
+    is_available_online: bool = Field(True, description="Whether product is available for online ordering (delivery/pickup)")
     is_combo: bool = Field(False, description="Whether product is a combo")
     is_resale: bool = Field(False, description="Whether product is a resale product (not prepared)")
     allow_modifiers: bool = Field(True, description="Whether product allows modifiers")
@@ -93,6 +94,7 @@ class ProductUpdate(BaseModel):
     # DEPRECATED: controla_stock is ignored - all products always control inventory
     controla_stock: Optional[bool] = Field(None, description="DEPRECATED: Ignored, always True")
     is_available: Optional[bool] = None
+    is_available_online: Optional[bool] = None
     is_combo: Optional[bool] = None
     is_resale: Optional[bool] = None
     allow_modifiers: Optional[bool] = None

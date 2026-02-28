@@ -7,11 +7,6 @@ from uuid import UUID
 from datetime import datetime, time
 from fastapi import HTTPException
 from app.database import get_db_connection
-from app.models.tenant_public_profile import (
-    TenantPublicProfile, TenantPublicProfileResponse
-)
-from app.models.product import Product
-from decimal import Decimal
 import json
 import logging
 
@@ -121,7 +116,7 @@ async def get_menu_by_slug(
                 SELECT DISTINCT c.id, c.name, c.description
                 FROM categories c
                 JOIN product p ON p.category_id = c.id
-                WHERE p.tenant_id = $1 AND p.is_available = true
+                WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
                 ORDER BY c.name
             """
             categories_rows = await conn.fetch(categories_query, tenant_id)
@@ -143,7 +138,7 @@ async def get_menu_by_slug(
                     ) as has_modifiers
                 FROM product p
                 JOIN categories c ON p.category_id = c.id
-                WHERE p.tenant_id = $1 AND p.is_available = true
+                WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
             """
 
             params = [tenant_id]
@@ -192,6 +187,7 @@ async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
                 FROM product p
                 JOIN tenant_public_profiles tpp ON tpp.tenant_id = p.tenant_id
                 WHERE tpp.slug = $1 AND tpp.is_active = true AND p.id = $2
+                  AND p.is_available = true AND p.is_available_online = true
             """
             verification = await conn.fetchrow(verification_query, slug, product_id)
 

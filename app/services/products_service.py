@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional
 from uuid import UUID
 from fastapi import Request, Response, HTTPException
 from app.database import get_db_connection
@@ -6,11 +6,10 @@ from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from app.models.product import (
     Product, ProductCreate, ProductUpdate, ProductsListResponse,
-    ProductResponse, ProductStats, RecipeIngredient
+    ProductResponse, ProductStats
 )
 from app.services import menu_history_service
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
-from decimal import Decimal
 import logging
 
 logger = logging.getLogger(__name__)
@@ -52,9 +51,9 @@ async def create_product_with_recipe(
                 product_query = """
                     INSERT INTO product (
                         name, description, price, category_id, product_base_type_id, preparation_time,
-                        controla_stock, is_available, is_combo, is_resale, allow_modifiers, tenant_id
+                        controla_stock, is_available, is_available_online, is_combo, is_resale, allow_modifiers, tenant_id
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                     RETURNING id, created_at, updated_at
                 """
                 product_result = await conn.fetchrow(
@@ -67,6 +66,7 @@ async def create_product_with_recipe(
                     product_data.preparation_time,
                     True,  # ALWAYS True - controla_stock is mandatory
                     product_data.is_available,
+                    product_data.is_available_online,
                     product_data.is_combo,
                     product_data.is_resale,
                     product_data.allow_modifiers,
@@ -189,6 +189,7 @@ async def get_product_by_id(
                     p.preparation_time,
                     p.controla_stock,
                     p.is_available,
+                    p.is_available_online,
                     p.is_combo,
                     p.allow_modifiers,
                     p.costo_calculado,
@@ -377,6 +378,7 @@ async def get_products_list(
                     p.preparation_time,
                     p.controla_stock,
                     p.is_available,
+                    p.is_available_online,
                     p.is_combo,
                     p.is_resale,
                     p.allow_modifiers,
@@ -484,8 +486,8 @@ async def get_products_list(
             if is_resale is None:
                 if not include_modifiers:
                     # Default for menu list: exclude resale products
-                    base_query += f" AND (is_resale = false OR is_resale IS NULL)"
-                    count_query += f" AND (is_resale = false OR is_resale IS NULL)"
+                    base_query += " AND (is_resale = false OR is_resale IS NULL)"
+                    count_query += " AND (is_resale = false OR is_resale IS NULL)"
                 # else: POS context - show all products (no filter)
             else:
                 base_query += f" AND is_resale = ${param_count}"
@@ -711,10 +713,10 @@ async def update_product_with_recipe(
                         param_count += 1
 
                 # Force controla_stock to always be True
-                update_fields.append(f"controla_stock = TRUE")
+                update_fields.append("controla_stock = TRUE")
 
                 if update_fields:
-                    update_fields.append(f"updated_at = NOW()")
+                    update_fields.append("updated_at = NOW()")
                     update_query = f"""
                         UPDATE product
                         SET {', '.join(update_fields)}
