@@ -182,8 +182,9 @@ async def update_public_profile(
                         description, logo_url, banner_url,
                         phone_number, email, address, city, neighborhood,
                         business_hours, social_media,
-                        accepts_online_orders, min_order_amount, estimated_preparation_time
-                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                        accepts_online_orders, min_order_amount, estimated_preparation_time,
+                        is_manually_open
+                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                     RETURNING *
                 """
                 result = await conn.fetchrow(
@@ -204,6 +205,7 @@ async def update_public_profile(
                     data_dict.get('accepts_online_orders', False),
                     data_dict.get('min_order_amount', 0),
                     data_dict.get('estimated_preparation_time', 30),
+                    data_dict.get('is_manually_open', True),
                 )
 
                 profile_data_dict = dict(result)
@@ -242,9 +244,10 @@ async def update_public_profile(
                         detail=f"Slug '{data_dict['slug']}' is already taken"
                     )
 
+            _jsonb_fields = {'business_hours', 'social_media'}
             for field, value in data_dict.items():
                 update_fields.append(f"{field} = ${param_counter}")
-                params.append(value)
+                params.append(json.dumps(value) if field in _jsonb_fields and value is not None else value)
                 param_counter += 1
 
             if not update_fields:
@@ -268,7 +271,19 @@ async def update_public_profile(
 
             result = await conn.fetchrow(query, *params)
 
-            profile = TenantPublicProfile(**dict(result))
+            profile_data_dict = dict(result)
+            if isinstance(profile_data_dict.get('business_hours'), str):
+                try:
+                    profile_data_dict['business_hours'] = json.loads(profile_data_dict['business_hours'])
+                except Exception:
+                    profile_data_dict['business_hours'] = None
+            if isinstance(profile_data_dict.get('social_media'), str):
+                try:
+                    profile_data_dict['social_media'] = json.loads(profile_data_dict['social_media'])
+                except Exception:
+                    profile_data_dict['social_media'] = None
+
+            profile = TenantPublicProfile(**profile_data_dict)
 
             logger.info(f"Updated public profile for tenant {tenant_id}")
 
