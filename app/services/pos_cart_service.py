@@ -4,7 +4,7 @@ Handles cart persistence for POS system
 """
 from typing import List, Optional
 from uuid import UUID
-from fastapi import Request, HTTPException
+from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
@@ -208,7 +208,8 @@ async def create_cart_with_batch_items(
 
 async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
     """
-    Get all items in a cart with their modifiers
+    Get all items in a cart with their modifiers.
+    Single query using json_agg to avoid N+1 round-trips.
     """
     items_query = """
         SELECT
@@ -219,27 +220,33 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
             ci.subtotal,
             ci.notes,
             p.name as product_name,
-            p.is_resale as product_is_resale
+            p.is_resale as product_is_resale,
+            COALESCE(
+                json_agg(
+                    json_build_object(
+                        'id', m.modifier_id::text,
+                        'name', m.modifier_name,
+                        'price', m.price
+                    ) ORDER BY m.created_at
+                ) FILTER (WHERE m.cart_item_id IS NOT NULL),
+                '[]'::json
+            ) as modifiers
         FROM pos_cart_items ci
         JOIN product p ON ci.product_id = p.id
+        LEFT JOIN pos_cart_item_modifiers m ON m.cart_item_id = ci.id
         WHERE ci.cart_id = $1
+        GROUP BY ci.id, ci.product_id, ci.quantity, ci.unit_price, ci.subtotal,
+                 ci.notes, ci.created_at, p.name, p.is_resale
         ORDER BY ci.created_at
     """
     items_rows = await conn.fetch(items_query, cart_id)
 
     items = []
     for item_row in items_rows:
-        # Get modifiers for this item
-        modifiers_query = """
-            SELECT
-                modifier_id as id,
-                modifier_name as name,
-                price
-            FROM pos_cart_item_modifiers
-            WHERE cart_item_id = $1
-            ORDER BY created_at
-        """
-        modifiers_rows = await conn.fetch(modifiers_query, item_row['id'])
+        raw_modifiers = item_row['modifiers']
+        if isinstance(raw_modifiers, str):
+            import json
+            raw_modifiers = json.loads(raw_modifiers)
 
         items.append({
             "id": str(item_row['id']),
@@ -253,11 +260,11 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
             "is_resale": item_row['product_is_resale'] or False,
             "modifiers": [
                 {
-                    "id": str(mod['id']),
+                    "id": mod['id'],
                     "name": mod['name'],
                     "price": float(mod['price'])
                 }
-                for mod in modifiers_rows
+                for mod in raw_modifiers
             ],
             "notes": item_row['notes'],
             "subtotal": float(item_row['subtotal'])

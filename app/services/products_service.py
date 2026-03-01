@@ -364,9 +364,40 @@ async def get_products_list(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
-            # Base query with DYNAMIC cost calculation
-            # Calculates cost based on WEIGHTED AVERAGE from purchase movements
-            # Uses tenant_ingredient_movements to calculate real acquisition cost per tenant
+            # CTE: pre-compute latest purchase cost per ingredient once (O(1) index scan)
+            # Replaces nested correlated subqueries that ran O(products × base_recipe_rows) times
+            cte_prefix = """
+                WITH latest_purchase_costs AS (
+                    SELECT DISTINCT ON (pi.ingredient_id)
+                        pi.ingredient_id,
+                        pi.unit_cost
+                    FROM tenant_purchase_items pi
+                    JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                    WHERE tp.tenant_id = $1
+                      AND pi.unit_cost IS NOT NULL
+                      AND pi.unit_cost > 0
+                    ORDER BY pi.ingredient_id, tp.purchase_date DESC
+                ),
+                direct_costs AS (
+                    SELECT
+                        pr.product_id,
+                        SUM(pr.quantity * COALESCE(lpc.unit_cost, 0)) as direct_cost
+                    FROM product_recipes pr
+                    LEFT JOIN latest_purchase_costs lpc ON pr.ingredient_id = lpc.ingredient_id
+                    GROUP BY pr.product_id
+                ),
+                base_costs AS (
+                    SELECT
+                        pbr.product_id,
+                        SUM(brt.base_quantity * COALESCE(lpc.unit_cost, 0)) as base_cost
+                    FROM product_base_recipes pbr
+                    JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+                    LEFT JOIN latest_purchase_costs lpc ON brt.ingredient_id = lpc.ingredient_id
+                    GROUP BY pbr.product_id
+                )
+            """
+
+            # Base query uses CTE JOINs instead of correlated subqueries
             base_query = """
                 SELECT
                     p.id,
@@ -382,44 +413,7 @@ async def get_products_list(
                     p.is_combo,
                     p.is_resale,
                     p.allow_modifiers,
-                    -- DYNAMIC cost calculation based on last purchase price
-                    (
-                        -- Direct ingredients cost (last purchase price)
-                        COALESCE((
-                            SELECT SUM(
-                                pr.quantity * COALESCE(
-                                    (SELECT pi.unit_cost
-                                     FROM tenant_purchase_items pi
-                                     JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                                     WHERE pi.ingredient_id = pr.ingredient_id
-                                       AND tp.tenant_id = $1
-                                       AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
-                                     ORDER BY tp.purchase_date DESC LIMIT 1),
-                                    0
-                                )
-                            )
-                            FROM product_recipes pr
-                            WHERE pr.product_id = p.id
-                        ), 0) +
-                        -- Recipe base ingredients cost (last purchase price)
-                        COALESCE((
-                            SELECT SUM(
-                                brt.base_quantity * COALESCE(
-                                    (SELECT pi.unit_cost
-                                     FROM tenant_purchase_items pi
-                                     JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                                     WHERE pi.ingredient_id = brt.ingredient_id
-                                       AND tp.tenant_id = $1
-                                       AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
-                                     ORDER BY tp.purchase_date DESC LIMIT 1),
-                                    0
-                                )
-                            )
-                            FROM product_base_recipes pbr
-                            JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
-                            WHERE pbr.product_id = p.id
-                        ), 0)
-                    ) as costo_calculado,
+                    COALESCE(dc.direct_cost, 0) + COALESCE(bc.base_cost, 0) as costo_calculado,
                     p.precio_sugerido,
                     p.margen_objetivo,
                     p.tenant_id,
@@ -427,11 +421,13 @@ async def get_products_list(
                     p.updated_at
                 FROM product p
                 LEFT JOIN categories c ON p.category_id = c.id
+                LEFT JOIN direct_costs dc ON p.id = dc.product_id
+                LEFT JOIN base_costs bc ON p.id = bc.product_id
                 WHERE p.tenant_id = $1
             """
 
-            # Add calculated fields after the main query
-            base_query = """
+            # Add calculated margin fields after the main query
+            base_query = cte_prefix + """
                 SELECT
                     *,
                     CASE

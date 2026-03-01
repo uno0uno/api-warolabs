@@ -2,7 +2,7 @@
 Orders Service
 Handles listing and filtering of POS orders
 """
-from typing import List, Optional
+from typing import Optional
 from uuid import UUID
 from fastapi import Request
 from app.database import get_db_connection
@@ -407,15 +407,18 @@ async def get_orders_metrics(
             metrics_query = f"""
                 SELECT
                     COUNT(*) as total_orders,
-                    COUNT(*) FILTER (WHERE status = 'completed') as completed_orders,
-                    COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled_orders,
-                    COUNT(*) FILTER (WHERE status = 'pending') as pending_orders,
-                    COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) as total_sales,
-                    COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) as avg_ticket,
-                    COALESCE(SUM(
-                        (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id)
-                    ) FILTER (WHERE status = 'completed'), 0) as total_items
+                    COUNT(*) FILTER (WHERE o.status = 'completed') as completed_orders,
+                    COUNT(*) FILTER (WHERE o.status = 'cancelled') as cancelled_orders,
+                    COUNT(*) FILTER (WHERE o.status = 'pending') as pending_orders,
+                    COALESCE(SUM(o.total_amount) FILTER (WHERE o.status = 'completed'), 0) as total_sales,
+                    COALESCE(AVG(o.total_amount) FILTER (WHERE o.status = 'completed'), 0) as avg_ticket,
+                    COALESCE(SUM(oi_counts.item_count) FILTER (WHERE o.status = 'completed'), 0) as total_items
                 FROM orders o
+                LEFT JOIN (
+                    SELECT order_id, COUNT(*) as item_count
+                    FROM order_items
+                    GROUP BY order_id
+                ) oi_counts ON oi_counts.order_id = o.id
                 WHERE {where_clause}
             """
 
