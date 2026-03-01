@@ -116,17 +116,8 @@ async def get_orders_list(
             }
             sort_column = sort_column_map.get(sort_field, "o.order_date")
 
-            # Get total count
-            count_query = f"""
-                SELECT COUNT(*) as total
-                FROM orders o
-                LEFT JOIN profile p ON o.customer_id = p.id
-                WHERE {where_clause}
-            """
-            count_row = await conn.fetchrow(count_query, *params)
-            total_count = count_row['total']
-
-            # Get orders
+            # Single query: COUNT(*) OVER() replaces separate count round-trip.
+            # items_count uses correlated subquery (idx_order_items_order_id exists).
             param_count += 1
             limit_param = param_count
             param_count += 1
@@ -148,7 +139,8 @@ async def get_orders_list(
                         SELECT COUNT(*)
                         FROM order_items oi
                         WHERE oi.order_id = o.id
-                    ) as items_count
+                    ) as items_count,
+                    COUNT(*) OVER() as total_count
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
                 WHERE {where_clause}
@@ -158,6 +150,7 @@ async def get_orders_list(
 
             params.extend([limit, offset])
             orders_rows = await conn.fetch(orders_query, *params)
+            total_count = orders_rows[0]['total_count'] if orders_rows else 0
 
             orders = [
                 {
