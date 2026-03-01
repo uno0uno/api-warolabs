@@ -2,6 +2,7 @@ from google import genai
 from google.genai import types
 from fastapi import HTTPException
 from app.config import settings
+from typing import Optional
 import json
 import logging
 import asyncio
@@ -13,7 +14,7 @@ _DAILY_QUOTA_IDS = {
     "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
 }
 
-def _parse_retry_delay(error_str: str) -> float | None:
+def _parse_retry_delay(error_str: str) -> Optional[float]:
     """Extract retryDelay seconds from a Gemini 429 error string."""
     match = re.search(r"'retryDelay':\s*'(\d+)s'", error_str)
     if match:
