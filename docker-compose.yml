@@ -7,6 +7,8 @@ services:
       - "5001:80"
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - DATABASE_URL=postgresql://${NUXT_PRIVATE_DB_USER}:${NUXT_PRIVATE_DB_PASSWORD}@${NUXT_PRIVATE_DB_HOST}:${NUXT_PRIVATE_DB_PORT}/${NUXT_PRIVATE_DB_NAME}
       - JWT_SECRET=${NUXT_PRIVATE_JWT_SECRET}
