@@ -47,8 +47,21 @@ async def get_inventory_stock(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
-            # Build base query
-            base_query = """
+            # CTE to fetch latest cost per ingredient ONCE (avoids N correlated subqueries)
+            cost_cte = """
+                WITH latest_costs AS (
+                    SELECT DISTINCT ON (ingredient_id)
+                        ingredient_id,
+                        cost_per_unit
+                    FROM tenant_ingredient_movements
+                    WHERE tenant_id = $1
+                      AND cost_per_unit IS NOT NULL
+                    ORDER BY ingredient_id, created_at DESC
+                )
+            """
+
+            # Build base query using CTE join instead of correlated subqueries
+            base_query = cost_cte + """
                 SELECT
                     ti.id,
                     ti.ingredient_id,
@@ -62,42 +75,21 @@ async def get_inventory_stock(
                     ti.location,
                     ti.lote_actual,
                     ti.fecha_vencimiento,
-                    -- Calculate status
                     CASE
                         WHEN ti.current_stock < 0 THEN 'negative'
                         WHEN ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock THEN 'low'
                         ELSE 'ok'
                     END as status,
-                    -- Calculate stock percentage
                     CASE
                         WHEN ti.maximum_stock IS NOT NULL AND ti.maximum_stock > 0
                         THEN ROUND((ti.current_stock / ti.maximum_stock * 100)::numeric, 2)
                         ELSE NULL
                     END as stock_percentage,
-                    -- Get cost from latest movement
-                    (
-                        SELECT tim.cost_per_unit
-                        FROM tenant_ingredient_movements tim
-                        WHERE tim.ingredient_id = ti.ingredient_id
-                          AND tim.tenant_id = ti.tenant_id
-                          AND tim.cost_per_unit IS NOT NULL
-                        ORDER BY tim.created_at DESC
-                        LIMIT 1
-                    ) as unit_cost,
-                    -- Calculate total value
-                    ti.current_stock * COALESCE(
-                        (
-                            SELECT tim.cost_per_unit
-                            FROM tenant_ingredient_movements tim
-                            WHERE tim.ingredient_id = ti.ingredient_id
-                              AND tim.tenant_id = ti.tenant_id
-                              AND tim.cost_per_unit IS NOT NULL
-                            ORDER BY tim.created_at DESC
-                            LIMIT 1
-                        ), 0
-                    ) as total_value
+                    lc.cost_per_unit as unit_cost,
+                    ti.current_stock * COALESCE(lc.cost_per_unit, 0) as total_value
                 FROM tenant_inventory ti
                 JOIN ingredients i ON ti.ingredient_id = i.id
+                LEFT JOIN latest_costs lc ON lc.ingredient_id = ti.ingredient_id
                 WHERE ti.tenant_id = $1 AND ti.current_stock != 0
             """
 
@@ -151,27 +143,16 @@ async def get_inventory_stock(
             inventory_data = await conn.fetch(base_query, *params)
             count_result = await conn.fetchrow(count_query, *params[:-2])
 
-            # Get stats
-            stats_query = """
+            # Get stats using CTE join (avoids correlated subquery per row)
+            stats_query = cost_cte + """
                 SELECT
                     COUNT(*) FILTER (WHERE ti.current_stock != 0) as total_ingredients,
                     COUNT(*) FILTER (WHERE ti.current_stock < 0) as critical_count,
                     COUNT(*) FILTER (WHERE ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock) as low_stock_count,
                     COUNT(*) FILTER (WHERE ti.current_stock > ti.minimum_stock) as ok_count,
-                    SUM(
-                        ti.current_stock * COALESCE(
-                            (
-                                SELECT tim.cost_per_unit
-                                FROM tenant_ingredient_movements tim
-                                WHERE tim.ingredient_id = ti.ingredient_id
-                                  AND tim.tenant_id = ti.tenant_id
-                                  AND tim.cost_per_unit IS NOT NULL
-                                ORDER BY tim.created_at DESC
-                                LIMIT 1
-                            ), 0
-                        )
-                    ) as total_inventory_value
+                    SUM(ti.current_stock * COALESCE(lc.cost_per_unit, 0)) as total_inventory_value
                 FROM tenant_inventory ti
+                LEFT JOIN latest_costs lc ON lc.ingredient_id = ti.ingredient_id
                 WHERE ti.tenant_id = $1
             """
             stats = await conn.fetchrow(stats_query, tenant_id)
