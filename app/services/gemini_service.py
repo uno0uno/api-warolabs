@@ -4,8 +4,27 @@ from fastapi import HTTPException
 from app.config import settings
 import json
 import logging
+import asyncio
+import re
 
 logger = logging.getLogger(__name__)
+
+_DAILY_QUOTA_IDS = {
+    "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+}
+
+def _parse_retry_delay(error_str: str) -> float | None:
+    """Extract retryDelay seconds from a Gemini 429 error string."""
+    match = re.search(r"'retryDelay':\s*'(\d+)s'", error_str)
+    if match:
+        return float(match.group(1))
+    match = re.search(r"retry in ([\d.]+)s", error_str)
+    if match:
+        return float(match.group(1))
+    return None
+
+def _is_daily_quota_exhausted(error_str: str) -> bool:
+    return any(qid in error_str for qid in _DAILY_QUOTA_IDS)
 
 
 def _fix_item_unit_prices(data: dict) -> None:
@@ -40,13 +59,15 @@ def _fix_item_unit_prices(data: dict) -> None:
 async def process_invoice(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
     """
     Process an invoice image using Google Gemini 2.0 Flash.
-    Returns structured JSON data.
+    Returns structured JSON data. Retries once on per-minute 429 quota errors.
     """
     if not settings.google_api_key:
         logger.error("Google API Key not found")
         raise HTTPException(status_code=500, detail="Google API Key not configured")
 
-    try:
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+      try:
         client = genai.Client(api_key=settings.google_api_key)
 
         prompt = """
@@ -120,7 +141,7 @@ async def process_invoice(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
         """
 
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-2.5-flash-lite',
             contents=[
                 prompt,
                 types.Part.from_bytes(
@@ -141,6 +162,28 @@ async def process_invoice(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
             logger.error(f"Failed to parse Gemini response: {response.text}")
             raise HTTPException(status_code=502, detail="Invalid JSON response from AI model")
 
-    except Exception as e:
-        logger.error(f"Gemini API error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"AI Processing Error: {str(e)}")
+      except HTTPException:
+          raise
+      except Exception as e:
+          error_str = str(e)
+          if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+              logger.error(f"Gemini API error: {error_str}")
+              if _is_daily_quota_exhausted(error_str):
+                  raise HTTPException(
+                      status_code=503,
+                      detail="AI service daily quota exhausted. Try again tomorrow or contact support.",
+                      headers={"Retry-After": "86400"},
+                  )
+              retry_delay = _parse_retry_delay(error_str)
+              if attempt < max_attempts and retry_delay is not None:
+                  logger.warning(f"Gemini 429 (per-minute), retrying in {retry_delay}s (attempt {attempt}/{max_attempts})")
+                  await asyncio.sleep(retry_delay + 1)
+                  continue
+              retry_after = str(int(retry_delay)) if retry_delay else "60"
+              raise HTTPException(
+                  status_code=503,
+                  detail="AI service temporarily unavailable due to rate limiting. Please try again shortly.",
+                  headers={"Retry-After": retry_after},
+              )
+          logger.error(f"Gemini API error: {error_str}")
+          raise HTTPException(status_code=500, detail=f"AI Processing Error: {error_str}")
