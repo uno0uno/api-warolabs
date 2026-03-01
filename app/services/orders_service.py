@@ -116,17 +116,8 @@ async def get_orders_list(
             }
             sort_column = sort_column_map.get(sort_field, "o.order_date")
 
-            # Get total count
-            count_query = f"""
-                SELECT COUNT(*) as total
-                FROM orders o
-                LEFT JOIN profile p ON o.customer_id = p.id
-                WHERE {where_clause}
-            """
-            count_row = await conn.fetchrow(count_query, *params)
-            total_count = count_row['total']
-
-            # Get orders
+            # Single query: COUNT(*) OVER() replaces separate count round-trip.
+            # items_count uses correlated subquery (idx_order_items_order_id exists).
             param_count += 1
             limit_param = param_count
             param_count += 1
@@ -148,7 +139,8 @@ async def get_orders_list(
                         SELECT COUNT(*)
                         FROM order_items oi
                         WHERE oi.order_id = o.id
-                    ) as items_count
+                    ) as items_count,
+                    COUNT(*) OVER() as total_count
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
                 WHERE {where_clause}
@@ -158,6 +150,7 @@ async def get_orders_list(
 
             params.extend([limit, offset])
             orders_rows = await conn.fetch(orders_query, *params)
+            total_count = orders_rows[0]['total_count'] if orders_rows else 0
 
             orders = [
                 {
@@ -407,18 +400,12 @@ async def get_orders_metrics(
             metrics_query = f"""
                 SELECT
                     COUNT(*) as total_orders,
-                    COUNT(*) FILTER (WHERE o.status = 'completed') as completed_orders,
-                    COUNT(*) FILTER (WHERE o.status = 'cancelled') as cancelled_orders,
-                    COUNT(*) FILTER (WHERE o.status = 'pending') as pending_orders,
-                    COALESCE(SUM(o.total_amount) FILTER (WHERE o.status = 'completed'), 0) as total_sales,
-                    COALESCE(AVG(o.total_amount) FILTER (WHERE o.status = 'completed'), 0) as avg_ticket,
-                    COALESCE(SUM(oi_counts.item_count) FILTER (WHERE o.status = 'completed'), 0) as total_items
-                FROM orders o
-                LEFT JOIN (
-                    SELECT order_id, COUNT(*) as item_count
-                    FROM order_items
-                    GROUP BY order_id
-                ) oi_counts ON oi_counts.order_id = o.id
+                    COUNT(*) FILTER (WHERE status = 'completed') as completed_orders,
+                    COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled_orders,
+                    COUNT(*) FILTER (WHERE status = 'pending') as pending_orders,
+                    COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) as total_sales,
+                    COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) as avg_ticket
+                FROM orders
                 WHERE {where_clause}
             """
 
@@ -433,7 +420,6 @@ async def get_orders_metrics(
                     "cancelled_orders": row['cancelled_orders'],
                     "pending_orders": row['pending_orders'],
                     "avg_ticket": float(row['avg_ticket']),
-                    "total_items": row['total_items']
                 }
             }
 
@@ -442,6 +428,120 @@ async def get_orders_metrics(
     except Exception as e:
         logger.error(f"Error getting orders metrics: {str(e)}")
         raise APIError(f"Error getting orders metrics: {str(e)}", status_code=500)
+
+
+async def get_orders_dashboard(
+    request: Request,
+    payment_method: Optional[str] = None,
+    status: Optional[str] = None
+) -> dict:
+    """
+    Returns all metrics needed for the /ventas dashboard in a single DB query.
+    Eliminates the need for 3 separate /orders/metrics calls on page load.
+
+    Returns:
+    - main: all-time metrics (filtered by payment_method/status if provided)
+    - month: current month-to-date metrics (always fixed, ignores user filters)
+    - year: current year-to-date metrics (always fixed, ignores user filters)
+    - commission_savings: main.total_sales * commission_rate (from commission_configs or 30% default)
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # Build optional filters for the main (all-time) metrics
+            main_filters = []
+            params = [tenant_id]
+            param_count = 1
+
+            if payment_method:
+                param_count += 1
+                main_filters.append(f"payment_method = ${param_count}")
+                params.append(payment_method)
+
+            if status:
+                param_count += 1
+                main_filters.append(f"status = ${param_count}")
+                params.append(status)
+
+            # Build FILTER clause suffix for main metrics (e.g. "AND payment_method = $2")
+            main_filter_sql = ""
+            if main_filters:
+                main_filter_sql = " AND " + " AND ".join(main_filters)
+
+            dashboard_query = f"""
+                SELECT
+                    -- Main: all-time (with optional payment/status filters)
+                    COUNT(*) FILTER (WHERE status = 'completed'{main_filter_sql}) as main_completed,
+                    COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_sales,
+                    COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_avg_ticket,
+
+                    -- Month-to-date (fixed, ignores user filters)
+                    COUNT(*) FILTER (
+                        WHERE status = 'completed'
+                        AND DATE(order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Bogota')::date
+                    ) as month_completed,
+                    COALESCE(SUM(total_amount) FILTER (
+                        WHERE status = 'completed'
+                        AND DATE(order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Bogota')::date
+                    ), 0) as month_sales,
+
+                    -- Year-to-date (fixed, ignores user filters)
+                    COUNT(*) FILTER (
+                        WHERE status = 'completed'
+                        AND DATE(order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('year', NOW() AT TIME ZONE 'America/Bogota')::date
+                    ) as year_completed,
+                    COALESCE(SUM(total_amount) FILTER (
+                        WHERE status = 'completed'
+                        AND DATE(order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('year', NOW() AT TIME ZONE 'America/Bogota')::date
+                    ), 0) as year_sales
+
+                FROM orders
+                WHERE tenant_id = $1 AND pos_cart_id IS NOT NULL
+            """
+
+            row = await conn.fetchrow(dashboard_query, *params)
+
+            # Fetch commission rate from tenant config (default 30% — typical Rappi/iFood Colombian rate)
+            commission_row = await conn.fetchrow(
+                "SELECT default_commission_percentage FROM commission_configs WHERE tenant_id = $1",
+                tenant_id
+            )
+            commission_rate = float(commission_row['default_commission_percentage']) if commission_row else 30.0
+
+            main_sales = float(row['main_sales'])
+            commission_savings = round(main_sales * (commission_rate / 100))
+
+            return {
+                "success": True,
+                "data": {
+                    "main": {
+                        "total_sales": main_sales,
+                        "completed_orders": row['main_completed'],
+                        "avg_ticket": float(row['main_avg_ticket']),
+                    },
+                    "month": {
+                        "total_sales": float(row['month_sales']),
+                        "completed_orders": row['month_completed'],
+                    },
+                    "year": {
+                        "total_sales": float(row['year_sales']),
+                        "completed_orders": row['year_completed'],
+                    },
+                    "commission_savings": commission_savings,
+                    "commission_rate": commission_rate,
+                }
+            }
+
+    except AuthenticationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting orders dashboard: {str(e)}")
+        raise APIError(f"Error getting orders dashboard: {str(e)}", status_code=500)
 
 
 async def export_orders_to_email(

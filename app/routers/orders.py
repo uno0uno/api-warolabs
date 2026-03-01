@@ -10,6 +10,26 @@ from app.services import orders_service
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
+@router.get("/dashboard")
+async def get_orders_dashboard(
+    request: Request,
+    payment_method: Optional[str] = Query(None),
+    status: Optional[str] = Query(None)
+):
+    """
+    Returns all /ventas dashboard metrics in a single DB query:
+    - main: all-time totals (filtered by payment_method/status if provided)
+    - month: current month-to-date
+    - year: current year-to-date
+    - commission_savings: savings vs. marketplace apps
+    """
+    return await orders_service.get_orders_dashboard(
+        request,
+        payment_method=payment_method,
+        status=status
+    )
+
+
 @router.get("/metrics")
 async def get_orders_metrics(
     request: Request,
