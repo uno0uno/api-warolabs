@@ -160,3 +160,85 @@ WARO Colombia
 def get_order_confirmation_subject(order_number: int) -> str:
     """Email subject line for order confirmation."""
     return f"Tu pedido #{order_number} está siendo confirmado — WARO"
+
+
+def get_order_accepted_text(
+    order_number: int,
+    order_type: str,
+    items: list,
+    subtotal: float,
+    delivery_address: Optional[dict],
+    order_id: Optional[str] = None,
+) -> str:
+    """
+    Build the plain text body for an order acceptance email.
+
+    Sent when the restaurant confirms the order via the auto_complete path
+    (pending → completed). Simpler than the creation email — no pickup PIN,
+    no scheduled time, no delivery instructions.
+    """
+    type_label = _order_type_label(order_type)
+
+    items_lines = []
+    for item in items:
+        qty = item.get("quantity", 1)
+        name = item.get("product_name", "Producto")
+        item_subtotal = _format_cop(float(item.get("subtotal", 0)))
+        line = f"  {qty}x {name} — {item_subtotal}"
+        if item.get("modifiers"):
+            mod_names = ", ".join(
+                m.get("modifier_name") or m.get("name", "") for m in item["modifiers"]
+            )
+            line += f"\n     + {mod_names}"
+        items_lines.append(line)
+    items_block = "\n".join(items_lines)
+
+    total_block = f"Total: {_format_cop(subtotal)}"
+
+    address_block = ""
+    if order_type == "delivery" and delivery_address:
+        line1 = delivery_address.get("address_line1", "")
+        line2 = delivery_address.get("address_line2", "")
+        city = delivery_address.get("city", "")
+        notes = delivery_address.get("delivery_notes", "")
+        addr = line1
+        if line2:
+            addr += f", {line2}"
+        if city:
+            addr += f", {city}"
+        if notes:
+            addr += f"\nNotas: {notes}"
+        address_block = f"\nDirección de entrega: {addr}\n"
+
+    tracking_block = ""
+    if order_id:
+        tracking_block = f"\nVER TU PEDIDO\n-------------\nPuedes seguir el estado de tu pedido en:\n{settings.frontend_url}/mis-pedidos/{order_id}\n"
+
+    return f"""¡Buenas noticias!
+
+Tu pedido #{order_number} fue aceptado — el restaurante ya lo está preparando.
+
+RESUMEN DEL PEDIDO
+------------------
+Pedido: #{order_number}
+Tipo: {type_label}
+{address_block}
+PRODUCTOS
+---------
+{items_block}
+
+TOTAL
+-----
+{total_block}
+
+Pago: Efectivo contra entrega
+{tracking_block}
+Gracias,
+WARO Colombia
+{settings.email_from or "hola@warocol.com"}
+""".strip()
+
+
+def get_order_accepted_subject(order_number: int) -> str:
+    """Email subject line for order acceptance notification."""
+    return f"¡Tu pedido #{order_number} fue aceptado! — WARO"

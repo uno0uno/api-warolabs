@@ -3,12 +3,13 @@ Email helper functions for sending formatted emails
 """
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from pathlib import Path
 from app.services.aws_ses_service import AWSSESService
 from app.config import settings
 from app.templates.order_confirmation_template import (
     get_order_confirmation_text,
     get_order_confirmation_subject,
+    get_order_accepted_text,
+    get_order_accepted_subject,
 )
 import logging
 
@@ -153,7 +154,7 @@ Tecnología colombiana para el mundo.
 
         return success
 
-    except Exception as e:
+    except Exception:
         pass
         return False
 
@@ -299,7 +300,7 @@ Tecnología colombiana para el mundo.
 
         return success
 
-    except Exception as e:
+    except Exception:
         pass
         return False
 
@@ -360,4 +361,56 @@ async def send_order_confirmation_email(
 
     except Exception as e:
         logger.error(f"Error sending order confirmation email for order #{order_number}: {e}")
+        return False
+
+
+async def send_order_accepted_email(
+    customer_email: str,
+    order_number: int,
+    order_type: str,
+    items: List[Dict[str, Any]],
+    subtotal: float,
+    delivery_address: Optional[Dict[str, Any]] = None,
+    order_id: Optional[str] = None,
+) -> bool:
+    """
+    Send an order acceptance email to the customer.
+
+    Called fire-and-forget (via asyncio.create_task) when a restaurant accepts
+    an order via the auto_complete path (pending → completed).
+    Never raises — logs on failure so the PATCH response is never delayed.
+
+    Returns:
+        True if the email was sent successfully, False otherwise.
+    """
+    try:
+        text_body = get_order_accepted_text(
+            order_number=order_number,
+            order_type=order_type,
+            items=items,
+            subtotal=subtotal,
+            delivery_address=delivery_address,
+            order_id=order_id,
+        )
+        subject = get_order_accepted_subject(order_number)
+
+        ses_service = AWSSESService()
+        success = await ses_service.send_email(
+            from_email=settings.email_from or "hola@warocol.com",
+            from_name="WARO Colombia",
+            to_emails=[customer_email],
+            subject=subject,
+            html_body=None,
+            text_body=text_body,
+        )
+
+        if success:
+            logger.info(f"Order accepted email sent for order #{order_number} to {customer_email}")
+        else:
+            logger.warning(f"SES returned failure for order accepted email #{order_number}")
+
+        return success
+
+    except Exception as e:
+        logger.error(f"Error sending order accepted email for order #{order_number}: {e}")
         return False

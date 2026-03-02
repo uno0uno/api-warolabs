@@ -2,12 +2,14 @@
 Online Orders Service
 Authenticated, tenant-scoped listing of online orders for restaurant operators.
 """
+import asyncio
 from typing import Optional
 from uuid import UUID
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError, ValidationError
+from app.services.email_helpers import send_order_accepted_email
 import logging
 
 logger = logging.getLogger(__name__)
@@ -345,6 +347,48 @@ async def update_order_status(
                     """,
                     order_id, "confirmed", "completed", changed_by, None,
                 )
+
+                # Fire acceptance email (non-blocking — does not delay the response)
+                email_row = await conn.fetchrow(
+                    """
+                    SELECT oc.verified_email, oc.order_type, o.order_number, o.total_amount,
+                           ap.address_line1, ap.address_line2, ap.city, ap.delivery_notes
+                    FROM orders o
+                    JOIN online_carts oc ON oc.id = o.online_cart_id
+                    LEFT JOIN addresses_profile ap ON ap.id = oc.delivery_address_id
+                    WHERE o.id = $1
+                    """,
+                    order_id,
+                )
+                item_rows = await conn.fetch(
+                    """
+                    SELECT pr.name AS product_name, oi.quantity, oi.price_at_purchase, oi.subtotal
+                    FROM order_items oi
+                    JOIN product pr ON pr.id = oi.product_id
+                    WHERE oi.order_id = $1
+                    ORDER BY oi.created_at
+                    """,
+                    order_id,
+                )
+
+                if email_row and email_row["verified_email"]:
+                    delivery_address = None
+                    if email_row["address_line1"]:
+                        delivery_address = {
+                            "address_line1": email_row["address_line1"],
+                            "address_line2": email_row["address_line2"],
+                            "city": email_row["city"],
+                            "delivery_notes": email_row["delivery_notes"],
+                        }
+                    asyncio.create_task(send_order_accepted_email(
+                        customer_email=email_row["verified_email"],
+                        order_number=int(email_row["order_number"]),
+                        order_type=email_row["order_type"],
+                        items=[dict(r) for r in item_rows],
+                        subtotal=float(email_row["total_amount"]),
+                        delivery_address=delivery_address,
+                        order_id=str(order_id),
+                    ))
 
                 # Override the return payload to reflect the final completed state
                 return {
