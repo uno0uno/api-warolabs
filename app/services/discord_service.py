@@ -599,22 +599,22 @@ class DiscordWebhookService:
     async def notify_new_lead(
         self,
         email: str,
-        phone: str,
         button_source: str,
         ip_address: Optional[str] = None,
+        phone: Optional[str] = None,
     ) -> bool:
         """Send notification when a new lead is captured from the homepage CTA."""
         button_labels = {
             "comenzar": "Comenzar",
             "habla_con_nosotros": "Habla con nosotros",
+            "access_request": "Solicitar acceso",
         }
         button_label = button_labels.get(button_source, button_source)
 
-        description = (
-            f"**Email:** {email}\n"
-            f"**Teléfono:** +57 {phone}\n"
-            f"**Botón:** {button_label}"
-        )
+        description = f"**Email:** {email}\n"
+        if phone:
+            description += f"**Teléfono:** +57 {phone}\n"
+        description += f"**Botón:** {button_label}"
         if ip_address:
             description += f"\n**IP:** {ip_address}"
 

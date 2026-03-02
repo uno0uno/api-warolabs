@@ -137,6 +137,117 @@ async def capture_lead(
     return {"profile_id": str(profile_id), "lead_id": str(lead_id)}
 
 
+async def capture_access_request(
+    conn,
+    email: str,
+    ip_address: Optional[str],
+    user_agent: Optional[str],
+    button_source: str = "access_request",
+) -> dict:
+    """
+    Capture an access request from the login page.
+
+    Flow:
+    1. UPSERT profile by email only (no phone touch)
+    2. INSERT lead with source='access_request' (skip if already exists)
+    3. INSERT lead_interaction to track the event
+    """
+
+    # 1. UPSERT profile by email — do not overwrite phone if profile exists
+    await conn.execute(
+        """
+        INSERT INTO profile (email, nationality_id)
+        VALUES ($1, 0)
+        ON CONFLICT (email) DO NOTHING
+        """,
+        email,
+    )
+    profile = await conn.fetchrow(
+        "SELECT id FROM profile WHERE email = $1",
+        email,
+    )
+    profile_id = profile["id"]
+    logger.info(f"📥 [capture_access_request] Profile id: {profile_id}")
+
+    # 2. INSERT lead (skip if one already exists for this profile)
+    lead = await conn.fetchrow(
+        """
+        INSERT INTO leads (profile_id, email, source, status)
+        VALUES ($1, $2, 'access_request', 'active')
+        ON CONFLICT DO NOTHING
+        RETURNING id
+        """,
+        profile_id,
+        email,
+    )
+
+    if lead is None:
+        lead = await conn.fetchrow(
+            "SELECT id FROM leads WHERE profile_id = $1 ORDER BY created_at ASC LIMIT 1",
+            profile_id,
+        )
+
+    lead_id = lead["id"]
+    logger.info(f"📥 [capture_access_request] Lead id: {lead_id}")
+
+    # 3. INSERT lead_interaction for every access request
+    import json as _json
+    metadata = _json.dumps({"button": button_source})
+    await conn.execute(
+        """
+        INSERT INTO lead_interactions
+            (lead_id, interaction_type, source, ip_address, user_agent, metadata)
+        VALUES ($1, 'access_request', 'login_page', $2, $3, $4::jsonb)
+        """,
+        lead_id,
+        ip_address,
+        user_agent,
+        metadata,
+    )
+    logger.info(f"📥 [capture_access_request] Interaction recorded for lead {lead_id}")
+
+    # Fire-and-forget notifications (non-blocking)
+    asyncio.create_task(_send_access_request_notifications(email, ip_address))
+
+    return {"profile_id": str(profile_id), "lead_id": str(lead_id)}
+
+
+async def _send_access_request_notifications(
+    email: str,
+    ip_address: Optional[str],
+) -> None:
+    """Send Discord notification and confirmation email for access requests."""
+    from app.services.discord_service import discord_leads_service
+    from app.services.aws_ses_service import ses_service
+    from app.config import settings
+
+    tasks = []
+
+    if discord_leads_service:
+        tasks.append(
+            discord_leads_service.notify_new_lead(
+                email=email,
+                button_source="access_request",
+                ip_address=ip_address,
+            )
+        )
+
+    tasks.append(
+        ses_service.send_email(
+            from_email=settings.email_from,
+            from_name="WARO Colombia",
+            to_emails=[email],
+            subject="¡Gracias por contactarnos! — WARO Colombia",
+            html_body=_build_confirmation_email(email),
+        )
+    )
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(f"[capture_access_request] Notification error: {result}")
+
+
 async def _send_notifications(
     email: str,
     phone: str,

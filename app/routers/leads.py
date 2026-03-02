@@ -1,5 +1,5 @@
 """
-Leads router - public endpoint for homepage lead capture
+Leads router - public endpoints for lead capture
 No authentication required
 """
 import logging
@@ -12,6 +12,11 @@ from app.services import leads_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class AccessRequestBody(BaseModel):
+    email: EmailStr
+    button_source: str = "access_request"
 
 
 class LeadCaptureRequest(BaseModel):
@@ -56,3 +61,32 @@ async def capture_lead(body: LeadCaptureRequest, request: Request):
         )
 
     return {"success": True, "message": "¡Gracias! Nos pondremos en contacto contigo pronto."}
+
+
+@router.post("/access-request")
+async def capture_access_request(body: AccessRequestBody, request: Request):
+    """
+    Capture an access request from the login page (PUBLIC - no auth required).
+
+    Called when a user tries to log in but has no account.
+    Creates a lead and notifies the WARO team via Discord + SES.
+
+    Body:
+    - email: required (pre-filled from login form)
+    - button_source: 'access_request' (default)
+    """
+    ip_address = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+
+    logger.info(f"📥 [leads/access-request] email={body.email} source={body.button_source} ip={ip_address}")
+
+    async with get_db_connection() as conn:
+        await leads_service.capture_access_request(
+            conn=conn,
+            email=str(body.email),
+            ip_address=ip_address,
+            user_agent=user_agent,
+            button_source=body.button_source,
+        )
+
+    return {"success": True, "message": "¡Solicitud enviada! Nos pondremos en contacto contigo pronto."}
