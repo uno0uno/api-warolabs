@@ -4,6 +4,7 @@ Leads service - public lead capture from homepage CTA buttons
 import asyncio
 import logging
 import json
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +66,8 @@ async def capture_lead(
     conn,
     email: str,
     phone: str,
-    ip_address: str | None,
-    user_agent: str | None,
+    ip_address: Optional[str],
+    user_agent: Optional[str],
     button_source: str,
 ) -> dict:
     """
@@ -140,7 +141,7 @@ async def _send_notifications(
     email: str,
     phone: str,
     button_source: str,
-    ip_address: str | None,
+    ip_address: Optional[str],
 ) -> None:
     """Send Discord notification and confirmation email without blocking the response."""
     from app.services.discord_service import discord_leads_service
