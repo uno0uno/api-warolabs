@@ -1,10 +1,64 @@
 """
 Leads service - public lead capture from homepage CTA buttons
 """
+import asyncio
 import logging
 import json
 
 logger = logging.getLogger(__name__)
+
+
+def _build_confirmation_email(email: str) -> str:
+    return f"""
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>¡Gracias por contactarnos!</title>
+</head>
+<body style="margin:0;padding:0;background:#F8F9FA;font-family:Lato,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F8F9FA;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border-radius:12px;overflow:hidden;max-width:600px;width:100%;">
+          <!-- Header -->
+          <tr>
+            <td style="background:#7C3AED;padding:32px 40px;text-align:center;">
+              <h1 style="margin:0;color:#FFFFFF;font-size:24px;font-weight:700;letter-spacing:-0.3px;">WARO Colombia</h1>
+            </td>
+          </tr>
+          <!-- Body -->
+          <tr>
+            <td style="padding:40px;">
+              <p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#1F1D35;">Hola,</p>
+              <p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#1F1D35;">
+                Gracias por comunicarte con nosotros. Hemos recibido tu mensaje y nos pondremos en contacto contigo muy pronto.
+              </p>
+              <p style="margin:0 0 32px;font-size:16px;line-height:1.6;color:#1F1D35;">
+                Si tienes alguna pregunta urgente, no dudes en responder a este correo.
+              </p>
+              <p style="margin:0;font-size:16px;line-height:1.6;color:#1F1D35;">
+                ¡Hasta pronto!<br />
+                <strong>El equipo de WARO Colombia</strong>
+              </p>
+            </td>
+          </tr>
+          <!-- Footer -->
+          <tr>
+            <td style="background:#F0F1F3;padding:20px 40px;text-align:center;">
+              <p style="margin:0;font-size:13px;color:#4B5565;">
+                Este correo fue enviado a {email} porque completaste un formulario en warocol.com
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+"""
 
 
 async def capture_lead(
@@ -76,4 +130,46 @@ async def capture_lead(
     )
     logger.info(f"📥 [capture_lead] Interaction recorded for lead {lead_id} via '{button_source}'")
 
+    # Fire-and-forget: Discord notification + confirmation email (non-blocking)
+    asyncio.create_task(_send_notifications(email, phone, button_source, ip_address))
+
     return {"profile_id": str(profile_id), "lead_id": str(lead_id)}
+
+
+async def _send_notifications(
+    email: str,
+    phone: str,
+    button_source: str,
+    ip_address: str | None,
+) -> None:
+    """Send Discord notification and confirmation email without blocking the response."""
+    from app.services.discord_service import discord_leads_service
+    from app.services.aws_ses_service import ses_service
+    from app.config import settings
+
+    tasks = []
+
+    if discord_leads_service:
+        tasks.append(
+            discord_leads_service.notify_new_lead(
+                email=email,
+                phone=phone,
+                button_source=button_source,
+                ip_address=ip_address,
+            )
+        )
+
+    tasks.append(
+        ses_service.send_email(
+            from_email=settings.email_from,
+            from_name="WARO Colombia",
+            to_emails=[email],
+            subject="¡Gracias por contactarnos! — WARO Colombia",
+            html_body=_build_confirmation_email(email),
+        )
+    )
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(f"[capture_lead] Notification error: {result}")

@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     )
     discord_supplier_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_SUPPLIER_WEBHOOK_URL')
     discord_purchase_actions_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_PURCHASE_ACTIONS_WEBHOOK_URL')
+    discord_leads_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_LEADS_WEBHOOK_URL')
 
     class Config:
         env_file = ".env"

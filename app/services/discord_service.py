@@ -596,6 +596,35 @@ class DiscordWebhookService:
         )
 
 
+    async def notify_new_lead(
+        self,
+        email: str,
+        phone: str,
+        button_source: str,
+        ip_address: Optional[str] = None,
+    ) -> bool:
+        """Send notification when a new lead is captured from the homepage CTA."""
+        button_labels = {
+            "comenzar": "Comenzar",
+            "habla_con_nosotros": "Habla con nosotros",
+        }
+        button_label = button_labels.get(button_source, button_source)
+
+        description = (
+            f"**Email:** {email}\n"
+            f"**Teléfono:** +57 {phone}\n"
+            f"**Botón:** {button_label}"
+        )
+        if ip_address:
+            description += f"\n**IP:** {ip_address}"
+
+        return await self.send_notification(
+            title="🎯 Nuevo Lead Capturado",
+            description=description,
+            color=5763719,  # Green
+        )
+
+
 # Singleton instance with webhook URL from settings
 from app.config import settings
 
@@ -633,3 +662,10 @@ if settings.discord_purchase_actions_webhook_url:
     discord_purchase_actions_service = DiscordWebhookService(settings.discord_purchase_actions_webhook_url)
 else:
     logger.warning("Discord purchase actions webhook URL not configured - purchase actions notifications disabled")
+
+# Separate service for lead capture notifications (homepage CTA)
+discord_leads_service = None
+if settings.discord_leads_webhook_url:
+    discord_leads_service = DiscordWebhookService(settings.discord_leads_webhook_url)
+else:
+    logger.warning("Discord leads webhook URL not configured - lead notifications disabled")
