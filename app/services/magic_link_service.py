@@ -121,7 +121,7 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             
             return MagicLinkResponse()
             
-    except ValidationError:
+    except (ValidationError, AuthenticationError):
         raise
     except Exception as e:
         logger.error(f"❌ Magic link handler error: {e}", exc_info=True)

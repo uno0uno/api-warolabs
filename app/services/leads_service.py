@@ -156,8 +156,8 @@ async def capture_access_request(
     # 1. UPSERT profile by email — do not overwrite phone if profile exists
     await conn.execute(
         """
-        INSERT INTO profile (email, nationality_id)
-        VALUES ($1, 0)
+        INSERT INTO profile (email, phone_number, phone_country_code, nationality_id)
+        VALUES ($1, '', 57, 0)
         ON CONFLICT (email) DO NOTHING
         """,
         email,
@@ -232,13 +232,23 @@ async def _send_access_request_notifications(
             )
         )
 
+    text_body = (
+        "WARO Colombia\n\n"
+        "Hola,\n\n"
+        "Gracias por comunicarte con nosotros. Hemos recibido tu mensaje y nos pondremos en contacto contigo muy pronto.\n\n"
+        "Si tienes alguna pregunta urgente, no dudes en responder a este correo.\n\n"
+        "¡Hasta pronto!\n"
+        "El equipo de WARO Colombia\n\n"
+        f"Este correo fue enviado a {email} porque completaste un formulario en warocol.com"
+    )
+
     tasks.append(
         ses_service.send_email(
             from_email=settings.email_from,
             from_name="WARO Colombia",
             to_emails=[email],
             subject="¡Gracias por contactarnos! — WARO Colombia",
-            html_body=_build_confirmation_email(email),
+            text_body=text_body,
         )
     )
 
