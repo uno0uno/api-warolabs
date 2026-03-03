@@ -349,6 +349,119 @@ async def get_order_items(
         raise APIError(f"Error getting order items: {str(e)}", status_code=500)
 
 
+async def get_customers_list(
+    request: Request,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+) -> dict:
+    """
+    Get list of customers aggregated from POS orders.
+    Returns customers ranked by total_spent DESC.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            where_conditions = [
+                "o.tenant_id = $1",
+                "o.pos_cart_id IS NOT NULL",
+                "o.customer_id IS NOT NULL",
+            ]
+            params = [tenant_id]
+            param_count = 1
+
+            if payment_method:
+                param_count += 1
+                where_conditions.append(f"o.payment_method = ${param_count}")
+                params.append(payment_method)
+
+            if status:
+                param_count += 1
+                where_conditions.append(f"o.status = ${param_count}")
+                params.append(status)
+
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
+
+            if parsed_date_from:
+                param_count += 1
+                where_conditions.append(
+                    f"o.order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')"
+                )
+                params.append(parsed_date_from)
+
+            if parsed_date_to:
+                param_count += 1
+                where_conditions.append(
+                    f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')"
+                )
+                params.append(parsed_date_to)
+
+            where_clause = " AND ".join(where_conditions)
+
+            param_count += 1
+            limit_param = param_count
+            param_count += 1
+            offset_param = param_count
+
+            query = f"""
+                SELECT
+                    o.customer_id,
+                    COALESCE(p.name, 'Sin identificar') AS name,
+                    p.phone_number                       AS phone,
+                    SUM(o.total_amount)                  AS total_spent,
+                    COUNT(o.id)                          AS order_count,
+                    AVG(o.total_amount)                  AS avg_ticket,
+                    MAX(o.order_date)                    AS last_order_date,
+                    COUNT(*) OVER()                      AS total_count
+                FROM orders o
+                LEFT JOIN profile p ON o.customer_id = p.id
+                WHERE {where_clause}
+                GROUP BY o.customer_id, p.name, p.phone_number
+                ORDER BY total_spent DESC
+                LIMIT ${limit_param} OFFSET ${offset_param}
+            """
+
+            params.extend([limit, offset])
+            rows = await conn.fetch(query, *params)
+            total_count = rows[0]['total_count'] if rows else 0
+
+            customers = [
+                {
+                    "customer_id": str(row['customer_id']),
+                    "name": row['name'],
+                    "phone": row['phone'],
+                    "total_spent": float(row['total_spent']),
+                    "order_count": int(row['order_count']),
+                    "avg_ticket": float(row['avg_ticket']),
+                    "last_order_date": row['last_order_date'].isoformat(),
+                }
+                for row in rows
+            ]
+
+            return {
+                "success": True,
+                "data": customers,
+                "total": total_count,
+                "limit": limit,
+                "offset": offset,
+            }
+
+    except AuthenticationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting customers list: {str(e)}")
+        raise APIError(f"Error getting customers list: {str(e)}", status_code=500)
+
+
 async def get_orders_metrics(
     request: Request,
     date_from: Optional[str] = None,

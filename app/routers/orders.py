@@ -165,6 +165,38 @@ async def get_orders(
     )
 
 
+@router.get("/customers")
+async def get_customers(
+    request: Request,
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    payment_method: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0)
+):
+    """
+    Get list of customers aggregated from POS orders, ranked by total spent.
+
+    Query parameters:
+    - date_from: Start date (YYYY-MM-DD)
+    - date_to: End date (YYYY-MM-DD)
+    - payment_method: Filter by payment method
+    - status: Filter by order status
+    - limit: Number of customers to return (1-500, default 100)
+    - offset: Number of customers to skip (default 0)
+    """
+    return await orders_service.get_customers_list(
+        request,
+        date_from=date_from,
+        date_to=date_to,
+        payment_method=payment_method,
+        status=status,
+        limit=limit,
+        offset=offset
+    )
+
+
 @router.get("/{order_id}")
 async def get_order(
     request: Request,
