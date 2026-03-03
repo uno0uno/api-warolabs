@@ -413,19 +413,25 @@ async def get_customers_list(
             offset_param = param_count
 
             query = f"""
+                WITH customer_agg AS (
+                    SELECT
+                        o.customer_id,
+                        COALESCE(p.name, 'Sin identificar') AS name,
+                        p.phone_number                       AS phone,
+                        SUM(o.total_amount)                  AS total_spent,
+                        COUNT(o.id)                          AS order_count,
+                        AVG(o.total_amount)                  AS avg_ticket,
+                        MAX(o.order_date)                    AS last_order_date
+                    FROM orders o
+                    LEFT JOIN profile p ON o.customer_id = p.id
+                    WHERE {where_clause}
+                    GROUP BY o.customer_id, p.name, p.phone_number
+                )
                 SELECT
-                    o.customer_id,
-                    COALESCE(p.name, 'Sin identificar') AS name,
-                    p.phone_number                       AS phone,
-                    SUM(o.total_amount)                  AS total_spent,
-                    COUNT(o.id)                          AS order_count,
-                    AVG(o.total_amount)                  AS avg_ticket,
-                    MAX(o.order_date)                    AS last_order_date,
-                    COUNT(*) OVER()                      AS total_count
-                FROM orders o
-                LEFT JOIN profile p ON o.customer_id = p.id
-                WHERE {where_clause}
-                GROUP BY o.customer_id, p.name, p.phone_number
+                    *,
+                    COUNT(*) OVER()          AS total_count,
+                    SUM(total_spent) OVER()  AS total_revenue
+                FROM customer_agg
                 ORDER BY total_spent DESC
                 LIMIT ${limit_param} OFFSET ${offset_param}
             """
@@ -433,6 +439,7 @@ async def get_customers_list(
             params.extend([limit, offset])
             rows = await conn.fetch(query, *params)
             total_count = rows[0]['total_count'] if rows else 0
+            total_revenue = float(rows[0]['total_revenue']) if rows else 0.0
 
             customers = [
                 {
@@ -451,6 +458,7 @@ async def get_customers_list(
                 "success": True,
                 "data": customers,
                 "total": total_count,
+                "total_revenue": total_revenue,
                 "limit": limit,
                 "offset": offset,
             }
