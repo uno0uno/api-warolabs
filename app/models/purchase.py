@@ -471,6 +471,7 @@ class DirectPurchaseCreate(BaseModel):
     notes: Optional[str] = None
     invoice_number: Optional[str] = None
     invoice_amount: Optional[float] = None
+    purchase_date: Optional[str] = None
     invoice_date: Optional[str] = None
     payment_method: Optional[str] = None
     payment_reference: Optional[str] = None
@@ -483,6 +484,7 @@ class DirectPurchaseCreate(BaseModel):
 class DirectPurchaseUpdate(BaseModel):
     """Model for updating direct purchases - JSON payload"""
     items_data: str = Field(..., description="JSON string of items with ingredient_id, quantity, unit_cost, etc.")
+    purchase_date: Optional[str] = None
     notes: Optional[str] = None
     invoice_number: Optional[str] = None
     payment_method: Optional[str] = None

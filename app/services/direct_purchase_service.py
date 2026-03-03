@@ -134,7 +134,8 @@ async def create_direct_purchase(
     payment_method: Optional[str] = None,
     payment_reference: Optional[str] = None,
     payment_amount: Optional[float] = None,
-    payment_date: Optional[str] = None
+    payment_date: Optional[str] = None,
+    purchase_date: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Create a direct purchase that immediately updates inventory.
@@ -207,7 +208,7 @@ async def create_direct_purchase(
                         received_by,
                         paid_at
                     ) VALUES (
-                        $1, $2, $3, NOW(), $4, 0, $5, $6, $7, $8, $9, $10,
+                        $1, $2, $3, COALESCE($19, NOW()), $4, 0, $5, $6, $7, $8, $9, $10,
                         $11, $12, $13, $14, $15, $16, TRUE, NOW(), $17,
                         CASE WHEN $18 THEN NOW() ELSE NULL END
                     )
@@ -230,7 +231,8 @@ async def create_direct_purchase(
                     payment_amount,
                     _parse_date(payment_date),
                     user_id,
-                    bool(payment_method and payment_amount)
+                    bool(payment_method and payment_amount),
+                    _parse_date(purchase_date)
                 )
 
                 purchase_id = purchase_row['id']
@@ -769,6 +771,7 @@ async def update_direct_purchase(
     response: Response,
     purchase_id: UUID,
     items_data: str,
+    purchase_date: Optional[str] = None,
     notes: Optional[str] = None,
     invoice_number: Optional[str] = None,
     payment_method: Optional[str] = None,
@@ -1119,7 +1122,8 @@ async def update_direct_purchase(
                         payment_date = $7,
                         status = $8,
                         updated_at = NOW(),
-                        paid_at = CASE WHEN $9 THEN NOW() ELSE paid_at END
+                        paid_at = CASE WHEN $9 THEN NOW() ELSE paid_at END,
+                        purchase_date = COALESCE($11, purchase_date)
                     WHERE id = $10
                 """,
                     total_amount,
@@ -1131,7 +1135,8 @@ async def update_direct_purchase(
                     _parse_date(payment_date),
                     new_status,
                     bool(payment_method and payment_amount and current_status != 'paid'),
-                    purchase_id
+                    purchase_id,
+                    _parse_date(purchase_date)
                 )
 
                 # 10. Create status history if status changed
