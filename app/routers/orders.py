@@ -197,6 +197,34 @@ async def get_customers(
     )
 
 
+@router.get("/customers/{customer_id}")
+async def get_customer_detail(
+    request: Request,
+    customer_id: UUID,
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100)
+):
+    """
+    Get a single customer's aggregate stats and paginated POS order history.
+
+    Query parameters:
+    - date_from: Filter order history start date (YYYY-MM-DD)
+    - date_to: Filter order history end date (YYYY-MM-DD)
+    - page: Page number (default 1)
+    - per_page: Orders per page (1-100, default 20)
+    """
+    return await orders_service.get_customer_detail(
+        request,
+        customer_id=customer_id,
+        date_from=date_from,
+        date_to=date_to,
+        page=page,
+        per_page=per_page
+    )
+
+
 @router.get("/{order_id}")
 async def get_order(
     request: Request,

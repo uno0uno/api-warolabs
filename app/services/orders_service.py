@@ -462,6 +462,150 @@ async def get_customers_list(
         raise APIError(f"Error getting customers list: {str(e)}", status_code=500)
 
 
+async def get_customer_detail(
+    request: Request,
+    customer_id: UUID,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 20
+) -> dict:
+    """
+    Get a single customer's aggregate stats plus their paginated POS order history.
+    Returns 404 if the customer has no POS orders for this tenant.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # --- Customer aggregate stats ---
+            customer_row = await conn.fetchrow(
+                """
+                SELECT
+                    o.customer_id,
+                    COALESCE(p.name, 'Sin identificar') AS name,
+                    p.phone_number                       AS phone,
+                    p.email                              AS email,
+                    COUNT(o.id)                          AS total_orders,
+                    SUM(o.total_amount)                  AS total_spent,
+                    MIN(o.order_date)                    AS first_purchase,
+                    MAX(o.order_date)                    AS last_purchase
+                FROM orders o
+                LEFT JOIN profile p ON o.customer_id = p.id
+                WHERE o.tenant_id = $1
+                  AND o.pos_cart_id IS NOT NULL
+                  AND o.customer_id = $2
+                GROUP BY o.customer_id, p.name, p.phone_number, p.email
+                """,
+                tenant_id,
+                customer_id,
+            )
+
+            if not customer_row:
+                raise APIError("Customer not found", status_code=404)
+
+            # --- Paginated order history ---
+            where_conditions = [
+                "o.tenant_id = $1",
+                "o.pos_cart_id IS NOT NULL",
+                "o.customer_id = $2",
+            ]
+            params = [tenant_id, customer_id]
+            param_count = 2
+
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
+
+            if parsed_date_from:
+                param_count += 1
+                where_conditions.append(
+                    f"o.order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')"
+                )
+                params.append(parsed_date_from)
+
+            if parsed_date_to:
+                param_count += 1
+                where_conditions.append(
+                    f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')"
+                )
+                params.append(parsed_date_to)
+
+            where_clause = " AND ".join(where_conditions)
+
+            offset = (page - 1) * per_page
+            param_count += 1
+            limit_param = param_count
+            param_count += 1
+            offset_param = param_count
+
+            orders_query = f"""
+                SELECT
+                    o.id                AS order_id,
+                    o.order_number,
+                    o.order_date,
+                    o.total_amount,
+                    o.status,
+                    o.payment_method,
+                    (
+                        SELECT COUNT(*)
+                        FROM order_items oi
+                        WHERE oi.order_id = o.id
+                    )                   AS items_count,
+                    COUNT(*) OVER()     AS total_count
+                FROM orders o
+                WHERE {where_clause}
+                ORDER BY o.order_date DESC
+                LIMIT ${limit_param} OFFSET ${offset_param}
+            """
+
+            params.extend([per_page, offset])
+            order_rows = await conn.fetch(orders_query, *params)
+            total_orders_in_period = order_rows[0]['total_count'] if order_rows else 0
+
+            orders = [
+                {
+                    "order_id": str(row['order_id']),
+                    "order_number": int(row['order_number']),
+                    "date": row['order_date'].isoformat(),
+                    "total": float(row['total_amount']),
+                    "items_count": int(row['items_count']),
+                    "payment_method": row['payment_method'],
+                    "status": row['status'],
+                }
+                for row in order_rows
+            ]
+
+            return {
+                "success": True,
+                "customer": {
+                    "customer_id": str(customer_row['customer_id']),
+                    "name": customer_row['name'],
+                    "phone": customer_row['phone'],
+                    "email": customer_row['email'],
+                    "total_orders": int(customer_row['total_orders']),
+                    "total_spent": float(customer_row['total_spent']),
+                    "first_purchase": customer_row['first_purchase'].date().isoformat(),
+                    "last_purchase": customer_row['last_purchase'].date().isoformat(),
+                },
+                "orders": {
+                    "items": orders,
+                    "total": total_orders_in_period,
+                    "page": page,
+                    "per_page": per_page,
+                },
+            }
+
+    except (AuthenticationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting customer detail {customer_id}: {str(e)}")
+        raise APIError(f"Error getting customer detail: {str(e)}", status_code=500)
+
+
 async def get_orders_metrics(
     request: Request,
     date_from: Optional[str] = None,
