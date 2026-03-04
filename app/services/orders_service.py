@@ -2,7 +2,7 @@
 Orders Service
 Handles listing and filtering of POS orders
 """
-from typing import Optional
+from typing import Optional, List
 from uuid import UUID
 from fastapi import Request
 from app.database import get_db_connection
@@ -54,7 +54,10 @@ async def get_orders_list(
 
         async with get_db_connection() as conn:
             # Build WHERE clause
-            where_conditions = ["o.tenant_id = $1", "o.pos_cart_id IS NOT NULL"]
+            where_conditions = [
+                "o.tenant_id = $1",
+                "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"
+            ]
             params = [tenant_id]
             param_count = 1
 
@@ -1674,3 +1677,78 @@ async def get_sales_flow(
     except Exception as e:
         logger.error(f"Error getting sales flow: {str(e)}")
         raise APIError(f"Error getting sales flow: {str(e)}", status_code=500)
+
+
+async def create_manual_order(
+    request: Request,
+    order_date: str,
+    payment_method: str,
+    items: List[dict],
+    customer_id: Optional[str] = None
+) -> dict:
+    """
+    Create an order manually with a custom date, bypassing the POS cart.
+    Stores extra_attributes = {"source": "manual"} to identify it.
+    """
+    import json
+
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        if not items:
+            raise APIError("At least one item is required", status_code=400)
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # Compute total server-side — never trust client total
+                total_amount = sum(
+                    float(item["quantity"]) * float(item["unit_price"])
+                    for item in items
+                )
+
+                order_row = await conn.fetchrow(
+                    """
+                    INSERT INTO orders (
+                        tenant_id, customer_id, payment_method,
+                        order_date, total_amount, status, extra_attributes
+                    )
+                    VALUES ($1, $2, $3, $4::timestamptz, $5, 'completed', $6)
+                    RETURNING id, order_number, order_date, created_at
+                    """,
+                    tenant_id,
+                    UUID(customer_id) if customer_id else None,
+                    payment_method,
+                    order_date,
+                    total_amount,
+                    json.dumps({"source": "manual"})
+                )
+
+                order_id = order_row["id"]
+
+                for item in items:
+                    subtotal = float(item["quantity"]) * float(item["unit_price"])
+                    await conn.execute(
+                        """
+                        INSERT INTO order_items (
+                            order_id, product_id, quantity, price_at_purchase, subtotal
+                        )
+                        VALUES ($1, $2, $3, $4, $5)
+                        """,
+                        order_id,
+                        UUID(item["product_id"]),
+                        float(item["quantity"]),
+                        float(item["unit_price"]),
+                        subtotal
+                    )
+
+        return await get_order_by_id(request, order_id)
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error creating manual order: {str(e)}")
+        raise APIError(f"Error creating manual order: {str(e)}", status_code=500)

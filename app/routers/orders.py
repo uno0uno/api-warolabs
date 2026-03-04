@@ -3,8 +3,9 @@ Orders Router
 Endpoints for listing and managing orders
 """
 from fastapi import APIRouter, Request, Query
-from typing import Optional
+from typing import Optional, List
 from uuid import UUID
+from pydantic import BaseModel, Field
 from app.services import orders_service
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
@@ -222,6 +223,37 @@ async def get_customer_detail(
         date_to=date_to,
         page=page,
         per_page=per_page
+    )
+
+
+class ManualOrderItem(BaseModel):
+    product_id: str
+    quantity: float = Field(gt=0)
+    unit_price: float = Field(ge=0)
+
+
+class CreateManualOrderRequest(BaseModel):
+    order_date: str
+    payment_method: str
+    customer_id: Optional[str] = None
+    items: List[ManualOrderItem] = Field(min_length=1)
+
+
+@router.post("/manual")
+async def create_manual_order(
+    request: Request,
+    data: CreateManualOrderRequest
+):
+    """
+    Create a manual order with a custom date, bypassing the POS cart.
+    Useful for registering sales that occurred outside the POS system.
+    """
+    return await orders_service.create_manual_order(
+        request,
+        order_date=data.order_date,
+        payment_method=data.payment_method,
+        items=[item.model_dump() for item in data.items],
+        customer_id=data.customer_id
     )
 
 
