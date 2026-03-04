@@ -1707,6 +1707,7 @@ async def create_manual_order(
                 # Compute total server-side — never trust client total
                 total_amount = sum(
                     float(item["quantity"]) * float(item["unit_price"])
+                    + sum(float(m.get("price", 0)) for m in item.get("modifiers", []))
                     for item in items
                 )
 
@@ -1730,13 +1731,16 @@ async def create_manual_order(
                 order_id = order_row["id"]
 
                 for item in items:
-                    subtotal = float(item["quantity"]) * float(item["unit_price"])
-                    await conn.execute(
+                    modifiers = item.get("modifiers", [])
+                    modifiers_total = sum(float(m.get("price", 0)) for m in modifiers)
+                    subtotal = float(item["quantity"]) * float(item["unit_price"]) + modifiers_total
+                    order_item_row = await conn.fetchrow(
                         """
                         INSERT INTO order_items (
                             order_id, product_id, quantity, price_at_purchase, subtotal
                         )
                         VALUES ($1, $2, $3, $4, $5)
+                        RETURNING id
                         """,
                         order_id,
                         UUID(item["product_id"]),
@@ -1744,6 +1748,22 @@ async def create_manual_order(
                         float(item["unit_price"]),
                         subtotal
                     )
+                    order_item_id = order_item_row["id"]
+
+                    for modifier in modifiers:
+                        await conn.execute(
+                            """
+                            INSERT INTO order_item_modifiers (
+                                order_item_id, modifier_id, modifier_name,
+                                price_at_purchase, quantity
+                            )
+                            VALUES ($1, $2, $3, $4, 1)
+                            """,
+                            order_item_id,
+                            UUID(modifier["id"]),
+                            modifier["name"],
+                            float(modifier.get("price", 0))
+                        )
 
         return await get_order_by_id(request, order_id)
 

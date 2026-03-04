@@ -226,10 +226,17 @@ async def get_customer_detail(
     )
 
 
+class ManualOrderModifier(BaseModel):
+    id: str
+    name: str
+    price: float = 0.0
+
+
 class ManualOrderItem(BaseModel):
     product_id: str
     quantity: float = Field(gt=0)
     unit_price: float = Field(ge=0)
+    modifiers: List[ManualOrderModifier] = []
 
 
 class CreateManualOrderRequest(BaseModel):
