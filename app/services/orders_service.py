@@ -1698,6 +1698,7 @@ async def create_manual_order(
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
@@ -1771,6 +1772,124 @@ async def create_manual_order(
                             UUID(modifier["id"]),
                             modifier["name"],
                             float(modifier.get("price", 0))
+                        )
+
+                        # Deduct inventory for modifier ingredient (if linked)
+                        modifier_ingredient = await conn.fetchrow(
+                            """
+                            SELECT
+                                m.ingredient_id,
+                                m.ingredient_quantity,
+                                m.ingredient_unit,
+                                i.name AS ingredient_name
+                            FROM modifiers m
+                            LEFT JOIN ingredients i ON m.ingredient_id = i.id
+                            WHERE m.id = $1 AND m.ingredient_id IS NOT NULL
+                            """,
+                            UUID(modifier["id"])
+                        )
+
+                        if modifier_ingredient and modifier_ingredient["ingredient_id"] and modifier_ingredient["ingredient_quantity"]:
+                            total_deduction = float(item["quantity"]) * float(modifier_ingredient["ingredient_quantity"])
+                            stock_row = await conn.fetchrow(
+                                "SELECT current_stock FROM tenant_inventory WHERE ingredient_id = $1 AND tenant_id = $2",
+                                modifier_ingredient["ingredient_id"],
+                                tenant_id
+                            )
+                            previous_stock = float(stock_row["current_stock"]) if stock_row else 0.0
+                            new_stock = previous_stock - total_deduction
+
+                            if stock_row:
+                                await conn.execute(
+                                    "UPDATE tenant_inventory SET current_stock = $1, last_updated = NOW() WHERE ingredient_id = $2 AND tenant_id = $3",
+                                    new_stock, modifier_ingredient["ingredient_id"], tenant_id
+                                )
+                            else:
+                                await conn.execute(
+                                    "INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock, last_updated) VALUES ($1, $2, $3, 0, NOW())",
+                                    tenant_id, modifier_ingredient["ingredient_id"], -total_deduction
+                                )
+
+                            await conn.execute(
+                                """
+                                INSERT INTO tenant_ingredient_movements (
+                                    tenant_id, ingredient_id, movement_type,
+                                    quantity_change, unit, previous_stock, new_stock,
+                                    reference_table, reference_id, reason, created_by, created_at
+                                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+                                """,
+                                tenant_id,
+                                modifier_ingredient["ingredient_id"],
+                                "consumption",
+                                -total_deduction,
+                                modifier_ingredient["ingredient_unit"] or "und",
+                                previous_stock,
+                                new_stock,
+                                "orders",
+                                order_id,
+                                f"Modificador {modifier['name']} - Orden #{order_row['order_number']}",
+                                user_id
+                            )
+
+                    # Deduct inventory for product ingredients (direct + base recipes)
+                    ingredients = await conn.fetch(
+                        """
+                        SELECT pr.ingredient_id, pr.quantity, pr.unit, i.name AS ingredient_name
+                        FROM product_recipes pr
+                        JOIN ingredients i ON pr.ingredient_id = i.id
+                        WHERE pr.product_id = $1
+
+                        UNION ALL
+
+                        SELECT brt.ingredient_id, brt.base_quantity AS quantity, brt.unit, i.name AS ingredient_name
+                        FROM product_base_recipes pbr
+                        JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+                        JOIN ingredients i ON brt.ingredient_id = i.id
+                        WHERE pbr.product_id = $1
+                        """,
+                        UUID(item["product_id"])
+                    )
+
+                    for ingredient in ingredients:
+                        quantity_to_deduct = float(item["quantity"]) * float(ingredient["quantity"])
+                        stock_row = await conn.fetchrow(
+                            "SELECT current_stock FROM tenant_inventory WHERE ingredient_id = $1 AND tenant_id = $2",
+                            ingredient["ingredient_id"],
+                            tenant_id
+                        )
+                        previous_stock = float(stock_row["current_stock"]) if stock_row else 0.0
+                        new_stock = previous_stock - quantity_to_deduct
+
+                        if stock_row:
+                            await conn.execute(
+                                "UPDATE tenant_inventory SET current_stock = $1, last_updated = NOW() WHERE ingredient_id = $2 AND tenant_id = $3",
+                                new_stock, ingredient["ingredient_id"], tenant_id
+                            )
+                        else:
+                            await conn.execute(
+                                "INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock, last_updated) VALUES ($1, $2, $3, 0, NOW())",
+                                tenant_id, ingredient["ingredient_id"], -quantity_to_deduct
+                            )
+
+                        await conn.execute(
+                            """
+                            INSERT INTO tenant_ingredient_movements (
+                                tenant_id, ingredient_id, movement_type,
+                                quantity_change, unit, previous_stock, new_stock,
+                                reference_table, reference_id, reason, created_by, created_at
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+                            """,
+                            tenant_id,
+                            ingredient["ingredient_id"],
+                            "consumption",
+                            -quantity_to_deduct,
+                            ingredient["unit"],
+                            previous_stock,
+                            new_stock,
+                            "orders",
+                            order_id,
+                            f"Venta de {item['quantity']}x {item.get('product_name', '')} - Orden #{order_row['order_number']}",
+                            user_id
                         )
 
         return {
