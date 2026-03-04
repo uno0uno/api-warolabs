@@ -226,7 +226,8 @@ async def get_order_by_id(
                     ) as items_count
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
-                WHERE o.id = $1 AND o.tenant_id = $2 AND o.pos_cart_id IS NOT NULL
+                WHERE o.id = $1 AND o.tenant_id = $2
+                  AND (o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
             """
 
             order_row = await conn.fetchrow(order_query, order_id, tenant_id)
@@ -278,7 +279,8 @@ async def get_order_items(
             # First verify order exists and belongs to this tenant
             verify_query = """
                 SELECT id FROM orders
-                WHERE id = $1 AND tenant_id = $2 AND pos_cart_id IS NOT NULL
+                WHERE id = $1 AND tenant_id = $2
+                  AND (pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')
             """
             order_exists = await conn.fetchrow(verify_query, order_id, tenant_id)
 
@@ -375,7 +377,7 @@ async def get_customers_list(
         async with get_db_connection() as conn:
             where_conditions = [
                 "o.tenant_id = $1",
-                "o.pos_cart_id IS NOT NULL",
+                "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
                 "o.customer_id IS NOT NULL",
             ]
             params = [tenant_id]
@@ -508,7 +510,7 @@ async def get_customer_detail(
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
                 WHERE o.tenant_id = $1
-                  AND o.pos_cart_id IS NOT NULL
+                  AND (o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
                   AND o.customer_id = $2
                 GROUP BY o.customer_id, p.name, p.phone_number, p.email
                 """,
@@ -522,7 +524,7 @@ async def get_customer_detail(
             # --- Paginated order history ---
             where_conditions = [
                 "o.tenant_id = $1",
-                "o.pos_cart_id IS NOT NULL",
+                "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
                 "o.customer_id = $2",
             ]
             params = [tenant_id, customer_id]
@@ -636,7 +638,7 @@ async def get_orders_metrics(
 
         async with get_db_connection() as conn:
             # Build WHERE clause
-            where_conditions = ["tenant_id = $1", "pos_cart_id IS NOT NULL"]
+            where_conditions = ["tenant_id = $1", "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"]
             params = [tenant_id]
             param_count = 1
 
@@ -769,7 +771,7 @@ async def get_orders_dashboard(
                     ), 0) as year_sales
 
                 FROM orders
-                WHERE tenant_id = $1 AND pos_cart_id IS NOT NULL
+                WHERE tenant_id = $1 AND (pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')
             """
 
             row = await conn.fetchrow(dashboard_query, *params)
@@ -840,7 +842,7 @@ async def export_orders_to_email(
 
         async with get_db_connection() as conn:
             # Build WHERE clause (same as get_orders_list but without pagination)
-            where_conditions = ["o.tenant_id = $1", "o.pos_cart_id IS NOT NULL"]
+            where_conditions = ["o.tenant_id = $1", "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"]
             params = [tenant_id]
             param_count = 1
 
@@ -1493,7 +1495,7 @@ async def get_sales_flow(
 
         async with get_db_connection() as conn:
             # Build WHERE conditions
-            where_conditions = ["tenant_id = $1", "pos_cart_id IS NOT NULL"]
+            where_conditions = ["tenant_id = $1", "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"]
             params = [tenant_id]
             param_count = 1
 
@@ -1691,6 +1693,7 @@ async def create_manual_order(
     Stores extra_attributes = {"source": "manual"} to identify it.
     """
     import json
+    from datetime import datetime
 
     try:
         session_context = require_valid_session(request)
@@ -1701,6 +1704,11 @@ async def create_manual_order(
 
         if not items:
             raise APIError("At least one item is required", status_code=400)
+
+        try:
+            order_datetime = datetime.fromisoformat(order_date)
+        except ValueError:
+            raise APIError("Invalid order_date format. Expected YYYY-MM-DDTHH:MM", status_code=400)
 
         async with get_db_connection() as conn:
             async with conn.transaction():
@@ -1717,13 +1725,13 @@ async def create_manual_order(
                         tenant_id, customer_id, payment_method,
                         order_date, total_amount, status, extra_attributes
                     )
-                    VALUES ($1, $2, $3, $4::timestamptz, $5, 'completed', $6)
+                    VALUES ($1, $2, $3, $4, $5, 'completed', $6)
                     RETURNING id, order_number, order_date, created_at
                     """,
                     tenant_id,
                     UUID(customer_id) if customer_id else None,
                     payment_method,
-                    order_date,
+                    order_datetime,
                     total_amount,
                     json.dumps({"source": "manual"})
                 )
@@ -1765,7 +1773,17 @@ async def create_manual_order(
                             float(modifier.get("price", 0))
                         )
 
-        return await get_order_by_id(request, order_id)
+        return {
+            "success": True,
+            "data": {
+                "id": str(order_row["id"]),
+                "order_number": int(order_row["order_number"]),
+                "order_date": order_row["order_date"].isoformat(),
+                "total_amount": float(total_amount),
+                "status": "completed",
+                "payment_method": payment_method,
+            }
+        }
 
     except (AuthenticationError, APIError):
         raise
