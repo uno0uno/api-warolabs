@@ -503,6 +503,7 @@ async def request_logging_middleware(request: Request, call_next):
     # Simple endpoint logging with timestamp
     from datetime import datetime
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    logger.info(f"{timestamp} | {method} {path}")
+    query = f"?{request.url.query}" if request.url.query else ""
+    logger.info(f"{timestamp} | {method} {path}{query}")
     
     return response

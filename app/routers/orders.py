@@ -24,6 +24,8 @@ async def get_orders_dashboard(
     - year: current year-to-date
     - commission_savings: savings vs. marketplace apps
     """
+    import logging
+    logging.getLogger(__name__).info(f"[dashboard] payment_method={payment_method!r} status={status!r}")
     return await orders_service.get_orders_dashboard(
         request,
         payment_method=payment_method,
