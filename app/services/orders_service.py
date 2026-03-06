@@ -711,8 +711,8 @@ async def get_orders_dashboard(
 
     Returns:
     - main: all-time metrics (filtered by payment_method/status if provided)
-    - month: current month-to-date metrics (always fixed, ignores user filters)
-    - year: current year-to-date metrics (always fixed, ignores user filters)
+    - month: current month-to-date metrics (filtered by payment_method/status if provided)
+    - year: current year-to-date metrics (filtered by payment_method/status if provided)
     - commission_savings: main.total_sales * commission_rate (from commission_configs or 30% default)
     """
     try:
@@ -750,24 +750,28 @@ async def get_orders_dashboard(
                     COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_sales,
                     COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_avg_ticket,
 
-                    -- Month-to-date (fixed, ignores user filters)
+                    -- Month-to-date (with optional payment/status filters)
                     COUNT(*) FILTER (
                         WHERE status = 'completed'
                         AND DATE(order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Bogota')::date
+                        {main_filter_sql}
                     ) as month_completed,
                     COALESCE(SUM(total_amount) FILTER (
                         WHERE status = 'completed'
                         AND DATE(order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Bogota')::date
+                        {main_filter_sql}
                     ), 0) as month_sales,
 
-                    -- Year-to-date (fixed, ignores user filters)
+                    -- Year-to-date (with optional payment/status filters)
                     COUNT(*) FILTER (
                         WHERE status = 'completed'
                         AND DATE(order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('year', NOW() AT TIME ZONE 'America/Bogota')::date
+                        {main_filter_sql}
                     ) as year_completed,
                     COALESCE(SUM(total_amount) FILTER (
                         WHERE status = 'completed'
                         AND DATE(order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('year', NOW() AT TIME ZONE 'America/Bogota')::date
+                        {main_filter_sql}
                     ), 0) as year_sales
 
                 FROM orders
