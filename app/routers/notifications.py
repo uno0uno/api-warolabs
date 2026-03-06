@@ -13,12 +13,49 @@ from app.services import notifications_service
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
+# Fan-out registry: one LISTEN connection per tenant channel, shared across all SSE clients.
+# With 2 uvicorn workers each worker maintains its own registry (processes don't share memory).
+# Worst case: 2 LISTEN connections per tenant (one per worker). Far better than 1 per tab.
+_channel_listeners: dict = {}   # channel → set of asyncio.Queue
+_channel_connections: dict = {} # channel → asyncpg.Connection
+_channel_locks: dict = {}       # channel → asyncio.Lock (prevents double-connect race)
+
+
+async def _ensure_listener(channel: str) -> None:
+    """Open one LISTEN connection per channel. No-op if already open."""
+    lock = _channel_locks.setdefault(channel, asyncio.Lock())
+    async with lock:
+        if channel not in _channel_connections:
+            conn = await asyncpg.connect(dsn=settings.database_url)
+
+            async def on_notify(conn, pid, channel_name, payload):
+                for q in list(_channel_listeners.get(channel_name, set())):
+                    await q.put(payload)
+
+            await conn.add_listener(channel, on_notify)
+            _channel_connections[channel] = conn
+
+
+async def _remove_listener_if_empty(channel: str) -> None:
+    """Close LISTEN connection and clean up registry when last client disconnects."""
+    lock = _channel_locks.get(channel)
+    if not lock:
+        return
+    async with lock:
+        if not _channel_listeners.get(channel):
+            conn = _channel_connections.pop(channel, None)
+            if conn:
+                await conn.close()
+            _channel_listeners.pop(channel, None)
+            _channel_locks.pop(channel, None)
+
 
 @router.get("/stream")
 async def notification_stream(request: Request):
     """
     SSE endpoint — keeps connection open and pushes new order notifications in real time.
-    Uses a dedicated asyncpg connection (outside the pool) for LISTEN.
+    Uses a single shared asyncpg LISTEN connection per tenant channel, fan-out via asyncio queues.
+    Multiple tabs of the same tenant share one PG connection within the same worker process.
     """
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -28,12 +65,11 @@ async def notification_stream(request: Request):
     channel = "tenant_" + str(tenant_id).replace("-", "")
     queue: asyncio.Queue = asyncio.Queue()
 
-    async def on_notify(connection, pid, channel_name, payload_str):
-        await queue.put(payload_str)
+    # Register queue BEFORE opening LISTEN to avoid losing events during setup race
+    _channel_listeners.setdefault(channel, set()).add(queue)
+    await _ensure_listener(channel)
 
     async def event_stream():
-        conn = await asyncpg.connect(dsn=settings.database_url)
-        await conn.add_listener(channel, on_notify)
         try:
             while True:
                 if await request.is_disconnected():
@@ -46,8 +82,8 @@ async def notification_stream(request: Request):
         except asyncio.CancelledError:
             pass
         finally:
-            await conn.remove_listener(channel, on_notify)
-            await conn.close()
+            _channel_listeners.get(channel, set()).discard(queue)
+            await _remove_listener_if_empty(channel)
 
     return StreamingResponse(
         event_stream(),
