@@ -15,7 +15,7 @@ class DatabasePool:
                 cls._pool = await asyncpg.create_pool(
                     **settings.db_connection_params,
                     min_size=2,
-                    max_size=45,
+                    max_size=20,
                     max_queries=50000,  # Recycle connection after 50k queries
                     max_inactive_connection_lifetime=300,  # Close idle connections after 5 minutes
                     command_timeout=60,  # Command timeout in seconds
