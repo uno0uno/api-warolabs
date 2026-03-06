@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads
@@ -5,18 +6,26 @@ from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
 from app.core.middleware import tenant_detection_middleware, session_validation_middleware, request_logging_middleware
+from app.database import DatabasePool
 
 # Initialize logging
 setup_logging()
 
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await DatabasePool.create_pool()
+    yield
+    await DatabasePool.close_pool()
+
 app = FastAPI(
     title="Waro Colombia FastAPI Service",
     version="1.0.0",
     debug=settings.debug,
     docs_url="/docs",
-    redirect_slashes=True  # Explicitly handle trailing slashes
+    redirect_slashes=True,  # Explicitly handle trailing slashes
+    lifespan=lifespan
 )
 
 # Configure cookie authentication for Swagger UI

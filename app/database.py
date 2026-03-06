@@ -14,12 +14,12 @@ class DatabasePool:
             try:
                 cls._pool = await asyncpg.create_pool(
                     **settings.db_connection_params,
-                    min_size=5,
-                    max_size=30,  # Increased for better concurrency
+                    min_size=2,
+                    max_size=45,
                     max_queries=50000,  # Recycle connection after 50k queries
                     max_inactive_connection_lifetime=300,  # Close idle connections after 5 minutes
                     command_timeout=60,  # Command timeout in seconds
-                    timeout=30  # Connection acquisition timeout
+                    timeout=10  # Fail fast if pool is saturated
                 )
                 logger.info(f" Database pool created: {settings.db_name}@{settings.db_host}")
             except Exception as e:
