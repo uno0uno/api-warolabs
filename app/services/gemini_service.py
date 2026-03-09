@@ -107,10 +107,18 @@ async def process_invoice(
         11. "ingredient_match.confidence": número entre 0 y 1 que indica tu certeza de la
             coincidencia. 1.0 = exacto, 0.5 = probable, 0.0 = sin coincidencia.
 
-        12. "ingredient_match.should_create": true SOLO cuando:
-            - confidence < 0.4 (no encontraste coincidencia suficiente), Y
-            - El producto es claramente un ingrediente de cocina real (no un servicio, envase,
-              embalaje, etc.)
+        12. "ingredient_match.should_create": true SOLO cuando SE CUMPLEN AMBAS CONDICIONES:
+            a) confidence < 0.4 (no encontraste coincidencia suficiente en el catálogo), Y
+            b) El producto es claramente un ingrediente de cocina real.
+
+            SIEMPRE debe ser false (nunca crear) si el ítem cumple CUALQUIERA de estas condiciones:
+            - Es un código PLU, referencia interna, o solo números: "22 / P", "PLU-123", "REF 445"
+            - La descripción está visiblemente truncada o termina a mitad de palabra: "JUGOS CALIFORNI", "PROD VA..."
+            - Es una agrupación genérica sin producto específico: "PRODUCTOS VARIOS", "VARIOS", "MIXTO", "SURTIDO", "MISCELANEOS"
+            - Es material de empaque o embalaje: contiene BOLSA, BOLSAS, ETIQUETA, CAJA, EMPAQUE, EMBALAJE, ENVASE, ROLLO, PAPEL
+            - Es un servicio, transporte o cobro: contiene SERVICIO, DOMICILIO, FLETE, TRANSPORTE, COBRO, CARGO, COMISION
+            - La descripción tiene 2 palabras o menos Y ninguna es un ingrediente reconocible
+
             En cualquier otro caso debe ser false.
 
         13. "ingredient_match.suggested_name": si should_create=true, escribe el nombre
