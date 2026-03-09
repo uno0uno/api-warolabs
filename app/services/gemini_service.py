@@ -45,6 +45,17 @@ def _fix_item_unit_prices(data: dict) -> None:
             if qty <= 1 or total == 0 or pu == 0:
                 continue
 
+            # PLU-as-quantity guard: some Colombian POS systems print PLU codes in
+            # the quantity column. Detected when qty > 500 and unit price < 10 COP.
+            if qty > 500 and pu < 10 and total > 0:
+                logger.info(
+                    f"PLU fix: '{item.get('descripcion')}' "
+                    f"cantidad {qty} → 1 (PLU misread, precio_unitario → {total})"
+                )
+                item["cantidad"] = 1
+                item["precio_unitario"] = round(total, 2)
+                continue
+
             # Si precio_unitario ≈ total (dentro del 1%), el modelo cometió el error clásico
             if abs(pu - total) / total < 0.01:
                 corrected = round(total / qty, 2)
@@ -208,6 +219,13 @@ async def process_invoice(
            O VICEVERSA. Usa el contexto (valores de facturas típicas) para decidir.
 
         8. Todos los valores numéricos sin símbolos de moneda ($, COP, etc.).
+
+        8b. DETECCIÓN DE CÓDIGO PLU MAL INTERPRETADO COMO CANTIDAD:
+            Algunas facturas colombianas imprimen un código PLU o referencia interna
+            en la columna de cantidad. Si ves que `cantidad` > 500 Y `precio_unitario` < 10,
+            es muy probable que `cantidad` sea un código PLU, no una cantidad real.
+            En ese caso: corrige cantidad = 1 y precio_unitario = total_linea.
+            Ejemplo: "11000 | 1 | 11.000" donde 11000 es el PLU → cantidad=1, precio_unitario=11000.
         {ingredient_match_rules if catalog else ""}
         """
 
