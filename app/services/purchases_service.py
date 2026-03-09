@@ -947,8 +947,10 @@ async def extract_invoice_data(request: Request, file: UploadFile) -> dict:
                         item["detected_ingredient_id"] = matched_id
                     elif should_create and suggested_name and suggested_unit:
                         # Gemini is confident this is a new ingredient — create it
+                        peso = item.get("peso_unidad_gr")
                         new_id = await create_ai_ingredient(
-                            conn, suggested_name, suggested_unit, tenant_id
+                            conn, suggested_name, suggested_unit, tenant_id,
+                            peso_unidad_gr=float(peso) if peso else None
                         )
                         if new_id:
                             item["detected_ingredient_id"] = new_id

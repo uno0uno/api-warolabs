@@ -198,10 +198,18 @@ async def create_ai_ingredient(
     conn,
     suggested_name: str,
     suggested_unit: str,
-    tenant_id
+    tenant_id,
+    peso_unidad_gr: Optional[float] = None
 ) -> Optional[str]:
     """
-    Creates a new ingredient inferred by Gemini during invoice scanning.
+    Creates a new ingredient inferred by Gemini during invoice scanning,
+    then inserts standard purchase units for it based on the base unit pattern
+    used across the existing catalog.
+
+    Standard purchase units created by base unit:
+      gr  → kg/1000 (default), lb/454
+      ml  → botella/{peso} or botella/1000 (default), galon/3785, garrafa/5000
+      und → no extra purchase units (buying by unit is already the base)
 
     Runs a pg_trgm similarity check first to prevent near-duplicate creation.
     The new ingredient is scoped to the tenant (tenant_id set) so it does not
@@ -241,12 +249,78 @@ async def create_ai_ingredient(
             tenant_id
         )
 
+        ingredient_id = row["id"]
         logger.info(
             f"AI-created ingredient '{suggested_name}' ({suggested_unit}) "
-            f"for tenant {tenant_id} → id {row['id']}"
+            f"for tenant {tenant_id} → id {ingredient_id}"
         )
-        return str(row["id"])
+
+        # Auto-create standard purchase units based on the base unit pattern
+        purchase_units = _build_standard_purchase_units(suggested_unit, peso_unidad_gr)
+        for pu in purchase_units:
+            await conn.execute(
+                """
+                INSERT INTO ingredient_purchase_units
+                  (ingredient_id, purchase_unit, purchase_unit_label,
+                   conversion_factor, is_default, is_active)
+                VALUES ($1, $2, $3, $4, $5, TRUE)
+                """,
+                ingredient_id,
+                pu["purchase_unit"],
+                pu["purchase_unit_label"],
+                pu["conversion_factor"],
+                pu["is_default"],
+            )
+
+        if purchase_units:
+            logger.info(
+                f"Auto-created {len(purchase_units)} purchase units for "
+                f"ingredient {ingredient_id} ({suggested_unit})"
+            )
+
+        return str(ingredient_id)
 
     except Exception as e:
         logger.error(f"Failed to create AI ingredient '{suggested_name}': {e}")
         return None
+
+
+def _build_standard_purchase_units(base_unit: str, peso_unidad_gr: Optional[float]) -> list:
+    """
+    Returns the standard purchase unit configurations for a new ingredient
+    based on the base unit, mirroring the patterns used in the existing catalog.
+    """
+    if base_unit == "gr":
+        units = [
+            {"purchase_unit": "kg", "purchase_unit_label": "1 Kilogramo",
+             "conversion_factor": 1000.0, "is_default": True},
+            {"purchase_unit": "lb", "purchase_unit_label": "1 Libra",
+             "conversion_factor": 454.0, "is_default": False},
+        ]
+        # If invoice reveals a specific unit weight, also add individual unit
+        if peso_unidad_gr and 10 < peso_unidad_gr < 30000:
+            units.append({
+                "purchase_unit": "und",
+                "purchase_unit_label": f"1 Unidad ({int(peso_unidad_gr)}g)",
+                "conversion_factor": float(peso_unidad_gr),
+                "is_default": False,
+            })
+        return units
+
+    if base_unit == "ml":
+        bottle_ml = float(peso_unidad_gr) if peso_unidad_gr and peso_unidad_gr > 0 else 1000.0
+        if bottle_ml < 1000:
+            label = f"Botella {int(bottle_ml)}ml"
+        else:
+            label = f"Botella {bottle_ml / 1000:.4g}L"
+        return [
+            {"purchase_unit": "botella", "purchase_unit_label": label,
+             "conversion_factor": bottle_ml, "is_default": True},
+            {"purchase_unit": "galon", "purchase_unit_label": "Galón 3785ml",
+             "conversion_factor": 3785.0, "is_default": False},
+            {"purchase_unit": "garrafa", "purchase_unit_label": "Garrafa 5L",
+             "conversion_factor": 5000.0, "is_default": False},
+        ]
+
+    # "und" or unknown: no extra purchase units needed
+    return []

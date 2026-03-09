@@ -118,10 +118,10 @@ async def process_invoice(
             Ej: "Leche entera". Si should_create=false → null.
 
         14. "ingredient_match.suggested_unit": si should_create=true, elige la unidad base
-            más apropiada: "kg", "lt", "und", "gr", "ml".
-            - Sólidos pesables → "kg"
-            - Líquidos → "lt"
-            - Unidades contables (huevos, panes, etc.) → "und"
+            más apropiada. IMPORTANTE: usa EXACTAMENTE estos valores:
+            - Sólidos pesables (carnes, quesos, verduras, harinas, etc.) → "gr"
+            - Líquidos (aceites, salsas, lácteos, bebidas, etc.) → "ml"
+            - Unidades contables (huevos, panes, porciones individuales, etc.) → "und"
             Si should_create=false → null.
     """
 
