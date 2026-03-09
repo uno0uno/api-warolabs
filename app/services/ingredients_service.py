@@ -192,3 +192,61 @@ async def update_ingredient_unit_weight(
     except Exception as e:
         logger.error(f"Error updating unit_weight_gr: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+async def create_ai_ingredient(
+    conn,
+    suggested_name: str,
+    suggested_unit: str,
+    tenant_id
+) -> Optional[str]:
+    """
+    Creates a new ingredient inferred by Gemini during invoice scanning.
+
+    Runs a pg_trgm similarity check first to prevent near-duplicate creation.
+    The new ingredient is scoped to the tenant (tenant_id set) so it does not
+    pollute the global catalog until an admin promotes it.
+
+    Returns the UUID of the created (or existing duplicate) ingredient as a string,
+    or None if creation failed.
+    """
+    try:
+        # pg_trgm duplicate guard: if a very similar name already exists, reuse it
+        existing = await conn.fetchrow(
+            """
+            SELECT id
+            FROM ingredients
+            WHERE similarity(name, $1) > 0.6
+            ORDER BY similarity(name, $1) DESC
+            LIMIT 1
+            """,
+            suggested_name
+        )
+
+        if existing:
+            logger.info(
+                f"AI ingredient '{suggested_name}' matches existing ingredient "
+                f"{existing['id']} — skipping creation"
+            )
+            return str(existing["id"])
+
+        row = await conn.fetchrow(
+            """
+            INSERT INTO ingredients (name, unit, tenant_id, ai_generated, ai_generated_at)
+            VALUES ($1, $2, $3, TRUE, NOW())
+            RETURNING id
+            """,
+            suggested_name,
+            suggested_unit,
+            tenant_id
+        )
+
+        logger.info(
+            f"AI-created ingredient '{suggested_name}' ({suggested_unit}) "
+            f"for tenant {tenant_id} → id {row['id']}"
+        )
+        return str(row["id"])
+
+    except Exception as e:
+        logger.error(f"Failed to create AI ingredient '{suggested_name}': {e}")
+        return None

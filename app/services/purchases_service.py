@@ -21,6 +21,7 @@ from app.models.purchase import (
 )
 from app.services.email_helpers import send_quotation_email
 from app.services.gemini_service import process_invoice
+from app.services.ingredients_service import create_ai_ingredient
 
 async def get_purchases_list(
     request: Request,
@@ -913,9 +914,46 @@ async def extract_invoice_data(request: Request, file: UploadFile) -> dict:
     finally:
         await file.close()
 
-    # Process with Gemini
+    # Fetch ingredient catalog to pass to Gemini for matching
+    catalog = []
     try:
-        data = await process_invoice(file_bytes, file.content_type)
+        async with get_db_connection() as conn:
+            rows = await conn.fetch(
+                "SELECT id, name, unit FROM ingredients ORDER BY name"
+            )
+            catalog = [
+                {"id": str(r["id"]), "name": r["name"], "unit": r["unit"]}
+                for r in rows
+            ]
+    except Exception as e:
+        logger.warning(f"Could not fetch ingredient catalog for OCR matching: {e}")
+
+    # Process with Gemini (catalog injected into prompt)
+    try:
+        data = await process_invoice(file_bytes, file.content_type, catalog=catalog)
+
+        # For items where Gemini flagged a new ingredient, create it automatically
+        if data.get("items"):
+            async with get_db_connection() as conn:
+                for item in data["items"]:
+                    match = item.get("ingredient_match") or {}
+                    matched_id = match.get("id")
+                    should_create = match.get("should_create", False)
+                    suggested_name = match.get("suggested_name")
+                    suggested_unit = match.get("suggested_unit")
+
+                    if matched_id:
+                        # Gemini found an existing ingredient
+                        item["detected_ingredient_id"] = matched_id
+                    elif should_create and suggested_name and suggested_unit:
+                        # Gemini is confident this is a new ingredient — create it
+                        new_id = await create_ai_ingredient(
+                            conn, suggested_name, suggested_unit, tenant_id
+                        )
+                        if new_id:
+                            item["detected_ingredient_id"] = new_id
+                            item["detected_ingredient"] = suggested_name
+
         return {
             "success": True,
             "data": data

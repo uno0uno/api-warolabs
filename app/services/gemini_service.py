@@ -2,7 +2,7 @@ from google import genai
 from google.genai import types
 from fastapi import HTTPException
 from app.config import settings
-from typing import Optional
+from typing import Optional, List, Dict
 import json
 import logging
 import asyncio
@@ -57,47 +57,108 @@ def _fix_item_unit_prices(data: dict) -> None:
             continue
 
 
-async def process_invoice(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
+async def process_invoice(
+    image_bytes: bytes,
+    mime_type: str = "image/jpeg",
+    catalog: Optional[List[Dict]] = None
+) -> dict:
     """
-    Process an invoice image using Google Gemini 2.0 Flash.
+    Process an invoice image using Google Gemini 2.5 Flash Lite.
     Returns structured JSON data. Retries once on per-minute 429 quota errors.
+
+    If `catalog` is provided (list of {id, name, unit} dicts), Gemini will also
+    attempt to match each item against the catalog and flag new ingredients.
     """
     if not settings.google_api_key:
         logger.error("Google API Key not found")
         raise HTTPException(status_code=500, detail="Google API Key not configured")
+
+    # Build catalog context block for the prompt
+    catalog_block = ""
+    if catalog:
+        lines = [f"{i['id']}|{i['name']}|{i['unit']}" for i in catalog]
+        catalog_block = (
+            "\n\nCATÁLOGO DE INGREDIENTES DEL SISTEMA (id|nombre|unidad_base):\n"
+            + "\n".join(lines)
+            + "\n\nUsa este catálogo para rellenar el campo 'ingredient_match' de cada item."
+        )
+
+    ingredient_match_schema = """
+                    "detected_ingredient": "Nombre normalizado del ingrediente (corregido y sin marcas)",
+                    "ingredient_match": {
+                        "id": "UUID del catálogo si hay coincidencia, sino null",
+                        "confidence": 0.0,
+                        "should_create": false,
+                        "suggested_name": null,
+                        "suggested_unit": null
+                    }"""
+
+    ingredient_match_rules = """
+        REGLAS PARA ingredient_match (aplica SOLO si se proporcionó catálogo):
+
+        9. "detected_ingredient": nombre del producto limpio, sin cantidad ni marca comercial.
+           Ej: "JAMON SDW ZENU X 450 G" → "Jamón" o "Jamón de sándwich".
+
+        10. "ingredient_match.id": UUID del ingrediente del catálogo que mejor coincide con el
+            producto de la factura. Usa coincidencia semántica, no exacta.
+            Ej: "Aceite Gira 1L" → coincide con "Aceite de girasol" (id del catálogo).
+            Si no hay ninguna coincidencia razonable → null.
+
+        11. "ingredient_match.confidence": número entre 0 y 1 que indica tu certeza de la
+            coincidencia. 1.0 = exacto, 0.5 = probable, 0.0 = sin coincidencia.
+
+        12. "ingredient_match.should_create": true SOLO cuando:
+            - confidence < 0.4 (no encontraste coincidencia suficiente), Y
+            - El producto es claramente un ingrediente de cocina real (no un servicio, envase,
+              embalaje, etc.)
+            En cualquier otro caso debe ser false.
+
+        13. "ingredient_match.suggested_name": si should_create=true, escribe el nombre
+            normalizado del nuevo ingrediente en español, sin marca, sin cantidad.
+            Ej: "Leche entera". Si should_create=false → null.
+
+        14. "ingredient_match.suggested_unit": si should_create=true, elige la unidad base
+            más apropiada: "kg", "lt", "und", "gr", "ml".
+            - Sólidos pesables → "kg"
+            - Líquidos → "lt"
+            - Unidades contables (huevos, panes, etc.) → "und"
+            Si should_create=false → null.
+    """
 
     max_attempts = 2
     for attempt in range(1, max_attempts + 1):
       try:
         client = genai.Client(api_key=settings.google_api_key)
 
-        prompt = """
+        prompt = f"""
         Contexto: Eres un asistente contable experto en restaurantes colombianos.
         Tarea: Analiza la imagen adjunta (factura de proveedor).
         Salida: Genera UNICAMENTE un objeto JSON válido con la siguiente estructura.
 
         Esquema JSON:
-        {
+        {{
             "proveedor": "Nombre del proveedor o Razón Social",
             "nit": "Número de identificación tributaria si es visible",
             "fecha": "YYYY-MM-DD",
             "numero_factura": "Número de la factura",
             "total_factura": 0,
             "items": [
-                {
-                    "descripcion": "Nombre del producto",
+                {{
+                    "descripcion": "Nombre del producto tal como aparece en la factura",
                     "cantidad": 1.0,
                     "precio_unitario": 0,
                     "total": 0,
-                    "peso_unidad_gr": null
-                }
+                    "peso_unidad_gr": null,
+                    {ingredient_match_schema}
+                }}
             ],
             "subtotal": 0,
             "iva": 0,
             "forma_pago": "Efectivo/Credito/etc",
             "observaciones": "Observaciones si las hay",
             "advertencia": "Si la imagen es borrosa o ilegible, escribe 'ILEGIBLE', sino deja null"
-        }
+        }}
+        {catalog_block}
 
         REGLAS CRÍTICAS PARA LOS ITEMS:
 
@@ -139,6 +200,7 @@ async def process_invoice(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
            O VICEVERSA. Usa el contexto (valores de facturas típicas) para decidir.
 
         8. Todos los valores numéricos sin símbolos de moneda ($, COP, etc.).
+        {ingredient_match_rules if catalog else ""}
         """
 
         response = client.models.generate_content(
