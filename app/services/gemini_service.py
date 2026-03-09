@@ -204,7 +204,7 @@ async def process_invoice(
         """
 
         response = client.models.generate_content(
-            model='gemini-2.5-flash-lite',
+            model='gemini-2.5-flash',
             contents=[
                 prompt,
                 types.Part.from_bytes(
