@@ -25,6 +25,14 @@ from app.services.aws_s3_service import AWSS3Service
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_date(value):
+    """Parse ISO 8601 date string safely on Python < 3.11 (handles Z suffix)."""
+    if not value:
+        return None
+    return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+
+
 async def get_expense_categories(
     request: Request,
     response: Response
@@ -378,7 +386,7 @@ async def create_expense(
             raise AuthenticationError("Tenant ID is required")
 
         # Parse transaction_date
-        trans_date = datetime.fromisoformat(transaction_date).date()
+        trans_date = _parse_date(transaction_date).date()
         month_year = trans_date.strftime("%Y-%m")
 
         # Parse expense_category_id
@@ -390,7 +398,7 @@ async def create_expense(
         # Parse recurring_end_date if provided
         recurring_end_date_parsed = None
         if recurring_end_date:
-            recurring_end_date_parsed = datetime.fromisoformat(recurring_end_date).date()
+            recurring_end_date_parsed = _parse_date(recurring_end_date).date()
 
         # Validate: if is_recurring is True, frequency must be provided
         if is_recurring_bool and not frequency:
@@ -753,7 +761,7 @@ async def update_expense(
             raise AuthenticationError("Tenant ID is required")
 
         # Parse inputs
-        trans_date = datetime.fromisoformat(transaction_date).date()
+        trans_date = _parse_date(transaction_date).date()
         month_year = trans_date.strftime("%Y-%m")
         category_uuid = UUID(expense_category_id)
 
@@ -763,7 +771,7 @@ async def update_expense(
         # Parse recurring_end_date if provided
         recurring_end_date_parsed = None
         if recurring_end_date:
-            recurring_end_date_parsed = datetime.fromisoformat(recurring_end_date).date()
+            recurring_end_date_parsed = _parse_date(recurring_end_date).date()
 
         # Validate: if is_recurring is True, frequency must be provided
         if is_recurring_bool and not frequency:
@@ -1593,10 +1601,10 @@ async def create_recurring_instance(
             raise AuthenticationError("Tenant ID is required")
 
         # Parse dates
-        scheduled_date_parsed = datetime.fromisoformat(scheduled_date).date()
+        scheduled_date_parsed = _parse_date(scheduled_date).date()
         payment_date_parsed = None
         if payment_date:
-            payment_date_parsed = datetime.fromisoformat(payment_date)
+            payment_date_parsed = _parse_date(payment_date)
 
         async with get_db_connection() as conn:
             # Verify expense is recurring
@@ -1758,7 +1766,7 @@ async def update_recurring_instance(
         # Parse payment_date if provided
         payment_date_parsed = None
         if payment_date:
-            payment_date_parsed = datetime.fromisoformat(payment_date)
+            payment_date_parsed = _parse_date(payment_date)
 
         async with get_db_connection() as conn:
             # Verify instance exists
@@ -1893,10 +1901,10 @@ async def create_recurring_instance_json(
             raise AuthenticationError("Tenant ID is required")
 
         # Parse dates
-        scheduled_date_parsed = datetime.fromisoformat(instance_data.scheduled_date).date() if isinstance(instance_data.scheduled_date, str) else instance_data.scheduled_date
+        scheduled_date_parsed = _parse_date(instance_data.scheduled_date).date() if isinstance(instance_data.scheduled_date, str) else instance_data.scheduled_date
         payment_date_parsed = None
         if instance_data.payment_date:
-            payment_date_parsed = datetime.fromisoformat(instance_data.payment_date)
+            payment_date_parsed = _parse_date(instance_data.payment_date)
 
         async with get_db_connection() as conn:
             # Verify expense is recurring
@@ -2000,7 +2008,7 @@ async def update_recurring_instance_json(
         # Parse payment_date if provided
         payment_date_parsed = None
         if instance_data.payment_date:
-            payment_date_parsed = datetime.fromisoformat(instance_data.payment_date)
+            payment_date_parsed = _parse_date(instance_data.payment_date)
 
         async with get_db_connection() as conn:
             # Verify instance exists
