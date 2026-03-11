@@ -225,7 +225,7 @@ async def create_ai_ingredient(
                 """
                 SELECT id
                 FROM ingredients
-                WHERE similarity(name, $1) > 0.6
+                WHERE similarity(name, $1) > 0.75
                 ORDER BY similarity(name, $1) DESC
                 LIMIT 1
                 """,
