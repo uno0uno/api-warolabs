@@ -219,66 +219,67 @@ async def create_ai_ingredient(
     or None if creation failed.
     """
     try:
-        # pg_trgm duplicate guard: if a very similar name already exists, reuse it
-        existing = await conn.fetchrow(
-            """
-            SELECT id
-            FROM ingredients
-            WHERE similarity(name, $1) > 0.6
-            ORDER BY similarity(name, $1) DESC
-            LIMIT 1
-            """,
-            suggested_name
-        )
-
-        if existing:
-            logger.info(
-                f"AI ingredient '{suggested_name}' matches existing ingredient "
-                f"{existing['id']} — skipping creation"
-            )
-            return str(existing["id"])
-
-        row = await conn.fetchrow(
-            """
-            INSERT INTO ingredients (name, unit, tenant_id, ai_generated, ai_generated_at)
-            VALUES ($1, $2, $3, TRUE, NOW())
-            RETURNING id
-            """,
-            suggested_name,
-            suggested_unit,
-            tenant_id
-        )
-
-        ingredient_id = row["id"]
-        logger.info(
-            f"AI-created ingredient '{suggested_name}' ({suggested_unit}) "
-            f"for tenant {tenant_id} → id {ingredient_id}"
-        )
-
-        # Auto-create standard purchase units based on the base unit pattern
-        purchase_units = _build_standard_purchase_units(suggested_unit, peso_unidad_gr)
-        for pu in purchase_units:
-            await conn.execute(
+        async with conn.transaction():
+            # pg_trgm duplicate guard: if a very similar name already exists, reuse it
+            existing = await conn.fetchrow(
                 """
-                INSERT INTO ingredient_purchase_units
-                  (ingredient_id, purchase_unit, purchase_unit_label,
-                   conversion_factor, is_default, is_active)
-                VALUES ($1, $2, $3, $4, $5, TRUE)
+                SELECT id
+                FROM ingredients
+                WHERE similarity(name, $1) > 0.6
+                ORDER BY similarity(name, $1) DESC
+                LIMIT 1
                 """,
-                ingredient_id,
-                pu["purchase_unit"],
-                pu["purchase_unit_label"],
-                pu["conversion_factor"],
-                pu["is_default"],
+                suggested_name
             )
 
-        if purchase_units:
+            if existing:
+                logger.info(
+                    f"AI ingredient '{suggested_name}' matches existing ingredient "
+                    f"{existing['id']} — skipping creation"
+                )
+                return str(existing["id"])
+
+            row = await conn.fetchrow(
+                """
+                INSERT INTO ingredients (name, unit, tenant_id, ai_generated, ai_generated_at)
+                VALUES ($1, $2, $3, TRUE, NOW())
+                RETURNING id
+                """,
+                suggested_name,
+                suggested_unit,
+                tenant_id
+            )
+
+            ingredient_id = row["id"]
             logger.info(
-                f"Auto-created {len(purchase_units)} purchase units for "
-                f"ingredient {ingredient_id} ({suggested_unit})"
+                f"AI-created ingredient '{suggested_name}' ({suggested_unit}) "
+                f"for tenant {tenant_id} → id {ingredient_id}"
             )
 
-        return str(ingredient_id)
+            # Auto-create standard purchase units based on the base unit pattern
+            purchase_units = _build_standard_purchase_units(suggested_unit, peso_unidad_gr)
+            for pu in purchase_units:
+                await conn.execute(
+                    """
+                    INSERT INTO ingredient_purchase_units
+                      (ingredient_id, purchase_unit, purchase_unit_label,
+                       conversion_factor, is_default, is_active)
+                    VALUES ($1, $2, $3, $4, $5, TRUE)
+                    """,
+                    ingredient_id,
+                    pu["purchase_unit"],
+                    pu["purchase_unit_label"],
+                    pu["conversion_factor"],
+                    pu["is_default"],
+                )
+
+            if purchase_units:
+                logger.info(
+                    f"Auto-created {len(purchase_units)} purchase units for "
+                    f"ingredient {ingredient_id} ({suggested_unit})"
+                )
+
+            return str(ingredient_id)
 
     except Exception as e:
         logger.error(f"Failed to create AI ingredient '{suggested_name}': {e}")
