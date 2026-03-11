@@ -197,14 +197,21 @@ async def update_ingredient_unit_weight(
 async def match_ingredient_by_name(conn, name: str, threshold: float = 0.35) -> Optional[dict]:
     """Find closest ingredient by name using pg_trgm similarity."""
     row = await conn.fetchrow("""
-        SELECT id, name, unit, similarity(name, $1) as score
+        SELECT id, name, unit, type, unit_weight_gr, similarity(name, $1) as score
         FROM ingredients
         WHERE similarity(name, $1) > $2
         ORDER BY similarity(name, $1) DESC
         LIMIT 1
     """, name, threshold)
     if row:
-        return {"id": str(row["id"]), "name": row["name"], "unit": row["unit"], "score": float(row["score"])}
+        return {
+            "id": str(row["id"]),
+            "name": row["name"],
+            "unit": row["unit"],
+            "type": row["type"],
+            "unit_weight_gr": float(row["unit_weight_gr"]) if row["unit_weight_gr"] is not None else None,
+            "score": float(row["score"])
+        }
     return None
 
 

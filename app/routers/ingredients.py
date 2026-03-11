@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Response, Query, Body, HTTPException, Depends
+from fastapi import APIRouter, Request, Response, Query, Body, HTTPException
 from typing import Optional
 from uuid import UUID
 from app.services.ingredients_service import get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name
