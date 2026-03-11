@@ -5,10 +5,13 @@ No authentication required - these are public endpoints
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 from datetime import datetime, time
+from zoneinfo import ZoneInfo
 from fastapi import HTTPException
 from app.database import get_db_connection
 import json
 import logging
+
+BOGOTA_TZ = ZoneInfo("America/Bogota")
 
 logger = logging.getLogger(__name__)
 
@@ -300,7 +303,7 @@ def is_currently_open(business_hours: Optional[Dict[str, Any]], is_manually_open
         return False
 
     try:
-        now = datetime.now()
+        now = datetime.now(tz=BOGOTA_TZ)
         current_day = now.strftime('%A').lower()  # 'monday', 'tuesday', etc.
         current_time = now.time()
 
