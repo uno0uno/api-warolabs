@@ -934,17 +934,26 @@ async def extract_invoice_data(request: Request, file: UploadFile) -> dict:
 
         # For items where Gemini flagged a new ingredient, create it automatically
         if data.get("items"):
+            logger.info(f"[OCR] Processing {len(data['items'])} items from Gemini")
             async with get_db_connection() as conn:
-                for item in data["items"]:
+                for i, item in enumerate(data["items"]):
                     match = item.get("ingredient_match") or {}
                     matched_id = match.get("id")
                     should_create = match.get("should_create", False)
                     suggested_name = match.get("suggested_name")
                     suggested_unit = match.get("suggested_unit")
+                    descripcion = item.get("descripcion", "")
+
+                    logger.info(
+                        f"[OCR] Item {i+1} '{descripcion}' → "
+                        f"ingredient_match={match} | "
+                        f"detected_ingredient='{item.get('detected_ingredient', '')}'"
+                    )
 
                     if matched_id:
                         # Gemini found an existing ingredient
                         item["detected_ingredient_id"] = matched_id
+                        logger.info(f"[OCR] Item {i+1} → matched existing id={matched_id}")
                     elif should_create and suggested_name and suggested_unit:
                         # Gemini is confident this is a new ingredient — create it
                         peso = item.get("peso_unidad_gr")
@@ -955,6 +964,14 @@ async def extract_invoice_data(request: Request, file: UploadFile) -> dict:
                         if new_id:
                             item["detected_ingredient_id"] = new_id
                             item["detected_ingredient"] = suggested_name
+                            logger.info(f"[OCR] Item {i+1} → AI-created id={new_id} name='{suggested_name}' unit={suggested_unit}")
+                        else:
+                            logger.warning(f"[OCR] Item {i+1} → AI creation FAILED for '{suggested_name}'")
+                    else:
+                        logger.warning(
+                            f"[OCR] Item {i+1} '{descripcion}' → NO MATCH and NO CREATE "
+                            f"(should_create={should_create}, suggested_name={suggested_name})"
+                        )
 
         return {
             "success": True,
