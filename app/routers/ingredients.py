@@ -45,6 +45,32 @@ async def get_ingredients_endpoint(
     )
 
 
+@router.get("/{ingredient_id}")
+async def get_ingredient_by_id(ingredient_id: UUID):
+    """
+    Fetch a single ingredient by its UUID.
+    Used by the frontend OCR flow to populate the ingredient cache for
+    detected_ingredient_id items without relying on name similarity.
+    """
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, name, unit, type, unit_weight_gr FROM ingredients WHERE id = $1",
+            ingredient_id
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Ingredient not found")
+    return {
+        "success": True,
+        "data": {
+            "id": str(row["id"]),
+            "name": row["name"],
+            "unit": row["unit"],
+            "type": row["type"],
+            "unit_weight_gr": float(row["unit_weight_gr"]) if row["unit_weight_gr"] is not None else None,
+        }
+    }
+
+
 @router.patch("/{ingredient_id}/unit-weight")
 async def patch_ingredient_unit_weight(
     ingredient_id: UUID,
