@@ -194,6 +194,20 @@ async def update_ingredient_unit_weight(
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
+async def match_ingredient_by_name(conn, name: str, threshold: float = 0.35) -> Optional[dict]:
+    """Find closest ingredient by name using pg_trgm similarity."""
+    row = await conn.fetchrow("""
+        SELECT id, name, unit, similarity(name, $1) as score
+        FROM ingredients
+        WHERE similarity(name, $1) > $2
+        ORDER BY similarity(name, $1) DESC
+        LIMIT 1
+    """, name, threshold)
+    if row:
+        return {"id": str(row["id"]), "name": row["name"], "unit": row["unit"], "score": float(row["score"])}
+    return None
+
+
 async def create_ai_ingredient(
     conn,
     suggested_name: str,

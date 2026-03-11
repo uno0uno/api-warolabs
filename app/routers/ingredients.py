@@ -1,10 +1,28 @@
-from fastapi import APIRouter, Request, Response, Query, Body
+from fastapi import APIRouter, Request, Response, Query, Body, HTTPException, Depends
 from typing import Optional
 from uuid import UUID
-from app.services.ingredients_service import get_ingredients_list, update_ingredient_unit_weight
+from app.services.ingredients_service import get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name
 from app.models.ingredient import IngredientsListResponse
+from app.database import get_db_connection
 
 router = APIRouter()
+
+
+@router.get("/match")
+async def match_ingredient(
+    name: str = Query(..., min_length=1),
+    threshold: float = Query(default=0.35, ge=0.1, le=1.0)
+):
+    """
+    Find the closest ingredient by name using pg_trgm similarity.
+    Used by the frontend OCR invoice flow to replace client-side fuzzy matching.
+    """
+    async with get_db_connection() as conn:
+        match = await match_ingredient_by_name(conn, name, threshold)
+    if not match:
+        raise HTTPException(status_code=404, detail="No matching ingredient found")
+    return {"success": True, "data": match}
+
 
 @router.get("", response_model=IngredientsListResponse)
 async def get_ingredients_endpoint(
