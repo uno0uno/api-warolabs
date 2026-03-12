@@ -2,7 +2,7 @@
 Customer Models - Pydantic schemas for customer management
 """
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 from uuid import UUID
 from datetime import datetime
 
@@ -44,3 +44,16 @@ class CustomerSearchResponse(BaseModel):
     success: bool = True
     customer: Optional[Customer] = None
     found: bool = Field(..., description="True if customer was found")
+
+
+class CustomerSummary(BaseModel):
+    """Minimal customer data for search results"""
+    id: UUID
+    name: Optional[str] = None
+    phone_number: Optional[str] = None
+
+
+class CustomerQuerySearchResponse(BaseModel):
+    """Response for partial-match customer search"""
+    success: bool = True
+    data: List[CustomerSummary]

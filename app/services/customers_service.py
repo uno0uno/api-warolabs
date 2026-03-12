@@ -1,8 +1,6 @@
 """
 Customers Service - Business logic for customer management
 """
-from typing import Optional
-from uuid import UUID
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -11,7 +9,9 @@ from app.models.customer import (
     Customer,
     CustomerSearchOrCreate,
     CustomerResponse,
-    CustomerSearchResponse
+    CustomerSearchResponse,
+    CustomerSummary,
+    CustomerQuerySearchResponse
 )
 import logging
 
@@ -260,3 +260,62 @@ async def search_customer_by_phone(
     except Exception as e:
         logger.error(f"Error searching customer: {str(e)}")
         raise APIError(f"Error searching customer: {str(e)}", status_code=500)
+
+
+async def search_customers_by_query(
+    request: Request,
+    q: str,
+    limit: int = 20
+) -> CustomerQuerySearchResponse:
+    """
+    Search customers by partial name or phone number (ILIKE OR).
+    Results are scoped to the current tenant via tenant_members.
+
+    Args:
+        request: FastAPI request object
+        q: Search query (partial name or phone)
+        limit: Maximum number of results (default 20)
+
+    Returns:
+        CustomerQuerySearchResponse with list of CustomerSummary
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise APIError("No tenant context found", status_code=400)
+
+        async with get_db_connection() as conn:
+            query = """
+                SELECT DISTINCT
+                    p.id,
+                    p.name,
+                    p.phone_number
+                FROM profile p
+                JOIN tenant_members tm ON tm.user_id = p.id
+                WHERE tm.tenant_id = $1
+                  AND tm.role = 'customer'
+                  AND (p.name ILIKE $2 OR p.phone_number ILIKE $2)
+                ORDER BY p.name
+                LIMIT $3
+            """
+
+            rows = await conn.fetch(query, tenant_id, f"%{q}%", limit)
+
+            data = [
+                CustomerSummary(
+                    id=row['id'],
+                    name=row['name'],
+                    phone_number=row['phone_number']
+                )
+                for row in rows
+            ]
+
+            return CustomerQuerySearchResponse(success=True, data=data)
+
+    except APIError:
+        raise
+    except Exception as e:
+        logger.error(f"Error in search_customers_by_query: {str(e)}")
+        raise APIError(f"Error searching customers: {str(e)}", status_code=500)
