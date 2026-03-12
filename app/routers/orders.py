@@ -175,8 +175,7 @@ async def get_customers(
     date_to: Optional[str] = Query(None),
     payment_method: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
-    search_name: Optional[str] = Query(None),
-    search_phone: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0)
 ):
@@ -188,8 +187,7 @@ async def get_customers(
     - date_to: End date (YYYY-MM-DD)
     - payment_method: Filter by payment method
     - status: Filter by order status
-    - search_name: Partial case-insensitive match on customer name
-    - search_phone: Partial match on customer phone number
+    - search: Partial case-insensitive match on customer name OR phone number
     - limit: Number of customers to return (1-500, default 100)
     - offset: Number of customers to skip (default 0)
     """
@@ -199,8 +197,7 @@ async def get_customers(
         date_to=date_to,
         payment_method=payment_method,
         status=status,
-        search_name=search_name,
-        search_phone=search_phone,
+        search=search,
         limit=limit,
         offset=offset
     )

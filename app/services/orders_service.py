@@ -360,8 +360,7 @@ async def get_customers_list(
     date_to: Optional[str] = None,
     payment_method: Optional[str] = None,
     status: Optional[str] = None,
-    search_name: Optional[str] = None,
-    search_phone: Optional[str] = None,
+    search: Optional[str] = None,
     limit: int = 100,
     offset: int = 0
 ) -> dict:
@@ -412,15 +411,12 @@ async def get_customers_list(
                 )
                 params.append(parsed_date_to)
 
-            if search_name:
+            if search:
                 param_count += 1
-                where_conditions.append(f"p.name ILIKE ${param_count}")
-                params.append(f"%{search_name}%")
-
-            if search_phone:
-                param_count += 1
-                where_conditions.append(f"p.phone_number ILIKE ${param_count}")
-                params.append(f"%{search_phone}%")
+                where_conditions.append(
+                    f"(p.name ILIKE ${param_count} OR p.phone_number ILIKE ${param_count})"
+                )
+                params.append(f"%{search}%")
 
             where_clause = " AND ".join(where_conditions)
 
