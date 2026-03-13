@@ -17,6 +17,7 @@ from app.models.customer import (
     CustomerInsightsResponse
 )
 from uuid import UUID
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -410,6 +411,8 @@ async def get_customer_insights(
             data = CustomerInsights(orders_count=0)
         else:
             raw_products = row['products_json'] or []
+            if isinstance(raw_products, str):
+                raw_products = json.loads(raw_products)
             top_products = [
                 TopProduct(name=p['name'], count=p['count'])
                 for p in (raw_products if isinstance(raw_products, list) else [])
