@@ -12,6 +12,7 @@ from app.models.customer import (
     CustomerSearchResponse,
     CustomerSummary,
     CustomerQuerySearchResponse,
+    TopProduct,
     CustomerInsights,
     CustomerInsightsResponse
 )
@@ -353,17 +354,26 @@ async def get_customer_insights(
                   AND o.tenant_id   = $2
                   AND o.status      = 'completed'
             ),
-            top_product AS (
-                SELECT p.name AS top_product_name, SUM(oi.quantity)::int AS top_product_count
-                FROM order_items oi
-                JOIN orders  o ON o.id = oi.order_id
-                JOIN product p ON p.id = oi.product_id
-                WHERE o.customer_id = $1
-                  AND o.tenant_id   = $2
-                  AND o.status      = 'completed'
-                GROUP BY p.id, p.name
-                ORDER BY top_product_count DESC
-                LIMIT 1
+            top_products AS (
+                SELECT COALESCE(
+                    json_agg(
+                        json_build_object('name', sub.pname, 'count', sub.cnt)
+                        ORDER BY sub.cnt DESC
+                    ),
+                    '[]'::json
+                ) AS products_json
+                FROM (
+                    SELECT p.name AS pname, SUM(oi.quantity)::int AS cnt
+                    FROM order_items oi
+                    JOIN orders  o ON o.id = oi.order_id
+                    JOIN product p ON p.id = oi.product_id
+                    WHERE o.customer_id = $1
+                      AND o.tenant_id   = $2
+                      AND o.status      = 'completed'
+                    GROUP BY p.id, p.name
+                    ORDER BY cnt DESC
+                    LIMIT 5
+                ) sub
             ),
             freq AS (
                 WITH ordered AS (
@@ -384,12 +394,11 @@ async def get_customer_insights(
                 s.orders_count,
                 s.last_order_date,
                 s.avg_ticket,
-                tp.top_product_name,
-                tp.top_product_count,
+                tp.products_json,
                 f.avg_days
             FROM stats s
-            LEFT JOIN top_product tp ON true
-            LEFT JOIN freq        f  ON true
+            LEFT JOIN top_products tp ON true
+            LEFT JOIN freq         f  ON true
         """
 
         async with get_db_connection() as conn:
@@ -400,12 +409,16 @@ async def get_customer_insights(
         if orders_count == 0:
             data = CustomerInsights(orders_count=0)
         else:
+            raw_products = row['products_json'] or []
+            top_products = [
+                TopProduct(name=p['name'], count=p['count'])
+                for p in (raw_products if isinstance(raw_products, list) else [])
+            ] or None
             data = CustomerInsights(
                 orders_count=orders_count,
                 last_order_date=row['last_order_date'],
                 avg_ticket=row['avg_ticket'],
-                top_product_name=row['top_product_name'] or None,
-                top_product_count=row['top_product_count'] or None,
+                top_products=top_products,
                 avg_days_between_visits=float(row['avg_days']) if row['avg_days'] is not None else None
             )
 

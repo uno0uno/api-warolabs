@@ -59,13 +59,18 @@ class CustomerQuerySearchResponse(BaseModel):
     data: List[CustomerSummary]
 
 
+class TopProduct(BaseModel):
+    """Single product entry in top products list"""
+    name: str
+    count: int
+
+
 class CustomerInsights(BaseModel):
     """Aggregated purchase stats for a customer, scoped to a tenant"""
     orders_count: int
     last_order_date: Optional[datetime] = None
     avg_ticket: Optional[int] = None
-    top_product_name: Optional[str] = None
-    top_product_count: Optional[int] = None
+    top_products: Optional[List[TopProduct]] = None
     avg_days_between_visits: Optional[float] = None
 
 
