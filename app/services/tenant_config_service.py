@@ -2,6 +2,7 @@
 Tenant configuration service - handles tenant public profile management
 Requires authentication - these are admin endpoints
 """
+import asyncio
 import json
 from typing import Optional, Literal
 from fastapi import Request, HTTPException
@@ -323,20 +324,34 @@ async def toggle_public_profile(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
-            query = """
-                UPDATE tenant_public_profiles
-                SET is_active = $1, updated_at = CURRENT_TIMESTAMP
-                WHERE tenant_id = $2
-                RETURNING id
-            """
+            # Fetch current state to detect first activation
+            current_row = await conn.fetchrow(
+                "SELECT is_active, email, display_name FROM tenant_public_profiles WHERE tenant_id = $1",
+                tenant_id
+            )
 
-            result = await conn.fetchrow(query, is_active, tenant_id)
-
-            if not result:
+            if not current_row:
                 raise HTTPException(
                     status_code=404,
                     detail="Public profile not found. Please create one first."
                 )
+
+            was_inactive = not current_row['is_active']
+
+            await conn.execute(
+                "UPDATE tenant_public_profiles SET is_active = $1, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = $2",
+                is_active, tenant_id
+            )
+
+            # Send welcome email on first activation (false → true)
+            if is_active and was_inactive:
+                profile_email = current_row['email']
+                profile_name = current_row['display_name']
+                if profile_email:
+                    from app.services import email_helpers
+                    asyncio.create_task(
+                        email_helpers.send_negocio_welcome_email(profile_email, profile_name)
+                    )
 
             action = "activated" if is_active else "deactivated"
             logger.info(f"Public profile {action} for tenant {tenant_id}")

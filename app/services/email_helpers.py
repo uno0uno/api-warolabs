@@ -11,6 +11,10 @@ from app.templates.order_confirmation_template import (
     get_order_accepted_text,
     get_order_accepted_subject,
 )
+from app.templates.negocio_welcome_template import (
+    get_negocio_welcome_text,
+    get_negocio_welcome_subject,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -302,6 +306,44 @@ Tecnología colombiana para el mundo.
 
     except Exception:
         pass
+        return False
+
+
+async def send_negocio_welcome_email(
+    owner_email: str,
+    display_name: str,
+) -> bool:
+    """
+    Send a welcome email when a negocio activates its public profile for the first time.
+
+    Called fire-and-forget via asyncio.create_task — never raises.
+
+    Returns:
+        True if the email was sent successfully, False otherwise.
+    """
+    try:
+        text_body = get_negocio_welcome_text(display_name)
+        subject = get_negocio_welcome_subject(display_name)
+
+        ses_service = AWSSESService()
+        success = await ses_service.send_email(
+            from_email=settings.email_from or "hola@warocol.com",
+            from_name="Saifer 101 de WaRo Colombia",
+            to_emails=[owner_email],
+            subject=subject,
+            html_body=None,
+            text_body=text_body,
+        )
+
+        if success:
+            logger.info(f"Negocio welcome email sent to {owner_email} for '{display_name}'")
+        else:
+            logger.warning(f"SES returned failure for negocio welcome email to {owner_email}")
+
+        return success
+
+    except Exception as e:
+        logger.error(f"Error sending negocio welcome email to {owner_email}: {e}")
         return False
 
 
