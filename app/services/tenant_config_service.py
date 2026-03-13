@@ -324,9 +324,9 @@ async def toggle_public_profile(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
-            # Fetch current state to detect first activation
+            # Fetch current state to detect first-ever activation
             current_row = await conn.fetchrow(
-                "SELECT is_active, email, display_name FROM tenant_public_profiles WHERE tenant_id = $1",
+                "SELECT is_active, email, display_name, welcome_email_sent FROM tenant_public_profiles WHERE tenant_id = $1",
                 tenant_id
             )
 
@@ -337,20 +337,25 @@ async def toggle_public_profile(
                 )
 
             was_inactive = not current_row['is_active']
+            already_welcomed = current_row['welcome_email_sent']
 
             await conn.execute(
                 "UPDATE tenant_public_profiles SET is_active = $1, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = $2",
                 is_active, tenant_id
             )
 
-            # Send welcome email on first activation (false → true)
-            if is_active and was_inactive:
+            # Send welcome email only on the very first activation ever
+            if is_active and was_inactive and not already_welcomed:
                 profile_email = current_row['email']
                 profile_name = current_row['display_name']
                 if profile_email:
                     from app.services import email_helpers
                     asyncio.create_task(
                         email_helpers.send_negocio_welcome_email(profile_email, profile_name)
+                    )
+                    await conn.execute(
+                        "UPDATE tenant_public_profiles SET welcome_email_sent = true WHERE tenant_id = $1",
+                        tenant_id
                     )
 
             action = "activated" if is_active else "deactivated"
