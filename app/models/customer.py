@@ -57,3 +57,19 @@ class CustomerQuerySearchResponse(BaseModel):
     """Response for partial-match customer search"""
     success: bool = True
     data: List[CustomerSummary]
+
+
+class CustomerInsights(BaseModel):
+    """Aggregated purchase stats for a customer, scoped to a tenant"""
+    orders_count: int
+    last_order_date: Optional[datetime] = None
+    avg_ticket: Optional[int] = None
+    top_product_name: Optional[str] = None
+    top_product_count: Optional[int] = None
+    avg_days_between_visits: Optional[float] = None
+
+
+class CustomerInsightsResponse(BaseModel):
+    """Response for customer insights endpoint"""
+    success: bool = True
+    data: CustomerInsights

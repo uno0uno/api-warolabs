@@ -2,16 +2,19 @@
 Customers Router - HTTP endpoints for customer management
 """
 from fastapi import APIRouter, Request, Query
+from uuid import UUID
 from app.services.customers_service import (
     search_or_create_customer,
     search_customer_by_phone,
-    search_customers_by_query
+    search_customers_by_query,
+    get_customer_insights
 )
 from app.models.customer import (
     CustomerSearchOrCreate,
     CustomerResponse,
     CustomerSearchResponse,
-    CustomerQuerySearchResponse
+    CustomerQuerySearchResponse,
+    CustomerInsightsResponse
 )
 
 router = APIRouter()
@@ -89,3 +92,27 @@ async def search_customers_by_query_endpoint(
     ```
     """
     return await search_customers_by_query(request, q, limit)
+
+
+@router.get("/{customer_id}/insights", response_model=CustomerInsightsResponse, status_code=200)
+async def get_customer_insights_endpoint(
+    request: Request,
+    customer_id: UUID
+):
+    """
+    Return aggregated purchase stats for a customer scoped to the current tenant.
+
+    **Path Parameters:**
+    - customer_id: Customer UUID
+
+    **Response:**
+    - orders_count: Total completed orders
+    - last_order_date: Most recent order timestamp
+    - avg_ticket: Average order value (COP, integer)
+    - top_product_name: Most purchased product name
+    - top_product_count: Units of top product purchased
+    - avg_days_between_visits: Average days between orders (null if < 2 orders)
+
+    All metric fields are null when orders_count == 0.
+    """
+    return await get_customer_insights(request, customer_id)

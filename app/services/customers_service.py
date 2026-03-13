@@ -11,8 +11,11 @@ from app.models.customer import (
     CustomerResponse,
     CustomerSearchResponse,
     CustomerSummary,
-    CustomerQuerySearchResponse
+    CustomerQuerySearchResponse,
+    CustomerInsights,
+    CustomerInsightsResponse
 )
+from uuid import UUID
 import logging
 
 logger = logging.getLogger(__name__)
@@ -319,3 +322,97 @@ async def search_customers_by_query(
     except Exception as e:
         logger.error(f"Error in search_customers_by_query: {str(e)}")
         raise APIError(f"Error searching customers: {str(e)}", status_code=500)
+
+
+async def get_customer_insights(
+    request: Request,
+    customer_id: UUID
+) -> CustomerInsightsResponse:
+    """
+    Return aggregated purchase stats for a customer, scoped to the current tenant.
+
+    Metrics: orders_count, last_order_date, avg_ticket, top_product, avg_days_between_visits.
+    All metric fields are None when orders_count == 0.
+    Single CTE query — one DB round trip.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise APIError("No tenant context found", status_code=400)
+
+        query = """
+            WITH stats AS (
+                SELECT
+                    COUNT(*)::int                                          AS orders_count,
+                    MAX(o.order_date)                                      AS last_order_date,
+                    ROUND(AVG(o.total_amount)::numeric, 0)::bigint         AS avg_ticket
+                FROM orders o
+                WHERE o.customer_id = $1
+                  AND o.tenant_id   = $2
+                  AND o.status      = 'completed'
+            ),
+            top_product AS (
+                SELECT p.name AS top_product_name, SUM(oi.quantity)::int AS top_product_count
+                FROM order_items oi
+                JOIN orders  o ON o.id = oi.order_id
+                JOIN product p ON p.id = oi.product_id
+                WHERE o.customer_id = $1
+                  AND o.tenant_id   = $2
+                  AND o.status      = 'completed'
+                GROUP BY p.id, p.name
+                ORDER BY top_product_count DESC
+                LIMIT 1
+            ),
+            freq AS (
+                WITH ordered AS (
+                    SELECT order_date,
+                           LAG(order_date) OVER (ORDER BY order_date) AS prev_date
+                    FROM orders
+                    WHERE customer_id = $1
+                      AND tenant_id   = $2
+                      AND status      = 'completed'
+                )
+                SELECT ROUND(
+                    AVG(EXTRACT(EPOCH FROM (order_date - prev_date)) / 86400)::numeric, 1
+                ) AS avg_days
+                FROM ordered
+                WHERE prev_date IS NOT NULL
+            )
+            SELECT
+                s.orders_count,
+                s.last_order_date,
+                s.avg_ticket,
+                tp.top_product_name,
+                tp.top_product_count,
+                f.avg_days
+            FROM stats s
+            LEFT JOIN top_product tp ON true
+            LEFT JOIN freq        f  ON true
+        """
+
+        async with get_db_connection() as conn:
+            row = await conn.fetchrow(query, customer_id, tenant_id)
+
+        orders_count = row['orders_count'] if row else 0
+
+        if orders_count == 0:
+            data = CustomerInsights(orders_count=0)
+        else:
+            data = CustomerInsights(
+                orders_count=orders_count,
+                last_order_date=row['last_order_date'],
+                avg_ticket=row['avg_ticket'],
+                top_product_name=row['top_product_name'] or None,
+                top_product_count=row['top_product_count'] or None,
+                avg_days_between_visits=float(row['avg_days']) if row['avg_days'] is not None else None
+            )
+
+        return CustomerInsightsResponse(success=True, data=data)
+
+    except APIError:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_customer_insights: {str(e)}")
+        raise APIError(f"Error fetching customer insights: {str(e)}", status_code=500)
