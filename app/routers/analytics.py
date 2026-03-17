@@ -79,3 +79,21 @@ async def get_alerts(
         request,
         limit=limit
     )
+
+
+@router.get("/data-quality")
+async def get_data_quality(request: Request):
+    """
+    Scan 30-day purchase history for price anomalies and return quality score.
+
+    Detects:
+    - price_spike / price_drop: >25% deviation from rolling average (warning),
+      >50% or outside IQR×2 fence (critical)
+    - impossible_value: unit_cost <= 0 (critical)
+
+    Returns:
+    - score: 0-100 quality score (100 - critical*10 - warning*2)
+    - critical / warning / resolved counts
+    - alerts: full list ordered by severity and date
+    """
+    return await analytics_service.get_data_quality(request)

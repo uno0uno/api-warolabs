@@ -2,12 +2,13 @@
 Analytics Service
 Provides menu analysis, food cost tracking, and system alerts
 """
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from datetime import datetime, date, timedelta
+from statistics import mean as st_mean, quantiles
 import logging
 
 logger = logging.getLogger(__name__)
@@ -814,3 +815,245 @@ async def get_alerts(
     except Exception as e:
         logger.error(f"Error getting alerts: {str(e)}")
         raise APIError(f"Error getting alerts: {str(e)}", status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# Data Quality — anomaly detection helpers
+# ---------------------------------------------------------------------------
+
+def _compute_anomaly(
+    history: List[float],
+    new_price: float,
+    ingredient_name: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Return anomaly metadata if new_price is anomalous vs history, else None.
+
+    Algorithm:
+    1. Impossible value check (price <= 0)
+    2. % deviation from rolling average (>25% warning, >50% critical)
+    3. IQR fence with k=2 (upgrades to critical if outside fence)
+
+    Requires at least 2 history points to run deviation checks.
+    """
+    if new_price <= 0:
+        return {
+            "alert_type": "impossible_value",
+            "severity": "critical",
+            "expected_value": None,
+            "actual_value": new_price,
+            "deviation_pct": None,
+            "rolling_avg": None,
+        }
+
+    if len(history) < 2:
+        return None
+
+    rolling_avg = st_mean(history)
+    if rolling_avg == 0:
+        return None
+
+    deviation_pct = abs(new_price - rolling_avg) / rolling_avg * 100
+
+    if deviation_pct > 50:
+        severity = "critical"
+    elif deviation_pct > 25:
+        severity = "warning"
+    else:
+        severity = None
+
+    # IQR fence (needs at least 4 points for meaningful quartiles)
+    if len(history) >= 4:
+        q1, _, q3 = quantiles(history, n=4, method="inclusive")
+        iqr = q3 - q1
+        lower = q1 - 2 * iqr
+        upper = q3 + 2 * iqr
+        if new_price < lower or new_price > upper:
+            severity = "critical"
+
+    if severity is None:
+        return None
+
+    alert_type = "price_spike" if new_price > rolling_avg else "price_drop"
+
+    return {
+        "alert_type": alert_type,
+        "severity": severity,
+        "expected_value": rolling_avg,
+        "actual_value": new_price,
+        "deviation_pct": round(deviation_pct, 2),
+        "rolling_avg": rolling_avg,
+    }
+
+
+async def get_data_quality(request: Request) -> dict:
+    """
+    Scan the 30-day purchase history for each ingredient and detect price
+    anomalies (spikes, drops, impossible values).
+
+    Returns the existing alerts stored in data_quality_alerts plus a summary
+    score.  New anomalies found on this run are upserted idempotently.
+
+    Score: max(0, 100 - critical*10 - warning*2)
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # Ensure UNIQUE constraint exists for idempotent upsert
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'uq_dqa_item_tenant'
+                    ) THEN
+                        ALTER TABLE data_quality_alerts
+                        ADD CONSTRAINT uq_dqa_item_tenant
+                        UNIQUE (purchase_item_id, tenant_id);
+                    END IF;
+                END
+                $$;
+            """)
+
+            # Fetch last 30 days of purchase items with price history per ingredient
+            history_query = """
+                WITH recent_items AS (
+                    SELECT
+                        tpi.id            AS purchase_item_id,
+                        tpi.ingredient_id,
+                        i.name            AS ingredient_name,
+                        tpi.unit_cost     AS price,
+                        tp.purchase_date
+                    FROM tenant_purchase_items tpi
+                    JOIN tenant_purchases tp ON tpi.purchase_id = tp.id
+                    JOIN ingredients i ON tpi.ingredient_id = i.id
+                    WHERE tp.tenant_id = $1
+                      AND tp.purchase_date >= CURRENT_DATE - INTERVAL '30 days'
+                      AND tpi.unit_cost IS NOT NULL
+                      AND tpi.unit_cost > 0
+                    ORDER BY tpi.ingredient_id, tp.purchase_date ASC
+                )
+                SELECT
+                    ingredient_id,
+                    ingredient_name,
+                    ARRAY_AGG(purchase_item_id ORDER BY purchase_date ASC) AS item_ids,
+                    ARRAY_AGG(price::float ORDER BY purchase_date ASC)     AS prices
+                FROM recent_items
+                GROUP BY ingredient_id, ingredient_name
+                HAVING COUNT(*) >= 2
+            """
+            rows = await conn.fetch(history_query, tenant_id)
+
+            # Detect anomalies and upsert alerts
+            for row in rows:
+                prices: List[float] = list(row["prices"])
+                item_ids = list(row["item_ids"])
+                ingredient_id = row["ingredient_id"]
+                ingredient_name = row["ingredient_name"]
+
+                # Evaluate each item against its preceding history
+                for idx in range(1, len(prices)):
+                    history = prices[:idx]
+                    new_price = prices[idx]
+                    purchase_item_id = item_ids[idx]
+
+                    anomaly = _compute_anomaly(history, new_price, ingredient_name)
+                    if anomaly is None:
+                        continue
+
+                    await conn.execute("""
+                        INSERT INTO data_quality_alerts (
+                            tenant_id, purchase_item_id, ingredient_id,
+                            ingredient_name, alert_type, severity,
+                            expected_value, actual_value, deviation_pct, rolling_avg,
+                            resolved
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, FALSE)
+                        ON CONFLICT (purchase_item_id, tenant_id)
+                        DO UPDATE SET
+                            alert_type    = EXCLUDED.alert_type,
+                            severity      = EXCLUDED.severity,
+                            expected_value = EXCLUDED.expected_value,
+                            actual_value  = EXCLUDED.actual_value,
+                            deviation_pct = EXCLUDED.deviation_pct,
+                            rolling_avg   = EXCLUDED.rolling_avg
+                        WHERE data_quality_alerts.resolved = FALSE
+                    """,
+                        tenant_id,
+                        purchase_item_id,
+                        ingredient_id,
+                        ingredient_name,
+                        anomaly["alert_type"],
+                        anomaly["severity"],
+                        anomaly["expected_value"],
+                        anomaly["actual_value"],
+                        anomaly["deviation_pct"],
+                        anomaly["rolling_avg"],
+                    )
+
+            # Fetch all alerts for this tenant
+            alerts_query = """
+                SELECT
+                    id, tenant_id, purchase_item_id, ingredient_id,
+                    ingredient_name, alert_type, severity,
+                    expected_value, actual_value, deviation_pct, rolling_avg,
+                    context, resolved, resolved_by, resolved_at,
+                    resolution_note, original_value, corrected_value, created_at
+                FROM data_quality_alerts
+                WHERE tenant_id = $1
+                ORDER BY
+                    resolved ASC,
+                    CASE severity WHEN 'critical' THEN 0 ELSE 1 END,
+                    created_at DESC
+            """
+            alert_rows = await conn.fetch(alerts_query, tenant_id)
+
+            alerts = []
+            for r in alert_rows:
+                alerts.append({
+                    "id": str(r["id"]),
+                    "tenant_id": str(r["tenant_id"]),
+                    "purchase_item_id": str(r["purchase_item_id"]) if r["purchase_item_id"] else None,
+                    "ingredient_id": str(r["ingredient_id"]) if r["ingredient_id"] else None,
+                    "ingredient_name": r["ingredient_name"],
+                    "alert_type": r["alert_type"],
+                    "severity": r["severity"],
+                    "expected_value": float(r["expected_value"]) if r["expected_value"] is not None else None,
+                    "actual_value": float(r["actual_value"]) if r["actual_value"] is not None else None,
+                    "deviation_pct": float(r["deviation_pct"]) if r["deviation_pct"] is not None else None,
+                    "rolling_avg": float(r["rolling_avg"]) if r["rolling_avg"] is not None else None,
+                    "context": r["context"],
+                    "resolved": r["resolved"],
+                    "resolved_by": str(r["resolved_by"]) if r["resolved_by"] else None,
+                    "resolved_at": r["resolved_at"].isoformat() if r["resolved_at"] else None,
+                    "resolution_note": r["resolution_note"],
+                    "original_value": float(r["original_value"]) if r["original_value"] is not None else None,
+                    "corrected_value": float(r["corrected_value"]) if r["corrected_value"] is not None else None,
+                    "created_at": r["created_at"].isoformat(),
+                })
+
+            critical_count = sum(1 for a in alerts if a["severity"] == "critical" and not a["resolved"])
+            warning_count = sum(1 for a in alerts if a["severity"] == "warning" and not a["resolved"])
+            resolved_count = sum(1 for a in alerts if a["resolved"])
+            score = max(0, 100 - critical_count * 10 - warning_count * 2)
+
+            return {
+                "success": True,
+                "data": {
+                    "score": score,
+                    "critical": critical_count,
+                    "warning": warning_count,
+                    "resolved": resolved_count,
+                    "alerts": alerts,
+                },
+            }
+
+    except AuthenticationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting data quality: {str(e)}")
+        raise APIError(f"Error getting data quality: {str(e)}", status_code=500)
