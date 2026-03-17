@@ -1173,3 +1173,235 @@ async def run_anomaly_checks_for_purchase(purchase_id: UUID, tenant_id: UUID) ->
 
     except Exception as e:
         logger.error(f"run_anomaly_checks_for_purchase failed (purchase={purchase_id}): {e}")
+
+
+async def resolve_data_quality_alert(
+    request: Request,
+    alert_id: UUID,
+    resolve_data: Any,  # DataQualityAlertResolve — typed as Any to avoid circular import
+) -> dict:
+    """
+    Resolve a data quality alert in one of two modes:
+
+    - ``valid``: marks the alert resolved with no changes to purchase data.
+    - ``corrected``: updates ``unit_cost`` (and optionally ``purchase_quantity``)
+      on ``tenant_purchase_items``, recalculates ``product.costo_calculado`` for
+      all products that use the ingredient, then marks the alert resolved with a
+      full audit trail (``original_value``, ``corrected_value``, ``resolved_by``,
+      ``resolved_at``).
+
+    A pre-resolution anomaly re-check runs on the corrected value before accepting
+    it — if the new value would itself trigger an anomaly, a 400 is returned.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # 1. Fetch alert — tenant-scoped to prevent cross-tenant access
+            alert = await conn.fetchrow("""
+                SELECT
+                    id, tenant_id, purchase_item_id, ingredient_id,
+                    ingredient_name, alert_type, severity,
+                    actual_value, resolved, resolution_note
+                FROM data_quality_alerts
+                WHERE id = $1 AND tenant_id = $2
+            """, alert_id, tenant_id)
+
+            if not alert:
+                raise APIError("Alert not found", status_code=404)
+
+            if alert["resolved"]:
+                raise APIError("Alert already resolved", status_code=400)
+
+            resolution_type = resolve_data.resolution_type
+            resolution_note = resolve_data.resolution_note
+
+            if resolution_type == "valid":
+                # Mark resolved without touching purchase data
+                await conn.execute("""
+                    UPDATE data_quality_alerts
+                    SET resolved = TRUE,
+                        resolved_by = $2,
+                        resolved_at = NOW(),
+                        resolution_note = $3
+                    WHERE id = $1
+                """, alert_id, user_id, resolution_note)
+
+            elif resolution_type == "corrected":
+                corrected_value = resolve_data.corrected_value
+                corrected_quantity = resolve_data.corrected_quantity
+
+                if not corrected_value or corrected_value <= 0:
+                    raise APIError(
+                        "corrected_value is required and must be > 0 for resolution_type 'corrected'",
+                        status_code=422
+                    )
+
+                purchase_item_id = alert["purchase_item_id"]
+                ingredient_id = alert["ingredient_id"]
+                ingredient_name = alert["ingredient_name"]
+
+                if not purchase_item_id:
+                    raise APIError(
+                        "Cannot correct: alert has no associated purchase_item_id",
+                        status_code=400
+                    )
+
+                # 2. Pre-resolution anomaly re-check on the corrected value
+                if purchase_item_id:
+                    purchase_row = await conn.fetchrow("""
+                        SELECT tpi.purchase_id FROM tenant_purchase_items tpi WHERE tpi.id = $1
+                    """, purchase_item_id)
+
+                    if purchase_row:
+                        history_rows = await conn.fetch("""
+                            SELECT tpi2.unit_cost::float AS price
+                            FROM tenant_purchase_items tpi2
+                            JOIN tenant_purchases tp ON tpi2.purchase_id = tp.id
+                            WHERE tpi2.ingredient_id = $1
+                              AND tp.tenant_id = $2
+                              AND tpi2.purchase_id != $3
+                              AND tpi2.unit_cost IS NOT NULL
+                              AND tpi2.unit_cost > 0
+                            ORDER BY tp.purchase_date DESC
+                            LIMIT 30
+                        """, ingredient_id, tenant_id, purchase_row["purchase_id"])
+
+                        history: List[float] = [r["price"] for r in history_rows]
+
+                        if len(history) >= 5:
+                            recheck = _compute_anomaly(history, corrected_value, ingredient_name)
+                            if recheck is not None:
+                                raise APIError(
+                                    f"Corrected value ${corrected_value:,.2f} is also anomalous "
+                                    f"({recheck['alert_type']}, {recheck['severity']}, "
+                                    f"{recheck['deviation_pct']}% deviation from avg "
+                                    f"${recheck['expected_value']:,.2f}). "
+                                    f"Provide a value closer to the historical average.",
+                                    status_code=400
+                                )
+
+                # 3. Fetch current purchase_quantity for total_cost calculation
+                item_row = await conn.fetchrow("""
+                    SELECT purchase_quantity FROM tenant_purchase_items WHERE id = $1
+                """, purchase_item_id)
+
+                effective_quantity = (
+                    corrected_quantity
+                    if corrected_quantity is not None
+                    else (float(item_row["purchase_quantity"]) if item_row and item_row["purchase_quantity"] else 1.0)
+                )
+
+                # 4. Update tenant_purchase_items
+                await conn.execute("""
+                    UPDATE tenant_purchase_items
+                    SET unit_cost       = $2,
+                        purchase_quantity = $3,
+                        total_cost      = $4
+                    WHERE id = $1
+                """,
+                    purchase_item_id,
+                    corrected_value,
+                    effective_quantity,
+                    effective_quantity * corrected_value,
+                )
+
+                # 5. Recalculate costo_calculado for all products using this ingredient
+                await conn.execute("""
+                    UPDATE product
+                    SET costo_calculado = (
+                        SELECT COALESCE(SUM(
+                            pr.quantity * COALESCE(
+                                (SELECT pi.unit_cost
+                                 FROM tenant_purchase_items pi
+                                 JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                 WHERE pi.ingredient_id = pr.ingredient_id
+                                   AND tp.tenant_id = $2
+                                   AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                                 ORDER BY tp.purchase_date DESC LIMIT 1),
+                                i.costo_unitario, 0
+                            )
+                        ), 0)
+                        FROM product_recipes pr
+                        JOIN ingredients i ON pr.ingredient_id = i.id
+                        WHERE pr.product_id = product.id
+                    )
+                    WHERE id IN (
+                        SELECT DISTINCT pr.product_id
+                        FROM product_recipes pr
+                        WHERE pr.ingredient_id = $1
+                    )
+                """, ingredient_id, tenant_id)
+
+                # 6. Mark alert resolved with full audit trail
+                await conn.execute("""
+                    UPDATE data_quality_alerts
+                    SET resolved        = TRUE,
+                        resolved_by     = $2,
+                        resolved_at     = NOW(),
+                        resolution_note = $3,
+                        original_value  = $4,
+                        corrected_value = $5
+                    WHERE id = $1
+                """,
+                    alert_id,
+                    user_id,
+                    resolution_note,
+                    alert["actual_value"],
+                    corrected_value,
+                )
+
+            else:
+                raise APIError(
+                    f"Invalid resolution_type '{resolution_type}'. Use 'valid' or 'corrected'.",
+                    status_code=422
+                )
+
+            # Return the updated alert
+            updated = await conn.fetchrow("""
+                SELECT
+                    id, tenant_id, purchase_item_id, ingredient_id,
+                    ingredient_name, alert_type, severity,
+                    expected_value, actual_value, deviation_pct, rolling_avg,
+                    context, resolved, resolved_by, resolved_at,
+                    resolution_note, original_value, corrected_value, created_at
+                FROM data_quality_alerts
+                WHERE id = $1
+            """, alert_id)
+
+            return {
+                "success": True,
+                "data": {
+                    "id": str(updated["id"]),
+                    "tenant_id": str(updated["tenant_id"]),
+                    "purchase_item_id": str(updated["purchase_item_id"]) if updated["purchase_item_id"] else None,
+                    "ingredient_id": str(updated["ingredient_id"]) if updated["ingredient_id"] else None,
+                    "ingredient_name": updated["ingredient_name"],
+                    "alert_type": updated["alert_type"],
+                    "severity": updated["severity"],
+                    "expected_value": float(updated["expected_value"]) if updated["expected_value"] is not None else None,
+                    "actual_value": float(updated["actual_value"]) if updated["actual_value"] is not None else None,
+                    "deviation_pct": float(updated["deviation_pct"]) if updated["deviation_pct"] is not None else None,
+                    "rolling_avg": float(updated["rolling_avg"]) if updated["rolling_avg"] is not None else None,
+                    "resolved": updated["resolved"],
+                    "resolved_by": str(updated["resolved_by"]) if updated["resolved_by"] else None,
+                    "resolved_at": updated["resolved_at"].isoformat() if updated["resolved_at"] else None,
+                    "resolution_note": updated["resolution_note"],
+                    "original_value": float(updated["original_value"]) if updated["original_value"] is not None else None,
+                    "corrected_value": float(updated["corrected_value"]) if updated["corrected_value"] is not None else None,
+                    "created_at": updated["created_at"].isoformat(),
+                },
+            }
+
+    except AuthenticationError as e:
+        raise e
+    except APIError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error resolving data quality alert {alert_id}: {str(e)}")
+        raise APIError(f"Error resolving alert: {str(e)}", status_code=500)

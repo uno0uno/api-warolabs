@@ -4,7 +4,9 @@ Endpoints for analytics dashboard data
 """
 from fastapi import APIRouter, Request, Query
 from typing import Optional
+from uuid import UUID
 from app.services import analytics_service
+from app.models.data_quality import DataQualityAlertResolve
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
@@ -97,3 +99,33 @@ async def get_data_quality(request: Request):
     - alerts: full list ordered by severity and date
     """
     return await analytics_service.get_data_quality(request)
+
+
+@router.patch("/data-quality/{alert_id}/resolve")
+async def resolve_data_quality_alert(
+    alert_id: UUID,
+    resolve_data: DataQualityAlertResolve,
+    request: Request,
+):
+    """
+    Resolve a data quality alert.
+
+    Body:
+    - resolution_type: "valid" | "corrected"
+    - corrected_value: float (required if resolution_type = "corrected")
+    - corrected_quantity: float (optional — corrects purchase_quantity too)
+    - resolution_note: str (optional)
+
+    Modes:
+    - valid: marks alert resolved, no changes to purchase data
+    - corrected: updates unit_cost (and optionally purchase_quantity) on the
+      purchase item, recalculates costo_calculado on all affected products,
+      saves original_value + corrected_value as audit log
+
+    Returns 400 if the corrected value is itself anomalous vs prior history.
+    Returns 400 if alert is already resolved.
+    Returns 404 if alert not found for this tenant.
+    """
+    return await analytics_service.resolve_data_quality_alert(
+        request, alert_id, resolve_data
+    )
