@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Response, Query, Form, File, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Request, Response, Query, Form, File, UploadFile
 from uuid import UUID
 from typing import Optional, List
 from app.services.purchases_service import (
@@ -32,6 +32,8 @@ from app.services.direct_purchase_service import (
     update_direct_purchase,
     upload_direct_purchase_attachments
 )
+from app.services.analytics_service import run_anomaly_checks_for_purchase
+from app.core.middleware import require_valid_session
 from app.models.purchase import (
     Purchase,
     PurchaseCreate,
@@ -145,7 +147,8 @@ async def get_direct_purchases_endpoint(
 async def create_direct_purchase_endpoint(
     purchase_data: DirectPurchaseCreate,
     request: Request,
-    response: Response
+    response: Response,
+    background_tasks: BackgroundTasks
 ):
     """
     Create a direct purchase (Compra Directa) with immediate inventory update.
@@ -155,8 +158,9 @@ async def create_direct_purchase_endpoint(
     2. Updates inventory immediately for all items
     3. Optionally attaches invoice and payment documents
     4. Generates purchase number with WR-CD-XXXX format
+    5. Schedules anomaly detection in background (non-blocking)
     """
-    return await create_direct_purchase(
+    result = await create_direct_purchase(
         request=request,
         response=response,
         supplier_id=purchase_data.supplier_id,
@@ -174,6 +178,18 @@ async def create_direct_purchase_endpoint(
         payment_date=purchase_data.payment_date,
         purchase_date=purchase_data.purchase_date
     )
+
+    # Schedule anomaly check after the purchase transaction has committed
+    try:
+        if result.get("success") and result.get("data", {}).get("id"):
+            session_context = require_valid_session(request)
+            tenant_id = session_context.tenant_id
+            purchase_id = UUID(result["data"]["id"])
+            background_tasks.add_task(run_anomaly_checks_for_purchase, purchase_id, tenant_id)
+    except Exception:
+        pass  # Never fail the purchase response due to background scheduling
+
+    return result
 
 
 @router.get("/direct/next-number")

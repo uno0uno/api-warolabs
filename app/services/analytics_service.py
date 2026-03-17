@@ -3,6 +3,7 @@ Analytics Service
 Provides menu analysis, food cost tracking, and system alerts
 """
 from typing import Optional, List, Dict, Any
+from uuid import UUID
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -1057,3 +1058,118 @@ async def get_data_quality(request: Request) -> dict:
     except Exception as e:
         logger.error(f"Error getting data quality: {str(e)}")
         raise APIError(f"Error getting data quality: {str(e)}", status_code=500)
+
+
+async def run_anomaly_checks_for_purchase(purchase_id: UUID, tenant_id: UUID) -> None:
+    """
+    Background task: scan each item of a newly saved purchase for price anomalies.
+
+    Triggered automatically after POST /purchases/direct commits.
+    Requires >= 5 prior purchases for the ingredient before running — below that
+    there is not enough baseline to flag anomalies reliably.
+
+    Upserts detected anomalies into data_quality_alerts idempotently via
+    ON CONFLICT (purchase_item_id, tenant_id).
+    """
+    try:
+        # Read-only: fetch items for this purchase + ingredient names
+        async with get_db_connection(use_transaction=False) as conn:
+            items = await conn.fetch("""
+                SELECT
+                    tpi.id          AS purchase_item_id,
+                    tpi.ingredient_id,
+                    i.name          AS ingredient_name,
+                    tpi.unit_cost::float AS unit_cost
+                FROM tenant_purchase_items tpi
+                JOIN ingredients i ON tpi.ingredient_id = i.id
+                WHERE tpi.purchase_id = $1
+                  AND tpi.unit_cost IS NOT NULL
+            """, purchase_id)
+
+        if not items:
+            logger.debug(f"No items found for purchase {purchase_id} — skipping anomaly check")
+            return
+
+        for item in items:
+            try:
+                ingredient_id = item["ingredient_id"]
+                new_price = item["unit_cost"]
+                ingredient_name = item["ingredient_name"]
+                purchase_item_id = item["purchase_item_id"]
+
+                # Fetch up to 30 prior prices for this ingredient, excluding the current purchase
+                async with get_db_connection(use_transaction=False) as conn:
+                    history_rows = await conn.fetch("""
+                        SELECT tpi2.unit_cost::float AS price
+                        FROM tenant_purchase_items tpi2
+                        JOIN tenant_purchases tp ON tpi2.purchase_id = tp.id
+                        WHERE tpi2.ingredient_id = $1
+                          AND tp.tenant_id = $2
+                          AND tpi2.purchase_id != $3
+                          AND tpi2.unit_cost IS NOT NULL
+                          AND tpi2.unit_cost > 0
+                        ORDER BY tp.purchase_date DESC
+                        LIMIT 30
+                    """, ingredient_id, tenant_id, purchase_id)
+
+                history: List[float] = [r["price"] for r in history_rows]
+
+                # Issue spec: minimum 5 prior purchases required for a reliable baseline
+                if len(history) < 5:
+                    logger.debug(
+                        f"Ingredient {ingredient_name}: only {len(history)} prior purchases "
+                        f"(need >= 5) — skipping"
+                    )
+                    continue
+
+                anomaly = _compute_anomaly(history, new_price, ingredient_name)
+                if anomaly is None:
+                    continue
+
+                logger.info(
+                    f"Anomaly detected: {ingredient_name} | "
+                    f"{anomaly['alert_type']} | {anomaly['severity']} | "
+                    f"actual={new_price} expected={anomaly['expected_value']:.2f} "
+                    f"deviation={anomaly['deviation_pct']}%"
+                )
+
+                # Write: upsert alert
+                async with get_db_connection() as conn:
+                    await conn.execute("""
+                        INSERT INTO data_quality_alerts (
+                            tenant_id, purchase_item_id, ingredient_id,
+                            ingredient_name, alert_type, severity,
+                            expected_value, actual_value, deviation_pct, rolling_avg,
+                            resolved
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, FALSE)
+                        ON CONFLICT (purchase_item_id, tenant_id)
+                        DO UPDATE SET
+                            alert_type     = EXCLUDED.alert_type,
+                            severity       = EXCLUDED.severity,
+                            expected_value = EXCLUDED.expected_value,
+                            actual_value   = EXCLUDED.actual_value,
+                            deviation_pct  = EXCLUDED.deviation_pct,
+                            rolling_avg    = EXCLUDED.rolling_avg
+                        WHERE data_quality_alerts.resolved = FALSE
+                    """,
+                        tenant_id,
+                        purchase_item_id,
+                        ingredient_id,
+                        ingredient_name,
+                        anomaly["alert_type"],
+                        anomaly["severity"],
+                        anomaly["expected_value"],
+                        anomaly["actual_value"],
+                        anomaly["deviation_pct"],
+                        anomaly["rolling_avg"],
+                    )
+
+            except Exception as item_err:
+                logger.error(
+                    f"Anomaly check failed for item {item.get('purchase_item_id')} "
+                    f"({item.get('ingredient_name')}): {item_err}"
+                )
+                continue
+
+    except Exception as e:
+        logger.error(f"run_anomaly_checks_for_purchase failed (purchase={purchase_id}): {e}")
