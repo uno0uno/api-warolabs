@@ -2,12 +2,14 @@
 POS Cart Service
 Handles cart persistence for POS system
 """
+import asyncio
 from typing import List, Optional
 from uuid import UUID
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
+from app.services.waros_service import evaluate_and_award
 import logging
 
 logger = logging.getLogger(__name__)
@@ -876,6 +878,14 @@ async def complete_pos_order(
                 await conn.execute(complete_cart_query, cart_id)
 
                 logger.info(f"Order #{order_number} completed successfully")
+
+                # Award waros for completed order (fire-and-forget — never blocks)
+                try:
+                    asyncio.create_task(
+                        evaluate_and_award(order_id, customer_id, tenant_id)
+                    )
+                except Exception as _waros_err:
+                    logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
 
                 # 8. Return order details
                 return {

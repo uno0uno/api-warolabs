@@ -10,6 +10,7 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError, ValidationError
 from app.services.email_helpers import send_order_accepted_email
+from app.services.waros_service import evaluate_and_award
 import logging
 
 logger = logging.getLogger(__name__)
@@ -282,7 +283,7 @@ async def update_order_status(
             # 1. Fetch current order (tenant-scoped, online orders only)
             row = await conn.fetchrow(
                 """
-                SELECT id, status
+                SELECT id, status, customer_id
                 FROM orders
                 WHERE id = $1
                   AND tenant_id = $2
@@ -294,6 +295,7 @@ async def update_order_status(
                 raise NotFoundError(f"Order {order_id} not found")
 
             old_status = row["status"]
+            order_customer_id = row["customer_id"]  # may be None for guest checkout
 
             # 2. Validate state machine transition
             allowed = ALLOWED_TRANSITIONS.get(old_status, [])
@@ -390,6 +392,15 @@ async def update_order_status(
                         order_id=str(order_id),
                     ))
 
+                # Award waros for auto-completed order (fire-and-forget — never blocks)
+                if order_customer_id:
+                    try:
+                        asyncio.create_task(
+                            evaluate_and_award(order_id, order_customer_id, tenant_id)
+                        )
+                    except Exception as _waros_err:
+                        logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
+
                 # Override the return payload to reflect the final completed state
                 return {
                     "success": True,
@@ -414,6 +425,15 @@ async def update_order_status(
                         ],
                     },
                 }
+
+            # Award waros for direct completed transition (fire-and-forget — never blocks)
+            if new_status == "completed" and order_customer_id:
+                try:
+                    asyncio.create_task(
+                        evaluate_and_award(order_id, order_customer_id, tenant_id)
+                    )
+                except Exception as _waros_err:
+                    logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
 
             return {
                 "success": True,

@@ -2,6 +2,7 @@
 Orders Service
 Handles listing and filtering of POS orders
 """
+import asyncio
 from typing import Optional, List
 from uuid import UUID
 from fastapi import Request
@@ -9,6 +10,7 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from app.services.aws_ses_service import ses_service
+from app.services.waros_service import evaluate_and_award
 from datetime import datetime, date
 import csv
 
@@ -1903,6 +1905,15 @@ async def create_manual_order(
                             f"Venta de {item['quantity']}x {item.get('product_name', '')} - Orden #{order_row['order_number']}",
                             user_id
                         )
+
+        # Award waros for completed manual order (fire-and-forget — never blocks)
+        if customer_id:
+            try:
+                asyncio.create_task(
+                    evaluate_and_award(order_row["id"], UUID(customer_id), tenant_id)
+                )
+            except Exception as _waros_err:
+                logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
 
         return {
             "success": True,
