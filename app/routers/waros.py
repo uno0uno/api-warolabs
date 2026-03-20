@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
 from app.services import waros_service
 
@@ -89,6 +89,28 @@ async def update_global_config(body: GlobalConfigBody, request: Request):
     Upserts gamification_config.is_enabled.
     """
     return await waros_service.update_global_config(request, is_enabled=body.is_enabled)
+
+
+@router.get("/estimate")
+async def estimate_waros(
+    request: Request,
+    total_amount: float = Query(..., description="Cart total in COP", gt=0),
+    customer_id: Optional[str] = Query(None, description="Customer profile UUID (optional)"),
+):
+    """
+    Read-only estimate of Waros that would be earned for an order with the given total.
+    - Never writes to DB.
+    - per_ticket_qty always returns 0 (item count unknown before order is placed).
+    - purchase_count and frequency simulate +1 completed order.
+    - customer_id is optional: omit it to estimate ticket_value rule only.
+    """
+    parsed_customer_id: Optional[UUID] = None
+    if customer_id:
+        try:
+            parsed_customer_id = UUID(customer_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="customer_id no es un UUID válido")
+    return await waros_service.estimate_waros(request, total_amount, parsed_customer_id)
 
 
 @router.get("/customers/balances")

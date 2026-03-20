@@ -485,6 +485,147 @@ async def assign_manual_waros(
         raise HTTPException(status_code=500, detail="Error al asignar Waros")
 
 
+# ── Estimate (read-only) ─────────────────────────────────────────────────────
+
+async def estimate_waros(
+    request: Request,
+    total_amount: float,
+    customer_id: Optional[UUID],
+) -> Dict[str, Any]:
+    """
+    GET /admin/waros/estimate
+    Read-only preview of Waros that would be earned for an order with the given total.
+    Never writes to DB. per_ticket_qty always returns 0 (item count unknown pre-order).
+    purchase_count and frequency simulate +1 order (the one being estimated).
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+
+        async with get_db_connection(use_transaction=False) as conn:
+            # 1. Check system enabled + daily cap config
+            config_row = await conn.fetchrow(
+                """
+                SELECT is_enabled, max_daily_waros
+                FROM gamification_config
+                WHERE tenant_id = $1
+                """,
+                tenant_id,
+            )
+            if not config_row or not config_row["is_enabled"]:
+                return {"estimated_waros": 0, "system_enabled": False, "breakdown": []}
+
+            max_daily = int(config_row["max_daily_waros"] or 0)
+
+            # 2. Fetch active rules
+            rule_rows = await conn.fetch(
+                """
+                SELECT rule_type, config
+                FROM waro_earning_rules
+                WHERE tenant_id = $1 AND is_active = true
+                """,
+                tenant_id,
+            )
+            if not rule_rows:
+                return {"estimated_waros": 0, "system_enabled": True, "breakdown": []}
+
+            active_types = {r["rule_type"] for r in rule_rows}
+
+            # 3. total_completed for purchase_count rule (+1: simulate this order completing)
+            total_completed = 0
+            if customer_id and "purchase_count" in active_types:
+                count_row = await conn.fetchrow(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM orders
+                    WHERE customer_id = $1 AND tenant_id = $2 AND status = 'completed'
+                    """,
+                    customer_id,
+                    tenant_id,
+                )
+                total_completed = int(count_row["total"]) + 1
+
+            # 4. freq_count for frequency rule (+1: simulate this order completing)
+            freq_count = 0
+            if customer_id and "frequency" in active_types:
+                freq_cfg = next(
+                    (r["config"] for r in rule_rows if r["rule_type"] == "frequency"),
+                    {},
+                )
+                if isinstance(freq_cfg, str):
+                    freq_cfg = json.loads(freq_cfg)
+                within_days = int(freq_cfg.get("within_days", 60))
+                cutoff = datetime.now() - timedelta(days=within_days)
+                freq_row = await conn.fetchrow(
+                    """
+                    SELECT COUNT(*) AS freq_count
+                    FROM orders
+                    WHERE customer_id = $1 AND tenant_id = $2
+                      AND status = 'completed'
+                      AND created_at >= $3
+                    """,
+                    customer_id,
+                    tenant_id,
+                    cutoff,
+                )
+                freq_count = int(freq_row["freq_count"]) + 1
+
+            # 5. Today's earned waros for daily cap (only when customer_id provided)
+            today_earned = 0
+            if customer_id and max_daily > 0:
+                today_row = await conn.fetchrow(
+                    """
+                    SELECT COALESCE(SUM(waros_amount), 0) AS today_earned
+                    FROM waros_transactions
+                    WHERE profile_id = $1
+                      AND tenant_id = $2
+                      AND transaction_type = 'earned'
+                      AND created_at >= CURRENT_DATE
+                    """,
+                    customer_id,
+                    tenant_id,
+                )
+                today_earned = int(today_row["today_earned"])
+
+        # 6. Evaluate each active rule — total_qty=0 (unknown pre-order)
+        breakdown: List[Dict[str, Any]] = []
+        total_waros = 0
+
+        for rule in rule_rows:
+            rule_type = rule["rule_type"]
+            config = rule["config"]
+            if isinstance(config, str):
+                config = json.loads(config)
+
+            earned = _eval_rule(
+                rule_type=rule_type,
+                config=config,
+                total_amount=total_amount,
+                total_completed=total_completed,
+                total_qty=0,
+                freq_count=freq_count,
+            )
+            breakdown.append({"rule_type": rule_type, "waros": earned})
+            total_waros += earned
+
+        # 7. Apply daily cap (only when customer_id known)
+        if customer_id and max_daily > 0 and total_waros > 0:
+            remaining = max(0, max_daily - today_earned)
+            total_waros = min(total_waros, remaining)
+
+        return {
+            "estimated_waros": total_waros,
+            "system_enabled": True,
+            "breakdown": breakdown,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in estimate_waros: {e}")
+        raise HTTPException(status_code=500, detail="Error al estimar Waros")
+
+
 # ── Rule evaluator ───────────────────────────────────────────────────────────
 
 def _eval_rule(
