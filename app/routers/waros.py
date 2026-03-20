@@ -4,6 +4,7 @@ Endpoints for configuring earning rules and global system toggle.
 All endpoints require a valid tenant session.
 """
 from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
@@ -27,6 +28,13 @@ class RuleBody(BaseModel):
 class GlobalConfigBody(BaseModel):
     """Body for PATCH /admin/waros/config"""
     is_enabled: bool
+
+
+class AssignBody(BaseModel):
+    """Body for POST /admin/waros/assign"""
+    profile_id: UUID
+    waros_amount: int
+    reason: Optional[str] = None
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -81,3 +89,21 @@ async def update_global_config(body: GlobalConfigBody, request: Request):
     Upserts gamification_config.is_enabled.
     """
     return await waros_service.update_global_config(request, is_enabled=body.is_enabled)
+
+
+@router.post("/assign")
+async def assign_waros(body: AssignBody, request: Request):
+    """
+    Manually award or deduct Waros from a customer.
+    - waros_amount > 0: award points
+    - waros_amount < 0: deduct points (cannot go below 0)
+    - assigned_by is taken from the authenticated admin session
+    """
+    if body.waros_amount == 0:
+        raise HTTPException(status_code=422, detail="waros_amount no puede ser 0")
+    return await waros_service.assign_manual_waros(
+        request,
+        profile_id=body.profile_id,
+        waros_amount=body.waros_amount,
+        reason=body.reason,
+    )

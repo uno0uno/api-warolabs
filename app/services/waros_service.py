@@ -6,6 +6,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from fastapi import HTTPException, Request
 
@@ -227,6 +228,152 @@ async def update_global_config(request: Request, is_enabled: bool) -> Dict[str, 
     except Exception as e:
         logger.error(f"Error in update_global_config: {e}")
         raise HTTPException(status_code=500, detail="Error al actualizar configuración global")
+
+
+# ── Manual assignment ────────────────────────────────────────────────────────
+
+async def assign_manual_waros(
+    request: Request,
+    profile_id: UUID,
+    waros_amount: int,
+    reason: Optional[str],
+) -> Dict[str, Any]:
+    """
+    POST /admin/waros/assign
+    Manually award (positive) or deduct (negative) Waros for a customer.
+    Atomic write: upsert wallet + audit log + transaction.
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+        admin_user_id = session.user_id  # profile.id of the logged-in admin
+
+        # Validate: profile must be a customer of this tenant
+        async with get_db_connection(use_transaction=False) as conn:
+            customer_check = await conn.fetchrow(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM orders
+                WHERE customer_id = $1 AND tenant_id = $2 AND status = 'completed'
+                """,
+                profile_id,
+                tenant_id,
+            )
+            if int(customer_check["cnt"]) == 0:
+                raise HTTPException(
+                    status_code=422,
+                    detail="El perfil no tiene órdenes completadas en este tenant",
+                )
+
+        # Atomic write
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # 1. Lock + read current balance (0 if no wallet yet)
+                wallet_row = await conn.fetchrow(
+                    """
+                    SELECT current_balance
+                    FROM waros_wallets
+                    WHERE profile_id = $1 AND tenant_id = $2
+                    FOR UPDATE
+                    """,
+                    profile_id,
+                    tenant_id,
+                )
+                current_balance = int(wallet_row["current_balance"]) if wallet_row else 0
+
+                # 2. Guard: no negative balance
+                if current_balance + waros_amount < 0:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"Saldo insuficiente. Balance actual: {current_balance} Waros. "
+                            f"No se pueden deducir {abs(waros_amount)} Waros."
+                        ),
+                    )
+
+                # 3. Upsert wallet — lifetime_earned for positive, lifetime_spent for negative
+                wallet_after = await conn.fetchrow(
+                    """
+                    INSERT INTO waros_wallets (
+                        profile_id, tenant_id, current_balance, lifetime_earned,
+                        lifetime_spent, daily_waros, weekly_waros, monthly_waros,
+                        daily_reset_date, last_activity_date
+                    )
+                    VALUES (
+                        $1, $2, $3,
+                        GREATEST($3, 0), GREATEST(-$3, 0),
+                        GREATEST($3, 0), GREATEST($3, 0), GREATEST($3, 0),
+                        CURRENT_DATE, CURRENT_DATE
+                    )
+                    ON CONFLICT (profile_id, tenant_id) DO UPDATE SET
+                        current_balance  = waros_wallets.current_balance + $3,
+                        lifetime_earned  = waros_wallets.lifetime_earned + GREATEST($3, 0),
+                        lifetime_spent   = waros_wallets.lifetime_spent  + GREATEST(-$3, 0),
+                        last_activity_date = CURRENT_DATE,
+                        updated_at       = now()
+                    RETURNING current_balance
+                    """,
+                    profile_id,
+                    tenant_id,
+                    waros_amount,
+                )
+                new_balance = int(wallet_after["current_balance"])
+
+                # 4. Audit log — get assignment ID for cross-reference
+                assignment_row = await conn.fetchrow(
+                    """
+                    INSERT INTO waro_manual_assignments
+                        (tenant_id, profile_id, waros_amount, reason, assigned_by)
+                    VALUES ($1, $2, $3, $4, $5)
+                    RETURNING id
+                    """,
+                    tenant_id,
+                    profile_id,
+                    waros_amount,
+                    reason,
+                    UUID(str(admin_user_id)),
+                )
+                assignment_id = assignment_row["id"]
+
+                # 5. Transaction record
+                description = reason if reason else (
+                    "Asignación manual de Waros" if waros_amount > 0
+                    else "Deducción manual de Waros"
+                )
+                tx_row = await conn.fetchrow(
+                    """
+                    INSERT INTO waros_transactions (
+                        profile_id, tenant_id, transaction_type, waros_amount,
+                        balance_after, description, related_entity_type, related_entity_id
+                    )
+                    VALUES ($1, $2, 'manual', $3, $4, $5, 'manual_assignment', $6)
+                    RETURNING id
+                    """,
+                    profile_id,
+                    tenant_id,
+                    waros_amount,
+                    new_balance,
+                    description,
+                    str(assignment_id),
+                )
+
+        logger.info(
+            f"assign_manual_waros: {waros_amount:+d} waros → "
+            f"profile={profile_id}, tenant={tenant_id}, "
+            f"new_balance={new_balance}, by={admin_user_id}"
+        )
+        return {
+            "assigned": True,
+            "waros_amount": waros_amount,
+            "new_balance": new_balance,
+            "transaction_id": tx_row["id"],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in assign_manual_waros: {e}")
+        raise HTTPException(status_code=500, detail="Error al asignar Waros")
 
 
 # ── Rule evaluator ───────────────────────────────────────────────────────────
