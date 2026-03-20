@@ -230,6 +230,115 @@ async def update_global_config(request: Request, is_enabled: bool) -> Dict[str, 
         raise HTTPException(status_code=500, detail="Error al actualizar configuración global")
 
 
+# ── Customer read endpoints ──────────────────────────────────────────────────
+
+async def get_customer_summary(
+    request: Request,
+    profile_id: UUID,
+) -> Dict[str, Any]:
+    """
+    GET /admin/waros/customers/{profile_id}/summary
+    Returns wallet balance + last 5 transactions for a customer.
+    Returns 0 balance and empty transactions if no wallet exists (never 404).
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+
+        async with get_db_connection(use_transaction=False) as conn:
+            wallet_row = await conn.fetchrow(
+                """
+                SELECT current_balance, lifetime_earned, lifetime_spent
+                FROM waros_wallets
+                WHERE profile_id = $1 AND tenant_id = $2
+                """,
+                profile_id,
+                tenant_id,
+            )
+
+            tx_rows = await conn.fetch(
+                """
+                SELECT id, created_at, transaction_type, waros_amount,
+                       description, related_entity_type, related_entity_id
+                FROM waros_transactions
+                WHERE profile_id = $1 AND tenant_id = $2
+                ORDER BY created_at DESC
+                LIMIT 5
+                """,
+                profile_id,
+                tenant_id,
+            )
+
+        transactions = [
+            {
+                "id": row["id"],
+                "created_at": row["created_at"].isoformat(),
+                "transaction_type": row["transaction_type"],
+                "waros_amount": row["waros_amount"],
+                "description": row["description"],
+                "related_entity_type": row["related_entity_type"],
+                "related_entity_id": row["related_entity_id"],
+            }
+            for row in tx_rows
+        ]
+
+        return {
+            "profile_id": str(profile_id),
+            "current_balance": int(wallet_row["current_balance"]) if wallet_row else 0,
+            "lifetime_earned": int(wallet_row["lifetime_earned"]) if wallet_row else 0,
+            "lifetime_spent": int(wallet_row["lifetime_spent"]) if wallet_row else 0,
+            "recent_transactions": transactions,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_customer_summary (profile={profile_id}): {e}")
+        raise HTTPException(status_code=500, detail="Error al obtener resumen de Waros")
+
+
+async def get_customers_balances(
+    request: Request,
+    profile_ids: List[UUID],
+) -> Dict[str, Any]:
+    """
+    GET /admin/waros/customers/balances?profile_ids=uuid1,uuid2,...
+    Batch query: returns {profile_id: balance} map for a list of customers.
+    Profiles without a wallet return 0. Missing IDs also return 0.
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+
+        # Initialise all requested IDs to 0
+        balances: Dict[str, int] = {str(pid): 0 for pid in profile_ids}
+
+        if not profile_ids:
+            return {"balances": balances}
+
+        async with get_db_connection(use_transaction=False) as conn:
+            rows = await conn.fetch(
+                """
+                SELECT profile_id, COALESCE(current_balance, 0) AS current_balance
+                FROM waros_wallets
+                WHERE profile_id = ANY($1::uuid[]) AND tenant_id = $2
+                """,
+                profile_ids,
+                tenant_id,
+            )
+
+        for row in rows:
+            balances[str(row["profile_id"])] = int(row["current_balance"])
+
+        return {"balances": balances}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_customers_balances: {e}")
+        raise HTTPException(status_code=500, detail="Error al obtener balances de Waros")
+
+
 # ── Manual assignment ────────────────────────────────────────────────────────
 
 async def assign_manual_waros(

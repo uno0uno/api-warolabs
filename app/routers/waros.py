@@ -6,7 +6,7 @@ All endpoints require a valid tenant session.
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, field_validator
 
 from app.services import waros_service
@@ -89,6 +89,41 @@ async def update_global_config(body: GlobalConfigBody, request: Request):
     Upserts gamification_config.is_enabled.
     """
     return await waros_service.update_global_config(request, is_enabled=body.is_enabled)
+
+
+@router.get("/customers/balances")
+async def get_customers_balances(
+    request: Request,
+    profile_ids: str = Query(..., description="Comma-separated profile UUIDs (max 500)"),
+):
+    """
+    Batch Waros balances for a list of customers.
+    Returns { "balances": { "uuid": int, ... } } — missing wallets return 0.
+    Must be defined BEFORE /customers/{profile_id}/summary to avoid route conflict.
+    """
+    try:
+        ids: List[UUID] = [
+            UUID(p.strip()) for p in profile_ids.split(",") if p.strip()
+        ]
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Uno o más profile_ids no son UUIDs válidos")
+
+    if not ids:
+        raise HTTPException(status_code=422, detail="profile_ids no puede estar vacío")
+
+    if len(ids) > 500:
+        raise HTTPException(status_code=422, detail="Máximo 500 profile_ids por consulta")
+
+    return await waros_service.get_customers_balances(request, ids)
+
+
+@router.get("/customers/{profile_id}/summary")
+async def get_customer_summary(profile_id: UUID, request: Request):
+    """
+    Waros summary for a single customer: balance + last 5 transactions.
+    Returns 0 balance and empty transactions if the customer has no wallet.
+    """
+    return await waros_service.get_customer_summary(request, profile_id)
 
 
 @router.post("/assign")
