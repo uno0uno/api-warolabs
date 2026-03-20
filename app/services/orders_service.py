@@ -578,6 +578,13 @@ async def get_customer_detail(
                         FROM order_items oi
                         WHERE oi.order_id = o.id
                     )                   AS items_count,
+                    (
+                        SELECT COALESCE(SUM(wt.waros_amount), 0)
+                        FROM waros_transactions wt
+                        WHERE wt.related_entity_id = o.id::text
+                          AND wt.transaction_type = 'earned'
+                          AND wt.tenant_id = $1
+                    )                   AS waros_earned,
                     COUNT(*) OVER()     AS total_count
                 FROM orders o
                 WHERE {where_clause}
@@ -598,9 +605,48 @@ async def get_customer_detail(
                     "items_count": int(row['items_count']),
                     "payment_method": row['payment_method'],
                     "status": row['status'],
+                    "waros_earned": int(row['waros_earned']),
                 }
                 for row in order_rows
             ]
+
+            # --- Waros summary (same connection, no extra round-trip) ---
+            wallet_row = await conn.fetchrow(
+                """
+                SELECT current_balance, lifetime_earned, lifetime_spent
+                FROM waros_wallets
+                WHERE profile_id = $1 AND tenant_id = $2
+                """,
+                customer_id,
+                tenant_id,
+            )
+
+            manual_tx_rows = await conn.fetch(
+                """
+                SELECT id, created_at, waros_amount, description
+                FROM waros_transactions
+                WHERE profile_id = $1 AND tenant_id = $2
+                  AND transaction_type = 'manual'
+                ORDER BY created_at DESC
+                """,
+                customer_id,
+                tenant_id,
+            )
+
+            waros_summary = {
+                "current_balance": int(wallet_row["current_balance"]) if wallet_row else 0,
+                "lifetime_earned": int(wallet_row["lifetime_earned"]) if wallet_row else 0,
+                "lifetime_spent": int(wallet_row["lifetime_spent"]) if wallet_row else 0,
+                "manual_transactions": [
+                    {
+                        "id": row["id"],
+                        "created_at": row["created_at"].isoformat(),
+                        "waros_amount": row["waros_amount"],
+                        "description": row["description"],
+                    }
+                    for row in manual_tx_rows
+                ],
+            }
 
             return {
                 "success": True,
@@ -620,6 +666,7 @@ async def get_customer_detail(
                     "page": page,
                     "per_page": per_page,
                 },
+                "waros_summary": waros_summary,
             }
 
     except (AuthenticationError, APIError) as e:
