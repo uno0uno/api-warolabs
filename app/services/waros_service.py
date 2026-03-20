@@ -640,41 +640,59 @@ def _eval_rule(
     Pure function: evaluate a single rule and return waros to award.
     Returns 0 if the rule does not fire.
     Python 3.9 safe — no match/case syntax.
+
+    Supports both frontend config keys (base_waros/base_pesos/bonus/purchase_number)
+    and legacy keys (base_waros_per_1000/bonus_waros/count) for backwards compatibility.
     """
     try:
         if rule_type == "ticket_value":
-            base = int(config.get("base_waros_per_1000", 1))
-            units = int(total_amount // 1000)
+            # Frontend: base_waros + base_pesos. Legacy: base_waros_per_1000 (base_pesos=1000)
+            base_waros = int(config.get("base_waros", config.get("base_waros_per_1000", 1)))
+            base_pesos = int(config.get("base_pesos", 1000))
+            if base_pesos <= 0:
+                return 0
+            units = int(total_amount // base_pesos)
             if units <= 0:
                 return 0
-            waros = units * base
+            waros = units * base_waros
             # Apply highest matching tier multiplier
+            # Frontend tiers use "from"/"to"/"multiplier"; legacy used "min_amount"
             tiers = config.get("tiers", [])
             if tiers:
                 multiplier = 1.0
-                for tier in sorted(tiers, key=lambda t: t.get("min_amount", 0)):
-                    if total_amount >= float(tier.get("min_amount", 0)):
+                for tier in sorted(tiers, key=lambda t: t.get("from", t.get("min_amount", 0))):
+                    tier_from = float(tier.get("from", tier.get("min_amount", 0)))
+                    if total_amount >= tier_from:
                         multiplier = float(tier.get("multiplier", 1.0))
                 waros = int(waros * multiplier)
             return waros
 
         elif rule_type == "purchase_count":
-            # Fire only when a milestone is reached exactly
+            # Frontend: purchase_number + bonus. Legacy: count + bonus_waros
             for milestone in config.get("milestones", []):
-                if total_completed == int(milestone.get("count", 0)):
-                    return int(milestone.get("bonus_waros", 0))
+                num = int(milestone.get("purchase_number", milestone.get("count", 0)))
+                bonus = int(milestone.get("bonus", milestone.get("bonus_waros", 0)))
+                if total_completed == num:
+                    return bonus
             return 0
 
         elif rule_type == "frequency":
             required = int(config.get("purchases", 2))
-            bonus = int(config.get("bonus_waros", 75))
+            # Frontend: bonus. Legacy: bonus_waros
+            bonus = int(config.get("bonus", config.get("bonus_waros", 75)))
             return bonus if freq_count >= required else 0
 
         elif rule_type == "per_ticket_qty":
             if total_qty <= 0:
                 return 0
-            waros_per = int(config.get("waros_per_ticket", 10))
+            # Frontend: points_per_item. Legacy: waros_per_ticket
+            waros_per = int(config.get("points_per_item", config.get("waros_per_ticket", 10)))
             waros = total_qty * waros_per
+            # Frontend bonus: bonus_from_qty + bonus_extra_points
+            bonus_from_qty = config.get("bonus_from_qty")
+            if bonus_from_qty and total_qty >= int(bonus_from_qty):
+                waros += int(config.get("bonus_extra_points") or 0)
+            # Legacy bonus: bonus_thresholds list
             for threshold in sorted(
                 config.get("bonus_thresholds", []),
                 key=lambda t: t.get("min_qty", 0),
@@ -908,7 +926,7 @@ async def evaluate_and_award(
                     tenant_id,
                     total_waros,
                     balance_after,
-                    order_id,
+                    str(order_id),
                     json.dumps({"rules_fired": rules_fired}),
                 )
 
