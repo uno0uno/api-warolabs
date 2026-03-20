@@ -879,16 +879,11 @@ async def complete_pos_order(
 
                 logger.info(f"Order #{order_number} completed successfully")
 
-                # Award waros for completed order (fire-and-forget — never blocks)
-                try:
-                    asyncio.create_task(
-                        evaluate_and_award(order_id, customer_id, tenant_id)
-                    )
-                except Exception as _waros_err:
-                    logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
-
-                # 8. Return order details
-                return {
+                # Capture values needed after the transaction closes
+                _order_id = order_id
+                _customer_id = customer_id
+                _tenant_id = tenant_id
+                _result = {
                     "success": True,
                     "message": "Order completed successfully",
                     "data": {
@@ -900,6 +895,18 @@ async def complete_pos_order(
                         "created_at": order_row['created_at'].isoformat()
                     }
                 }
+
+        # Award waros AFTER the transaction commits — avoids race condition where
+        # create_task runs at an await point inside the transaction before commit.
+        if _customer_id:
+            try:
+                asyncio.create_task(
+                    evaluate_and_award(_order_id, _customer_id, _tenant_id)
+                )
+            except Exception as _waros_err:
+                logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
+
+        return _result
 
     except (AuthenticationError, APIError) as e:
         raise e
