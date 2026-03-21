@@ -899,6 +899,12 @@ async def extract_invoice_data(request: Request, file: UploadFile) -> dict:
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
 
+    # ── Scan quota check (must run before Gemini to avoid wasting API calls) ──
+    from app.services.billing_service import check_scan_quota
+    async with get_db_connection() as conn:
+        await check_scan_quota(tenant_id, conn)
+    # ──────────────────────────────────────────────────────────────────────────
+
     if not file:
         raise HTTPException(status_code=400, detail="File is required")
 

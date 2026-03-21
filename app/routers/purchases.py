@@ -67,8 +67,37 @@ async def extract_invoice(
     """
     Extract structured data from invoice image using Google Gemini 1.5 Flash.
     Receives an image file, returns structured JSON with invoice fields.
+    Enforces per-tenant scan quota (1 000 scans/period). Returns 429 when exceeded.
     """
     return await extract_invoice_data(request, file)
+
+
+@router.get("/scan-usage")
+async def get_scan_usage_endpoint(request: Request):
+    """
+    Returns current period scan quota usage for the authenticated tenant.
+
+    Response:
+    {
+      "scans_used": 342,
+      "scans_limit": 1000,
+      "period_start": "2026-03-01",
+      "period_end": "2026-04-01",
+      "percentage": 34.2
+    }
+    """
+    from app.database import get_db_connection
+    from app.services.billing_service import get_scan_usage
+
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    if not tenant_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="Tenant ID required")
+
+    async with get_db_connection(use_transaction=False) as conn:
+        return await get_scan_usage(tenant_id, conn)
 
 
 @router.get("/next-number")
