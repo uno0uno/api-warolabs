@@ -1,11 +1,13 @@
 """
-Billing Service — scan quota (#58) + admin CRUD (#61) + MP subscriptions (#60)
+Billing Service — scan quota (#58) + admin CRUD (#61) + MP subscriptions (#60) + grace period (#62)
 
 Handles scan quota enforcement, admin CRUD for billing entities,
-and tenant-facing subscription flows (subscribe, cancel, activate via webhook).
+tenant-facing subscription flows, and grace period access control.
 Works with tables created in migration #59.
 """
 import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -670,3 +672,173 @@ async def activate_tenant_subscription(conn, mp_preapproval_id: str) -> bool:
         row["tenant_id"], mp_preapproval_id,
     )
     return True
+
+
+# ── Grace period & access control — issue #62 ────────────────────────────────
+
+GRACE_PERIOD_DAYS = 7
+WARNING_THRESHOLD_DAYS = 3
+
+
+@dataclass
+class SubscriptionAccess:
+    """
+    Represents the access level for a tenant based on subscription status.
+
+    Levels:
+      free             — no subscription row; default 1000 scans/month
+      full             — active or pending subscription
+      full_with_warning — past_due, < 3 days overdue — access OK but banner shown
+      read_only        — past_due, 3-7 days overdue — IA scanner blocked
+      blocked          — past_due > 7 days OR cancelled/expired
+    """
+    level: str
+    grace_days_remaining: int
+    subscription_status: Optional[str]
+    next_payment_date: Optional[str]
+    message: str
+
+
+async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
+    """
+    Returns the access level for a tenant based on their subscription status
+    and how many days past_due they are.
+
+    Uses timezone.utc (Python 3.9 safe — NOT datetime.UTC which requires 3.11+).
+    """
+    sub = await conn.fetchrow("""
+        SELECT status, current_period_end, plan_id
+        FROM tenant_subscriptions
+        WHERE tenant_id = $1
+    """, tenant_id)
+
+    if sub is None:
+        return SubscriptionAccess(
+            level="free",
+            grace_days_remaining=0,
+            subscription_status=None,
+            next_payment_date=None,
+            message="Estás en el plan gratuito con 1000 escaneos al mes.",
+        )
+
+    status = sub["status"]
+    period_end = sub["current_period_end"]
+
+    if status in ("active", "pending"):
+        return SubscriptionAccess(
+            level="full",
+            grace_days_remaining=0,
+            subscription_status=status,
+            next_payment_date=period_end.date().isoformat() if period_end else None,
+            message="Acceso completo.",
+        )
+
+    if status == "past_due":
+        now = datetime.now(timezone.utc)
+        # Ensure period_end is timezone-aware for comparison
+        if period_end.tzinfo is None:
+            period_end = period_end.replace(tzinfo=timezone.utc)
+        days_overdue = max(0, (now - period_end).days)
+        grace_remaining = max(0, GRACE_PERIOD_DAYS - days_overdue)
+
+        if days_overdue <= WARNING_THRESHOLD_DAYS:
+            return SubscriptionAccess(
+                level="full_with_warning",
+                grace_days_remaining=grace_remaining,
+                subscription_status=status,
+                next_payment_date=period_end.date().isoformat(),
+                message=(
+                    f"Hubo un problema con tu pago. "
+                    f"Tienes {grace_remaining} días para renovar antes de perder acceso."
+                ),
+            )
+        elif days_overdue <= GRACE_PERIOD_DAYS:
+            return SubscriptionAccess(
+                level="read_only",
+                grace_days_remaining=grace_remaining,
+                subscription_status=status,
+                next_payment_date=period_end.date().isoformat(),
+                message=(
+                    f"Tu acceso a funciones IA está suspendido. "
+                    f"Renueva tu suscripción en los próximos {grace_remaining} días."
+                ),
+            )
+
+    # past_due > 7 days, cancelled, or expired
+    return SubscriptionAccess(
+        level="blocked",
+        grace_days_remaining=0,
+        subscription_status=status,
+        next_payment_date=None,
+        message="Tu suscripción ha vencido. Renueva para recuperar el acceso.",
+    )
+
+
+async def get_past_due_tenants(conn) -> List[Dict[str, Any]]:
+    """
+    Returns all tenants with past_due subscription and their days overdue.
+    Used by the grace reminder cron endpoint.
+    """
+    rows = await conn.fetch("""
+        SELECT
+            ts.tenant_id,
+            ts.id AS subscription_id,
+            ts.current_period_end,
+            t.name AS tenant_name,
+            t.email AS tenant_email,
+            EXTRACT(DAY FROM (now() - ts.current_period_end))::int AS days_overdue
+        FROM tenant_subscriptions ts
+        JOIN tenants t ON t.id = ts.tenant_id
+        WHERE ts.status = 'past_due'
+          AND ts.current_period_end < now()
+        ORDER BY ts.current_period_end ASC
+    """)
+
+    result = []
+    for r in rows:
+        days = max(0, r["days_overdue"] or 0)
+        result.append({
+            "tenant_id": str(r["tenant_id"]),
+            "subscription_id": str(r["subscription_id"]),
+            "tenant_name": r["tenant_name"],
+            "tenant_email": r["tenant_email"],
+            "days_overdue": days,
+            "grace_days_remaining": max(0, GRACE_PERIOD_DAYS - days),
+            "period_end": r["current_period_end"].date().isoformat(),
+        })
+    return result
+
+
+async def reminder_already_sent(conn, subscription_id: str, days_overdue: int) -> bool:
+    """
+    Check if a grace reminder email was already sent for this day bucket.
+    Prevents duplicate emails when the cron runs multiple times per day.
+    """
+    # Day buckets: 1, 3, 6, 7
+    DAY_BUCKETS = [1, 3, 6, 7]
+    # Find the matching bucket
+    bucket = next((d for d in sorted(DAY_BUCKETS) if days_overdue <= d), None)
+    if bucket is None:
+        return True  # > 7 days — no more reminders
+
+    event_type = f"grace_reminder_day_{bucket}"
+
+    row = await conn.fetchrow("""
+        SELECT id FROM billing_events
+        WHERE subscription_id = $1
+          AND event_type = $2
+          AND created_at >= now() - interval '20 hours'
+    """, subscription_id, event_type)
+    return row is not None
+
+
+async def record_reminder_sent(conn, tenant_id: str, subscription_id: str, days_overdue: int) -> None:
+    """Record that a grace reminder was sent in billing_events."""
+    DAY_BUCKETS = [1, 3, 6, 7]
+    bucket = next((d for d in sorted(DAY_BUCKETS) if days_overdue <= d), days_overdue)
+    event_type = f"grace_reminder_day_{bucket}"
+
+    await conn.execute("""
+        INSERT INTO billing_events (tenant_id, subscription_id, event_type, metadata)
+        VALUES ($1, $2, $3, $4)
+    """, tenant_id, subscription_id, event_type, {"days_overdue": days_overdue})

@@ -899,8 +899,20 @@ async def extract_invoice_data(request: Request, file: UploadFile) -> dict:
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
 
+    # ── Subscription access check — grace period enforcement (issue #62) ────
+    from app.services.billing_service import check_scan_quota, get_subscription_access
+    async with get_db_connection(use_transaction=False) as conn:
+        access = await get_subscription_access(tenant_id, conn)
+    if access.level == "blocked":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "subscription_blocked",
+                "message": access.message,
+                "level": access.level,
+            },
+        )
     # ── Scan quota check (must run before Gemini to avoid wasting API calls) ──
-    from app.services.billing_service import check_scan_quota
     async with get_db_connection() as conn:
         await check_scan_quota(tenant_id, conn)
     # ──────────────────────────────────────────────────────────────────────────

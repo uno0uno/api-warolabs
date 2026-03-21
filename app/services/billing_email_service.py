@@ -1,0 +1,240 @@
+"""
+Billing Email Service — grace period reminders (issue #62)
+
+Sends HTML reminder emails via AWS SES for tenants with past_due subscriptions.
+Triggered by POST /billing/send-grace-reminders (cron endpoint).
+"""
+import logging
+from typing import Any, Dict, List
+
+from app.config import settings
+from app.services.aws_ses_service import AWSSESService
+from app.services.billing_service import (
+    GRACE_PERIOD_DAYS,
+    get_past_due_tenants,
+    record_reminder_sent,
+    reminder_already_sent,
+)
+
+logger = logging.getLogger(__name__)
+
+_ses = AWSSESService()
+
+# Day buckets that trigger a reminder email
+REMINDER_BUCKETS = [1, 3, 6, 7]
+
+BILLING_URL = f"{settings.frontend_url}/billing"
+
+
+def _render_reminder_html(
+    tenant_name: str,
+    days_overdue: int,
+    grace_days_remaining: int,
+    billing_url: str,
+) -> str:
+    """Render the grace period reminder email as HTML."""
+    if days_overdue <= 3:
+        urgency = "Aviso de pago"
+        color = "#E87020"
+        intro = (
+            f"Hola {tenant_name}, hubo un problema al procesar tu pago de WARO. "
+            f"Todavía tienes acceso completo, pero debes actualizar tu método de "
+            f"pago en los próximos <strong>{grace_days_remaining} días</strong>."
+        )
+    elif days_overdue <= 6:
+        urgency = "Acceso limitado — Renueva hoy"
+        color = "#DC2626"
+        intro = (
+            f"Hola {tenant_name}, tu acceso a las funciones IA de WARO está suspendido "
+            f"por falta de pago. Te quedan <strong>{grace_days_remaining} días</strong> "
+            f"antes del bloqueo total. Renueva ahora para recuperar el acceso completo."
+        )
+    else:
+        urgency = "Último aviso — Tu cuenta será bloqueada"
+        color = "#991B1B"
+        intro = (
+            f"Hola {tenant_name}, mañana tu cuenta de WARO será bloqueada por falta de pago. "
+            f"Para conservar tus datos y acceso, renueva tu suscripción ahora."
+        )
+
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{urgency}</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0"
+             style="background:#ffffff;border-radius:8px;overflow:hidden;
+                    box-shadow:0 1px 4px rgba(0,0,0,0.08);">
+        <!-- Header -->
+        <tr>
+          <td style="background:{color};padding:24px 32px;">
+            <p style="margin:0;color:#ffffff;font-size:22px;font-weight:bold;">
+              WARO — {urgency}
+            </p>
+          </td>
+        </tr>
+        <!-- Body -->
+        <tr>
+          <td style="padding:32px;">
+            <p style="margin:0 0 16px;color:#1f2937;font-size:16px;line-height:1.6;">
+              {intro}
+            </p>
+            <p style="margin:0 0 24px;color:#6b7280;font-size:14px;">
+              Días vencido: <strong>{days_overdue}</strong> &nbsp;|&nbsp;
+              Período de gracia restante: <strong>{grace_days_remaining} de {GRACE_PERIOD_DAYS} días</strong>
+            </p>
+            <a href="{billing_url}"
+               style="display:inline-block;background:{color};color:#ffffff;
+                      text-decoration:none;padding:14px 28px;border-radius:6px;
+                      font-size:16px;font-weight:bold;">
+              Renovar suscripción
+            </a>
+          </td>
+        </tr>
+        <!-- Footer -->
+        <tr>
+          <td style="padding:16px 32px;border-top:1px solid #e5e7eb;">
+            <p style="margin:0;color:#9ca3af;font-size:12px;">
+              WARO Colombia &bull; Si ya realizaste el pago, ignora este mensaje.
+              Puede tardar hasta 24 horas en verse reflejado.
+            </p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def _reminder_subject(days_overdue: int) -> str:
+    if days_overdue <= 3:
+        return "WARO — Actualiza tu método de pago"
+    elif days_overdue <= 6:
+        return "WARO — Tu acceso IA está suspendido, renueva hoy"
+    return "WARO — Último aviso: tu cuenta será bloqueada mañana"
+
+
+async def send_grace_reminder(tenant: Dict[str, Any]) -> bool:
+    """
+    Send a single grace reminder email to one tenant.
+
+    Returns True if sent, False if skipped (no email, no SES config) or failed.
+    """
+    email = tenant.get("tenant_email")
+    if not email:
+        logger.info(
+            "grace_reminder: tenant %s has no email — skipped",
+            tenant["tenant_id"],
+        )
+        return False
+
+    days_overdue = tenant["days_overdue"]
+    grace_remaining = tenant["grace_days_remaining"]
+    tenant_name = tenant.get("tenant_name") or "Cliente"
+
+    subject = _reminder_subject(days_overdue)
+    html = _render_reminder_html(
+        tenant_name=tenant_name,
+        days_overdue=days_overdue,
+        grace_days_remaining=grace_remaining,
+        billing_url=BILLING_URL,
+    )
+
+    sent = await _ses.send_email(
+        from_email=settings.email_from,
+        from_name="WARO Colombia",
+        to_emails=[email],
+        subject=subject,
+        html_body=html,
+    )
+
+    if sent:
+        logger.info(
+            "grace_reminder: sent day-%d email to tenant=%s email=%s",
+            days_overdue,
+            tenant["tenant_id"],
+            email,
+        )
+    else:
+        logger.warning(
+            "grace_reminder: SES returned False for tenant=%s",
+            tenant["tenant_id"],
+        )
+
+    return sent
+
+
+async def process_grace_reminders(conn) -> Dict[str, Any]:
+    """
+    Main entry point for the cron job.
+
+    1. Fetches all past_due tenants from DB
+    2. For each tenant in a reminder bucket (days 1, 3, 6, 7):
+       - Checks deduplication via billing_events
+       - Sends email via AWS SES
+       - Records send event to prevent duplicates
+    3. Returns a summary dict with sent/skipped/error counts.
+    """
+    tenants = await get_past_due_tenants(conn)
+
+    sent_count = 0
+    skipped_count = 0
+    error_count = 0
+    details: List[Dict[str, Any]] = []
+
+    for tenant in tenants:
+        days = tenant["days_overdue"]
+
+        # Only send on bucket days (1, 3, 6, 7) — skip other days
+        if days not in REMINDER_BUCKETS:
+            skipped_count += 1
+            continue
+
+        sub_id = tenant["subscription_id"]
+
+        already_sent = await reminder_already_sent(conn, sub_id, days)
+        if already_sent:
+            skipped_count += 1
+            details.append({
+                "tenant_id": tenant["tenant_id"],
+                "days_overdue": days,
+                "result": "already_sent",
+            })
+            continue
+
+        success = await send_grace_reminder(tenant)
+
+        if success:
+            await record_reminder_sent(conn, tenant["tenant_id"], sub_id, days)
+            sent_count += 1
+            details.append({
+                "tenant_id": tenant["tenant_id"],
+                "days_overdue": days,
+                "result": "sent",
+            })
+        else:
+            error_count += 1
+            details.append({
+                "tenant_id": tenant["tenant_id"],
+                "days_overdue": days,
+                "result": "error",
+            })
+
+    logger.info(
+        "process_grace_reminders: sent=%d skipped=%d error=%d total=%d",
+        sent_count, skipped_count, error_count, len(tenants),
+    )
+
+    return {
+        "total_past_due": len(tenants),
+        "sent": sent_count,
+        "skipped": skipped_count,
+        "error": error_count,
+        "details": details,
+    }

@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     mp_webhook_secret: Optional[str] = Field(default=None, alias='MP_WEBHOOK_SECRET')
     mp_environment: str = Field(default='sandbox', alias='MP_ENVIRONMENT')
 
+    # Cron secret — grace period reminders (issue #62)
+    cron_secret: Optional[str] = Field(default=None, alias='CRON_SECRET')
+
     class Config:
         env_file = ".env"
         extra = "ignore"  # Ignore extra environment variables

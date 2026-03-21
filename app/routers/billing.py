@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from app.config import settings
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
-from app.services import billing_service, mercadopago_service
+from app.services import billing_service, billing_email_service, mercadopago_service
 
 logger = logging.getLogger(__name__)
 
@@ -302,3 +302,58 @@ async def mercadopago_webhook(
             logger.info("MP webhook: preapproval %s is %s — no action needed", preapproval_id, mp_status)
 
     return {"received": True}
+
+
+# ── Grace period & access control — issue #62 ────────────────────────────────
+
+
+@tenant_router.get("/access-status")
+async def get_access_status(request: Request):
+    """
+    Return the subscription access level for the authenticated tenant.
+
+    Levels:
+      free             — no subscription; limited free plan
+      full             — active or pending subscription
+      full_with_warning — past_due, ≤ 3 days overdue
+      read_only        — past_due, 3-7 days overdue
+      blocked          — past_due > 7 days, or cancelled/expired
+    """
+    session = require_valid_session(request)
+    async with get_db_connection(use_transaction=False) as conn:
+        access = await billing_service.get_subscription_access(session.tenant_id, conn)
+        return {
+            "level": access.level,
+            "grace_days_remaining": access.grace_days_remaining,
+            "subscription_status": access.subscription_status,
+            "next_payment_date": access.next_payment_date,
+            "message": access.message,
+        }
+
+
+@tenant_router.post("/send-grace-reminders", status_code=200)
+async def send_grace_reminders(
+    request: Request,
+    x_cron_secret: Optional[str] = Header(None, alias="x-cron-secret"),
+):
+    """
+    Cron endpoint — send grace period reminder emails to past_due tenants.
+
+    Protected by X-Cron-Secret header. Called by an external scheduler (e.g. cron-job.org).
+    Returns a summary of sent / skipped / error counts.
+
+    If CRON_SECRET is not configured, the endpoint runs without auth (dev mode).
+    """
+    if settings.cron_secret:
+        if x_cron_secret != settings.cron_secret:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=401, detail="Invalid cron secret")
+
+    async with get_db_connection() as conn:
+        result = await billing_email_service.process_grace_reminders(conn)
+
+    logger.info(
+        "send_grace_reminders cron: sent=%d skipped=%d error=%d",
+        result["sent"], result["skipped"], result["error"],
+    )
+    return result
