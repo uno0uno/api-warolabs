@@ -1,11 +1,13 @@
 """
-Billing Email Service — grace period reminders (issue #62)
+Billing Email Service — grace period reminders (#62) + payment events (#63)
 
-Sends HTML reminder emails via AWS SES for tenants with past_due subscriptions.
-Triggered by POST /billing/send-grace-reminders (cron endpoint).
+Sends HTML reminder emails via AWS SES:
+- Grace period reminders (days 1, 3, 6, 7 past_due) — triggered by cron
+- Payment rejected / subscription paused — triggered by MP webhook
+- Payment approved / period renewed — triggered by MP webhook
 """
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from app.config import settings
 from app.services.aws_ses_service import AWSSESService
@@ -238,3 +240,163 @@ async def process_grace_reminders(conn) -> Dict[str, Any]:
         "error": error_count,
         "details": details,
     }
+
+
+# ── Payment event emails — issue #63 ─────────────────────────────────────────
+
+
+async def send_payment_rejected_email(
+    tenant_name: str,
+    tenant_email: Optional[str],
+    billing_url: str,
+) -> bool:
+    """
+    Send a payment rejection email when MP reports payment → rejected
+    or subscription_preapproval → paused.
+
+    Returns False if tenant has no email or SES fails.
+    """
+    if not tenant_email:
+        logger.info("send_payment_rejected_email: no email for tenant %s — skipped", tenant_name)
+        return False
+
+    html = f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pago rechazado — WARO</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0"
+             style="background:#ffffff;border-radius:8px;overflow:hidden;
+                    box-shadow:0 1px 4px rgba(0,0,0,0.08);">
+        <tr>
+          <td style="background:#DC2626;padding:24px 32px;">
+            <p style="margin:0;color:#ffffff;font-size:22px;font-weight:bold;">
+              WARO — Tu pago fue rechazado
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:32px;">
+            <p style="margin:0 0 16px;color:#1f2937;font-size:16px;line-height:1.6;">
+              Hola {tenant_name}, no pudimos procesar tu pago de WARO.
+              Tu acceso puede verse limitado si no actualizas tu método de pago pronto.
+            </p>
+            <p style="margin:0 0 24px;color:#6b7280;font-size:14px;">
+              Esto puede ocurrir si tu tarjeta venció, no tenía fondos suficientes,
+              o tu banco rechazó el cargo. Actualiza tu método de pago para continuar
+              usando WARO sin interrupciones.
+            </p>
+            <a href="{billing_url}"
+               style="display:inline-block;background:#DC2626;color:#ffffff;
+                      text-decoration:none;padding:14px 28px;border-radius:6px;
+                      font-size:16px;font-weight:bold;">
+              Actualizar método de pago
+            </a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:16px 32px;border-top:1px solid #e5e7eb;">
+            <p style="margin:0;color:#9ca3af;font-size:12px;">
+              WARO Colombia &bull; Si ya actualizaste tu pago, ignora este mensaje.
+            </p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+    sent = await _ses.send_email(
+        from_email=settings.email_from,
+        from_name="WARO Colombia",
+        to_emails=[tenant_email],
+        subject="WARO — Tu pago fue rechazado, actualiza tu método de pago",
+        html_body=html,
+    )
+
+    if sent:
+        logger.info("send_payment_rejected_email: sent to %s", tenant_email)
+    else:
+        logger.warning("send_payment_rejected_email: SES failed for %s", tenant_email)
+
+    return sent
+
+
+async def send_payment_renewed_email(
+    tenant_name: str,
+    tenant_email: Optional[str],
+    next_period_end: str,
+) -> bool:
+    """
+    Send a subscription renewal confirmation email when MP reports payment → approved.
+
+    Returns False if tenant has no email or SES fails.
+    """
+    if not tenant_email:
+        logger.info("send_payment_renewed_email: no email for tenant %s — skipped", tenant_name)
+        return False
+
+    html = f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Suscripción renovada — WARO</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0"
+             style="background:#ffffff;border-radius:8px;overflow:hidden;
+                    box-shadow:0 1px 4px rgba(0,0,0,0.08);">
+        <tr>
+          <td style="background:#16A34A;padding:24px 32px;">
+            <p style="margin:0;color:#ffffff;font-size:22px;font-weight:bold;">
+              WARO — Tu suscripción fue renovada
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:32px;">
+            <p style="margin:0 0 16px;color:#1f2937;font-size:16px;line-height:1.6;">
+              Hola {tenant_name}, tu suscripción a WARO ha sido renovada exitosamente.
+              Tienes acceso completo hasta el <strong>{next_period_end}</strong>.
+            </p>
+            <p style="margin:0 0 24px;color:#6b7280;font-size:14px;">
+              Gracias por seguir confiando en WARO para gestionar tu restaurante.
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:16px 32px;border-top:1px solid #e5e7eb;">
+            <p style="margin:0;color:#9ca3af;font-size:12px;">
+              WARO Colombia &bull; Este es un correo de confirmación automático.
+            </p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+    sent = await _ses.send_email(
+        from_email=settings.email_from,
+        from_name="WARO Colombia",
+        to_emails=[tenant_email],
+        subject="WARO — Tu suscripción fue renovada exitosamente",
+        html_body=html,
+    )
+
+    if sent:
+        logger.info("send_payment_renewed_email: sent to %s", tenant_email)
+    else:
+        logger.warning("send_payment_renewed_email: SES failed for %s", tenant_email)
+
+    return sent

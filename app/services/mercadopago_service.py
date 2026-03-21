@@ -206,6 +206,50 @@ async def get_preapproval_status(preapproval_id: str) -> str:
     return data.get("status", "unknown")
 
 
+async def get_payment_status(payment_id: str) -> Dict[str, Any]:
+    """
+    Fetch details of a MercadoPago payment event.
+
+    Used by the webhook handler to verify payment status and extract amount.
+    Returns a dict with: status, transaction_amount, currency_id, external_reference.
+
+    external_reference is the tenant_id (UUID string) set when creating the preapproval.
+    Raises HTTP 502 on MP API error.
+    """
+    headers = _get_headers()
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{MP_API_BASE}/v1/payments/{payment_id}",
+                headers=headers,
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            "MP API error fetching payment %s: status=%s",
+            payment_id,
+            exc.response.status_code,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "mp_api_error", "message": "Error al consultar pago en MP"},
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "mp_connection_error", "message": str(exc)},
+        )
+
+    return {
+        "status": data.get("status", "unknown"),
+        "transaction_amount": data.get("transaction_amount", 0),
+        "currency_id": data.get("currency_id", "COP"),
+        "external_reference": data.get("external_reference"),  # tenant_id UUID string
+    }
+
+
 def verify_webhook_signature(
     x_signature: Optional[str],
     x_request_id: Optional[str],

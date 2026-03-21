@@ -842,3 +842,172 @@ async def record_reminder_sent(conn, tenant_id: str, subscription_id: str, days_
         INSERT INTO billing_events (tenant_id, subscription_id, event_type, metadata)
         VALUES ($1, $2, $3, $4)
     """, tenant_id, subscription_id, event_type, {"days_overdue": days_overdue})
+
+
+# ── Webhook event handlers — issue #63 ───────────────────────────────────────
+
+
+async def mark_subscription_past_due(
+    conn, mp_preapproval_id: str, event_type: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Set subscription status='past_due' for a given preapproval ID.
+
+    Called when MP sends:
+    - subscription_preapproval → paused  (event_type='subscription_paused')
+    - payment → rejected                 (event_type='payment_rejected')
+
+    Does NOT filter by current status — allows active → past_due transition.
+    Returns tenant info dict for email trigger, or None if preapproval not found.
+    """
+    row = await conn.fetchrow("""
+        UPDATE tenant_subscriptions ts
+        SET status = 'past_due', updated_at = now()
+        WHERE ts.mp_preapproval_id = $1
+        RETURNING ts.id AS subscription_id, ts.tenant_id
+    """, mp_preapproval_id)
+
+    if row is None:
+        logger.warning(
+            "mark_subscription_past_due: no subscription for preapproval=%s",
+            mp_preapproval_id,
+        )
+        return None
+
+    sub_id = row["subscription_id"]
+    tenant_id = row["tenant_id"]
+
+    # Fetch tenant info for email
+    tenant = await conn.fetchrow(
+        "SELECT name, email FROM tenants WHERE id = $1", tenant_id
+    )
+
+    await conn.execute("""
+        INSERT INTO billing_events (tenant_id, subscription_id, event_type, metadata)
+        VALUES ($1, $2, $3, $4)
+    """, tenant_id, sub_id, event_type, {"mp_preapproval_id": mp_preapproval_id})
+
+    logger.info(
+        "%s: tenant=%s preapproval=%s",
+        event_type, tenant_id, mp_preapproval_id,
+    )
+
+    return {
+        "tenant_id": str(tenant_id),
+        "subscription_id": str(sub_id),
+        "tenant_name": tenant["name"] if tenant else "",
+        "tenant_email": tenant["email"] if tenant else None,
+    }
+
+
+async def renew_subscription_period(
+    conn,
+    tenant_id_str: str,
+    mp_payment_id: str,
+    amount: float,
+    currency: str = "COP",
+) -> Optional[Dict[str, Any]]:
+    """
+    Renew subscription period and reset scan_usage after a successful payment.
+
+    Called when MP sends payment → approved.
+
+    Idempotency: checks billing_events.mp_payment_id before processing.
+    If already processed, returns None silently.
+
+    Steps:
+    1. Idempotency check via mp_payment_id in billing_events
+    2. Fetch subscription + billing_cycle
+    3. Extend current_period_end (1 month or 12 months)
+    4. Set status='active' (in case it was past_due)
+    5. Insert new scan_usage row for the new period
+    6. Insert billing_event with mp_payment_id + amount
+    7. Return tenant info for email trigger
+    """
+    from uuid import UUID as _UUID
+
+    # Idempotency: if this payment was already processed, skip
+    existing = await conn.fetchval(
+        "SELECT id FROM billing_events WHERE mp_payment_id = $1", mp_payment_id
+    )
+    if existing is not None:
+        logger.info(
+            "renew_subscription_period: mp_payment_id=%s already processed — skipping",
+            mp_payment_id,
+        )
+        return None
+
+    try:
+        tenant_id = _UUID(tenant_id_str)
+    except (ValueError, AttributeError):
+        logger.error("renew_subscription_period: invalid tenant_id=%s", tenant_id_str)
+        return None
+
+    sub = await conn.fetchrow("""
+        SELECT id, billing_cycle, current_period_end, plan_id
+        FROM tenant_subscriptions
+        WHERE tenant_id = $1
+    """, tenant_id)
+
+    if sub is None:
+        logger.warning(
+            "renew_subscription_period: no subscription for tenant=%s", tenant_id
+        )
+        return None
+
+    sub_id = sub["id"]
+    billing_cycle = sub["billing_cycle"]
+    interval = "1 month" if billing_cycle == "monthly" else "12 months"
+
+    # Extend period + activate
+    new_period = await conn.fetchrow("""
+        UPDATE tenant_subscriptions
+        SET
+            status = 'active',
+            current_period_start = current_period_end,
+            current_period_end = current_period_end + $1::interval,
+            updated_at = now()
+        WHERE id = $2
+        RETURNING current_period_start, current_period_end
+    """, interval, sub_id)
+
+    new_start = new_period["current_period_start"]
+    new_end = new_period["current_period_end"]
+
+    # Get scan limit from plan
+    scan_limit = await conn.fetchval(
+        "SELECT scan_limit FROM subscription_plans WHERE id = $1", sub["plan_id"]
+    )
+
+    # New scan_usage row for the new period (INSERT — preserves history)
+    await conn.execute("""
+        INSERT INTO scan_usage
+            (tenant_id, subscription_id, period_start, period_end, scans_used, scans_limit)
+        VALUES ($1, $2, $3, $4, 0, $5)
+        ON CONFLICT (tenant_id, period_start) DO NOTHING
+    """, tenant_id, sub_id, new_start, new_end, scan_limit or 1000)
+
+    # Billing event with payment amount
+    await conn.execute("""
+        INSERT INTO billing_events
+            (tenant_id, subscription_id, event_type, amount, currency, mp_payment_id, metadata)
+        VALUES ($1, $2, 'payment_approved', $3, $4, $5, $6)
+    """, tenant_id, sub_id, amount, currency, mp_payment_id,
+        {"billing_cycle": billing_cycle, "new_period_end": new_end.isoformat()})
+
+    # Fetch tenant info for email
+    tenant = await conn.fetchrow(
+        "SELECT name, email FROM tenants WHERE id = $1", tenant_id
+    )
+
+    logger.info(
+        "payment_approved: tenant=%s payment=%s new_period_end=%s",
+        tenant_id, mp_payment_id, new_end.date().isoformat(),
+    )
+
+    return {
+        "tenant_id": str(tenant_id),
+        "tenant_name": tenant["name"] if tenant else "",
+        "tenant_email": tenant["email"] if tenant else None,
+        "next_period_end": new_end.date().isoformat(),
+    }

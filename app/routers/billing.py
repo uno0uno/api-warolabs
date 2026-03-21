@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Any, Dict, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Header, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Header, Query, Request
 from pydantic import BaseModel
 
 from app.config import settings
@@ -255,6 +255,7 @@ async def cancel_my_subscription(request: Request):
 @tenant_router.post("/webhook", status_code=200)
 async def mercadopago_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_signature: Optional[str] = Header(None, alias="x-signature"),
     x_request_id: Optional[str] = Header(None, alias="x-request-id"),
 ):
@@ -262,7 +263,14 @@ async def mercadopago_webhook(
     MercadoPago webhook endpoint — called directly by MP (no session auth).
 
     Verifies HMAC-SHA256 signature before processing.
-    Handles subscription_preapproval events to activate or cancel subscriptions.
+    Handles all subscription and payment events:
+    - subscription_preapproval → authorized  : activate subscription
+    - subscription_preapproval → paused      : mark past_due + email
+    - subscription_preapproval → cancelled   : log only (user already cancelled)
+    - payment → approved                     : renew period + reset scan_usage + email
+    - payment → rejected                     : mark past_due + email
+
+    Emails are sent via BackgroundTasks so the 200 response is immediate.
     """
     query_params = dict(request.query_params)
     data_id = query_params.get("data.id") or query_params.get("id")
@@ -297,9 +305,84 @@ async def mercadopago_webhook(
         if mp_status == "authorized":
             async with get_db_connection() as conn:
                 await billing_service.activate_tenant_subscription(conn, preapproval_id)
+
+        elif mp_status == "paused":
+            async with get_db_connection() as conn:
+                tenant_info = await billing_service.mark_subscription_past_due(
+                    conn, preapproval_id, "subscription_paused"
+                )
+            if tenant_info:
+                background_tasks.add_task(
+                    billing_email_service.send_payment_rejected_email,
+                    tenant_name=tenant_info["tenant_name"],
+                    tenant_email=tenant_info["tenant_email"],
+                    billing_url=f"{settings.frontend_url}/billing",
+                )
+
         elif mp_status in ("cancelled", "expired"):
-            # Status already set by cancel_my_subscription or MP itself
-            logger.info("MP webhook: preapproval %s is %s — no action needed", preapproval_id, mp_status)
+            logger.info(
+                "MP webhook: preapproval %s is %s — no action needed",
+                preapproval_id, mp_status,
+            )
+
+    elif event_type == "payment":
+        payment_id = resource_data.get("id") or data_id
+        if not payment_id:
+            return {"received": True}
+
+        mp_payment = await mercadopago_service.get_payment_status(str(payment_id))
+        payment_status = mp_payment["status"]
+        external_reference = mp_payment.get("external_reference")  # tenant_id UUID string
+
+        logger.info(
+            "MP payment webhook: id=%s status=%s tenant=%s",
+            payment_id, payment_status, external_reference,
+        )
+
+        if payment_status == "approved" and external_reference:
+            async with get_db_connection() as conn:
+                tenant_info = await billing_service.renew_subscription_period(
+                    conn,
+                    tenant_id_str=external_reference,
+                    mp_payment_id=str(payment_id),
+                    amount=mp_payment.get("transaction_amount", 0),
+                    currency=mp_payment.get("currency_id", "COP"),
+                )
+            if tenant_info:
+                background_tasks.add_task(
+                    billing_email_service.send_payment_renewed_email,
+                    tenant_name=tenant_info["tenant_name"],
+                    tenant_email=tenant_info["tenant_email"],
+                    next_period_end=tenant_info["next_period_end"],
+                )
+
+        elif payment_status in ("rejected", "cancelled") and external_reference:
+            # Find preapproval_id via tenant subscription for mark_subscription_past_due
+            async with get_db_connection() as conn:
+                from uuid import UUID as _UUID
+                try:
+                    _tid = _UUID(external_reference)
+                except ValueError:
+                    logger.error("MP payment webhook: invalid external_reference=%s", external_reference)
+                    return {"received": True}
+
+                preapproval_row = await conn.fetchval(
+                    "SELECT mp_preapproval_id FROM tenant_subscriptions WHERE tenant_id = $1",
+                    _tid,
+                )
+                tenant_info = None
+                if preapproval_row:
+                    tenant_info = await billing_service.mark_subscription_past_due(
+                        conn, preapproval_row, "payment_rejected"
+                    )
+
+            if tenant_info:
+                background_tasks.add_task(
+                    billing_email_service.send_payment_rejected_email,
+                    tenant_name=tenant_info["tenant_name"],
+                    tenant_email=tenant_info["tenant_email"],
+                    billing_url=f"{settings.frontend_url}/billing",
+                )
 
     return {"received": True}
 
