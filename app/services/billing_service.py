@@ -1,9 +1,8 @@
 """
-Billing Service — scan quota management (issue #58) + admin CRUD (issue #61)
+Billing Service — scan quota (#58) + admin CRUD (#61) + MP subscriptions (#60)
 
-Handles scan quota enforcement for the AI invoice scanner endpoint.
-Also provides admin CRUD for subscription plans, tenant subscriptions,
-usage summaries, and billing events.
+Handles scan quota enforcement, admin CRUD for billing entities,
+and tenant-facing subscription flows (subscribe, cancel, activate via webhook).
 Works with tables created in migration #59.
 """
 import logging
@@ -503,3 +502,171 @@ def _serialize_subscription(row) -> Dict[str, Any]:
     if "scan_limit" in row.keys():
         data["scan_limit"] = row["scan_limit"]
     return data
+
+
+# ── Tenant subscription flows — issue #60 ────────────────────────────────────
+
+async def get_tenant_email(conn, tenant_id: UUID) -> Optional[str]:
+    """Return the email for a tenant, or None if not set."""
+    row = await conn.fetchrow(
+        "SELECT email FROM tenants WHERE id = $1", tenant_id
+    )
+    return row["email"] if row else None
+
+
+async def get_plan_for_subscribe(conn, plan_id: UUID) -> Dict[str, Any]:
+    """
+    Return plan data needed to create a MP preapproval.
+    Raises 404 if plan not found or is inactive.
+    """
+    row = await conn.fetchrow("""
+        SELECT id, name, price_monthly, price_annual, scan_limit
+        FROM subscription_plans
+        WHERE id = $1 AND is_active = true
+    """, plan_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Plan no encontrado o inactivo")
+    return {
+        "id": str(row["id"]),
+        "name": row["name"],
+        "price_monthly": float(row["price_monthly"]),
+        "price_annual": float(row["price_annual"]),
+        "scan_limit": row["scan_limit"],
+    }
+
+
+async def subscribe_tenant(
+    conn,
+    tenant_id: UUID,
+    plan_id: UUID,
+    billing_cycle: str,
+    checkout_url: str,
+    mp_preapproval_id: str,
+) -> Dict[str, Any]:
+    """
+    Update (or insert) the tenant's subscription row with the new plan and
+    MP preapproval ID, setting status='pending' until the webhook confirms.
+    Also inserts a billing_events row for auditability.
+
+    Uses INSERT ... ON CONFLICT (tenant_id) DO UPDATE to handle both
+    first-time tenants (no seed row) and existing ones.
+    """
+    row = await conn.fetchrow("""
+        INSERT INTO tenant_subscriptions
+            (tenant_id, plan_id, billing_cycle, status,
+             mp_preapproval_id,
+             current_period_start, current_period_end)
+        VALUES (
+            $1, $2, $3, 'pending',
+            $4,
+            date_trunc('month', now()),
+            date_trunc('month', now()) + interval '1 month'
+        )
+        ON CONFLICT (tenant_id) DO UPDATE SET
+            plan_id              = EXCLUDED.plan_id,
+            billing_cycle        = EXCLUDED.billing_cycle,
+            status               = 'pending',
+            mp_preapproval_id    = EXCLUDED.mp_preapproval_id,
+            current_period_start = EXCLUDED.current_period_start,
+            current_period_end   = EXCLUDED.current_period_end,
+            cancelled_at         = NULL,
+            updated_at           = now()
+        RETURNING id, tenant_id, plan_id, billing_cycle, status,
+                  mp_preapproval_id, current_period_start, current_period_end
+    """, tenant_id, plan_id, billing_cycle, mp_preapproval_id)
+
+    sub_id = row["id"]
+
+    await conn.execute("""
+        INSERT INTO billing_events
+            (tenant_id, subscription_id, event_type, metadata)
+        VALUES ($1, $2, 'subscribe_initiated', $3)
+    """, tenant_id, sub_id, {"checkout_url": checkout_url, "plan_id": str(plan_id)})
+
+    logger.info(
+        "subscribe_initiated: tenant=%s plan=%s cycle=%s preapproval=%s",
+        tenant_id, plan_id, billing_cycle, mp_preapproval_id,
+    )
+
+    return {
+        "subscription_id": str(sub_id),
+        "checkout_url": checkout_url,
+        "mp_preapproval_id": mp_preapproval_id,
+        "status": "pending",
+    }
+
+
+async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
+    """
+    Return the tenant's current subscription with plan details.
+    Raises 404 if tenant has no subscription row.
+    """
+    return await get_subscription_by_tenant(conn, tenant_id)
+
+
+async def cancel_tenant_subscription(conn, tenant_id: UUID) -> str:
+    """
+    Set subscription status='cancelled' in DB and return the mp_preapproval_id
+    so the caller can cancel it in MP API.
+    Raises 404 if no active subscription exists.
+    """
+    row = await conn.fetchrow("""
+        UPDATE tenant_subscriptions
+        SET status = 'cancelled', cancelled_at = now(), updated_at = now()
+        WHERE tenant_id = $1
+          AND status IN ('active', 'pending')
+        RETURNING id, mp_preapproval_id
+    """, tenant_id)
+
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay suscripción activa o pendiente para cancelar",
+        )
+
+    sub_id = row["id"]
+    mp_preapproval_id = row["mp_preapproval_id"]
+
+    await conn.execute("""
+        INSERT INTO billing_events
+            (tenant_id, subscription_id, event_type, metadata)
+        VALUES ($1, $2, 'subscription_cancelled', $3)
+    """, tenant_id, sub_id, {"mp_preapproval_id": mp_preapproval_id or ""})
+
+    logger.info("subscription_cancelled: tenant=%s preapproval=%s", tenant_id, mp_preapproval_id)
+
+    return mp_preapproval_id or ""
+
+
+async def activate_tenant_subscription(conn, mp_preapproval_id: str) -> bool:
+    """
+    Called from the MP webhook when status='authorized'.
+    Sets status='active' for the subscription with the given preapproval ID.
+    Returns True if a row was updated, False if no matching row was found.
+    """
+    row = await conn.fetchrow("""
+        UPDATE tenant_subscriptions
+        SET status = 'active', updated_at = now()
+        WHERE mp_preapproval_id = $1
+          AND status = 'pending'
+        RETURNING id, tenant_id
+    """, mp_preapproval_id)
+
+    if row is None:
+        logger.warning(
+            "activate_tenant_subscription: no pending row for preapproval=%s",
+            mp_preapproval_id,
+        )
+        return False
+
+    await conn.execute("""
+        INSERT INTO billing_events
+            (tenant_id, subscription_id, event_type, metadata)
+        VALUES ($1, $2, 'subscription_activated', $3)
+    """, row["tenant_id"], row["id"], {"mp_preapproval_id": mp_preapproval_id})
+
+    logger.info(
+        "subscription_activated: tenant=%s preapproval=%s",
+        row["tenant_id"], mp_preapproval_id,
+    )
+    return True

@@ -1,21 +1,26 @@
 """
-Billing Admin Router — issue #61
+Billing Routers — admin CRUD (issue #61) + tenant subscription flows (issue #60)
 
-CRUD endpoints for subscription plans, tenant subscriptions, usage summary,
-and billing events. All endpoints require a valid tenant session.
+router:        /admin/billing — plan CRUD, subscription management (admin)
+tenant_router: /billing       — subscribe, status, cancel, webhook (tenant-facing)
 """
+import logging
 from decimal import Decimal
 from typing import Any, Dict, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Header, Query, Request
 from pydantic import BaseModel
 
+from app.config import settings
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
-from app.services import billing_service
+from app.services import billing_service, mercadopago_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/billing", tags=["Billing Admin"])
+tenant_router = APIRouter(prefix="/billing", tags=["Billing"])
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -145,3 +150,155 @@ async def list_billing_events(
     require_valid_session(request)
     async with get_db_connection(use_transaction=False) as conn:
         return await billing_service.list_billing_events(conn, limit, offset)
+
+
+# ── Tenant-facing billing endpoints (issue #60) ───────────────────────────────
+# tenant_router prefix: /billing
+
+
+class SubscribeBody(BaseModel):
+    """Body for POST /billing/subscribe"""
+    plan_id: UUID
+    billing_cycle: str = "monthly"  # "monthly" | "annual"
+
+
+@tenant_router.get("/plans")
+async def tenant_list_plans(request: Request):
+    """List active subscription plans (tenant-facing, read-only)."""
+    require_valid_session(request)
+    async with get_db_connection(use_transaction=False) as conn:
+        plans = await billing_service.list_plans(conn)
+        return [p for p in plans if p["is_active"]]
+
+
+@tenant_router.post("/subscribe", status_code=201)
+async def subscribe(body: SubscribeBody, request: Request):
+    """
+    Subscribe the authenticated tenant to a plan.
+
+    1. Validates plan exists and is active
+    2. Validates tenant has email (required by MP)
+    3. Creates a MercadoPago Preapproval
+    4. Saves mp_preapproval_id and status='pending' to DB
+    5. Returns checkout_url for the tenant to approve the subscription
+
+    billing_cycle must be 'monthly' or 'annual'.
+    """
+    if body.billing_cycle not in ("monthly", "annual"):
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=422,
+            detail="billing_cycle debe ser 'monthly' o 'annual'",
+        )
+
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        plan = await billing_service.get_plan_for_subscribe(conn, body.plan_id)
+        tenant_email = await billing_service.get_tenant_email(conn, tenant_id)
+
+        amount = (
+            plan["price_monthly"]
+            if body.billing_cycle == "monthly"
+            else plan["price_annual"]
+        )
+        back_url = f"{settings.frontend_url}/billing/confirmacion"
+
+        mp_result = await mercadopago_service.create_preapproval(
+            plan_name=plan["name"],
+            transaction_amount=amount,
+            billing_cycle=body.billing_cycle,
+            tenant_id=tenant_id,
+            tenant_email=tenant_email or "",
+            back_url=back_url,
+        )
+
+        return await billing_service.subscribe_tenant(
+            conn,
+            tenant_id=tenant_id,
+            plan_id=body.plan_id,
+            billing_cycle=body.billing_cycle,
+            checkout_url=mp_result["checkout_url"],
+            mp_preapproval_id=mp_result["mp_preapproval_id"],
+        )
+
+
+@tenant_router.get("/subscription")
+async def get_my_subscription(request: Request):
+    """Get the current subscription status for the authenticated tenant."""
+    session = require_valid_session(request)
+    async with get_db_connection(use_transaction=False) as conn:
+        return await billing_service.get_tenant_subscription(conn, session.tenant_id)
+
+
+@tenant_router.delete("/subscription")
+async def cancel_my_subscription(request: Request):
+    """
+    Cancel the authenticated tenant's active subscription.
+    Cancels both in the DB and in MercadoPago API.
+    Returns 404 if there is no active/pending subscription.
+    """
+    session = require_valid_session(request)
+
+    async with get_db_connection() as conn:
+        mp_preapproval_id = await billing_service.cancel_tenant_subscription(
+            conn, session.tenant_id
+        )
+
+    if mp_preapproval_id:
+        await mercadopago_service.cancel_preapproval(mp_preapproval_id)
+
+    return {"status": "cancelled", "mp_preapproval_id": mp_preapproval_id or None}
+
+
+@tenant_router.post("/webhook", status_code=200)
+async def mercadopago_webhook(
+    request: Request,
+    x_signature: Optional[str] = Header(None, alias="x-signature"),
+    x_request_id: Optional[str] = Header(None, alias="x-request-id"),
+):
+    """
+    MercadoPago webhook endpoint — called directly by MP (no session auth).
+
+    Verifies HMAC-SHA256 signature before processing.
+    Handles subscription_preapproval events to activate or cancel subscriptions.
+    """
+    query_params = dict(request.query_params)
+    data_id = query_params.get("data.id") or query_params.get("id")
+
+    if settings.mp_webhook_secret:
+        is_valid = mercadopago_service.verify_webhook_signature(
+            x_signature=x_signature,
+            x_request_id=x_request_id,
+            data_id=data_id,
+            secret=settings.mp_webhook_secret,
+        )
+        if not is_valid:
+            logger.warning("MP webhook: invalid signature — request rejected")
+            from fastapi import HTTPException
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    body = await request.json()
+    event_type = body.get("type", "")
+    action = body.get("action", "")
+    resource_data = body.get("data", {})
+
+    logger.info("MP webhook received: type=%s action=%s", event_type, action)
+
+    if event_type == "subscription_preapproval":
+        preapproval_id = resource_data.get("id") or data_id
+        if not preapproval_id:
+            return {"received": True}
+
+        # Fetch current status from MP to be authoritative
+        mp_status = await mercadopago_service.get_preapproval_status(preapproval_id)
+
+        if mp_status == "authorized":
+            async with get_db_connection() as conn:
+                await billing_service.activate_tenant_subscription(conn, preapproval_id)
+        elif mp_status in ("cancelled", "expired"):
+            # Status already set by cancel_my_subscription or MP itself
+            logger.info("MP webhook: preapproval %s is %s — no action needed", preapproval_id, mp_status)
+
+    return {"received": True}
