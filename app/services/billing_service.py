@@ -421,30 +421,7 @@ async def list_usage_summary(conn) -> List[Dict[str, Any]]:
     return result
 
 
-async def list_billing_events(
-    conn, limit: int = 50, offset: int = 0
-) -> Dict[str, Any]:
-    """Paginated billing events log, newest first."""
-    rows = await conn.fetch("""
-        SELECT
-            be.id,
-            be.tenant_id,
-            t.name AS tenant_name,
-            be.subscription_id,
-            be.event_type,
-            be.amount,
-            be.currency,
-            be.mp_payment_id,
-            be.metadata,
-            be.created_at
-        FROM billing_events be
-        JOIN tenants t ON t.id = be.tenant_id
-        ORDER BY be.created_at DESC
-        LIMIT $1 OFFSET $2
-    """, limit, offset)
-
-    total = await conn.fetchval("SELECT COUNT(*) FROM billing_events")
-
+def _serialize_billing_events(rows, total: int, limit: int, offset: int) -> Dict[str, Any]:
     events = []
     for r in rows:
         events.append({
@@ -459,8 +436,46 @@ async def list_billing_events(
             "metadata": dict(r["metadata"]) if r["metadata"] else {},
             "created_at": r["created_at"].isoformat(),
         })
-
     return {"total": total, "limit": limit, "offset": offset, "events": events}
+
+
+async def list_billing_events(
+    conn, limit: int = 50, offset: int = 0
+) -> Dict[str, Any]:
+    """Paginated billing events for all tenants (admin), newest first."""
+    rows = await conn.fetch("""
+        SELECT
+            be.id, be.tenant_id, t.name AS tenant_name,
+            be.subscription_id, be.event_type, be.amount,
+            be.currency, be.mp_payment_id, be.metadata, be.created_at
+        FROM billing_events be
+        JOIN tenants t ON t.id = be.tenant_id
+        ORDER BY be.created_at DESC
+        LIMIT $1 OFFSET $2
+    """, limit, offset)
+    total = await conn.fetchval("SELECT COUNT(*) FROM billing_events")
+    return _serialize_billing_events(rows, total, limit, offset)
+
+
+async def list_tenant_billing_events(
+    conn, tenant_id, limit: int = 20, offset: int = 0
+) -> Dict[str, Any]:
+    """Paginated billing events for the session tenant, newest first."""
+    rows = await conn.fetch("""
+        SELECT
+            be.id, be.tenant_id, t.name AS tenant_name,
+            be.subscription_id, be.event_type, be.amount,
+            be.currency, be.mp_payment_id, be.metadata, be.created_at
+        FROM billing_events be
+        JOIN tenants t ON t.id = be.tenant_id
+        WHERE be.tenant_id = $3
+        ORDER BY be.created_at DESC
+        LIMIT $1 OFFSET $2
+    """, limit, offset, tenant_id)
+    total = await conn.fetchval(
+        "SELECT COUNT(*) FROM billing_events WHERE tenant_id = $1", tenant_id
+    )
+    return _serialize_billing_events(rows, total, limit, offset)
 
 
 # ── Serialization helpers ─────────────────────────────────────────────────────

@@ -232,6 +232,18 @@ async def get_my_subscription(request: Request):
         return await billing_service.get_tenant_subscription(conn, session.tenant_id)
 
 
+@tenant_router.get("/events")
+async def get_my_billing_events(
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """Paginated billing events for the authenticated tenant (tenant_id from session cookie)."""
+    session = require_valid_session(request)
+    async with get_db_connection(use_transaction=False) as conn:
+        return await billing_service.list_tenant_billing_events(conn, session.tenant_id, limit, offset)
+
+
 @tenant_router.delete("/subscription")
 async def cancel_my_subscription(request: Request):
     """
