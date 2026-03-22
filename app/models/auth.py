@@ -8,7 +8,8 @@ class User(BaseModel):
     email: str
     name: Optional[str] = None
     created_at: datetime = Field(alias='createdAt')
-    
+    role: Optional[str] = None
+
     class Config:
         populate_by_name = True
 

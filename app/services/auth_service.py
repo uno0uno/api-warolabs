@@ -48,6 +48,7 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
             
             # Get tenant info if tenant_id exists (exact logic from warolabs.com)
             current_tenant = None
+            user_role = None
             if session_result['tenant_id']:
                 tenant_query = "SELECT id, name, slug FROM tenants WHERE id = $1"
                 tenant_result = await conn.fetchrow(tenant_query, session_result['tenant_id'])
@@ -57,13 +58,20 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                         name=tenant_result['name'],
                         slug=tenant_result['slug']
                     )
-            
+                role_result = await conn.fetchrow(
+                    "SELECT role FROM tenant_members WHERE tenant_id = $1 AND user_id = $2 LIMIT 1",
+                    session_result['tenant_id'], session_result['user_id']
+                )
+                if role_result:
+                    user_role = role_result['role']
+
             # Build response models
             user = User(
                 id=session_result['user_id'],
                 email=session_result['email'],
                 name=session_result['name'],
-                createdAt=session_result['user_created_at']
+                createdAt=session_result['user_created_at'],
+                role=user_role
             )
             
             session = Session(
