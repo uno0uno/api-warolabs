@@ -10,56 +10,22 @@ logger = logging.getLogger(__name__)
 
 
 def _build_confirmation_email(email: str) -> str:
-    return f"""
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>¡Gracias por contactarnos!</title>
-</head>
-<body style="margin:0;padding:0;background:#F8F9FA;font-family:Lato,Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F8F9FA;padding:40px 0;">
-    <tr>
-      <td align="center">
-        <table width="600" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border-radius:12px;overflow:hidden;max-width:600px;width:100%;">
-          <!-- Header -->
-          <tr>
-            <td style="background:#7C3AED;padding:32px 40px;text-align:center;">
-              <h1 style="margin:0;color:#FFFFFF;font-size:24px;font-weight:700;letter-spacing:-0.3px;">WARO Colombia</h1>
-            </td>
-          </tr>
-          <!-- Body -->
-          <tr>
-            <td style="padding:40px;">
-              <p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#1F1D35;">Hola,</p>
-              <p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#1F1D35;">
-                Gracias por comunicarte con nosotros. Hemos recibido tu mensaje y nos pondremos en contacto contigo muy pronto.
-              </p>
-              <p style="margin:0 0 32px;font-size:16px;line-height:1.6;color:#1F1D35;">
-                Si tienes alguna pregunta urgente, no dudes en responder a este correo.
-              </p>
-              <p style="margin:0;font-size:16px;line-height:1.6;color:#1F1D35;">
-                ¡Hasta pronto!<br />
-                <strong>El equipo de WARO Colombia</strong>
-              </p>
-            </td>
-          </tr>
-          <!-- Footer -->
-          <tr>
-            <td style="background:#F0F1F3;padding:20px 40px;text-align:center;">
-              <p style="margin:0;font-size:13px;color:#4B5565;">
-                Este correo fue enviado a {email} porque completaste un formulario en warocol.com
-              </p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-"""
+    return (
+        "WARO Colombia\n\n"
+        "Hola,\n\n"
+        "Gracias por comunicarte con nosotros. Hemos recibido tu mensaje y nos pondremos en contacto contigo muy pronto.\n\n"
+        "Si tienes alguna pregunta urgente, no dudes en responder a este correo.\n\n"
+        "¡Hasta pronto!\n"
+        "El equipo de WARO Colombia\n\n"
+        "----\n"
+        "Saifer 101 (Anderson Arévalo)\n"
+        "Fundador WaRo Colombia\n"
+        "Bogotá, D.C, Colombia\n"
+        "Tel: 3142047013\n"
+        "Correo: anderson.arevalo@warolabs.com\n"
+        "Tecnología colombiana para el mundo. warocol.com\n\n"
+        f"Este correo fue enviado a {email} porque completaste un formulario en warocol.com"
+    )
 
 
 async def capture_lead(
@@ -287,7 +253,7 @@ async def _send_notifications(
             from_name="WARO Colombia",
             to_emails=[email],
             subject="¡Gracias por contactarnos! — WARO Colombia",
-            html_body=_build_confirmation_email(email),
+            text_body=_build_confirmation_email(email),
         )
     )
 
