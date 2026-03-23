@@ -79,28 +79,26 @@ async def capture_lead(
     profile_id = profile["id"]
     logger.info(f"📥 [capture_lead] Profile upserted: {profile_id}")
 
-    # 2. INSERT lead (skip if one already exists for this profile)
-    new_lead = await conn.fetchrow(
-        """
-        INSERT INTO leads (profile_id, email, source, status)
-        VALUES ($1, $2, 'homepage_cta', 'active')
-        ON CONFLICT DO NOTHING
-        RETURNING id
-        """,
+    # 2. Check if lead already exists for this profile
+    existing_lead = await conn.fetchrow(
+        "SELECT id FROM leads WHERE profile_id = $1 ORDER BY created_at ASC LIMIT 1",
         profile_id,
-        email,
     )
+    is_duplicate = existing_lead is not None
 
-    is_duplicate = new_lead is None
     if is_duplicate:
-        lead = await conn.fetchrow(
-            "SELECT id FROM leads WHERE profile_id = $1 ORDER BY created_at ASC LIMIT 1",
-            profile_id,
-        )
+        lead_id = existing_lead["id"]
     else:
-        lead = new_lead
-
-    lead_id = lead["id"]
+        new_lead = await conn.fetchrow(
+            """
+            INSERT INTO leads (profile_id, email, source, status)
+            VALUES ($1, $2, 'homepage_cta', 'active')
+            RETURNING id
+            """,
+            profile_id,
+            email,
+        )
+        lead_id = new_lead["id"]
     logger.info(f"📥 [capture_lead] Lead id: {lead_id} (duplicate={is_duplicate})")
 
     # 3. INSERT lead_interaction — type differs for duplicate vs new
