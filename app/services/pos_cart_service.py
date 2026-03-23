@@ -803,7 +803,12 @@ async def complete_pos_order(
                         previous_stock = float(stock_row['current_stock']) if stock_row else 0.0
                         new_stock = previous_stock - quantity_to_deduct
 
-                        # Update inventory
+                        # Stock is deducted from the exact ingredient_id stored in the recipe.
+                        # Variants and base ingredients maintain independent inventory rows
+                        # (UNIQUE constraint on tenant_inventory(tenant_id, ingredient_id)).
+                        # This is by design: purchasing a variant does NOT add to the base's stock,
+                        # and a recipe referencing the base deducts from the base's row.
+                        # Always ensure recipes reference the intended ingredient_id (variant or base).
                         if stock_row:
                             update_inventory_query = """
                                 UPDATE tenant_inventory

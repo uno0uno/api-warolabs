@@ -342,7 +342,10 @@ async def create_direct_purchase(
                         item.get('notes')
                     )
 
-                    # Update inventory
+                    # Stock is stored against the exact ingredient_id from the purchase item.
+                    # If ingredient_id is a variant, stock goes to the variant's row — not the base.
+                    # Variants and base ingredients maintain independent inventory rows by design
+                    # (UNIQUE constraint on tenant_inventory(tenant_id, ingredient_id)).
                     inventory_row = await conn.fetchrow("""
                         SELECT id, current_stock
                         FROM tenant_inventory

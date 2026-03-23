@@ -119,7 +119,10 @@ async def create_product_with_recipe(
                             tenant_id
                         )
 
-                # 4. Calculate and update product cost (last purchase price)
+                # 4. Calculate and update product cost (last purchase price).
+                # Fallback order: variant's own purchase → parent's purchase → costo_unitario → 0
+                # i.parent_id IS NULL for standalone ingredients, so the parent subquery
+                # safely returns NULL and COALESCE falls through to costo_unitario.
                 cost_query = """
                     UPDATE product
                     SET costo_calculado = (
@@ -129,6 +132,13 @@ async def create_product_with_recipe(
                                  FROM tenant_purchase_items pi
                                  JOIN tenant_purchases tp ON pi.purchase_id = tp.id
                                  WHERE pi.ingredient_id = pr.ingredient_id
+                                   AND tp.tenant_id = $2
+                                   AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                                 ORDER BY tp.purchase_date DESC LIMIT 1),
+                                (SELECT pi.unit_cost
+                                 FROM tenant_purchase_items pi
+                                 JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                 WHERE pi.ingredient_id = i.parent_id
                                    AND tp.tenant_id = $2
                                    AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
                                  ORDER BY tp.purchase_date DESC LIMIT 1),
@@ -232,6 +242,13 @@ async def get_product_by_id(
                            AND tp.tenant_id = $2
                            AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
                          ORDER BY tp.purchase_date DESC LIMIT 1),
+                        (SELECT pi.unit_cost
+                         FROM tenant_purchase_items pi
+                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                         WHERE pi.ingredient_id = i.parent_id
+                           AND tp.tenant_id = $2
+                           AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                         ORDER BY tp.purchase_date DESC LIMIT 1),
                         i.costo_unitario, 0
                     ) as ingredient_cost_per_unit,
                     pr.quantity * COALESCE(
@@ -239,6 +256,13 @@ async def get_product_by_id(
                          FROM tenant_purchase_items pi
                          JOIN tenant_purchases tp ON pi.purchase_id = tp.id
                          WHERE pi.ingredient_id = pr.ingredient_id
+                           AND tp.tenant_id = $2
+                           AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                         ORDER BY tp.purchase_date DESC LIMIT 1),
+                        (SELECT pi.unit_cost
+                         FROM tenant_purchase_items pi
+                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                         WHERE pi.ingredient_id = i.parent_id
                            AND tp.tenant_id = $2
                            AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
                          ORDER BY tp.purchase_date DESC LIMIT 1),
@@ -368,6 +392,7 @@ async def get_products_list(
             # Replaces nested correlated subqueries that ran O(products × base_recipe_rows) times
             cte_prefix = """
                 WITH latest_purchase_costs AS (
+                    -- Direct match: use the ingredient's own purchase history
                     SELECT DISTINCT ON (pi.ingredient_id)
                         pi.ingredient_id,
                         pi.unit_cost
@@ -377,6 +402,31 @@ async def get_products_list(
                       AND pi.unit_cost IS NOT NULL
                       AND pi.unit_cost > 0
                     ORDER BY pi.ingredient_id, tp.purchase_date DESC
+
+                    UNION ALL
+
+                    -- Parent fallback: for variants that have no own purchase history yet,
+                    -- use the parent ingredient's most recent purchase price.
+                    -- Variants and bases maintain independent inventory rows by design
+                    -- (UNIQUE on tenant_inventory(tenant_id, ingredient_id)).
+                    SELECT DISTINCT ON (i.id)
+                        i.id AS ingredient_id,
+                        pi.unit_cost
+                    FROM ingredients i
+                    JOIN tenant_purchase_items pi ON pi.ingredient_id = i.parent_id
+                    JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                    WHERE i.parent_id IS NOT NULL
+                      AND tp.tenant_id = $1
+                      AND pi.unit_cost IS NOT NULL
+                      AND pi.unit_cost > 0
+                      AND NOT EXISTS (
+                          SELECT 1 FROM tenant_purchase_items pi2
+                          JOIN tenant_purchases tp2 ON pi2.purchase_id = tp2.id
+                          WHERE pi2.ingredient_id = i.id
+                            AND tp2.tenant_id = $1
+                            AND pi2.unit_cost IS NOT NULL AND pi2.unit_cost > 0
+                      )
+                    ORDER BY i.id, tp.purchase_date DESC
                 ),
                 direct_costs AS (
                     SELECT
@@ -524,6 +574,13 @@ async def get_products_list(
                                    AND tp.tenant_id = $2
                                    AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
                                  ORDER BY tp.purchase_date DESC LIMIT 1),
+                                (SELECT pi.unit_cost
+                                 FROM tenant_purchase_items pi
+                                 JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                 WHERE pi.ingredient_id = i.parent_id
+                                   AND tp.tenant_id = $2
+                                   AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                                 ORDER BY tp.purchase_date DESC LIMIT 1),
                                 i.costo_unitario, 0
                             ) as ingredient_cost_per_unit,
                             pr.quantity * COALESCE(
@@ -531,6 +588,13 @@ async def get_products_list(
                                  FROM tenant_purchase_items pi
                                  JOIN tenant_purchases tp ON pi.purchase_id = tp.id
                                  WHERE pi.ingredient_id = pr.ingredient_id
+                                   AND tp.tenant_id = $2
+                                   AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                                 ORDER BY tp.purchase_date DESC LIMIT 1),
+                                (SELECT pi.unit_cost
+                                 FROM tenant_purchase_items pi
+                                 JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                 WHERE pi.ingredient_id = i.parent_id
                                    AND tp.tenant_id = $2
                                    AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
                                  ORDER BY tp.purchase_date DESC LIMIT 1),
@@ -797,7 +861,8 @@ async def update_product_with_recipe(
                                 tenant_id
                             )
 
-                    # 4. Recalculate product cost (last purchase price)
+                    # 4. Recalculate product cost (last purchase price).
+                    # Fallback order: variant's own purchase → parent's purchase → costo_unitario → 0
                     cost_query = """
                         UPDATE product
                         SET costo_calculado = (
@@ -807,6 +872,13 @@ async def update_product_with_recipe(
                                      FROM tenant_purchase_items pi
                                      JOIN tenant_purchases tp ON pi.purchase_id = tp.id
                                      WHERE pi.ingredient_id = pr.ingredient_id
+                                       AND tp.tenant_id = $2
+                                       AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                                     ORDER BY tp.purchase_date DESC LIMIT 1),
+                                    (SELECT pi.unit_cost
+                                     FROM tenant_purchase_items pi
+                                     JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                     WHERE pi.ingredient_id = i.parent_id
                                        AND tp.tenant_id = $2
                                        AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
                                      ORDER BY tp.purchase_date DESC LIMIT 1),
