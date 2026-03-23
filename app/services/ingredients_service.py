@@ -260,21 +260,54 @@ async def create_ingredient(
                     detail=f"Variant unit must match parent unit '{parent['unit']}'"
                 )
             try:
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO ingredients
-                        (name, unit, category, type, description,
-                         minimum_order_quantity, unit_weight_gr, parent_id)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                    RETURNING id
-                    """,
-                    data.name, data.unit, data.category, data.type, data.description,
-                    data.minimum_order_quantity, data.unit_weight_gr, data.parent_id
-                )
+                async with conn.transaction():
+                    row = await conn.fetchrow(
+                        """
+                        INSERT INTO ingredients
+                            (name, unit, category, type, description,
+                             minimum_order_quantity, unit_weight_gr, parent_id)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        RETURNING id
+                        """,
+                        data.name, data.unit, data.category, data.type, data.description,
+                        data.minimum_order_quantity, data.unit_weight_gr, data.parent_id
+                    )
+                    new_id = row["id"]
+
+                    parent_units = await conn.fetch(
+                        """
+                        SELECT purchase_unit, purchase_unit_label, conversion_factor,
+                               unit_cost, is_default, is_active, notes
+                        FROM ingredient_purchase_units
+                        WHERE ingredient_id = $1 AND is_active = TRUE
+                        """,
+                        data.parent_id
+                    )
+                    for pu in parent_units:
+                        await conn.execute(
+                            """
+                            INSERT INTO ingredient_purchase_units
+                                (ingredient_id, purchase_unit, purchase_unit_label,
+                                 conversion_factor, unit_cost, is_default, is_active, notes)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                            """,
+                            new_id,
+                            pu["purchase_unit"],
+                            pu["purchase_unit_label"],
+                            pu["conversion_factor"],
+                            pu["unit_cost"],
+                            pu["is_default"],
+                            pu["is_active"],
+                            pu["notes"],
+                        )
             except asyncpg.UniqueViolationError:
                 raise HTTPException(status_code=409, detail="An ingredient with this name already exists")
 
-            return {"success": True, "data": {"id": str(row["id"])}}
+            return {
+                "success": True,
+                "data": {"id": str(new_id)},
+                "purchase_units_inherited": len(parent_units),
+            }
 
     except HTTPException:
         raise
