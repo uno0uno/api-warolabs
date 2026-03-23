@@ -60,7 +60,10 @@ async def capture_lead(body: LeadCaptureRequest, request: Request):
             button_source=body.button_source,
         )
 
-    return {"success": True, "message": "¡Gracias! Nos pondremos en contacto contigo pronto."}
+    return {
+        "success": True,
+        "already_registered": result["is_duplicate"],
+    }
 
 
 @router.post("/access-request")

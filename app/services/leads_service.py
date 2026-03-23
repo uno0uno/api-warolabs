@@ -9,6 +9,17 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+_FOOTER = (
+    "----\n"
+    "Saifer 101 (Anderson Arévalo)\n"
+    "Fundador WaRo Colombia\n"
+    "Bogotá, D.C, Colombia\n"
+    "Tel: 3142047013\n"
+    "Correo: anderson.arevalo@warolabs.com\n"
+    "Tecnología colombiana para el mundo. warocol.com"
+)
+
+
 def _build_confirmation_email(email: str) -> str:
     return (
         "WARO Colombia\n\n"
@@ -17,13 +28,21 @@ def _build_confirmation_email(email: str) -> str:
         "Si tienes alguna pregunta urgente, no dudes en responder a este correo.\n\n"
         "¡Hasta pronto!\n"
         "El equipo de WARO Colombia\n\n"
-        "----\n"
-        "Saifer 101 (Anderson Arévalo)\n"
-        "Fundador WaRo Colombia\n"
-        "Bogotá, D.C, Colombia\n"
-        "Tel: 3142047013\n"
-        "Correo: anderson.arevalo@warolabs.com\n"
-        "Tecnología colombiana para el mundo. warocol.com\n\n"
+        f"{_FOOTER}\n\n"
+        f"Este correo fue enviado a {email} porque completaste un formulario en warocol.com"
+    )
+
+
+def _build_duplicate_email(email: str) -> str:
+    return (
+        "WARO Colombia\n\n"
+        "Hola,\n\n"
+        "Disculpa si enviaste el formulario más de una vez. Ya tenemos tu solicitud registrada y "
+        "nos pondremos en contacto contigo pronto.\n\n"
+        "No necesitas hacer nada más, ya estás en nuestra lista.\n\n"
+        "¡Hasta pronto!\n"
+        "El equipo de WARO Colombia\n\n"
+        f"{_FOOTER}\n\n"
         f"Este correo fue enviado a {email} porque completaste un formulario en warocol.com"
     )
 
@@ -61,7 +80,7 @@ async def capture_lead(
     logger.info(f"📥 [capture_lead] Profile upserted: {profile_id}")
 
     # 2. INSERT lead (skip if one already exists for this profile)
-    lead = await conn.fetchrow(
+    new_lead = await conn.fetchrow(
         """
         INSERT INTO leads (profile_id, email, source, status)
         VALUES ($1, $2, 'homepage_cta', 'active')
@@ -72,35 +91,39 @@ async def capture_lead(
         email,
     )
 
-    if lead is None:
-        # Lead already existed — fetch it
+    is_duplicate = new_lead is None
+    if is_duplicate:
         lead = await conn.fetchrow(
             "SELECT id FROM leads WHERE profile_id = $1 ORDER BY created_at ASC LIMIT 1",
             profile_id,
         )
+    else:
+        lead = new_lead
 
     lead_id = lead["id"]
-    logger.info(f"📥 [capture_lead] Lead id: {lead_id}")
+    logger.info(f"📥 [capture_lead] Lead id: {lead_id} (duplicate={is_duplicate})")
 
-    # 3. INSERT lead_interaction for every CTA click
-    metadata = json.dumps({"button": button_source})
+    # 3. INSERT lead_interaction — type differs for duplicate vs new
+    interaction_type = "duplicate_submit" if is_duplicate else "homepage_cta"
+    metadata = json.dumps({"button": button_source, "duplicate": is_duplicate})
     await conn.execute(
         """
         INSERT INTO lead_interactions
             (lead_id, interaction_type, source, ip_address, user_agent, metadata)
-        VALUES ($1, 'homepage_cta', 'homepage', $2, $3, $4::jsonb)
+        VALUES ($1, $2, 'homepage', $3, $4, $5::jsonb)
         """,
         lead_id,
+        interaction_type,
         ip_address,
         user_agent,
         metadata,
     )
-    logger.info(f"📥 [capture_lead] Interaction recorded for lead {lead_id} via '{button_source}'")
+    logger.info(f"📥 [capture_lead] Interaction '{interaction_type}' recorded for lead {lead_id}")
 
-    # Fire-and-forget: Discord notification + confirmation email (non-blocking)
-    asyncio.create_task(_send_notifications(email, phone, button_source, ip_address))
+    # Fire-and-forget: Discord notification + email (non-blocking, always fires)
+    asyncio.create_task(_send_notifications(email, phone, button_source, ip_address, is_duplicate))
 
-    return {"profile_id": str(profile_id), "lead_id": str(lead_id)}
+    return {"profile_id": str(profile_id), "lead_id": str(lead_id), "is_duplicate": is_duplicate}
 
 
 async def capture_access_request(
@@ -229,6 +252,7 @@ async def _send_notifications(
     phone: str,
     button_source: str,
     ip_address: Optional[str],
+    is_duplicate: bool = False,
 ) -> None:
     """Send Discord notification and confirmation email without blocking the response."""
     from app.services.discord_service import discord_leads_service
@@ -238,22 +262,43 @@ async def _send_notifications(
     tasks = []
 
     if discord_leads_service:
-        tasks.append(
-            discord_leads_service.notify_new_lead(
-                email=email,
-                phone=phone,
-                button_source=button_source,
-                ip_address=ip_address,
+        if is_duplicate:
+            tasks.append(
+                discord_leads_service.send_notification(
+                    title="🔁 Reintento de Lead",
+                    description=(
+                        f"**Email:** {email}\n"
+                        f"**Teléfono:** +57 {phone}\n"
+                        f"**Botón:** {button_source}\n"
+                        f"**IP:** {ip_address or '-'}\n"
+                        "_Este email ya estaba registrado como lead._"
+                    ),
+                    color=16776960,  # Yellow
+                )
             )
-        )
+        else:
+            tasks.append(
+                discord_leads_service.notify_new_lead(
+                    email=email,
+                    phone=phone,
+                    button_source=button_source,
+                    ip_address=ip_address,
+                )
+            )
 
+    email_body = _build_duplicate_email(email) if is_duplicate else _build_confirmation_email(email)
+    subject = (
+        "Ya tenemos tu solicitud — WARO Colombia"
+        if is_duplicate
+        else "¡Gracias por contactarnos! — WARO Colombia"
+    )
     tasks.append(
         ses_service.send_email(
             from_email=settings.email_from,
             from_name="WARO Colombia",
             to_emails=[email],
-            subject="¡Gracias por contactarnos! — WARO Colombia",
-            text_body=_build_confirmation_email(email),
+            subject=subject,
+            text_body=email_body,
         )
     )
 
