@@ -1,11 +1,12 @@
-from typing import List, Optional
+from typing import Optional
 from uuid import UUID
 from fastapi import Request, Response, HTTPException
+import asyncpg
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 import logging
 from app.core.exceptions import AuthenticationError
-from app.models.ingredient import Ingredient, IngredientsListResponse
+from app.models.ingredient import Ingredient, IngredientCreate, IngredientsListResponse
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,9 @@ async def get_ingredients_list(
     category: Optional[str] = None,
     supplier_id: Optional[UUID] = None,
     type: Optional[str] = None,
-    is_resale: Optional[bool] = None
+    is_resale: Optional[bool] = None,
+    base_only: Optional[bool] = None,
+    parent_id_filter: Optional[UUID] = None,
 ) -> IngredientsListResponse:
     """
     Fetches a list of ingredients from the database with tenant isolation,
@@ -48,8 +51,11 @@ async def get_ingredients_list(
                     i.created_at,
                     i.updated_at,
                     CAST(COALESCE(tsp.unit_price, tim.cost_per_unit) AS float) as price,
-                    tsp.supplier_id
+                    tsp.supplier_id,
+                    i.parent_id,
+                    p.name AS parent_name
                 FROM ingredients i
+                LEFT JOIN ingredients p ON i.parent_id = p.id
                 LEFT JOIN (
                     SELECT
                         ingredient_id,
@@ -119,6 +125,18 @@ async def get_ingredients_list(
                 base_param_count += 1
                 count_param_count += 1
 
+            if base_only:
+                base_query += " AND i.parent_id IS NULL"
+                count_query += " AND parent_id IS NULL"
+
+            if parent_id_filter is not None:
+                base_query += f" AND i.parent_id = ${base_param_count}"
+                count_query += f" AND parent_id = ${count_param_count}"
+                base_params.append(parent_id_filter)
+                count_params.append(parent_id_filter)
+                base_param_count += 1
+                count_param_count += 1
+
             # Add pagination
             offset = (page - 1) * limit
             base_query += f" ORDER BY i.created_at DESC LIMIT ${base_param_count} OFFSET ${base_param_count + 1}"
@@ -134,7 +152,7 @@ async def get_ingredients_list(
             for row in ingredients_data:
                 try:
                     ingredients.append(Ingredient(**row))
-                except ValidationError as e:
+                except ValidationError:
                     # Continue to the next row instead of raising
                     continue
 
@@ -146,7 +164,7 @@ async def get_ingredients_list(
 
     except AuthenticationError:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
@@ -213,6 +231,140 @@ async def match_ingredient_by_name(conn, name: str, threshold: float = 0.35) -> 
             "score": float(row["score"])
         }
     return None
+
+
+async def create_ingredient(
+    request: Request,
+    response: Response,
+    data: IngredientCreate,
+) -> dict:
+    """
+    Creates a new variant ingredient. parent_id is required — base ingredients
+    cannot be created via this endpoint.
+    """
+    try:
+        require_valid_session(request)
+
+        async with get_db_connection() as conn:
+            parent = await conn.fetchrow(
+                "SELECT id, unit, parent_id FROM ingredients WHERE id = $1",
+                data.parent_id
+            )
+            if not parent:
+                raise HTTPException(status_code=422, detail="parent_id does not exist")
+            if parent["parent_id"] is not None:
+                raise HTTPException(status_code=422, detail="Cannot create a variant of a variant (max 1 level deep)")
+            if parent["unit"] != data.unit:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Variant unit must match parent unit '{parent['unit']}'"
+                )
+            try:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO ingredients
+                        (name, unit, category, type, description,
+                         minimum_order_quantity, unit_weight_gr, parent_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    RETURNING id
+                    """,
+                    data.name, data.unit, data.category, data.type, data.description,
+                    data.minimum_order_quantity, data.unit_weight_gr, data.parent_id
+                )
+            except asyncpg.UniqueViolationError:
+                raise HTTPException(status_code=409, detail="An ingredient with this name already exists")
+
+            return {"success": True, "data": {"id": str(row["id"])}}
+
+    except HTTPException:
+        raise
+    except AuthenticationError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating ingredient: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+async def delete_ingredient(
+    request: Request,
+    response: Response,
+    ingredient_id: UUID,
+) -> dict:
+    """
+    Deletes a variant ingredient. Base ingredients (parent_id IS NULL) cannot be deleted.
+    Returns 409 if the ingredient is in use (FK violation).
+    """
+    try:
+        require_valid_session(request)
+
+        async with get_db_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, parent_id FROM ingredients WHERE id = $1",
+                ingredient_id
+            )
+            if not row:
+                raise HTTPException(status_code=404, detail="Ingredient not found")
+            if row["parent_id"] is None:
+                raise HTTPException(status_code=403, detail="Base ingredients cannot be deleted via this API")
+            try:
+                await conn.execute("DELETE FROM ingredients WHERE id = $1", ingredient_id)
+            except asyncpg.ForeignKeyViolationError:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot delete: variant is in use (purchases, inventory, or recipes)"
+                )
+
+        return {"success": True}
+
+    except HTTPException:
+        raise
+    except AuthenticationError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error deleting ingredient {ingredient_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+async def get_ingredient_variants(
+    request: Request,
+    response: Response,
+    ingredient_id: UUID,
+) -> dict:
+    """
+    Returns all variants for a given base ingredient.
+    Returns 404 if the ingredient doesn't exist or is itself a variant.
+    """
+    try:
+        require_valid_session(request)
+
+        async with get_db_connection() as conn:
+            base = await conn.fetchrow(
+                "SELECT id FROM ingredients WHERE id = $1 AND parent_id IS NULL",
+                ingredient_id
+            )
+            if not base:
+                raise HTTPException(status_code=404, detail="Base ingredient not found")
+
+            rows = await conn.fetch(
+                """
+                SELECT id, name, unit, category, type, description,
+                       parent_id, created_at, updated_at
+                FROM ingredients
+                WHERE parent_id = $1
+                ORDER BY name
+                """,
+                ingredient_id
+            )
+
+        return {"success": True, "total": len(rows), "data": [dict(r) for r in rows]}
+
+    except HTTPException:
+        raise
+    except AuthenticationError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error fetching variants for ingredient {ingredient_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 async def create_ai_ingredient(

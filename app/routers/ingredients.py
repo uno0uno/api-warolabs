@@ -1,8 +1,15 @@
-from fastapi import APIRouter, Request, Response, Query, Body, HTTPException
+from fastapi import APIRouter, Request, Response, Query, Body, HTTPException, Path
 from typing import Optional
 from uuid import UUID
-from app.services.ingredients_service import get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name
-from app.models.ingredient import IngredientsListResponse
+from app.services.ingredients_service import (
+    get_ingredients_list,
+    update_ingredient_unit_weight,
+    match_ingredient_by_name,
+    create_ingredient,
+    delete_ingredient,
+    get_ingredient_variants,
+)
+from app.models.ingredient import IngredientCreate, IngredientsListResponse
 from app.database import get_db_connection
 
 router = APIRouter()
@@ -34,15 +41,47 @@ async def get_ingredients_endpoint(
     category: Optional[str] = Query(default=None, description="Filter by ingredient category"),
     supplier_id: Optional[UUID] = Query(default=None, description="Filter by supplier ID"),
     type: Optional[str] = Query(default=None, description="Filter by type: 'food', 'service', 'supply'"),
-    is_resale: Optional[bool] = Query(default=None, description="Filter resale ingredients only")
+    is_resale: Optional[bool] = Query(default=None, description="Filter resale ingredients only"),
+    base_only: Optional[bool] = Query(default=None, description="If true, return only base ingredients (parent_id IS NULL)"),
+    parent_id: Optional[UUID] = Query(default=None, description="Filter variants of a specific base ingredient"),
 ):
     """
-    Get ingredients list with tenant isolation
-    Requires valid session with tenant context
+    Get ingredients list with tenant isolation.
+    Supports base_only and parent_id filters for the base+variant hierarchy.
+    Requires valid session with tenant context.
     """
     return await get_ingredients_list(
-        request, response, page, limit, search, category, supplier_id, type, is_resale
+        request, response, page, limit, search, category, supplier_id, type, is_resale,
+        base_only=base_only, parent_id_filter=parent_id,
     )
+
+
+@router.post("", status_code=201)
+async def create_ingredient_endpoint(
+    request: Request,
+    response: Response,
+    data: IngredientCreate,
+):
+    """
+    Create a new variant ingredient. parent_id is required — only variants can be created.
+    Validates that unit matches the parent and that the parent is not itself a variant.
+    Requires valid session with tenant context.
+    """
+    return await create_ingredient(request, response, data)
+
+
+@router.get("/{ingredient_id}/variants")
+async def get_ingredient_variants_endpoint(
+    request: Request,
+    response: Response,
+    ingredient_id: UUID = Path(..., description="Base ingredient ID"),
+):
+    """
+    Get all variants for a base ingredient.
+    Returns 404 if ingredient doesn't exist or is itself a variant.
+    Requires valid session with tenant context.
+    """
+    return await get_ingredient_variants(request, response, ingredient_id)
 
 
 @router.get("/{ingredient_id}")
@@ -54,7 +93,7 @@ async def get_ingredient_by_id(ingredient_id: UUID):
     """
     async with get_db_connection() as conn:
         row = await conn.fetchrow(
-            "SELECT id, name, unit, type, unit_weight_gr FROM ingredients WHERE id = $1",
+            "SELECT id, name, unit, type, unit_weight_gr, parent_id FROM ingredients WHERE id = $1",
             ingredient_id
         )
     if not row:
@@ -67,8 +106,24 @@ async def get_ingredient_by_id(ingredient_id: UUID):
             "unit": row["unit"],
             "type": row["type"],
             "unit_weight_gr": float(row["unit_weight_gr"]) if row["unit_weight_gr"] is not None else None,
+            "parent_id": str(row["parent_id"]) if row["parent_id"] is not None else None,
         }
     }
+
+
+@router.delete("/{ingredient_id}")
+async def delete_ingredient_endpoint(
+    request: Request,
+    response: Response,
+    ingredient_id: UUID = Path(..., description="Variant ingredient ID to delete"),
+):
+    """
+    Delete a variant ingredient.
+    Base ingredients (parent_id IS NULL) cannot be deleted — returns 403.
+    Returns 409 if the variant is in use (purchases, inventory, or recipes).
+    Requires valid session with tenant context.
+    """
+    return await delete_ingredient(request, response, ingredient_id)
 
 
 @router.patch("/{ingredient_id}/unit-weight")

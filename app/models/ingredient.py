@@ -18,10 +18,11 @@ class IngredientBase(BaseModel):
     # Assuming price and supplier_id might come from a join or another service
     price: Optional[float] = Field(None, gt=0, description="Current price of the ingredient")
     supplier_id: Optional[UUID] = Field(None, description="ID of the primary supplier for this ingredient")
+    parent_id: Optional[UUID] = Field(None, description="ID of the base ingredient — set to make this a variant")
 
 
 class IngredientCreate(IngredientBase):
-    pass
+    parent_id: UUID = Field(..., description="Required — only variants can be created via API")
 
 class IngredientUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
@@ -39,6 +40,7 @@ class Ingredient(IngredientBase):
     tenant_id: Optional[UUID] # tenant_id is nullable in DB
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
+    parent_name: Optional[str] = None
 
     class Config:
         from_attributes = True
