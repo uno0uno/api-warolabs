@@ -21,11 +21,10 @@ Saludos desde la nave de WaRo Colombia.
 ----
 Saifer 101 (Anderson Arévalo)
 Fundador WaRo Colombia
-Dirección: Calle 39F # 68F - 66 Sur
 Bogotá, D.C, Colombia
 Tel: 3142047013
-Correo: anderson.arevalo@warocol.com
-Tecnología colombiana para el mundo.
+Correo: anderson.arevalo@warolabs.com
+Tecnología colombiana para el mundo. warocol.com
 """
 
 

@@ -20,10 +20,10 @@ def get_magic_link_template(magic_link_url: str, verification_code: str, tenant_
     brand_name = tenant_context.get('brand_name', 'Waro Colombia')
     tenant_name = tenant_context.get('tenant_name', 'Waro Colombia')
     admin_name = tenant_context.get('admin_name', 'Saifer 101 (Anderson Arévalo)')
-    admin_email = tenant_context.get('admin_email', 'anderson.arevalo@warocol.com')
+    admin_email = tenant_context.get('admin_email', 'anderson.arevalo@warolabs.com')
     
     # Dynamic footer message based on tenant
-    footer_message = 'Tecnología colombiana para el mundo.' if tenant_name == 'Waro Colombia' else 'No olvides mirar al futuro.'
+    footer_message = 'Tecnología colombiana para el mundo. warocol.com' if tenant_name == 'Waro Colombia' else 'No olvides mirar al futuro.'
     
     return f"""
 <!DOCTYPE html>
@@ -54,7 +54,6 @@ def get_magic_link_template(magic_link_url: str, verification_code: str, tenant_
         ----<br>
         {admin_name}<br>
         Fundador {tenant_name}<br>
-        Direccion: <a href="https://maps.app.goo.gl/CjipiqrV2iYUx2fa8"> Calle 39F # 68F - 66 Sur</a><br>
         Bogotá, D.C, Colombia<br>
         Tel: 3142047013<br>
         Correo: <a href="mailto:{admin_email}">{admin_email}</a><br>

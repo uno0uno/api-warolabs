@@ -21,7 +21,7 @@ def get_invitation_template(invitation_url: str, context: dict) -> str:
     role = context.get('role', 'Administrador')
 
     # Dynamic footer message based on tenant
-    footer_message = 'Tecnologia colombiana para el mundo.' if tenant_name == 'Waro Colombia' else 'No olvides mirar al futuro.'
+    footer_message = 'Tecnología colombiana para el mundo. warocol.com' if tenant_name == 'Waro Colombia' else 'No olvides mirar al futuro.'
 
     greeting = f"Hola {invitee_name}!" if invitee_name else "Hola!"
 
@@ -56,7 +56,6 @@ def get_invitation_template(invitation_url: str, context: dict) -> str:
         <br><br>
         ----<br>
         Equipo {tenant_name}<br>
-        Direccion: <a href="https://maps.app.goo.gl/CjipiqrV2iYUx2fa8"> Calle 39F # 68F - 66 Sur</a><br>
         Bogota, D.C, Colombia<br>
         Tel: 3142047013<br>
         {footer_message}
