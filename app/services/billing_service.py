@@ -1048,9 +1048,9 @@ async def mark_subscription_past_due(
 async def gift_tenant_subscription(
     conn,
     tenant_id: UUID,
-    days: int | None = None,
-    months: int | None = None,
-    note: str | None = None,
+    days: Optional[int] = None,
+    months: Optional[int] = None,
+    note: Optional[str] = None,
 ) -> dict:
     """
     Extiende o crea una suscripción activa como regalo comercial.
