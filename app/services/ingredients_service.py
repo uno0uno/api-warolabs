@@ -213,23 +213,71 @@ async def update_ingredient_unit_weight(
 
 
 async def match_ingredient_by_name(conn, name: str, threshold: float = 0.35) -> Optional[dict]:
-    """Find closest ingredient by name using pg_trgm similarity."""
+    """
+    Find closest ingredient by name using pg_trgm similarity.
+
+    Two-phase search:
+      1. Variants first (parent_id IS NOT NULL) — more specific match preferred.
+      2. Fallback to base ingredients (parent_id IS NULL) if no variant matches.
+
+    Response includes hierarchy context: parent_id, parent_name, match_type, has_variants.
+    match_type: "variant" | "base" | "standalone"
+    """
+    # Phase 1: search variants first (more specific)
     row = await conn.fetchrow("""
-        SELECT id, name, unit, type, unit_weight_gr, similarity(name, $1) as score
-        FROM ingredients
-        WHERE similarity(name, $1) > $2
-        ORDER BY similarity(name, $1) DESC
+        SELECT i.id, i.name, i.unit, i.type, i.parent_id,
+               p.name AS parent_name,
+               similarity(i.name, $1) AS similarity
+        FROM ingredients i
+        LEFT JOIN ingredients p ON i.parent_id = p.id
+        WHERE i.parent_id IS NOT NULL
+          AND similarity(i.name, $1) > $2
+        ORDER BY similarity(i.name, $1) DESC
         LIMIT 1
     """, name, threshold)
+
     if row:
         return {
             "id": str(row["id"]),
             "name": row["name"],
             "unit": row["unit"],
             "type": row["type"],
-            "unit_weight_gr": float(row["unit_weight_gr"]) if row["unit_weight_gr"] is not None else None,
-            "score": float(row["score"])
+            "parent_id": str(row["parent_id"]),
+            "parent_name": row["parent_name"],
+            "match_type": "variant",
+            "similarity": float(row["similarity"]),
+            "has_variants": False,
         }
+
+    # Phase 2: fallback to base ingredients
+    row = await conn.fetchrow("""
+        SELECT id, name, unit, type,
+               similarity(name, $1) AS similarity
+        FROM ingredients
+        WHERE parent_id IS NULL
+          AND similarity(name, $1) > $2
+        ORDER BY similarity(name, $1) DESC
+        LIMIT 1
+    """, name, threshold)
+
+    if row:
+        child_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM ingredients WHERE parent_id = $1",
+            row["id"]
+        )
+        has_variants = child_count > 0
+        return {
+            "id": str(row["id"]),
+            "name": row["name"],
+            "unit": row["unit"],
+            "type": row["type"],
+            "parent_id": None,
+            "parent_name": None,
+            "match_type": "base" if has_variants else "standalone",
+            "similarity": float(row["similarity"]),
+            "has_variants": has_variants,
+        }
+
     return None
 
 
