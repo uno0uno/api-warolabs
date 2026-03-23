@@ -75,11 +75,12 @@ class Settings(BaseSettings):
     discord_purchase_actions_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_PURCHASE_ACTIONS_WEBHOOK_URL')
     discord_leads_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_LEADS_WEBHOOK_URL')
 
-    # MercadoPago — pagos recurrentes (issue #60)
-    mp_access_token: Optional[str] = Field(default=None, alias='MP_ACCESS_TOKEN')
-    mp_public_key: Optional[str] = Field(default=None, alias='MP_PUBLIC_KEY')
-    mp_webhook_secret: Optional[str] = Field(default=None, alias='MP_WEBHOOK_SECRET')
-    mp_environment: str = Field(default='sandbox', alias='MP_ENVIRONMENT')
+    # Wompi — pasarela de pagos Colombia (issue #60)
+    wompi_public_key: Optional[str] = Field(default=None, alias='WOMPI_PUBLIC_KEY')
+    wompi_private_key: Optional[str] = Field(default=None, alias='WOMPI_PRIVATE_KEY')
+    wompi_events_secret: Optional[str] = Field(default=None, alias='WOMPI_EVENTS_SECRET')
+    wompi_integrity_secret: Optional[str] = Field(default=None, alias='WOMPI_INTEGRITY_SECRET')
+    wompi_environment: str = Field(default='sandbox', alias='WOMPI_ENVIRONMENT')
 
     # Cron secret — grace period reminders (issue #62)
     cron_secret: Optional[str] = Field(default=None, alias='CRON_SECRET')

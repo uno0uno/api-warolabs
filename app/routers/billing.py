@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from app.config import settings
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
-from app.services import billing_service, billing_email_service, mercadopago_service
+from app.services import billing_service, billing_email_service, wompi_service
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,13 @@ class SubscriptionUpdate(BaseModel):
     """Body for PATCH /admin/billing/subscriptions/{sub_id}"""
     status: Optional[str] = None
     plan_id: Optional[UUID] = None
+
+
+class GiftBody(BaseModel):
+    """Body for POST /admin/billing/subscriptions/{tenant_id}/gift"""
+    days: Optional[int] = None
+    months: Optional[int] = None
+    note: Optional[str] = None
 
 
 # ── Plan endpoints ────────────────────────────────────────────────────────────
@@ -127,6 +134,33 @@ async def update_subscription_status(
         )
 
 
+@router.post("/subscriptions/{tenant_id}/gift", status_code=200)
+async def gift_subscription(tenant_id: UUID, body: GiftBody, request: Request):
+    """
+    Extend (or create) a subscription for a tenant as a commercial gift.
+
+    - days XOR months must be provided (not both, not neither).
+    - If the tenant has no subscription, creates one (Plan Pro, annual cycle).
+    - If the tenant already has an active subscription, extends current_period_end.
+    - Always records a gift_granted billing event.
+    """
+    require_valid_session(request)
+    if not body.days and not body.months:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail="Debe proveer 'days' o 'months'")
+    if body.days and body.months:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail="Provee solo 'days' o 'months', no ambos")
+    async with get_db_connection() as conn:
+        return await billing_service.gift_tenant_subscription(
+            conn,
+            tenant_id=tenant_id,
+            days=body.days,
+            months=body.months,
+            note=body.note,
+        )
+
+
 # ── Usage & events ────────────────────────────────────────────────────────────
 
 @router.get("/usage")
@@ -160,6 +194,7 @@ class SubscribeBody(BaseModel):
     """Body for POST /billing/subscribe"""
     plan_id: UUID
     billing_cycle: str = "monthly"  # "monthly" | "annual"
+    payer_email: Optional[str] = None
 
 
 @tenant_router.get("/plans")
@@ -174,15 +209,14 @@ async def tenant_list_plans(request: Request):
 @tenant_router.post("/subscribe", status_code=201)
 async def subscribe(body: SubscribeBody, request: Request):
     """
-    Subscribe the authenticated tenant to a plan.
+    Subscribe the authenticated tenant to a plan via Wompi Payment Link.
 
-    1. Validates plan exists and is active
-    2. Validates tenant has email (required by MP)
-    3. Creates a MercadoPago Preapproval
-    4. Saves mp_preapproval_id and status='pending' to DB
-    5. Returns checkout_url for the tenant to approve the subscription
+    1. Valida que el plan exista y esté activo
+    2. Crea un Payment Link en Wompi
+    3. Guarda wompi_link_id y status='pending' en DB
+    4. Retorna checkout_url para redirigir al checkout de Wompi
 
-    billing_cycle must be 'monthly' or 'annual'.
+    billing_cycle debe ser 'monthly' o 'annual'.
     """
     if body.billing_cycle not in ("monthly", "annual"):
         from fastapi import HTTPException
@@ -196,22 +230,26 @@ async def subscribe(body: SubscribeBody, request: Request):
 
     async with get_db_connection() as conn:
         plan = await billing_service.get_plan_for_subscribe(conn, body.plan_id)
-        tenant_email = await billing_service.get_tenant_email(conn, tenant_id)
 
         amount = (
             plan["price_monthly"]
             if body.billing_cycle == "monthly"
             else plan["price_annual"]
         )
-        back_url = f"{settings.frontend_url}/billing/confirmacion"
 
-        mp_result = await mercadopago_service.create_preapproval(
+        # Strip any base path from frontend_url to get the root host
+        # e.g. "http://localhost:8080/waro-colombia" → "http://localhost:8080"
+        from urllib.parse import urlparse
+        parsed = urlparse(settings.frontend_url)
+        frontend_host = f"{parsed.scheme}://{parsed.netloc}"
+        redirect_url = f"{frontend_host}/billing/confirmacion"
+
+        wompi_result = await wompi_service.create_payment_link(
             plan_name=plan["name"],
-            transaction_amount=amount,
+            amount=amount,
             billing_cycle=body.billing_cycle,
             tenant_id=tenant_id,
-            tenant_email=tenant_email or "",
-            back_url=back_url,
+            redirect_url=redirect_url,
         )
 
         return await billing_service.subscribe_tenant(
@@ -219,8 +257,8 @@ async def subscribe(body: SubscribeBody, request: Request):
             tenant_id=tenant_id,
             plan_id=body.plan_id,
             billing_cycle=body.billing_cycle,
-            checkout_url=mp_result["checkout_url"],
-            mp_preapproval_id=mp_result["mp_preapproval_id"],
+            checkout_url=wompi_result["checkout_url"],
+            gateway_reference=wompi_result["wompi_link_id"],
         )
 
 
@@ -230,6 +268,49 @@ async def get_my_subscription(request: Request):
     session = require_valid_session(request)
     async with get_db_connection(use_transaction=False) as conn:
         return await billing_service.get_tenant_subscription(conn, session.tenant_id)
+
+
+@tenant_router.get("/verify-payment")
+async def verify_payment(request: Request, transaction_id: str = Query(...)):
+    """
+    Verifica el estado de una transacción de Wompi y activa la suscripción si fue aprobada.
+    Llamado desde /billing/confirmacion al regresar del checkout de Wompi.
+    """
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    transaction = await wompi_service.get_transaction(transaction_id)
+    wompi_status = transaction.get("status", "PENDING").upper()
+    internal_status = wompi_service.map_status(wompi_status)
+    payment_link_id = transaction.get("payment_link_id")
+
+    async with get_db_connection() as conn:
+        if internal_status == "active" and payment_link_id:
+            await billing_service.activate_subscription_by_gateway_ref(
+                conn,
+                tenant_id=tenant_id,
+                gateway_reference=payment_link_id,
+                wompi_transaction_id=transaction_id,
+                amount=transaction.get("amount_in_cents", 0) / 100,
+            )
+
+    return {
+        "status": internal_status,
+        "wompi_status": wompi_status,
+        "transaction_id": transaction_id,
+        "payment_link_id": payment_link_id,
+    }
+
+
+@tenant_router.get("/usage-history")
+async def get_my_usage_history(
+    request: Request,
+    months: int = Query(12, ge=1, le=24, description="Número de meses a retornar"),
+):
+    """Monthly scan usage history for the authenticated tenant (last N months)."""
+    session = require_valid_session(request)
+    async with get_db_connection(use_transaction=False) as conn:
+        return await billing_service.get_scan_monthly_history(session.tenant_id, conn, months)
 
 
 @tenant_router.get("/events")
@@ -247,154 +328,89 @@ async def get_my_billing_events(
 @tenant_router.delete("/subscription")
 async def cancel_my_subscription(request: Request):
     """
-    Cancel the authenticated tenant's active subscription.
-    Cancels both in the DB and in MercadoPago API.
-    Returns 404 if there is no active/pending subscription.
+    Cancela la suscripción activa del tenant en la DB.
+    Wompi Payment Links no requieren cancelación en la API.
     """
     session = require_valid_session(request)
 
     async with get_db_connection() as conn:
-        mp_preapproval_id = await billing_service.cancel_tenant_subscription(
+        gateway_reference = await billing_service.cancel_tenant_subscription(
             conn, session.tenant_id
         )
 
-    if mp_preapproval_id:
-        await mercadopago_service.cancel_preapproval(mp_preapproval_id)
-
-    return {"status": "cancelled", "mp_preapproval_id": mp_preapproval_id or None}
+    return {"status": "cancelled", "gateway_reference": gateway_reference or None}
 
 
 @tenant_router.post("/webhook", status_code=200)
-async def mercadopago_webhook(
+async def wompi_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
-    x_signature: Optional[str] = Header(None, alias="x-signature"),
-    x_request_id: Optional[str] = Header(None, alias="x-request-id"),
 ):
     """
-    MercadoPago webhook endpoint — called directly by MP (no session auth).
+    Wompi webhook endpoint — llamado por Wompi al completar una transacción.
 
-    Verifies HMAC-SHA256 signature before processing.
-    Handles all subscription and payment events:
-    - subscription_preapproval → authorized  : activate subscription
-    - subscription_preapproval → paused      : mark past_due + email
-    - subscription_preapproval → cancelled   : log only (user already cancelled)
-    - payment → approved                     : renew period + reset scan_usage + email
-    - payment → rejected                     : mark past_due + email
+    Evento: transaction.updated
+    - status APPROVED → activa la suscripción
+    - status DECLINED/VOIDED/ERROR → marca como cancelled + email
 
-    Emails are sent via BackgroundTasks so the 200 response is immediate.
+    Verifica la firma incluida en el body del evento.
     """
-    query_params = dict(request.query_params)
-    data_id = query_params.get("data.id") or query_params.get("id")
-
-    if settings.mp_webhook_secret:
-        is_valid = mercadopago_service.verify_webhook_signature(
-            x_signature=x_signature,
-            x_request_id=x_request_id,
-            data_id=data_id,
-            secret=settings.mp_webhook_secret,
-        )
-        if not is_valid:
-            logger.warning("MP webhook: invalid signature — request rejected")
-            from fastapi import HTTPException
-            raise HTTPException(status_code=401, detail="Invalid webhook signature")
-
     body = await request.json()
-    event_type = body.get("type", "")
-    action = body.get("action", "")
-    resource_data = body.get("data", {})
+    event = body.get("event", "")
 
-    logger.info("MP webhook received: type=%s action=%s", event_type, action)
+    logger.info("Wompi webhook received: event=%s", event)
 
-    if event_type == "subscription_preapproval":
-        preapproval_id = resource_data.get("id") or data_id
-        if not preapproval_id:
-            return {"received": True}
+    if not wompi_service.verify_event_signature(body):
+        logger.warning("Wompi webhook: firma inválida — rechazando")
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
-        # Fetch current status from MP to be authoritative
-        mp_status = await mercadopago_service.get_preapproval_status(preapproval_id)
+    if event != "transaction.updated":
+        return {"received": True}
 
-        if mp_status == "authorized":
-            async with get_db_connection() as conn:
-                await billing_service.activate_tenant_subscription(conn, preapproval_id)
+    transaction = body.get("data", {}).get("transaction", {})
+    wompi_status = transaction.get("status", "").upper()
+    payment_link_id = transaction.get("payment_link_id", "")
+    transaction_id = str(transaction.get("id", ""))
+    amount_cents = transaction.get("amount_in_cents", 0)
 
-        elif mp_status == "paused":
-            async with get_db_connection() as conn:
-                tenant_info = await billing_service.mark_subscription_past_due(
-                    conn, preapproval_id, "subscription_paused"
-                )
-            if tenant_info:
-                background_tasks.add_task(
-                    billing_email_service.send_payment_rejected_email,
-                    tenant_name=tenant_info["tenant_name"],
-                    tenant_email=tenant_info["tenant_email"],
-                    billing_url=f"{settings.frontend_url}/billing",
-                )
+    logger.info(
+        "Wompi transaction: link=%s status=%s tx=%s",
+        payment_link_id, wompi_status, transaction_id,
+    )
 
-        elif mp_status in ("cancelled", "expired"):
-            logger.info(
-                "MP webhook: preapproval %s is %s — no action needed",
-                preapproval_id, mp_status,
+    if not payment_link_id:
+        return {"received": True}
+
+    if wompi_status == "APPROVED":
+        async with get_db_connection() as conn:
+            tenant_info = await billing_service.activate_tenant_subscription(
+                conn,
+                gateway_reference=payment_link_id,
+                payment_id=transaction_id,
+                amount=amount_cents / 100,
+                currency="COP",
+            )
+        if tenant_info:
+            background_tasks.add_task(
+                billing_email_service.send_payment_renewed_email,
+                tenant_name=tenant_info["tenant_name"],
+                tenant_email=tenant_info["tenant_email"],
+                next_period_end=tenant_info["next_period_end"],
             )
 
-    elif event_type == "payment":
-        payment_id = resource_data.get("id") or data_id
-        if not payment_id:
-            return {"received": True}
-
-        mp_payment = await mercadopago_service.get_payment_status(str(payment_id))
-        payment_status = mp_payment["status"]
-        external_reference = mp_payment.get("external_reference")  # tenant_id UUID string
-
-        logger.info(
-            "MP payment webhook: id=%s status=%s tenant=%s",
-            payment_id, payment_status, external_reference,
-        )
-
-        if payment_status == "approved" and external_reference:
-            async with get_db_connection() as conn:
-                tenant_info = await billing_service.renew_subscription_period(
-                    conn,
-                    tenant_id_str=external_reference,
-                    mp_payment_id=str(payment_id),
-                    amount=mp_payment.get("transaction_amount", 0),
-                    currency=mp_payment.get("currency_id", "COP"),
-                )
-            if tenant_info:
-                background_tasks.add_task(
-                    billing_email_service.send_payment_renewed_email,
-                    tenant_name=tenant_info["tenant_name"],
-                    tenant_email=tenant_info["tenant_email"],
-                    next_period_end=tenant_info["next_period_end"],
-                )
-
-        elif payment_status in ("rejected", "cancelled") and external_reference:
-            # Find preapproval_id via tenant subscription for mark_subscription_past_due
-            async with get_db_connection() as conn:
-                from uuid import UUID as _UUID
-                try:
-                    _tid = _UUID(external_reference)
-                except ValueError:
-                    logger.error("MP payment webhook: invalid external_reference=%s", external_reference)
-                    return {"received": True}
-
-                preapproval_row = await conn.fetchval(
-                    "SELECT mp_preapproval_id FROM tenant_subscriptions WHERE tenant_id = $1",
-                    _tid,
-                )
-                tenant_info = None
-                if preapproval_row:
-                    tenant_info = await billing_service.mark_subscription_past_due(
-                        conn, preapproval_row, "payment_rejected"
-                    )
-
-            if tenant_info:
-                background_tasks.add_task(
-                    billing_email_service.send_payment_rejected_email,
-                    tenant_name=tenant_info["tenant_name"],
-                    tenant_email=tenant_info["tenant_email"],
-                    billing_url=f"{settings.frontend_url}/billing",
-                )
+    elif wompi_status in ("DECLINED", "VOIDED", "ERROR"):
+        async with get_db_connection() as conn:
+            tenant_info = await billing_service.mark_subscription_past_due(
+                conn, payment_link_id, "payment_rejected"
+            )
+        if tenant_info:
+            background_tasks.add_task(
+                billing_email_service.send_payment_rejected_email,
+                tenant_name=tenant_info["tenant_name"],
+                tenant_email=tenant_info["tenant_email"],
+                billing_url=f"{settings.frontend_url}/gestion/billing",
+            )
 
     return {"received": True}
 

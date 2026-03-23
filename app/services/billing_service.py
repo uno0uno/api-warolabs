@@ -5,6 +5,7 @@ Handles scan quota enforcement, admin CRUD for billing entities,
 tenant-facing subscription flows, and grace period access control.
 Works with tables created in migration #59.
 """
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -42,7 +43,8 @@ async def check_scan_quota(tenant_id: UUID, conn) -> None:
     """, tenant_id)
 
     if result is not None:
-        # Quota OK — already incremented
+        # Quota OK — already incremented; log monthly usage
+        await _upsert_monthly_log(tenant_id, conn)
         return
 
     # UPDATE matched 0 rows — find out why
@@ -81,6 +83,9 @@ async def check_scan_quota(tenant_id: UUID, conn) -> None:
           AND period_start <= now()
           AND period_end   >  now()
     """, tenant_id)
+
+    # Log monthly usage
+    await _upsert_monthly_log(tenant_id, conn)
 
 
 async def _create_period_usage(tenant_id: UUID, conn) -> None:
@@ -121,6 +126,53 @@ async def _create_period_usage(tenant_id: UUID, conn) -> None:
     logger.info(
         "scan_usage row created: tenant=%s scan_limit=%d", tenant_id, scan_limit
     )
+
+
+async def _upsert_monthly_log(tenant_id: UUID, conn) -> None:
+    """
+    Atomically increments the scan_monthly_log counter for the current calendar
+    month. Called after every successful scan quota increment.
+    Uses ON CONFLICT DO UPDATE so it is safe for concurrent calls.
+    """
+    sub = await conn.fetchrow("""
+        SELECT id FROM tenant_subscriptions
+        WHERE tenant_id = $1
+          AND status IN ('active', 'past_due')
+          AND current_period_end > now()
+        ORDER BY current_period_end DESC
+        LIMIT 1
+    """, tenant_id)
+
+    subscription_id: Optional[UUID] = sub["id"] if sub else None
+
+    await conn.execute("""
+        INSERT INTO scan_monthly_log (tenant_id, subscription_id, year_month, scans_count)
+        VALUES ($1, $2, DATE_TRUNC('month', NOW())::date, 1)
+        ON CONFLICT (tenant_id, year_month)
+        DO UPDATE SET scans_count = scan_monthly_log.scans_count + 1
+    """, tenant_id, subscription_id)
+
+
+async def get_scan_monthly_history(tenant_id: UUID, conn, months: int = 12) -> List[Dict[str, Any]]:
+    """
+    Returns the last N months of scan usage for a tenant from scan_monthly_log.
+    Months with zero scans are not included (no row exists).
+    """
+    rows = await conn.fetch("""
+        SELECT year_month, scans_count
+        FROM scan_monthly_log
+        WHERE tenant_id = $1
+        ORDER BY year_month DESC
+        LIMIT $2
+    """, tenant_id, months)
+
+    return [
+        {
+            "year_month": row["year_month"].isoformat(),
+            "scans_count": row["scans_count"],
+        }
+        for row in rows
+    ]
 
 
 async def get_scan_usage(tenant_id: UUID, conn) -> Dict[str, Any]:
@@ -273,7 +325,6 @@ async def list_subscriptions(conn) -> List[Dict[str, Any]]:
             ts.status,
             ts.current_period_start,
             ts.current_period_end,
-            ts.mp_subscription_id,
             ts.cancelled_at,
             ts.created_at,
             ts.updated_at
@@ -305,14 +356,18 @@ async def get_subscription_by_tenant(
             ts.status,
             ts.current_period_start,
             ts.current_period_end,
-            ts.mp_subscription_id,
-            ts.mp_preapproval_id,
+            ts.gateway_reference,
             ts.cancelled_at,
             ts.created_at,
-            ts.updated_at
+            ts.updated_at,
+            COALESCE(su.scans_used, 0) AS scans_used
         FROM tenant_subscriptions ts
         JOIN tenants t ON t.id = ts.tenant_id
         JOIN subscription_plans sp ON sp.id = ts.plan_id
+        LEFT JOIN scan_usage su
+            ON su.tenant_id = ts.tenant_id
+           AND su.period_start <= now()
+           AND su.period_end   >  now()
         WHERE ts.tenant_id = $1
     """, tenant_id)
     if row is None:
@@ -432,8 +487,7 @@ def _serialize_billing_events(rows, total: int, limit: int, offset: int) -> Dict
             "event_type": r["event_type"],
             "amount": str(r["amount"]) if r["amount"] is not None else None,
             "currency": r["currency"],
-            "mp_payment_id": r["mp_payment_id"],
-            "metadata": dict(r["metadata"]) if r["metadata"] else {},
+            "metadata": (json.loads(r["metadata"]) if isinstance(r["metadata"], str) else dict(r["metadata"])) if r["metadata"] else {},
             "created_at": r["created_at"].isoformat(),
         })
     return {"total": total, "limit": limit, "offset": offset, "events": events}
@@ -447,7 +501,7 @@ async def list_billing_events(
         SELECT
             be.id, be.tenant_id, t.name AS tenant_name,
             be.subscription_id, be.event_type, be.amount,
-            be.currency, be.mp_payment_id, be.metadata, be.created_at
+            be.currency, be.metadata, be.created_at
         FROM billing_events be
         JOIN tenants t ON t.id = be.tenant_id
         ORDER BY be.created_at DESC
@@ -465,7 +519,7 @@ async def list_tenant_billing_events(
         SELECT
             be.id, be.tenant_id, t.name AS tenant_name,
             be.subscription_id, be.event_type, be.amount,
-            be.currency, be.mp_payment_id, be.metadata, be.created_at
+            be.currency, be.metadata, be.created_at
         FROM billing_events be
         JOIN tenants t ON t.id = be.tenant_id
         WHERE be.tenant_id = $3
@@ -490,7 +544,7 @@ def _serialize_plan(row) -> Dict[str, Any]:
         "price_annual": str(row["price_annual"]),
         "scan_limit": row["scan_limit"],
         "is_active": row["is_active"],
-        "features": dict(row["features"]) if row["features"] else {},
+        "features": (json.loads(row["features"]) if isinstance(row["features"], str) else dict(row["features"])) if row["features"] else {},
         "created_at": row["created_at"].isoformat(),
         "updated_at": row["updated_at"].isoformat(),
     }
@@ -508,16 +562,17 @@ def _serialize_subscription(row) -> Dict[str, Any]:
         "status": row["status"],
         "current_period_start": row["current_period_start"].isoformat(),
         "current_period_end": row["current_period_end"].isoformat(),
-        "mp_subscription_id": row["mp_subscription_id"],
         "cancelled_at": row["cancelled_at"].isoformat() if row["cancelled_at"] else None,
         "created_at": row["created_at"].isoformat(),
         "updated_at": row["updated_at"].isoformat(),
     }
     # Optional fields (not always selected)
-    if "mp_preapproval_id" in row.keys():
-        data["mp_preapproval_id"] = row["mp_preapproval_id"]
+    if "gateway_reference" in row.keys():
+        data["gateway_reference"] = row["gateway_reference"]
     if "scan_limit" in row.keys():
         data["scan_limit"] = row["scan_limit"]
+    if "scans_used" in row.keys():
+        data["scans_used"] = row["scans_used"]
     return data
 
 
@@ -558,7 +613,7 @@ async def subscribe_tenant(
     plan_id: UUID,
     billing_cycle: str,
     checkout_url: str,
-    mp_preapproval_id: str,
+    gateway_reference: str,
 ) -> Dict[str, Any]:
     """
     Update (or insert) the tenant's subscription row with the new plan and
@@ -571,7 +626,7 @@ async def subscribe_tenant(
     row = await conn.fetchrow("""
         INSERT INTO tenant_subscriptions
             (tenant_id, plan_id, billing_cycle, status,
-             mp_preapproval_id,
+             gateway_reference,
              current_period_start, current_period_end)
         VALUES (
             $1, $2, $3, 'pending',
@@ -583,14 +638,14 @@ async def subscribe_tenant(
             plan_id              = EXCLUDED.plan_id,
             billing_cycle        = EXCLUDED.billing_cycle,
             status               = 'pending',
-            mp_preapproval_id    = EXCLUDED.mp_preapproval_id,
+            gateway_reference    = EXCLUDED.gateway_reference,
             current_period_start = EXCLUDED.current_period_start,
             current_period_end   = EXCLUDED.current_period_end,
             cancelled_at         = NULL,
             updated_at           = now()
         RETURNING id, tenant_id, plan_id, billing_cycle, status,
-                  mp_preapproval_id, current_period_start, current_period_end
-    """, tenant_id, plan_id, billing_cycle, mp_preapproval_id)
+                  gateway_reference, current_period_start, current_period_end
+    """, tenant_id, plan_id, billing_cycle, gateway_reference)
 
     sub_id = row["id"]
 
@@ -598,19 +653,65 @@ async def subscribe_tenant(
         INSERT INTO billing_events
             (tenant_id, subscription_id, event_type, metadata)
         VALUES ($1, $2, 'subscribe_initiated', $3)
-    """, tenant_id, sub_id, {"checkout_url": checkout_url, "plan_id": str(plan_id)})
+    """, tenant_id, sub_id, json.dumps({"checkout_url": checkout_url, "plan_id": str(plan_id)}))
 
     logger.info(
         "subscribe_initiated: tenant=%s plan=%s cycle=%s preapproval=%s",
-        tenant_id, plan_id, billing_cycle, mp_preapproval_id,
+        tenant_id, plan_id, billing_cycle, gateway_reference,
     )
 
     return {
         "subscription_id": str(sub_id),
         "checkout_url": checkout_url,
-        "mp_preapproval_id": mp_preapproval_id,
+        "gateway_reference": gateway_reference,
         "status": "pending",
     }
+
+
+async def activate_subscription_by_gateway_ref(
+    conn,
+    tenant_id: UUID,
+    gateway_reference: str,
+    wompi_transaction_id: str,
+    amount: float,
+) -> None:
+    """
+    Activa la suscripción del tenant cuando Wompi confirma el pago.
+    Solo activa si el gateway_reference coincide con la suscripción pendiente.
+    """
+    row = await conn.fetchrow(
+        "SELECT id, status FROM tenant_subscriptions WHERE tenant_id = $1 AND gateway_reference = $2",
+        tenant_id, gateway_reference,
+    )
+    if not row:
+        logger.warning(
+            "activate_subscription: no subscription found for tenant=%s gateway_ref=%s",
+            tenant_id, gateway_reference,
+        )
+        return
+
+    if row["status"] == "active":
+        logger.info("activate_subscription: already active tenant=%s", tenant_id)
+        return
+
+    await conn.execute("""
+        UPDATE tenant_subscriptions
+        SET status = 'active', updated_at = now()
+        WHERE id = $1
+    """, row["id"])
+
+    await conn.execute("""
+        INSERT INTO billing_events (tenant_id, subscription_id, event_type, amount, currency, metadata)
+        VALUES ($1, $2, 'payment_approved', $3, 'COP', $4)
+    """, tenant_id, row["id"], amount, json.dumps({
+        "wompi_transaction_id": wompi_transaction_id,
+        "gateway_reference": gateway_reference,
+    }))
+
+    logger.info(
+        "Subscription activated: tenant=%s transaction=%s amount=%s",
+        tenant_id, wompi_transaction_id, amount,
+    )
 
 
 async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
@@ -623,7 +724,7 @@ async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
 
 async def cancel_tenant_subscription(conn, tenant_id: UUID) -> str:
     """
-    Set subscription status='cancelled' in DB and return the mp_preapproval_id
+    Set subscription status='cancelled' in DB and return the gateway_reference
     so the caller can cancel it in MP API.
     Raises 404 if no active subscription exists.
     """
@@ -632,7 +733,7 @@ async def cancel_tenant_subscription(conn, tenant_id: UUID) -> str:
         SET status = 'cancelled', cancelled_at = now(), updated_at = now()
         WHERE tenant_id = $1
           AND status IN ('active', 'pending')
-        RETURNING id, mp_preapproval_id
+        RETURNING id, gateway_reference
     """, tenant_id)
 
     if row is None:
@@ -642,51 +743,79 @@ async def cancel_tenant_subscription(conn, tenant_id: UUID) -> str:
         )
 
     sub_id = row["id"]
-    mp_preapproval_id = row["mp_preapproval_id"]
+    gateway_reference = row["gateway_reference"]
 
     await conn.execute("""
         INSERT INTO billing_events
             (tenant_id, subscription_id, event_type, metadata)
         VALUES ($1, $2, 'subscription_cancelled', $3)
-    """, tenant_id, sub_id, {"mp_preapproval_id": mp_preapproval_id or ""})
+    """, tenant_id, sub_id, {"gateway_reference": gateway_reference or ""})
 
-    logger.info("subscription_cancelled: tenant=%s preapproval=%s", tenant_id, mp_preapproval_id)
+    logger.info("subscription_cancelled: tenant=%s preapproval=%s", tenant_id, gateway_reference)
 
-    return mp_preapproval_id or ""
+    return gateway_reference or ""
 
 
-async def activate_tenant_subscription(conn, mp_preapproval_id: str) -> bool:
+async def activate_tenant_subscription(
+    conn,
+    gateway_reference: str,
+    payment_id: str = "",
+    amount: float = 0,
+    currency: str = "COP",
+):
     """
-    Called from the MP webhook when status='authorized'.
-    Sets status='active' for the subscription with the given preapproval ID.
-    Returns True if a row was updated, False if no matching row was found.
+    Llamado desde el webhook de Wompi cuando la transacción es APPROVED.
+    Activa la suscripción y extiende el período según billing_cycle.
+    Retorna tenant_info dict o None si no hay fila pendiente.
     """
     row = await conn.fetchrow("""
-        UPDATE tenant_subscriptions
-        SET status = 'active', updated_at = now()
-        WHERE mp_preapproval_id = $1
-          AND status = 'pending'
-        RETURNING id, tenant_id
-    """, mp_preapproval_id)
+        SELECT ts.id, ts.tenant_id, ts.billing_cycle,
+               t.name AS tenant_name, t.email AS tenant_email
+        FROM tenant_subscriptions ts
+        JOIN tenants t ON t.id = ts.tenant_id
+        WHERE ts.gateway_reference = $1
+          AND ts.status = 'pending'
+    """, gateway_reference)
 
     if row is None:
         logger.warning(
-            "activate_tenant_subscription: no pending row for preapproval=%s",
-            mp_preapproval_id,
+            "activate_tenant_subscription: no pending row for gateway_reference=%s",
+            gateway_reference,
         )
-        return False
+        return None
+
+    billing_cycle = row["billing_cycle"]
+    interval = "1 month" if billing_cycle == "monthly" else "1 year"
+
+    updated = await conn.fetchrow("""
+        UPDATE tenant_subscriptions
+        SET status               = 'active',
+            current_period_start = now(),
+            current_period_end   = now() + $2::interval,
+            updated_at           = now()
+        WHERE id = $1
+        RETURNING current_period_end
+    """, row["id"], interval)
+
+    next_period_end = updated["current_period_end"].isoformat() if updated else None
 
     await conn.execute("""
         INSERT INTO billing_events
-            (tenant_id, subscription_id, event_type, metadata)
-        VALUES ($1, $2, 'subscription_activated', $3)
-    """, row["tenant_id"], row["id"], {"mp_preapproval_id": mp_preapproval_id})
+            (tenant_id, subscription_id, event_type, amount, currency, metadata)
+        VALUES ($1, $2, 'payment_approved', $3, $4, $5)
+    """, row["tenant_id"], row["id"], amount, currency,
+        json.dumps({"gateway_reference": gateway_reference}))
 
     logger.info(
-        "subscription_activated: tenant=%s preapproval=%s",
-        row["tenant_id"], mp_preapproval_id,
+        "subscription_activated: tenant=%s gateway_reference=%s cycle=%s",
+        row["tenant_id"], gateway_reference, billing_cycle,
     )
-    return True
+
+    return {
+        "tenant_name": row["tenant_name"],
+        "tenant_email": row["tenant_email"],
+        "next_period_end": next_period_end,
+    }
 
 
 # ── Grace period & access control — issue #62 ────────────────────────────────
@@ -863,7 +992,7 @@ async def record_reminder_sent(conn, tenant_id: str, subscription_id: str, days_
 
 
 async def mark_subscription_past_due(
-    conn, mp_preapproval_id: str, event_type: str
+    conn, gateway_reference: str, event_type: str
 ) -> Optional[Dict[str, Any]]:
     """
     Set subscription status='past_due' for a given preapproval ID.
@@ -878,14 +1007,14 @@ async def mark_subscription_past_due(
     row = await conn.fetchrow("""
         UPDATE tenant_subscriptions ts
         SET status = 'past_due', updated_at = now()
-        WHERE ts.mp_preapproval_id = $1
+        WHERE ts.gateway_reference = $1
         RETURNING ts.id AS subscription_id, ts.tenant_id
-    """, mp_preapproval_id)
+    """, gateway_reference)
 
     if row is None:
         logger.warning(
             "mark_subscription_past_due: no subscription for preapproval=%s",
-            mp_preapproval_id,
+            gateway_reference,
         )
         return None
 
@@ -900,11 +1029,11 @@ async def mark_subscription_past_due(
     await conn.execute("""
         INSERT INTO billing_events (tenant_id, subscription_id, event_type, metadata)
         VALUES ($1, $2, $3, $4)
-    """, tenant_id, sub_id, event_type, {"mp_preapproval_id": mp_preapproval_id})
+    """, tenant_id, sub_id, event_type, {"gateway_reference": gateway_reference})
 
     logger.info(
         "%s: tenant=%s preapproval=%s",
-        event_type, tenant_id, mp_preapproval_id,
+        event_type, tenant_id, gateway_reference,
     )
 
     return {
@@ -915,114 +1044,99 @@ async def mark_subscription_past_due(
     }
 
 
-async def renew_subscription_period(
+
+async def gift_tenant_subscription(
     conn,
-    tenant_id_str: str,
-    mp_payment_id: str,
-    amount: float,
-    currency: str = "COP",
-) -> Optional[Dict[str, Any]]:
+    tenant_id: UUID,
+    days: int | None = None,
+    months: int | None = None,
+    note: str | None = None,
+) -> dict:
     """
-    Renew subscription period and reset scan_usage after a successful payment.
+    Extiende o crea una suscripción activa como regalo comercial.
 
-    Called when MP sends payment → approved.
-
-    Idempotency: checks billing_events.mp_payment_id before processing.
-    If already processed, returns None silently.
-
-    Steps:
-    1. Idempotency check via mp_payment_id in billing_events
-    2. Fetch subscription + billing_cycle
-    3. Extend current_period_end (1 month or 12 months)
-    4. Set status='active' (in case it was past_due)
-    5. Insert new scan_usage row for the new period
-    6. Insert billing_event with mp_payment_id + amount
-    7. Return tenant info for email trigger
+    - Si el tenant ya tiene suscripción: extiende current_period_end.
+    - Si no tiene: crea una nueva con el plan Pro activo.
+    - Registra billing_event gift_granted con días/meses y nota.
     """
-    from uuid import UUID as _UUID
-
-    # Idempotency: if this payment was already processed, skip
-    existing = await conn.fetchval(
-        "SELECT id FROM billing_events WHERE mp_payment_id = $1", mp_payment_id
-    )
-    if existing is not None:
-        logger.info(
-            "renew_subscription_period: mp_payment_id=%s already processed — skipping",
-            mp_payment_id,
-        )
-        return None
-
-    try:
-        tenant_id = _UUID(tenant_id_str)
-    except (ValueError, AttributeError):
-        logger.error("renew_subscription_period: invalid tenant_id=%s", tenant_id_str)
-        return None
+    interval = f"{days} days" if days else f"{months} months"
+    label = f"{days} días" if days else f"{months} meses"
 
     sub = await conn.fetchrow("""
-        SELECT id, billing_cycle, current_period_end, plan_id
-        FROM tenant_subscriptions
-        WHERE tenant_id = $1
+        SELECT ts.id, ts.status, ts.current_period_end, ts.plan_id,
+               sp.price_monthly
+        FROM tenant_subscriptions ts
+        JOIN subscription_plans sp ON sp.id = ts.plan_id
+        WHERE ts.tenant_id = $1
     """, tenant_id)
 
-    if sub is None:
-        logger.warning(
-            "renew_subscription_period: no subscription for tenant=%s", tenant_id
+    if sub:
+        plan_price_monthly = float(sub["price_monthly"])
+        plan_id = sub["plan_id"]
+
+        updated = await conn.fetchrow("""
+            UPDATE tenant_subscriptions
+            SET status = 'active',
+                current_period_end = GREATEST(current_period_end, now()) + $1::interval,
+                updated_at = now()
+            WHERE id = $2
+            RETURNING id, current_period_end
+        """, interval, sub["id"])
+        sub_id = updated["id"]
+        new_end = updated["current_period_end"]
+
+        await conn.execute("""
+            UPDATE scan_usage
+            SET period_end = $1, updated_at = now()
+            WHERE subscription_id = $2
+              AND period_start <= now() AND period_end > now()
+        """, new_end, sub_id)
+    else:
+        plan = await conn.fetchrow(
+            "SELECT id, scan_limit, price_monthly FROM subscription_plans WHERE is_active = true ORDER BY price_monthly LIMIT 1"
         )
-        return None
+        if not plan:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="No hay planes activos disponibles")
 
-    sub_id = sub["id"]
-    billing_cycle = sub["billing_cycle"]
-    interval = "1 month" if billing_cycle == "monthly" else "12 months"
+        plan_price_monthly = float(plan["price_monthly"])
+        plan_id = plan["id"]
 
-    # Extend period + activate
-    new_period = await conn.fetchrow("""
-        UPDATE tenant_subscriptions
-        SET
-            status = 'active',
-            current_period_start = current_period_end,
-            current_period_end = current_period_end + $1::interval,
-            updated_at = now()
-        WHERE id = $2
-        RETURNING current_period_start, current_period_end
-    """, interval, sub_id)
+        new_end_row = await conn.fetchrow("""
+            INSERT INTO tenant_subscriptions
+                (tenant_id, plan_id, billing_cycle, status, current_period_start, current_period_end)
+            VALUES ($1, $2, 'annual', 'active', now(), now() + $3::interval)
+            RETURNING id, current_period_end
+        """, tenant_id, plan_id, interval)
 
-    new_start = new_period["current_period_start"]
-    new_end = new_period["current_period_end"]
+        sub_id = new_end_row["id"]
+        new_end = new_end_row["current_period_end"]
 
-    # Get scan limit from plan
-    scan_limit = await conn.fetchval(
-        "SELECT scan_limit FROM subscription_plans WHERE id = $1", sub["plan_id"]
-    )
+        await conn.execute("""
+            INSERT INTO scan_usage
+                (tenant_id, subscription_id, period_start, period_end, scans_used, scans_limit)
+            VALUES ($1, $2, now(), $3, 0, $4)
+        """, tenant_id, sub_id, new_end, plan["scan_limit"] or 1000)
 
-    # New scan_usage row for the new period (INSERT — preserves history)
+    # Valor equivalente del regalo
+    equivalent_amount = round(plan_price_monthly * months, 2) if months else round(plan_price_monthly / 30 * days, 2)
+
+    metadata = {"label": label}
+    if note:
+        metadata["note"] = note
+
     await conn.execute("""
-        INSERT INTO scan_usage
-            (tenant_id, subscription_id, period_start, period_end, scans_used, scans_limit)
-        VALUES ($1, $2, $3, $4, 0, $5)
-        ON CONFLICT (tenant_id, period_start) DO NOTHING
-    """, tenant_id, sub_id, new_start, new_end, scan_limit or 1000)
+        INSERT INTO billing_events (tenant_id, subscription_id, event_type, amount, currency, metadata)
+        VALUES ($1, $2, 'gift_granted', $3, 'COP', $4)
+    """, tenant_id, sub_id, equivalent_amount, json.dumps(metadata))
 
-    # Billing event with payment amount
-    await conn.execute("""
-        INSERT INTO billing_events
-            (tenant_id, subscription_id, event_type, amount, currency, mp_payment_id, metadata)
-        VALUES ($1, $2, 'payment_approved', $3, $4, $5, $6)
-    """, tenant_id, sub_id, amount, currency, mp_payment_id,
-        {"billing_cycle": billing_cycle, "new_period_end": new_end.isoformat()})
-
-    # Fetch tenant info for email
-    tenant = await conn.fetchrow(
-        "SELECT name, email FROM tenants WHERE id = $1", tenant_id
-    )
-
-    logger.info(
-        "payment_approved: tenant=%s payment=%s new_period_end=%s",
-        tenant_id, mp_payment_id, new_end.date().isoformat(),
-    )
+    logger.info("gift_granted: tenant=%s %s amount=%s new_end=%s", tenant_id, label, equivalent_amount, new_end.date())
 
     return {
         "tenant_id": str(tenant_id),
-        "tenant_name": tenant["name"] if tenant else "",
-        "tenant_email": tenant["email"] if tenant else None,
-        "next_period_end": new_end.date().isoformat(),
+        "subscription_id": str(sub_id),
+        "granted": label,
+        "equivalent_amount": equivalent_amount,
+        "active_until": new_end.date().isoformat(),
+        "note": note,
     }
