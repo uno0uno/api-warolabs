@@ -256,6 +256,145 @@ async def get_online_order_by_id(
         raise APIError(f"Error getting online order detail: {str(e)}", status_code=500)
 
 
+async def _deduct_inventory_for_order(conn, tenant_id, order_id, user_id):
+    """
+    Deduct ingredient stock for all items in an online order.
+    Mirrors the deduction logic in pos_cart_service.complete_pos_order().
+
+    Called at two points:
+      - Manual flow: when order transitions to 'preparing' (kitchen starts cooking)
+      - Fast flow:   inside auto_complete block (pending → confirmed → completed)
+
+    Deducts recipe ingredients (direct + base templates) and modifier ingredients.
+    Uses ingredient_id directly from recipes — variant-safe by design.
+    Items with product_id IS NULL (variant-only rows) are skipped.
+    """
+    items = await conn.fetch(
+        """
+        SELECT oi.id, oi.product_id, oi.quantity, o.order_number
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        WHERE oi.order_id = $1 AND oi.product_id IS NOT NULL
+        """,
+        order_id,
+    )
+
+    for item in items:
+        product_id = item["product_id"]
+        item_qty = float(item["quantity"])
+        order_number = item["order_number"]
+        order_item_id = item["id"]
+
+        # --- Modifier ingredient deduction ---
+        modifier_rows = await conn.fetch(
+            """
+            SELECT oim.modifier_id, oim.quantity AS modifier_qty, oim.modifier_name,
+                   m.ingredient_id, m.ingredient_quantity, m.ingredient_unit,
+                   i.name AS ingredient_name
+            FROM order_item_modifiers oim
+            JOIN modifiers m ON m.id = oim.modifier_id
+            LEFT JOIN ingredients i ON i.id = m.ingredient_id
+            WHERE oim.order_item_id = $1
+              AND m.ingredient_id IS NOT NULL
+              AND m.ingredient_quantity IS NOT NULL
+            """,
+            order_item_id,
+        )
+
+        for mod in modifier_rows:
+            total_deduction = item_qty * float(mod["modifier_qty"]) * float(mod["ingredient_quantity"])
+            stock_row = await conn.fetchrow(
+                "SELECT current_stock FROM tenant_inventory WHERE ingredient_id = $1 AND tenant_id = $2",
+                mod["ingredient_id"], tenant_id,
+            )
+            previous = float(stock_row["current_stock"]) if stock_row else 0.0
+            new_stock = previous - total_deduction
+            if stock_row:
+                await conn.execute(
+                    "UPDATE tenant_inventory SET current_stock = $1, last_updated = NOW() WHERE ingredient_id = $2 AND tenant_id = $3",
+                    new_stock, mod["ingredient_id"], tenant_id,
+                )
+            else:
+                await conn.execute(
+                    "INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock, last_updated) VALUES ($1, $2, $3, 0, NOW())",
+                    tenant_id, mod["ingredient_id"], -total_deduction,
+                )
+            await conn.execute(
+                """
+                INSERT INTO tenant_ingredient_movements (
+                    tenant_id, ingredient_id, movement_type, quantity_change, unit,
+                    previous_stock, new_stock, reference_table, reference_id,
+                    reason, created_by, created_at
+                ) VALUES ($1, $2, 'consumption', $3, $4, $5, $6, 'orders', $7, $8, $9, NOW())
+                """,
+                tenant_id, mod["ingredient_id"], -total_deduction,
+                mod["ingredient_unit"] or "und", previous, new_stock,
+                order_id,
+                f"Modificador {mod['modifier_name']} ({float(mod['modifier_qty']):.0f}x) - Domicilio #{order_number}",
+                user_id,
+            )
+            logger.info(
+                f"Modifier inventory deducted: {mod['ingredient_name']} "
+                f"-{total_deduction} (Modifier: {mod['modifier_name']}, Order #{order_number})"
+            )
+
+        # --- Recipe ingredient deduction (direct + base templates) ---
+        ingredients = await conn.fetch(
+            """
+            SELECT pr.ingredient_id, pr.quantity, pr.unit, i.name AS ingredient_name
+            FROM product_recipes pr
+            JOIN ingredients i ON i.id = pr.ingredient_id
+            WHERE pr.product_id = $1
+
+            UNION ALL
+
+            SELECT brt.ingredient_id, brt.base_quantity AS quantity, brt.unit, i.name AS ingredient_name
+            FROM product_base_recipes pbr
+            JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+            JOIN ingredients i ON i.id = brt.ingredient_id
+            WHERE pbr.product_id = $1
+            """,
+            product_id,
+        )
+
+        for ing in ingredients:
+            qty_to_deduct = item_qty * float(ing["quantity"])
+            stock_row = await conn.fetchrow(
+                "SELECT current_stock FROM tenant_inventory WHERE ingredient_id = $1 AND tenant_id = $2",
+                ing["ingredient_id"], tenant_id,
+            )
+            previous = float(stock_row["current_stock"]) if stock_row else 0.0
+            new_stock = previous - qty_to_deduct
+            if stock_row:
+                await conn.execute(
+                    "UPDATE tenant_inventory SET current_stock = $1, last_updated = NOW() WHERE ingredient_id = $2 AND tenant_id = $3",
+                    new_stock, ing["ingredient_id"], tenant_id,
+                )
+            else:
+                await conn.execute(
+                    "INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock, last_updated) VALUES ($1, $2, $3, 0, NOW())",
+                    tenant_id, ing["ingredient_id"], -qty_to_deduct,
+                )
+            await conn.execute(
+                """
+                INSERT INTO tenant_ingredient_movements (
+                    tenant_id, ingredient_id, movement_type, quantity_change, unit,
+                    previous_stock, new_stock, reference_table, reference_id,
+                    reason, created_by, created_at
+                ) VALUES ($1, $2, 'consumption', $3, $4, $5, $6, 'orders', $7, $8, $9, NOW())
+                """,
+                tenant_id, ing["ingredient_id"], -qty_to_deduct,
+                ing["unit"], previous, new_stock,
+                order_id,
+                f"Domicilio {item_qty:.0f}x {ing['ingredient_name']} - Orden #{order_number}",
+                user_id,
+            )
+            logger.info(
+                f"Inventory deducted: {ing['ingredient_name']} "
+                f"-{qty_to_deduct}{ing['unit']} (Order #{order_number})"
+            )
+
+
 async def update_order_status(
     request: Request,
     order_id: UUID,
@@ -326,7 +465,11 @@ async def update_order_status(
                 order_id, old_status, new_status, changed_by, reason,
             )
 
-            # 5. Auto-complete: if requested and this was a pending → confirmed transition,
+            # 5. Manual flow: deduct inventory when kitchen starts preparing
+            if new_status == "preparing":
+                await _deduct_inventory_for_order(conn, tenant_id, order_id, changed_by)
+
+            # 6. Auto-complete: if requested and this was a pending → confirmed transition,
             #    immediately execute a second confirmed → completed transition in the same conn.
             if auto_complete and old_status == "pending" and new_status == "confirmed":
                 # 5a. UPDATE orders to completed
@@ -349,6 +492,9 @@ async def update_order_status(
                     """,
                     order_id, "confirmed", "completed", changed_by, None,
                 )
+
+                # Fast flow: deduct inventory (pending → confirmed → completed skips 'preparing')
+                await _deduct_inventory_for_order(conn, tenant_id, order_id, changed_by)
 
                 # Fire acceptance email (non-blocking — does not delay the response)
                 email_row = await conn.fetchrow(
