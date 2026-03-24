@@ -41,6 +41,7 @@ class Ingredient(IngredientBase):
     updated_at: Optional[datetime]
     hierarchy_base_id: Optional[str] = None
     hierarchy_base_name: Optional[str] = None
+    has_variants: Optional[int] = None  # count of variants via ingredient_global_hierarchy
 
     class Config:
         from_attributes = True

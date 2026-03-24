@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Request, Response, Query, Body, HTTPException
-from typing import Optional
+from typing import Any, Dict, Optional
 from uuid import UUID
 from app.services.ingredients_service import get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name
 from app.models.ingredient import IngredientsListResponse
 from app.database import get_db_connection
+from app.core.middleware import require_valid_session
 
 router = APIRouter()
 
@@ -34,14 +35,15 @@ async def get_ingredients_endpoint(
     category: Optional[str] = Query(default=None, description="Filter by ingredient category"),
     supplier_id: Optional[UUID] = Query(default=None, description="Filter by supplier ID"),
     type: Optional[str] = Query(default=None, description="Filter by type: 'food', 'service', 'supply'"),
-    is_resale: Optional[bool] = Query(default=None, description="Filter resale ingredients only")
+    is_resale: Optional[bool] = Query(default=None, description="Filter resale ingredients only"),
+    base_only: Optional[bool] = Query(default=None, description="When true, exclude variant ingredients (those with a base assigned)"),
 ):
     """
     Get ingredients list with tenant isolation
     Requires valid session with tenant context
     """
     return await get_ingredients_list(
-        request, response, page, limit, search, category, supplier_id, type, is_resale
+        request, response, page, limit, search, category, supplier_id, type, is_resale, base_only
     )
 
 
@@ -84,3 +86,42 @@ async def patch_ingredient_unit_weight(
     Only applies to 'und' ingredients.
     """
     return await update_ingredient_unit_weight(request, response, ingredient_id, unit_weight_gr)
+
+
+@router.get("/{ingredient_id}/variants")
+async def list_ingredient_variants(
+    ingredient_id: UUID,
+    request: Request,
+    response: Response,
+) -> Dict[str, Any]:
+    """
+    List all variants of a base ingredient for the tenant catalog view.
+    Uses ingredient_global_hierarchy — accessible to any authenticated session.
+    """
+    require_valid_session(request)
+
+    async with get_db_connection() as conn:
+        base = await conn.fetchrow(
+            "SELECT id::text, name, unit FROM ingredients WHERE id = $1 AND tenant_id IS NULL",
+            ingredient_id,
+        )
+        if not base:
+            raise HTTPException(status_code=404, detail="Ingredient not found")
+
+        rows = await conn.fetch(
+            """
+            SELECT i.id::text, i.name, i.unit, i.category, i.type
+            FROM ingredients i
+            JOIN ingredient_global_hierarchy h ON h.variant_id = i.id
+            WHERE h.base_id = $1
+            ORDER BY i.name
+            """,
+            ingredient_id,
+        )
+
+    return {
+        "success": True,
+        "base": dict(base),
+        "data": [dict(r) for r in rows],
+        "count": len(rows),
+    }

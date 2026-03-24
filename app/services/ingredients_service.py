@@ -18,7 +18,8 @@ async def get_ingredients_list(
     category: Optional[str] = None,
     supplier_id: Optional[UUID] = None,
     type: Optional[str] = None,
-    is_resale: Optional[bool] = None
+    is_resale: Optional[bool] = None,
+    base_only: Optional[bool] = None,
 ) -> IngredientsListResponse:
     """
     Fetches a list of ingredients from the database with tenant isolation,
@@ -50,7 +51,11 @@ async def get_ingredients_list(
                     CAST(COALESCE(tsp.unit_price, tim.cost_per_unit) AS float) as price,
                     tsp.supplier_id,
                     igh.base_id::text   AS hierarchy_base_id,
-                    hb.name             AS hierarchy_base_name
+                    hb.name             AS hierarchy_base_name,
+                    COALESCE((
+                        SELECT COUNT(*)::int FROM ingredient_global_hierarchy
+                        WHERE base_id = i.id
+                    ), 0) AS has_variants
                 FROM ingredients i
                 LEFT JOIN (
                     SELECT
@@ -122,6 +127,11 @@ async def get_ingredients_list(
                 count_params.append(is_resale)
                 base_param_count += 1
                 count_param_count += 1
+
+            if base_only:
+                # Exclude ingredients that are variants (have a base assigned)
+                base_query += " AND NOT EXISTS (SELECT 1 FROM ingredient_global_hierarchy WHERE variant_id = i.id)"
+                count_query += " AND NOT EXISTS (SELECT 1 FROM ingredient_global_hierarchy WHERE variant_id = id)"
 
             # Add pagination
             offset = (page - 1) * limit
