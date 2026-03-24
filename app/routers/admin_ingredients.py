@@ -94,6 +94,7 @@ async def list_global_ingredients(
             i.id::text,
             i.name,
             i.unit,
+            i.type,
             i.category,
             hb.base_id::text              AS hierarchy_base_id,
             bi.name                        AS hierarchy_base_name,
