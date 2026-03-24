@@ -889,11 +889,10 @@ def _compute_anomaly(
 
 async def get_data_quality(request: Request) -> dict:
     """
-    Scan the 30-day purchase history for each ingredient and detect price
-    anomalies (spikes, drops, impossible values).
+    Returns existing alerts from data_quality_alerts plus a summary score.
 
-    Returns the existing alerts stored in data_quality_alerts plus a summary
-    score.  New anomalies found on this run are upserted idempotently.
+    Read-only endpoint — anomaly detection and upserts happen in the background
+    task run_anomaly_checks_for_purchase(), triggered after each purchase save.
 
     Score: max(0, 100 - critical*10 - warning*2)
     """
@@ -904,112 +903,27 @@ async def get_data_quality(request: Request) -> dict:
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
-        async with get_db_connection() as conn:
-            # Ensure UNIQUE constraint exists for idempotent upsert
-            await conn.execute("""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM pg_constraint
-                        WHERE conname = 'uq_dqa_item_tenant'
-                    ) THEN
-                        ALTER TABLE data_quality_alerts
-                        ADD CONSTRAINT uq_dqa_item_tenant
-                        UNIQUE (purchase_item_id, tenant_id);
-                    END IF;
-                END
-                $$;
-            """)
-
-            # Fetch last 30 days of purchase items with price history per ingredient
-            history_query = """
-                WITH recent_items AS (
-                    SELECT
-                        tpi.id            AS purchase_item_id,
-                        tpi.ingredient_id,
-                        i.name            AS ingredient_name,
-                        tpi.unit_cost     AS price,
-                        tp.purchase_date
-                    FROM tenant_purchase_items tpi
-                    JOIN tenant_purchases tp ON tpi.purchase_id = tp.id
-                    JOIN ingredients i ON tpi.ingredient_id = i.id
-                    WHERE tp.tenant_id = $1
-                      AND tp.purchase_date >= CURRENT_DATE - INTERVAL '30 days'
-                      AND tpi.unit_cost IS NOT NULL
-                      AND tpi.unit_cost > 0
-                    ORDER BY tpi.ingredient_id, tp.purchase_date ASC
-                )
-                SELECT
-                    ingredient_id,
-                    ingredient_name,
-                    ARRAY_AGG(purchase_item_id ORDER BY purchase_date ASC) AS item_ids,
-                    ARRAY_AGG(price::float ORDER BY purchase_date ASC)     AS prices
-                FROM recent_items
-                GROUP BY ingredient_id, ingredient_name
-                HAVING COUNT(*) >= 2
-            """
-            rows = await conn.fetch(history_query, tenant_id)
-
-            # Detect anomalies and upsert alerts
-            for row in rows:
-                prices: List[float] = list(row["prices"])
-                item_ids = list(row["item_ids"])
-                ingredient_id = row["ingredient_id"]
-                ingredient_name = row["ingredient_name"]
-
-                # Evaluate each item against its preceding history
-                for idx in range(1, len(prices)):
-                    history = prices[:idx]
-                    new_price = prices[idx]
-                    purchase_item_id = item_ids[idx]
-
-                    anomaly = _compute_anomaly(history, new_price, ingredient_name)
-                    if anomaly is None:
-                        continue
-
-                    await conn.execute("""
-                        INSERT INTO data_quality_alerts (
-                            tenant_id, purchase_item_id, ingredient_id,
-                            ingredient_name, alert_type, severity,
-                            expected_value, actual_value, deviation_pct, rolling_avg,
-                            resolved
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, FALSE)
-                        ON CONFLICT (purchase_item_id, tenant_id)
-                        DO UPDATE SET
-                            alert_type    = EXCLUDED.alert_type,
-                            severity      = EXCLUDED.severity,
-                            expected_value = EXCLUDED.expected_value,
-                            actual_value  = EXCLUDED.actual_value,
-                            deviation_pct = EXCLUDED.deviation_pct,
-                            rolling_avg   = EXCLUDED.rolling_avg
-                        WHERE data_quality_alerts.resolved = FALSE
-                    """,
-                        tenant_id,
-                        purchase_item_id,
-                        ingredient_id,
-                        ingredient_name,
-                        anomaly["alert_type"],
-                        anomaly["severity"],
-                        anomaly["expected_value"],
-                        anomaly["actual_value"],
-                        anomaly["deviation_pct"],
-                        anomaly["rolling_avg"],
-                    )
-
-            # Fetch all alerts for this tenant
+        async with get_db_connection(use_transaction=False) as conn:
             alerts_query = """
                 SELECT
-                    id, tenant_id, purchase_item_id, ingredient_id,
-                    ingredient_name, alert_type, severity,
-                    expected_value, actual_value, deviation_pct, rolling_avg,
-                    context, resolved, resolved_by, resolved_at,
-                    resolution_note, original_value, corrected_value, created_at
-                FROM data_quality_alerts
-                WHERE tenant_id = $1
+                    dqa.id, dqa.tenant_id, dqa.purchase_item_id, dqa.ingredient_id,
+                    dqa.ingredient_name, dqa.alert_type, dqa.severity,
+                    dqa.expected_value, dqa.actual_value, dqa.deviation_pct, dqa.rolling_avg,
+                    dqa.context, dqa.resolved, dqa.resolved_by, dqa.resolved_at,
+                    dqa.resolution_note, dqa.original_value, dqa.corrected_value, dqa.created_at,
+                    tpi.purchase_id,
+                    tp.purchase_date,
+                    tp.purchase_number,
+                    ts.name AS supplier_name
+                FROM data_quality_alerts dqa
+                LEFT JOIN tenant_purchase_items tpi ON tpi.id = dqa.purchase_item_id
+                LEFT JOIN tenant_purchases tp ON tp.id = tpi.purchase_id
+                LEFT JOIN tenant_suppliers ts ON ts.id = tp.supplier_id
+                WHERE dqa.tenant_id = $1
                 ORDER BY
-                    resolved ASC,
-                    CASE severity WHEN 'critical' THEN 0 ELSE 1 END,
-                    created_at DESC
+                    dqa.resolved ASC,
+                    CASE dqa.severity WHEN 'critical' THEN 0 ELSE 1 END,
+                    dqa.created_at DESC
             """
             alert_rows = await conn.fetch(alerts_query, tenant_id)
 
@@ -1019,6 +933,10 @@ async def get_data_quality(request: Request) -> dict:
                     "id": str(r["id"]),
                     "tenant_id": str(r["tenant_id"]),
                     "purchase_item_id": str(r["purchase_item_id"]) if r["purchase_item_id"] else None,
+                    "purchase_id": str(r["purchase_id"]) if r["purchase_id"] else None,
+                    "purchase_date": r["purchase_date"].isoformat() if r["purchase_date"] else None,
+                    "purchase_number": r["purchase_number"],
+                    "supplier_name": r["supplier_name"],
                     "ingredient_id": str(r["ingredient_id"]) if r["ingredient_id"] else None,
                     "ingredient_name": r["ingredient_name"],
                     "alert_type": r["alert_type"],
