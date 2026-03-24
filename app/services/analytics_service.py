@@ -911,9 +911,14 @@ async def get_data_quality(request: Request) -> dict:
                     dqa.expected_value, dqa.actual_value, dqa.deviation_pct, dqa.rolling_avg,
                     dqa.context, dqa.resolved, dqa.resolved_by, dqa.resolved_at,
                     dqa.resolution_note, dqa.original_value, dqa.corrected_value, dqa.created_at,
-                    tpi.purchase_id
+                    tpi.purchase_id,
+                    tp.purchase_date,
+                    tp.purchase_number,
+                    ts.name AS supplier_name
                 FROM data_quality_alerts dqa
                 LEFT JOIN tenant_purchase_items tpi ON tpi.id = dqa.purchase_item_id
+                LEFT JOIN tenant_purchases tp ON tp.id = tpi.purchase_id
+                LEFT JOIN tenant_suppliers ts ON ts.id = tp.supplier_id
                 WHERE dqa.tenant_id = $1
                 ORDER BY
                     dqa.resolved ASC,
@@ -929,6 +934,9 @@ async def get_data_quality(request: Request) -> dict:
                     "tenant_id": str(r["tenant_id"]),
                     "purchase_item_id": str(r["purchase_item_id"]) if r["purchase_item_id"] else None,
                     "purchase_id": str(r["purchase_id"]) if r["purchase_id"] else None,
+                    "purchase_date": r["purchase_date"].isoformat() if r["purchase_date"] else None,
+                    "purchase_number": r["purchase_number"],
+                    "supplier_name": r["supplier_name"],
                     "ingredient_id": str(r["ingredient_id"]) if r["ingredient_id"] else None,
                     "ingredient_name": r["ingredient_name"],
                     "alert_type": r["alert_type"],
