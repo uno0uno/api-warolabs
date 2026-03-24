@@ -276,3 +276,65 @@ async def process_invoice(
               )
           logger.error(f"Gemini API error: {error_str}")
           raise HTTPException(status_code=500, detail=f"AI Processing Error: {error_str}")
+
+
+async def check_name_semantic_duplicate(
+    name: str,
+    candidates: List[Dict]
+) -> Dict:
+    """
+    Uses Gemini to determine if 'name' is semantically the same ingredient
+    as any of the given pg_trgm candidates.
+
+    Returns:
+        {"is_duplicate": bool, "best_match_id": str|None, "reason": str}
+
+    Falls back to {"is_duplicate": False, ...} on any error so creation is never blocked.
+    """
+    if not candidates:
+        return {"is_duplicate": False, "best_match_id": None, "reason": "Sin candidatos"}
+
+    candidates_text = "\n".join(
+        f'- "{c["name"]}" (id: {c["id"]})'
+        for c in candidates
+    )
+
+    prompt = f"""Eres un asistente de catálogo de ingredientes para restaurantes colombianos.
+
+Tarea: Determina si el nombre de ingrediente "{name}" es semánticamente el MISMO producto que alguno de los siguientes ingredientes ya existentes en el catálogo:
+{candidates_text}
+
+Reglas:
+- Singular/plural de la MISMA palabra = duplicado ("bolsa" = "bolsas", "huevo" = "huevos")
+- Abreviación del mismo producto = duplicado
+- Productos diferentes con nombres similares = NO duplicado
+- Marcas distintas del mismo genérico = NO duplicado (pueden coexistir)
+- Si ningún candidato es el mismo producto, is_duplicate debe ser false
+
+Responde ÚNICAMENTE con un objeto JSON válido (sin texto adicional):
+{{
+  "is_duplicate": true,
+  "best_match_id": "el id del candidato duplicado",
+  "reason": "explicación breve en español"
+}}
+o
+{{
+  "is_duplicate": false,
+  "best_match_id": null,
+  "reason": "explicación breve en español"
+}}"""
+
+    try:
+        client = genai.Client(api_key=settings.google_api_key)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
+        return json.loads(response.text)
+    except Exception as e:
+        logger.error(f"Gemini semantic check failed for '{name}': {e}")
+        # Fail open: allow creation so user is never blocked
+        return {"is_duplicate": False, "best_match_id": None, "reason": "Verificación no disponible"}

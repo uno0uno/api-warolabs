@@ -58,6 +58,10 @@ class SetBaseRequest(BaseModel):
     base_id: str
 
 
+class ValidateBaseRequest(BaseModel):
+    name: str
+
+
 class SimilarIngredient(BaseModel):
     id: str
     name: str
@@ -177,6 +181,62 @@ async def list_ingredient_variants(
         "data": [dict(r) for r in rows],
         "count": len(rows),
     }
+
+
+@router.post("/validate-base", status_code=200)
+async def validate_base_name(
+    body: ValidateBaseRequest,
+    request: Request,
+) -> Dict[str, Any]:
+    """
+    Validates a potential new base ingredient name before creation.
+
+    1. pg_trgm similarity check at threshold 0.4 against global catalog.
+    2. If similar candidates found → Gemini semantic duplicate check.
+    3. Returns:
+       - verdict "suggest": Gemini detected a semantic duplicate, includes `suggested` ingredient.
+       - verdict "create":  No duplicate found, safe to auto-create.
+    """
+    await require_valid_session(request)
+
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Name cannot be empty")
+
+    async with get_db_connection() as conn:
+        similar_rows = await conn.fetch(
+            """
+            SELECT id::text, name, unit, similarity(name, $1)::float AS score
+            FROM ingredients
+            WHERE tenant_id IS NULL AND similarity(name, $1) > 0.4
+            ORDER BY score DESC
+            LIMIT 5
+            """,
+            name,
+        )
+
+    if not similar_rows:
+        return {"verdict": "create", "similar": [], "suggested": None}
+
+    candidates = [
+        {"id": r["id"], "name": r["name"], "unit": r["unit"]}
+        for r in similar_rows
+    ]
+
+    from app.services.gemini_service import check_name_semantic_duplicate
+    gemini_result = await check_name_semantic_duplicate(name, candidates)
+
+    if gemini_result.get("is_duplicate") and gemini_result.get("best_match_id"):
+        match_id = gemini_result["best_match_id"]
+        suggested = next((c for c in candidates if c["id"] == match_id), candidates[0])
+        return {
+            "verdict": "suggest",
+            "suggested": suggested,
+            "similar": candidates,
+            "reason": gemini_result.get("reason", ""),
+        }
+
+    return {"verdict": "create", "similar": candidates, "suggested": None}
 
 
 @router.post("", status_code=201)
