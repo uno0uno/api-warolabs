@@ -72,6 +72,7 @@ async def list_global_ingredients(
     search: Optional[str] = Query(default=None, description="Filter by name (case-insensitive)"),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=100, ge=1, le=1000),
+    bases_only: bool = Query(default=False, description="When true, exclude variant ingredients from results"),
 ) -> Dict[str, Any]:
     """
     List all global ingredients with hierarchy metadata.
@@ -89,6 +90,9 @@ async def list_global_ingredients(
     if search:
         params.append(f"%{search}%")
         where_clause += f" AND i.name ILIKE ${len(params)}"
+
+    if bases_only:
+        where_clause += " AND NOT EXISTS (SELECT 1 FROM ingredient_global_hierarchy WHERE variant_id = i.id)"
 
     query = f"""
         SELECT
