@@ -937,10 +937,10 @@ async def extract_invoice_data(request: Request, file: UploadFile) -> dict:
     try:
         async with get_db_connection() as conn:
             rows = await conn.fetch(
-                "SELECT id, name, unit FROM ingredients ORDER BY name"
+                "SELECT id, name, unit, type FROM ingredients ORDER BY name"
             )
             catalog = [
-                {"id": str(r["id"]), "name": r["name"], "unit": r["unit"]}
+                {"id": str(r["id"]), "name": r["name"], "unit": r["unit"], "type": r.get("type", "food")}
                 for r in rows
             ]
     except Exception as e:
@@ -961,18 +961,25 @@ async def extract_invoice_data(request: Request, file: UploadFile) -> dict:
                     suggested_unit = match.get("suggested_unit")
 
                     if matched_id:
-                        # Gemini found an existing ingredient
+                        # Gemini found an existing ingredient - enrich it from catalog
+                        cat_item = next((c for c in catalog if c["id"] == matched_id), None)
+                        if cat_item:
+                            item["matched_ingredient"] = cat_item
                         item["detected_ingredient_id"] = matched_id
                     elif should_create and suggested_name and suggested_unit:
-                        # Gemini is confident this is a new ingredient — create it
+                        # Gemini is confident this is a new ingredient — create it (Global)
                         peso = item.get("peso_unidad_gr")
-                        new_id = await create_ai_ingredient(
-                            conn, suggested_name, suggested_unit, tenant_id,
-                            peso_unidad_gr=float(peso) if peso else None
+                        base_name = match.get("suggested_base_name")
+                        res = await create_ai_ingredient(
+                            conn, suggested_name, suggested_unit,
+                            tenant_id=None,
+                            peso_unidad_gr=float(peso) if peso else None,
+                            suggested_base_name=base_name
                         )
-                        if new_id:
-                            item["detected_ingredient_id"] = new_id
-                            item["detected_ingredient"] = suggested_name
+                        if res:
+                            item["matched_ingredient"] = res
+                            item["detected_ingredient_id"] = res["id"]
+                            item["detected_ingredient"] = res["name"]
 
         return {
             "success": True,

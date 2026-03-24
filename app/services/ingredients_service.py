@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from uuid import UUID
 from fastapi import Request, Response, HTTPException
 from app.database import get_db_connection
@@ -233,88 +233,91 @@ async def create_ai_ingredient(
     conn,
     suggested_name: str,
     suggested_unit: str,
-    tenant_id,
-    peso_unidad_gr: Optional[float] = None
-) -> Optional[str]:
+    tenant_id: Optional[UUID] = None, # No longer used for scoping new ingredients, kept for signature compatibility
+    peso_unidad_gr: Optional[float] = None,
+    suggested_base_name: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     """
-    Creates a new ingredient inferred by Gemini during invoice scanning,
-    then inserts standard purchase units for it based on the base unit pattern
-    used across the existing catalog.
+    Creates a new ingredient inferred by Gemini during invoice scanning.
+    AI-generated ingredients are now ALWAYS created globally (tenant_id = NULL).
 
-    Standard purchase units created by base unit:
-      gr  → kg/1000 (default), lb/454
-      ml  → botella/{peso} or botella/1000 (default), galon/3785, garrafa/5000
-      und → no extra purchase units (buying by unit is already the base)
-
-    Runs a pg_trgm similarity check first to prevent near-duplicate creation.
-    The new ingredient is scoped to the tenant (tenant_id set) so it does not
-    pollute the global catalog until an admin promotes it.
-
-    Returns the UUID of the created (or existing duplicate) ingredient as a string,
-    or None if creation failed.
+    If suggested_base_name is provided, it ensures the base ingredient exists
+    and creates a link in ingredient_global_hierarchy.
     """
     try:
         async with conn.transaction():
-            # pg_trgm duplicate guard: if a very similar name already exists, reuse it
-            existing = await conn.fetchrow(
-                """
-                SELECT id
-                FROM ingredients
-                WHERE similarity(name, $1) > 0.75
+            # 1. Handle Hierarchy Base if suggested
+            base_id = None
+            if suggested_base_name:
+                # Search for an existing global base ingredient
+                base_row = await conn.fetchrow("""
+                    SELECT id FROM ingredients
+                    WHERE (LOWER(name) = LOWER($1) OR similarity(name, $1) > 0.8)
+                    AND tenant_id IS NULL
+                    ORDER BY similarity(name, $1) DESC
+                    LIMIT 1
+                """, suggested_base_name)
+
+                if base_row:
+                    base_id = base_row["id"]
+                else:
+                    # Create new global base ingredient
+                    base_row = await conn.fetchrow("""
+                        INSERT INTO ingredients (name, unit, tenant_id, ai_generated, ai_generated_at)
+                        VALUES ($1, $2, NULL, TRUE, NOW())
+                        RETURNING id
+                    """, suggested_base_name, suggested_unit)
+                    base_id = base_row["id"]
+                    logger.info(f"Created new global base ingredient: {suggested_base_name}")
+
+            # 2. Check for existing variant/ingredient (Global)
+            existing = await conn.fetchrow("""
+                SELECT id FROM ingredients
+                WHERE (LOWER(name) = LOWER($1) OR similarity(name, $1) > 0.8)
+                AND tenant_id IS NULL
                 ORDER BY similarity(name, $1) DESC
                 LIMIT 1
-                """,
-                suggested_name
-            )
+            """, suggested_name)
 
             if existing:
-                logger.info(
-                    f"AI ingredient '{suggested_name}' matches existing ingredient "
-                    f"{existing['id']} — skipping creation"
-                )
-                return str(existing["id"])
+                ingredient_id = existing["id"]
+                logger.info(f"AI ingredient '{suggested_name}' matches existing global ingredient {ingredient_id}")
+            else:
+                # 3. Create new global variant ingredient
+                row = await conn.fetchrow("""
+                    INSERT INTO ingredients (name, unit, tenant_id, ai_generated, ai_generated_at)
+                    VALUES ($1, $2, NULL, TRUE, NOW())
+                    RETURNING id
+                """, suggested_name, suggested_unit)
+                ingredient_id = row["id"]
+                logger.info(f"Created new global AI ingredient: {suggested_name}")
 
-            row = await conn.fetchrow(
-                """
-                INSERT INTO ingredients (name, unit, tenant_id, ai_generated, ai_generated_at)
-                VALUES ($1, $2, $3, TRUE, NOW())
-                RETURNING id
-                """,
-                suggested_name,
-                suggested_unit,
-                tenant_id
-            )
+                # 4. Auto-create standard purchase units
+                purchase_units = _build_standard_purchase_units(suggested_unit, peso_unidad_gr)
+                for pu in purchase_units:
+                    await conn.execute("""
+                        INSERT INTO ingredient_purchase_units
+                          (ingredient_id, purchase_unit, purchase_unit_label,
+                           conversion_factor, is_default, is_active)
+                        VALUES ($1, $2, $3, $4, $5, TRUE)
+                    """, ingredient_id, pu["purchase_unit"], pu["purchase_unit_label"],
+                        pu["conversion_factor"], pu["is_default"])
 
-            ingredient_id = row["id"]
-            logger.info(
-                f"AI-created ingredient '{suggested_name}' ({suggested_unit}) "
-                f"for tenant {tenant_id} → id {ingredient_id}"
-            )
+            # 5. Link to base in hierarchy if needed
+            if base_id and ingredient_id != base_id:
+                await conn.execute("""
+                    INSERT INTO ingredient_global_hierarchy (base_id, variant_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                """, base_id, ingredient_id)
+                logger.info(f"Linked variant {ingredient_id} to base {base_id}")
 
-            # Auto-create standard purchase units based on the base unit pattern
-            purchase_units = _build_standard_purchase_units(suggested_unit, peso_unidad_gr)
-            for pu in purchase_units:
-                await conn.execute(
-                    """
-                    INSERT INTO ingredient_purchase_units
-                      (ingredient_id, purchase_unit, purchase_unit_label,
-                       conversion_factor, is_default, is_active)
-                    VALUES ($1, $2, $3, $4, $5, TRUE)
-                    """,
-                    ingredient_id,
-                    pu["purchase_unit"],
-                    pu["purchase_unit_label"],
-                    pu["conversion_factor"],
-                    pu["is_default"],
-                )
-
-            if purchase_units:
-                logger.info(
-                    f"Auto-created {len(purchase_units)} purchase units for "
-                    f"ingredient {ingredient_id} ({suggested_unit})"
-                )
-
-            return str(ingredient_id)
+            return {
+                "id": str(ingredient_id),
+                "name": suggested_name,
+                "unit": suggested_unit,
+                "type": "food" # Default for AI-created
+            }
 
     except Exception as e:
         logger.error(f"Failed to create AI ingredient '{suggested_name}': {e}")

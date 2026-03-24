@@ -101,7 +101,8 @@ async def process_invoice(
                         "confidence": 0.0,
                         "should_create": false,
                         "suggested_name": null,
-                        "suggested_unit": null
+                        "suggested_unit": null,
+                        "suggested_base_name": null
                     }"""
 
     ingredient_match_rules = """
@@ -126,11 +127,10 @@ async def process_invoice(
             - Es un código PLU, referencia interna, o solo números: "22 / P", "PLU-123", "REF 445"
             - La descripción está visiblemente truncada o termina a mitad de palabra: "JUGOS CALIFORNI", "PROD VA..."
             - Es una agrupación genérica sin producto específico: "PRODUCTOS VARIOS", "VARIOS", "MIXTO", "SURTIDO", "MISCELANEOS"
-            - Es material de empaque o embalaje: contiene BOLSA, BOLSAS, ETIQUETA, CAJA, EMPAQUE, EMBALAJE, ENVASE, ROLLO, PAPEL
             - Es un servicio, transporte o cobro: contiene SERVICIO, DOMICILIO, FLETE, TRANSPORTE, COBRO, CARGO, COMISION
-            - La descripción tiene 2 palabras o menos Y ninguna es un ingrediente reconocible
+            - La descripción tiene 2 palabras o menos Y ninguna es un ingrediente reconocible de cocina o suministro.
 
-            En cualquier otro caso debe ser false.
+            NOTA: Suministros como papel parafinado, papel aluminio, o bolsas de empaque específico SÍ se deben crear si el confidence es bajo.
 
         13. "ingredient_match.suggested_name": si should_create=true, escribe el nombre
             normalizado del nuevo ingrediente en español, sin marca, sin cantidad.
@@ -141,6 +141,18 @@ async def process_invoice(
             - Sólidos pesables (carnes, quesos, verduras, harinas, etc.) → "gr"
             - Líquidos (aceites, salsas, lácteos, bebidas, etc.) → "ml"
             - Unidades contables (huevos, panes, porciones individuales, etc.) → "und"
+            Si should_create=false → null.
+
+        15. "ingredient_match.suggested_base_name": si should_create=true, indica el nombre
+            genérico BASE del que este producto es una variante específica.
+            REGLA DE ORO: Si el producto tiene especificaciones (marca, tamaño, tipo, material), el base es el genérico.
+            Ejemplos:
+            - "Bolsa Aluminio 1/25" → base = "Bolsa"
+            - "Aceite de oliva extra virgen" → base = "Aceite de oliva"
+            - "Leche entera 1L" → base = "Leche"
+            - "Arroz Diana 1kg" → base = "Arroz"
+            - "Sal" (ya es el genérico) → null
+            Si el ingrediente ES el genérico (no tiene un base más amplio) → null.
             Si should_create=false → null.
     """
 
