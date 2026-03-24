@@ -85,7 +85,7 @@ async def list_global_ingredients(
     All 2,291 global ingredients are always returned — visibility rule: no filtering
     by hierarchy status (all visible to all restaurants).
     """
-    await require_valid_session(request)
+    require_valid_session(request)
 
     offset = (page - 1) * limit
     params: List[Any] = []
@@ -153,7 +153,7 @@ async def list_ingredient_variants(
     List all variants of a base ingredient via ingredient_global_hierarchy.
     Uses the hierarchy table — not the deprecated parent_id column.
     """
-    await require_valid_session(request)
+    require_valid_session(request)
 
     async with get_db_connection() as conn:
         # Verify base exists and is global
@@ -197,7 +197,7 @@ async def validate_base_name(
        - verdict "suggest": Gemini detected a semantic duplicate, includes `suggested` ingredient.
        - verdict "create":  No duplicate found, safe to auto-create.
     """
-    await require_valid_session(request)
+    require_valid_session(request)
 
     name = body.name.strip()
     if not name:
@@ -253,7 +253,7 @@ async def create_global_ingredient(
 
     Immutability rule: no endpoint to edit or delete global ingredients.
     """
-    await require_valid_session(request)
+    require_valid_session(request)
 
     name = body.name.strip()
     if not name:
@@ -367,7 +367,7 @@ async def assign_base(
 
     Idempotent: ON CONFLICT(variant_id) → 409 with clear message.
     """
-    await require_valid_session(request)
+    require_valid_session(request)
 
     try:
         base_uuid = UUID(body.base_id)
@@ -445,7 +445,7 @@ async def remove_base(
     Deletes from ingredient_global_hierarchy only — the ingredient itself is untouched.
     Returns removed=true if a row was deleted, removed=false if none existed.
     """
-    await require_valid_session(request)
+    require_valid_session(request)
 
     async with get_db_connection() as conn:
         deleted = await conn.fetchrow(
