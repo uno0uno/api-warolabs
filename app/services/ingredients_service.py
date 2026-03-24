@@ -48,7 +48,9 @@ async def get_ingredients_list(
                     i.created_at,
                     i.updated_at,
                     CAST(COALESCE(tsp.unit_price, tim.cost_per_unit) AS float) as price,
-                    tsp.supplier_id
+                    tsp.supplier_id,
+                    igh.base_id::text   AS hierarchy_base_id,
+                    hb.name             AS hierarchy_base_name
                 FROM ingredients i
                 LEFT JOIN (
                     SELECT
@@ -68,6 +70,8 @@ async def get_ingredients_list(
                     WHERE tenant_id = $1 AND movement_type = 'purchase'
                       AND cost_per_unit IS NOT NULL AND cost_per_unit > 0
                 ) tim ON i.id = tim.ingredient_id AND tim.rn = 1
+                LEFT JOIN ingredient_global_hierarchy igh ON igh.variant_id = i.id
+                LEFT JOIN ingredients hb ON hb.id = igh.base_id
                 WHERE 1=1
             """
 

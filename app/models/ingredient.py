@@ -39,6 +39,8 @@ class Ingredient(IngredientBase):
     tenant_id: Optional[UUID] # tenant_id is nullable in DB
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
+    hierarchy_base_id: Optional[str] = None
+    hierarchy_base_name: Optional[str] = None
 
     class Config:
         from_attributes = True
