@@ -51,6 +51,7 @@ class CreateIngredientRequest(BaseModel):
     unit: Optional[str] = None
     category: Optional[str] = None
     force: bool = False  # bypass fuzzy conflict and confirm creation
+    base_id: Optional[str] = None  # if set: creates hierarchy row in same transaction
 
 
 class SetBaseRequest(BaseModel):
@@ -194,6 +195,14 @@ async def create_global_ingredient(
     if not name:
         raise HTTPException(status_code=422, detail="Ingredient name cannot be empty")
 
+    # Validate base_id if provided
+    base_uuid = None
+    if body.base_id:
+        try:
+            base_uuid = UUID(body.base_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="base_id must be a valid UUID")
+
     async with get_db_connection() as conn:
         if not body.force:
             similar_rows = await conn.fetch(
@@ -219,20 +228,62 @@ async def create_global_ingredient(
                     },
                 )
 
-        new_row = await conn.fetchrow(
-            """
-            INSERT INTO ingredients (name, unit, category, tenant_id)
-            VALUES ($1, $2, $3, NULL)
-            RETURNING id::text, name, unit, category
-            """,
-            name,
-            body.unit,
-            body.category,
-        )
+        # Resolve unit: use request unit, or auto-fill from base if base_id provided
+        unit_to_use = body.unit
+        base_row = None
+        if base_uuid:
+            base_row = await conn.fetchrow(
+                "SELECT id, name, unit FROM ingredients WHERE id = $1 AND tenant_id IS NULL",
+                base_uuid,
+            )
+            if not base_row:
+                raise HTTPException(
+                    status_code=422,
+                    detail="base_id not found or not a global ingredient",
+                )
+            if not unit_to_use:
+                unit_to_use = base_row["unit"]
+            elif unit_to_use != base_row["unit"]:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Unit mismatch: requested '{unit_to_use}', base is '{base_row['unit']}'. "
+                           "Either omit unit (auto-filled from base) or match the base unit.",
+                )
+
+        async with conn.transaction():
+            new_row = await conn.fetchrow(
+                """
+                INSERT INTO ingredients (name, unit, category, tenant_id)
+                VALUES ($1, $2, $3, NULL)
+                RETURNING id::text, name, unit, category
+                """,
+                name,
+                unit_to_use,
+                body.category,
+            )
+
+            hierarchy_id = None
+            if base_uuid:
+                h_row = await conn.fetchrow(
+                    """
+                    INSERT INTO ingredient_global_hierarchy (base_id, variant_id)
+                    VALUES ($1, $2::uuid)
+                    RETURNING id
+                    """,
+                    base_uuid,
+                    new_row["id"],
+                )
+                hierarchy_id = str(h_row["id"])
+
+    result = dict(new_row)
+    if hierarchy_id:
+        result["hierarchy_id"] = hierarchy_id
+        result["hierarchy_base_id"] = str(base_uuid)
+        result["hierarchy_base_name"] = base_row["name"]
 
     return {
         "success": True,
-        "data": dict(new_row),
+        "data": result,
     }
 
 
