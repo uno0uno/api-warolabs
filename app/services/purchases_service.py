@@ -932,22 +932,35 @@ async def extract_invoice_data(request: Request, file: UploadFile) -> dict:
     finally:
         await file.close()
 
-    # Fetch ingredient catalog to pass to Gemini for matching
+    # Fetch ingredient catalog to pass to Gemini for matching - Optimize: only take names to reduce token count
     catalog = []
     try:
         async with get_db_connection() as conn:
+            # We only send ID and Name to Gemini to save tokens and avoid 504 timeouts
+            # If the catalog is very large, this can still be a problem. 
+            # Optimization: limit to top ingredients or those most frequently used.
             rows = await conn.fetch(
-                "SELECT id, name, unit, type FROM ingredients ORDER BY name"
+                "SELECT id, name, unit FROM ingredients ORDER BY name"
             )
             catalog = [
-                {"id": str(r["id"]), "name": r["name"], "unit": r["unit"], "type": r.get("type", "food")}
+                {"id": str(r["id"]), "name": r["name"], "unit": r["unit"]}
                 for r in rows
             ]
+            
+            # If catalog is too large (> 500 items), Gemini might struggle/timeout.
+            # We'll trim it or let the backend do the fuzzy matching later.
+            if len(catalog) > 500:
+                logger.warning(f"Catalog too large ({len(catalog)} items). Trimming for Gemini prompt.")
+                # In a more advanced version, we'd use vector search here.
+                # For now, we'll just send the first 500.
+                catalog = catalog[:500]
+                
     except Exception as e:
         logger.warning(f"Could not fetch ingredient catalog for OCR matching: {e}")
 
     # Process with Gemini (catalog injected into prompt)
     try:
+        # model name fix: gemini-2.0-flash is the current stable flash model
         data = await process_invoice(file_bytes, file.content_type, catalog=catalog)
 
         # For items where Gemini flagged a new ingredient, create it automatically
