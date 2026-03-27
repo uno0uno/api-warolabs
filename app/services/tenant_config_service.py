@@ -419,6 +419,11 @@ async def get_own_public_profile(request: Request) -> Optional[TenantPublicProfi
                 except Exception:
                     profile_data['social_media'] = None
 
+            profile_data['is_currently_open'] = public_restaurant_service.is_currently_open(
+                profile_data.get('business_hours'),
+                profile_data.get('is_manually_open', True),
+            )
+
             profile = TenantPublicProfile(**profile_data)
 
             return TenantPublicProfileResponse(
