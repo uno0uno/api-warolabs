@@ -16,6 +16,90 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+async def _deduct_stock_for_order(conn, order_id: UUID, tenant_id, changed_by) -> None:
+    """
+    Deduct ingredient stock for all items in an online order, mirroring POS logic.
+    Runs inside an existing connection/transaction.
+    """
+    items = await conn.fetch(
+        """
+        SELECT oi.product_id, oi.quantity, p.name AS product_name, o.order_number
+        FROM order_items oi
+        JOIN product p ON p.id = oi.product_id
+        JOIN orders o ON o.id = oi.order_id
+        WHERE oi.order_id = $1
+        """,
+        order_id,
+    )
+
+    ingredients_query = """
+        SELECT pr.ingredient_id, pr.quantity, pr.unit, i.name AS ingredient_name
+        FROM product_recipes pr
+        JOIN ingredients i ON pr.ingredient_id = i.id
+        WHERE pr.product_id = $1
+
+        UNION ALL
+
+        SELECT brt.ingredient_id, brt.base_quantity AS quantity, brt.unit, i.name AS ingredient_name
+        FROM product_base_recipes pbr
+        JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+        JOIN ingredients i ON brt.ingredient_id = i.id
+        WHERE pbr.product_id = $1
+    """
+
+    for item in items:
+        ingredients = await conn.fetch(ingredients_query, item["product_id"])
+        order_number = item["order_number"]
+
+        for ingredient in ingredients:
+            quantity_to_deduct = float(item["quantity"]) * float(ingredient["quantity"])
+
+            stock_row = await conn.fetchrow(
+                "SELECT current_stock FROM tenant_inventory WHERE ingredient_id = $1 AND tenant_id = $2",
+                ingredient["ingredient_id"], tenant_id,
+            )
+
+            previous_stock = float(stock_row["current_stock"]) if stock_row else 0.0
+            new_stock = previous_stock - quantity_to_deduct
+
+            if stock_row:
+                await conn.execute(
+                    "UPDATE tenant_inventory SET current_stock = $1, last_updated = NOW() WHERE ingredient_id = $2 AND tenant_id = $3",
+                    new_stock, ingredient["ingredient_id"], tenant_id,
+                )
+            else:
+                await conn.execute(
+                    "INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock, last_updated) VALUES ($1, $2, $3, 0, NOW())",
+                    tenant_id, ingredient["ingredient_id"], -quantity_to_deduct,
+                )
+
+            await conn.execute(
+                """
+                INSERT INTO tenant_ingredient_movements (
+                    tenant_id, ingredient_id, movement_type,
+                    quantity_change, unit, previous_stock, new_stock,
+                    reference_table, reference_id, reason, created_by, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+                """,
+                tenant_id,
+                ingredient["ingredient_id"],
+                "consumption",
+                -quantity_to_deduct,
+                ingredient["unit"],
+                previous_stock,
+                new_stock,
+                "orders",
+                order_id,
+                f"Domicilio {item['quantity']}x {item['product_name']} - Orden #{order_number}",
+                changed_by,
+            )
+
+            logger.info(
+                f"Stock deducted (online order): {ingredient['ingredient_name']} "
+                f"-{quantity_to_deduct}{ingredient['unit']} (Order #{order_number})"
+            )
+
+
 SORT_COLUMNS = {
     "order_number": "o.order_number",
     "order_date": "o.order_date",
@@ -350,6 +434,12 @@ async def update_order_status(
                     order_id, "confirmed", "completed", changed_by, None,
                 )
 
+                # Deduct stock for completed order
+                try:
+                    await _deduct_stock_for_order(conn, order_id, tenant_id, changed_by)
+                except Exception as _stock_err:
+                    logger.error(f"Stock deduction failed for order {order_id}: {_stock_err}")
+
                 # Fire acceptance email (non-blocking — does not delay the response)
                 email_row = await conn.fetchrow(
                     """
@@ -425,6 +515,13 @@ async def update_order_status(
                         ],
                     },
                 }
+
+            # Deduct stock for direct completed transition
+            if new_status == "completed":
+                try:
+                    await _deduct_stock_for_order(conn, order_id, tenant_id, changed_by)
+                except Exception as _stock_err:
+                    logger.error(f"Stock deduction failed for order {order_id}: {_stock_err}")
 
             # Award waros for direct completed transition (fire-and-forget — never blocks)
             if new_status == "completed" and order_customer_id:
