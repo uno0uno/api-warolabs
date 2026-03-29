@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, admin_ingredients
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, admin_ingredients, menu
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -143,6 +143,7 @@ app.include_router(ingredient_purchase_units.router, prefix="/suppliers/ingredie
 app.include_router(purchases.router, prefix="/suppliers/purchases", tags=["purchases"])
 app.include_router(suppliers.router, prefix="/suppliers/providers", tags=["suppliers"])
 app.include_router(supplier_portal.router, prefix="/supplier-portal", tags=["supplier-portal"])
+app.include_router(menu.router, prefix="/menu", tags=["menu"])
 app.include_router(products.router, prefix="/menu/products", tags=["products"])
 app.include_router(categories.router, prefix="/menu/categories", tags=["categories"])
 app.include_router(recipe_bases.router, prefix="/menu/recipe-bases", tags=["recipe-bases"])
