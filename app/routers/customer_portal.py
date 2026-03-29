@@ -3,11 +3,15 @@ Customer Portal Router
 Authenticated endpoints for customers to manage their own data.
 Authentication: waro_customer_session JWT cookie (set by POST /online/otp/verify)
 """
-from fastapi import APIRouter, Depends, Response, Query
+from fastapi import APIRouter, Depends, Request, Response, Query
 from typing import Optional
 from uuid import UUID
+import json
+from datetime import datetime, timedelta
 from app.dependencies.customer_auth import get_current_customer
 from app.core.security import clear_customer_cookie
+from app.core.middleware import get_tenant_context
+from app.database import get_db_connection
 from app.services.customer_orders_service import cancel_customer_order, get_customer_order_detail, get_customer_orders_list
 
 router = APIRouter(prefix="/customer", tags=["Customer Portal"])
@@ -86,6 +90,134 @@ async def cancel_order(
         order_id=order_id,
         customer_id=current_customer["customer_id"],
     )
+
+
+@router.get("/waros/summary")
+async def get_waros_summary(
+    request: Request,
+    current_customer: dict = Depends(get_current_customer),
+):
+    """
+    Return WaRos wallet balance for the authenticated customer in the current tenant.
+    Returns 0 balance if no wallet exists (never 404).
+    """
+    tenant_context = get_tenant_context(request)
+    if not tenant_context.is_valid:
+        return {"current_balance": 0, "lifetime_earned": 0, "lifetime_spent": 0}
+
+    customer_id = UUID(current_customer["customer_id"])
+    tenant_id = tenant_context.tenant_id
+
+    async with get_db_connection(use_transaction=False) as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT current_balance, lifetime_earned, lifetime_spent
+            FROM waros_wallets
+            WHERE profile_id = $1 AND tenant_id = $2
+            """,
+            customer_id,
+            tenant_id,
+        )
+
+    return {
+        "current_balance": int(row["current_balance"]) if row else 0,
+        "lifetime_earned": int(row["lifetime_earned"]) if row else 0,
+        "lifetime_spent": int(row["lifetime_spent"]) if row else 0,
+    }
+
+
+@router.get("/waros/estimate")
+async def estimate_waros(
+    request: Request,
+    total_amount: float = Query(..., gt=0),
+    current_customer: dict = Depends(get_current_customer),
+):
+    """
+    Read-only estimate of WaRos that would be earned for a cart total.
+    Uses active earning rules configured for this tenant.
+    """
+    tenant_context = get_tenant_context(request)
+    if not tenant_context.is_valid:
+        return {"estimated_waros": 0, "system_enabled": False, "breakdown": []}
+
+    customer_id = UUID(current_customer["customer_id"])
+    tenant_id = tenant_context.tenant_id
+
+    async with get_db_connection(use_transaction=False) as conn:
+        config_row = await conn.fetchrow(
+            "SELECT is_enabled, max_daily_waros FROM gamification_config WHERE tenant_id = $1",
+            tenant_id,
+        )
+        if not config_row or not config_row["is_enabled"]:
+            return {"estimated_waros": 0, "system_enabled": False, "breakdown": []}
+
+        rule_rows = await conn.fetch(
+            "SELECT rule_type, config FROM waro_earning_rules WHERE tenant_id = $1 AND is_active = true",
+            tenant_id,
+        )
+        if not rule_rows:
+            return {"estimated_waros": 0, "system_enabled": True, "breakdown": []}
+
+        active_types = {r["rule_type"] for r in rule_rows}
+
+        total_completed = 0
+        if "purchase_count" in active_types:
+            count_row = await conn.fetchrow(
+                "SELECT COUNT(*) AS total FROM orders WHERE customer_id = $1 AND tenant_id = $2 AND status = 'completed'",
+                customer_id, tenant_id,
+            )
+            total_completed = int(count_row["total"]) + 1
+
+        freq_count = 0
+        if "frequency" in active_types:
+            freq_cfg = next((r["config"] for r in rule_rows if r["rule_type"] == "frequency"), {})
+            if isinstance(freq_cfg, str):
+                freq_cfg = json.loads(freq_cfg)
+            within_days = int(freq_cfg.get("within_days", 60))
+            cutoff = datetime.now() - timedelta(days=within_days)
+            freq_row = await conn.fetchrow(
+                "SELECT COUNT(*) AS freq_count FROM orders WHERE customer_id = $1 AND tenant_id = $2 AND status = 'completed' AND created_at >= $3",
+                customer_id, tenant_id, cutoff,
+            )
+            freq_count = int(freq_row["freq_count"]) + 1
+
+    breakdown = []
+    total_waros = 0
+
+    for rule in rule_rows:
+        rule_type = rule["rule_type"]
+        cfg = rule["config"]
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg)
+
+        waros = 0
+        if rule_type == "ticket_value":
+            min_amount = float(cfg.get("min_amount", 0))
+            waros_per_unit = int(cfg.get("waros_per_unit", 0))
+            unit_size = float(cfg.get("unit_size", 1000))
+            if total_amount >= min_amount and unit_size > 0:
+                waros = int((total_amount // unit_size) * waros_per_unit)
+        elif rule_type == "purchase_count":
+            thresholds = cfg.get("thresholds", [])
+            for t in sorted(thresholds, key=lambda x: x.get("count", 0), reverse=True):
+                if total_completed >= int(t.get("count", 0)):
+                    waros = int(t.get("waros", 0))
+                    break
+        elif rule_type == "frequency":
+            thresholds = cfg.get("thresholds", [])
+            for t in sorted(thresholds, key=lambda x: x.get("orders", 0), reverse=True):
+                if freq_count >= int(t.get("orders", 0)):
+                    waros = int(t.get("waros", 0))
+                    break
+
+        breakdown.append({"rule_type": rule_type, "waros": waros, "is_active": True})
+        total_waros += waros
+
+    max_daily = int(config_row["max_daily_waros"] or 0)
+    if max_daily > 0:
+        total_waros = min(total_waros, max_daily)
+
+    return {"estimated_waros": total_waros, "system_enabled": True, "breakdown": breakdown}
 
 
 @router.post("/logout")
