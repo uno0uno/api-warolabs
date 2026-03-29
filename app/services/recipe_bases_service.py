@@ -5,6 +5,7 @@ import logging
 from typing import Optional
 from uuid import UUID
 from fastapi import Request, Response, HTTPException
+import asyncpg
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
@@ -154,6 +155,11 @@ async def create_recipe_base_type(
         raise
     except HTTPException:
         raise
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+            status_code=400,
+            detail="Ya existe una receta base con ese nombre"
+        )
     except Exception as e:
         logger.error(f"Error creating recipe base type: {str(e)}")
         raise APIError(f"Error creating recipe base type: {str(e)}", status_code=500)
@@ -568,6 +574,11 @@ async def update_recipe_base_type(
         raise
     except HTTPException:
         raise
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+            status_code=400,
+            detail="Ya existe una receta base con ese nombre"
+        )
     except Exception as e:
         logger.error(f"Error updating recipe base type {recipe_base_id}: {str(e)}")
         raise APIError(f"Error updating recipe base type: {str(e)}", status_code=500)
