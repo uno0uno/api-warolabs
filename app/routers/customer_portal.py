@@ -12,6 +12,7 @@ from app.dependencies.customer_auth import get_current_customer
 from app.core.security import clear_customer_cookie
 from app.core.middleware import get_tenant_context
 from app.database import get_db_connection
+from app.services.waros_service import _eval_rule
 from app.services.customer_orders_service import cancel_customer_order, get_customer_order_detail, get_customer_orders_list
 
 router = APIRouter(prefix="/customer", tags=["Customer Portal"])
@@ -159,6 +160,7 @@ async def estimate_waros(
             return {"estimated_waros": 0, "system_enabled": True, "breakdown": []}
 
         active_types = {r["rule_type"] for r in rule_rows}
+        max_daily = int(config_row["max_daily_waros"] or 0)
 
         total_completed = 0
         if "purchase_count" in active_types:
@@ -181,6 +183,20 @@ async def estimate_waros(
             )
             freq_count = int(freq_row["freq_count"]) + 1
 
+        today_earned = 0
+        if max_daily > 0:
+            today_row = await conn.fetchrow(
+                """
+                SELECT COALESCE(SUM(waros_amount), 0) AS today_earned
+                FROM waros_transactions
+                WHERE profile_id = $1 AND tenant_id = $2
+                  AND transaction_type = 'earned'
+                  AND created_at >= CURRENT_DATE
+                """,
+                customer_id, tenant_id,
+            )
+            today_earned = int(today_row["today_earned"])
+
     breakdown = []
     total_waros = 0
 
@@ -190,32 +206,20 @@ async def estimate_waros(
         if isinstance(cfg, str):
             cfg = json.loads(cfg)
 
-        waros = 0
-        if rule_type == "ticket_value":
-            min_amount = float(cfg.get("min_amount", 0))
-            waros_per_unit = int(cfg.get("waros_per_unit", 0))
-            unit_size = float(cfg.get("unit_size", 1000))
-            if total_amount >= min_amount and unit_size > 0:
-                waros = int((total_amount // unit_size) * waros_per_unit)
-        elif rule_type == "purchase_count":
-            thresholds = cfg.get("thresholds", [])
-            for t in sorted(thresholds, key=lambda x: x.get("count", 0), reverse=True):
-                if total_completed >= int(t.get("count", 0)):
-                    waros = int(t.get("waros", 0))
-                    break
-        elif rule_type == "frequency":
-            thresholds = cfg.get("thresholds", [])
-            for t in sorted(thresholds, key=lambda x: x.get("orders", 0), reverse=True):
-                if freq_count >= int(t.get("orders", 0)):
-                    waros = int(t.get("waros", 0))
-                    break
+        earned = _eval_rule(
+            rule_type=rule_type,
+            config=cfg,
+            total_amount=total_amount,
+            total_completed=total_completed,
+            total_qty=0,
+            freq_count=freq_count,
+        )
+        breakdown.append({"rule_type": rule_type, "waros": earned, "is_active": True})
+        total_waros += earned
 
-        breakdown.append({"rule_type": rule_type, "waros": waros, "is_active": True})
-        total_waros += waros
-
-    max_daily = int(config_row["max_daily_waros"] or 0)
-    if max_daily > 0:
-        total_waros = min(total_waros, max_daily)
+    if max_daily > 0 and total_waros > 0:
+        remaining = max(0, max_daily - today_earned)
+        total_waros = min(total_waros, remaining)
 
     return {"estimated_waros": total_waros, "system_enabled": True, "breakdown": breakdown}
 
