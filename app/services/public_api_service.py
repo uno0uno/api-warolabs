@@ -1065,23 +1065,50 @@ async def get_customers_list(
     search: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    timezone: str = "America/Bogota"
+    timezone: str = "America/Bogota",
+    sort_field: str = "total_spent",
+    sort_direction: str = "desc"
 ) -> dict:
     """
-    Get list of customers aggregated from POS orders, ranked by total spent.
+    Get list of customers aggregated from POS orders.
+    Date filters scope the aggregation but never exclude customers with zero orders in the period.
     Requires scope: customers:read or read
     """
     try:
         tenant_id, token_id = validate_api_key_auth(request, "customers:read")
 
+        # Sort validation — allowlist prevents SQL injection
+        _allowed_sort = {"total_spent", "order_count", "last_order_date", "avg_ticket"}
+        sort_col = sort_field if sort_field in _allowed_sort else "total_spent"
+        sort_dir = "ASC" if sort_direction.lower() == "asc" else "DESC"
+
         async with get_db_connection(use_transaction=False) as conn:
-            where_conditions = [
+            # $1 = tenant_id (used in both CTEs)
+            params: list = [UUID(tenant_id)]
+            param_count = 1
+
+            # --- all_customers CTE: base pool (no date filter) ---
+            base_conditions = [
                 "o.tenant_id = $1",
                 "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
                 "o.customer_id IS NOT NULL",
             ]
-            params: list = [UUID(tenant_id)]
-            param_count = 1
+
+            if search:
+                param_count += 1
+                base_conditions.append(
+                    f"(p.name ILIKE ${param_count} OR p.phone_number ILIKE ${param_count})"
+                )
+                params.append(f"%{search}%")
+
+            base_where = " AND ".join(base_conditions)
+
+            # --- period_agg CTE: date-scoped aggregation ---
+            period_conditions = [
+                "o.tenant_id = $1",
+                "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
+                "o.customer_id IS NOT NULL",
+            ]
 
             parsed_date_from = parse_date(date_from)
             parsed_date_to = parse_date(date_to)
@@ -1091,7 +1118,7 @@ async def get_customers_list(
                 date_from_param = param_count
                 param_count += 1
                 tz_from_param = param_count
-                where_conditions.append(
+                period_conditions.append(
                     f"o.order_date >= (${date_from_param}::timestamp AT TIME ZONE ${tz_from_param})"
                 )
                 params.append(parsed_date_from)
@@ -1102,20 +1129,13 @@ async def get_customers_list(
                 date_to_param = param_count
                 param_count += 1
                 tz_to_param = param_count
-                where_conditions.append(
+                period_conditions.append(
                     f"o.order_date < ((${date_to_param}::timestamp + interval '1 day') AT TIME ZONE ${tz_to_param})"
                 )
                 params.append(parsed_date_to)
                 params.append(timezone)
 
-            if search:
-                param_count += 1
-                where_conditions.append(
-                    f"(p.name ILIKE ${param_count} OR p.phone_number ILIKE ${param_count})"
-                )
-                params.append(f"%{search}%")
-
-            where_clause = " AND ".join(where_conditions)
+            period_where = " AND ".join(period_conditions)
 
             param_count += 1
             limit_param = param_count
@@ -1123,25 +1143,41 @@ async def get_customers_list(
             offset_param = param_count
 
             query = f"""
-                WITH customer_agg AS (
-                    SELECT
+                WITH all_customers AS (
+                    SELECT DISTINCT
                         o.customer_id,
                         COALESCE(p.name, 'Sin identificar') AS name,
-                        p.phone_number                       AS phone,
-                        SUM(o.total_amount)                  AS total_spent,
-                        COUNT(o.id)                          AS order_count,
-                        AVG(o.total_amount)                  AS avg_ticket,
-                        MAX(o.order_date)                    AS last_order_date
+                        p.phone_number                       AS phone
                     FROM orders o
                     LEFT JOIN profile p ON o.customer_id = p.id
-                    WHERE {where_clause}
-                    GROUP BY o.customer_id, p.name, p.phone_number
+                    WHERE {base_where}
+                ),
+                period_agg AS (
+                    SELECT
+                        o.customer_id,
+                        SUM(o.total_amount)  AS total_spent,
+                        COUNT(o.id)          AS order_count,
+                        AVG(o.total_amount)  AS avg_ticket,
+                        MAX(o.order_date)    AS last_order_date
+                    FROM orders o
+                    WHERE {period_where}
+                    GROUP BY o.customer_id
                 )
                 SELECT
-                    *,
-                    COUNT(*) OVER()         AS total_count
-                FROM customer_agg
-                ORDER BY total_spent DESC
+                    ac.customer_id,
+                    ac.name,
+                    ac.phone,
+                    COALESCE(pa.total_spent, 0)     AS total_spent,
+                    COALESCE(pa.order_count, 0)     AS order_count,
+                    COALESCE(pa.avg_ticket, 0)      AS avg_ticket,
+                    pa.last_order_date,
+                    COALESCE(ww.current_balance, 0) AS waros_balance,
+                    COUNT(*) OVER()                 AS total_count
+                FROM all_customers ac
+                LEFT JOIN period_agg pa ON ac.customer_id = pa.customer_id
+                LEFT JOIN waros_wallets ww
+                    ON ww.profile_id = ac.customer_id AND ww.tenant_id = $1
+                ORDER BY {sort_col} {sort_dir} NULLS LAST
                 LIMIT ${limit_param} OFFSET ${offset_param}
             """
 
@@ -1151,30 +1187,23 @@ async def get_customers_list(
 
             customers = [
                 {
-                    "customerId": str(row['customer_id']),
+                    "customer_id": str(row['customer_id']),
                     "name": row['name'],
                     "phone": row['phone'],
-                    "totalSpent": float(row['total_spent']),
-                    "orderCount": int(row['order_count']),
-                    "avgTicket": float(row['avg_ticket']),
-                    "lastOrderDate": row['last_order_date'].isoformat(),
+                    "order_count": int(row['order_count']),
+                    "total_spent": float(row['total_spent']),
+                    "avg_ticket": float(row['avg_ticket']),
+                    "last_order_date": row['last_order_date'].isoformat() if row['last_order_date'] else None,
+                    "waros_balance": int(row['waros_balance']),
                 }
                 for row in rows
             ]
 
             return {
-                "success": True,
                 "data": customers,
-                "pagination": {
-                    "total": total_count,
-                    "limit": limit,
-                    "offset": offset,
-                    "hasMore": (offset + limit) < total_count
-                },
-                "meta": {
-                    "tokenId": token_id,
-                    "tenantId": tenant_id
-                }
+                "total": total_count,
+                "limit": limit,
+                "offset": offset,
             }
 
     except (AuthenticationError, AuthorizationError) as e:

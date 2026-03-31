@@ -69,9 +69,11 @@ class CustomersListRequest(BaseModel):
     limit: int = Field(default=50, ge=1, le=250, description="Number of results (1-250)")
     offset: int = Field(default=0, ge=0, description="Number of results to skip")
     search: Optional[str] = Field(default=None, description="Partial name or phone number search (case-insensitive)")
-    dateFrom: Optional[str] = Field(default=None, description="Filter by first/last order date start (YYYY-MM-DD)")
-    dateTo: Optional[str] = Field(default=None, description="Filter by first/last order date end (YYYY-MM-DD)")
+    dateFrom: Optional[str] = Field(default=None, description="Scopes order aggregation start date (YYYY-MM-DD) — does not exclude customers with zero orders in period")
+    dateTo: Optional[str] = Field(default=None, description="Scopes order aggregation end date (YYYY-MM-DD)")
     timezone: str = Field(default="America/Bogota", description="Timezone for date filters (e.g., America/Bogota, America/Mexico_City, America/New_York)")
+    sortField: str = Field(default="total_spent", description="Sort field: total_spent | order_count | last_order_date | avg_ticket")
+    sortDirection: str = Field(default="desc", description="Sort direction: asc | desc")
 
 
 class CustomerDetailRequest(BaseModel):
@@ -227,7 +229,9 @@ async def get_customers(request: Request, body: CustomersListRequest):
         search=body.search,
         date_from=body.dateFrom,
         date_to=body.dateTo,
-        timezone=body.timezone
+        timezone=body.timezone,
+        sort_field=body.sortField,
+        sort_direction=body.sortDirection
     )
 
 
