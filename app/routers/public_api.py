@@ -79,6 +79,11 @@ class CustomersListRequest(BaseModel):
 class CustomerDetailRequest(BaseModel):
     """Request body for customer detail query"""
     customerId: str = Field(description="Customer UUID")
+    dateFrom: Optional[str] = Field(default=None, description="Filter order history start date (YYYY-MM-DD)")
+    dateTo: Optional[str] = Field(default=None, description="Filter order history end date (YYYY-MM-DD)")
+    timezone: str = Field(default="America/Bogota", description="Timezone for date filters (e.g., America/Bogota, America/Mexico_City, America/New_York)")
+    limit: int = Field(default=20, ge=1, le=100, description="Number of orders to return (1-100)")
+    offset: int = Field(default=0, ge=0, description="Number of orders to skip")
 
 
 @router.post("/sales")
@@ -248,7 +253,12 @@ async def get_customer_detail(request: Request, body: CustomerDetailRequest):
     """
     return await public_api_service.get_customer_detail(
         request,
-        UUID(body.customerId)
+        UUID(body.customerId),
+        date_from=body.dateFrom,
+        date_to=body.dateTo,
+        timezone=body.timezone,
+        limit=body.limit,
+        offset=body.offset
     )
 
 

@@ -1215,27 +1215,34 @@ async def get_customers_list(
 
 async def get_customer_detail(
     request: Request,
-    customer_id: UUID
+    customer_id: UUID,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    timezone: str = "America/Bogota",
+    limit: int = 20,
+    offset: int = 0
 ) -> dict:
     """
-    Get a single customer's aggregate stats and WaRos summary.
+    Get a single customer's aggregate stats, paginated order history, and WaRos summary.
     Requires scope: customers:read or read
     """
     try:
         tenant_id, token_id = validate_api_key_auth(request, "customers:read")
 
         async with get_db_connection(use_transaction=False) as conn:
+            # --- Customer aggregate stats (all-time, no date filter) ---
             customer_row = await conn.fetchrow(
                 """
                 SELECT
                     o.customer_id,
-                    COALESCE(p.name, 'Sin identificar') AS name,
-                    p.phone_number                       AS phone,
-                    p.email                              AS email,
-                    COUNT(o.id)                          AS total_orders,
-                    SUM(o.total_amount)                  AS total_spent,
-                    MIN(o.order_date)                    AS first_purchase,
-                    MAX(o.order_date)                    AS last_purchase
+                    COALESCE(p.name, 'Sin identificar')                        AS name,
+                    p.phone_number                                               AS phone,
+                    CASE WHEN p.email LIKE '%@customer.temp' THEN NULL
+                         ELSE p.email END                                        AS email,
+                    COUNT(o.id)                                                  AS total_orders,
+                    SUM(o.total_amount)                                          AS total_spent,
+                    MIN(o.order_date)                                            AS first_purchase,
+                    MAX(o.order_date)                                            AS last_purchase
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
                 WHERE o.tenant_id = $1
@@ -1250,6 +1257,85 @@ async def get_customer_detail(
             if not customer_row:
                 raise APIError("Customer not found", status_code=404)
 
+            # --- Paginated order history (date-filtered) ---
+            where_conditions = [
+                "o.tenant_id = $1",
+                "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
+                "o.customer_id = $2",
+            ]
+            params: list = [UUID(tenant_id), customer_id]
+            param_count = 2
+
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
+
+            if parsed_date_from:
+                param_count += 1
+                where_conditions.append(
+                    f"o.order_date >= (${param_count}::timestamp AT TIME ZONE '{timezone}')"
+                )
+                params.append(parsed_date_from)
+
+            if parsed_date_to:
+                param_count += 1
+                where_conditions.append(
+                    f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE '{timezone}')"
+                )
+                params.append(parsed_date_to)
+
+            where_clause = " AND ".join(where_conditions)
+            param_count += 1
+            limit_param = param_count
+            param_count += 1
+            offset_param = param_count
+
+            orders_query = f"""
+                SELECT
+                    o.id                AS order_id,
+                    o.order_number,
+                    o.order_date,
+                    o.total_amount,
+                    o.status,
+                    o.payment_method,
+                    (
+                        SELECT COUNT(*)
+                        FROM order_items oi
+                        WHERE oi.order_id = o.id
+                    )                   AS items_count,
+                    (
+                        SELECT COALESCE(SUM(wt.waros_amount), 0)
+                        FROM waros_transactions wt
+                        WHERE wt.related_entity_id = o.id::text
+                          AND wt.transaction_type = 'earned'
+                          AND wt.tenant_id = $1
+                    )                   AS waros_earned,
+                    COUNT(*) OVER()     AS total_count
+                FROM orders o
+                WHERE {where_clause}
+                ORDER BY o.order_date DESC
+                LIMIT ${limit_param} OFFSET ${offset_param}
+            """
+
+            params.append(limit)
+            params.append(offset)
+            order_rows = await conn.fetch(orders_query, *params)
+            total_count = int(order_rows[0]['total_count']) if order_rows else 0
+
+            orders = [
+                {
+                    "order_id": str(row['order_id']),
+                    "order_number": int(row['order_number']),
+                    "date": row['order_date'].isoformat(),
+                    "total": float(row['total_amount']),
+                    "items_count": int(row['items_count']),
+                    "payment_method": row['payment_method'],
+                    "status": row['status'],
+                    "waros_earned": int(row['waros_earned']),
+                }
+                for row in order_rows
+            ]
+
+            # --- WaRos wallet summary ---
             wallet_row = await conn.fetchrow(
                 """
                 SELECT current_balance, lifetime_earned, lifetime_spent
@@ -1261,26 +1347,27 @@ async def get_customer_detail(
             )
 
             return {
-                "success": True,
-                "data": {
-                    "customerId": str(customer_row['customer_id']),
+                "customer": {
+                    "customer_id": str(customer_row['customer_id']),
                     "name": customer_row['name'],
                     "phone": customer_row['phone'],
                     "email": customer_row['email'],
-                    "totalOrders": int(customer_row['total_orders']),
-                    "totalSpent": float(customer_row['total_spent']),
-                    "firstPurchase": customer_row['first_purchase'].isoformat() if customer_row['first_purchase'] else None,
-                    "lastPurchase": customer_row['last_purchase'].isoformat() if customer_row['last_purchase'] else None,
-                    "waros": {
-                        "currentBalance": int(wallet_row['current_balance']) if wallet_row else 0,
-                        "lifetimeEarned": int(wallet_row['lifetime_earned']) if wallet_row else 0,
-                        "lifetimeSpent": int(wallet_row['lifetime_spent']) if wallet_row else 0,
-                    }
+                    "total_orders": int(customer_row['total_orders']),
+                    "total_spent": float(customer_row['total_spent']),
+                    "first_purchase": customer_row['first_purchase'].date().isoformat() if customer_row['first_purchase'] else None,
+                    "last_purchase": customer_row['last_purchase'].date().isoformat() if customer_row['last_purchase'] else None,
                 },
-                "meta": {
-                    "tokenId": token_id,
-                    "tenantId": tenant_id
-                }
+                "orders": {
+                    "items": orders,
+                    "total": total_count,
+                    "limit": limit,
+                    "offset": offset,
+                },
+                "waros_summary": {
+                    "current_balance": int(wallet_row['current_balance']) if wallet_row else 0,
+                    "lifetime_earned": int(wallet_row['lifetime_earned']) if wallet_row else 0,
+                    "lifetime_spent": int(wallet_row['lifetime_spent']) if wallet_row else 0,
+                },
             }
 
     except (AuthenticationError, AuthorizationError) as e:
