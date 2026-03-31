@@ -1058,6 +1058,211 @@ async def get_menu_recipes(
         raise APIError(f"Error al obtener recetas: {str(e)}", status_code=500)
 
 
+async def get_customers_list(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    search: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    timezone: str = "America/Bogota"
+) -> dict:
+    """
+    Get list of customers aggregated from POS orders, ranked by total spent.
+    Requires scope: customers:read or read
+    """
+    try:
+        tenant_id, token_id = validate_api_key_auth(request, "customers:read")
+
+        async with get_db_connection(use_transaction=False) as conn:
+            where_conditions = [
+                "o.tenant_id = $1",
+                "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
+                "o.customer_id IS NOT NULL",
+            ]
+            params: list = [UUID(tenant_id)]
+            param_count = 1
+
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
+
+            if parsed_date_from:
+                param_count += 1
+                date_from_param = param_count
+                param_count += 1
+                tz_from_param = param_count
+                where_conditions.append(
+                    f"o.order_date >= (${date_from_param}::timestamp AT TIME ZONE ${tz_from_param})"
+                )
+                params.append(parsed_date_from)
+                params.append(timezone)
+
+            if parsed_date_to:
+                param_count += 1
+                date_to_param = param_count
+                param_count += 1
+                tz_to_param = param_count
+                where_conditions.append(
+                    f"o.order_date < ((${date_to_param}::timestamp + interval '1 day') AT TIME ZONE ${tz_to_param})"
+                )
+                params.append(parsed_date_to)
+                params.append(timezone)
+
+            if search:
+                param_count += 1
+                where_conditions.append(
+                    f"(p.name ILIKE ${param_count} OR p.phone_number ILIKE ${param_count})"
+                )
+                params.append(f"%{search}%")
+
+            where_clause = " AND ".join(where_conditions)
+
+            param_count += 1
+            limit_param = param_count
+            param_count += 1
+            offset_param = param_count
+
+            query = f"""
+                WITH customer_agg AS (
+                    SELECT
+                        o.customer_id,
+                        COALESCE(p.name, 'Sin identificar') AS name,
+                        p.phone_number                       AS phone,
+                        SUM(o.total_amount)                  AS total_spent,
+                        COUNT(o.id)                          AS order_count,
+                        AVG(o.total_amount)                  AS avg_ticket,
+                        MAX(o.order_date)                    AS last_order_date
+                    FROM orders o
+                    LEFT JOIN profile p ON o.customer_id = p.id
+                    WHERE {where_clause}
+                    GROUP BY o.customer_id, p.name, p.phone_number
+                )
+                SELECT
+                    *,
+                    COUNT(*) OVER()         AS total_count
+                FROM customer_agg
+                ORDER BY total_spent DESC
+                LIMIT ${limit_param} OFFSET ${offset_param}
+            """
+
+            params.extend([limit, offset])
+            rows = await conn.fetch(query, *params)
+            total_count = rows[0]['total_count'] if rows else 0
+
+            customers = [
+                {
+                    "customerId": str(row['customer_id']),
+                    "name": row['name'],
+                    "phone": row['phone'],
+                    "totalSpent": float(row['total_spent']),
+                    "orderCount": int(row['order_count']),
+                    "avgTicket": float(row['avg_ticket']),
+                    "lastOrderDate": row['last_order_date'].isoformat(),
+                }
+                for row in rows
+            ]
+
+            return {
+                "success": True,
+                "data": customers,
+                "pagination": {
+                    "total": total_count,
+                    "limit": limit,
+                    "offset": offset,
+                    "hasMore": (offset + limit) < total_count
+                },
+                "meta": {
+                    "tokenId": token_id,
+                    "tenantId": tenant_id
+                }
+            }
+
+    except (AuthenticationError, AuthorizationError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting customers list via API: {str(e)}")
+        raise APIError(f"Error al obtener clientes: {str(e)}", status_code=500)
+
+
+async def get_customer_detail(
+    request: Request,
+    customer_id: UUID
+) -> dict:
+    """
+    Get a single customer's aggregate stats and WaRos summary.
+    Requires scope: customers:read or read
+    """
+    try:
+        tenant_id, token_id = validate_api_key_auth(request, "customers:read")
+
+        async with get_db_connection(use_transaction=False) as conn:
+            customer_row = await conn.fetchrow(
+                """
+                SELECT
+                    o.customer_id,
+                    COALESCE(p.name, 'Sin identificar') AS name,
+                    p.phone_number                       AS phone,
+                    p.email                              AS email,
+                    COUNT(o.id)                          AS total_orders,
+                    SUM(o.total_amount)                  AS total_spent,
+                    MIN(o.order_date)                    AS first_purchase,
+                    MAX(o.order_date)                    AS last_purchase
+                FROM orders o
+                LEFT JOIN profile p ON o.customer_id = p.id
+                WHERE o.tenant_id = $1
+                  AND (o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
+                  AND o.customer_id = $2
+                GROUP BY o.customer_id, p.name, p.phone_number, p.email
+                """,
+                UUID(tenant_id),
+                customer_id,
+            )
+
+            if not customer_row:
+                raise APIError("Customer not found", status_code=404)
+
+            wallet_row = await conn.fetchrow(
+                """
+                SELECT current_balance, lifetime_earned, lifetime_spent
+                FROM waros_wallets
+                WHERE profile_id = $1 AND tenant_id = $2
+                """,
+                customer_id,
+                UUID(tenant_id),
+            )
+
+            return {
+                "success": True,
+                "data": {
+                    "customerId": str(customer_row['customer_id']),
+                    "name": customer_row['name'],
+                    "phone": customer_row['phone'],
+                    "email": customer_row['email'],
+                    "totalOrders": int(customer_row['total_orders']),
+                    "totalSpent": float(customer_row['total_spent']),
+                    "firstPurchase": customer_row['first_purchase'].isoformat() if customer_row['first_purchase'] else None,
+                    "lastPurchase": customer_row['last_purchase'].isoformat() if customer_row['last_purchase'] else None,
+                    "waros": {
+                        "currentBalance": int(wallet_row['current_balance']) if wallet_row else 0,
+                        "lifetimeEarned": int(wallet_row['lifetime_earned']) if wallet_row else 0,
+                        "lifetimeSpent": int(wallet_row['lifetime_spent']) if wallet_row else 0,
+                    }
+                },
+                "meta": {
+                    "tokenId": token_id,
+                    "tenantId": tenant_id
+                }
+            }
+
+    except (AuthenticationError, AuthorizationError) as e:
+        raise e
+    except APIError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting customer detail via API: {str(e)}")
+        raise APIError(f"Error al obtener detalle del cliente: {str(e)}", status_code=500)
+
+
 async def get_menu_modifiers(
     request: Request,
     limit: int = 50,

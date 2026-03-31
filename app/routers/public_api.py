@@ -64,6 +64,21 @@ class MenuModifiersRequest(BaseModel):
     offset: int = Field(default=0, ge=0, description="Number of results to skip")
 
 
+class CustomersListRequest(BaseModel):
+    """Request body for customers list query"""
+    limit: int = Field(default=50, ge=1, le=250, description="Number of results (1-250)")
+    offset: int = Field(default=0, ge=0, description="Number of results to skip")
+    search: Optional[str] = Field(default=None, description="Partial name or phone number search (case-insensitive)")
+    dateFrom: Optional[str] = Field(default=None, description="Filter by first/last order date start (YYYY-MM-DD)")
+    dateTo: Optional[str] = Field(default=None, description="Filter by first/last order date end (YYYY-MM-DD)")
+    timezone: str = Field(default="America/Bogota", description="Timezone for date filters (e.g., America/Bogota, America/Mexico_City, America/New_York)")
+
+
+class CustomerDetailRequest(BaseModel):
+    """Request body for customer detail query"""
+    customerId: str = Field(description="Customer UUID")
+
+
 @router.post("/sales")
 async def get_sales(request: Request, body: SalesQueryRequest):
     """
@@ -191,6 +206,45 @@ async def get_menu_modifiers(request: Request, body: MenuModifiersRequest):
         request,
         limit=body.limit,
         offset=body.offset
+    )
+
+
+@router.post("/customers")
+async def get_customers(request: Request, body: CustomersListRequest):
+    """
+    Obtiene la lista de clientes del tenant autenticado, ordenados por total gastado.
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `customers:read` o `read`
+    """
+    return await public_api_service.get_customers_list(
+        request,
+        limit=body.limit,
+        offset=body.offset,
+        search=body.search,
+        date_from=body.dateFrom,
+        date_to=body.dateTo,
+        timezone=body.timezone
+    )
+
+
+@router.post("/customers/detail")
+async def get_customer_detail(request: Request, body: CustomerDetailRequest):
+    """
+    Obtiene el perfil, estadisticas y resumen de WaRos de un cliente especifico.
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `customers:read` o `read`
+    """
+    return await public_api_service.get_customer_detail(
+        request,
+        UUID(body.customerId)
     )
 
 
