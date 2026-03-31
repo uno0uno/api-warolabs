@@ -86,6 +86,14 @@ class CustomerDetailRequest(BaseModel):
     offset: int = Field(default=0, ge=0, description="Number of orders to skip")
 
 
+class CustomerMetricsRequest(BaseModel):
+    """Request body for customer metrics query"""
+    dateFrom: Optional[str] = Field(default=None, description="Start date (YYYY-MM-DD)")
+    dateTo: Optional[str] = Field(default=None, description="End date (YYYY-MM-DD)")
+    timezone: str = Field(default="America/Bogota", description="Timezone for date filters (e.g., America/Bogota, America/Mexico_City, America/New_York)")
+    groupBy: Optional[str] = Field(default=None, description="Time series breakdown: date | weekday | month")
+
+
 @router.post("/sales")
 async def get_sales(request: Request, body: SalesQueryRequest):
     """
@@ -259,6 +267,32 @@ async def get_customer_detail(request: Request, body: CustomerDetailRequest):
         timezone=body.timezone,
         limit=body.limit,
         offset=body.offset
+    )
+
+
+@router.post("/customers/metrics")
+async def get_customers_metrics(request: Request, body: CustomerMetricsRequest):
+    """
+    Obtiene metricas agregadas de clientes del tenant autenticado.
+
+    **Parametro groupBy:**
+    - null: Solo summary y top clientes (default)
+    - "date": Serie por dia calendario
+    - "weekday": Serie por dia de la semana (7 entradas)
+    - "month": Serie por mes (YYYY-MM)
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `customers:read` o `read`
+    """
+    return await public_api_service.get_customers_metrics(
+        request,
+        date_from=body.dateFrom,
+        date_to=body.dateTo,
+        timezone=body.timezone,
+        group_by=body.groupBy
     )
 
 

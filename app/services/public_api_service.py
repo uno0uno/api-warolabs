@@ -1514,3 +1514,350 @@ async def get_menu_modifiers(
     except Exception as e:
         logger.error(f"Error getting menu modifiers via API: {str(e)}")
         raise APIError(f"Error al obtener modificadores: {str(e)}", status_code=500)
+
+
+async def get_customers_metrics(
+    request: Request,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    timezone: str = "America/Bogota",
+    group_by: Optional[str] = None  # date, weekday, month
+) -> dict:
+    """
+    Get aggregate customer analytics for the authenticated tenant.
+    Requires scope: customers:read or read
+    """
+    try:
+        tenant_id, token_id = validate_api_key_auth(request, "customers:read")
+
+        async with get_db_connection(use_transaction=False) as conn:
+            # Build base WHERE clause (period-scoped, completed POS orders only)
+            pos_filter = "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
+            where_conditions = [f"tenant_id = $1", pos_filter, "status = 'completed'"]
+            params: list = [UUID(tenant_id)]
+            param_count = 1
+
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
+
+            if parsed_date_from:
+                param_count += 1
+                df_param = param_count
+                param_count += 1
+                tz_df_param = param_count
+                where_conditions.append(
+                    f"order_date >= (${df_param}::timestamp AT TIME ZONE ${tz_df_param})"
+                )
+                params.append(parsed_date_from)
+                params.append(timezone)
+
+            if parsed_date_to:
+                param_count += 1
+                dt_param = param_count
+                param_count += 1
+                tz_dt_param = param_count
+                where_conditions.append(
+                    f"order_date < ((${dt_param}::timestamp + interval '1 day') AT TIME ZONE ${tz_dt_param})"
+                )
+                params.append(parsed_date_to)
+                params.append(timezone)
+
+            where_clause = " AND ".join(where_conditions)
+
+            # --- Summary (2-CTE single query) ---
+            # new_customers FILTER: only apply when date bounds are given
+            if parsed_date_from and parsed_date_to:
+                param_count += 1
+                df2_param = param_count
+                param_count += 1
+                tz_df2_param = param_count
+                param_count += 1
+                dt2_param = param_count
+                param_count += 1
+                tz_dt2_param = param_count
+                new_cust_filter = (
+                    f"atf.first_ever >= (${df2_param}::timestamp AT TIME ZONE ${tz_df2_param})"
+                    f" AND atf.first_ever < ((${dt2_param}::timestamp + interval '1 day') AT TIME ZONE ${tz_dt2_param})"
+                )
+                params.append(parsed_date_from)
+                params.append(timezone)
+                params.append(parsed_date_to)
+                params.append(timezone)
+            elif parsed_date_from:
+                param_count += 1
+                df2_param = param_count
+                param_count += 1
+                tz_df2_param = param_count
+                new_cust_filter = (
+                    f"atf.first_ever >= (${df2_param}::timestamp AT TIME ZONE ${tz_df2_param})"
+                )
+                params.append(parsed_date_from)
+                params.append(timezone)
+            elif parsed_date_to:
+                param_count += 1
+                dt2_param = param_count
+                param_count += 1
+                tz_dt2_param = param_count
+                new_cust_filter = (
+                    f"atf.first_ever < ((${dt2_param}::timestamp + interval '1 day') AT TIME ZONE ${tz_dt2_param})"
+                )
+                params.append(parsed_date_to)
+                params.append(timezone)
+            else:
+                # No date filter: all customers in the all-time pool are "new" by definition
+                new_cust_filter = "TRUE"
+
+            summary_query = f"""
+                WITH all_time_first AS (
+                    SELECT customer_id, MIN(order_date) AS first_ever
+                    FROM orders
+                    WHERE tenant_id = $1
+                      AND {pos_filter}
+                      AND status = 'completed'
+                    GROUP BY customer_id
+                ),
+                period_orders AS (
+                    SELECT customer_id,
+                           COUNT(*)            AS order_count,
+                           SUM(total_amount)   AS revenue
+                    FROM orders
+                    WHERE {where_clause}
+                    GROUP BY customer_id
+                )
+                SELECT
+                    COUNT(*)                                                                     AS total_customers,
+                    COUNT(*) FILTER (WHERE {new_cust_filter})                                    AS new_customers,
+                    COALESCE(SUM(po.revenue), 0)                                                 AS total_revenue,
+                    COALESCE(SUM(po.revenue)::float / NULLIF(COUNT(*), 0), 0)                    AS avg_ticket,
+                    COALESCE(SUM(po.order_count)::float / NULLIF(COUNT(*), 0), 0)                AS avg_orders_per_customer
+                FROM period_orders po
+                JOIN all_time_first atf ON po.customer_id = atf.customer_id
+            """
+
+            summary_row = await conn.fetchrow(summary_query, *params)
+
+            total_customers = int(summary_row['total_customers'])
+            new_customers = int(summary_row['new_customers'])
+            summary = {
+                "total_customers": total_customers,
+                "new_customers": new_customers,
+                "returning_customers": total_customers - new_customers,
+                "total_revenue": float(summary_row['total_revenue']),
+                "avg_ticket": round(float(summary_row['avg_ticket']), 2),
+                "avg_orders_per_customer": round(float(summary_row['avg_orders_per_customer']), 2),
+            }
+
+            # --- Top 10 customers ---
+            top_params: list = [UUID(tenant_id)]
+            top_pc = 1
+            top_conditions = [f"o.tenant_id = $1", f"o.{pos_filter}", "o.status = 'completed'"]
+
+            if parsed_date_from:
+                top_pc += 1
+                top_df = top_pc
+                top_pc += 1
+                top_tz_df = top_pc
+                top_conditions.append(
+                    f"o.order_date >= (${top_df}::timestamp AT TIME ZONE ${top_tz_df})"
+                )
+                top_params.append(parsed_date_from)
+                top_params.append(timezone)
+
+            if parsed_date_to:
+                top_pc += 1
+                top_dt = top_pc
+                top_pc += 1
+                top_tz_dt = top_pc
+                top_conditions.append(
+                    f"o.order_date < ((${top_dt}::timestamp + interval '1 day') AT TIME ZONE ${top_tz_dt})"
+                )
+                top_params.append(parsed_date_to)
+                top_params.append(timezone)
+
+            top_where = " AND ".join(top_conditions)
+
+            top_query = f"""
+                SELECT
+                    o.customer_id,
+                    COALESCE(p.name, 'Sin identificar')  AS name,
+                    p.phone_number                        AS phone,
+                    COUNT(o.id)                           AS order_count,
+                    SUM(o.total_amount)                   AS total_spent
+                FROM orders o
+                LEFT JOIN profile p ON o.customer_id = p.id
+                WHERE {top_where}
+                GROUP BY o.customer_id, p.name, p.phone_number
+                ORDER BY total_spent DESC
+                LIMIT 10
+            """
+
+            top_rows = await conn.fetch(top_query, *top_params)
+            top_customers = [
+                {
+                    "customer_id": str(row['customer_id']),
+                    "name": row['name'],
+                    "phone": row['phone'],
+                    "order_count": int(row['order_count']),
+                    "total_spent": float(row['total_spent']),
+                }
+                for row in top_rows
+            ]
+
+            response = {
+                "summary": summary,
+                "top_customers": top_customers,
+            }
+
+            # --- Series (only when groupBy specified) ---
+            if group_by == "date":
+                response["series"] = await _customer_metrics_by_date(
+                    conn, where_clause, params, param_count, timezone
+                )
+            elif group_by == "weekday":
+                response["series"] = await _customer_metrics_by_weekday(
+                    conn, where_clause, params, param_count, timezone
+                )
+            elif group_by == "month":
+                response["series"] = await _customer_metrics_by_month(
+                    conn, where_clause, params, param_count, timezone
+                )
+
+            return response
+
+    except (AuthenticationError, AuthorizationError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting customers metrics via API: {str(e)}")
+        raise APIError(f"Error al obtener metricas de clientes: {str(e)}", status_code=500)
+
+
+async def _customer_metrics_by_date(conn, where_clause, params, param_count, timezone):
+    """Internal: customer metrics grouped by calendar date"""
+    pos_filter = "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
+    param_count += 1
+    tz_param = param_count
+    series_params = list(params) + [timezone]
+
+    query = f"""
+        WITH all_time_first AS (
+            SELECT customer_id,
+                   DATE(MIN(order_date) AT TIME ZONE ${tz_param}) AS first_day
+            FROM orders
+            WHERE tenant_id = $1
+              AND {pos_filter}
+              AND status = 'completed'
+            GROUP BY customer_id
+        )
+        SELECT
+            DATE(o.order_date AT TIME ZONE ${tz_param})          AS period_date,
+            COUNT(DISTINCT o.customer_id) FILTER (
+                WHERE DATE(atf.first_day) = DATE(o.order_date AT TIME ZONE ${tz_param})
+            )                                                      AS new_customers,
+            COUNT(o.id)                                            AS orders,
+            COALESCE(SUM(o.total_amount), 0)                       AS revenue
+        FROM orders o
+        JOIN all_time_first atf ON o.customer_id = atf.customer_id
+        WHERE {where_clause}
+        GROUP BY DATE(o.order_date AT TIME ZONE ${tz_param})
+        ORDER BY period_date
+    """
+
+    rows = await conn.fetch(query, *series_params)
+    return [
+        {
+            "period": row['period_date'].isoformat(),
+            "new_customers": int(row['new_customers']),
+            "orders": int(row['orders']),
+            "revenue": float(row['revenue']),
+        }
+        for row in rows
+    ]
+
+
+async def _customer_metrics_by_weekday(conn, where_clause, params, param_count, timezone):
+    """Internal: customer metrics grouped by day of week (0=Sunday … 6=Saturday)"""
+    pos_filter = "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
+    param_count += 1
+    tz_param = param_count
+    series_params = list(params) + [timezone]
+
+    days_map = {0: "Sunday", 1: "Monday", 2: "Tuesday", 3: "Wednesday",
+                4: "Thursday", 5: "Friday", 6: "Saturday"}
+
+    query = f"""
+        WITH all_time_first AS (
+            SELECT customer_id,
+                   EXTRACT(DOW FROM MIN(order_date) AT TIME ZONE ${tz_param})::int AS first_dow
+            FROM orders
+            WHERE tenant_id = $1
+              AND {pos_filter}
+              AND status = 'completed'
+            GROUP BY customer_id
+        )
+        SELECT
+            EXTRACT(DOW FROM o.order_date AT TIME ZONE ${tz_param})::int   AS dow,
+            COUNT(DISTINCT o.customer_id) FILTER (
+                WHERE atf.first_dow = EXTRACT(DOW FROM o.order_date AT TIME ZONE ${tz_param})::int
+            )                                                                AS new_customers,
+            COUNT(o.id)                                                      AS orders,
+            COALESCE(SUM(o.total_amount), 0)                                 AS revenue
+        FROM orders o
+        JOIN all_time_first atf ON o.customer_id = atf.customer_id
+        WHERE {where_clause}
+        GROUP BY EXTRACT(DOW FROM o.order_date AT TIME ZONE ${tz_param})::int
+        ORDER BY dow
+    """
+
+    rows = await conn.fetch(query, *series_params)
+    return [
+        {
+            "period": days_map.get(row['dow'], str(row['dow'])),
+            "new_customers": int(row['new_customers']),
+            "orders": int(row['orders']),
+            "revenue": float(row['revenue']),
+        }
+        for row in rows
+    ]
+
+
+async def _customer_metrics_by_month(conn, where_clause, params, param_count, timezone):
+    """Internal: customer metrics grouped by month (YYYY-MM)"""
+    pos_filter = "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
+    param_count += 1
+    tz_param = param_count
+    series_params = list(params) + [timezone]
+
+    query = f"""
+        WITH all_time_first AS (
+            SELECT customer_id,
+                   TO_CHAR(MIN(order_date) AT TIME ZONE ${tz_param}, 'YYYY-MM') AS first_month
+            FROM orders
+            WHERE tenant_id = $1
+              AND {pos_filter}
+              AND status = 'completed'
+            GROUP BY customer_id
+        )
+        SELECT
+            TO_CHAR(o.order_date AT TIME ZONE ${tz_param}, 'YYYY-MM')   AS period,
+            COUNT(DISTINCT o.customer_id) FILTER (
+                WHERE atf.first_month = TO_CHAR(o.order_date AT TIME ZONE ${tz_param}, 'YYYY-MM')
+            )                                                             AS new_customers,
+            COUNT(o.id)                                                   AS orders,
+            COALESCE(SUM(o.total_amount), 0)                              AS revenue
+        FROM orders o
+        JOIN all_time_first atf ON o.customer_id = atf.customer_id
+        WHERE {where_clause}
+        GROUP BY TO_CHAR(o.order_date AT TIME ZONE ${tz_param}, 'YYYY-MM')
+        ORDER BY period
+    """
+
+    rows = await conn.fetch(query, *series_params)
+    return [
+        {
+            "period": row['period'],
+            "new_customers": int(row['new_customers']),
+            "orders": int(row['orders']),
+            "revenue": float(row['revenue']),
+        }
+        for row in rows
+    ]
