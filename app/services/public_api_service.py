@@ -1650,7 +1650,7 @@ async def get_customers_metrics(
             # --- Top 10 customers ---
             top_params: list = [UUID(tenant_id)]
             top_pc = 1
-            top_conditions = [f"o.tenant_id = $1", f"o.{pos_filter}", "o.status = 'completed'"]
+            top_conditions = [f"o.tenant_id = $1", pos_filter, "o.status = 'completed'"]
 
             if parsed_date_from:
                 top_pc += 1
