@@ -2,11 +2,11 @@
 Public API Service
 Handles data access for external integrations via API tokens
 """
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 from fastapi import Request
 from app.database import get_db_connection
-from app.core.middleware import get_api_key_context, get_tenant_context
+from app.core.middleware import get_api_key_context
 from app.core.exceptions import AuthenticationError, AuthorizationError, APIError
 from datetime import datetime, date
 import logging
@@ -1533,7 +1533,7 @@ async def get_customers_metrics(
         async with get_db_connection(use_transaction=False) as conn:
             # Build base WHERE clause (period-scoped, completed POS orders only)
             pos_filter = "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
-            where_conditions = [f"tenant_id = $1", pos_filter, "status = 'completed'"]
+            where_conditions = ["tenant_id = $1", pos_filter, "status = 'completed'"]
             params: list = [UUID(tenant_id)]
             param_count = 1
 
@@ -1650,7 +1650,7 @@ async def get_customers_metrics(
             # --- Top 10 customers ---
             top_params: list = [UUID(tenant_id)]
             top_pc = 1
-            top_conditions = [f"o.tenant_id = $1", pos_filter, "o.status = 'completed'"]
+            top_conditions = ["o.tenant_id = $1", pos_filter, "o.status = 'completed'"]
 
             if parsed_date_from:
                 top_pc += 1
@@ -1861,3 +1861,99 @@ async def _customer_metrics_by_month(conn, where_clause, params, param_count, ti
         }
         for row in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Analytics endpoints (scope: analytics:read)
+# ---------------------------------------------------------------------------
+
+async def get_analytics_menu_analysis(
+    request: Request,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 10,
+) -> dict:
+    """Public API: BCG menu analysis (analytics:read)."""
+    from app.services.analytics_service import _get_menu_analysis_for_tenant
+    tenant_id, _ = validate_api_key_auth(request, "analytics:read")
+    return await _get_menu_analysis_for_tenant(tenant_id, date_from=date_from, date_to=date_to, limit=limit)
+
+
+async def get_analytics_food_cost(
+    request: Request,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+) -> dict:
+    """Public API: food cost analysis (analytics:read)."""
+    from app.services.analytics_service import _get_food_cost_for_tenant
+    tenant_id, _ = validate_api_key_auth(request, "analytics:read")
+    return await _get_food_cost_for_tenant(tenant_id, date_from=date_from, date_to=date_to)
+
+
+async def get_analytics_alerts(
+    request: Request,
+    limit: int = 10,
+) -> dict:
+    """Public API: inventory/operational alerts (analytics:read)."""
+    from app.services.analytics_service import _get_alerts_for_tenant
+    tenant_id, _ = validate_api_key_auth(request, "analytics:read")
+    return await _get_alerts_for_tenant(tenant_id, limit=limit)
+
+
+async def get_analytics_data_quality(request: Request) -> dict:
+    """Public API: data quality report (analytics:read)."""
+    from app.services.analytics_service import _get_data_quality_for_tenant
+    tenant_id, _ = validate_api_key_auth(request, "analytics:read")
+    return await _get_data_quality_for_tenant(tenant_id)
+
+
+# ---------------------------------------------------------------------------
+# Financial endpoints (scope: financial:read)
+# ---------------------------------------------------------------------------
+
+async def get_financial_products_analysis(
+    request: Request,
+    period: int = 365,
+    category: Optional[str] = None,
+    min_margin: Optional[int] = None,
+    sort_by: str = "margin",
+) -> dict:
+    """Public API: financial product analysis (financial:read)."""
+    from app.services.financial_service import _get_products_analysis_for_tenant
+    tenant_id, _ = validate_api_key_auth(request, "financial:read")
+    return await _get_products_analysis_for_tenant(tenant_id, period=period, category=category, min_margin=min_margin, sort_by=sort_by)
+
+
+# ---------------------------------------------------------------------------
+# WaRos endpoints (scope: waros:read)
+# ---------------------------------------------------------------------------
+
+async def get_waros_customer_summary(
+    request: Request,
+    profile_id: UUID,
+) -> dict:
+    """Public API: WaRos wallet summary for a customer (waros:read)."""
+    from app.services.waros_service import _get_customer_summary_for_tenant
+    tenant_id, _ = validate_api_key_auth(request, "waros:read")
+    return await _get_customer_summary_for_tenant(tenant_id, profile_id)
+
+
+async def get_waros_customers_balances(
+    request: Request,
+    profile_ids: List[UUID],
+) -> dict:
+    """Public API: batch WaRos balances for multiple customers (waros:read)."""
+    from app.services.waros_service import _get_customers_balances_for_tenant
+    tenant_id, _ = validate_api_key_auth(request, "waros:read")
+    return await _get_customers_balances_for_tenant(tenant_id, profile_ids)
+
+
+async def get_waros_estimate(
+    request: Request,
+    total_amount: float,
+    customer_id: Optional[UUID] = None,
+) -> dict:
+    """Public API: estimate WaRos for a purchase amount (waros:read)."""
+    from app.services.waros_service import _estimate_waros_for_tenant
+    tenant_id, _ = validate_api_key_auth(request, "waros:read")
+    return await _estimate_waros_for_tenant(tenant_id, total_amount, customer_id)

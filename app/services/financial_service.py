@@ -7,17 +7,8 @@ from app.core.middleware import require_valid_session
 
 logger = logging.getLogger(__name__)
 
-async def get_products_analysis(request: Request, response: Response, period: int = 365, category: Optional[str] = None, min_margin: Optional[int] = None, sort_by: str = "margin") -> Dict[str, Any]:
-    """
-    Products analysis - try real data first, fallback to empty response
-    """
-    # Get session context from middleware
-    session_context = require_valid_session(request)
-    tenant_id = session_context.tenant_id
-    
-    if not tenant_id:
-        raise ValueError("Tenant ID no puede ser null")
-    
+async def _get_products_analysis_for_tenant(tenant_id: str, period: int = 365, category: Optional[str] = None, min_margin: Optional[int] = None, sort_by: str = "margin") -> Dict[str, Any]:
+    """Auth-agnostic core for products analysis. Called by session wrapper and public API."""
     async with get_db_connection() as conn:
         # Check if tenant has any orders
         orders_check = await conn.fetchrow("""
@@ -137,6 +128,17 @@ async def get_products_analysis(request: Request, response: Response, period: in
         except Exception as e:
             logger.error(f"Error fetching products data: {e}")
             return generate_empty_response(period, category, min_margin, sort_by)
+
+
+async def get_products_analysis(request: Request, response: Response, period: int = 365, category: Optional[str] = None, min_margin: Optional[int] = None, sort_by: str = "margin") -> Dict[str, Any]:
+    """
+    Products analysis - try real data first, fallback to empty response
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    if not tenant_id:
+        raise ValueError("Tenant ID no puede ser null")
+    return await _get_products_analysis_for_tenant(tenant_id, period, category, min_margin, sort_by)
 
 async def get_obstacles_analysis(request: Request, response: Response, period: int = 30) -> Dict[str, Any]:
     """

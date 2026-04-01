@@ -232,6 +232,58 @@ async def update_global_config(request: Request, is_enabled: bool) -> Dict[str, 
 
 # ── Customer read endpoints ──────────────────────────────────────────────────
 
+async def _get_customer_summary_for_tenant(
+    tenant_id: str,
+    profile_id: UUID,
+) -> Dict[str, Any]:
+    """Auth-agnostic core for customer summary. Called by session wrapper and public API."""
+    async with get_db_connection(use_transaction=False) as conn:
+        wallet_row = await conn.fetchrow(
+            """
+            SELECT current_balance, lifetime_earned, lifetime_spent
+            FROM waros_wallets
+            WHERE profile_id = $1 AND tenant_id = $2
+            """,
+            profile_id,
+            tenant_id,
+        )
+
+        tx_rows = await conn.fetch(
+            """
+            SELECT id, created_at, transaction_type, waros_amount,
+                   description, related_entity_type, related_entity_id
+            FROM waros_transactions
+            WHERE profile_id = $1 AND tenant_id = $2
+            ORDER BY created_at DESC
+            LIMIT 5
+            """,
+            profile_id,
+            tenant_id,
+        )
+
+    transactions = [
+        {
+            "id": row["id"],
+            "created_at": row["created_at"].isoformat(),
+            "transaction_type": row["transaction_type"],
+            "waros_amount": row["waros_amount"],
+            "description": row["description"],
+            "related_entity_type": row["related_entity_type"],
+            "related_entity_id": row["related_entity_id"],
+        }
+        for row in tx_rows
+    ]
+
+    return {
+        "profile_id": str(profile_id),
+        "current_balance": int(wallet_row["current_balance"]) if wallet_row else 0,
+        "lifetime_earned": int(wallet_row["lifetime_earned"]) if wallet_row else 0,
+        "lifetime_spent": int(wallet_row["lifetime_spent"]) if wallet_row else 0,
+        "recent_transactions": transactions,
+    }
+
+
+
 async def get_customer_summary(
     request: Request,
     profile_id: UUID,
@@ -244,57 +296,41 @@ async def get_customer_summary(
     try:
         session = require_valid_session(request)
         tenant_id = session.tenant_id
-
-        async with get_db_connection(use_transaction=False) as conn:
-            wallet_row = await conn.fetchrow(
-                """
-                SELECT current_balance, lifetime_earned, lifetime_spent
-                FROM waros_wallets
-                WHERE profile_id = $1 AND tenant_id = $2
-                """,
-                profile_id,
-                tenant_id,
-            )
-
-            tx_rows = await conn.fetch(
-                """
-                SELECT id, created_at, transaction_type, waros_amount,
-                       description, related_entity_type, related_entity_id
-                FROM waros_transactions
-                WHERE profile_id = $1 AND tenant_id = $2
-                ORDER BY created_at DESC
-                LIMIT 5
-                """,
-                profile_id,
-                tenant_id,
-            )
-
-        transactions = [
-            {
-                "id": row["id"],
-                "created_at": row["created_at"].isoformat(),
-                "transaction_type": row["transaction_type"],
-                "waros_amount": row["waros_amount"],
-                "description": row["description"],
-                "related_entity_type": row["related_entity_type"],
-                "related_entity_id": row["related_entity_id"],
-            }
-            for row in tx_rows
-        ]
-
-        return {
-            "profile_id": str(profile_id),
-            "current_balance": int(wallet_row["current_balance"]) if wallet_row else 0,
-            "lifetime_earned": int(wallet_row["lifetime_earned"]) if wallet_row else 0,
-            "lifetime_spent": int(wallet_row["lifetime_spent"]) if wallet_row else 0,
-            "recent_transactions": transactions,
-        }
-
+        return await _get_customer_summary_for_tenant(tenant_id, profile_id)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error in get_customer_summary (profile={profile_id}): {e}")
         raise HTTPException(status_code=500, detail="Error al obtener resumen de Waros")
+
+
+async def _get_customers_balances_for_tenant(
+    tenant_id: str,
+    profile_ids: List[UUID],
+) -> Dict[str, Any]:
+    """Auth-agnostic core for batch balances. Called by session wrapper and public API."""
+    # Initialise all requested IDs to 0
+    balances: Dict[str, int] = {str(pid): 0 for pid in profile_ids}
+
+    if not profile_ids:
+        return {"balances": balances}
+
+    async with get_db_connection(use_transaction=False) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT profile_id, COALESCE(current_balance, 0) AS current_balance
+            FROM waros_wallets
+            WHERE profile_id = ANY($1::uuid[]) AND tenant_id = $2
+            """,
+            profile_ids,
+            tenant_id,
+        )
+
+    for row in rows:
+        balances[str(row["profile_id"])] = int(row["current_balance"])
+
+    return {"balances": balances}
+
 
 
 async def get_customers_balances(
@@ -309,29 +345,7 @@ async def get_customers_balances(
     try:
         session = require_valid_session(request)
         tenant_id = session.tenant_id
-
-        # Initialise all requested IDs to 0
-        balances: Dict[str, int] = {str(pid): 0 for pid in profile_ids}
-
-        if not profile_ids:
-            return {"balances": balances}
-
-        async with get_db_connection(use_transaction=False) as conn:
-            rows = await conn.fetch(
-                """
-                SELECT profile_id, COALESCE(current_balance, 0) AS current_balance
-                FROM waros_wallets
-                WHERE profile_id = ANY($1::uuid[]) AND tenant_id = $2
-                """,
-                profile_ids,
-                tenant_id,
-            )
-
-        for row in rows:
-            balances[str(row["profile_id"])] = int(row["current_balance"])
-
-        return {"balances": balances}
-
+        return await _get_customers_balances_for_tenant(tenant_id, profile_ids)
     except HTTPException:
         raise
     except Exception as e:
@@ -487,6 +501,131 @@ async def assign_manual_waros(
 
 # ── Estimate (read-only) ─────────────────────────────────────────────────────
 
+async def _estimate_waros_for_tenant(
+    tenant_id: str,
+    total_amount: float,
+    customer_id: Optional[UUID],
+) -> Dict[str, Any]:
+    """Auth-agnostic core for waros estimate. Called by session wrapper and public API."""
+    async with get_db_connection(use_transaction=False) as conn:
+        # 1. Check system enabled + daily cap config
+        config_row = await conn.fetchrow(
+            """
+            SELECT is_enabled, max_daily_waros
+            FROM gamification_config
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+        if not config_row or not config_row["is_enabled"]:
+            return {"estimated_waros": 0, "system_enabled": False, "breakdown": []}
+
+        max_daily = int(config_row["max_daily_waros"] or 0)
+
+        # 2. Fetch active rules
+        rule_rows = await conn.fetch(
+            """
+            SELECT rule_type, config
+            FROM waro_earning_rules
+            WHERE tenant_id = $1 AND is_active = true
+            """,
+            tenant_id,
+        )
+        if not rule_rows:
+            return {"estimated_waros": 0, "system_enabled": True, "breakdown": []}
+
+        active_types = {r["rule_type"] for r in rule_rows}
+
+        # 3. total_completed for purchase_count rule (+1: simulate this order completing)
+        total_completed = 0
+        if customer_id and "purchase_count" in active_types:
+            count_row = await conn.fetchrow(
+                """
+                SELECT COUNT(*) AS total
+                FROM orders
+                WHERE customer_id = $1 AND tenant_id = $2 AND status = 'completed'
+                """,
+                customer_id,
+                tenant_id,
+            )
+            total_completed = int(count_row["total"]) + 1
+
+        # 4. freq_count for frequency rule (+1: simulate this order completing)
+        freq_count = 0
+        if customer_id and "frequency" in active_types:
+            freq_cfg = next(
+                (r["config"] for r in rule_rows if r["rule_type"] == "frequency"),
+                {},
+            )
+            if isinstance(freq_cfg, str):
+                freq_cfg = json.loads(freq_cfg)
+            within_days = int(freq_cfg.get("within_days", 60))
+            cutoff = datetime.now() - timedelta(days=within_days)
+            freq_row = await conn.fetchrow(
+                """
+                SELECT COUNT(*) AS freq_count
+                FROM orders
+                WHERE customer_id = $1 AND tenant_id = $2
+                  AND status = 'completed'
+                  AND created_at >= $3
+                """,
+                customer_id,
+                tenant_id,
+                cutoff,
+            )
+            freq_count = int(freq_row["freq_count"]) + 1
+
+        # 5. Today's earned waros for daily cap (only when customer_id provided)
+        today_earned = 0
+        if customer_id and max_daily > 0:
+            today_row = await conn.fetchrow(
+                """
+                SELECT COALESCE(SUM(waros_amount), 0) AS today_earned
+                FROM waros_transactions
+                WHERE profile_id = $1
+                  AND tenant_id = $2
+                  AND transaction_type = 'earned'
+                  AND created_at >= CURRENT_DATE
+                """,
+                customer_id,
+                tenant_id,
+            )
+            today_earned = int(today_row["today_earned"])
+
+    # 6. Evaluate each active rule — total_qty=0 (unknown pre-order)
+    breakdown: List[Dict[str, Any]] = []
+    total_waros = 0
+
+    for rule in rule_rows:
+        rule_type = rule["rule_type"]
+        config = rule["config"]
+        if isinstance(config, str):
+            config = json.loads(config)
+
+        earned = _eval_rule(
+            rule_type=rule_type,
+            config=config,
+            total_amount=total_amount,
+            total_completed=total_completed,
+            total_qty=0,
+            freq_count=freq_count,
+        )
+        breakdown.append({"rule_type": rule_type, "waros": earned})
+        total_waros += earned
+
+    # 7. Apply daily cap (only when customer_id known)
+    if customer_id and max_daily > 0 and total_waros > 0:
+        remaining = max(0, max_daily - today_earned)
+        total_waros = min(total_waros, remaining)
+
+    return {
+        "estimated_waros": total_waros,
+        "system_enabled": True,
+        "breakdown": breakdown,
+    }
+
+
+
 async def estimate_waros(
     request: Request,
     total_amount: float,
@@ -501,124 +640,7 @@ async def estimate_waros(
     try:
         session = require_valid_session(request)
         tenant_id = session.tenant_id
-
-        async with get_db_connection(use_transaction=False) as conn:
-            # 1. Check system enabled + daily cap config
-            config_row = await conn.fetchrow(
-                """
-                SELECT is_enabled, max_daily_waros
-                FROM gamification_config
-                WHERE tenant_id = $1
-                """,
-                tenant_id,
-            )
-            if not config_row or not config_row["is_enabled"]:
-                return {"estimated_waros": 0, "system_enabled": False, "breakdown": []}
-
-            max_daily = int(config_row["max_daily_waros"] or 0)
-
-            # 2. Fetch active rules
-            rule_rows = await conn.fetch(
-                """
-                SELECT rule_type, config
-                FROM waro_earning_rules
-                WHERE tenant_id = $1 AND is_active = true
-                """,
-                tenant_id,
-            )
-            if not rule_rows:
-                return {"estimated_waros": 0, "system_enabled": True, "breakdown": []}
-
-            active_types = {r["rule_type"] for r in rule_rows}
-
-            # 3. total_completed for purchase_count rule (+1: simulate this order completing)
-            total_completed = 0
-            if customer_id and "purchase_count" in active_types:
-                count_row = await conn.fetchrow(
-                    """
-                    SELECT COUNT(*) AS total
-                    FROM orders
-                    WHERE customer_id = $1 AND tenant_id = $2 AND status = 'completed'
-                    """,
-                    customer_id,
-                    tenant_id,
-                )
-                total_completed = int(count_row["total"]) + 1
-
-            # 4. freq_count for frequency rule (+1: simulate this order completing)
-            freq_count = 0
-            if customer_id and "frequency" in active_types:
-                freq_cfg = next(
-                    (r["config"] for r in rule_rows if r["rule_type"] == "frequency"),
-                    {},
-                )
-                if isinstance(freq_cfg, str):
-                    freq_cfg = json.loads(freq_cfg)
-                within_days = int(freq_cfg.get("within_days", 60))
-                cutoff = datetime.now() - timedelta(days=within_days)
-                freq_row = await conn.fetchrow(
-                    """
-                    SELECT COUNT(*) AS freq_count
-                    FROM orders
-                    WHERE customer_id = $1 AND tenant_id = $2
-                      AND status = 'completed'
-                      AND created_at >= $3
-                    """,
-                    customer_id,
-                    tenant_id,
-                    cutoff,
-                )
-                freq_count = int(freq_row["freq_count"]) + 1
-
-            # 5. Today's earned waros for daily cap (only when customer_id provided)
-            today_earned = 0
-            if customer_id and max_daily > 0:
-                today_row = await conn.fetchrow(
-                    """
-                    SELECT COALESCE(SUM(waros_amount), 0) AS today_earned
-                    FROM waros_transactions
-                    WHERE profile_id = $1
-                      AND tenant_id = $2
-                      AND transaction_type = 'earned'
-                      AND created_at >= CURRENT_DATE
-                    """,
-                    customer_id,
-                    tenant_id,
-                )
-                today_earned = int(today_row["today_earned"])
-
-        # 6. Evaluate each active rule — total_qty=0 (unknown pre-order)
-        breakdown: List[Dict[str, Any]] = []
-        total_waros = 0
-
-        for rule in rule_rows:
-            rule_type = rule["rule_type"]
-            config = rule["config"]
-            if isinstance(config, str):
-                config = json.loads(config)
-
-            earned = _eval_rule(
-                rule_type=rule_type,
-                config=config,
-                total_amount=total_amount,
-                total_completed=total_completed,
-                total_qty=0,
-                freq_count=freq_count,
-            )
-            breakdown.append({"rule_type": rule_type, "waros": earned})
-            total_waros += earned
-
-        # 7. Apply daily cap (only when customer_id known)
-        if customer_id and max_daily > 0 and total_waros > 0:
-            remaining = max(0, max_daily - today_earned)
-            total_waros = min(total_waros, remaining)
-
-        return {
-            "estimated_waros": total_waros,
-            "system_enabled": True,
-            "breakdown": breakdown,
-        }
-
+        return await _estimate_waros_for_tenant(tenant_id, total_amount, customer_id)
     except HTTPException:
         raise
     except Exception as e:

@@ -79,14 +79,18 @@ class ApiTokenUpdateResponse(BaseModel):
 
 # Scopes disponibles
 AVAILABLE_SCOPES = [
-    "read",           # Lectura general
-    "write",          # Escritura general
-    "orders:read",    # Leer ordenes
-    "orders:write",   # Crear/modificar ordenes
-    "products:read",  # Leer productos
-    "products:write", # Crear/modificar productos
-    "inventory:read", # Leer inventario
-    "inventory:write",# Modificar inventario
-    "customers:read", # Leer clientes
-    "customers:write",# Crear/modificar clientes
+    "read",            # Lectura general (cubre todos los *:read)
+    "write",           # Escritura general (cubre todos los *:write)
+    "orders:read",     # Leer ordenes
+    "orders:write",    # Crear/modificar ordenes
+    "menu:read",       # Leer menu (productos, recetas, modificadores)
+    "products:read",   # Leer productos
+    "products:write",  # Crear/modificar productos
+    "inventory:read",  # Leer inventario
+    "inventory:write", # Modificar inventario
+    "customers:read",  # Leer clientes
+    "customers:write", # Crear/modificar clientes
+    "analytics:read",  # Leer analytics (menu BCG, food cost, alertas, calidad de datos)
+    "financial:read",  # Leer financiero (analisis de productos)
+    "waros:read",      # Leer waros (estimados, balances, resumen de cliente)
 ]

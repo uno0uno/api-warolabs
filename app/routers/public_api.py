@@ -4,7 +4,7 @@ Endpoints for external integrations authenticated via API tokens
 """
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 from app.services import public_api_service
 
@@ -296,3 +296,210 @@ async def get_customers_metrics(request: Request, body: CustomerMetricsRequest):
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Analytics request models
+# ---------------------------------------------------------------------------
+
+class AnalyticsMenuAnalysisRequest(BaseModel):
+    """Request body for BCG menu analysis"""
+    dateFrom: Optional[str] = Field(default=None, description="Start date (YYYY-MM-DD)")
+    dateTo: Optional[str] = Field(default=None, description="End date (YYYY-MM-DD)")
+    limit: int = Field(default=10, ge=1, le=100, description="Max number of products to return")
+
+
+class AnalyticsFoodCostRequest(BaseModel):
+    """Request body for food cost analysis"""
+    dateFrom: Optional[str] = Field(default=None, description="Start date (YYYY-MM-DD)")
+    dateTo: Optional[str] = Field(default=None, description="End date (YYYY-MM-DD)")
+
+
+class AnalyticsAlertsRequest(BaseModel):
+    """Request body for operational alerts"""
+    limit: int = Field(default=10, ge=1, le=100, description="Max number of alerts to return")
+
+
+# ---------------------------------------------------------------------------
+# Financial request models
+# ---------------------------------------------------------------------------
+
+class FinancialProductsRequest(BaseModel):
+    """Request body for financial product analysis"""
+    period: int = Field(default=365, ge=1, le=730, description="Analysis period in days")
+    category: Optional[str] = Field(default=None, description="Filter by category name")
+    minMargin: Optional[int] = Field(default=None, description="Minimum margin percentage filter")
+    sortBy: str = Field(default="margin", description="Sort field: margin | revenue | cost | quantity")
+
+
+# ---------------------------------------------------------------------------
+# WaRos request models
+# ---------------------------------------------------------------------------
+
+class WarosCustomerSummaryRequest(BaseModel):
+    """Request body for customer WaRos wallet summary"""
+    profileId: str = Field(description="Customer profile UUID")
+
+
+class WarosCustomersBalancesRequest(BaseModel):
+    """Request body for batch WaRos balances"""
+    profileIds: List[str] = Field(description="List of customer profile UUIDs (max 250)")
+
+
+class WarosEstimateRequest(BaseModel):
+    """Request body for WaRos purchase estimate"""
+    totalAmount: float = Field(ge=0, description="Purchase total amount")
+    customerId: Optional[str] = Field(default=None, description="Customer UUID (for personalized estimate)")
+
+
+# ---------------------------------------------------------------------------
+# Analytics endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/analytics/menu-analysis")
+async def get_analytics_menu_analysis(request: Request, body: AnalyticsMenuAnalysisRequest):
+    """
+    Obtiene el analisis BCG del menu (estrellas, vacas, interrogantes, perros).
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `analytics:read` o `read`
+    """
+    return await public_api_service.get_analytics_menu_analysis(
+        request,
+        date_from=body.dateFrom,
+        date_to=body.dateTo,
+        limit=body.limit,
+    )
+
+
+@router.post("/analytics/food-cost")
+async def get_analytics_food_cost(request: Request, body: AnalyticsFoodCostRequest):
+    """
+    Obtiene el analisis de food cost por producto.
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `analytics:read` o `read`
+    """
+    return await public_api_service.get_analytics_food_cost(
+        request,
+        date_from=body.dateFrom,
+        date_to=body.dateTo,
+    )
+
+
+@router.post("/analytics/alerts")
+async def get_analytics_alerts(request: Request, body: AnalyticsAlertsRequest):
+    """
+    Obtiene alertas operacionales e inventario del tenant.
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `analytics:read` o `read`
+    """
+    return await public_api_service.get_analytics_alerts(
+        request,
+        limit=body.limit,
+    )
+
+
+@router.post("/analytics/data-quality")
+async def get_analytics_data_quality(request: Request):
+    """
+    Obtiene el reporte de calidad de datos del tenant.
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `analytics:read` o `read`
+    """
+    return await public_api_service.get_analytics_data_quality(request)
+
+
+# ---------------------------------------------------------------------------
+# Financial endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/financial/products")
+async def get_financial_products(request: Request, body: FinancialProductsRequest):
+    """
+    Obtiene el analisis financiero de productos (margen, costo, rentabilidad).
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `financial:read` o `read`
+    """
+    return await public_api_service.get_financial_products_analysis(
+        request,
+        period=body.period,
+        category=body.category,
+        min_margin=body.minMargin,
+        sort_by=body.sortBy,
+    )
+
+
+# ---------------------------------------------------------------------------
+# WaRos endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/waros/customer-summary")
+async def get_waros_customer_summary(request: Request, body: WarosCustomerSummaryRequest):
+    """
+    Obtiene el resumen de WaRos (wallet) de un cliente especifico.
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `waros:read` o `read`
+    """
+    return await public_api_service.get_waros_customer_summary(
+        request,
+        profile_id=UUID(body.profileId),
+    )
+
+
+@router.post("/waros/balances")
+async def get_waros_customers_balances(request: Request, body: WarosCustomersBalancesRequest):
+    """
+    Obtiene los balances de WaRos para multiples clientes en batch.
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `waros:read` o `read`
+    """
+    profile_uuids = [UUID(pid) for pid in body.profileIds]
+    return await public_api_service.get_waros_customers_balances(
+        request,
+        profile_ids=profile_uuids,
+    )
+
+
+@router.post("/waros/estimate")
+async def get_waros_estimate(request: Request, body: WarosEstimateRequest):
+    """
+    Estima cuantos WaRos se ganarian por una compra de determinado monto.
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `waros:read` o `read`
+    """
+    customer_uuid = UUID(body.customerId) if body.customerId else None
+    return await public_api_service.get_waros_estimate(
+        request,
+        total_amount=body.totalAmount,
+        customer_id=customer_uuid,
+    )
