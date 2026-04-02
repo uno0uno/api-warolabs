@@ -1409,8 +1409,8 @@ async def _get_cohort_for_tenant(
                 FROM orders
                 WHERE customer_id IS NOT NULL
                   AND tenant_id = $1
-                  AND order_date >= $2
-                  AND order_date < $3 + interval '1 day'
+                  AND order_date >= $2::date
+                  AND order_date < $3::date + interval '1 day'
                 GROUP BY customer_id
             ),
             cohort_sizes AS (
@@ -1458,8 +1458,8 @@ async def _get_cohort_for_tenant(
                 FROM orders
                 WHERE customer_id IS NOT NULL
                   AND tenant_id = $1
-                  AND order_date >= $2
-                  AND order_date < $3 + interval '1 day'
+                  AND order_date >= $2::date
+                  AND order_date < $3::date + interval '1 day'
                 GROUP BY customer_id
             ),
             cohort_sizes AS (
