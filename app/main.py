@@ -173,6 +173,7 @@ app.include_router(v1_ordering.router)           # V1 cart endpoints — API key
 app.include_router(v1_ordering.address_router)   # V1 address endpoints — API key auth
 app.include_router(v1_ordering.otp_router)       # V1 OTP endpoints — API key auth + customer_token in verify response
 app.include_router(v1_ordering.customer_router_v1)  # V1 customer validate — API key auth
+app.include_router(v1_ordering.product_router_v1)   # V1 product detail + modifiers — API key auth
 app.include_router(public_restaurant.router, prefix="/public/restaurant", tags=["public-restaurant"])
 app.include_router(tenant_config.router, prefix="/api/tenant", tags=["tenant-config"])
 app.include_router(customer_portal.router)  # Customer portal (authenticated via JWT cookie)

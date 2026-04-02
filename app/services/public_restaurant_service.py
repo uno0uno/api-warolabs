@@ -293,6 +293,91 @@ async def get_menu_by_tenant_id(
         raise HTTPException(status_code=500, detail="Error fetching menu")
 
 
+async def get_product_detail_by_tenant_id(tenant_id: UUID, product_id: UUID) -> Dict[str, Any]:
+    """
+    Get detailed product information with modifiers, verified by tenant_id.
+    Used by API key authenticated endpoints — no slug needed.
+    """
+    try:
+        async with get_db_connection() as conn:
+            verification_query = """
+                SELECT p.id
+                FROM product p
+                WHERE p.tenant_id = $1 AND p.id = $2 AND p.is_available = true
+            """
+            verification = await conn.fetchrow(verification_query, tenant_id, product_id)
+
+            if not verification:
+                raise HTTPException(status_code=404, detail="Product not found for this restaurant")
+
+            product_query = """
+                SELECT
+                    p.id, p.name, p.description, p.price,
+                    c.name as category_name,
+                    p.is_available, p.is_available_online, p.preparation_time
+                FROM product p
+                JOIN categories c ON p.category_id = c.id
+                WHERE p.id = $1
+            """
+            product_row = await conn.fetchrow(product_query, product_id)
+            product = dict(product_row)
+            product['price'] = float(product['price'])
+
+            modifiers_query = """
+                SELECT
+                    mg.id as group_id,
+                    mg.name as group_name,
+                    mg.is_required,
+                    mg.min_qty,
+                    mg.max_qty,
+                    mg.sort_order as group_sort_order,
+                    m.id as modifier_id,
+                    m.name as modifier_name,
+                    m.price as modifier_price,
+                    m.is_available as modifier_is_available,
+                    m.is_default as modifier_is_default,
+                    m.max_limit as modifier_max_limit,
+                    m.sort_order as modifier_sort_order
+                FROM product_modifier_groups pmg
+                JOIN modifier_groups mg ON mg.id = pmg.modifier_group_id
+                LEFT JOIN modifiers m ON m.modifier_group_id = mg.id
+                WHERE pmg.product_id = $1
+                ORDER BY mg.sort_order, m.sort_order
+            """
+            modifiers_rows = await conn.fetch(modifiers_query, product_id)
+
+            modifier_groups: Dict[str, Any] = {}
+            for row in modifiers_rows:
+                group_id = str(row['group_id'])
+                if group_id not in modifier_groups:
+                    modifier_groups[group_id] = {
+                        'id': row['group_id'],
+                        'name': row['group_name'],
+                        'is_required': row['is_required'],
+                        'min_qty': row['min_qty'],
+                        'max_qty': row['max_qty'],
+                        'modifiers': []
+                    }
+                if row['modifier_id'] and row['modifier_is_available']:
+                    modifier_groups[group_id]['modifiers'].append({
+                        'id': row['modifier_id'],
+                        'name': row['modifier_name'],
+                        'price': float(row['modifier_price']),
+                        'is_available': row['modifier_is_available'],
+                        'is_default': row['modifier_is_default'],
+                        'max_limit': row['modifier_max_limit']
+                    })
+
+            product['modifier_groups'] = list(modifier_groups.values())
+            return product
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting product detail by tenant_id for product {product_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error fetching product details")
+
+
 async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
     """
     Get detailed product information with modifiers

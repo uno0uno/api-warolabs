@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field
 from app.services import online_cart_service, address_profile_service, otp_service
 from app.services.public_api_service import validate_api_key_auth
+from app.services import public_restaurant_service
 from app.models.online_cart import OnlineCartItemCreate, DeliveryInfoUpdate
 from app.models.address_profile import AddressProfileCreate, AddressProfileUpdate
 from app.core.security import create_customer_jwt, set_customer_cookie
@@ -348,6 +349,12 @@ async def v1_resend_otp(request: Request, body: V1ResendOTPRequest):
 
 customer_router_v1 = APIRouter(prefix="/v1/customer", tags=["V1 Customer"])
 
+# ---------------------------------------------------------------------------
+# V1 Product detail endpoint
+# ---------------------------------------------------------------------------
+
+product_router_v1 = APIRouter(prefix="/v1/product", tags=["V1 Product"])
+
 
 class V1ValidateCustomerRequest(BaseModel):
     phone_number: str
@@ -369,3 +376,29 @@ async def v1_validate_customer(request: Request, body: V1ValidateCustomerRequest
         phone_number=body.phone_number,
         cart_total=body.cart_total,
     )
+
+
+@product_router_v1.get("/{product_id}")
+async def v1_get_product_detail(product_id: UUID, request: Request):
+    """
+    Get full product details including modifier groups.
+
+    Use this after `GET /v1/menu` — when a product has `has_modifiers: true`,
+    fetch this endpoint to get the selectable modifier groups before adding
+    the item to the cart.
+
+    **Response includes:**
+    - Product name, description, price, category
+    - `modifier_groups[]` — each group has `is_required`, `min_qty`, `max_qty`,
+      and `modifiers[]` with `id`, `name`, `price`, `is_default`
+    - `is_available_online` — false means the product is currently unavailable online
+
+    **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
+    **Scope required:** `read`
+    """
+    tenant_id, _ = validate_api_key_auth(request, "read")
+    product = await public_restaurant_service.get_product_detail_by_tenant_id(
+        tenant_id=UUID(tenant_id),
+        product_id=product_id,
+    )
+    return {"success": True, "data": product}
