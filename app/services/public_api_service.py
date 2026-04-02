@@ -335,6 +335,47 @@ async def get_sale_by_id(
         raise APIError(f"Error al obtener venta: {str(e)}", status_code=500)
 
 
+def _build_comparison_window(
+    parsed_date_from,  # date object or None
+    parsed_date_to,    # date object or None
+    compare_to: Optional[str] = None,
+    compare_from: Optional[str] = None,
+    compare_date_to: Optional[str] = None,
+):
+    """
+    Return (prev_date_from, prev_date_to) as date objects for the comparison window,
+    or (None, None) when compare_to is not set.
+
+    Modes:
+      previous_period — same duration immediately before date_from
+      previous_year   — same calendar dates shifted back 365 days
+      custom          — compare_from / compare_date_to parsed as dates
+    """
+    from datetime import timedelta as _td
+    if not compare_to or not parsed_date_from or not parsed_date_to:
+        return None, None
+
+    if compare_to == "previous_period":
+        days_diff = (parsed_date_to - parsed_date_from).days + 1
+        prev_date_to = parsed_date_from - _td(days=1)
+        prev_date_from = prev_date_to - _td(days=days_diff - 1)
+        return prev_date_from, prev_date_to
+
+    if compare_to == "previous_year":
+        prev_date_from = parsed_date_from - _td(days=365)
+        prev_date_to = parsed_date_to - _td(days=365)
+        return prev_date_from, prev_date_to
+
+    if compare_to == "custom":
+        from app.services.analytics_service import parse_date as _parse_date
+        cf = _parse_date(compare_from)
+        ct = _parse_date(compare_date_to)
+        if cf and ct:
+            return cf, ct
+
+    return None, None
+
+
 async def get_sales_metrics(
     request: Request,
     date_from: Optional[str] = None,
@@ -343,7 +384,10 @@ async def get_sales_metrics(
     group_by: Optional[str] = None,  # date, weekday, hour, product, payment, ticket
     limit: int = 20,  # for product grouping
     sort_by: str = "quantity",  # for product grouping: quantity, revenue
-    ranges: Optional[list] = None  # for ticket grouping
+    ranges: Optional[list] = None,  # for ticket grouping
+    compare_to: Optional[str] = None,
+    compare_from: Optional[str] = None,
+    compare_date_to: Optional[str] = None,
 ) -> dict:
     """
     Get sales metrics for the authenticated tenant via API key.
@@ -450,16 +494,80 @@ async def get_sales_metrics(
 
                 row = await conn.fetchrow(metrics_query, *params_all)
 
+                data = {
+                    "totalSales": float(row['total_sales']),
+                    "totalOrders": row['total_orders'],
+                    "completedOrders": row['completed_orders'],
+                    "cancelledOrders": row['cancelled_orders'],
+                    "pendingOrders": row['pending_orders'],
+                    "avgTicket": float(row['avg_ticket'])
+                }
+
+                # --- Period comparison (only when compare_to is set) ---
+                prev_df, prev_dt = _build_comparison_window(
+                    parsed_date_from, parsed_date_to,
+                    compare_to, compare_from, compare_date_to
+                )
+                if prev_df and prev_dt:
+                    prev_conditions = ["tenant_id = $1", "pos_cart_id IS NOT NULL"]
+                    prev_params = [UUID(tenant_id)]
+                    prev_pc = 1
+                    prev_pc += 1; prev_params.append(prev_df); prev_df_p = prev_pc
+                    prev_pc += 1; prev_params.append(timezone); prev_tz_df = prev_pc
+                    prev_conditions.append(
+                        f"order_date >= (${prev_df_p}::timestamp AT TIME ZONE ${prev_tz_df})"
+                    )
+                    prev_pc += 1; prev_params.append(prev_dt); prev_dt_p = prev_pc
+                    prev_pc += 1; prev_params.append(timezone); prev_tz_dt = prev_pc
+                    prev_conditions.append(
+                        f"order_date < ((${prev_dt_p}::timestamp + interval '1 day') AT TIME ZONE ${prev_tz_dt})"
+                    )
+                    prev_where = " AND ".join(prev_conditions)
+                    prev_query = f"""
+                        SELECT
+                            COUNT(*) as total_orders,
+                            COUNT(*) FILTER (WHERE status = 'completed') as completed_orders,
+                            COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled_orders,
+                            COUNT(*) FILTER (WHERE status = 'pending') as pending_orders,
+                            COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) as total_sales,
+                            COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) as avg_ticket
+                        FROM orders
+                        WHERE {prev_where}
+                    """
+                    prev_row = await conn.fetchrow(prev_query, *prev_params)
+                    prev_sales = float(prev_row['total_sales'])
+                    prev_ticket = float(prev_row['avg_ticket'])
+
+                    def _pct_change(current, previous):
+                        if previous == 0:
+                            return None
+                        return round((current - previous) / previous * 100, 2)
+
+                    def _change_type(pct):
+                        if pct is None:
+                            return "neutral"
+                        return "increase" if pct > 0 else "decrease" if pct < 0 else "neutral"
+
+                    sales_pct = _pct_change(data["totalSales"], prev_sales)
+                    ticket_pct = _pct_change(data["avgTicket"], prev_ticket)
+                    data["comparison"] = {
+                        "previous_period": {
+                            "from": prev_df.isoformat(),
+                            "to": prev_dt.isoformat(),
+                            "totalSales": prev_sales,
+                            "totalOrders": prev_row['total_orders'],
+                            "completedOrders": prev_row['completed_orders'],
+                            "avgTicket": prev_ticket,
+                        },
+                        "totalSales_change_pct": sales_pct,
+                        "totalSales_change_type": _change_type(sales_pct),
+                        "avgTicket_change_pct": ticket_pct,
+                        "avgTicket_change_type": _change_type(ticket_pct),
+                    }
+
                 return {
                     "success": True,
-                    "data": {
-                        "totalSales": float(row['total_sales']),
-                        "totalOrders": row['total_orders'],
-                        "completedOrders": row['completed_orders'],
-                        "cancelledOrders": row['cancelled_orders'],
-                        "pendingOrders": row['pending_orders'],
-                        "avgTicket": float(row['avg_ticket'])
-                    },
+                    "data": data,
                     "meta": meta
                 }
 
@@ -1653,7 +1761,10 @@ async def get_customers_metrics(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     timezone: str = "America/Bogota",
-    group_by: Optional[str] = None  # date, weekday, month
+    group_by: Optional[str] = None,  # date, weekday, month
+    compare_to: Optional[str] = None,
+    compare_from: Optional[str] = None,
+    compare_date_to: Optional[str] = None,
 ) -> dict:
     """
     Get aggregate customer analytics for the authenticated tenant.
@@ -1840,6 +1951,76 @@ async def get_customers_metrics(
                 "top_customers": top_customers,
             }
 
+            # --- Period comparison (only when compare_to is set and groupBy is null) ---
+            if not group_by:
+                prev_df, prev_dt = _build_comparison_window(
+                    parsed_date_from, parsed_date_to,
+                    compare_to, compare_from, compare_date_to
+                )
+                if prev_df and prev_dt:
+                    # Build previous-period summary using same CTE pattern
+                    prev_pos_filter = "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
+                    prev_where_conds = ["tenant_id = $1", prev_pos_filter, "status = 'completed'"]
+                    prev_params = [UUID(tenant_id)]
+                    ppc = 1
+                    ppc += 1; prev_params.append(prev_df); prev_df_p = ppc
+                    ppc += 1; prev_params.append(timezone); prev_tz_df = ppc
+                    prev_where_conds.append(
+                        f"order_date >= (${prev_df_p}::timestamp AT TIME ZONE ${prev_tz_df})"
+                    )
+                    ppc += 1; prev_params.append(prev_dt); prev_dt_p = ppc
+                    ppc += 1; prev_params.append(timezone); prev_tz_dt = ppc
+                    prev_where_conds.append(
+                        f"order_date < ((${prev_dt_p}::timestamp + interval '1 day') AT TIME ZONE ${prev_tz_dt})"
+                    )
+                    prev_where = " AND ".join(prev_where_conds)
+                    prev_summary_query = f"""
+                        WITH period_orders AS (
+                            SELECT customer_id,
+                                   COUNT(*)          AS order_count,
+                                   SUM(total_amount) AS revenue
+                            FROM orders
+                            WHERE {prev_where}
+                            GROUP BY customer_id
+                        )
+                        SELECT
+                            COUNT(*)                                                            AS total_customers,
+                            COALESCE(SUM(revenue), 0)                                          AS total_revenue,
+                            COALESCE(SUM(revenue)::float / NULLIF(COUNT(*), 0), 0)             AS avg_ticket,
+                            COALESCE(SUM(order_count)::float / NULLIF(COUNT(*), 0), 0)         AS avg_orders_per_customer
+                        FROM period_orders
+                    """
+                    prev_row = await conn.fetchrow(prev_summary_query, *prev_params)
+
+                    def _pct_change(current, previous):
+                        if previous == 0:
+                            return None
+                        return round((current - previous) / previous * 100, 2)
+
+                    def _change_type(pct):
+                        if pct is None:
+                            return "neutral"
+                        return "increase" if pct > 0 else "decrease" if pct < 0 else "neutral"
+
+                    prev_revenue = float(prev_row['total_revenue'])
+                    prev_customers = int(prev_row['total_customers'])
+                    rev_pct = _pct_change(summary["total_revenue"], prev_revenue)
+                    cust_pct = _pct_change(summary["total_customers"], prev_customers)
+                    response["comparison"] = {
+                        "previous_period": {
+                            "from": prev_df.isoformat(),
+                            "to": prev_dt.isoformat(),
+                            "total_customers": prev_customers,
+                            "total_revenue": prev_revenue,
+                            "avg_ticket": round(float(prev_row['avg_ticket']), 2),
+                            "avg_orders_per_customer": round(float(prev_row['avg_orders_per_customer']), 2),
+                        },
+                        "total_revenue_change_pct": rev_pct,
+                        "total_revenue_change_type": _change_type(rev_pct),
+                        "total_customers_change_pct": cust_pct,
+                        "total_customers_change_type": _change_type(cust_pct),
+                    }
+
             # --- Series (only when groupBy specified) ---
             if group_by == "date":
                 response["series"] = await _customer_metrics_by_date(
@@ -2015,11 +2196,21 @@ async def get_analytics_food_cost(
     request: Request,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    compare_to: Optional[str] = None,
+    compare_from: Optional[str] = None,
+    compare_date_to: Optional[str] = None,
 ) -> dict:
     """Public API: food cost analysis (analytics:read)."""
     from app.services.analytics_service import _get_food_cost_for_tenant
     tenant_id, _ = validate_api_key_auth(request, "analytics:read")
-    return await _get_food_cost_for_tenant(tenant_id, date_from=date_from, date_to=date_to)
+    return await _get_food_cost_for_tenant(
+        tenant_id,
+        date_from=date_from,
+        date_to=date_to,
+        compare_to=compare_to,
+        compare_from=compare_from,
+        compare_date_to=compare_date_to,
+    )
 
 
 async def get_analytics_alerts(

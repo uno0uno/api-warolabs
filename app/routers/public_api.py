@@ -33,6 +33,9 @@ class MetricsQueryRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=100, description="For product grouping: number of products")
     sortBy: str = Field(default="quantity", description="For product grouping: quantity or revenue")
     ranges: Optional[list] = Field(default=None, description="For ticket grouping: custom price ranges")
+    compareTo: Optional[str] = Field(default=None, description="Comparison mode: previous_period | previous_year | custom. Only applies when groupBy is null.")
+    compareFrom: Optional[str] = Field(default=None, description="Custom comparison window start (YYYY-MM-DD). Required when compareTo=custom.")
+    compareDateTo: Optional[str] = Field(default=None, description="Custom comparison window end (YYYY-MM-DD). Required when compareTo=custom.")
 
 
 class SaleDetailRequest(BaseModel):
@@ -92,6 +95,9 @@ class CustomerMetricsRequest(BaseModel):
     dateTo: Optional[str] = Field(default=None, description="End date (YYYY-MM-DD)")
     timezone: str = Field(default="America/Bogota", description="Timezone for date filters (e.g., America/Bogota, America/Mexico_City, America/New_York)")
     groupBy: Optional[str] = Field(default=None, description="Time series breakdown: date | weekday | month")
+    compareTo: Optional[str] = Field(default=None, description="Comparison mode: previous_period | previous_year | custom. Only applies when groupBy is null.")
+    compareFrom: Optional[str] = Field(default=None, description="Custom comparison window start (YYYY-MM-DD). Required when compareTo=custom.")
+    compareDateTo: Optional[str] = Field(default=None, description="Custom comparison window end (YYYY-MM-DD). Required when compareTo=custom.")
 
 
 class CustomerOrdersRequest(BaseModel):
@@ -157,7 +163,10 @@ async def get_sales_metrics(request: Request, body: MetricsQueryRequest):
         group_by=body.groupBy,
         limit=body.limit,
         sort_by=body.sortBy,
-        ranges=body.ranges
+        ranges=body.ranges,
+        compare_to=body.compareTo,
+        compare_from=body.compareFrom,
+        compare_date_to=body.compareDateTo,
     )
 
 
@@ -332,7 +341,10 @@ async def get_customers_metrics(request: Request, body: CustomerMetricsRequest):
         date_from=body.dateFrom,
         date_to=body.dateTo,
         timezone=body.timezone,
-        group_by=body.groupBy
+        group_by=body.groupBy,
+        compare_to=body.compareTo,
+        compare_from=body.compareFrom,
+        compare_date_to=body.compareDateTo,
     )
 
 
@@ -352,6 +364,9 @@ class AnalyticsFoodCostRequest(BaseModel):
     """Request body for food cost analysis"""
     dateFrom: Optional[str] = Field(default=None, description="Start date (YYYY-MM-DD)")
     dateTo: Optional[str] = Field(default=None, description="End date (YYYY-MM-DD)")
+    compareTo: Optional[str] = Field(default=None, description="Comparison mode: previous_period (default) | previous_year | custom")
+    compareFrom: Optional[str] = Field(default=None, description="Custom comparison window start (YYYY-MM-DD). Required when compareTo=custom.")
+    compareDateTo: Optional[str] = Field(default=None, description="Custom comparison window end (YYYY-MM-DD). Required when compareTo=custom.")
 
 
 class AnalyticsAlertsRequest(BaseModel):
@@ -446,6 +461,9 @@ async def get_analytics_food_cost(request: Request, body: AnalyticsFoodCostReque
         request,
         date_from=body.dateFrom,
         date_to=body.dateTo,
+        compare_to=body.compareTo,
+        compare_from=body.compareFrom,
+        compare_date_to=body.compareDateTo,
     )
 
 

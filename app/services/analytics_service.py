@@ -279,7 +279,10 @@ async def get_menu_analysis(
 async def _get_food_cost_for_tenant(
     tenant_id: str,
     date_from: Optional[str] = None,
-    date_to: Optional[str] = None
+    date_to: Optional[str] = None,
+    compare_to: Optional[str] = None,
+    compare_from: Optional[str] = None,
+    compare_date_to: Optional[str] = None,
 ) -> dict:
     """Auth-agnostic core for food cost. Called by session wrapper and public API."""
     # Default to start of current year
@@ -291,10 +294,21 @@ async def _get_food_cost_for_tenant(
         parsed_date_to = today
         parsed_date_from = today.replace(month=1, day=1)
 
-    # Calculate previous period (same duration)
-    days_diff = (parsed_date_to - parsed_date_from).days + 1
-    prev_date_to = parsed_date_from - timedelta(days=1)
-    prev_date_from = prev_date_to - timedelta(days=days_diff - 1)
+    # Determine comparison window based on compare_to mode.
+    # Default (None or "previous_period") mirrors the same duration immediately before date_from.
+    if compare_to == "previous_year":
+        prev_date_from = parsed_date_from - timedelta(days=365)
+        prev_date_to = parsed_date_to - timedelta(days=365)
+    elif compare_to == "custom":
+        cf = parse_date(compare_from)
+        ct = parse_date(compare_date_to)
+        prev_date_from = cf if cf else parsed_date_from - timedelta(days=(parsed_date_to - parsed_date_from).days + 1)
+        prev_date_to = ct if ct else parsed_date_from - timedelta(days=1)
+    else:
+        # "previous_period" (default) — same duration immediately before
+        days_diff = (parsed_date_to - parsed_date_from).days + 1
+        prev_date_to = parsed_date_from - timedelta(days=1)
+        prev_date_from = prev_date_to - timedelta(days=days_diff - 1)
 
     async with get_db_connection() as conn:
         # Query for current and previous period with REAL costs from purchase history
