@@ -1,0 +1,930 @@
+{
+  "info": {
+    "name": "Waro Public API",
+    "_postman_id": "waro-public-api-v1",
+    "description": "API pública de Waro Colombia — autenticada con API key (`waro_sk_xxx`).\n\nFlujo de checkout completo:\n1. GET /v1/restaurant — info del restaurante\n2. GET /v1/menu — menú público\n3. POST /v1/cart/batch — crear carrito\n4. POST /v1/otp/send — enviar OTP al email del cliente\n5. POST /v1/otp/verify — verificar OTP → guarda `customer_token` automáticamente\n6. POST /v1/cart/{cart_id}/verify — vincular cliente al carrito (usa customer_token)\n7. POST /v1/cart/{cart_id}/checkout — confirmar orden\n\nVariables clave:\n- `base_url` — URL base de la API\n- `api_key` — tu API key `waro_sk_xxx`\n- `cart_id`, `session_id`, `customer_token`, `address_id` — se capturan automáticamente con scripts",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{api_key}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000", "type": "string" },
+    { "key": "api_key", "value": "waro_sk_CHANGE_ME", "type": "string" },
+    { "key": "cart_id", "value": "", "type": "string" },
+    { "key": "session_id", "value": "", "type": "string" },
+    { "key": "customer_token", "value": "", "type": "string" },
+    { "key": "address_id", "value": "", "type": "string" },
+    { "key": "customer_id", "value": "", "type": "string" },
+    { "key": "order_id", "value": "", "type": "string" },
+    { "key": "profile_id", "value": "", "type": "string" },
+    { "key": "test_email", "value": "test@example.com", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "🍽️ Restaurant & Menu",
+      "description": "Información pública del restaurante y menú — no requiere conocer el slug.",
+      "item": [
+        {
+          "name": "GET /v1/restaurant",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/restaurant",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "restaurant"]
+            },
+            "description": "Retorna el perfil público del restaurante asociado al API key."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('success flag', () => pm.expect(json.success).to.be.true);",
+                  "console.log('Restaurant:', json.data?.name);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /v1/menu",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/menu",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "menu"],
+              "query": [
+                {
+                  "key": "category_id",
+                  "value": "",
+                  "description": "Opcional: filtrar por categoría UUID",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Retorna el menú público con productos disponibles."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('success flag', () => pm.expect(json.success).to.be.true);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "🛒 V1 Cart",
+      "description": "Operaciones de carrito — el tenant_id se inyecta desde el API key, nunca se expone al caller.",
+      "item": [
+        {
+          "name": "POST /v1/cart/batch — Crear carrito",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"session_id\": \"session-test-001\",\n  \"order_type\": \"delivery\",\n  \"items\": [\n    {\n      \"product_id\": \"PRODUCT_UUID_AQUI\",\n      \"quantity\": 2,\n      \"unit_price\": 15000,\n      \"notes\": \"Sin cebolla\"\n    }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/cart/batch",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "cart", "batch"]
+            },
+            "description": "Crea un carrito con uno o más items en batch. El tenant se infiere del API key."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200 or 201', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.cart_id || json.id) {",
+                  "  const id = json.cart_id || json.id;",
+                  "  pm.collectionVariables.set('cart_id', id);",
+                  "  console.log('✅ cart_id guardado:', id);",
+                  "}",
+                  "if (json.session_id) {",
+                  "  pm.collectionVariables.set('session_id', json.session_id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /v1/cart/session/{session_id}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/cart/session/{{session_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "cart", "session", "{{session_id}}"]
+            },
+            "description": "Obtiene el carrito activo de una sesión."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "if (json.cart_id || json.id) {",
+                  "  pm.collectionVariables.set('cart_id', json.cart_id || json.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "PUT /v1/cart/{cart_id}/delivery — Actualizar entrega",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_type\": \"delivery\",\n  \"delivery_address_id\": \"{{address_id}}\",\n  \"scheduled_time\": null,\n  \"delivery_instructions\": \"Tocar el timbre dos veces\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/cart/{{cart_id}}/delivery",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "cart", "{{cart_id}}", "delivery"]
+            },
+            "description": "Actualiza el tipo de entrega y dirección del carrito."
+          }
+        },
+        {
+          "name": "DELETE /v1/cart/{cart_id}/items/{item_id}",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/cart/{{cart_id}}/items/ITEM_UUID_AQUI",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "cart", "{{cart_id}}", "items", "ITEM_UUID_AQUI"]
+            },
+            "description": "Elimina un item específico del carrito."
+          }
+        },
+        {
+          "name": "DELETE /v1/cart/{cart_id} — Limpiar carrito",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/cart/{{cart_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "cart", "{{cart_id}}"]
+            },
+            "description": "Elimina todos los items del carrito."
+          }
+        },
+        {
+          "name": "POST /v1/cart/{cart_id}/verify — Verificar sesión existente",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Customer-Token", "value": "{{customer_token}}", "description": "JWT del cliente — obtenido de /v1/otp/verify" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/cart/{{cart_id}}/verify",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "cart", "{{cart_id}}", "verify"]
+            },
+            "description": "Vincula el cliente autenticado al carrito. Requiere API key + customer JWT.\n\nUsar cuando el cliente ya tiene una sesión activa (no necesita OTP).\nEnviar el token obtenido de /v1/otp/verify en el header X-Customer-Token."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/cart/{cart_id}/checkout — Confirmar orden",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/cart/{{cart_id}}/checkout",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "cart", "{{cart_id}}", "checkout"]
+            },
+            "description": "Finaliza el carrito como orden confirmada. El carrito debe haber sido verificado previamente via OTP o sesión.\n\nRetorna order_number, total_amount, order_type y pickup_pin (para pickup).\nRetorna 409 si el carrito ya fue procesado (idempotente)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "if (json.order_id) pm.collectionVariables.set('order_id', json.order_id);",
+                  "console.log('📦 Order number:', json.order_number);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "🔑 V1 OTP",
+      "description": "Flujo de identidad por OTP — verifica el email del cliente y emite un JWT.\n\n⚡ /verify captura automáticamente el customer_token en las variables de colección.",
+      "item": [
+        {
+          "name": "POST /v1/otp/send",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{test_email}}\",\n  \"cart_id\": \"{{cart_id}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/otp/send",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "otp", "send"]
+            },
+            "description": "Envía código OTP al email del cliente."
+          }
+        },
+        {
+          "name": "POST /v1/otp/verify ⚡ — captura customer_token",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{test_email}}\",\n  \"cart_id\": \"{{cart_id}}\",\n  \"otp_code\": \"123456\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/otp/verify",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "otp", "verify"]
+            },
+            "description": "Verifica el código OTP.\n\nAl tener éxito:\n- Establece cookie HttpOnly `waro_customer_session` (clientes browser)\n- Retorna `customer_token` en el body (clientes no-browser)\n\nEl script de test guarda automáticamente `customer_token` y `customer_id` en las variables de colección."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "if (json.customer_token) {",
+                  "  pm.collectionVariables.set('customer_token', json.customer_token);",
+                  "  console.log('✅ customer_token guardado');",
+                  "}",
+                  "if (json.customer_id) {",
+                  "  pm.collectionVariables.set('customer_id', json.customer_id);",
+                  "  console.log('✅ customer_id guardado:', json.customer_id);",
+                  "}",
+                  "pm.test('OTP verificado', () => pm.expect(json.success).to.be.true);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/otp/resend",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{test_email}}\",\n  \"cart_id\": \"{{cart_id}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/otp/resend",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "otp", "resend"]
+            },
+            "description": "Reenvía el código OTP. Cooldown: 60 segundos entre reenvíos."
+          }
+        }
+      ]
+    },
+    {
+      "name": "👤 V1 Customer",
+      "description": "Validación de elegibilidad del cliente para realizar un pedido.",
+      "item": [
+        {
+          "name": "POST /v1/customer/validate",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"+573001234567\",\n  \"cart_total\": 45000\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/customer/validate",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "customer", "validate"]
+            },
+            "description": "Verifica si el cliente puede realizar un pedido — blacklist, tier y límites de gasto."
+          }
+        }
+      ]
+    },
+    {
+      "name": "📍 V1 Addresses",
+      "description": "Gestión de direcciones de entrega del cliente.",
+      "item": [
+        {
+          "name": "GET /v1/addresses/preview?email=",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/addresses/preview?email={{test_email}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "addresses", "preview"],
+              "query": [
+                { "key": "email", "value": "{{test_email}}", "description": "Email del cliente" }
+              ]
+            },
+            "description": "Previsualización de direcciones guardadas sin requerir OTP — para el paso de entrega."
+          }
+        },
+        {
+          "name": "POST /v1/addresses — Crear dirección",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customer_id\": \"{{customer_id}}\",\n  \"address_line1\": \"Calle 72 # 10-35\",\n  \"address_line2\": \"Apto 301\",\n  \"city\": \"Bogotá\",\n  \"state\": \"Cundinamarca\",\n  \"postal_code\": \"110231\",\n  \"country\": \"CO\",\n  \"latitude\": 4.6547,\n  \"longitude\": -74.0582,\n  \"is_default\": true,\n  \"address_type\": \"home\",\n  \"delivery_notes\": \"Edificio azul, segundo piso\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/addresses",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "addresses"]
+            },
+            "description": "Crea una dirección de entrega. Máximo 5 por cliente. Si is_default=true, las demás se desmarcan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.id || json.address_id) {",
+                  "  const id = json.id || json.address_id;",
+                  "  pm.collectionVariables.set('address_id', id);",
+                  "  console.log('✅ address_id guardado:', id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /v1/addresses/customer/{customer_id}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/addresses/customer/{{customer_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "addresses", "customer", "{{customer_id}}"]
+            },
+            "description": "Lista todas las direcciones del cliente, ordenadas por default primero, luego más recientes."
+          }
+        },
+        {
+          "name": "PUT /v1/addresses/{address_id} — Actualizar",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"delivery_notes\": \"Nuevo comentario de entrega\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/addresses/{{address_id}}?customer_id={{customer_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "addresses", "{{address_id}}"],
+              "query": [
+                { "key": "customer_id", "value": "{{customer_id}}", "description": "Validación de propiedad" }
+              ]
+            },
+            "description": "Actualización parcial — solo se modifican los campos enviados."
+          }
+        },
+        {
+          "name": "PATCH /v1/addresses/{address_id}/set-default",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/addresses/{{address_id}}/set-default?customer_id={{customer_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "addresses", "{{address_id}}", "set-default"],
+              "query": [
+                { "key": "customer_id", "value": "{{customer_id}}", "description": "Validación de propiedad" }
+              ]
+            },
+            "description": "Marca esta dirección como predeterminada. Desmarca todas las demás."
+          }
+        },
+        {
+          "name": "DELETE /v1/addresses/{address_id}",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/addresses/{{address_id}}?customer_id={{customer_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "addresses", "{{address_id}}"],
+              "query": [
+                { "key": "customer_id", "value": "{{customer_id}}", "description": "Validación de propiedad" }
+              ]
+            },
+            "description": "Elimina la dirección. Si era la default y existen otras, promueve la más reciente."
+          }
+        }
+      ]
+    },
+    {
+      "name": "📊 Sales",
+      "description": "Consulta de ventas y métricas del tenant.",
+      "item": [
+        {
+          "name": "POST /v1/sales — Listar ventas",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"dateFrom\": \"2025-01-01\",\n  \"dateTo\": \"2025-12-31\",\n  \"timezone\": \"America/Bogota\",\n  \"limit\": 20,\n  \"offset\": 0,\n  \"status\": null,\n  \"paymentMethod\": null,\n  \"sortField\": \"created_at\",\n  \"sortDirection\": \"desc\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/sales",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "sales"]
+            }
+          }
+        },
+        {
+          "name": "POST /v1/sales/metrics",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"dateFrom\": \"2025-01-01\",\n  \"dateTo\": \"2025-12-31\",\n  \"timezone\": \"America/Bogota\",\n  \"groupBy\": null,\n  \"limit\": 10\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/sales/metrics",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "sales", "metrics"]
+            },
+            "description": "groupBy: null | weekday | hour | product | payment | ticket"
+          }
+        },
+        {
+          "name": "POST /v1/sales/detail",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"orderId\": \"{{order_id}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/sales/detail",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "sales", "detail"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "🍔 Menu API",
+      "description": "Consulta detallada del menú con ingredientes, recetas y modificadores.",
+      "item": [
+        {
+          "name": "POST /v1/menu/products",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"limit\": 20,\n  \"offset\": 0,\n  \"isAvailable\": true,\n  \"categoryId\": null,\n  \"includeIngredients\": false,\n  \"includeRecipeBases\": false,\n  \"includeModifiers\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/menu/products",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "menu", "products"]
+            }
+          }
+        },
+        {
+          "name": "POST /v1/menu/recipes",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"limit\": 20,\n  \"offset\": 0,\n  \"isActive\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/menu/recipes",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "menu", "recipes"]
+            }
+          }
+        },
+        {
+          "name": "POST /v1/menu/modifiers",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"limit\": 20,\n  \"offset\": 0\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/menu/modifiers",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "menu", "modifiers"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "👥 Customers",
+      "description": "Listado, detalle e historial de clientes del tenant.",
+      "item": [
+        {
+          "name": "POST /v1/customers — Listar clientes",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"limit\": 20,\n  \"offset\": 0,\n  \"search\": null,\n  \"dateFrom\": null,\n  \"dateTo\": null,\n  \"timezone\": \"America/Bogota\",\n  \"sortField\": \"total_spent\",\n  \"sortDirection\": \"desc\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/customers",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "customers"]
+            }
+          }
+        },
+        {
+          "name": "POST /v1/customers/detail",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"{{customer_id}}\",\n  \"dateFrom\": null,\n  \"dateTo\": null,\n  \"timezone\": \"America/Bogota\",\n  \"limit\": 10,\n  \"offset\": 0\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/customers/detail",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "customers", "detail"]
+            }
+          }
+        },
+        {
+          "name": "POST /v1/customers/orders",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": \"{{customer_id}}\",\n  \"limit\": 20,\n  \"offset\": 0,\n  \"includeItems\": false,\n  \"dateFrom\": null,\n  \"dateTo\": null,\n  \"timezone\": \"America/Bogota\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/customers/orders",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "customers", "orders"]
+            },
+            "description": "includeItems: false → solo cabeceras | true → incluye items (segunda query batch, sin N+1)"
+          }
+        },
+        {
+          "name": "POST /v1/customers/metrics",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"dateFrom\": null,\n  \"dateTo\": null,\n  \"timezone\": \"America/Bogota\",\n  \"groupBy\": null\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/customers/metrics",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "customers", "metrics"]
+            },
+            "description": "groupBy: null | date | weekday | month"
+          }
+        }
+      ]
+    },
+    {
+      "name": "📈 Analytics",
+      "description": "Análisis avanzado: BCG menú, food cost, cohortes, RFM, churn risk.",
+      "item": [
+        {
+          "name": "POST /v1/analytics/menu-analysis — BCG",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"dateFrom\": null,\n  \"dateTo\": null,\n  \"limit\": 20\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/analytics/menu-analysis",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "analytics", "menu-analysis"]
+            }
+          }
+        },
+        {
+          "name": "POST /v1/analytics/food-cost",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"dateFrom\": null,\n  \"dateTo\": null,\n  \"compareTo\": \"previous_period\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/analytics/food-cost",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "analytics", "food-cost"]
+            }
+          }
+        },
+        {
+          "name": "POST /v1/analytics/alerts",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"limit\": 10\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/analytics/alerts",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "analytics", "alerts"]
+            }
+          }
+        },
+        {
+          "name": "POST /v1/analytics/data-quality",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/analytics/data-quality",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "analytics", "data-quality"]
+            }
+          }
+        },
+        {
+          "name": "POST /v1/analytics/cohort",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"dateFrom\": null,\n  \"dateTo\": null,\n  \"period\": \"weekly\",\n  \"periods\": 8,\n  \"timezone\": \"America/Bogota\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/analytics/cohort",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "analytics", "cohort"]
+            },
+            "description": "period: weekly | monthly\nperiods: 1-24"
+          }
+        },
+        {
+          "name": "POST /v1/analytics/rfm",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"dateFrom\": null,\n  \"dateTo\": null,\n  \"segments\": 5,\n  \"timezone\": \"America/Bogota\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/analytics/rfm",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "analytics", "rfm"]
+            },
+            "description": "segments: 2-10 (default 5 = quintiles)\nSegmentos: Champions, Loyal, At Risk, Hibernating, Lost"
+          }
+        },
+        {
+          "name": "POST /v1/analytics/churn-risk",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"threshold_multiplier\": 2.0,\n  \"min_orders\": 3,\n  \"limit\": 50,\n  \"offset\": 0\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/analytics/churn-risk",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "analytics", "churn-risk"]
+            },
+            "description": "Clientes cuya inactividad supera N × su intervalo promedio de visita personal."
+          }
+        },
+        {
+          "name": "POST /v1/analytics/waros",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"groupBy\": \"day\",\n  \"dateFrom\": null,\n  \"dateTo\": null\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/analytics/waros",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "analytics", "waros"]
+            },
+            "description": "groupBy: customer | day | week"
+          }
+        }
+      ]
+    },
+    {
+      "name": "💰 Financial",
+      "description": "Análisis financiero de productos — margen, costo, rentabilidad.",
+      "item": [
+        {
+          "name": "POST /v1/financial/products",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"period\": 365,\n  \"category\": null,\n  \"minMargin\": null,\n  \"sortBy\": \"margin\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/financial/products",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "financial", "products"]
+            },
+            "description": "sortBy: margin | revenue | cost | quantity\nperiod: días de análisis (1-730)"
+          }
+        }
+      ]
+    },
+    {
+      "name": "🎯 WaRos",
+      "description": "Puntos de fidelidad WaRos — balance, historial, estimados.",
+      "item": [
+        {
+          "name": "POST /v1/waros/customer-summary",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"profileId\": \"{{profile_id}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/waros/customer-summary",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "waros", "customer-summary"]
+            }
+          }
+        },
+        {
+          "name": "POST /v1/waros/balances — Batch",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"profileIds\": [\n    \"{{profile_id}}\"\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/waros/balances",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "waros", "balances"]
+            },
+            "description": "Hasta 250 profileIds en una sola llamada."
+          }
+        },
+        {
+          "name": "POST /v1/waros/estimate",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"totalAmount\": 45000,\n  \"customerId\": null\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/waros/estimate",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "waros", "estimate"]
+            },
+            "description": "Estima cuántos WaRos ganaría el cliente por una compra de ese monto."
+          }
+        },
+        {
+          "name": "POST /v1/waros/customer-history",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"profileId\": \"{{profile_id}}\",\n  \"limit\": 50,\n  \"offset\": 0,\n  \"transactionType\": null\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/waros/customer-history",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "waros", "customer-history"]
+            },
+            "description": "transactionType: null | earned | manual"
+          }
+        }
+      ]
+    }
+  ]
+}
