@@ -2,7 +2,7 @@
   "info": {
     "name": "Waro Public API",
     "_postman_id": "waro-public-api-v1",
-    "description": "API pública de Waro Colombia — autenticada con API key (`waro_sk_xxx`).\n\nFlujo de checkout completo:\n1. GET /v1/restaurant — info del restaurante\n2. GET /v1/menu — menú público\n3. POST /v1/cart/batch — crear carrito\n4. POST /v1/otp/send — enviar OTP al email del cliente\n5. POST /v1/otp/verify — verificar OTP → guarda `customer_token` automáticamente\n6. POST /v1/cart/{cart_id}/verify — vincular cliente al carrito (usa customer_token)\n7. POST /v1/cart/{cart_id}/checkout — confirmar orden\n\nVariables clave:\n- `base_url` — URL base de la API\n- `api_key` — tu API key `waro_sk_xxx`\n- `cart_id`, `session_id`, `customer_token`, `address_id` — se capturan automáticamente con scripts",
+    "description": "API pública de Waro Colombia — autenticada con API key (`waro_sk_xxx`).\n\nFlujo de checkout completo:\n1. GET /v1/restaurant — info del restaurante\n2. GET /v1/menu — menú público (script captura product_id automáticamente)\n2.5. GET /v1/product/{product_id} — detalle con modifier_groups[] (solo si has_modifiers: true)\n3. POST /v1/cart/batch — crear carrito (incluir modifiers[] si aplica)\n4. POST /v1/otp/send — enviar OTP al email del cliente\n5. POST /v1/otp/verify — verificar OTP → guarda `customer_token` automáticamente\n6. POST /v1/cart/{cart_id}/verify — vincular cliente al carrito (usa customer_token)\n7. PUT /v1/cart/{cart_id}/delivery — asignar dirección de entrega\n8. POST /v1/cart/{cart_id}/checkout — confirmar orden\n\nVariables clave:\n- `base_url` — URL base de la API\n- `api_key` — tu API key `waro_sk_xxx`\n- `product_id`, `cart_id`, `session_id`, `customer_token`, `address_id` — se capturan automáticamente con scripts",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -25,7 +25,8 @@
     { "key": "customer_id", "value": "", "type": "string" },
     { "key": "order_id", "value": "", "type": "string" },
     { "key": "profile_id", "value": "", "type": "string" },
-    { "key": "test_email", "value": "test@example.com", "type": "string" }
+    { "key": "test_email", "value": "test@example.com", "type": "string" },
+    { "key": "product_id", "value": "", "type": "string" }
   ],
   "item": [
     {
@@ -77,7 +78,7 @@
                 }
               ]
             },
-            "description": "Retorna el menú público con productos disponibles."
+            "description": "Retorna el menú público con productos disponibles.\n\nCada producto incluye `has_modifiers: true/false`.\nEl script captura automáticamente el primer producto con has_modifiers=true en `product_id`.\nSi ninguno tiene modificadores, captura el primer producto disponible."
           },
           "event": [
             {
@@ -86,7 +87,47 @@
                 "exec": [
                   "pm.test('Status 200', () => pm.response.to.have.status(200));",
                   "const json = pm.response.json();",
-                  "pm.test('success flag', () => pm.expect(json.success).to.be.true);"
+                  "pm.test('success flag', () => pm.expect(json.success).to.be.true);",
+                  "const products = json.data?.products || [];",
+                  "const withMods = products.find(p => p.has_modifiers);",
+                  "const fallback = products[0];",
+                  "const chosen = withMods || fallback;",
+                  "if (chosen) {",
+                  "  pm.collectionVariables.set('product_id', chosen.id);",
+                  "  console.log('✅ product_id guardado:', chosen.id, '| has_modifiers:', chosen.has_modifiers);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /v1/product/{product_id} — Detalle + modificadores ⚡",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/product/{{product_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "product", "{{product_id}}"]
+            },
+            "description": "Retorna el detalle completo de un producto incluyendo `modifier_groups[]`.\n\nUsar cuando `has_modifiers: true` en GET /v1/menu.\n\nRespuesta incluye:\n- `modifier_groups[]` con `is_required`, `min_qty`, `max_qty`\n- `modifiers[]` dentro de cada grupo con `id`, `name`, `price`, `is_default`\n- `is_available_online` — false = producto no disponible para domicilio\n\nUsar el `id` de cada modificador seleccionado en `modifiers[]` al crear el carrito."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('success flag', () => pm.expect(json.success).to.be.true);",
+                  "const groups = json.data?.modifier_groups || [];",
+                  "console.log('Modifier groups:', groups.length);",
+                  "groups.forEach(g => {",
+                  "  console.log(' Group:', g.name, '| required:', g.is_required, '| min:', g.min_qty, '| max:', g.max_qty);",
+                  "  g.modifiers.forEach(m => console.log('   -', m.name, '$' + m.price, m.is_default ? '(default)' : ''));",
+                  "});"
                 ],
                 "type": "text/javascript"
               }
@@ -106,7 +147,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"session_id\": \"session-test-001\",\n  \"order_type\": \"delivery\",\n  \"items\": [\n    {\n      \"product_id\": \"PRODUCT_UUID_AQUI\",\n      \"quantity\": 2,\n      \"unit_price\": 15000,\n      \"notes\": \"Sin cebolla\"\n    }\n  ]\n}",
+              "raw": "{\n  \"session_id\": \"session-test-001\",\n  \"order_type\": \"delivery\",\n  \"items\": [\n    {\n      \"product_id\": \"{{product_id}}\",\n      \"quantity\": 1,\n      \"unit_price\": 15000,\n      \"notes\": \"Sin cebolla\",\n      \"modifiers\": [\n        {\n          \"id\": \"MODIFIER_UUID_DE_/v1/product/{id}\",\n          \"name\": \"Extra queso\",\n          \"price\": 2000\n        }\n      ]\n    },\n    {\n      \"product_id\": \"{{product_id}}\",\n      \"quantity\": 1,\n      \"unit_price\": 15000,\n      \"notes\": null,\n      \"modifiers\": []\n    }\n  ]\n}",
               "options": { "raw": { "language": "json" } }
             },
             "url": {
@@ -114,7 +155,7 @@
               "host": ["{{base_url}}"],
               "path": ["v1", "cart", "batch"]
             },
-            "description": "Crea un carrito con uno o más items en batch. El tenant se infiere del API key."
+            "description": "Crea un carrito con uno o más items en batch. El tenant se infiere del API key.\n\n**modifiers[]** — array de modificadores seleccionados para el item:\n- `id` — UUID del modificador (obtenido de GET /v1/product/{id} → modifier_groups[].modifiers[].id)\n- `name` — nombre del modificador (para display)\n- `price` — precio adicional del modificador\n\nSi el producto no tiene modificadores, enviar `modifiers: []`.\n\nEl mismo producto con diferente combinación de modifiers se trata como un item separado."
           },
           "event": [
             {
