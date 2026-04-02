@@ -368,6 +368,14 @@ class AnalyticsCohortRequest(BaseModel):
     timezone: str = Field(default="America/Bogota", description="Timezone for date bucketing (e.g., America/Bogota)")
 
 
+class AnalyticsRFMRequest(BaseModel):
+    """Request body for RFM customer segmentation"""
+    dateFrom: Optional[str] = Field(default=None, description="Evaluation window start date (YYYY-MM-DD)")
+    dateTo: Optional[str] = Field(default=None, description="Evaluation window end date (YYYY-MM-DD)")
+    segments: int = Field(default=5, ge=2, le=10, description="Number of scoring tiers (default 5 = quintiles)")
+    timezone: str = Field(default="America/Bogota", description="Timezone for date filters (e.g., America/Bogota)")
+
+
 # ---------------------------------------------------------------------------
 # Financial request models
 # ---------------------------------------------------------------------------
@@ -502,6 +510,32 @@ async def get_analytics_cohort(request: Request, body: AnalyticsCohortRequest):
         periods=body.periods,
         date_from=body.dateFrom,
         date_to=body.dateTo,
+        timezone=body.timezone,
+    )
+
+
+@router.post("/analytics/rfm")
+async def get_analytics_rfm(request: Request, body: AnalyticsRFMRequest):
+    """
+    Retorna la segmentación RFM (Recency, Frequency, Monetary) de los clientes del tenant.
+
+    Cada cliente recibe un score R, F y M de 1 a `segments` (default 5 = quintiles)
+    y un segmento con nombre legible: Champions, Loyal, At Risk, Hibernating o Lost.
+
+    Solo incluye clientes identificados (customer_id IS NOT NULL) con perfil no anónimo.
+    Todos los canales de pedido cuentan (POS, online, manual).
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `analytics:read` o `read`
+    """
+    return await public_api_service.get_analytics_rfm(
+        request,
+        date_from=body.dateFrom,
+        date_to=body.dateTo,
+        segments=body.segments,
         timezone=body.timezone,
     )
 

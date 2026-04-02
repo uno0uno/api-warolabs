@@ -1534,3 +1534,139 @@ async def _get_cohort_for_tenant(
         "period": period,
         "cohorts": cohorts,
     }
+
+
+async def _get_rfm_for_tenant(
+    tenant_id: str,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    segments: int = 5,
+    timezone: str = "America/Bogota",
+) -> dict:
+    """
+    Auth-agnostic RFM customer segmentation.
+
+    Scores each identified, non-anonymous customer on:
+      R (Recency)   — NTILE over days since last order (lower days = higher score)
+      F (Frequency) — NTILE over order count (higher count = higher score)
+      M (Monetary)  — NTILE over total spent (higher spend = higher score)
+
+    Segment labels are assigned top-to-bottom (first match wins):
+      Champions   — top tier on all three dimensions
+      Loyal       — high frequency + monetary (any recency)
+      At Risk     — low recency, but previously high frequency + monetary
+      Hibernating — low recency and low frequency
+      Lost        — catch-all for remaining combinations
+    """
+    today = datetime.now().date()
+
+    parsed_date_from = parse_date(date_from)
+    parsed_date_to = parse_date(date_to)
+
+    if not parsed_date_from:
+        parsed_date_from = today.replace(month=1, day=1)
+    if not parsed_date_to:
+        parsed_date_to = today
+
+    # Thresholds scaled to the configured number of segments.
+    # For segments=5: high_threshold=4, mid_threshold=3, low_threshold=2
+    # For segments=3: high_threshold=3, mid_threshold=2, low_threshold=1
+    high_threshold = max(1, int(segments * 0.7 + 0.5))   # ceil(segments*0.7)
+    mid_threshold = max(1, int(segments * 0.6 + 0.5))    # ceil(segments*0.6)
+    low_threshold = max(1, int(segments * 0.4))           # floor(segments*0.4)
+
+    # Timezone is embedded as a literal — same safe pattern used across all analytics
+    # functions. It comes from a validated Pydantic field; PostgreSQL raises on invalid tz.
+    query = f"""
+        WITH base AS (
+            SELECT
+                o.customer_id,
+                p.name                                                     AS customer_name,
+                COUNT(*)::int                                              AS order_count,
+                MAX(o.order_date AT TIME ZONE '{timezone}')                AS last_order_date,
+                SUM(o.total_amount)::bigint                                AS total_spent,
+                EXTRACT(
+                    EPOCH FROM (
+                        NOW() AT TIME ZONE '{timezone}'
+                        - MAX(o.order_date AT TIME ZONE '{timezone}')
+                    )
+                ) / 86400.0                                                AS recency_days
+            FROM orders o
+            JOIN profile p ON p.id = o.customer_id
+            WHERE o.tenant_id   = $1
+              AND o.status      = 'completed'
+              AND o.customer_id IS NOT NULL
+              AND p.email NOT LIKE '%@customer.temp'
+              AND DATE(o.order_date AT TIME ZONE '{timezone}') >= $2
+              AND DATE(o.order_date AT TIME ZONE '{timezone}') <= $3
+            GROUP BY o.customer_id, p.name
+        ),
+        scored AS (
+            SELECT
+                customer_id,
+                customer_name,
+                order_count,
+                last_order_date,
+                total_spent,
+                NTILE($4) OVER (ORDER BY recency_days ASC)  AS r_score,
+                NTILE($4) OVER (ORDER BY order_count DESC)  AS f_score,
+                NTILE($4) OVER (ORDER BY total_spent DESC)  AS m_score
+            FROM base
+        )
+        SELECT
+            customer_id::text,
+            customer_name,
+            order_count,
+            last_order_date,
+            total_spent,
+            r_score,
+            f_score,
+            m_score,
+            CASE
+                WHEN r_score >= $5 AND f_score >= $5 AND m_score >= $5 THEN 'Champions'
+                WHEN f_score >= $5 AND m_score >= $6                    THEN 'Loyal'
+                WHEN r_score <= $7 AND f_score >= $6 AND m_score >= $6  THEN 'At Risk'
+                WHEN r_score <= $7 AND f_score <= $7                    THEN 'Hibernating'
+                ELSE 'Lost'
+            END AS segment
+        FROM scored
+        ORDER BY r_score DESC, f_score DESC, m_score DESC
+    """
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            query,
+            tenant_id,
+            parsed_date_from,
+            parsed_date_to,
+            segments,
+            high_threshold,
+            mid_threshold,
+            low_threshold,
+        )
+
+    customers = [
+        {
+            "customer_id": row["customer_id"],
+            "customer_name": row["customer_name"],
+            "r_score": row["r_score"],
+            "f_score": row["f_score"],
+            "m_score": row["m_score"],
+            "segment": row["segment"],
+            "last_order_date": row["last_order_date"].isoformat() if row["last_order_date"] else None,
+            "order_count": row["order_count"],
+            "total_spent": row["total_spent"],
+        }
+        for row in rows
+    ]
+
+    return {
+        "success": True,
+        "data": {
+            "customers": customers,
+            "total": len(customers),
+            "segments_used": segments,
+            "evaluated_from": parsed_date_from.isoformat(),
+            "evaluated_to": parsed_date_to.isoformat(),
+        },
+    }

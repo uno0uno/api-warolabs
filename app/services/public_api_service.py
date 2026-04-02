@@ -2060,6 +2060,25 @@ async def get_analytics_cohort(
     )
 
 
+async def get_analytics_rfm(
+    request: Request,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    segments: int = 5,
+    timezone: str = "America/Bogota",
+) -> dict:
+    """Public API: RFM customer segmentation (analytics:read)."""
+    from app.services.analytics_service import _get_rfm_for_tenant
+    tenant_id, _ = validate_api_key_auth(request, "analytics:read")
+    return await _get_rfm_for_tenant(
+        tenant_id,
+        date_from=date_from,
+        date_to=date_to,
+        segments=segments,
+        timezone=timezone,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Financial endpoints (scope: financial:read)
 # ---------------------------------------------------------------------------
