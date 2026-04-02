@@ -3,7 +3,7 @@ V1 Ordering Router
 Cart, address, OTP, and customer-validate endpoints authenticated via API key.
 tenant_id is injected from the API key context — never exposed to callers.
 """
-from fastapi import APIRouter, Request, Query, Response
+from fastapi import APIRouter, Depends, Request, Query, Response
 from typing import List, Optional
 from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field
@@ -12,6 +12,7 @@ from app.services.public_api_service import validate_api_key_auth
 from app.models.online_cart import OnlineCartItemCreate, DeliveryInfoUpdate
 from app.models.address_profile import AddressProfileCreate, AddressProfileUpdate
 from app.core.security import create_customer_jwt, set_customer_cookie
+from app.dependencies.customer_auth import get_customer_flexible
 
 router = APIRouter(prefix="/v1/cart", tags=["V1 Ordering"])
 address_router = APIRouter(prefix="/v1/addresses", tags=["V1 Addresses"])
@@ -100,6 +101,53 @@ async def clear_cart(cart_id: UUID, request: Request):
     """
     validate_api_key_auth(request, "read")
     return await online_cart_service.clear_cart(cart_id=cart_id)
+
+
+@router.post("/{cart_id}/verify")
+async def verify_cart(
+    cart_id: UUID,
+    request: Request,
+    current_customer: dict = Depends(get_customer_flexible),
+):
+    """
+    Verify a cart using an existing customer session (no OTP required).
+
+    Used for returning customers who already have a valid session.
+    Accepts the customer JWT from either:
+    - `X-Customer-Token: <jwt>` header (non-browser clients)
+    - `waro_customer_session` cookie (browser clients)
+
+    Sets is_verified = true and links the customer to the cart.
+    Generates pickup_pin for pickup orders.
+
+    **Authentication required:** API key + customer JWT
+    **Scope required:** `read`
+    """
+    validate_api_key_auth(request, "read")
+    return await online_cart_service.verify_cart_with_session(
+        cart_id=cart_id,
+        customer_id=UUID(current_customer["customer_id"]),
+        email=current_customer["email"],
+    )
+
+
+@router.post("/{cart_id}/checkout")
+async def checkout_cart_v1(cart_id: UUID, request: Request):
+    """
+    Finalize a verified cart as a confirmed order.
+
+    The cart must have been previously verified via OTP (`/v1/otp/verify`)
+    or session (`/v1/cart/{id}/verify`). No customer JWT required here —
+    `is_verified` is already stored on the cart row.
+
+    Returns order_number, total_amount, order_type, and pickup_pin (pickup orders).
+    Returns 409 if the cart was already checked out (double-submit safe).
+
+    **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
+    **Scope required:** `read`
+    """
+    validate_api_key_auth(request, "read")
+    return await online_cart_service.checkout_cart(cart_id=cart_id)
 
 
 # ---------------------------------------------------------------------------
