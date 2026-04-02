@@ -22,12 +22,14 @@ async def _get_products_analysis_for_tenant(tenant_id: str, period: int = 365, c
             # Exact SQL query from warolabs.com with parameters properly escaped
             products_query = f"""
                 WITH recent_orders AS (
-                  SELECT 
+                  SELECT
                     o.id as order_id,
                     o.order_date,
                     o.total_amount,
                     o.user_id,
-                    oi.variant_id,
+                    COALESCE(oi.product_id,
+                             (SELECT pv2.product_id FROM product_variants pv2
+                              WHERE pv2.id = oi.variant_id LIMIT 1)) as product_id,
                     oi.quantity,
                     oi.price_at_purchase,
                     tm.tenant_id
@@ -37,9 +39,10 @@ async def _get_products_analysis_for_tenant(tenant_id: str, period: int = 365, c
                   WHERE o.status = 'completed'
                     AND tm.tenant_id = $1::uuid
                     AND o.order_date >= NOW() - INTERVAL '{period} days'
+                    AND (oi.product_id IS NOT NULL OR oi.variant_id IS NOT NULL)
                 ),
                 product_analytics AS (
-                  SELECT 
+                  SELECT
                     p.id,
                     p.name,
                     p.price,
@@ -50,14 +53,14 @@ async def _get_products_analysis_for_tenant(tenant_id: str, period: int = 365, c
                     -- Calcular costo estimado basado en precio (60% del precio como costo)
                     p.price * 0.6 as avg_unit_cost,
                     -- Calcular margen basado en precio menos costo estimado
-                    CASE 
+                    CASE
                       WHEN p.price > 0 THEN
                         ROUND(((p.price - (p.price * 0.6)) / p.price) * 100, 2)
                       ELSE 0
                     END as real_margin,
                     -- Calcular ganancia real basada en ventas menos costos estimados
                     COALESCE(
-                      SUM(ro.quantity * (ro.price_at_purchase - (p.price * 0.6))), 
+                      SUM(ro.quantity * (ro.price_at_purchase - (p.price * 0.6))),
                       0
                     ) as real_profit,
                     -- Contar órdenes en el período
@@ -65,13 +68,13 @@ async def _get_products_analysis_for_tenant(tenant_id: str, period: int = 365, c
                     -- Fecha de último pedido
                     MAX(ro.order_date) as last_order_date,
                     -- TIR impact basado en contribución a ingresos totales
-                    CASE 
+                    CASE
                       WHEN SUM(ro.price_at_purchase * ro.quantity) > 0 THEN
                         ROUND(
-                          (SUM(ro.price_at_purchase * ro.quantity) / 
-                           NULLIF((SELECT SUM(total_amount) FROM orders o2 
-                                  INNER JOIN tenant_members tm2 ON o2.user_id = tm2.user_id 
-                                  WHERE o2.status = 'completed' 
+                          (SUM(ro.price_at_purchase * ro.quantity) /
+                           NULLIF((SELECT SUM(total_amount) FROM orders o2
+                                  INNER JOIN tenant_members tm2 ON o2.user_id = tm2.user_id
+                                  WHERE o2.status = 'completed'
                                   AND o2.order_date >= NOW() - INTERVAL '{period} days'), 0)
                           ) * 100, 2
                         )
@@ -79,8 +82,7 @@ async def _get_products_analysis_for_tenant(tenant_id: str, period: int = 365, c
                     END as tir_impact_percentage
                   FROM product p
                   LEFT JOIN categories c ON p.category_id = c.id
-                  LEFT JOIN product_variants pv ON p.id = pv.product_id
-                  INNER JOIN recent_orders ro ON pv.id = ro.variant_id
+                  INNER JOIN recent_orders ro ON p.id = ro.product_id
                   GROUP BY p.id, p.name, p.price, c.name
                   HAVING SUM(ro.quantity) > 0
                 ),
@@ -111,7 +113,10 @@ async def _get_products_analysis_for_tenant(tenant_id: str, period: int = 365, c
             # Add ordering exactly like warolabs.com
             order_mapping = {
                 'margin': 'real_margin',
-                'sales': 'total_sales', 
+                'revenue': 'total_revenue',
+                'cost': 'avg_unit_cost',
+                'quantity': 'total_sales',
+                'sales': 'total_sales',
                 'profit': 'real_profit',
                 'impact': 'tir_impact_percentage'
             }
