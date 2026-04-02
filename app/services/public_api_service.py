@@ -1211,11 +1211,12 @@ async def get_customers_list(
 
             base_where = " AND ".join(base_conditions)
 
-            # --- period_agg CTE: date-scoped aggregation ---
+            # --- period_agg CTE: date-scoped aggregation (completed orders only) ---
             period_conditions = [
                 "o.tenant_id = $1",
                 "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
                 "o.customer_id IS NOT NULL",
+                "o.status = 'completed'",
             ]
 
             parsed_date_from = parse_date(date_from)
@@ -1871,7 +1872,7 @@ async def get_customers_metrics(
                     COUNT(*)                                                                     AS total_customers,
                     COUNT(*) FILTER (WHERE {new_cust_filter})                                    AS new_customers,
                     COALESCE(SUM(po.revenue), 0)                                                 AS total_revenue,
-                    COALESCE(SUM(po.revenue)::float / NULLIF(COUNT(*), 0), 0)                    AS avg_ticket,
+                    COALESCE(SUM(po.revenue)::float / NULLIF(SUM(po.order_count), 0), 0)         AS avg_ticket,
                     COALESCE(SUM(po.order_count)::float / NULLIF(COUNT(*), 0), 0)                AS avg_orders_per_customer
                 FROM period_orders po
                 JOIN all_time_first atf ON po.customer_id = atf.customer_id
