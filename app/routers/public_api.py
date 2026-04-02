@@ -2,11 +2,11 @@
 Public API Router
 Endpoints for external integrations authenticated via API tokens
 """
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request, Query
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from uuid import UUID
-from app.services import public_api_service
+from app.services import public_api_service, public_restaurant_service
 
 router = APIRouter(prefix="/v1", tags=["Public API"])
 
@@ -109,6 +109,47 @@ class CustomerOrdersRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=100, description="Number of orders to return (1-100)")
     offset: int = Field(default=0, ge=0, description="Number of orders to skip")
     includeItems: bool = Field(default=False, description="Include line items per order")
+
+
+@router.get("/restaurant")
+async def get_restaurant_profile(request: Request) -> Dict[str, Any]:
+    """
+    Retorna el perfil público del restaurante asociado al API key.
+
+    No requiere conocer el slug — el tenant se infiere del API key.
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `read`
+    """
+    tenant_id, _ = public_api_service.validate_api_key_auth(request, "read")
+    profile = await public_restaurant_service.get_profile_by_tenant_id(UUID(tenant_id))
+    if not profile:
+        raise HTTPException(status_code=404, detail="Restaurant profile not found or not active")
+    return {"success": True, "data": profile}
+
+
+@router.get("/menu")
+async def get_restaurant_menu(
+    request: Request,
+    category_id: Optional[UUID] = Query(default=None, description="Optional: filter by category ID")
+) -> Dict[str, Any]:
+    """
+    Retorna el menú público del restaurante asociado al API key.
+
+    No requiere conocer el slug — el tenant se infiere del API key.
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `read`
+    """
+    tenant_id, _ = public_api_service.validate_api_key_auth(request, "read")
+    menu = await public_restaurant_service.get_menu_by_tenant_id(UUID(tenant_id), category_id=category_id)
+    return {"success": True, "data": menu}
 
 
 @router.post("/sales")

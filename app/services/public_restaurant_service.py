@@ -169,6 +169,130 @@ async def get_menu_by_slug(
         raise HTTPException(status_code=500, detail="Error fetching menu")
 
 
+async def get_profile_by_tenant_id(tenant_id: UUID) -> Optional[Dict[str, Any]]:
+    """
+    Get public restaurant profile by tenant_id (used by API key authenticated endpoints)
+    """
+    try:
+        async with get_db_connection() as conn:
+            query = """
+                SELECT
+                    id, tenant_id, slug, is_active,
+                    display_name, description, logo_url, banner_url,
+                    phone_number, email, address,
+                    city, neighborhood, latitude, longitude,
+                    business_hours, social_media,
+                    seo_title, seo_description,
+                    accepts_online_orders, min_order_amount, estimated_preparation_time,
+                    is_manually_open,
+                    created_at, updated_at
+                FROM tenant_public_profiles
+                WHERE tenant_id = $1 AND is_active = true
+            """
+            row = await conn.fetchrow(query, tenant_id)
+
+            if not row:
+                return None
+
+            profile = dict(row)
+
+            if isinstance(profile.get('business_hours'), str):
+                try:
+                    profile['business_hours'] = json.loads(profile['business_hours'])
+                except (json.JSONDecodeError, TypeError):
+                    profile['business_hours'] = {}
+
+            if isinstance(profile.get('social_media'), str):
+                try:
+                    profile['social_media'] = json.loads(profile['social_media'])
+                except (json.JSONDecodeError, TypeError):
+                    profile['social_media'] = {}
+
+            profile['is_currently_open'] = is_currently_open(
+                profile.get('business_hours'),
+                profile.get('is_manually_open', True)
+            )
+
+            return profile
+
+    except Exception as e:
+        logger.error(f"Error getting profile by tenant_id '{tenant_id}': {e}")
+        raise HTTPException(status_code=500, detail="Error fetching restaurant profile")
+
+
+async def get_menu_by_tenant_id(
+    tenant_id: UUID,
+    category_id: Optional[UUID] = None
+) -> Dict[str, Any]:
+    """
+    Get public menu for a restaurant by tenant_id (used by API key authenticated endpoints)
+    """
+    try:
+        async with get_db_connection() as conn:
+            profile_query = """
+                SELECT display_name
+                FROM tenant_public_profiles
+                WHERE tenant_id = $1 AND is_active = true
+            """
+            profile = await conn.fetchrow(profile_query, tenant_id)
+
+            if not profile:
+                raise HTTPException(status_code=404, detail="Restaurant not found or not active")
+
+            restaurant_name = profile['display_name']
+
+            categories_query = """
+                SELECT DISTINCT c.id, c.name, c.description
+                FROM categories c
+                JOIN product p ON p.category_id = c.id
+                WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
+                ORDER BY c.name
+            """
+            categories_rows = await conn.fetch(categories_query, tenant_id)
+            categories = [dict(row) for row in categories_rows]
+
+            products_query = """
+                SELECT
+                    p.id, p.name, p.description, p.price,
+                    p.category_id, c.name as category_name,
+                    p.is_available, p.preparation_time,
+                    p.allow_modifiers,
+                    EXISTS(
+                        SELECT 1
+                        FROM product_modifier_groups pmg
+                        WHERE pmg.product_id = p.id
+                    ) as has_modifiers
+                FROM product p
+                JOIN categories c ON p.category_id = c.id
+                WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
+            """
+
+            params = [tenant_id]
+
+            if category_id:
+                products_query += " AND p.category_id = $2"
+                params.append(category_id)
+
+            products_query += " ORDER BY c.name, p.name"
+
+            products_rows = await conn.fetch(products_query, *params)
+            products = [dict(row) for row in products_rows]
+            for p in products:
+                p['price'] = float(p['price'])
+
+            return {
+                "restaurant_name": restaurant_name,
+                "categories": categories,
+                "products": products
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting menu by tenant_id '{tenant_id}': {e}")
+        raise HTTPException(status_code=500, detail="Error fetching menu")
+
+
 async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
     """
     Get detailed product information with modifiers

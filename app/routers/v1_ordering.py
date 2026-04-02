@@ -1,17 +1,20 @@
 """
 V1 Ordering Router
-Cart management endpoints authenticated via API key.
+Cart, address, OTP, and customer-validate endpoints authenticated via API key.
 tenant_id is injected from the API key context — never exposed to callers.
 """
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Query, Response
 from typing import List, Optional
 from uuid import UUID
-from pydantic import BaseModel, Field
-from app.services import online_cart_service
+from pydantic import BaseModel, EmailStr, Field
+from app.services import online_cart_service, address_profile_service, otp_service
 from app.services.public_api_service import validate_api_key_auth
 from app.models.online_cart import OnlineCartItemCreate, DeliveryInfoUpdate
+from app.models.address_profile import AddressProfileCreate, AddressProfileUpdate
+from app.core.security import create_customer_jwt, set_customer_cookie
 
 router = APIRouter(prefix="/v1/cart", tags=["V1 Ordering"])
+address_router = APIRouter(prefix="/v1/addresses", tags=["V1 Addresses"])
 
 
 class V1BatchCreateCartRequest(BaseModel):
@@ -97,3 +100,224 @@ async def clear_cart(cart_id: UUID, request: Request):
     """
     validate_api_key_auth(request, "read")
     return await online_cart_service.clear_cart(cart_id=cart_id)
+
+
+# ---------------------------------------------------------------------------
+# V1 Address endpoints
+# ---------------------------------------------------------------------------
+
+@address_router.get("/preview")
+async def preview_addresses_by_email(
+    request: Request,
+    email: str = Query(..., description="Customer email to look up addresses for"),
+):
+    """
+    Read-only preview of saved addresses for a given email.
+
+    Used at the delivery step to show returning customers their saved addresses
+    without requiring OTP.
+
+    **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
+    **Scope required:** `read`
+    """
+    validate_api_key_auth(request, "read")
+    return await address_profile_service.get_addresses_by_email(email)
+
+
+@address_router.post("")
+async def create_address(request: Request, address: AddressProfileCreate):
+    """
+    Create a new delivery address for a customer.
+
+    Enforces a 5-address limit per customer. If `is_default=true`, all other
+    addresses for this customer are unset as default.
+
+    **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
+    **Scope required:** `read`
+    """
+    validate_api_key_auth(request, "read")
+    return await address_profile_service.create_address(
+        customer_id=address.customer_id,
+        address_line1=address.address_line1,
+        address_line2=address.address_line2,
+        city=address.city,
+        state=address.state,
+        postal_code=address.postal_code,
+        country=address.country,
+        latitude=address.latitude,
+        longitude=address.longitude,
+        is_default=address.is_default,
+        address_type=address.address_type,
+        delivery_notes=address.delivery_notes,
+    )
+
+
+@address_router.get("/customer/{customer_id}")
+async def get_customer_addresses(customer_id: UUID, request: Request):
+    """
+    Get all addresses for a customer, ordered by default-first then newest.
+
+    **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
+    **Scope required:** `read`
+    """
+    validate_api_key_auth(request, "read")
+    return await address_profile_service.get_customer_addresses(customer_id)
+
+
+@address_router.put("/{address_id}")
+async def update_address(
+    address_id: UUID,
+    customer_id: UUID,
+    request: Request,
+    address_update: AddressProfileUpdate,
+):
+    """
+    Update an existing address (partial update — only provided fields are changed).
+
+    - **customer_id**: Query param for ownership validation
+    - **address_id**: Path param identifying the address
+
+    **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
+    **Scope required:** `read`
+    """
+    validate_api_key_auth(request, "read")
+    update_data = address_update.model_dump(exclude_none=True)
+    return await address_profile_service.update_address(
+        address_id=address_id,
+        customer_id=customer_id,
+        update_data=update_data,
+    )
+
+
+@address_router.delete("/{address_id}")
+async def delete_address(address_id: UUID, customer_id: UUID, request: Request):
+    """
+    Delete an address. If the deleted address was the default and others exist,
+    the most recent address is automatically promoted to default.
+
+    - **customer_id**: Query param for ownership validation
+
+    **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
+    **Scope required:** `read`
+    """
+    validate_api_key_auth(request, "read")
+    return await address_profile_service.delete_address(address_id, customer_id)
+
+
+@address_router.patch("/{address_id}/set-default")
+async def set_default_address(address_id: UUID, customer_id: UUID, request: Request):
+    """
+    Set an address as the customer's default. Unsets all other addresses as default.
+
+    - **customer_id**: Query param for ownership validation
+
+    **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
+    **Scope required:** `read`
+    """
+    validate_api_key_auth(request, "read")
+    return await address_profile_service.set_default_address(address_id, customer_id)
+
+
+# ---------------------------------------------------------------------------
+# V1 OTP endpoints
+# ---------------------------------------------------------------------------
+
+otp_router = APIRouter(prefix="/v1/otp", tags=["V1 OTP"])
+
+
+class V1SendOTPRequest(BaseModel):
+    email: EmailStr
+    cart_id: Optional[UUID] = None
+
+
+class V1VerifyOTPRequest(BaseModel):
+    email: EmailStr
+    cart_id: Optional[UUID] = None
+    otp_code: str
+
+
+class V1ResendOTPRequest(BaseModel):
+    email: EmailStr
+    cart_id: Optional[UUID] = None
+
+
+@otp_router.post("/send")
+async def v1_send_otp(request: Request, body: V1SendOTPRequest):
+    """
+    Send OTP code via email.
+
+    **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
+    **Scope required:** `read`
+    """
+    validate_api_key_auth(request, "read")
+    return await otp_service.send_otp_email(email=body.email, cart_id=body.cart_id)
+
+
+@otp_router.post("/verify")
+async def v1_verify_otp(request: Request, body: V1VerifyOTPRequest, response: Response):
+    """
+    Verify OTP code.
+
+    In addition to setting the `waro_customer_session` HttpOnly cookie (browser clients),
+    the response body includes a `customer_token` field — the same JWT — so that
+    non-browser clients (CLI, mobile, server-side) can store it and send it as an
+    `X-Customer-Token` header in subsequent requests.
+
+    **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
+    **Scope required:** `read`
+    """
+    validate_api_key_auth(request, "read")
+    result = await otp_service.verify_otp_code(
+        email=body.email,
+        cart_id=body.cart_id,
+        otp_code=body.otp_code,
+    )
+    if result.get("success") and result.get("customer_id"):
+        jwt_token = create_customer_jwt(
+            customer_id=result["customer_id"],
+            email=body.email,
+        )
+        set_customer_cookie(response, jwt_token)
+        result["customer_token"] = jwt_token
+    return result
+
+
+@otp_router.post("/resend")
+async def v1_resend_otp(request: Request, body: V1ResendOTPRequest):
+    """
+    Resend OTP code. Cooldown: 60 seconds between resends.
+
+    **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
+    **Scope required:** `read`
+    """
+    validate_api_key_auth(request, "read")
+    return await otp_service.send_otp_email(email=body.email, cart_id=body.cart_id)
+
+
+# ---------------------------------------------------------------------------
+# V1 Customer validate endpoint
+# ---------------------------------------------------------------------------
+
+customer_router_v1 = APIRouter(prefix="/v1/customer", tags=["V1 Customer"])
+
+
+class V1ValidateCustomerRequest(BaseModel):
+    phone_number: str
+    cart_total: float = 0.0
+
+
+@customer_router_v1.post("/validate")
+async def v1_validate_customer(request: Request, body: V1ValidateCustomerRequest):
+    """
+    Validate customer eligibility to place an order.
+
+    Checks blacklist status, customer tier, and spending limits.
+
+    **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
+    **Scope required:** `read`
+    """
+    validate_api_key_auth(request, "read")
+    return await otp_service.validate_customer(
+        phone_number=body.phone_number,
+        cart_total=body.cart_total,
+    )
