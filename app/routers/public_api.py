@@ -94,6 +94,17 @@ class CustomerMetricsRequest(BaseModel):
     groupBy: Optional[str] = Field(default=None, description="Time series breakdown: date | weekday | month")
 
 
+class CustomerOrdersRequest(BaseModel):
+    """Request body for customer order history query"""
+    customerId: str = Field(description="Customer UUID")
+    dateFrom: Optional[str] = Field(default=None, description="Filter start date (YYYY-MM-DD)")
+    dateTo: Optional[str] = Field(default=None, description="Filter end date (YYYY-MM-DD)")
+    timezone: str = Field(default="America/Bogota", description="Timezone for date filters (e.g., America/Bogota, America/Mexico_City, America/New_York)")
+    limit: int = Field(default=20, ge=1, le=100, description="Number of orders to return (1-100)")
+    offset: int = Field(default=0, ge=0, description="Number of orders to skip")
+    includeItems: bool = Field(default=False, description="Include line items per order")
+
+
 @router.post("/sales")
 async def get_sales(request: Request, body: SalesQueryRequest):
     """
@@ -267,6 +278,35 @@ async def get_customer_detail(request: Request, body: CustomerDetailRequest):
         timezone=body.timezone,
         limit=body.limit,
         offset=body.offset
+    )
+
+
+@router.post("/customers/orders")
+async def get_customer_orders(request: Request, body: CustomerOrdersRequest):
+    """
+    Obtiene el historial de pedidos paginado de un cliente especifico, en todas las fuentes (POS, online, manual).
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `customers:read` o `read`
+
+    **Parametro includeItems:**
+    - false (default): Solo cabeceras de pedido
+    - true: Incluye los items de cada pedido (una segunda query batch — sin N+1)
+
+    **Devuelve lista vacia (no 404) cuando el cliente no tiene pedidos.**
+    """
+    return await public_api_service.get_customer_orders_history(
+        request,
+        UUID(body.customerId),
+        date_from=body.dateFrom,
+        date_to=body.dateTo,
+        timezone=body.timezone,
+        limit=body.limit,
+        offset=body.offset,
+        include_items=body.includeItems,
     )
 
 

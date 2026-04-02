@@ -1379,6 +1379,138 @@ async def get_customer_detail(
         raise APIError(f"Error al obtener detalle del cliente: {str(e)}", status_code=500)
 
 
+async def get_customer_orders_history(
+    request: Request,
+    customer_id: UUID,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    timezone: str = "America/Bogota",
+    limit: int = 20,
+    offset: int = 0,
+    include_items: bool = False,
+) -> dict:
+    """
+    Get paginated order history for a specific customer across all order sources.
+    Requires scope: customers:read or read
+    """
+    try:
+        tenant_id, token_id = validate_api_key_auth(request, "customers:read")
+
+        async with get_db_connection(use_transaction=False) as conn:
+            where_conditions = [
+                "o.customer_id = $1",
+                "o.tenant_id = $2",
+            ]
+            params: list = [customer_id, UUID(tenant_id)]
+            param_count = 2
+
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
+
+            if parsed_date_from:
+                param_count += 1
+                where_conditions.append(
+                    f"o.order_date >= (${param_count}::timestamp AT TIME ZONE '{timezone}')"
+                )
+                params.append(parsed_date_from)
+
+            if parsed_date_to:
+                param_count += 1
+                where_conditions.append(
+                    f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE '{timezone}')"
+                )
+                params.append(parsed_date_to)
+
+            where_clause = " AND ".join(where_conditions)
+            param_count += 1
+            limit_param = param_count
+            param_count += 1
+            offset_param = param_count
+
+            orders_query = f"""
+                SELECT
+                    o.id            AS order_id,
+                    o.order_number,
+                    o.order_date,
+                    o.total_amount,
+                    o.status,
+                    o.payment_method,
+                    o.pos_cart_id,
+                    o.online_cart_id,
+                    (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) AS items_count,
+                    COUNT(*) OVER()     AS total_count
+                FROM orders o
+                WHERE {where_clause}
+                ORDER BY o.order_date DESC
+                LIMIT ${limit_param} OFFSET ${offset_param}
+            """
+
+            params.append(limit)
+            params.append(offset)
+            order_rows = await conn.fetch(orders_query, *params)
+            total_count = int(order_rows[0]['total_count']) if order_rows else 0
+
+            # Batch-fetch items for all returned orders (no N+1)
+            items_by_order: dict = {}
+            if include_items and order_rows:
+                order_ids = [r['order_id'] for r in order_rows]
+                item_rows = await conn.fetch("""
+                    SELECT
+                        oi.order_id,
+                        p.name          AS product_name,
+                        oi.quantity,
+                        oi.price_at_purchase,
+                        oi.subtotal
+                    FROM order_items oi
+                    JOIN product p ON p.id = oi.product_id
+                    WHERE oi.order_id = ANY($1::uuid[])
+                    ORDER BY oi.created_at
+                """, order_ids)
+
+                for item in item_rows:
+                    key = str(item['order_id'])
+                    items_by_order.setdefault(key, []).append({
+                        "product_name": item['product_name'],
+                        "quantity": float(item['quantity']),
+                        "unit_price": float(item['price_at_purchase']),
+                        "subtotal": float(item['subtotal']),
+                    })
+
+            orders = [
+                {
+                    "order_id": str(row['order_id']),
+                    "order_number": int(row['order_number']),
+                    "date": row['order_date'].isoformat(),
+                    "total": float(row['total_amount']),
+                    "status": row['status'],
+                    "payment_method": row['payment_method'],
+                    "source": (
+                        "pos" if row['pos_cart_id']
+                        else "online" if row['online_cart_id']
+                        else "manual"
+                    ),
+                    "items_count": int(row['items_count']),
+                    "items": items_by_order.get(str(row['order_id'])) if include_items else None,
+                }
+                for row in order_rows
+            ]
+
+            return {
+                "items": orders,
+                "total": total_count,
+                "limit": limit,
+                "offset": offset,
+            }
+
+    except (AuthenticationError, AuthorizationError) as e:
+        raise e
+    except APIError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting customer orders history for {customer_id}: {str(e)}")
+        raise APIError(f"Error al obtener historial de pedidos: {str(e)}", status_code=500)
+
+
 async def get_menu_modifiers(
     request: Request,
     limit: int = 50,
