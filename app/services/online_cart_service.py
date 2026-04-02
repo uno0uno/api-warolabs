@@ -200,16 +200,24 @@ async def create_cart_with_batch_items(
                 cart_id = cart_row['id']
                 logger.info(f"Created online cart: {cart_id}")
 
-                # Validate all products belong to this tenant before inserting
+                # Validate all products belong to this tenant and fetch real prices
                 product_ids = [UUID(str(item['product_id'])) for item in items]
                 await validate_products_belong_to_tenant(conn, product_ids, tenant_id)
+
+                # Fetch real product prices from DB (keyed by product_id)
+                product_price_query = """
+                    SELECT id, price FROM product
+                    WHERE id = ANY($1) AND tenant_id = $2
+                """
+                product_rows = await conn.fetch(product_price_query, product_ids, tenant_id)
+                product_prices = {str(row['id']): Decimal(str(row['price'])) for row in product_rows}
 
                 # Add all items
                 cart_total = Decimal('0')
                 for item_data in items:
                     product_id = item_data['product_id']
                     quantity = item_data['quantity']
-                    unit_price = Decimal(str(item_data['unit_price']))
+                    unit_price = product_prices[str(product_id)]  # always from DB
                     modifiers = item_data.get('modifiers', [])
                     notes = item_data.get('notes')
 
@@ -217,12 +225,28 @@ async def create_cart_with_batch_items(
                     if modifiers:
                         await validate_modifiers_for_item(conn, UUID(str(product_id)), modifiers)
 
-                    # Calculate subtotal
-                    subtotal = calculate_item_subtotal(
-                        float(unit_price),
-                        modifiers,
-                        quantity
-                    )
+                    # Fetch real modifier prices and names from DB
+                    modifier_ids = [UUID(str(mod['id'])) for mod in modifiers]
+                    resolved_modifiers = []
+                    if modifier_ids:
+                        mod_price_query = """
+                            SELECT id, name, price FROM modifiers
+                            WHERE id = ANY($1)
+                        """
+                        mod_rows = await conn.fetch(mod_price_query, modifier_ids)
+                        mod_map = {str(row['id']): row for row in mod_rows}
+                        for mod in modifiers:
+                            db_mod = mod_map.get(str(mod['id']))
+                            if db_mod:
+                                resolved_modifiers.append({
+                                    'id': mod['id'],
+                                    'name': db_mod['name'],
+                                    'price': Decimal(str(db_mod['price']))
+                                })
+
+                    # Calculate subtotal from DB prices
+                    modifier_total = sum(m['price'] for m in resolved_modifiers)
+                    subtotal = (unit_price + modifier_total) * quantity
 
                     # Insert cart item
                     item_insert_query = """
@@ -238,13 +262,13 @@ async def create_cart_with_batch_items(
                         product_id,
                         quantity,
                         unit_price,
-                        Decimal(str(subtotal)),
+                        subtotal,
                         notes
                     )
                     item_id = item_row['id']
 
-                    # Insert modifiers
-                    for mod in modifiers:
+                    # Insert modifiers with DB-sourced name and price
+                    for mod in resolved_modifiers:
                         mod_insert_query = """
                             INSERT INTO online_cart_item_modifiers (
                                 cart_item_id, modifier_id, modifier_name, price
@@ -256,10 +280,10 @@ async def create_cart_with_batch_items(
                             item_id,
                             mod['id'],
                             mod['name'],
-                            Decimal(str(mod['price']))
+                            mod['price']
                         )
 
-                    cart_total += Decimal(str(subtotal))
+                    cart_total += subtotal
 
                 # Update cart total
                 await conn.execute(

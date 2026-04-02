@@ -10,17 +10,15 @@ from decimal import Decimal
 
 
 class ModifierInput(BaseModel):
-    """Modifier input for cart items"""
+    """Modifier input for cart items — only the ID is required.
+    Price and name are always looked up from the DB."""
     id: UUID
-    name: str
-    price: float
 
 
 class OnlineCartItemCreate(BaseModel):
-    """Create cart item request"""
+    """Create cart item request — unit_price is looked up from DB by product_id."""
     product_id: UUID
     quantity: int = Field(gt=0)
-    unit_price: float
     modifiers: List[ModifierInput] = []
     notes: Optional[str] = None
 
