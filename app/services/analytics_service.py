@@ -1684,3 +1684,148 @@ async def _get_rfm_for_tenant(
             "evaluated_to": parsed_date_to.isoformat(),
         },
     }
+
+
+async def _get_churn_risk_for_tenant(
+    tenant_id: str,
+    threshold_multiplier: float,
+    min_orders: int,
+    limit: int,
+    offset: int,
+) -> dict:
+    """
+    Returns identified customers whose inactivity exceeds threshold_multiplier × their
+    personal average visit interval, sorted by lifetime_value DESC.
+
+    Algorithm:
+    - CTE 1 (intervals): LAG(order_date) per customer — required first level
+    - CTE 2 (stats): aggregate COUNT, MAX, SUM, AVG — second level to avoid
+      "aggregate function calls cannot contain window function calls" PostgreSQL error
+    - Final SELECT: JOIN profile + waros_wallets, filter anonymous + above threshold
+
+    risk_score formula: LEAST(1.0, (days_since / (multiplier × avg_interval) - 1.0) / 2.0)
+      0.0 = just crossed threshold, 0.5 = 2× threshold, 1.0 = 3× threshold (capped)
+    """
+    async with get_db_connection(use_transaction=False) as conn:
+        # COUNT for pagination (same filters, no LIMIT/OFFSET)
+        count_row = await conn.fetchrow(
+            """
+            WITH intervals AS (
+                SELECT customer_id, order_date,
+                       LAG(order_date) OVER (PARTITION BY customer_id ORDER BY order_date) AS prev_date
+                FROM orders
+                WHERE status = 'completed'
+                  AND customer_id IS NOT NULL
+                  AND tenant_id = $1
+            ),
+            stats AS (
+                SELECT i.customer_id,
+                       COUNT(*)                                            AS order_count,
+                       MAX(i.order_date)                                   AS last_order_date,
+                       ROUND(AVG(
+                           EXTRACT(EPOCH FROM (i.order_date - i.prev_date)) / 86400
+                       )::numeric, 1)                                      AS avg_interval_days
+                FROM intervals i
+                JOIN orders o ON o.customer_id = i.customer_id
+                             AND o.order_date  = i.order_date
+                             AND o.status      = 'completed'
+                             AND o.tenant_id   = $1
+                GROUP BY i.customer_id
+                HAVING COUNT(*) >= $2
+            )
+            SELECT COUNT(*) AS total
+            FROM stats s
+            JOIN profile p ON p.id = s.customer_id
+            WHERE p.email NOT LIKE '%@customer.temp'
+              AND s.avg_interval_days > 0
+              AND EXTRACT(EPOCH FROM (NOW() - s.last_order_date)) / 86400
+                  > ($3::numeric * s.avg_interval_days)
+            """,
+            tenant_id,
+            min_orders,
+            threshold_multiplier,
+        )
+        total_count = int(count_row["total"]) if count_row else 0
+
+        rows = await conn.fetch(
+            """
+            WITH intervals AS (
+                SELECT customer_id, order_date,
+                       LAG(order_date) OVER (PARTITION BY customer_id ORDER BY order_date) AS prev_date
+                FROM orders
+                WHERE status = 'completed'
+                  AND customer_id IS NOT NULL
+                  AND tenant_id = $1
+            ),
+            stats AS (
+                SELECT i.customer_id,
+                       COUNT(*)                                            AS order_count,
+                       MAX(i.order_date)                                   AS last_order_date,
+                       SUM(o.total_amount)                                 AS lifetime_value,
+                       ROUND(AVG(
+                           EXTRACT(EPOCH FROM (i.order_date - i.prev_date)) / 86400
+                       )::numeric, 1)                                      AS avg_interval_days
+                FROM intervals i
+                JOIN orders o ON o.customer_id = i.customer_id
+                             AND o.order_date  = i.order_date
+                             AND o.status      = 'completed'
+                             AND o.tenant_id   = $1
+                GROUP BY i.customer_id
+                HAVING COUNT(*) >= $2
+            )
+            SELECT
+                s.customer_id,
+                p.name,
+                p.phone_number,
+                s.last_order_date,
+                s.avg_interval_days,
+                s.lifetime_value,
+                ROUND(EXTRACT(EPOCH FROM (NOW() - s.last_order_date)) / 86400)::int
+                    AS days_since_last_order,
+                ROUND(
+                    LEAST(1.0,
+                        (EXTRACT(EPOCH FROM (NOW() - s.last_order_date)) / 86400
+                         / ($3::numeric * s.avg_interval_days) - 1.0) / 2.0
+                    )::numeric, 2
+                )   AS risk_score,
+                COALESCE(ww.current_balance, 0) AS waros_balance
+            FROM stats s
+            JOIN profile p ON p.id = s.customer_id
+            LEFT JOIN waros_wallets ww ON ww.profile_id = s.customer_id
+            WHERE p.email NOT LIKE '%@customer.temp'
+              AND s.avg_interval_days > 0
+              AND EXTRACT(EPOCH FROM (NOW() - s.last_order_date)) / 86400
+                  > ($3::numeric * s.avg_interval_days)
+            ORDER BY s.lifetime_value DESC, risk_score DESC
+            LIMIT $4 OFFSET $5
+            """,
+            tenant_id,
+            min_orders,
+            threshold_multiplier,
+            limit,
+            offset,
+        )
+
+    customers = [
+        {
+            "customer_id": str(row["customer_id"]),
+            "name": row["name"],
+            "phone": row["phone_number"],
+            "last_order_date": row["last_order_date"].isoformat(),
+            "avg_visit_interval_days": float(row["avg_interval_days"]),
+            "days_since_last_order": int(row["days_since_last_order"]),
+            "risk_score": float(row["risk_score"]),
+            "lifetime_value": int(row["lifetime_value"]),
+            "waros_balance": int(row["waros_balance"]),
+        }
+        for row in rows
+    ]
+
+    return {
+        "total_count": total_count,
+        "limit": limit,
+        "offset": offset,
+        "threshold_multiplier": threshold_multiplier,
+        "min_orders": min_orders,
+        "customers": customers,
+    }

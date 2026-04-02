@@ -2322,6 +2322,21 @@ async def get_waros_estimate(
     return await _estimate_waros_for_tenant(tenant_id, total_amount, customer_id)
 
 
+async def get_analytics_churn_risk(
+    request: Request,
+    threshold_multiplier: float,
+    min_orders: int,
+    limit: int,
+    offset: int,
+) -> dict:
+    """Public API: churn risk list sorted by lifetime value (analytics:read)."""
+    from app.services.analytics_service import _get_churn_risk_for_tenant
+    tenant_id, _ = validate_api_key_auth(request, "analytics:read")
+    return await _get_churn_risk_for_tenant(
+        tenant_id, threshold_multiplier, min_orders, limit, offset
+    )
+
+
 async def get_waros_customer_history(
     request: Request,
     profile_id: UUID,

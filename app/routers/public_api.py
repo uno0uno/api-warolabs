@@ -423,6 +423,14 @@ class WarosEstimateRequest(BaseModel):
     customerId: Optional[str] = Field(default=None, description="Customer UUID (for personalized estimate)")
 
 
+class AnalyticsChurnRiskRequest(BaseModel):
+    """Request body for churn risk endpoint"""
+    threshold_multiplier: float = Field(default=2.0, ge=1.0, description="Flag customer when inactive N × avg interval (default 2)")
+    min_orders: int = Field(default=3, ge=2, description="Minimum completed orders to be included (default 3)")
+    limit: int = Field(default=50, ge=1, le=200, description="Page size (max 200)")
+    offset: int = Field(default=0, ge=0, description="Pagination offset")
+
+
 class WarosCustomerHistoryRequest(BaseModel):
     """Request body for paginated WaRos transaction history per customer"""
     profileId: str = Field(description="Customer profile UUID")
@@ -652,6 +660,29 @@ async def get_waros_estimate(request: Request, body: WarosEstimateRequest):
         request,
         total_amount=body.totalAmount,
         customer_id=customer_uuid,
+    )
+
+
+@router.post("/analytics/churn-risk")
+async def get_analytics_churn_risk(request: Request, body: AnalyticsChurnRiskRequest):
+    """
+    Clientes en riesgo de churn basado en su patron de visitas historico.
+
+    Devuelve clientes identificados cuya inactividad supera N veces su intervalo
+    promedio de visita personal, ordenados por lifetime value descendente.
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `analytics:read` o `read`
+    """
+    return await public_api_service.get_analytics_churn_risk(
+        request,
+        threshold_multiplier=body.threshold_multiplier,
+        min_orders=body.min_orders,
+        limit=body.limit,
+        offset=body.offset,
     )
 
 
