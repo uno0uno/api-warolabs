@@ -1067,6 +1067,8 @@ async def _get_waros_analytics_for_tenant(
         date_conditions.append(f"AND created_at < (${len(date_params)}::date + INTERVAL '1 day')")
 
     date_filter = " ".join(date_conditions)
+    # Qualified version for queries that JOIN with other tables having created_at
+    date_filter_wt = date_filter.replace("created_at", "wt.created_at")
 
     async with get_db_connection(use_transaction=False) as conn:
         # Summary row: totals across all transaction types
@@ -1114,7 +1116,7 @@ async def _get_waros_analytics_for_tenant(
                 JOIN profile p ON p.id = wt.profile_id
                 WHERE wt.tenant_id = $1
                   AND p.email NOT LIKE '%@customer.temp'
-                {date_filter}
+                {date_filter_wt}
                 GROUP BY wt.profile_id, p.name, p.phone_number
                 ORDER BY total_earned DESC
                 LIMIT 100
