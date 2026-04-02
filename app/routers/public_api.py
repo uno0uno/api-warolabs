@@ -359,6 +359,15 @@ class AnalyticsAlertsRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=100, description="Max number of alerts to return")
 
 
+class AnalyticsCohortRequest(BaseModel):
+    """Request body for cohort retention analysis"""
+    dateFrom: Optional[str] = Field(default=None, description="Cohort window start date (YYYY-MM-DD)")
+    dateTo: Optional[str] = Field(default=None, description="Cohort window end date (YYYY-MM-DD)")
+    period: str = Field(default="weekly", description="Grouping: weekly | monthly")
+    periods: int = Field(default=8, ge=1, le=24, description="Number of look-ahead periods (1-24)")
+    timezone: str = Field(default="America/Bogota", description="Timezone for date bucketing (e.g., America/Bogota)")
+
+
 # ---------------------------------------------------------------------------
 # Financial request models
 # ---------------------------------------------------------------------------
@@ -461,6 +470,40 @@ async def get_analytics_data_quality(request: Request):
     **Scope requerido:** `analytics:read` o `read`
     """
     return await public_api_service.get_analytics_data_quality(request)
+
+
+@router.post("/analytics/cohort")
+async def get_analytics_cohort(request: Request, body: AnalyticsCohortRequest):
+    """
+    Retorna la matriz de retención por cohorte de adquisición.
+
+    Cada fila = cohorte (semana o mes en que el cliente hizo su primer pedido).
+    Cada columna = periodos desde la primera visita.
+    Las celdas muestran cuántos clientes del cohorte regresaron en ese periodo y el porcentaje de retención.
+
+    **Parametro `period`:**
+    - `weekly` (default): Cohortes por semana ISO
+    - `monthly`: Cohortes por mes calendario
+
+    **Parametro `periods`:**
+    - Cuántos periodos de look-ahead incluir (default 8 para weekly, recomendado 6 para monthly)
+
+    **Solo incluye clientes identificados** (customer_id IS NOT NULL). Todos los canales de pedido cuentan (POS, online, manual).
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `analytics:read` o `read`
+    """
+    return await public_api_service.get_analytics_cohort(
+        request,
+        period=body.period,
+        periods=body.periods,
+        date_from=body.dateFrom,
+        date_to=body.dateTo,
+        timezone=body.timezone,
+    )
 
 
 # ---------------------------------------------------------------------------

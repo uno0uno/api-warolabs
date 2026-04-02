@@ -2039,6 +2039,27 @@ async def get_analytics_data_quality(request: Request) -> dict:
     return await _get_data_quality_for_tenant(tenant_id)
 
 
+async def get_analytics_cohort(
+    request: Request,
+    period: str = "weekly",
+    periods: int = 8,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    timezone: str = "America/Bogota",
+) -> dict:
+    """Public API: cohort retention matrix (analytics:read)."""
+    from app.services.analytics_service import _get_cohort_for_tenant
+    tenant_id, _ = validate_api_key_auth(request, "analytics:read")
+    return await _get_cohort_for_tenant(
+        tenant_id,
+        period=period,
+        periods=periods,
+        date_from=date_from,
+        date_to=date_to,
+        timezone=timezone,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Financial endpoints (scope: financial:read)
 # ---------------------------------------------------------------------------

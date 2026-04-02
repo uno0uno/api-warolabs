@@ -1346,3 +1346,191 @@ async def resolve_data_quality_alert(
     except Exception as e:
         logger.error(f"Error resolving data quality alert {alert_id}: {str(e)}")
         raise APIError(f"Error resolving alert: {str(e)}", status_code=500)
+
+
+async def _get_cohort_for_tenant(
+    tenant_id: str,
+    period: str = "weekly",
+    periods: int = 8,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    timezone: str = "America/Bogota",
+) -> dict:
+    """
+    Auth-agnostic cohort retention analysis.
+
+    Builds a retention matrix: rows = acquisition cohort (week/month of first order),
+    columns = periods since first visit (1..N), cells = % of cohort that returned.
+
+    Only identified customers (customer_id IS NOT NULL) are included.
+    All order sources (POS, online, manual) count as a visit.
+    A customer with multiple orders in the same period counts once (DISTINCT).
+    """
+    if period not in ("weekly", "monthly"):
+        raise APIError("period must be 'weekly' or 'monthly'", status_code=400)
+
+    today = datetime.now().date()
+
+    parsed_date_from = parse_date(date_from)
+    parsed_date_to = parse_date(date_to)
+
+    if not parsed_date_from:
+        parsed_date_from = today - timedelta(days=90 if period == "weekly" else 365)
+    if not parsed_date_to:
+        parsed_date_to = today
+
+    trunc_unit = "week" if period == "weekly" else "month"
+
+    # Timezone string is embedded as a literal — same pattern used across analytics endpoints.
+    # It is not user-controlled free-text; it comes from a validated Pydantic field with a
+    # fixed default. PostgreSQL will raise an error on an invalid timezone name.
+
+    if period == "weekly":
+        query = f"""
+            WITH first_orders AS (
+                SELECT
+                    customer_id,
+                    DATE_TRUNC('{trunc_unit}',
+                        MIN(order_date) AT TIME ZONE '{timezone}') AS cohort_period
+                FROM orders
+                WHERE customer_id IS NOT NULL
+                  AND tenant_id = $1
+                  AND order_date >= $2
+                  AND order_date < $3 + interval '1 day'
+                GROUP BY customer_id
+            ),
+            cohort_sizes AS (
+                SELECT cohort_period, COUNT(*) AS cohort_size
+                FROM first_orders
+                GROUP BY cohort_period
+            ),
+            customer_active_periods AS (
+                SELECT DISTINCT
+                    fo.customer_id,
+                    fo.cohort_period,
+                    DATE_TRUNC('{trunc_unit}',
+                        o.order_date AT TIME ZONE '{timezone}') AS active_period
+                FROM orders o
+                JOIN first_orders fo ON fo.customer_id = o.customer_id
+                WHERE o.tenant_id = $1
+            )
+            SELECT
+                fo.cohort_period,
+                cs.cohort_size,
+                (EXTRACT(EPOCH FROM (caw.active_period - fo.cohort_period))
+                 / 604800)::int                              AS period_offset,
+                COUNT(DISTINCT fo.customer_id)               AS returning_count,
+                ROUND(
+                    100.0 * COUNT(DISTINCT fo.customer_id)
+                    / cs.cohort_size,
+                1)                                           AS retention_pct
+            FROM customer_active_periods caw
+            JOIN first_orders fo
+                ON fo.customer_id = caw.customer_id
+               AND fo.cohort_period = caw.cohort_period
+            JOIN cohort_sizes cs ON cs.cohort_period = fo.cohort_period
+            WHERE (EXTRACT(EPOCH FROM (caw.active_period - fo.cohort_period))
+                   / 604800)::int BETWEEN 1 AND $4
+            GROUP BY fo.cohort_period, cs.cohort_size, period_offset
+            ORDER BY fo.cohort_period DESC, period_offset
+        """
+    else:
+        query = f"""
+            WITH first_orders AS (
+                SELECT
+                    customer_id,
+                    DATE_TRUNC('{trunc_unit}',
+                        MIN(order_date) AT TIME ZONE '{timezone}') AS cohort_period
+                FROM orders
+                WHERE customer_id IS NOT NULL
+                  AND tenant_id = $1
+                  AND order_date >= $2
+                  AND order_date < $3 + interval '1 day'
+                GROUP BY customer_id
+            ),
+            cohort_sizes AS (
+                SELECT cohort_period, COUNT(*) AS cohort_size
+                FROM first_orders
+                GROUP BY cohort_period
+            ),
+            customer_active_periods AS (
+                SELECT DISTINCT
+                    fo.customer_id,
+                    fo.cohort_period,
+                    DATE_TRUNC('{trunc_unit}',
+                        o.order_date AT TIME ZONE '{timezone}') AS active_period
+                FROM orders o
+                JOIN first_orders fo ON fo.customer_id = o.customer_id
+                WHERE o.tenant_id = $1
+            )
+            SELECT
+                fo.cohort_period,
+                cs.cohort_size,
+                (EXTRACT(YEAR FROM AGE(caw.active_period, fo.cohort_period)) * 12
+                 + EXTRACT(MONTH FROM AGE(caw.active_period, fo.cohort_period)))::int
+                                                             AS period_offset,
+                COUNT(DISTINCT fo.customer_id)               AS returning_count,
+                ROUND(
+                    100.0 * COUNT(DISTINCT fo.customer_id)
+                    / cs.cohort_size,
+                1)                                           AS retention_pct
+            FROM customer_active_periods caw
+            JOIN first_orders fo
+                ON fo.customer_id = caw.customer_id
+               AND fo.cohort_period = caw.cohort_period
+            JOIN cohort_sizes cs ON cs.cohort_period = fo.cohort_period
+            WHERE (EXTRACT(YEAR FROM AGE(caw.active_period, fo.cohort_period)) * 12
+                   + EXTRACT(MONTH FROM AGE(caw.active_period, fo.cohort_period)))::int
+                  BETWEEN 1 AND $4
+            GROUP BY fo.cohort_period, cs.cohort_size, period_offset
+            ORDER BY fo.cohort_period DESC, period_offset
+        """
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            query,
+            UUID(tenant_id),
+            parsed_date_from,
+            parsed_date_to,
+            periods,
+        )
+
+    # Group rows by cohort_period and build the full retention matrix.
+    # SQL only returns periods with returning_count > 0; fill gaps with zeros.
+    cohort_map: Dict[Any, dict] = {}
+    for row in rows:
+        key = row['cohort_period']
+        if key not in cohort_map:
+            cohort_date = key.date() if hasattr(key, 'date') else key
+            if period == "weekly":
+                iso = cohort_date.isocalendar()
+                label = f"{iso[0]}-W{iso[1]:02d}"
+            else:
+                label = cohort_date.strftime("%Y-%m")
+
+            cohort_map[key] = {
+                "cohort_label": label,
+                "cohort_date": cohort_date.isoformat(),
+                "cohort_size": int(row['cohort_size']),
+                "_retention_map": {},
+            }
+        cohort_map[key]["_retention_map"][int(row['period_offset'])] = {
+            "period": int(row['period_offset']),
+            "count": int(row['returning_count']),
+            "pct": float(row['retention_pct']),
+        }
+
+    cohorts = []
+    for cohort in cohort_map.values():
+        retention_map = cohort.pop("_retention_map")
+        retention = [
+            retention_map.get(p, {"period": p, "count": 0, "pct": 0.0})
+            for p in range(1, periods + 1)
+        ]
+        cohort["retention"] = retention
+        cohorts.append(cohort)
+
+    return {
+        "period": period,
+        "cohorts": cohorts,
+    }
