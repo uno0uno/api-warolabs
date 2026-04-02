@@ -277,7 +277,7 @@ async def create_cart_with_batch_items(
                         "id": str(cart_id),
                         "total_amount": float(cart_total),
                         "items": items_list,
-                        "session_id": session_id,
+                        "session_id": generated_session_id,
                         "order_type": order_type,
                         "created_at": cart_row['created_at'].isoformat(),
                         "updated_at": cart_row['updated_at'].isoformat()

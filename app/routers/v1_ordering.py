@@ -40,7 +40,6 @@ async def create_cart_batch(request: Request, body: V1BatchCreateCartRequest):
     return await online_cart_service.create_cart_with_batch_items(
         tenant_id=UUID(tenant_id),
         items=[item.dict() for item in body.items],
-        session_id=body.session_id,
         order_type=body.order_type,
     )
 
