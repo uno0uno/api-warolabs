@@ -147,7 +147,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"order_type\": \"delivery\",\n  \"items\": [\n    {\n      \"product_id\": \"{{product_id}}\",\n      \"quantity\": 1,\n      \"unit_price\": 15000,\n      \"notes\": \"Sin cebolla\",\n      \"modifiers\": [\n        {\n          \"id\": \"MODIFIER_UUID_DE_/v1/product/{id}\",\n          \"name\": \"Extra queso\",\n          \"price\": 2000\n        }\n      ]\n    },\n    {\n      \"product_id\": \"{{product_id}}\",\n      \"quantity\": 1,\n      \"unit_price\": 15000,\n      \"notes\": null,\n      \"modifiers\": []\n    }\n  ]\n}",
+              "raw": "{\n  \"order_type\": \"delivery\",\n  \"items\": [\n    {\n      \"product_id\": \"{{product_id}}\",\n      \"quantity\": 1,\n      \"notes\": \"Sin cebolla\",\n      \"modifiers\": [\n        { \"id\": \"MODIFIER_UUID_DE_/v1/product/{id}\" }\n      ]\n    },\n    {\n      \"product_id\": \"{{product_id}}\",\n      \"quantity\": 2,\n      \"notes\": null,\n      \"modifiers\": []\n    }\n  ]\n}",
               "options": { "raw": { "language": "json" } }
             },
             "url": {
@@ -155,7 +155,7 @@
               "host": ["{{base_url}}"],
               "path": ["v1", "cart", "batch"]
             },
-            "description": "Crea un carrito con uno o más items en batch. El tenant se infiere del API key.\n\n**modifiers[]** — array de modificadores seleccionados para el item:\n- `id` — UUID del modificador (obtenido de GET /v1/product/{id} → modifier_groups[].modifiers[].id)\n- `name` — nombre del modificador (para display)\n- `price` — precio adicional del modificador\n\nSi el producto no tiene modificadores, enviar `modifiers: []`.\n\nEl mismo producto con diferente combinación de modifiers se trata como un item separado."
+            "description": "Crea un carrito con uno o más items en batch. El tenant se infiere del API key.\n\n**Precios siempre desde la DB** — no enviar `unit_price` ni precios de modificadores. El backend los resuelve por ID.\n\n**modifiers[]** — solo el `id` del modificador (obtenido de GET /v1/product/{id} → modifier_groups[].modifiers[].id).\n\nSi el producto no tiene modificadores, enviar `modifiers: []`.\n\nEl mismo producto con diferente combinación de modifiers se trata como un item separado."
           },
           "event": [
             {
