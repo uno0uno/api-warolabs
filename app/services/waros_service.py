@@ -964,3 +964,209 @@ async def evaluate_and_award(
             f"evaluate_and_award error (order={order_id}, customer={customer_id}): {e}"
         )
         return 0
+
+
+# ── Public API read functions (auth-agnostic) ────────────────────────────────
+
+async def _get_customer_tx_history_for_tenant(
+    tenant_id: str,
+    profile_id: UUID,
+    limit: int,
+    offset: int,
+    transaction_type: Optional[str],
+) -> Dict[str, Any]:
+    """
+    Paginated WaRos transaction history for a customer, scoped to tenant.
+    Called by session wrapper and public API.
+    """
+    async with get_db_connection(use_transaction=False) as conn:
+        # Build optional type filter
+        type_filter = "AND transaction_type = $5" if transaction_type else ""
+        params_count: List[Any] = [profile_id, tenant_id, limit, offset]
+        if transaction_type:
+            params_count.append(transaction_type)
+
+        count_params: List[Any] = [profile_id, tenant_id]
+        count_filter = ""
+        if transaction_type:
+            count_filter = "AND transaction_type = $3"
+            count_params.append(transaction_type)
+
+        total_row = await conn.fetchrow(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM waros_transactions
+            WHERE profile_id = $1 AND tenant_id = $2
+            {count_filter}
+            """,
+            *count_params,
+        )
+        total_count = int(total_row["total"]) if total_row else 0
+
+        rows = await conn.fetch(
+            f"""
+            SELECT id, transaction_type, waros_amount, balance_after,
+                   description, related_entity_type, related_entity_id, created_at
+            FROM waros_transactions
+            WHERE profile_id = $1 AND tenant_id = $2
+            {type_filter}
+            ORDER BY created_at DESC
+            LIMIT $3 OFFSET $4
+            """,
+            *params_count,
+        )
+
+    transactions = [
+        {
+            "id": row["id"],
+            "transaction_type": row["transaction_type"],
+            "waros_amount": row["waros_amount"],
+            "balance_after": row["balance_after"],
+            "description": row["description"],
+            "related_entity_type": row["related_entity_type"],
+            "related_entity_id": row["related_entity_id"],
+            "created_at": row["created_at"].isoformat(),
+        }
+        for row in rows
+    ]
+
+    return {
+        "profile_id": str(profile_id),
+        "total_count": total_count,
+        "limit": limit,
+        "offset": offset,
+        "transactions": transactions,
+    }
+
+
+async def _get_waros_analytics_for_tenant(
+    tenant_id: str,
+    group_by: str,
+    date_from: Optional[str],
+    date_to: Optional[str],
+) -> Dict[str, Any]:
+    """
+    Aggregate WaRos analytics for a tenant.
+    group_by: 'customer' | 'day' | 'week'
+    Called by session wrapper and public API.
+    """
+    from app.services.analytics_service import parse_date as _parse_date
+
+    parsed_from = _parse_date(date_from) if date_from else None
+    parsed_to = _parse_date(date_to) if date_to else None
+
+    # Build date filter
+    date_conditions: List[str] = []
+    date_params: List[Any] = [tenant_id]
+
+    if parsed_from:
+        date_params.append(parsed_from)
+        date_conditions.append(f"AND created_at >= ${len(date_params)}")
+    if parsed_to:
+        date_params.append(parsed_to)
+        date_conditions.append(f"AND created_at < (${len(date_params)}::date + INTERVAL '1 day')")
+
+    date_filter = " ".join(date_conditions)
+
+    async with get_db_connection(use_transaction=False) as conn:
+        # Summary row: totals across all transaction types
+        summary_row = await conn.fetchrow(
+            f"""
+            SELECT
+                COALESCE(SUM(CASE WHEN transaction_type IN ('earned', 'manual') AND waros_amount > 0
+                               THEN waros_amount ELSE 0 END), 0) AS total_issued,
+                COALESCE(SUM(CASE WHEN transaction_type = 'redeemed'
+                               THEN ABS(waros_amount) ELSE 0 END), 0) AS total_redeemed,
+                COUNT(DISTINCT profile_id) AS active_members
+            FROM waros_transactions
+            WHERE tenant_id = $1
+            {date_filter}
+            """,
+            *date_params,
+        )
+
+        total_issued = int(summary_row["total_issued"])
+        total_redeemed = int(summary_row["total_redeemed"])
+        active_members = int(summary_row["active_members"])
+        redemption_rate = round(total_redeemed / total_issued * 100, 1) if total_issued > 0 else 0.0
+
+        summary = {
+            "total_issued": total_issued,
+            "total_redeemed": total_redeemed,
+            "redemption_rate_pct": redemption_rate,
+            "active_members": active_members,
+        }
+
+        # Grouped rows
+        if group_by == "customer":
+            rows = await conn.fetch(
+                f"""
+                SELECT
+                    wt.profile_id,
+                    p.name,
+                    p.phone_number,
+                    COALESCE(SUM(CASE WHEN wt.transaction_type IN ('earned', 'manual') AND wt.waros_amount > 0
+                                   THEN wt.waros_amount ELSE 0 END), 0) AS total_earned,
+                    COALESCE(SUM(CASE WHEN wt.transaction_type = 'redeemed'
+                                   THEN ABS(wt.waros_amount) ELSE 0 END), 0) AS total_redeemed,
+                    COUNT(*) AS transaction_count
+                FROM waros_transactions wt
+                JOIN profile p ON p.id = wt.profile_id
+                WHERE wt.tenant_id = $1
+                  AND p.email NOT LIKE '%@customer.temp'
+                {date_filter}
+                GROUP BY wt.profile_id, p.name, p.phone_number
+                ORDER BY total_earned DESC
+                LIMIT 100
+                """,
+                *date_params,
+            )
+            groups = [
+                {
+                    "profile_id": str(row["profile_id"]),
+                    "name": row["name"],
+                    "phone_number": row["phone_number"],
+                    "total_earned": int(row["total_earned"]),
+                    "total_redeemed": int(row["total_redeemed"]),
+                    "transaction_count": int(row["transaction_count"]),
+                }
+                for row in rows
+            ]
+
+        elif group_by in ("day", "week"):
+            trunc = "day" if group_by == "day" else "week"
+            rows = await conn.fetch(
+                f"""
+                SELECT
+                    date_trunc('{trunc}', created_at AT TIME ZONE 'America/Bogota') AS period,
+                    COALESCE(SUM(CASE WHEN transaction_type IN ('earned', 'manual') AND waros_amount > 0
+                                   THEN waros_amount ELSE 0 END), 0) AS total_earned,
+                    COALESCE(SUM(CASE WHEN transaction_type = 'redeemed'
+                                   THEN ABS(waros_amount) ELSE 0 END), 0) AS total_redeemed,
+                    COUNT(DISTINCT profile_id) AS active_members
+                FROM waros_transactions
+                WHERE tenant_id = $1
+                {date_filter}
+                GROUP BY period
+                ORDER BY period DESC
+                """,
+                *date_params,
+            )
+            groups = [
+                {
+                    "period": row["period"].date().isoformat(),
+                    "total_earned": int(row["total_earned"]),
+                    "total_redeemed": int(row["total_redeemed"]),
+                    "active_members": int(row["active_members"]),
+                }
+                for row in rows
+            ]
+
+        else:
+            groups = []
+
+    return {
+        "group_by": group_by,
+        "summary": summary,
+        "groups": groups,
+    }

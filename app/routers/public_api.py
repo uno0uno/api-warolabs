@@ -423,6 +423,21 @@ class WarosEstimateRequest(BaseModel):
     customerId: Optional[str] = Field(default=None, description="Customer UUID (for personalized estimate)")
 
 
+class WarosCustomerHistoryRequest(BaseModel):
+    """Request body for paginated WaRos transaction history per customer"""
+    profileId: str = Field(description="Customer profile UUID")
+    limit: int = Field(default=50, ge=1, le=200, description="Page size (max 200)")
+    offset: int = Field(default=0, ge=0, description="Pagination offset")
+    transactionType: Optional[str] = Field(default=None, description="Filter by type: earned | manual")
+
+
+class WarosAnalyticsRequest(BaseModel):
+    """Request body for aggregate WaRos analytics"""
+    groupBy: str = Field(default="day", description="Grouping: customer | day | week")
+    dateFrom: Optional[str] = Field(default=None, description="Start date (YYYY-MM-DD)")
+    dateTo: Optional[str] = Field(default=None, description="End date (YYYY-MM-DD)")
+
+
 # ---------------------------------------------------------------------------
 # Analytics endpoints
 # ---------------------------------------------------------------------------
@@ -637,4 +652,49 @@ async def get_waros_estimate(request: Request, body: WarosEstimateRequest):
         request,
         total_amount=body.totalAmount,
         customer_id=customer_uuid,
+    )
+
+
+@router.post("/waros/customer-history")
+async def get_waros_customer_history(request: Request, body: WarosCustomerHistoryRequest):
+    """
+    Historial paginado de transacciones de WaRos para un cliente especifico.
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `waros:read` o `read`
+    """
+    profile_uuid = UUID(body.profileId)
+    return await public_api_service.get_waros_customer_history(
+        request,
+        profile_id=profile_uuid,
+        limit=body.limit,
+        offset=body.offset,
+        transaction_type=body.transactionType,
+    )
+
+
+@router.post("/analytics/waros")
+async def get_analytics_waros(request: Request, body: WarosAnalyticsRequest):
+    """
+    Analytics agregado de WaRos: puntos emitidos, canjeados, tasa de redencion y miembros activos.
+    Soporta agrupacion por cliente, dia o semana.
+
+    **Autenticacion requerida:**
+    - Header `Authorization: Bearer waro_sk_xxx`
+    - O header `X-API-Key: waro_sk_xxx`
+
+    **Scope requerido:** `waros:read` o `read`
+    """
+    valid_groups = {"customer", "day", "week"}
+    if body.groupBy not in valid_groups:
+        from app.core.exceptions import APIError
+        raise APIError(f"groupBy debe ser uno de: {sorted(valid_groups)}", status_code=422)
+    return await public_api_service.get_waros_analytics(
+        request,
+        group_by=body.groupBy,
+        date_from=body.dateFrom,
+        date_to=body.dateTo,
     )

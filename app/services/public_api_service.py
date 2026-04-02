@@ -2320,3 +2320,30 @@ async def get_waros_estimate(
     from app.services.waros_service import _estimate_waros_for_tenant
     tenant_id, _ = validate_api_key_auth(request, "waros:read")
     return await _estimate_waros_for_tenant(tenant_id, total_amount, customer_id)
+
+
+async def get_waros_customer_history(
+    request: Request,
+    profile_id: UUID,
+    limit: int,
+    offset: int,
+    transaction_type: Optional[str],
+) -> dict:
+    """Public API: paginated WaRos transaction history for a customer (waros:read)."""
+    from app.services.waros_service import _get_customer_tx_history_for_tenant
+    tenant_id, _ = validate_api_key_auth(request, "waros:read")
+    return await _get_customer_tx_history_for_tenant(
+        tenant_id, profile_id, limit, offset, transaction_type
+    )
+
+
+async def get_waros_analytics(
+    request: Request,
+    group_by: str,
+    date_from: Optional[str],
+    date_to: Optional[str],
+) -> dict:
+    """Public API: aggregate WaRos analytics by customer/day/week (waros:read)."""
+    from app.services.waros_service import _get_waros_analytics_for_tenant
+    tenant_id, _ = validate_api_key_auth(request, "waros:read")
+    return await _get_waros_analytics_for_tenant(tenant_id, group_by, date_from, date_to)
