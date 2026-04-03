@@ -71,24 +71,12 @@ def custom_openapi():
     # /online/addresses is public for address management
     public_prefixes = ["/blog", "/v1", "/public/restaurant", "/online/cart", "/online/otp", "/online/customer", "/online/addresses", "/leads"]
 
-    for path in openapi_schema["paths"]:
-        is_v1 = path.startswith("/v1")
-
-        # Mark non-v1 endpoints as deprecated in Swagger
-        if not is_v1:
-            for method in openapi_schema["paths"][path]:
-                if method in ["get", "post", "put", "delete", "patch"]:
-                    openapi_schema["paths"][path][method]["deprecated"] = True
-
-        # Apply cookie auth to internal (non-public) endpoints
-        if path in public_endpoints:
-            continue
-        if any(path.startswith(prefix) for prefix in public_prefixes):
-            continue
-
-        for method in openapi_schema["paths"][path]:
-            if method in ["get", "post", "put", "delete", "patch"]:
-                openapi_schema["paths"][path][method]["security"] = [{"cookieAuth": []}]
+    # Only expose v1 endpoints in Swagger — remove everything else from the schema
+    openapi_schema["paths"] = {
+        path: methods
+        for path, methods in openapi_schema["paths"].items()
+        if path.startswith("/v1")
+    }
     
     app.openapi_schema = openapi_schema
     return app.openapi_schema
