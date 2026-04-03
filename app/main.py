@@ -77,6 +77,29 @@ def custom_openapi():
         for path, methods in openapi_schema["paths"].items()
         if path.startswith("/v1")
     }
+
+    # Assign tags by path prefix so Swagger groups endpoints into sections
+    tag_map = [
+        ("/v1/restaurant", "Restaurant"),
+        ("/v1/menu",       "Menu"),
+        ("/v1/product",    "Menu"),
+        ("/v1/sales",      "Sales"),
+        ("/v1/customers",  "Customers"),
+        ("/v1/analytics",  "Analytics"),
+        ("/v1/financial",  "Financial"),
+        ("/v1/waros",      "WaRos"),
+        ("/v1/cart",       "Ordering"),
+        ("/v1/addresses",  "Addresses"),
+        ("/v1/otp",        "OTP"),
+        ("/v1/customer",   "Customer Auth"),
+    ]
+    for path, methods in openapi_schema["paths"].items():
+        for prefix, tag in tag_map:
+            if path.startswith(prefix):
+                for method_data in methods.values():
+                    if isinstance(method_data, dict):
+                        method_data["tags"] = [tag]
+                break
     
     app.openapi_schema = openapi_schema
     return app.openapi_schema
