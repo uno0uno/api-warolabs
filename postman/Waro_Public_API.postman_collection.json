@@ -419,22 +419,6 @@
       "description": "Gestión de direcciones de entrega del cliente.",
       "item": [
         {
-          "name": "GET /v1/addresses/preview?email=",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/v1/addresses/preview?email={{test_email}}",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "addresses", "preview"],
-              "query": [
-                { "key": "email", "value": "{{test_email}}", "description": "Email del cliente" }
-              ]
-            },
-            "description": "Previsualización de direcciones guardadas sin requerir OTP — para el paso de entrega."
-          }
-        },
-        {
           "name": "POST /v1/addresses — Crear dirección",
           "request": {
             "method": "POST",

@@ -154,23 +154,6 @@ async def checkout_cart_v1(cart_id: UUID, request: Request):
 # V1 Address endpoints
 # ---------------------------------------------------------------------------
 
-@address_router.get("/preview")
-async def preview_addresses_by_email(
-    request: Request,
-    email: str = Query(..., description="Customer email to look up addresses for"),
-):
-    """
-    Read-only preview of saved addresses for a given email.
-
-    Used at the delivery step to show returning customers their saved addresses
-    without requiring OTP.
-
-    **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
-    **Scope required:** `read`
-    """
-    validate_api_key_auth(request, "read")
-    return await address_profile_service.get_addresses_by_email(email)
-
 
 @address_router.post("")
 async def create_address(request: Request, address: AddressProfileCreate):
