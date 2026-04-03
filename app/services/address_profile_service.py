@@ -262,6 +262,12 @@ async def delete_address(address_id: UUID, customer_id: UUID) -> dict:
 
                 # If deleting the default and others exist, promote the most recent one
                 if address_row['is_default'] and total_addresses > 1:
+                    # First unset current default to avoid unique constraint violation
+                    await conn.execute(
+                        "UPDATE addresses_profile SET is_default = false WHERE id = $1",
+                        address_id
+                    )
+                    # Then promote the most recent remaining address
                     await conn.execute(
                         """
                         UPDATE addresses_profile
