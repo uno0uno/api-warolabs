@@ -41,7 +41,7 @@ async def create_address(
             async with conn.transaction():
                 # Enforce 5-address limit per customer
                 count_row = await conn.fetchrow(
-                    "SELECT COUNT(*) AS total FROM addresses_profile WHERE user_id = $1",
+                    "SELECT COUNT(*) AS total FROM addresses_profile WHERE user_id = $1 AND deleted_at IS NULL",
                     customer_id
                 )
                 if count_row['total'] >= 5:
@@ -107,7 +107,7 @@ async def get_customer_addresses(customer_id: UUID) -> dict:
                        postal_code, country, latitude, longitude, is_default,
                        label AS address_type, delivery_notes, created_at, updated_at
                 FROM addresses_profile
-                WHERE user_id = $1
+                WHERE user_id = $1 AND deleted_at IS NULL
                 ORDER BY is_default DESC, created_at DESC
             """
             rows = await conn.fetch(query, customer_id)
@@ -141,7 +141,7 @@ async def get_address_by_id(address_id: UUID, customer_id: UUID) -> dict:
                        postal_code, country, latitude, longitude, is_default,
                        label AS address_type, delivery_notes, created_at, updated_at
                 FROM addresses_profile
-                WHERE id = $1 AND user_id = $2
+                WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
             """
             address_row = await conn.fetchrow(query, address_id, customer_id)
 
@@ -173,7 +173,7 @@ async def update_address(
         async with get_db_connection() as conn:
             async with conn.transaction():
                 # Verify ownership
-                verify_query = "SELECT id FROM addresses_profile WHERE id = $1 AND user_id = $2"
+                verify_query = "SELECT id FROM addresses_profile WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL"
                 address_exists = await conn.fetchrow(verify_query, address_id, customer_id)
 
                 if not address_exists:
@@ -235,52 +235,55 @@ async def update_address(
 
 async def delete_address(address_id: UUID, customer_id: UUID) -> dict:
     """
-    Delete address (PUBLIC)
-    Validates ownership and prevents deleting the only address if it's default
+    Soft-delete address (PUBLIC)
+    Sets deleted_at = now(). If it was the default, promotes the most recent remaining address.
     """
     try:
         async with get_db_connection() as conn:
             async with conn.transaction():
-                # Check if address exists and belongs to customer
+                # Check ownership and not already deleted
                 check_query = """
                     SELECT id, is_default
                     FROM addresses_profile
-                    WHERE id = $1 AND user_id = $2
+                    WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
                 """
                 address_row = await conn.fetchrow(check_query, address_id, customer_id)
 
                 if not address_row:
-                    raise HTTPException(
-                        status_code=404,
-                        detail="Dirección no encontrada"
-                    )
+                    raise HTTPException(status_code=404, detail="Dirección no encontrada")
 
-                # Count total addresses for customer
-                count_query = "SELECT COUNT(*) as total FROM addresses_profile WHERE user_id = $1"
+                # Count remaining active addresses
+                count_query = """
+                    SELECT COUNT(*) AS total FROM addresses_profile
+                    WHERE user_id = $1 AND deleted_at IS NULL
+                """
                 count_row = await conn.fetchrow(count_query, customer_id)
                 total_addresses = count_row['total']
 
-                # If deleting the default and there are other addresses, set another as default
+                # If deleting the default and others exist, promote the most recent one
                 if address_row['is_default'] and total_addresses > 1:
-                    # Set the most recent non-default address as default
                     await conn.execute(
                         """
                         UPDATE addresses_profile
                         SET is_default = true
-                        WHERE user_id = $1
-                        AND id != $2
-                        ORDER BY created_at DESC
-                        LIMIT 1
+                        WHERE id = (
+                            SELECT id FROM addresses_profile
+                            WHERE user_id = $1 AND id != $2 AND deleted_at IS NULL
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                        )
                         """,
                         customer_id,
                         address_id
                     )
 
-                # Delete address
-                delete_query = "DELETE FROM addresses_profile WHERE id = $1 AND user_id = $2"
-                await conn.execute(delete_query, address_id, customer_id)
+                # Soft delete
+                await conn.execute(
+                    "UPDATE addresses_profile SET deleted_at = now(), is_default = false WHERE id = $1",
+                    address_id
+                )
 
-                logger.info(f"Deleted address {address_id} for customer {customer_id}")
+                logger.info(f"Soft-deleted address {address_id} for customer {customer_id}")
                 return {
                     "success": True,
                     "message": "Dirección eliminada exitosamente",
@@ -304,7 +307,7 @@ async def set_default_address(address_id: UUID, customer_id: UUID) -> dict:
         async with get_db_connection() as conn:
             async with conn.transaction():
                 # Verify ownership
-                verify_query = "SELECT id FROM addresses_profile WHERE id = $1 AND user_id = $2"
+                verify_query = "SELECT id FROM addresses_profile WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL"
                 address_exists = await conn.fetchrow(verify_query, address_id, customer_id)
 
                 if not address_exists:
@@ -313,9 +316,9 @@ async def set_default_address(address_id: UUID, customer_id: UUID) -> dict:
                         detail="Dirección no encontrada"
                     )
 
-                # Unset all defaults for this customer
+                # Unset all defaults for this customer (active only)
                 await conn.execute(
-                    "UPDATE addresses_profile SET is_default = false WHERE user_id = $1",
+                    "UPDATE addresses_profile SET is_default = false WHERE user_id = $1 AND deleted_at IS NULL",
                     customer_id
                 )
 
