@@ -32,13 +32,19 @@ MODIFIER_MARISCOS = "b04743f8-d81f-4d8b-9a6c-24b67ed8ea07"  # group max_qty=1
 
 @pytest.fixture(autouse=True)
 async def reset_db_pool():
-    """Reset the asyncpg pool after each test.
+    """Reset the asyncpg pool before and after each test.
 
     With asyncio_default_fixture_loop_scope=function, each test gets its own
-    event loop. The DatabasePool singleton is created on the first loop and
-    becomes unusable when that loop closes. Resetting it here forces a fresh
-    pool on the next test's loop.
+    event loop. The DatabasePool singleton created on a previous loop becomes
+    unusable when that loop closes. Resetting before ensures a fresh pool even
+    if a test from another file left it in a bad state.
     """
+    if DatabasePool._pool is not None:
+        try:
+            await DatabasePool._pool.close()
+        except Exception:
+            pass
+        DatabasePool._pool = None
     yield
     if DatabasePool._pool is not None:
         try:
@@ -121,7 +127,11 @@ class TestOnlineCartBatchModifierValidation:
 
     @pytest.mark.asyncio
     async def test_zero_price_modifier_returns_200(self, client: AsyncClient):
-        """A $0 modifier (free add-on) is valid and does not inflate the subtotal."""
+        """Client-provided modifier price is ignored — backend always reads from DB.
+
+        Achiote/Color has price=3000 in DB, so subtotal = (25000 + 3000) * 1 = 28000
+        regardless of the price=0.0 sent by the client.
+        """
         payload = _batch_payload([{
             "product_id": PRODUCT_ID,
             "quantity": 1,
@@ -132,8 +142,8 @@ class TestOnlineCartBatchModifierValidation:
         }])
         response = await client.post("/online/cart/batch", json=payload)
         assert response.status_code == 200
-        # subtotal = (25000 + 0) * 1 = 25000
-        assert response.json()["data"]["items"][0]["subtotal"] == 25000.0
+        # subtotal = (25000 + 3000) * 1 = 28000  (DB price used, client price ignored)
+        assert response.json()["data"]["items"][0]["subtotal"] == 28000.0
 
     @pytest.mark.asyncio
     async def test_missing_tenant_id_returns_422(self, client: AsyncClient):
