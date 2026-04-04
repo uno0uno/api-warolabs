@@ -1,12 +1,35 @@
 from fastapi import APIRouter, Request, Response, Query, Body, HTTPException
 from typing import Any, Dict, Optional
 from uuid import UUID
-from app.services.ingredients_service import get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name
-from app.models.ingredient import IngredientsListResponse
+from app.services.ingredients_service import get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name, create_tenant_ingredient
+from app.models.ingredient import IngredientsListResponse, TenantIngredientCreate
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 
 router = APIRouter()
+
+
+@router.post("", status_code=201)
+async def create_custom_ingredient(
+    body: TenantIngredientCreate,
+    request: Request,
+) -> Dict[str, Any]:
+    """
+    Create a tenant-scoped custom ingredient.
+
+    The ingredient is only visible to the requesting restaurant.
+    Optionally link to a global base ingredient via parent_id.
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant context required")
+
+    async with get_db_connection() as conn:
+        data = await create_tenant_ingredient(conn, tenant_id, body)
+
+    return {"success": True, "data": data}
 
 
 @router.get("/match")

@@ -4,8 +4,9 @@ from fastapi import Request, Response, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 import logging
+import asyncpg
 from app.core.exceptions import AuthenticationError
-from app.models.ingredient import Ingredient, IngredientsListResponse
+from app.models.ingredient import Ingredient, IngredientsListResponse, TenantIngredientCreate
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +228,79 @@ async def match_ingredient_by_name(conn, name: str, threshold: float = 0.35) -> 
             "score": float(row["score"])
         }
     return None
+
+
+async def create_tenant_ingredient(
+    conn,
+    tenant_id: UUID,
+    data: TenantIngredientCreate,
+) -> Dict[str, Any]:
+    """
+    Creates a custom ingredient scoped to the given tenant.
+
+    - name: trimmed, unique within tenant (enforced by ingredients_name_tenant_unique index)
+    - unit: must be one of gr, ml, kg, und, lt (enforced by DB CHECK constraint)
+    - parent_id (optional): must reference a global ingredient (tenant_id IS NULL)
+    """
+    ALLOWED_UNITS = {"gr", "ml", "kg", "und", "lt"}
+
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Ingredient name cannot be empty")
+
+    if data.unit not in ALLOWED_UNITS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid unit '{data.unit}'. Must be one of: {', '.join(sorted(ALLOWED_UNITS))}"
+        )
+
+    parent_uuid = None
+    parent_name = None
+    if data.parent_id:
+        try:
+            parent_uuid = UUID(data.parent_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="parent_id must be a valid UUID")
+
+        parent_row = await conn.fetchrow(
+            "SELECT id, name FROM ingredients WHERE id = $1 AND tenant_id IS NULL",
+            parent_uuid,
+        )
+        if not parent_row:
+            raise HTTPException(
+                status_code=422,
+                detail="parent_id not found or not a global ingredient"
+            )
+        parent_name = parent_row["name"]
+
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO ingredients (name, unit, type, category, costo_unitario, parent_id, tenant_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id::text, name, unit, type, category, costo_unitario,
+                      parent_id::text, tenant_id::text, created_at
+            """,
+            name,
+            data.unit,
+            data.type or "food",
+            data.category,
+            data.costo_unitario,
+            parent_uuid,
+            tenant_id,
+        )
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+            status_code=409,
+            detail=f"An ingredient named '{name}' already exists for this restaurant."
+        )
+
+    result = dict(row)
+    result["is_custom"] = True
+    if parent_uuid:
+        result["parent_name"] = parent_name
+
+    return result
 
 
 async def create_ai_ingredient(
