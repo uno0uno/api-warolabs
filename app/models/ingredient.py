@@ -52,6 +52,8 @@ class Ingredient(IngredientBase):
     hierarchy_base_id: Optional[str] = None
     hierarchy_base_name: Optional[str] = None
     has_variants: Optional[int] = None  # count of variants via ingredient_global_hierarchy
+    is_custom: Optional[bool] = None   # True when ingredient is tenant-scoped (not global)
+    parent_name: Optional[str] = None  # name of the global base ingredient (when parent_id is set)
 
     class Config:
         from_attributes = True

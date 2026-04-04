@@ -56,7 +56,9 @@ async def get_ingredients_list(
                     COALESCE((
                         SELECT COUNT(*)::int FROM ingredient_global_hierarchy
                         WHERE base_id = i.id
-                    ), 0) AS has_variants
+                    ), 0) AS has_variants,
+                    (i.tenant_id IS NOT NULL) AS is_custom,
+                    parent_i.name       AS parent_name
                 FROM ingredients i
                 LEFT JOIN (
                     SELECT
@@ -78,16 +80,17 @@ async def get_ingredients_list(
                 ) tim ON i.id = tim.ingredient_id AND tim.rn = 1
                 LEFT JOIN ingredient_global_hierarchy igh ON igh.variant_id = i.id
                 LEFT JOIN ingredients hb ON hb.id = igh.base_id
-                WHERE 1=1
+                LEFT JOIN ingredients parent_i ON parent_i.id = i.parent_id
+                WHERE (i.tenant_id IS NULL OR i.tenant_id = $1)
             """
 
-            count_query = "SELECT COUNT(*) FROM ingredients WHERE 1=1"
+            count_query = "SELECT COUNT(*) FROM ingredients WHERE (tenant_id IS NULL OR tenant_id = $1)"
 
-            # Separate params for base query (includes tenant_id) and count query (no tenant_id)
+            # Separate params for base query (includes tenant_id) and count query (also includes tenant_id)
             base_params = [tenant_id]
-            count_params = []
+            count_params = [tenant_id]
             base_param_count = 2
-            count_param_count = 1
+            count_param_count = 2
 
             # Add filters
             if search:
@@ -130,9 +133,10 @@ async def get_ingredients_list(
                 count_param_count += 1
 
             if base_only:
-                # Exclude ingredients that are variants (have a base assigned)
-                base_query += " AND NOT EXISTS (SELECT 1 FROM ingredient_global_hierarchy WHERE variant_id = i.id)"
-                count_query += " AND NOT EXISTS (SELECT 1 FROM ingredient_global_hierarchy WHERE variant_id = id)"
+                # Exclude global variants (those with a base in ingredient_global_hierarchy)
+                # and exclude all tenant custom ingredients (never bases for global hierarchy)
+                base_query += " AND i.tenant_id IS NULL AND NOT EXISTS (SELECT 1 FROM ingredient_global_hierarchy WHERE variant_id = i.id)"
+                count_query += " AND tenant_id IS NULL AND NOT EXISTS (SELECT 1 FROM ingredient_global_hierarchy WHERE variant_id = id)"
 
             # Add pagination
             offset = (page - 1) * limit
