@@ -33,6 +33,15 @@ class TenantIngredientCreate(BaseModel):
     parent_id: Optional[str] = Field(default=None, description="UUID of a global base ingredient")
 
 
+class TenantIngredientUpdate(BaseModel):
+    """Request body for updating a tenant-scoped custom ingredient (PATCH /suppliers/ingredients/:id)."""
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    unit: Optional[str] = Field(default=None, description="Must be one of: gr, ml, kg, und, lt")
+    category: Optional[str] = Field(default=None, max_length=255)
+    costo_unitario: Optional[float] = Field(default=None, ge=0)
+    parent_id: Optional[str] = Field(default=None, description="UUID of a global base ingredient, or empty string to clear")
+
+
 class IngredientUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     unit: Optional[str] = Field(None, min_length=1, max_length=50)

@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Request, Response, Query, Body, HTTPException
 from typing import Any, Dict, Optional
 from uuid import UUID
-from app.services.ingredients_service import get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name, create_tenant_ingredient
-from app.models.ingredient import IngredientsListResponse, TenantIngredientCreate
+from app.services.ingredients_service import get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name, create_tenant_ingredient, update_tenant_ingredient
+from app.models.ingredient import IngredientsListResponse, TenantIngredientCreate, TenantIngredientUpdate
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 
@@ -95,6 +95,28 @@ async def get_ingredient_by_id(ingredient_id: UUID):
             "unit_weight_gr": float(row["unit_weight_gr"]) if row["unit_weight_gr"] is not None else None,
         }
     }
+
+
+@router.patch("/{ingredient_id}", status_code=200)
+async def update_custom_ingredient(
+    ingredient_id: UUID,
+    body: TenantIngredientUpdate,
+    request: Request,
+) -> Dict[str, Any]:
+    """
+    Update a tenant-scoped custom ingredient.
+    Only the requesting tenant can update their own ingredients.
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant context required")
+
+    async with get_db_connection() as conn:
+        data = await update_tenant_ingredient(conn, tenant_id, ingredient_id, body)
+
+    return {"success": True, "data": data}
 
 
 @router.patch("/{ingredient_id}/unit-weight")

@@ -6,7 +6,7 @@ from app.core.middleware import require_valid_session
 import logging
 import asyncpg
 from app.core.exceptions import AuthenticationError
-from app.models.ingredient import Ingredient, IngredientsListResponse, TenantIngredientCreate
+from app.models.ingredient import Ingredient, IngredientsListResponse, TenantIngredientCreate, TenantIngredientUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +308,98 @@ async def create_tenant_ingredient(
     result = dict(row)
     result["is_custom"] = True
     if parent_uuid:
+        result["parent_name"] = parent_name
+
+    return result
+
+
+async def update_tenant_ingredient(
+    conn,
+    tenant_id: UUID,
+    ingredient_id: UUID,
+    data: TenantIngredientUpdate,
+) -> Dict[str, Any]:
+    """
+    Updates a tenant-scoped custom ingredient.
+    Only fields provided (non-None) are updated.
+    tenant_id guard ensures tenants can only edit their own ingredients.
+    """
+    ALLOWED_UNITS = {"gr", "ml", "kg", "und", "lt"}
+
+    row = await conn.fetchrow(
+        "SELECT id, name, unit, category, costo_unitario, parent_id::text FROM ingredients WHERE id = $1 AND tenant_id = $2",
+        ingredient_id,
+        tenant_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Ingredient not found or not owned by this restaurant")
+
+    updates: Dict[str, Any] = {}
+
+    if data.name is not None:
+        name = data.name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Ingredient name cannot be empty")
+        updates["name"] = name
+
+    if data.unit is not None:
+        if data.unit not in ALLOWED_UNITS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid unit '{data.unit}'. Must be one of: {', '.join(sorted(ALLOWED_UNITS))}"
+            )
+        updates["unit"] = data.unit
+
+    if data.category is not None:
+        updates["category"] = data.category or None
+
+    if data.costo_unitario is not None:
+        updates["costo_unitario"] = data.costo_unitario
+
+    # parent_id: empty string means clear it, a UUID string sets it
+    parent_name = None
+    if data.parent_id is not None:
+        if data.parent_id == "":
+            updates["parent_id"] = None
+        else:
+            try:
+                parent_uuid = UUID(data.parent_id)
+            except ValueError:
+                raise HTTPException(status_code=422, detail="parent_id must be a valid UUID")
+            parent_row = await conn.fetchrow(
+                "SELECT id, name FROM ingredients WHERE id = $1 AND tenant_id IS NULL",
+                parent_uuid,
+            )
+            if not parent_row:
+                raise HTTPException(status_code=422, detail="parent_id not found or not a global ingredient")
+            updates["parent_id"] = parent_uuid
+            parent_name = parent_row["name"]
+
+    if not updates:
+        raise HTTPException(status_code=422, detail="No fields to update")
+
+    set_clauses = ", ".join(f"{k} = ${i + 2}" for i, k in enumerate(updates))
+    values = list(updates.values())
+
+    try:
+        updated = await conn.fetchrow(
+            f"""
+            UPDATE ingredients SET {set_clauses}, updated_at = NOW()
+            WHERE id = $1
+            RETURNING id::text, name, unit, category, costo_unitario, parent_id::text, tenant_id::text, updated_at
+            """,
+            ingredient_id,
+            *values,
+        )
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+            status_code=409,
+            detail=f"An ingredient named '{updates.get('name', row['name'])}' already exists for this restaurant."
+        )
+
+    result = dict(updated)
+    result["is_custom"] = True
+    if parent_name:
         result["parent_name"] = parent_name
 
     return result
