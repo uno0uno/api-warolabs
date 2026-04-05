@@ -422,6 +422,28 @@ async def update_tenant_ingredient(
     if parent_name:
         result["parent_name"] = parent_name
 
+    # Insert purchase units only if provided and ingredient has none yet
+    if data.purchase_units:
+        existing_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM ingredient_purchase_units WHERE ingredient_id = $1",
+            ingredient_id,
+        )
+        if existing_count == 0:
+            for pu in data.purchase_units:
+                await conn.execute(
+                    """
+                    INSERT INTO ingredient_purchase_units
+                        (ingredient_id, purchase_unit, purchase_unit_label, conversion_factor, unit_cost, is_default, is_active)
+                    VALUES ($1, $2, $3, $4, $5, $6, true)
+                    """,
+                    ingredient_id,
+                    pu.purchase_unit,
+                    pu.purchase_unit_label,
+                    pu.conversion_factor,
+                    pu.unit_cost,
+                    pu.is_default,
+                )
+
     return result
 
 

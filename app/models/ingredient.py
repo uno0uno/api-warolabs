@@ -50,6 +50,7 @@ class TenantIngredientUpdate(BaseModel):
     category: Optional[str] = Field(default=None, max_length=255)
     costo_unitario: Optional[float] = Field(default=None, ge=0)
     parent_id: Optional[str] = Field(default=None, description="UUID of a global base ingredient, or empty string to clear")
+    purchase_units: Optional[List[PurchaseUnitInput]] = Field(default=None, description="Purchase units to create if the ingredient has none yet")
 
 
 class IngredientUpdate(BaseModel):
