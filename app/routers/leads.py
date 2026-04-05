@@ -4,6 +4,7 @@ No authentication required
 """
 import logging
 import re
+from typing import Optional
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, EmailStr, field_validator
 from app.database import get_db_connection
@@ -16,7 +17,18 @@ router = APIRouter()
 
 class AccessRequestBody(BaseModel):
     email: EmailStr
+    phone: Optional[str] = None
     button_source: str = "access_request"
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        digits = re.sub(r"\D", "", v)
+        if len(digits) < 7 or len(digits) > 10:
+            raise ValueError("El teléfono debe tener entre 7 y 10 dígitos")
+        return digits
 
 
 class LeadCaptureRequest(BaseModel):
@@ -87,6 +99,7 @@ async def capture_access_request(body: AccessRequestBody, request: Request):
         await leads_service.capture_access_request(
             conn=conn,
             email=str(body.email),
+            phone=body.phone,
             ip_address=ip_address,
             user_agent=user_agent,
             button_source=body.button_source,

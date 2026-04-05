@@ -128,6 +128,7 @@ async def capture_lead(
 async def capture_access_request(
     conn,
     email: str,
+    phone: Optional[str],
     ip_address: Optional[str],
     user_agent: Optional[str],
     button_source: str = "access_request",
@@ -136,20 +137,32 @@ async def capture_access_request(
     Capture an access request from the login page.
 
     Flow:
-    1. UPSERT profile by email only (no phone touch)
+    1. UPSERT profile by email (update phone if provided)
     2. INSERT lead with source='access_request' (skip if already exists)
     3. INSERT lead_interaction to track the event
     """
 
-    # 1. UPSERT profile by email — do not overwrite phone if profile exists
-    await conn.execute(
-        """
-        INSERT INTO profile (email, phone_number, phone_country_code, nationality_id)
-        VALUES ($1, '', 57, 0)
-        ON CONFLICT (email) DO NOTHING
-        """,
-        email,
-    )
+    # 1. UPSERT profile — update phone if provided, otherwise leave existing value
+    if phone:
+        await conn.execute(
+            """
+            INSERT INTO profile (email, phone_number, phone_country_code, nationality_id)
+            VALUES ($1, $2, 57, 0)
+            ON CONFLICT (email) DO UPDATE
+                SET phone_number = EXCLUDED.phone_number
+            """,
+            email,
+            phone,
+        )
+    else:
+        await conn.execute(
+            """
+            INSERT INTO profile (email, phone_number, phone_country_code, nationality_id)
+            VALUES ($1, '', 57, 0)
+            ON CONFLICT (email) DO NOTHING
+            """,
+            email,
+        )
     profile = await conn.fetchrow(
         "SELECT id FROM profile WHERE email = $1",
         email,
@@ -195,13 +208,14 @@ async def capture_access_request(
     logger.info(f"📥 [capture_access_request] Interaction recorded for lead {lead_id}")
 
     # Fire-and-forget notifications (non-blocking)
-    asyncio.create_task(_send_access_request_notifications(email, ip_address))
+    asyncio.create_task(_send_access_request_notifications(email, phone, ip_address))
 
     return {"profile_id": str(profile_id), "lead_id": str(lead_id)}
 
 
 async def _send_access_request_notifications(
     email: str,
+    phone: Optional[str],
     ip_address: Optional[str],
 ) -> None:
     """Send Discord notification and confirmation email for access requests."""
@@ -215,6 +229,7 @@ async def _send_access_request_notifications(
         tasks.append(
             discord_leads_service.notify_new_lead(
                 email=email,
+                phone=phone,
                 button_source="access_request",
                 ip_address=ip_address,
             )
