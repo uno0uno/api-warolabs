@@ -328,10 +328,10 @@ async def create_tenant_ingredient(
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO ingredients (name, unit, type, category, costo_unitario, parent_id, tenant_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO ingredients (name, unit, type, category, costo_unitario, parent_id, tenant_id, is_resale)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id::text, name, unit, type, category, costo_unitario,
-                      parent_id::text, tenant_id::text, created_at
+                      parent_id::text, tenant_id::text, is_resale, created_at
             """,
             name,
             data.unit,
@@ -340,6 +340,7 @@ async def create_tenant_ingredient(
             data.costo_unitario,
             parent_uuid,
             tenant_id,
+            data.is_resale or False,
         )
     except asyncpg.UniqueViolationError:
         raise HTTPException(
@@ -417,6 +418,9 @@ async def update_tenant_ingredient(
 
     if data.costo_unitario is not None:
         updates["costo_unitario"] = data.costo_unitario
+
+    if data.is_resale is not None:
+        updates["is_resale"] = data.is_resale
 
     # parent_id: empty string means clear it, a UUID string sets it
     parent_name = None

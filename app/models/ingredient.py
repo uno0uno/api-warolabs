@@ -41,6 +41,7 @@ class TenantIngredientCreate(BaseModel):
     category: Optional[str] = Field(default=None, max_length=255)
     costo_unitario: Optional[float] = Field(default=None, ge=0)
     parent_id: Optional[str] = Field(default=None, description="UUID of a global base ingredient")
+    is_resale: Optional[bool] = Field(default=False, description="Mark as resale product — will appear in /menu/reventa")
     purchase_units: List[PurchaseUnitInput] = Field(default_factory=list, description="Purchase units to create with the ingredient")
 
 
@@ -51,6 +52,7 @@ class TenantIngredientUpdate(BaseModel):
     category: Optional[str] = Field(default=None, max_length=255)
     costo_unitario: Optional[float] = Field(default=None, ge=0)
     parent_id: Optional[str] = Field(default=None, description="UUID of a global base ingredient, or empty string to clear")
+    is_resale: Optional[bool] = Field(default=None, description="Mark as resale product")
     purchase_units: Optional[List[PurchaseUnitInput]] = Field(default=None, description="Purchase units to create if the ingredient has none yet")
 
 
