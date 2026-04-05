@@ -60,13 +60,14 @@ async def get_ingredients_endpoint(
     type: Optional[str] = Query(default=None, description="Filter by type: 'food', 'service', 'supply'"),
     is_resale: Optional[bool] = Query(default=None, description="Filter resale ingredients only"),
     base_only: Optional[bool] = Query(default=None, description="When true, exclude variant ingredients (those with a base assigned)"),
+    tenant_only: Optional[bool] = Query(default=None, description="When true, return only tenant-scoped custom ingredients"),
 ):
     """
     Get ingredients list with tenant isolation
     Requires valid session with tenant context
     """
     return await get_ingredients_list(
-        request, response, page, limit, search, category, supplier_id, type, is_resale, base_only
+        request, response, page, limit, search, category, supplier_id, type, is_resale, base_only, tenant_only
     )
 
 

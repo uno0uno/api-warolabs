@@ -21,6 +21,7 @@ async def get_ingredients_list(
     type: Optional[str] = None,
     is_resale: Optional[bool] = None,
     base_only: Optional[bool] = None,
+    tenant_only: Optional[bool] = None,
 ) -> IngredientsListResponse:
     """
     Fetches a list of ingredients from the database with tenant isolation,
@@ -137,6 +138,11 @@ async def get_ingredients_list(
                 # and exclude all tenant custom ingredients (never bases for global hierarchy)
                 base_query += " AND i.tenant_id IS NULL AND NOT EXISTS (SELECT 1 FROM ingredient_global_hierarchy WHERE variant_id = i.id)"
                 count_query += " AND tenant_id IS NULL AND NOT EXISTS (SELECT 1 FROM ingredient_global_hierarchy WHERE variant_id = id)"
+
+            if tenant_only:
+                # Return only tenant-scoped custom ingredients (excludes global catalog)
+                base_query += " AND i.tenant_id IS NOT NULL"
+                count_query += " AND tenant_id IS NOT NULL"
 
             # Add pagination
             offset = (page - 1) * limit
