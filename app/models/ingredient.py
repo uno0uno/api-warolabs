@@ -23,6 +23,15 @@ class IngredientBase(BaseModel):
 class IngredientCreate(IngredientBase):
     pass
 
+class PurchaseUnitInput(BaseModel):
+    """A purchase unit to create alongside a new tenant ingredient."""
+    purchase_unit: str = Field(..., min_length=1, max_length=50)
+    purchase_unit_label: str = Field(..., min_length=1, max_length=100)
+    conversion_factor: float = Field(..., gt=0)
+    is_default: bool = Field(default=False)
+    unit_cost: Optional[float] = Field(default=None, ge=0)
+
+
 class TenantIngredientCreate(BaseModel):
     """Request body for tenant-scoped custom ingredient creation (POST /suppliers/ingredients)."""
     name: str = Field(..., min_length=1, max_length=255)
@@ -31,6 +40,7 @@ class TenantIngredientCreate(BaseModel):
     category: Optional[str] = Field(default=None, max_length=255)
     costo_unitario: Optional[float] = Field(default=None, ge=0)
     parent_id: Optional[str] = Field(default=None, description="UUID of a global base ingredient")
+    purchase_units: List[PurchaseUnitInput] = Field(default_factory=list, description="Purchase units to create with the ingredient")
 
 
 class TenantIngredientUpdate(BaseModel):

@@ -305,10 +305,30 @@ async def create_tenant_ingredient(
             detail=f"An ingredient named '{name}' already exists for this restaurant."
         )
 
+    ingredient_id_text = row["id"]
     result = dict(row)
     result["is_custom"] = True
     if parent_uuid:
         result["parent_name"] = parent_name
+
+    # Insert purchase units within the same transaction
+    if data.purchase_units:
+        from uuid import UUID as _UUID
+        ingredient_uuid = _UUID(ingredient_id_text)
+        for pu in data.purchase_units:
+            await conn.execute(
+                """
+                INSERT INTO ingredient_purchase_units
+                    (ingredient_id, purchase_unit, purchase_unit_label, conversion_factor, unit_cost, is_default, is_active)
+                VALUES ($1, $2, $3, $4, $5, $6, true)
+                """,
+                ingredient_uuid,
+                pu.purchase_unit,
+                pu.purchase_unit_label,
+                pu.conversion_factor,
+                pu.unit_cost,
+                pu.is_default,
+            )
 
     return result
 
