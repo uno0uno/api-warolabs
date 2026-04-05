@@ -10,6 +10,48 @@ from app.models.ingredient import Ingredient, IngredientsListResponse, TenantIng
 
 logger = logging.getLogger(__name__)
 
+# Catalog of allowed purchase units. Label and conversion_factor are resolved
+# server-side — the client only sends the key. Add new units here as needed.
+PURCHASE_UNIT_CATALOG: Dict[str, Dict[str, Any]] = {
+    # Weight (base unit: gr)
+    'kg':          {'label': 'Kilogramo',    'conversion_factor': 1000,  'compatible_units': {'gr'}},
+    'libra':       {'label': 'Libra',        'conversion_factor': 500,   'compatible_units': {'gr'}},
+    'arroba':      {'label': 'Arroba',       'conversion_factor': 12500, 'compatible_units': {'gr'}},
+    'bulto_25kg':  {'label': 'Bulto (25 kg)','conversion_factor': 25000, 'compatible_units': {'gr'}},
+    # Volume (base unit: ml)
+    'lt':          {'label': 'Litro',        'conversion_factor': 1000,  'compatible_units': {'ml'}},
+    'botella':     {'label': 'Botella',      'conversion_factor': 750,   'compatible_units': {'ml'}},
+    'galon':       {'label': 'Galón',        'conversion_factor': 3785,  'compatible_units': {'ml'}},
+}
+
+
+def resolve_purchase_units(purchase_units: list, base_unit: str) -> list:
+    """
+    Validate each purchase_unit key against the catalog and resolve
+    label + conversion_factor server-side. Raises 422 on unknown or
+    incompatible keys.
+    """
+    resolved = []
+    for pu in purchase_units:
+        entry = PURCHASE_UNIT_CATALOG.get(pu.purchase_unit)
+        if not entry:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown purchase unit '{pu.purchase_unit}'. Allowed: {', '.join(sorted(PURCHASE_UNIT_CATALOG))}"
+            )
+        if base_unit not in entry['compatible_units']:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Purchase unit '{pu.purchase_unit}' is not compatible with base unit '{base_unit}'"
+            )
+        resolved.append({
+            'purchase_unit': pu.purchase_unit,
+            'label': entry['label'],
+            'conversion_factor': entry['conversion_factor'],
+            'is_default': pu.is_default,
+        })
+    return resolved
+
 async def get_ingredients_list(
     request: Request,
     response: Response,
@@ -315,19 +357,19 @@ async def create_tenant_ingredient(
     if data.purchase_units:
         from uuid import UUID as _UUID
         ingredient_uuid = _UUID(ingredient_id_text)
-        for pu in data.purchase_units:
+        resolved = resolve_purchase_units(data.purchase_units, data.unit)
+        for pu in resolved:
             await conn.execute(
                 """
                 INSERT INTO ingredient_purchase_units
-                    (ingredient_id, purchase_unit, purchase_unit_label, conversion_factor, unit_cost, is_default, is_active)
-                VALUES ($1, $2, $3, $4, $5, $6, true)
+                    (ingredient_id, purchase_unit, purchase_unit_label, conversion_factor, is_default, is_active)
+                VALUES ($1, $2, $3, $4, $5, true)
                 """,
                 ingredient_uuid,
-                pu.purchase_unit,
-                pu.purchase_unit_label,
-                pu.conversion_factor,
-                pu.unit_cost,
-                pu.is_default,
+                pu['purchase_unit'],
+                pu['label'],
+                pu['conversion_factor'],
+                pu['is_default'],
             )
 
     return result
@@ -429,19 +471,20 @@ async def update_tenant_ingredient(
             ingredient_id,
         )
         if existing_count == 0:
-            for pu in data.purchase_units:
+            current_unit = updates.get("unit") or row["unit"] or ""
+            resolved = resolve_purchase_units(data.purchase_units, current_unit)
+            for pu in resolved:
                 await conn.execute(
                     """
                     INSERT INTO ingredient_purchase_units
-                        (ingredient_id, purchase_unit, purchase_unit_label, conversion_factor, unit_cost, is_default, is_active)
-                    VALUES ($1, $2, $3, $4, $5, $6, true)
+                        (ingredient_id, purchase_unit, purchase_unit_label, conversion_factor, is_default, is_active)
+                    VALUES ($1, $2, $3, $4, $5, true)
                     """,
                     ingredient_id,
-                    pu.purchase_unit,
-                    pu.purchase_unit_label,
-                    pu.conversion_factor,
-                    pu.unit_cost,
-                    pu.is_default,
+                    pu['purchase_unit'],
+                    pu['label'],
+                    pu['conversion_factor'],
+                    pu['is_default'],
                 )
 
     return result

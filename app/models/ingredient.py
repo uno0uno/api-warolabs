@@ -24,12 +24,13 @@ class IngredientCreate(IngredientBase):
     pass
 
 class PurchaseUnitInput(BaseModel):
-    """A purchase unit to create alongside a new tenant ingredient."""
-    purchase_unit: str = Field(..., min_length=1, max_length=50)
-    purchase_unit_label: str = Field(..., min_length=1, max_length=100)
-    conversion_factor: float = Field(..., gt=0)
+    """
+    A purchase unit to create alongside a tenant ingredient.
+    Only the key and is_default are accepted from the client — label and
+    conversion_factor are resolved server-side from PURCHASE_UNIT_CATALOG.
+    """
+    purchase_unit: str = Field(..., min_length=1, max_length=50, description="Key from PURCHASE_UNIT_CATALOG")
     is_default: bool = Field(default=False)
-    unit_cost: Optional[float] = Field(default=None, ge=0)
 
 
 class TenantIngredientCreate(BaseModel):
