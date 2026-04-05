@@ -219,7 +219,7 @@ async def create_purchase_unit(
             if not ingredient_check:
                 raise HTTPException(status_code=404, detail="Ingredient not found")
 
-            # Insert new purchase unit
+            # Insert new purchase unit and return all fields in one query
             insert_query = """
                 INSERT INTO ingredient_purchase_units (
                     ingredient_id,
@@ -232,10 +232,21 @@ async def create_purchase_unit(
                     notes
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                RETURNING id
+                RETURNING
+                    id,
+                    ingredient_id,
+                    purchase_unit,
+                    purchase_unit_label,
+                    CAST(conversion_factor AS float) as conversion_factor,
+                    CAST(unit_cost AS float) as unit_cost,
+                    is_default,
+                    is_active,
+                    notes,
+                    created_at,
+                    updated_at
             """
 
-            new_id = await conn.fetchval(
+            row = await conn.fetchrow(
                 insert_query,
                 purchase_unit_data.ingredient_id,
                 purchase_unit_data.purchase_unit,
@@ -247,8 +258,8 @@ async def create_purchase_unit(
                 purchase_unit_data.notes
             )
 
-            # Fetch the created purchase unit
-            return await get_purchase_unit_by_id(request, response, new_id)
+            purchase_unit = IngredientPurchaseUnit(**dict(row))
+            return IngredientPurchaseUnitResponse(success=True, data=purchase_unit)
 
     except HTTPException:
         raise
