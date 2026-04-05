@@ -79,9 +79,10 @@ async def capture_lead(
     profile_id = profile["id"]
     logger.info(f"📥 [capture_lead] Profile upserted: {profile_id}")
 
-    # 2. Check if lead already exists for this profile
+    # 2. Check if lead already exists for this profile (only homepage_cta counts as duplicate;
+    #    an access_request lead means the user is filling the full form for the first time)
     existing_lead = await conn.fetchrow(
-        "SELECT id FROM leads WHERE profile_id = $1 ORDER BY created_at ASC LIMIT 1",
+        "SELECT id FROM leads WHERE profile_id = $1 AND source = 'homepage_cta' ORDER BY created_at ASC LIMIT 1",
         profile_id,
     )
     is_duplicate = existing_lead is not None
