@@ -194,7 +194,7 @@ app.include_router(v1_ordering.customer_router_v1)  # V1 customer validate — A
 app.include_router(v1_ordering.product_router_v1)   # V1 product detail + modifiers — API key auth
 app.include_router(public_restaurant.router, prefix="/public/restaurant", tags=["public-restaurant"])
 app.include_router(tenant_config.router, prefix="/api/tenant", tags=["tenant-config"])
-app.include_router(tables.router, prefix="/api/tables", tags=["tables"])
+app.include_router(tables.router, prefix="/tables", tags=["tables"])
 app.include_router(customer_portal.router)  # Customer portal (authenticated via JWT cookie)
 app.include_router(leads.router, prefix="/leads", tags=["leads"])  # Public lead capture
 app.include_router(admin_ingredients.router)  # /admin/ingredients — hierarchy CRUD (issue #259)
