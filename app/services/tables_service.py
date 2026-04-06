@@ -427,6 +427,123 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
         raise APIError(f"Error fetching session: {e}", status_code=500)
 
 
+async def add_tab_items(
+    request: Request,
+    table_id: UUID,
+    items: List[dict],
+) -> dict:
+    """
+    Add items to the running tab for a table session.
+    Creates a pending order linked to the table_session_id — no payment method required.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+        if not items:
+            raise APIError("No items provided", status_code=400)
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # Verify the table has an open session owned by this tenant
+                session_row = await conn.fetchrow(
+                    """
+                    SELECT ts.id AS session_id
+                    FROM table_sessions ts
+                    JOIN tables t ON t.id = ts.table_id
+                    WHERE ts.table_id = $1
+                      AND ts.tenant_id = $2
+                      AND ts.closed_at IS NULL
+                      AND t.is_active = true
+                    """,
+                    table_id,
+                    tenant_id,
+                )
+                if not session_row:
+                    raise NotFoundError("No open session found for this table")
+
+                session_id = session_row["session_id"]
+
+                # Compute total from submitted prices (no DB price lookup — POS already verified)
+                total_amount = sum(
+                    item["quantity"] * item["unit_price"]
+                    for item in items
+                )
+
+                # Create pending order linked to the session
+                order_row = await conn.fetchrow(
+                    """
+                    INSERT INTO orders (
+                        user_id, tenant_id, table_session_id,
+                        order_date, total_amount, status
+                    )
+                    VALUES ($1, $2, $3, NOW(), $4, 'pending')
+                    RETURNING id, order_number
+                    """,
+                    user_id,
+                    tenant_id,
+                    session_id,
+                    total_amount,
+                )
+                order_id = order_row["id"]
+
+                # Insert order_items
+                for item in items:
+                    subtotal = item["quantity"] * item["unit_price"]
+                    order_item_row = await conn.fetchrow(
+                        """
+                        INSERT INTO order_items (
+                            order_id, product_id, quantity,
+                            price_at_purchase, subtotal
+                        )
+                        VALUES ($1, $2, $3, $4, $5)
+                        RETURNING id
+                        """,
+                        order_id,
+                        item["product_id"],
+                        item["quantity"],
+                        item["unit_price"],
+                        subtotal,
+                    )
+                    order_item_id = order_item_row["id"]
+
+                    # Insert modifiers if any
+                    for mod in item.get("modifiers") or []:
+                        await conn.execute(
+                            """
+                            INSERT INTO order_item_modifiers (
+                                order_item_id, modifier_id, modifier_name,
+                                price_at_purchase, quantity
+                            )
+                            VALUES ($1, $2, $3, $4, $5)
+                            """,
+                            order_item_id,
+                            mod.get("id"),
+                            mod.get("name"),
+                            mod.get("price", 0),
+                            1,
+                        )
+
+        logger.info(f"Tab items added: order {order_id} for table {table_id}")
+        return {
+            "success": True,
+            "data": {
+                "order_id": str(order_id),
+                "order_number": order_row["order_number"],
+                "items_count": len(items),
+                "total_amount": total_amount,
+            },
+        }
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error adding tab items for table {table_id}: {e}")
+        raise APIError(f"Error adding tab items: {e}", status_code=500)
+
+
 async def request_bill(request: Request, table_id: UUID) -> dict:
     """
     Mark a table as bill_requested (status: open → bill_requested).

@@ -5,7 +5,7 @@ CRUD and session lifecycle endpoints for restaurant table management.
 Issue: https://github.com/uno0uno/warocol.com/issues/298
 """
 from fastapi import APIRouter, Request
-from typing import Optional
+from typing import Optional, List
 from uuid import UUID
 from pydantic import BaseModel, Field
 from app.services import tables_service
@@ -21,6 +21,24 @@ class CreateTableRequest(BaseModel):
 class UpdateTableRequest(BaseModel):
     name: Optional[str] = Field(None, max_length=50)
     capacity: Optional[int] = Field(None, gt=0)
+
+
+class TabModifier(BaseModel):
+    id: Optional[str] = None
+    name: Optional[str] = None
+    price: float = 0.0
+
+
+class TabItem(BaseModel):
+    product_id: str
+    quantity: int = Field(..., gt=0)
+    unit_price: float = Field(..., ge=0)
+    modifiers: Optional[List[TabModifier]] = None
+    notes: Optional[str] = None
+
+
+class TabAddRequest(BaseModel):
+    items: List[TabItem] = Field(..., min_length=1)
 
 
 @router.get("")
@@ -85,6 +103,29 @@ async def get_current_session(request: Request, table_id: UUID):
     Returns 404 if no open session exists.
     """
     return await tables_service.get_current_session(request, table_id)
+
+
+@router.post("/{table_id}/tab/add")
+async def add_tab_items(request: Request, table_id: UUID, body: TabAddRequest):
+    """
+    Add items to the running tab for a table session.
+    Creates a pending order linked to the table_session_id.
+    Returns 404 if no open session exists.
+    """
+    items = [
+        {
+            "product_id": item.product_id,
+            "quantity": item.quantity,
+            "unit_price": item.unit_price,
+            "modifiers": [
+                {"id": m.id, "name": m.name, "price": m.price}
+                for m in (item.modifiers or [])
+            ],
+            "notes": item.notes,
+        }
+        for item in body.items
+    ]
+    return await tables_service.add_tab_items(request, table_id, items)
 
 
 @router.post("/{table_id}/bill")
