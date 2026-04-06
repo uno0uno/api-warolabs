@@ -62,6 +62,9 @@ class TenantPublicProfileBase(BaseModel):
     # Manual open/close toggle (operator override)
     is_manually_open: bool = Field(True, description="Operator manual toggle: False = closed regardless of business_hours")
 
+    # Table management module flag
+    tables_enabled: bool = Field(False, description="Whether the table management module is enabled for this tenant")
+
 class TenantPublicProfileCreate(TenantPublicProfileBase):
     """Create tenant public profile"""
     tenant_id: UUID = Field(..., description="Tenant ID")
@@ -95,6 +98,7 @@ class TenantPublicProfileUpdate(BaseModel):
     min_order_amount: Optional[Decimal] = None
     estimated_preparation_time: Optional[int] = None
     is_manually_open: Optional[bool] = None
+    tables_enabled: Optional[bool] = None
 
 class TenantPublicProfile(TenantPublicProfileBase):
     """Complete tenant public profile with all fields"""
