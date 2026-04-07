@@ -220,6 +220,7 @@ async def get_order_by_id(
                     o.status,
                     o.payment_method,
                     o.pos_cart_id,
+                    o.table_session_id,
                     p.id as customer_id,
                     p.name as customer_name,
                     p.phone_number as customer_phone,
@@ -232,6 +233,7 @@ async def get_order_by_id(
                 LEFT JOIN profile p ON o.customer_id = p.id
                 WHERE o.id = $1 AND o.tenant_id = $2
                   AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
+
             """
 
             order_row = await conn.fetchrow(order_query, order_id, tenant_id)
@@ -249,6 +251,7 @@ async def get_order_by_id(
                     "status": order_row['status'],
                     "payment_method": order_row['payment_method'],
                     "pos_cart_id": str(order_row['pos_cart_id']) if order_row['pos_cart_id'] else None,
+                    "source": "mesa" if order_row['table_session_id'] else "pos",
                     "customer": {
                         "id": str(order_row['customer_id']) if order_row['customer_id'] else None,
                         "name": order_row['customer_name'],
@@ -263,6 +266,48 @@ async def get_order_by_id(
     except Exception as e:
         logger.error(f"Error getting order by ID: {str(e)}")
         raise APIError(f"Error getting order by ID: {str(e)}", status_code=500)
+
+
+async def update_order_status(
+    request: Request,
+    order_id: UUID,
+    status: str,
+    payment_method: Optional[str] = None,
+) -> dict:
+    """Update the status of an order (mesa orders only)."""
+    allowed = {"completed", "cancelled", "pending"}
+    if status not in allowed:
+        raise APIError(f"Estado inválido. Valores permitidos: {', '.join(allowed)}", status_code=400)
+
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, status FROM orders WHERE id = $1 AND tenant_id = $2",
+                order_id, tenant_id
+            )
+            if not row:
+                raise APIError("Orden no encontrada", status_code=404)
+
+            await conn.execute(
+                """UPDATE orders
+                   SET status = $1,
+                       payment_method = COALESCE($2, payment_method)
+                   WHERE id = $3""",
+                status, payment_method, order_id
+            )
+
+        return {"success": True, "message": f"Estado actualizado a {status}"}
+
+    except (AuthenticationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating order status: {str(e)}")
+        raise APIError(f"Error al actualizar estado: {str(e)}", status_code=500)
 
 
 async def get_order_items(

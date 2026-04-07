@@ -280,6 +280,23 @@ async def get_order(
     return await orders_service.get_order_by_id(request, order_id)
 
 
+class UpdateOrderStatusRequest(BaseModel):
+    status: str = Field(..., description="completed | cancelled | pending")
+    payment_method: Optional[str] = Field(None, description="cash | card | digital")
+
+
+@router.patch("/{order_id}/status")
+async def update_order_status(
+    request: Request,
+    order_id: UUID,
+    body: UpdateOrderStatusRequest
+):
+    """
+    Update the status of a mesa order. Also accepts payment_method when completing.
+    """
+    return await orders_service.update_order_status(request, order_id, body.status, body.payment_method)
+
+
 @router.get("/{order_id}/items")
 async def get_order_items(
     request: Request,
