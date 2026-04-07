@@ -58,7 +58,7 @@ async def get_orders_list(
             # Build WHERE clause
             where_conditions = [
                 "o.tenant_id = $1",
-                "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"
+                "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"
             ]
             params = [tenant_id]
             param_count = 1
