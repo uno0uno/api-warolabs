@@ -289,6 +289,17 @@ async def bulk_update_order_status(
         ids = [_UUID(oid) for oid in order_ids]
 
         async with get_db_connection() as conn:
+            # Collect mesa session IDs before updating (only needed when closing)
+            session_ids = []
+            if status in ("completed", "cancelled"):
+                rows = await conn.fetch(
+                    """SELECT DISTINCT table_session_id FROM orders
+                       WHERE id = ANY($1) AND tenant_id = $2
+                         AND table_session_id IS NOT NULL""",
+                    ids, tenant_id
+                )
+                session_ids = [r['table_session_id'] for r in rows]
+
             result = await conn.execute(
                 """UPDATE orders
                    SET status = $1,
@@ -296,6 +307,20 @@ async def bulk_update_order_status(
                    WHERE id = ANY($3) AND tenant_id = $4""",
                 status, payment_method, ids, tenant_id
             )
+
+            # Release table sessions associated with the updated orders
+            for sid in session_ids:
+                await conn.execute(
+                    "UPDATE table_sessions SET closed_at = now() WHERE id = $1 AND closed_at IS NULL",
+                    sid
+                )
+                await conn.execute(
+                    """UPDATE tables SET status = 'free'
+                       WHERE id = (SELECT table_id FROM table_sessions WHERE id = $1)
+                         AND tenant_id = $2""",
+                    sid, tenant_id
+                )
+
         updated = int(result.split()[-1])
         return {"success": True, "updated": updated, "message": f"{updated} orden(es) actualizadas a {status}"}
 
@@ -325,7 +350,7 @@ async def update_order_status(
 
         async with get_db_connection() as conn:
             row = await conn.fetchrow(
-                "SELECT id, status FROM orders WHERE id = $1 AND tenant_id = $2",
+                "SELECT id, status, table_session_id FROM orders WHERE id = $1 AND tenant_id = $2",
                 order_id, tenant_id
             )
             if not row:
@@ -338,6 +363,19 @@ async def update_order_status(
                    WHERE id = $3""",
                 status, payment_method, order_id
             )
+
+            # Release the table session if this is a mesa order being closed
+            if status in ("completed", "cancelled") and row['table_session_id']:
+                await conn.execute(
+                    "UPDATE table_sessions SET closed_at = now() WHERE id = $1 AND closed_at IS NULL",
+                    row['table_session_id']
+                )
+                await conn.execute(
+                    """UPDATE tables SET status = 'free'
+                       WHERE id = (SELECT table_id FROM table_sessions WHERE id = $1)
+                         AND tenant_id = $2""",
+                    row['table_session_id'], tenant_id
+                )
 
         return {"success": True, "message": f"Estado actualizado a {status}"}
 
