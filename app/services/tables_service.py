@@ -786,6 +786,18 @@ async def clear_tab(request: Request, table_id: UUID) -> dict:
                 if not session_row:
                     raise NotFoundError("No open session found for this table")
 
+                # Delete order_items first (FK: order_items.order_id → orders.id, no cascade)
+                await conn.execute(
+                    """
+                    DELETE FROM order_items
+                    WHERE order_id IN (
+                        SELECT id FROM orders
+                        WHERE table_session_id = $1 AND status = 'pending'
+                    )
+                    """,
+                    session_row["id"],
+                )
+
                 deleted = await conn.fetchval(
                     """
                     WITH deleted AS (
