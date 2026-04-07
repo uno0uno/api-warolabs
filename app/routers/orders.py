@@ -285,6 +285,21 @@ class UpdateOrderStatusRequest(BaseModel):
     payment_method: Optional[str] = Field(None, description="cash | card | digital")
 
 
+class BulkUpdateStatusRequest(BaseModel):
+    order_ids: List[str] = Field(..., min_length=1)
+    status: str = Field(..., description="completed | cancelled | pending")
+    payment_method: Optional[str] = Field(None, description="cash | card | digital")
+
+
+@router.patch("/bulk-status")
+async def bulk_update_order_status(
+    request: Request,
+    body: BulkUpdateStatusRequest
+):
+    """Bulk update status for multiple orders."""
+    return await orders_service.bulk_update_order_status(request, body.order_ids, body.status, body.payment_method)
+
+
 @router.patch("/{order_id}/status")
 async def update_order_status(
     request: Request,

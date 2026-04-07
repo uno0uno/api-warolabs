@@ -268,6 +268,44 @@ async def get_order_by_id(
         raise APIError(f"Error getting order by ID: {str(e)}", status_code=500)
 
 
+async def bulk_update_order_status(
+    request: Request,
+    order_ids: list,
+    status: str,
+    payment_method: Optional[str] = None,
+) -> dict:
+    """Bulk update status for multiple orders belonging to the tenant."""
+    allowed = {"completed", "cancelled", "pending"}
+    if status not in allowed:
+        raise APIError(f"Estado inválido. Valores permitidos: {', '.join(allowed)}", status_code=400)
+
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        from uuid import UUID as _UUID
+        ids = [_UUID(oid) for oid in order_ids]
+
+        async with get_db_connection() as conn:
+            result = await conn.execute(
+                """UPDATE orders
+                   SET status = $1,
+                       payment_method = COALESCE($2, payment_method)
+                   WHERE id = ANY($3) AND tenant_id = $4""",
+                status, payment_method, ids, tenant_id
+            )
+        updated = int(result.split()[-1])
+        return {"success": True, "updated": updated, "message": f"{updated} orden(es) actualizadas a {status}"}
+
+    except (AuthenticationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error bulk updating order status: {str(e)}")
+        raise APIError(f"Error al actualizar órdenes: {str(e)}", status_code=500)
+
+
 async def update_order_status(
     request: Request,
     order_id: UUID,
