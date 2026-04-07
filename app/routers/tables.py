@@ -149,6 +149,15 @@ async def update_tab_item_quantity(request: Request, table_id: UUID, order_item_
     return await tables_service.update_tab_item_quantity(request, table_id, order_item_id, body.quantity)
 
 
+@router.delete("/{table_id}/tab")
+async def clear_tab(request: Request, table_id: UUID):
+    """
+    Delete all pending orders for the active session without closing it.
+    The table stays open and ready for new orders.
+    """
+    return await tables_service.clear_tab(request, table_id)
+
+
 @router.post("/{table_id}/bill")
 async def request_bill(request: Request, table_id: UUID):
     """

@@ -765,6 +765,49 @@ def _format_table_row(row: dict) -> dict:
     return result
 
 
+async def clear_tab(request: Request, table_id: UUID) -> dict:
+    """
+    Delete all pending orders (and their items) linked to the active session of a table.
+    Does NOT close the session — the table stays open and ready for new orders.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                session_row = await conn.fetchrow(
+                    "SELECT id FROM table_sessions WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL",
+                    table_id,
+                    tenant_id,
+                )
+                if not session_row:
+                    raise NotFoundError("No open session found for this table")
+
+                deleted = await conn.fetchval(
+                    """
+                    WITH deleted AS (
+                        DELETE FROM orders
+                        WHERE table_session_id = $1 AND status = 'pending'
+                        RETURNING id
+                    )
+                    SELECT COUNT(*) FROM deleted
+                    """,
+                    session_row["id"],
+                )
+
+        logger.info(f"[clear_tab] Deleted {deleted} pending orders for session {session_row['id']}")
+        return {"success": True, "data": {"deleted_orders": int(deleted)}}
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error clearing tab for table {table_id}: {e}")
+        raise APIError(f"Error clearing tab: {e}", status_code=500)
+
+
 def _format_table_simple(row: dict) -> dict:
     return {
         "id": str(row["id"]),
