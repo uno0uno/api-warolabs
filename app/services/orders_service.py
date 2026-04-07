@@ -273,6 +273,7 @@ async def bulk_update_order_status(
     order_ids: list,
     status: str,
     payment_method: Optional[str] = None,
+    customer_id: Optional[str] = None,
 ) -> dict:
     """Bulk update status for multiple orders belonging to the tenant."""
     allowed = {"completed", "cancelled", "pending"}
@@ -297,12 +298,15 @@ async def bulk_update_order_status(
                 ids, tenant_id
             )
 
+            from uuid import UUID as _UUID2
+            cid = _UUID2(customer_id) if customer_id else None
             result = await conn.execute(
                 """UPDATE orders
                    SET status = $1,
-                       payment_method = COALESCE($2, payment_method)
+                       payment_method = COALESCE($2, payment_method),
+                       customer_id = COALESCE($5, customer_id)
                    WHERE id = ANY($3) AND tenant_id = $4""",
-                status, payment_method, ids, tenant_id
+                status, payment_method, ids, tenant_id, cid
             )
 
             # Stock adjustments and mesa session releases per order
