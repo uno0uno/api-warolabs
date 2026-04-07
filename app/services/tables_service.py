@@ -589,6 +589,14 @@ async def add_tab_items(
                 session_id = session_row["session_id"]
 
                 # Compute total including modifier prices (no DB price lookup — POS already verified)
+                for item in items:
+                    mod_sum = sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
+                    logger.info(
+                        f"[add_tab_items] item product_id={item['product_id']} "
+                        f"qty={item['quantity']} unit_price={item['unit_price']} "
+                        f"modifier_sum={mod_sum} "
+                        f"line_total={item['quantity'] * (item['unit_price'] + mod_sum)}"
+                    )
                 total_amount = sum(
                     item["quantity"] * (
                         item["unit_price"]
@@ -596,6 +604,7 @@ async def add_tab_items(
                     )
                     for item in items
                 )
+                logger.info(f"[add_tab_items] total_amount={total_amount} items_count={len(items)}")
 
                 # Create pending order linked to the session
                 order_row = await conn.fetchrow(
