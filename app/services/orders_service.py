@@ -282,6 +282,7 @@ async def bulk_update_order_status(
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
@@ -289,16 +290,12 @@ async def bulk_update_order_status(
         ids = [_UUID(oid) for oid in order_ids]
 
         async with get_db_connection() as conn:
-            # Collect mesa session IDs before updating (only needed when closing)
-            session_ids = []
-            if status in ("completed", "cancelled"):
-                rows = await conn.fetch(
-                    """SELECT DISTINCT table_session_id FROM orders
-                       WHERE id = ANY($1) AND tenant_id = $2
-                         AND table_session_id IS NOT NULL""",
-                    ids, tenant_id
-                )
-                session_ids = [r['table_session_id'] for r in rows]
+            # Fetch current state of all orders before updating
+            order_rows = await conn.fetch(
+                """SELECT id, status, order_number, table_session_id FROM orders
+                   WHERE id = ANY($1) AND tenant_id = $2""",
+                ids, tenant_id
+            )
 
             result = await conn.execute(
                 """UPDATE orders
@@ -308,18 +305,37 @@ async def bulk_update_order_status(
                 status, payment_method, ids, tenant_id
             )
 
-            # Release table sessions associated with the updated orders
-            for sid in session_ids:
-                await conn.execute(
-                    "UPDATE table_sessions SET closed_at = now() WHERE id = $1 AND closed_at IS NULL",
-                    sid
-                )
-                await conn.execute(
-                    """UPDATE tables SET status = 'free'
-                       WHERE id = (SELECT table_id FROM table_sessions WHERE id = $1)
-                         AND tenant_id = $2""",
-                    sid, tenant_id
-                )
+            # Stock adjustments and mesa session releases per order
+            released_sessions = set()
+            for row in order_rows:
+                old_status = row['status']
+                if old_status == status:
+                    continue
+
+                order_id_row = row['id']
+                order_number = int(row['order_number'])
+
+                # Stock
+                if old_status != 'completed' and status == 'completed':
+                    await _deduct_stock_for_status_update(conn, order_id_row, tenant_id, user_id, order_number)
+                elif old_status == 'completed' and status in ('cancelled', 'pending'):
+                    await _return_stock_for_order_cancellation(conn, order_id_row, tenant_id, user_id, order_number)
+
+                # Mesa session (deduplicated by session id)
+                if status in ('completed', 'cancelled') and row['table_session_id']:
+                    sid = row['table_session_id']
+                    if sid not in released_sessions:
+                        released_sessions.add(sid)
+                        await conn.execute(
+                            "UPDATE table_sessions SET closed_at = now() WHERE id = $1 AND closed_at IS NULL",
+                            sid
+                        )
+                        await conn.execute(
+                            """UPDATE tables SET status = 'free'
+                               WHERE id = (SELECT table_id FROM table_sessions WHERE id = $1)
+                                 AND tenant_id = $2""",
+                            sid, tenant_id
+                        )
 
         updated = int(result.split()[-1])
         return {"success": True, "updated": updated, "message": f"{updated} orden(es) actualizadas a {status}"}
@@ -345,16 +361,20 @@ async def update_order_status(
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
             row = await conn.fetchrow(
-                "SELECT id, status, table_session_id FROM orders WHERE id = $1 AND tenant_id = $2",
+                "SELECT id, status, order_number, table_session_id FROM orders WHERE id = $1 AND tenant_id = $2",
                 order_id, tenant_id
             )
             if not row:
                 raise APIError("Orden no encontrada", status_code=404)
+
+            old_status = row['status']
+            order_number = int(row['order_number'])
 
             await conn.execute(
                 """UPDATE orders
@@ -363,6 +383,13 @@ async def update_order_status(
                    WHERE id = $3""",
                 status, payment_method, order_id
             )
+
+            # Stock adjustment based on transition
+            if old_status != status:
+                if old_status != 'completed' and status == 'completed':
+                    await _deduct_stock_for_status_update(conn, order_id, tenant_id, user_id, order_number)
+                elif old_status == 'completed' and status in ('cancelled', 'pending'):
+                    await _return_stock_for_order_cancellation(conn, order_id, tenant_id, user_id, order_number)
 
             # Release the table session if this is a mesa order being closed
             if status in ("completed", "cancelled") and row['table_session_id']:
@@ -1418,6 +1445,83 @@ async def delete_order_item(
     except Exception as e:
         logger.error(f"Error deleting order item: {str(e)}")
         raise APIError(f"Error deleting order item: {str(e)}", status_code=500)
+
+
+_INGREDIENTS_QUERY = """
+    SELECT pr.ingredient_id, pr.quantity, pr.unit, i.name AS ingredient_name
+    FROM product_recipes pr
+    JOIN ingredients i ON pr.ingredient_id = i.id
+    WHERE pr.product_id = $1
+    UNION ALL
+    SELECT brt.ingredient_id, brt.base_quantity AS quantity, brt.unit, i.name AS ingredient_name
+    FROM product_base_recipes pbr
+    JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+    JOIN ingredients i ON brt.ingredient_id = i.id
+    WHERE pbr.product_id = $1
+"""
+
+
+async def _deduct_stock_for_status_update(conn, order_id, tenant_id, user_id, order_number: int) -> None:
+    """Deduct ingredient stock when an order transitions to completed via status update."""
+    items = await conn.fetch(
+        """SELECT oi.product_id, oi.quantity, p.name AS product_name
+           FROM order_items oi
+           JOIN product p ON p.id = oi.product_id
+           WHERE oi.order_id = $1""",
+        order_id,
+    )
+    for item in items:
+        ingredients = await conn.fetch(_INGREDIENTS_QUERY, item["product_id"])
+        for ing in ingredients:
+            qty = float(item["quantity"]) * float(ing["quantity"])
+            stock_row = await conn.fetchrow(
+                "SELECT current_stock FROM tenant_inventory WHERE ingredient_id = $1 AND tenant_id = $2 FOR UPDATE",
+                ing["ingredient_id"], tenant_id,
+            )
+            prev = float(stock_row["current_stock"]) if stock_row else 0.0
+            new = prev - qty
+            if stock_row:
+                await conn.execute(
+                    "UPDATE tenant_inventory SET current_stock = $1, last_updated = NOW() WHERE ingredient_id = $2 AND tenant_id = $3",
+                    new, ing["ingredient_id"], tenant_id,
+                )
+            else:
+                await conn.execute(
+                    "INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock, last_updated) VALUES ($1, $2, $3, 0, NOW())",
+                    tenant_id, ing["ingredient_id"], -qty,
+                )
+            await conn.execute(
+                """INSERT INTO tenant_ingredient_movements (
+                    tenant_id, ingredient_id, movement_type, quantity_change, unit,
+                    previous_stock, new_stock, reference_table, reference_id, reason, created_by, created_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())""",
+                tenant_id, ing["ingredient_id"], "consumption", -qty,
+                ing["unit"], prev, new, "orders", order_id,
+                f"Venta #{order_number} completada: {item['quantity']}x {item['product_name']}",
+                user_id,
+            )
+            logger.info(f"Stock deducted (status update): {ing['ingredient_name']} -{qty}{ing['unit']} (Orden #{order_number})")
+
+
+async def _return_stock_for_order_cancellation(conn, order_id, tenant_id, user_id, order_number: int) -> None:
+    """Return ingredient stock when a completed order is cancelled or rolled back to pending."""
+    items = await conn.fetch(
+        """SELECT oi.product_id, oi.quantity, p.name AS product_name
+           FROM order_items oi
+           JOIN product p ON p.id = oi.product_id
+           WHERE oi.order_id = $1""",
+        order_id,
+    )
+    for item in items:
+        ingredients = await conn.fetch(_INGREDIENTS_QUERY, item["product_id"])
+        for ing in ingredients:
+            qty = float(item["quantity"]) * float(ing["quantity"])
+            await _return_ingredient_to_stock(
+                conn, tenant_id, user_id, order_id, order_number,
+                ing["ingredient_id"], qty, ing["unit"], ing["ingredient_name"],
+                f"Cancelación: {item['quantity']}x {item['product_name']}"
+            )
+            logger.info(f"Stock returned (cancellation): {ing['ingredient_name']} +{qty}{ing['unit']} (Orden #{order_number})")
 
 
 async def _return_ingredient_to_stock(
