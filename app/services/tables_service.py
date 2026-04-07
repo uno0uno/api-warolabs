@@ -391,6 +391,24 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                 session_row["id"],
             )
 
+            # Fetch individual order items for this session (with IDs for edit/delete)
+            tab_items = await conn.fetch(
+                """
+                SELECT
+                    oi.id AS order_item_id,
+                    oi.quantity,
+                    oi.price_at_purchase,
+                    oi.subtotal,
+                    p.name AS product_name
+                FROM order_items oi
+                JOIN orders o ON o.id = oi.order_id
+                JOIN product p ON p.id = oi.product_id
+                WHERE o.table_session_id = $1
+                ORDER BY oi.id ASC
+                """,
+                session_row["id"],
+            )
+
         return {
             "success": True,
             "data": {
@@ -417,6 +435,16 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     }
                     for o in orders
                 ],
+                "tab_items": [
+                    {
+                        "order_item_id": str(r["order_item_id"]),
+                        "product_name": r["product_name"],
+                        "quantity": int(r["quantity"]),
+                        "unit_price": float(r["subtotal"]) / int(r["quantity"]) if int(r["quantity"]) > 0 else float(r["price_at_purchase"]),
+                        "subtotal": float(r["subtotal"]),
+                    }
+                    for r in tab_items
+                ],
             },
         }
 
@@ -425,6 +453,100 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
     except Exception as e:
         logger.error(f"Error fetching current session for table {table_id}: {e}")
         raise APIError(f"Error fetching session: {e}", status_code=500)
+
+
+async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID) -> dict:
+    """Remove an order item from the running tab and update the order total."""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=True) as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT oi.id, oi.subtotal, o.id AS order_id, o.total_amount
+                FROM order_items oi
+                JOIN orders o ON o.id = oi.order_id
+                JOIN table_sessions ts ON ts.id = o.table_session_id
+                WHERE oi.id = $1
+                  AND ts.table_id = $2
+                  AND ts.tenant_id = $3
+                  AND ts.closed_at IS NULL
+                """,
+                order_item_id, table_id, tenant_id,
+            )
+            if not row:
+                raise NotFoundError("Order item not found or session already closed")
+
+            await conn.execute("DELETE FROM order_items WHERE id = $1", order_item_id)
+            new_total = max(0.0, float(row["total_amount"]) - float(row["subtotal"]))
+            await conn.execute(
+                "UPDATE orders SET total_amount = $1 WHERE id = $2",
+                new_total, row["order_id"],
+            )
+
+        return {"success": True, "data": {"removed": str(order_item_id)}}
+    except (AuthenticationError, NotFoundError):
+        raise
+    except Exception as e:
+        logger.error(f"Error removing tab item {order_item_id}: {e}")
+        raise APIError(f"Error removing item: {e}", status_code=500)
+
+
+async def update_tab_item_quantity(
+    request: Request, table_id: UUID, order_item_id: UUID, quantity: int
+) -> dict:
+    """Update quantity of an order item in the running tab."""
+    if quantity < 1:
+        raise APIError("Quantity must be at least 1", status_code=400)
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=True) as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT oi.id, oi.price_at_purchase, oi.subtotal, o.id AS order_id, o.total_amount
+                FROM order_items oi
+                JOIN orders o ON o.id = oi.order_id
+                JOIN table_sessions ts ON ts.id = o.table_session_id
+                WHERE oi.id = $1
+                  AND ts.table_id = $2
+                  AND ts.tenant_id = $3
+                  AND ts.closed_at IS NULL
+                """,
+                order_item_id, table_id, tenant_id,
+            )
+            if not row:
+                raise NotFoundError("Order item not found or session already closed")
+
+            modifier_sum = await conn.fetchval(
+                "SELECT COALESCE(SUM(price_at_purchase), 0) FROM order_item_modifiers WHERE order_item_id = $1",
+                order_item_id,
+            )
+            effective_unit_price = float(row["price_at_purchase"]) + float(modifier_sum)
+            new_subtotal = effective_unit_price * quantity
+            old_subtotal = float(row["subtotal"])
+            await conn.execute(
+                "UPDATE order_items SET quantity = $1, subtotal = $2 WHERE id = $3",
+                quantity, new_subtotal, order_item_id,
+            )
+            new_total = max(0.0, float(row["total_amount"]) - old_subtotal + new_subtotal)
+            await conn.execute(
+                "UPDATE orders SET total_amount = $1 WHERE id = $2",
+                new_total, row["order_id"],
+            )
+
+        return {"success": True, "data": {"order_item_id": str(order_item_id), "quantity": quantity, "subtotal": new_subtotal}}
+    except (AuthenticationError, NotFoundError):
+        raise
+    except Exception as e:
+        logger.error(f"Error updating tab item {order_item_id}: {e}")
+        raise APIError(f"Error updating item: {e}", status_code=500)
 
 
 async def add_tab_items(
@@ -466,9 +588,12 @@ async def add_tab_items(
 
                 session_id = session_row["session_id"]
 
-                # Compute total from submitted prices (no DB price lookup — POS already verified)
+                # Compute total including modifier prices (no DB price lookup — POS already verified)
                 total_amount = sum(
-                    item["quantity"] * item["unit_price"]
+                    item["quantity"] * (
+                        item["unit_price"]
+                        + sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
+                    )
                     for item in items
                 )
 
@@ -491,7 +616,8 @@ async def add_tab_items(
 
                 # Insert order_items
                 for item in items:
-                    subtotal = item["quantity"] * item["unit_price"]
+                    modifier_unit_total = sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
+                    subtotal = item["quantity"] * (item["unit_price"] + modifier_unit_total)
                     order_item_row = await conn.fetchrow(
                         """
                         INSERT INTO order_items (

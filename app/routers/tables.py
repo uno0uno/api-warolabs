@@ -41,6 +41,10 @@ class TabAddRequest(BaseModel):
     items: List[TabItem] = Field(..., min_length=1)
 
 
+class UpdateTabItemRequest(BaseModel):
+    quantity: int = Field(..., ge=1)
+
+
 @router.get("")
 async def list_tables(request: Request):
     """
@@ -126,6 +130,18 @@ async def add_tab_items(request: Request, table_id: UUID, body: TabAddRequest):
         for item in body.items
     ]
     return await tables_service.add_tab_items(request, table_id, items)
+
+
+@router.delete("/{table_id}/tab/items/{order_item_id}")
+async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID):
+    """Remove an order item from the running tab."""
+    return await tables_service.remove_tab_item(request, table_id, order_item_id)
+
+
+@router.patch("/{table_id}/tab/items/{order_item_id}")
+async def update_tab_item_quantity(request: Request, table_id: UUID, order_item_id: UUID, body: UpdateTabItemRequest):
+    """Update the quantity of an order item in the running tab."""
+    return await tables_service.update_tab_item_quantity(request, table_id, order_item_id, body.quantity)
 
 
 @router.post("/{table_id}/bill")
