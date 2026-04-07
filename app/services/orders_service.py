@@ -231,7 +231,7 @@ async def get_order_by_id(
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
                 WHERE o.id = $1 AND o.tenant_id = $2
-                  AND (o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
+                  AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
             """
 
             order_row = await conn.fetchrow(order_query, order_id, tenant_id)
