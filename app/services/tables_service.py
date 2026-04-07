@@ -265,10 +265,10 @@ async def open_session(request: Request, table_id: UUID) -> dict:
         raise APIError(f"Error opening session: {e}", status_code=500)
 
 
-async def close_session(request: Request, table_id: UUID) -> dict:
+async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None) -> dict:
     """
     Close the active session for a table.
-    Pending orders on this session remain pending — frontend routes to payment.
+    If payment_method is provided, marks all pending orders as completed with that payment method.
     """
     try:
         session_context = require_valid_session(request)
@@ -294,7 +294,25 @@ async def close_session(request: Request, table_id: UUID) -> dict:
                 if not session_row:
                     raise NotFoundError("No open session found for this table")
 
-                # Count pending orders (informational — not changed)
+                # Mark pending orders as completed if payment_method provided
+                if payment_method:
+                    completed_count = await conn.fetchval(
+                        """
+                        UPDATE orders
+                        SET status = 'completed', payment_method = $2
+                        WHERE table_session_id = $1 AND status = 'pending'
+                        RETURNING COUNT(*)
+                        """,
+                        session_row["id"],
+                        payment_method,
+                    )
+                    logger.info(
+                        f"[close_session] Marked {completed_count} orders as completed "
+                        f"(payment_method={payment_method}) for session {session_row['id']}"
+                    )
+                else:
+                    completed_count = 0
+
                 pending_count = await conn.fetchval(
                     "SELECT COUNT(*) FROM orders WHERE table_session_id = $1 AND status = 'pending'",
                     session_row["id"],
@@ -319,6 +337,7 @@ async def close_session(request: Request, table_id: UUID) -> dict:
             "data": {
                 "session_id": str(session_row["id"]),
                 "table_id": str(table_id),
+                "completed_orders": int(completed_count or 0),
                 "pending_orders": int(pending_count),
             },
         }

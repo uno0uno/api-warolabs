@@ -90,14 +90,18 @@ async def open_session(request: Request, table_id: UUID):
     return await tables_service.open_session(request, table_id)
 
 
+class CloseSessionRequest(BaseModel):
+    payment_method: Optional[str] = Field(None, description="cash | card | digital — marks pending orders as completed")
+
+
 @router.post("/{table_id}/close")
-async def close_session(request: Request, table_id: UUID):
+async def close_session(request: Request, table_id: UUID, body: CloseSessionRequest = CloseSessionRequest()):
     """
     Close the active session (status: open/bill_requested → free).
-    Pending orders on this session remain pending — frontend routes to payment.
+    If payment_method is provided, all pending orders are marked as completed.
     Returns 404 if no open session exists.
     """
-    return await tables_service.close_session(request, table_id)
+    return await tables_service.close_session(request, table_id, body.payment_method)
 
 
 @router.get("/{table_id}/current")
