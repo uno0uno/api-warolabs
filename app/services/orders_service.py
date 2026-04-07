@@ -137,6 +137,7 @@ async def get_orders_list(
                     o.status,
                     o.payment_method,
                     o.pos_cart_id,
+                    o.table_session_id,
                     p.id as customer_id,
                     p.name as customer_name,
                     p.phone_number as customer_phone,
@@ -166,6 +167,7 @@ async def get_orders_list(
                     "status": row['status'],
                     "payment_method": row['payment_method'],
                     "pos_cart_id": str(row['pos_cart_id']) if row['pos_cart_id'] else None,
+                    "source": "mesa" if row['table_session_id'] else "pos",
                     "customer": {
                         "id": str(row['customer_id']) if row['customer_id'] else None,
                         "name": row['customer_name'],
