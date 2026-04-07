@@ -408,7 +408,7 @@ async def get_sales_metrics(
 
         async with get_db_connection(use_transaction=False) as conn:
             # Build base WHERE clause
-            where_conditions = ["tenant_id = $1", "pos_cart_id IS NOT NULL", "status = 'completed'"]
+            where_conditions = ["tenant_id = $1", "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL)", "status = 'completed'"]
             params = [UUID(tenant_id)]
             param_count = 1
 
@@ -460,7 +460,7 @@ async def get_sales_metrics(
                 return await _metrics_by_ticket(conn, where_clause, params, timezone, ranges, meta)
             else:
                 # Default: overall metrics (include all statuses for this)
-                where_conditions_all = ["tenant_id = $1", "pos_cart_id IS NOT NULL"]
+                where_conditions_all = ["tenant_id = $1", "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL)"]
                 params_all = [UUID(tenant_id)]
                 pc = 1
 
