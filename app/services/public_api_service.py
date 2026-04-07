@@ -62,7 +62,7 @@ async def get_sales_list(
 
         async with get_db_connection(use_transaction=False) as conn:
             # Build WHERE clause
-            where_conditions = ["o.tenant_id = $1", "o.pos_cart_id IS NOT NULL"]
+            where_conditions = ["o.tenant_id = $1", "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL)"]
             params = [UUID(tenant_id)]
             param_count = 1
 
@@ -248,7 +248,7 @@ async def get_sale_by_id(
                     p.phone_number as customer_phone
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
-                WHERE o.id = $1 AND o.tenant_id = $2 AND o.pos_cart_id IS NOT NULL
+                WHERE o.id = $1 AND o.tenant_id = $2 AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL)
             """
 
             order_row = await conn.fetchrow(order_query, order_id, UUID(tenant_id))
