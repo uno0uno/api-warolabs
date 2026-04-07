@@ -284,7 +284,7 @@ async def get_order_items(
             verify_query = """
                 SELECT id FROM orders
                 WHERE id = $1 AND tenant_id = $2
-                  AND (pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')
+                  AND (pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')
             """
             order_exists = await conn.fetchrow(verify_query, order_id, tenant_id)
 
