@@ -7,6 +7,7 @@ Issue: https://github.com/uno0uno/warocol.com/issues/298
 from fastapi import APIRouter, Request
 from typing import Optional, List
 from uuid import UUID
+from datetime import date
 from pydantic import BaseModel, Field
 from app.services import tables_service
 
@@ -91,8 +92,9 @@ async def open_session(request: Request, table_id: UUID):
 
 
 class CloseSessionRequest(BaseModel):
-    payment_method: Optional[str] = Field(None, description="cash | card | digital — marks pending orders as completed")
+    payment_method: Optional[str] = Field(None, description="cash | card | digital | credit — marks pending orders as completed")
     customer_id: Optional[str] = Field(None, description="Customer UUID to associate with completed orders")
+    credit_due_date: Optional[date] = Field(None, description="Optional due date for credit orders (only used when payment_method='credit')")
 
 
 @router.post("/{table_id}/close")
@@ -102,7 +104,7 @@ async def close_session(request: Request, table_id: UUID, body: CloseSessionRequ
     If payment_method is provided, all pending orders are marked as completed.
     Returns 404 if no open session exists.
     """
-    return await tables_service.close_session(request, table_id, body.payment_method, body.customer_id)
+    return await tables_service.close_session(request, table_id, body.payment_method, body.customer_id, body.credit_due_date)
 
 
 @router.get("/{table_id}/current")

@@ -2,9 +2,10 @@
 POS Cart Router
 Endpoints for managing POS cart persistence
 """
-from fastapi import APIRouter, Request, Body
+from fastapi import APIRouter, Request
 from typing import List, Optional
 from uuid import UUID
+from datetime import date
 from pydantic import BaseModel, Field
 from app.services import pos_cart_service
 
@@ -139,8 +140,9 @@ async def clear_cart(
 
 
 class CompleteOrderRequest(BaseModel):
-    payment_method: str = Field(..., description="Payment method: cash, card, digital")
+    payment_method: str = Field(..., description="Payment method: cash, card, digital, credit")
     customer_id: UUID = Field(..., description="Customer ID to associate with the order")
+    credit_due_date: Optional[date] = Field(None, description="Optional due date for credit orders (only used when payment_method='credit')")
 
 
 @router.post("/{cart_id}/complete")
@@ -161,5 +163,6 @@ async def complete_order(
         request,
         cart_id,
         order_data.payment_method,
-        order_data.customer_id
+        order_data.customer_id,
+        order_data.credit_due_date
     )

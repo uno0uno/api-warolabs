@@ -6,6 +6,7 @@ Issue: https://github.com/uno0uno/warocol.com/issues/298
 """
 from typing import Optional, List
 from uuid import UUID
+from datetime import date
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -265,7 +266,7 @@ async def open_session(request: Request, table_id: UUID) -> dict:
         raise APIError(f"Error opening session: {e}", status_code=500)
 
 
-async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None) -> dict:
+async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None) -> dict:
     """
     Close the active session for a table.
     If payment_method is provided, marks all pending orders as completed with that payment method.
@@ -296,6 +297,20 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
 
                 # Mark pending orders as completed if payment_method provided
                 if payment_method:
+                    # Backend guard: credit requires an identified (non-anonymous) customer
+                    if payment_method == 'credit' and customer_id:
+                        cust_row = await conn.fetchrow(
+                            "SELECT phone_number FROM profile WHERE id = $1::uuid",
+                            customer_id
+                        )
+                        if cust_row and cust_row['phone_number'] == '0000000000':
+                            raise APIError(
+                                "El pago a crédito requiere un cliente identificado (no anónimo)",
+                                status_code=400
+                            )
+
+                    payment_status = 'credit' if payment_method == 'credit' else 'paid'
+
                     completed_count = await conn.fetchval(
                         "SELECT COUNT(*) FROM orders WHERE table_session_id = $1 AND status = 'pending'",
                         session_row["id"],
@@ -303,16 +318,23 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     await conn.execute(
                         """
                         UPDATE orders
-                        SET status = 'completed', payment_method = $2, customer_id = COALESCE($3::uuid, customer_id)
+                        SET status = 'completed',
+                            payment_method = $2,
+                            payment_status = $3,
+                            credit_due_date = $4,
+                            customer_id = COALESCE($5::uuid, customer_id)
                         WHERE table_session_id = $1 AND status = 'pending'
                         """,
                         session_row["id"],
                         payment_method,
+                        payment_status,
+                        credit_due_date,
                         customer_id,
                     )
                     logger.info(
                         f"[close_session] Marked {completed_count} orders as completed "
-                        f"(payment_method={payment_method}) for session {session_row['id']}"
+                        f"(payment_method={payment_method}, payment_status={payment_status}) "
+                        f"for session {session_row['id']}"
                     )
                 else:
                     completed_count = 0

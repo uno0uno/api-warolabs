@@ -5,6 +5,7 @@ Handles cart persistence for POS system
 import asyncio
 from typing import List, Optional
 from uuid import UUID
+from datetime import date
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -554,7 +555,8 @@ async def complete_pos_order(
     request: Request,
     cart_id: UUID,
     payment_method: str,
-    customer_id: UUID
+    customer_id: UUID,
+    credit_due_date: Optional[date] = None
 ) -> dict:
     """
     Complete a POS order:
@@ -575,6 +577,18 @@ async def complete_pos_order(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
+                # 0. Backend guard: credit requires an identified (non-anonymous) customer
+                if payment_method == 'credit':
+                    customer_check = await conn.fetchrow(
+                        "SELECT phone_number FROM profile WHERE id = $1",
+                        customer_id
+                    )
+                    if customer_check and customer_check['phone_number'] == '0000000000':
+                        raise APIError(
+                            "El pago a crédito requiere un cliente identificado (no anónimo)",
+                            status_code=400
+                        )
+
                 # 1. Verify cart exists and is active
                 cart_query = """
                     SELECT id, customer_id, total_amount, tenant_id
@@ -602,12 +616,15 @@ async def complete_pos_order(
                     raise APIError("Cannot complete order with empty cart", status_code=400)
 
                 # 3. Create order record (use customer_id from parameter)
+                # Compute payment_status: credit orders start as 'credit'; all others 'paid'
+                payment_status = 'credit' if payment_method == 'credit' else 'paid'
+
                 order_query = """
                     INSERT INTO orders (
                         user_id, tenant_id, customer_id, payment_method, pos_cart_id,
-                        order_date, total_amount, status
+                        order_date, total_amount, status, payment_status, credit_due_date
                     )
-                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed')
+                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8)
                     RETURNING id, order_number, created_at
                 """
                 order_row = await conn.fetchrow(
@@ -617,7 +634,9 @@ async def complete_pos_order(
                     customer_id,  # Use parameter instead of cart_row
                     payment_method,
                     cart_id,
-                    cart_row['total_amount']
+                    cart_row['total_amount'],
+                    payment_status,
+                    credit_due_date
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']
@@ -891,6 +910,8 @@ async def complete_pos_order(
                         "order_number": int(order_number),
                         "total_amount": float(cart_row['total_amount']),
                         "payment_method": payment_method,
+                        "payment_status": payment_status,
+                        "credit_due_date": str(credit_due_date) if credit_due_date is not None else None,
                         "items_count": len(items),
                         "created_at": order_row['created_at'].isoformat()
                     }

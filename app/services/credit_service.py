@@ -1,0 +1,318 @@
+"""
+Credit Service
+Handles credit payment registration, payment history, and open-credit order listing.
+
+Issue: https://github.com/uno0uno/warocol.com/issues/294
+"""
+from typing import Optional
+from uuid import UUID
+from decimal import Decimal
+from datetime import date
+from fastapi import Request
+from app.database import get_db_connection
+from app.core.middleware import require_valid_session
+from app.core.exceptions import AuthenticationError, APIError
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+async def register_credit_payment(
+    request: Request,
+    order_id: UUID,
+    amount: Decimal,
+    payment_method: str,
+    notes: Optional[str] = None,
+    payment_date: Optional[date] = None,
+) -> dict:
+    """
+    Register a payment against a credit order.
+
+    1. Fetches and validates the order (must belong to tenant, status must be 'credit' or 'partial').
+    2. Over-payment guard: amount must not exceed (total - credit_paid_amount).
+    3. Inserts into credit_payments.
+    4. Updates orders.credit_paid_amount and orders.payment_status atomically.
+    5. Transition: credit -> partial (partial payment) -> paid (full payment).
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # 1. Fetch order and verify ownership + credit state
+                order_row = await conn.fetchrow(
+                    """
+                    SELECT id, tenant_id, customer_id, total_amount,
+                           payment_status, credit_paid_amount
+                    FROM orders
+                    WHERE id = $1 AND tenant_id = $2
+                    """,
+                    order_id,
+                    tenant_id,
+                )
+
+                if not order_row:
+                    raise APIError("Orden no encontrada", status_code=404)
+
+                if order_row["payment_status"] == "paid":
+                    raise APIError(
+                        "Esta orden ya está completamente pagada",
+                        status_code=400,
+                    )
+
+                if order_row["payment_status"] not in ("credit", "partial"):
+                    raise APIError(
+                        "Esta orden no es una orden a crédito",
+                        status_code=400,
+                    )
+
+                total = Decimal(str(order_row["total_amount"]))
+                already_paid = Decimal(str(order_row["credit_paid_amount"]))
+                remaining = total - already_paid
+
+                # 2. Over-payment guard
+                if amount > remaining:
+                    raise APIError(
+                        f"El monto ({amount}) excede el saldo pendiente ({remaining}). "
+                        "No se permiten sobre-pagos.",
+                        status_code=400,
+                    )
+
+                # 3. Insert payment record
+                from datetime import datetime, timezone
+                effective_payment_date = (
+                    datetime.combine(payment_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+                    if payment_date
+                    else None
+                )
+
+                payment_row = await conn.fetchrow(
+                    """
+                    INSERT INTO credit_payments (
+                        order_id, customer_id, tenant_id,
+                        amount, payment_method, notes,
+                        created_by_user_id,
+                        payment_date
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()))
+                    RETURNING id, payment_date, created_at
+                    """,
+                    order_id,
+                    order_row["customer_id"],
+                    tenant_id,
+                    amount,
+                    payment_method,
+                    notes,
+                    user_id,
+                    effective_payment_date,
+                )
+
+                # 4. Update denormalized counter and resolve new payment_status
+                new_paid = already_paid + amount
+                if new_paid >= total:
+                    new_status = "paid"
+                elif new_paid > 0:
+                    new_status = "partial"
+                else:
+                    new_status = "credit"
+
+                await conn.execute(
+                    """
+                    UPDATE orders
+                    SET credit_paid_amount = $1,
+                        payment_status = $2
+                    WHERE id = $3
+                    """,
+                    new_paid,
+                    new_status,
+                    order_id,
+                )
+
+                logger.info(
+                    f"[register_credit_payment] order={order_id} "
+                    f"amount={amount} new_status={new_status} "
+                    f"new_paid={new_paid}/{total}"
+                )
+
+                return {
+                    "success": True,
+                    "message": "Pago registrado exitosamente",
+                    "data": {
+                        "payment_id": str(payment_row["id"]),
+                        "order_id": str(order_id),
+                        "amount": float(amount),
+                        "payment_method": payment_method,
+                        "payment_date": payment_row["payment_date"].isoformat(),
+                        "new_payment_status": new_status,
+                        "credit_paid_amount": float(new_paid),
+                        "remaining_amount": float(total - new_paid),
+                    },
+                }
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error registering credit payment: {exc}")
+        raise APIError(f"Error registering credit payment: {exc}", status_code=500)
+
+
+async def get_credit_payments(request: Request, order_id: UUID) -> dict:
+    """
+    List all payment records for a credit order (must belong to the current tenant).
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=False) as conn:
+            # Verify order belongs to tenant
+            order_row = await conn.fetchrow(
+                "SELECT id, total_amount, payment_status, credit_paid_amount "
+                "FROM orders WHERE id = $1 AND tenant_id = $2",
+                order_id,
+                tenant_id,
+            )
+            if not order_row:
+                raise APIError("Orden no encontrada", status_code=404)
+
+            rows = await conn.fetch(
+                """
+                SELECT
+                    cp.id,
+                    cp.amount,
+                    cp.payment_method,
+                    cp.payment_date,
+                    cp.notes,
+                    cp.created_at,
+                    cp.created_by_user_id
+                FROM credit_payments cp
+                WHERE cp.order_id = $1 AND cp.tenant_id = $2
+                ORDER BY cp.payment_date ASC
+                """,
+                order_id,
+                tenant_id,
+            )
+
+        return {
+            "success": True,
+            "data": {
+                "order_id": str(order_id),
+                "total_amount": float(order_row["total_amount"]),
+                "payment_status": order_row["payment_status"],
+                "credit_paid_amount": float(order_row["credit_paid_amount"]),
+                "remaining_amount": float(
+                    Decimal(str(order_row["total_amount"]))
+                    - Decimal(str(order_row["credit_paid_amount"]))
+                ),
+                "payments": [
+                    {
+                        "id": str(row["id"]),
+                        "amount": float(row["amount"]),
+                        "payment_method": row["payment_method"],
+                        "payment_date": row["payment_date"].isoformat(),
+                        "notes": row["notes"],
+                        "created_at": row["created_at"].isoformat(),
+                    }
+                    for row in rows
+                ],
+            },
+        }
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error fetching credit payments: {exc}")
+        raise APIError(f"Error fetching credit payments: {exc}", status_code=500)
+
+
+async def list_credit_orders(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """
+    List all open credit orders (payment_status IN ('credit', 'partial')) for the tenant.
+    Used by the Cartera view (#295).
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=False) as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    o.id,
+                    o.order_number,
+                    o.order_date,
+                    o.total_amount,
+                    o.payment_status,
+                    o.credit_paid_amount,
+                    o.credit_due_date,
+                    o.payment_method,
+                    p.id   AS customer_id,
+                    p.name AS customer_name,
+                    p.phone_number AS customer_phone,
+                    COUNT(*) OVER() AS total_count
+                FROM orders o
+                LEFT JOIN profile p ON o.customer_id = p.id
+                WHERE o.tenant_id = $1
+                  AND o.payment_status IN ('credit', 'partial')
+                ORDER BY o.order_date DESC
+                LIMIT $2 OFFSET $3
+                """,
+                tenant_id,
+                limit,
+                offset,
+            )
+
+        total_count = rows[0]["total_count"] if rows else 0
+
+        return {
+            "success": True,
+            "data": [
+                {
+                    "id": str(row["id"]),
+                    "order_number": int(row["order_number"]),
+                    "order_date": row["order_date"].isoformat(),
+                    "total_amount": float(row["total_amount"]),
+                    "payment_status": row["payment_status"],
+                    "credit_paid_amount": float(row["credit_paid_amount"]),
+                    "remaining_amount": float(
+                        Decimal(str(row["total_amount"]))
+                        - Decimal(str(row["credit_paid_amount"]))
+                    ),
+                    "credit_due_date": str(row["credit_due_date"]) if row["credit_due_date"] is not None else None,
+                    "payment_method": row["payment_method"],
+                    "customer": {
+                        "id": str(row["customer_id"]) if row["customer_id"] else None,
+                        "name": row["customer_name"],
+                        "phone": row["customer_phone"],
+                    },
+                }
+                for row in rows
+            ],
+            "pagination": {
+                "total": total_count,
+                "limit": limit,
+                "offset": offset,
+                "has_more": (offset + limit) < total_count,
+            },
+        }
+
+    except AuthenticationError:
+        raise
+    except Exception as exc:
+        logger.error(f"Error listing credit orders: {exc}")
+        raise APIError(f"Error listing credit orders: {exc}", status_code=500)
