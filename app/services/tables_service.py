@@ -620,31 +620,61 @@ async def add_tab_items(
                         f"modifier_sum={mod_sum} "
                         f"line_total={item['quantity'] * (item['unit_price'] + mod_sum)}"
                     )
-                total_amount = sum(
+                batch_amount = sum(
                     item["quantity"] * (
                         item["unit_price"]
                         + sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
                     )
                     for item in items
                 )
-                logger.info(f"[add_tab_items] total_amount={total_amount} items_count={len(items)}")
+                logger.info(f"[add_tab_items] batch_amount={batch_amount} items_count={len(items)}")
 
-                # Create pending order linked to the session
-                order_row = await conn.fetchrow(
+                # Reuse the existing pending order for this session, or create one if none exists
+                existing_order = await conn.fetchrow(
                     """
-                    INSERT INTO orders (
-                        user_id, tenant_id, table_session_id,
-                        order_date, total_amount, status
-                    )
-                    VALUES ($1, $2, $3, NOW(), $4, 'pending')
-                    RETURNING id, order_number
+                    SELECT id FROM orders
+                    WHERE table_session_id = $1 AND status = 'pending'
+                    ORDER BY order_date ASC
+                    LIMIT 1
                     """,
-                    user_id,
-                    tenant_id,
                     session_id,
-                    total_amount,
                 )
-                order_id = order_row["id"]
+                order_number: int
+                order_total: float
+                if existing_order:
+                    order_id = existing_order["id"]
+                    updated = await conn.fetchrow(
+                        """
+                        UPDATE orders
+                        SET total_amount = total_amount + $1
+                        WHERE id = $2
+                        RETURNING order_number, total_amount
+                        """,
+                        batch_amount,
+                        order_id,
+                    )
+                    order_number = updated["order_number"]
+                    order_total = float(updated["total_amount"])
+                    logger.info(f"[add_tab_items] reusing existing order {order_id}, adding {batch_amount}")
+                else:
+                    order_row = await conn.fetchrow(
+                        """
+                        INSERT INTO orders (
+                            user_id, tenant_id, table_session_id,
+                            order_date, total_amount, status
+                        )
+                        VALUES ($1, $2, $3, NOW(), $4, 'pending')
+                        RETURNING id, order_number, total_amount
+                        """,
+                        user_id,
+                        tenant_id,
+                        session_id,
+                        batch_amount,
+                    )
+                    order_id = order_row["id"]
+                    order_number = order_row["order_number"]
+                    order_total = float(order_row["total_amount"])
+                    logger.info(f"[add_tab_items] created new order {order_id}")
 
                 # Insert order_items
                 for item in items:
@@ -689,9 +719,9 @@ async def add_tab_items(
             "success": True,
             "data": {
                 "order_id": str(order_id),
-                "order_number": order_row["order_number"],
+                "order_number": order_number,
                 "items_count": len(items),
-                "total_amount": total_amount,
+                "total_amount": order_total,
             },
         }
 
