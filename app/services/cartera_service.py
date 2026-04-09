@@ -358,17 +358,24 @@ async def get_cartera_aging(request: Request) -> dict:
                     FROM orders o
                     WHERE o.tenant_id = $1
                       AND o.payment_status IN ('credit', 'partial')
+                ),
+                bucketed AS (
+                    SELECT
+                        customer_id,
+                        outstanding,
+                        CASE
+                            WHEN days_out <= 30 THEN '0-30'
+                            WHEN days_out <= 60 THEN '31-60'
+                            WHEN days_out <= 90 THEN '61-90'
+                            ELSE '90+'
+                        END AS bucket
+                    FROM aged
                 )
                 SELECT
-                    CASE
-                        WHEN days_out <= 30 THEN '0-30'
-                        WHEN days_out <= 60 THEN '31-60'
-                        WHEN days_out <= 90 THEN '61-90'
-                        ELSE '90+'
-                    END                          AS bucket,
-                    COUNT(DISTINCT customer_id)  AS customer_count,
+                    bucket,
+                    COUNT(DISTINCT customer_id)   AS customer_count,
                     COALESCE(SUM(outstanding), 0) AS total_amount
-                FROM aged
+                FROM bucketed
                 GROUP BY bucket
                 ORDER BY
                     CASE bucket
