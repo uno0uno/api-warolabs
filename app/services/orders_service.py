@@ -305,10 +305,19 @@ async def bulk_update_order_status(
         async with get_db_connection() as conn:
             # Fetch current state of all orders before updating
             order_rows = await conn.fetch(
-                """SELECT id, status, order_number, table_session_id FROM orders
-                   WHERE id = ANY($1) AND tenant_id = $2""",
+                """SELECT id, status, order_number, table_session_id, pos_cart_id, payment_status
+                   FROM orders WHERE id = ANY($1) AND tenant_id = $2""",
                 ids, tenant_id
             )
+
+            # Block completed → pending for POS orders in bulk
+            if status == 'pending':
+                blocked = [str(r['id']) for r in order_rows if r['status'] == 'completed' and r['pos_cart_id']]
+                if blocked:
+                    raise APIError(
+                        "Las órdenes completadas del POS no pueden volver a pendiente. Use 'Cancelar' en su lugar.",
+                        status_code=400
+                    )
 
             from uuid import UUID as _UUID2
             cid = _UUID2(customer_id) if customer_id else None
@@ -336,6 +345,13 @@ async def bulk_update_order_status(
                     await _deduct_stock_for_status_update(conn, order_id_row, tenant_id, user_id, order_number)
                 elif old_status == 'completed' and status in ('cancelled', 'pending'):
                     await _return_stock_for_order_cancellation(conn, order_id_row, tenant_id, user_id, order_number)
+
+                # If cancelling a credit order, clear payment_status so it leaves cartera
+                if status == 'cancelled' and row['payment_status'] in ('credit', 'partial'):
+                    await conn.execute(
+                        "UPDATE orders SET payment_status = NULL WHERE id = $1",
+                        order_id_row
+                    )
 
                 # Mesa session (deduplicated by session id)
                 if status in ('completed', 'cancelled') and row['table_session_id']:
@@ -383,7 +399,8 @@ async def update_order_status(
 
         async with get_db_connection() as conn:
             row = await conn.fetchrow(
-                "SELECT id, status, order_number, table_session_id FROM orders WHERE id = $1 AND tenant_id = $2",
+                """SELECT id, status, order_number, table_session_id, pos_cart_id, payment_status
+                   FROM orders WHERE id = $1 AND tenant_id = $2""",
                 order_id, tenant_id
             )
             if not row:
@@ -392,6 +409,13 @@ async def update_order_status(
             old_status = row['status']
             order_number = int(row['order_number'])
 
+            # Block completed → pending for POS orders (no active table session to restore)
+            if old_status == 'completed' and status == 'pending' and row['pos_cart_id']:
+                raise APIError(
+                    "Las órdenes completadas del POS no pueden volver a pendiente. Use 'Cancelar' en su lugar.",
+                    status_code=400
+                )
+
             await conn.execute(
                 """UPDATE orders
                    SET status = $1,
@@ -399,6 +423,13 @@ async def update_order_status(
                    WHERE id = $3""",
                 status, payment_method, order_id
             )
+
+            # If cancelling a credit order, clear payment_status so it leaves cartera
+            if status == 'cancelled' and row['payment_status'] in ('credit', 'partial'):
+                await conn.execute(
+                    "UPDATE orders SET payment_status = NULL WHERE id = $1",
+                    order_id
+                )
 
             # Stock adjustment based on transition
             if old_status != status:
