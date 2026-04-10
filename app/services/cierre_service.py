@@ -7,7 +7,7 @@ Issue: https://github.com/uno0uno/warocol.com/issues/311
 import logging
 from typing import Optional
 from uuid import UUID
-from datetime import date
+from datetime import date, timedelta
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -26,6 +26,9 @@ async def _compute_preview(conn, tenant_id: UUID, period_start: date, period_end
     Runs the three aggregation queries (sales, gastos, open tables) and returns
     a plain dict. Used by both get_cierre_preview and create_cierre.
     """
+    # Add 1 day in Python — avoids asyncpg date+interval type mismatch with timestamptz
+    period_end_exclusive = period_end + timedelta(days=1)
+
     sales_row = await conn.fetchrow(
         """
         SELECT
@@ -39,9 +42,9 @@ async def _compute_preview(conn, tenant_id: UUID, period_start: date, period_end
         WHERE tenant_id = $1
           AND status = 'completed'
           AND order_date >= $2
-          AND order_date < $3 + INTERVAL '1 day'
+          AND order_date < $3
         """,
-        tenant_id, period_start, period_end,
+        tenant_id, period_start, period_end_exclusive,
     )
 
     gastos_row = await conn.fetchrow(
