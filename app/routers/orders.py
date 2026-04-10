@@ -337,6 +337,32 @@ async def delete_order_item(
     return await orders_service.delete_order_item(request, order_id, item_id)
 
 
+@router.get("/products-sold")
+async def get_products_sold(
+    request: Request,
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    category_id: Optional[str] = Query(None),
+    sort: Optional[str] = Query("qty_desc"),
+):
+    """
+    Get products sold report aggregated by product.
+
+    Query parameters:
+    - date_from: Start date (YYYY-MM-DD)
+    - date_to: End date (YYYY-MM-DD)
+    - category_id: Filter by category UUID
+    - sort: qty_desc | revenue_desc | name_asc
+    """
+    return await orders_service.get_products_sold(
+        request,
+        date_from=date_from,
+        date_to=date_to,
+        category_id=category_id,
+        sort=sort or "qty_desc",
+    )
+
+
 @router.delete("/{order_id}/items/{item_id}/modifiers/{modifier_id}")
 async def delete_order_item_modifier(
     request: Request,

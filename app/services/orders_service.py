@@ -2253,3 +2253,107 @@ async def create_manual_order(
     except Exception as e:
         logger.error(f"Error creating manual order: {str(e)}")
         raise APIError(f"Error creating manual order: {str(e)}", status_code=500)
+
+
+async def get_products_sold(
+    request: Request,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    category_id: Optional[str] = None,
+    sort: str = "qty_desc",
+) -> dict:
+    """
+    Get products sold aggregated by product, filtered by date range and category.
+    Only includes orders with status = 'completed'.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            where_conditions = ["o.tenant_id = $1", "o.status = 'completed'"]
+            params: List = [tenant_id]
+            param_count = 1
+
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
+
+            if parsed_date_from:
+                param_count += 1
+                where_conditions.append(
+                    f"o.order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')"
+                )
+                params.append(parsed_date_from)
+
+            if parsed_date_to:
+                param_count += 1
+                where_conditions.append(
+                    f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')"
+                )
+                params.append(parsed_date_to)
+
+            if category_id:
+                param_count += 1
+                where_conditions.append(f"p.category_id = ${param_count}::uuid")
+                params.append(category_id)
+
+            where_clause = " AND ".join(where_conditions)
+
+            sort_map = {
+                "qty_desc": "quantity_sold DESC",
+                "revenue_desc": "total_revenue DESC",
+                "name_asc": "product_name ASC",
+            }
+            order_by = sort_map.get(sort, "quantity_sold DESC")
+
+            query = f"""
+                SELECT
+                    p.id::text AS product_id,
+                    p.name AS product_name,
+                    p.category_id::text AS category_id,
+                    c.name AS category_name,
+                    SUM(oi.quantity)::int AS quantity_sold,
+                    SUM(oi.subtotal) AS total_revenue
+                FROM order_items oi
+                JOIN orders o ON o.id = oi.order_id
+                JOIN product p ON p.id = oi.product_id
+                LEFT JOIN categories c ON c.id = p.category_id
+                WHERE {where_clause}
+                GROUP BY p.id, p.name, p.category_id, c.name
+                ORDER BY {order_by}
+            """
+
+            rows = await conn.fetch(query, *params)
+
+            data = [
+                {
+                    "product_id": row["product_id"],
+                    "product_name": row["product_name"],
+                    "category_id": row["category_id"],
+                    "category_name": row["category_name"],
+                    "quantity_sold": row["quantity_sold"],
+                    "total_revenue": float(row["total_revenue"]),
+                }
+                for row in rows
+            ]
+
+            total_qty = sum(r["quantity_sold"] for r in data)
+            total_revenue = sum(r["total_revenue"] for r in data)
+
+            return {
+                "success": True,
+                "data": data,
+                "totals": {
+                    "quantity_sold": total_qty,
+                    "total_revenue": total_revenue,
+                },
+            }
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error getting products sold: {str(e)}")
+        raise APIError(f"Error getting products sold: {str(e)}", status_code=500)
