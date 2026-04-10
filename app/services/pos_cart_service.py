@@ -556,7 +556,8 @@ async def complete_pos_order(
     cart_id: UUID,
     payment_method: str,
     customer_id: UUID,
-    credit_due_date: Optional[date] = None
+    credit_due_date: Optional[date] = None,
+    payment_method_id: Optional[UUID] = None,
 ) -> dict:
     """
     Complete a POS order:
@@ -622,9 +623,10 @@ async def complete_pos_order(
                 order_query = """
                     INSERT INTO orders (
                         user_id, tenant_id, customer_id, payment_method, pos_cart_id,
-                        order_date, total_amount, status, payment_status, credit_due_date
+                        order_date, total_amount, status, payment_status, credit_due_date,
+                        payment_method_id
                     )
-                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8)
+                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9)
                     RETURNING id, order_number, created_at
                 """
                 order_row = await conn.fetchrow(
@@ -636,7 +638,8 @@ async def complete_pos_order(
                     cart_id,
                     cart_row['total_amount'],
                     payment_status,
-                    credit_due_date
+                    credit_due_date,
+                    payment_method_id,
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']

@@ -143,6 +143,7 @@ class CompleteOrderRequest(BaseModel):
     payment_method: str = Field(..., description="Payment method: cash, card, digital, credit")
     customer_id: UUID = Field(..., description="Customer ID to associate with the order")
     credit_due_date: Optional[date] = Field(None, description="Optional due date for credit orders (only used when payment_method='credit')")
+    payment_method_id: Optional[UUID] = Field(None, description="UUID of the selected payment_methods row (nullable if group-level only)")
 
 
 @router.post("/{cart_id}/complete")
@@ -164,5 +165,6 @@ async def complete_order(
         cart_id,
         order_data.payment_method,
         order_data.customer_id,
-        order_data.credit_due_date
+        order_data.credit_due_date,
+        order_data.payment_method_id,
     )

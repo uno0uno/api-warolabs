@@ -266,7 +266,7 @@ async def open_session(request: Request, table_id: UUID) -> dict:
         raise APIError(f"Error opening session: {e}", status_code=500)
 
 
-async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None) -> dict:
+async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None) -> dict:
     """
     Close the active session for a table.
     If payment_method is provided, marks all pending orders as completed with that payment method.
@@ -322,7 +322,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             payment_method = $2,
                             payment_status = $3,
                             credit_due_date = $4,
-                            customer_id = COALESCE($5::uuid, customer_id)
+                            customer_id = COALESCE($5::uuid, customer_id),
+                            payment_method_id = $6
                         WHERE table_session_id = $1 AND status = 'pending'
                         """,
                         session_row["id"],
@@ -330,6 +331,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         payment_status,
                         credit_due_date,
                         customer_id,
+                        payment_method_id,
                     )
                     logger.info(
                         f"[close_session] Marked {completed_count} orders as completed "
