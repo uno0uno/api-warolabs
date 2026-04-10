@@ -21,13 +21,24 @@ logger = logging.getLogger(__name__)
 # Shared — aggregation queries
 # ---------------------------------------------------------------------------
 
-async def _compute_preview(conn, tenant_id: UUID, period_start: date, period_end: date) -> dict:
+async def _compute_preview(
+    conn,
+    tenant_id: UUID,
+    period_start: date,
+    period_end: date,
+    completed_only: bool = False,
+) -> dict:
     """
     Runs the three aggregation queries (sales, gastos, open tables) and returns
     a plain dict. Used by both get_cierre_preview and create_cierre.
+
+    completed_only=True  → only 'completed' orders (used for the actual Cierre Z)
+    completed_only=False → 'completed' + 'pending' (used for Cierre X preview so
+                           open-table orders are visible)
     """
+    status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
     sales_row = await conn.fetchrow(
-        """
+        f"""
         SELECT
             COALESCE(SUM(total_amount), 0)                                              AS total_sales,
             COALESCE(COUNT(*), 0)                                                       AS items_sold,
@@ -37,7 +48,7 @@ async def _compute_preview(conn, tenant_id: UUID, period_start: date, period_end
             COALESCE(SUM(total_amount) FILTER (WHERE payment_method = 'credit'),  0)    AS total_credit
         FROM orders
         WHERE tenant_id = $1
-          AND status = 'completed'
+          {status_filter}
           AND (order_date AT TIME ZONE 'America/Bogota')::date >= $2
           AND (order_date AT TIME ZONE 'America/Bogota')::date <= $3
         """,
@@ -136,8 +147,8 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                     status_code=409,
                 )
 
-            # 2. Preview aggregation
-            preview = await _compute_preview(conn, tenant_id, body.period_start, body.period_end)
+            # 2. Preview aggregation (completed only — cash already received)
+            preview = await _compute_preview(conn, tenant_id, body.period_start, body.period_end, completed_only=True)
 
             # 3. Open tables check
             if preview["open_tables_count"] > 0 and not body.manager_override:
