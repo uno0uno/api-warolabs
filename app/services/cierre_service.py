@@ -5,7 +5,7 @@ Preview (Cierre X), create close (Cierre Z), list, and detail.
 Issue: https://github.com/uno0uno/warocol.com/issues/311
 """
 import logging
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 from datetime import date
 from fastapi import Request
@@ -91,6 +91,69 @@ async def _compute_preview(
         "cashExpected":     cash_expected,
         "openTablesCount":  int(open_tables_row["open_tables_count"]),
     }
+
+
+# ---------------------------------------------------------------------------
+# Shared — payment breakdown computation
+# ---------------------------------------------------------------------------
+
+async def _compute_breakdown_rows(
+    conn,
+    tenant_id: UUID,
+    period_start: date,
+    period_end: date,
+    completed_only: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Compute per-method payment totals for the period via UNION ALL:
+      - Modern orders (payment_method_id IS NOT NULL): join payment_methods + payment_method_groups
+      - Legacy orders (payment_method_id IS NULL): group by payment_method VARCHAR slug
+
+    Returns list of {group_slug, method_name, total}, excluding zero-total rows.
+    """
+    status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
+    rows = await conn.fetch(
+        f"""
+        SELECT
+            pmg.slug        AS group_slug,
+            pm.name         AS method_name,
+            COALESCE(SUM(o.total_amount), 0) AS total
+        FROM orders o
+        JOIN payment_methods pm ON pm.id = o.payment_method_id
+        JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+        WHERE o.tenant_id = $1
+          {status_filter}
+          AND (o.order_date AT TIME ZONE 'America/Bogota')::date >= $2
+          AND (o.order_date AT TIME ZONE 'America/Bogota')::date <= $3
+          AND o.payment_method_id IS NOT NULL
+        GROUP BY pmg.slug, pm.name
+
+        UNION ALL
+
+        SELECT
+            o.payment_method AS group_slug,
+            o.payment_method AS method_name,
+            COALESCE(SUM(o.total_amount), 0) AS total
+        FROM orders o
+        WHERE o.tenant_id = $1
+          {status_filter}
+          AND (o.order_date AT TIME ZONE 'America/Bogota')::date >= $2
+          AND (o.order_date AT TIME ZONE 'America/Bogota')::date <= $3
+          AND o.payment_method_id IS NULL
+          AND o.payment_method IS NOT NULL
+        GROUP BY o.payment_method
+        """,
+        tenant_id, period_start, period_end,
+    )
+    return [
+        {
+            "group_slug":  row["group_slug"],
+            "method_name": row["method_name"],
+            "total":       float(row["total"]),
+        }
+        for row in rows
+        if float(row["total"]) > 0
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +262,22 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 body.notes,
             )
 
+            # 6. Compute and persist payment breakdown
+            breakdown_rows = await _compute_breakdown_rows(
+                conn, tenant_id, body.period_start, body.period_end, completed_only=True
+            )
+            if breakdown_rows:
+                await conn.execute(
+                    """
+                    INSERT INTO cierre_payment_breakdown (cierre_id, group_slug, method_name, total)
+                    SELECT $1, unnest($2::text[]), unnest($3::text[]), unnest($4::numeric[])
+                    """,
+                    summary_row["id"],
+                    [r["group_slug"] for r in breakdown_rows],
+                    [r["method_name"] for r in breakdown_rows],
+                    [r["total"] for r in breakdown_rows],
+                )
+
         return {
             "success": True,
             "data": {
@@ -219,6 +298,7 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 "cashDifference":       cash_difference,
                 "notes":                body.notes,
                 "closedAt":             closed_at.isoformat(),
+                "breakdown":            breakdown_rows,
             },
         }
 
@@ -310,10 +390,30 @@ async def get_cierre(request: Request, cierre_id: UUID) -> dict:
                 cierre_id, tenant_id,
             )
 
-        if not row:
-            raise APIError("Cierre no encontrado", status_code=404)
+            if not row:
+                raise APIError("Cierre no encontrado", status_code=404)
 
-        return {"success": True, "data": _row_to_dict(row)}
+            breakdown_rows = await conn.fetch(
+                """
+                SELECT group_slug, method_name, total
+                FROM cierre_payment_breakdown
+                WHERE cierre_id = $1
+                ORDER BY group_slug, method_name
+                """,
+                row["id"],
+            )
+            breakdown = [
+                {
+                    "groupSlug":  r["group_slug"],
+                    "methodName": r["method_name"],
+                    "total":      float(r["total"]),
+                }
+                for r in breakdown_rows
+            ]
+
+        data = _row_to_dict(row)
+        data["breakdown"] = breakdown
+        return {"success": True, "data": data}
 
     except (AuthenticationError, APIError):
         raise
