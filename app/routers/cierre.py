@@ -18,6 +18,7 @@ async def cierre_preview(
     request: Request,
     period_start: date = Query(..., alias="period_start"),
     period_end: date = Query(..., alias="period_end"),
+    completed_only: bool = Query(False, alias="completed_only"),
 ):
     """
     Cierre X — non-destructive daily summary.
@@ -26,7 +27,7 @@ async def cierre_preview(
     cash_expected, and open_tables_count.
     Safe to call multiple times — no writes.
     """
-    return await cierre_service.get_cierre_preview(request, period_start, period_end)
+    return await cierre_service.get_cierre_preview(request, period_start, period_end, completed_only)
 
 
 @router.post("")

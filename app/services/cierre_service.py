@@ -101,6 +101,7 @@ async def get_cierre_preview(
     request: Request,
     period_start: date,
     period_end: date,
+    completed_only: bool = False,
 ) -> dict:
     try:
         session_context = require_valid_session(request)
@@ -109,7 +110,7 @@ async def get_cierre_preview(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection(use_transaction=False) as conn:
-            preview = await _compute_preview(conn, tenant_id, period_start, period_end)
+            preview = await _compute_preview(conn, tenant_id, period_start, period_end, completed_only=completed_only)
 
         return {"success": True, "data": preview}
 
