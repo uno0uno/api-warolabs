@@ -81,15 +81,15 @@ async def _compute_preview(
     cash_expected = total_cash - gastos_efectivo
 
     return {
-        "total_sales":       float(sales_row["total_sales"]),
-        "items_sold":        int(sales_row["items_sold"]),
-        "total_cash":        total_cash,
-        "total_card":        float(sales_row["total_card"]),
-        "total_digital":     float(sales_row["total_digital"]),
-        "total_credit":      float(sales_row["total_credit"]),
-        "gastos_efectivo":   gastos_efectivo,
-        "cash_expected":     cash_expected,
-        "open_tables_count": int(open_tables_row["open_tables_count"]),
+        "totalSales":       float(sales_row["total_sales"]),
+        "itemsSold":        int(sales_row["items_sold"]),
+        "totalCash":        total_cash,
+        "totalCard":        float(sales_row["total_card"]),
+        "totalDigital":     float(sales_row["total_digital"]),
+        "totalCredit":      float(sales_row["total_credit"]),
+        "gastosEfectivo":   gastos_efectivo,
+        "cashExpected":     cash_expected,
+        "openTablesCount":  int(open_tables_row["open_tables_count"]),
     }
 
 
@@ -152,9 +152,9 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             preview = await _compute_preview(conn, tenant_id, body.period_start, body.period_end, completed_only=True)
 
             # 3. Open tables check
-            if preview["open_tables_count"] > 0 and not body.manager_override:
+            if preview["openTablesCount"] > 0 and not body.manager_override:
                 raise APIError(
-                    f"Hay {preview['open_tables_count']} mesa(s) con cuenta abierta. "
+                    f"Hay {preview['openTablesCount']} mesa(s) con cuenta abierta. "
                     "Use managerOverride: true para continuar.",
                     status_code=409,
                 )
@@ -172,7 +172,7 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             closed_at = period_row["closed_at"]
 
             # 5. INSERT closing_summary
-            cash_difference = body.cash_counted - preview["cash_expected"]
+            cash_difference = body.cash_counted - preview["cashExpected"]
             summary_row = await conn.fetchrow(
                 """
                 INSERT INTO closing_summary (
@@ -191,10 +191,10 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 RETURNING id, created_at
                 """,
                 period_id, tenant_id,
-                preview["total_sales"], preview["items_sold"],
-                preview["total_cash"], preview["total_card"],
-                preview["total_digital"], preview["total_credit"],
-                preview["gastos_efectivo"], preview["cash_expected"],
+                preview["totalSales"], preview["itemsSold"],
+                preview["totalCash"], preview["totalCard"],
+                preview["totalDigital"], preview["totalCredit"],
+                preview["gastosEfectivo"], preview["cashExpected"],
                 body.cash_counted, cash_difference,
                 body.notes,
             )
