@@ -38,6 +38,8 @@ async def list_cartera_customers(
     ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    days_min: Optional[int] = Query(None, description="Filter by min days outstanding (aging bucket lower bound)"),
+    days_max: Optional[int] = Query(None, description="Filter by max days outstanding (aging bucket upper bound)"),
 ):
     """
     Paginated list of customers with outstanding credit balance.
@@ -50,6 +52,8 @@ async def list_cartera_customers(
     - oldest_order_days: days since the oldest unpaid order became overdue
     - order_count: number of open credit orders
     - status: current | overdue
+
+    Aging filter: days_min / days_max filter by oldest_order_days range
     """
     return await cartera_service.list_cartera_customers(
         request,
@@ -57,6 +61,8 @@ async def list_cartera_customers(
         sort=sort or "balance_desc",
         limit=limit,
         offset=offset,
+        days_min=days_min,
+        days_max=days_max,
     )
 
 

@@ -4,7 +4,7 @@ Portfolio summary, aging report, and per-customer credit detail.
 
 Issue: https://github.com/uno0uno/warocol.com/issues/308
 """
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from uuid import UUID
 from fastapi import Request
 from app.database import get_db_connection
@@ -93,13 +93,17 @@ async def list_cartera_customers(
     sort: str = "balance_desc",
     limit: int = 50,
     offset: int = 0,
+    days_min: Optional[int] = None,
+    days_max: Optional[int] = None,
 ) -> dict:
     """
     Paginated list of customers with outstanding credit balance.
     Excludes customers whose ALL credit orders have been fully paid.
 
-    status: all | overdue | current
-    sort:   balance_desc | name_asc | days_desc
+    status:   all | overdue | current
+    sort:     balance_desc | name_asc | days_desc
+    days_min: filter customers with oldest_order_days >= days_min
+    days_max: filter customers with oldest_order_days <= days_max
     """
     try:
         session_context = require_valid_session(request)
@@ -114,6 +118,20 @@ async def list_cartera_customers(
             having_filter = f"HAVING NOT BOOL_OR({_OVERDUE_EXPR})"
         else:
             having_filter = ""
+
+        # Build aging filter (applied after GROUP BY via HAVING)
+        aging_filters = []
+        if days_min is not None:
+            aging_filters.append(f"MAX({_DAYS_OUTSTANDING_EXPR}) >= {int(days_min)}")
+        if days_max is not None:
+            aging_filters.append(f"MAX({_DAYS_OUTSTANDING_EXPR}) <= {int(days_max)}")
+
+        if aging_filters:
+            aging_clause = " AND ".join(aging_filters)
+            if having_filter:
+                having_filter = f"{having_filter} AND {aging_clause}"
+            else:
+                having_filter = f"HAVING {aging_clause}"
 
         # Build ORDER BY clause
         sort_map = {
