@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, admin_ingredients, menu, tables, credit, cartera, cierre
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, admin_ingredients, menu, tables, credit, cartera, cierre, payment_methods
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -201,6 +201,8 @@ app.include_router(admin_ingredients.router)  # /admin/ingredients — hierarchy
 app.include_router(credit.router)   # /credit — credit sales payments API (issue #294)
 app.include_router(cartera.router)  # /cartera — portfolio & aging report API (issue #308)
 app.include_router(cierre.router)   # /cierre — daily accounting close (issue #311)
+app.include_router(payment_methods.finanzas_router)  # /finanzas/metodos-pago — payment method groups & methods (issue #331)
+app.include_router(payment_methods.pos_router)        # /pos/payment-methods — POS read-only (issue #331)
 
 @app.get("/")
 async def root():
