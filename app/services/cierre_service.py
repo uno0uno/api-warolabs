@@ -233,16 +233,29 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
 # GET /cierre
 # ---------------------------------------------------------------------------
 
-async def list_cierres(request: Request) -> dict:
+async def list_cierres(
+    request: Request,
+    period_start: Optional[date] = None,
+    period_end: Optional[date] = None,
+) -> dict:
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
+        date_filter = ""
+        params = [tenant_id]
+        if period_start:
+            params.append(period_start)
+            date_filter += f" AND ap.period_start >= ${len(params)}"
+        if period_end:
+            params.append(period_end)
+            date_filter += f" AND ap.period_end <= ${len(params)}"
+
         async with get_db_connection(use_transaction=False) as conn:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT
                     cs.id, cs.accounting_period_id, cs.tenant_id,
                     ap.period_start, ap.period_end, ap.closed_at,
@@ -253,9 +266,10 @@ async def list_cierres(request: Request) -> dict:
                 FROM closing_summary cs
                 JOIN accounting_period ap ON ap.id = cs.accounting_period_id
                 WHERE cs.tenant_id = $1
+                {date_filter}
                 ORDER BY ap.period_start DESC
                 """,
-                tenant_id,
+                *params,
             )
 
         data = [_row_to_dict(row) for row in rows]

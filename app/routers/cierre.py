@@ -5,6 +5,7 @@ Daily accounting close: preview (Cierre X) and final close wizard (Cierre Z).
 Issue: https://github.com/uno0uno/warocol.com/issues/311
 """
 from fastapi import APIRouter, Request, Query
+from typing import Optional
 from uuid import UUID
 from datetime import date
 from app.models.cierre import CierreCreate
@@ -44,11 +45,16 @@ async def create_cierre(request: Request, body: CierreCreate):
 
 
 @router.get("")
-async def list_cierres(request: Request):
+async def list_cierres(
+    request: Request,
+    period_start: Optional[date] = Query(None, alias="period_start"),
+    period_end:   Optional[date] = Query(None, alias="period_end"),
+):
     """
-    List all closed periods for the tenant, ordered by period_start DESC.
+    List closed periods for the tenant, ordered by period_start DESC.
+    Optionally filter by period_start >= period_start and period_end <= period_end.
     """
-    return await cierre_service.list_cierres(request)
+    return await cierre_service.list_cierres(request, period_start, period_end)
 
 
 @router.get("/mensual")
