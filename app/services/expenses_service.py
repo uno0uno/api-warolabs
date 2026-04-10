@@ -107,6 +107,7 @@ async def get_expenses_list(
                     e.is_recurring,
                     e.frequency,
                     e.recurring_end_date,
+                    e.payment_method,
                     c.id as cat_id,
                     c.category_code,
                     c.category_name,
@@ -224,6 +225,7 @@ async def get_expenses_list(
                     isRecurring=row['is_recurring'],
                     frequency=row['frequency'],
                     recurringEndDate=row['recurring_end_date'],
+                    paymentMethod=row['payment_method'],
                     category=category
                 ))
                 
@@ -276,6 +278,7 @@ async def get_expense_by_id(
                     e.is_recurring,
                     e.frequency,
                     e.recurring_end_date,
+                    e.payment_method,
                     c.id as cat_id,
                     c.category_code,
                     c.category_name,
@@ -524,6 +527,7 @@ async def create_expense(
                     e.is_recurring,
                     e.frequency,
                     e.recurring_end_date,
+                    e.payment_method,
                     c.id as cat_id,
                     c.category_code,
                     c.category_name,
@@ -555,6 +559,7 @@ async def create_expense(
                 isRecurring=full_expense['is_recurring'],
                 frequency=full_expense['frequency'],
                 recurringEndDate=full_expense['recurring_end_date'],
+                paymentMethod=full_expense['payment_method'],
                 category=category
             )
             
@@ -621,8 +626,9 @@ async def create_expense_json(
                     source_system,
                     is_recurring,
                     frequency,
-                    recurring_end_date
-                ) VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9)
+                    recurring_end_date,
+                    payment_method
+                ) VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9, $10)
                 RETURNING id, created_at
             """,
                 tenant_id,
@@ -633,7 +639,8 @@ async def create_expense_json(
                 expense_data.transaction_date,
                 expense_data.is_recurring,
                 expense_data.frequency,
-                expense_data.recurring_end_date
+                expense_data.recurring_end_date,
+                expense_data.payment_method or 'cash'
             )
 
             expense_id = row['id']
@@ -653,6 +660,7 @@ async def create_expense_json(
                     e.is_recurring,
                     e.frequency,
                     e.recurring_end_date,
+                    e.payment_method,
                     c.id as cat_id,
                     c.category_code,
                     c.category_name,
@@ -684,6 +692,7 @@ async def create_expense_json(
                 isRecurring=full_expense['is_recurring'],
                 frequency=full_expense['frequency'],
                 recurringEndDate=full_expense['recurring_end_date'],
+                paymentMethod=full_expense['payment_method'],
                 category=category
             )
 
@@ -969,6 +978,7 @@ async def update_expense(
                     e.is_recurring,
                     e.frequency,
                     e.recurring_end_date,
+                    e.payment_method,
                     c.id as cat_id,
                     c.category_code,
                     c.category_name,
@@ -1000,6 +1010,7 @@ async def update_expense(
                 isRecurring=full_expense['is_recurring'],
                 frequency=full_expense['frequency'],
                 recurringEndDate=full_expense['recurring_end_date'],
+                paymentMethod=full_expense['payment_method'],
                 category=category
             )
             
@@ -1083,6 +1094,11 @@ async def update_expense_json(
                 update_values.append(expense_data.recurring_end_date)
                 param_count += 1
 
+            if expense_data.payment_method is not None:
+                update_fields.append(f"payment_method = ${param_count}")
+                update_values.append(expense_data.payment_method)
+                param_count += 1
+
             if update_fields:
                 update_values.extend([expense_id, tenant_id])
                 await conn.execute(f"""
@@ -1097,6 +1113,7 @@ async def update_expense_json(
                     e.id, e.tenant_id, e.expense_category_id, e.month_year,
                     e.amount, e.description, e.source_system, e.created_at,
                     e.transaction_date, e.is_recurring, e.frequency, e.recurring_end_date,
+                    e.payment_method,
                     c.id as cat_id, c.category_code, c.category_name,
                     c.description as cat_description, c.is_active as cat_active
                 FROM tenant_expenses e
@@ -1125,6 +1142,7 @@ async def update_expense_json(
                 isRecurring=full_expense['is_recurring'],
                 frequency=full_expense['frequency'],
                 recurringEndDate=full_expense['recurring_end_date'],
+                paymentMethod=full_expense['payment_method'],
                 category=category
             )
 
