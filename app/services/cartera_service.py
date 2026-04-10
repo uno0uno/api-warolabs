@@ -390,10 +390,10 @@ async def get_cartera_aging(request: Request) -> dict:
 
         # Ensure all 4 buckets are present even if empty
         bucket_map = {
-            "0-30":  {"label": "0-30 days",  "customer_count": 0, "total_amount": 0.0},
-            "31-60": {"label": "31-60 days", "customer_count": 0, "total_amount": 0.0},
-            "61-90": {"label": "61-90 days", "customer_count": 0, "total_amount": 0.0},
-            "90+":   {"label": "90+ days",   "customer_count": 0, "total_amount": 0.0},
+            "0-30":  {"label": "0–30 días",  "customer_count": 0, "total_amount": 0.0},
+            "31-60": {"label": "31–60 días", "customer_count": 0, "total_amount": 0.0},
+            "61-90": {"label": "61–90 días", "customer_count": 0, "total_amount": 0.0},
+            "90+":   {"label": "90+ días",   "customer_count": 0, "total_amount": 0.0},
         }
         for row in rows:
             bucket_map[row["bucket"]]["customer_count"] = int(row["customer_count"])
