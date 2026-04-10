@@ -1044,6 +1044,36 @@ async def get_orders_dashboard(
             main_sales = float(row['main_sales'])
             commission_savings = round(main_sales * (commission_rate / 100))
 
+            # Payment breakdown — COALESCE pattern handles both modern (FK) and legacy (VARCHAR) orders
+            breakdown_rows = await conn.fetch(
+                """
+                SELECT
+                    COALESCE(pmg.slug, o.payment_method)  AS group_slug,
+                    COALESCE(pmg.name, o.payment_method)  AS group_name,
+                    COALESCE(SUM(o.total_amount), 0)       AS total,
+                    COUNT(*)                               AS order_count
+                FROM orders o
+                LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
+                LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+                WHERE o.tenant_id = $1
+                  AND o.status = 'completed'
+                  AND (o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
+                GROUP BY COALESCE(pmg.slug, o.payment_method), COALESCE(pmg.name, o.payment_method)
+                ORDER BY total DESC
+                """,
+                tenant_id,
+            )
+            payment_breakdown = [
+                {
+                    "group_slug":  r["group_slug"],
+                    "group_name":  r["group_name"],
+                    "total":       float(r["total"]),
+                    "order_count": int(r["order_count"]),
+                }
+                for r in breakdown_rows
+                if r["group_slug"] is not None
+            ]
+
             return {
                 "success": True,
                 "data": {
@@ -1062,6 +1092,7 @@ async def get_orders_dashboard(
                     },
                     "commission_savings": commission_savings,
                     "commission_rate": commission_rate,
+                    "payment_breakdown": payment_breakdown,
                 }
             }
 

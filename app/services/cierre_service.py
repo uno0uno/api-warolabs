@@ -174,6 +174,8 @@ async def get_cierre_preview(
 
         async with get_db_connection(use_transaction=False) as conn:
             preview = await _compute_preview(conn, tenant_id, period_start, period_end, completed_only=completed_only)
+            breakdown = await _compute_breakdown_rows(conn, tenant_id, period_start, period_end, completed_only=completed_only)
+            preview["breakdown"] = breakdown
 
         return {"success": True, "data": preview}
 
