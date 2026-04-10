@@ -51,6 +51,19 @@ async def list_cierres(request: Request):
     return await cierre_service.list_cierres(request)
 
 
+@router.get("/mensual")
+async def get_cierre_mensual(
+    request: Request,
+    year:  int = Query(..., alias="year"),
+    month: int = Query(..., alias="month"),
+):
+    """
+    Monthly close report — read-only aggregation of daily closes for the given month.
+    Returns totals + list of individual daily closes + coverage metadata.
+    """
+    return await cierre_service.get_cierre_mensual(request, year, month)
+
+
 @router.get("/{cierre_id}")
 async def get_cierre(request: Request, cierre_id: UUID):
     """

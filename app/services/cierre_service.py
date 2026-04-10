@@ -207,14 +207,14 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 "tenantId":             str(tenant_id),
                 "periodStart":          body.period_start.isoformat(),
                 "periodEnd":            body.period_end.isoformat(),
-                "totalSales":           preview["total_sales"],
-                "itemsSold":            preview["items_sold"],
-                "totalCash":            preview["total_cash"],
-                "totalCard":            preview["total_card"],
-                "totalDigital":         preview["total_digital"],
-                "totalCredit":          preview["total_credit"],
-                "gastosEfectivo":       preview["gastos_efectivo"],
-                "cashExpected":         preview["cash_expected"],
+                "totalSales":           preview["totalSales"],
+                "itemsSold":            preview["itemsSold"],
+                "totalCash":            preview["totalCash"],
+                "totalCard":            preview["totalCard"],
+                "totalDigital":         preview["totalDigital"],
+                "totalCredit":          preview["totalCredit"],
+                "gastosEfectivo":       preview["gastosEfectivo"],
+                "cashExpected":         preview["cashExpected"],
                 "cashCounted":          body.cash_counted,
                 "cashDifference":       cash_difference,
                 "notes":                body.notes,
@@ -306,6 +306,70 @@ async def get_cierre(request: Request, cierre_id: UUID) -> dict:
     except Exception as exc:
         logger.error(f"Error in get_cierre: {exc}")
         raise APIError(f"Error in get_cierre: {exc}", status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# GET /cierre/mensual
+# ---------------------------------------------------------------------------
+
+async def get_cierre_mensual(request: Request, year: int, month: int) -> dict:
+    import calendar
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        # First and last day of the requested month
+        _, last_day = calendar.monthrange(year, month)
+        period_start = date(year, month, 1)
+        period_end   = date(year, month, last_day)
+
+        async with get_db_connection(use_transaction=False) as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    cs.id, cs.accounting_period_id, cs.tenant_id,
+                    ap.period_start, ap.period_end, ap.closed_at,
+                    cs.total_sales, cs.items_sold,
+                    cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
+                    cs.gastos_efectivo, cs.cash_expected, cs.cash_counted, cs.cash_difference,
+                    cs.notes
+                FROM closing_summary cs
+                JOIN accounting_period ap ON ap.id = cs.accounting_period_id
+                WHERE cs.tenant_id = $1
+                  AND ap.period_start >= $2
+                  AND ap.period_end   <= $3
+                ORDER BY ap.period_start ASC
+                """,
+                tenant_id, period_start, period_end,
+            )
+
+        daily = [_row_to_dict(row) for row in rows]
+        days_in_month = last_day
+
+        totals = {
+            "totalSales":     sum(r["totalSales"]     for r in daily),
+            "itemsSold":      sum(r["itemsSold"]       for r in daily),
+            "totalCash":      sum(r["totalCash"]       for r in daily),
+            "totalCard":      sum(r["totalCard"]       for r in daily),
+            "totalDigital":   sum(r["totalDigital"]    for r in daily),
+            "totalCredit":    sum(r["totalCredit"]     for r in daily),
+            "gastosEfectivo": sum(r["gastosEfectivo"]  for r in daily),
+            "cashExpected":   sum(r["cashExpected"]    for r in daily),
+            "cashCounted":    sum(r["cashCounted"]     for r in daily),
+            "cashDifference": sum(r["cashDifference"]  for r in daily),
+            "daysClosed":     len(daily),
+            "daysInMonth":    days_in_month,
+        }
+
+        return {"success": True, "data": {"totals": totals, "daily": daily}}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in get_cierre_mensual: {exc}")
+        raise APIError(f"Error in get_cierre_mensual: {exc}", status_code=500)
 
 
 # ---------------------------------------------------------------------------
