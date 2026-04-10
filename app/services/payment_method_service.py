@@ -228,7 +228,7 @@ async def create_method(request: Request, body: CreateMethodRequest) -> dict:
         # Verify group is visible to tenant
         group = await conn.fetchrow(
             """
-            SELECT id FROM payment_method_groups
+            SELECT id, slug FROM payment_method_groups
             WHERE id = $1 AND (tenant_id IS NULL OR tenant_id = $2)
             """,
             group_id,
@@ -236,6 +236,12 @@ async def create_method(request: Request, body: CreateMethodRequest) -> dict:
         )
         if group is None:
             raise NotFoundError("Payment method group not found.")
+
+        if group["slug"] == "cash":
+            raise ValidationError(
+                "Cannot add methods to the Efectivo group. "
+                "Cash is a single built-in payment method."
+            )
 
         try:
             row = await conn.fetchrow(
