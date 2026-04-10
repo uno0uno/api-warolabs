@@ -13,7 +13,6 @@ class CierreCreate(BaseModel):
     period_end: date = Field(alias='periodEnd')
     cash_counted: float = Field(alias='cashCounted')
     notes: Optional[str] = None
-    manager_override: Optional[bool] = Field(False, alias='managerOverride')
 
     class Config:
         populate_by_name = True

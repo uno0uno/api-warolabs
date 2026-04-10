@@ -152,10 +152,10 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             preview = await _compute_preview(conn, tenant_id, body.period_start, body.period_end, completed_only=True)
 
             # 3. Open tables check
-            if preview["openTablesCount"] > 0 and not body.manager_override:
+            if preview["openTablesCount"] > 0:
                 raise APIError(
                     f"Hay {preview['openTablesCount']} mesa(s) con cuenta abierta. "
-                    "Use managerOverride: true para continuar.",
+                    "Cierra todas las mesas antes de registrar el cierre del día.",
                     status_code=409,
                 )
 
