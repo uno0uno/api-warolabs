@@ -248,14 +248,29 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
 
         async with get_db_connection(use_transaction=True) as conn:
             # 1. Overlap check
-            overlap = await conn.fetchrow(
-                """
-                SELECT id FROM accounting_period
-                WHERE tenant_id = $1
-                  AND NOT (period_end < $2 OR period_start > $3)
-                """,
-                tenant_id, body.period_start, body.period_end,
-            )
+            # When exact timestamps are provided, compare TIMESTAMPTZ windows so that
+            # two shifts on the same calendar date but different hours don't conflict.
+            if body.period_start_time and body.period_end_time:
+                overlap = await conn.fetchrow(
+                    """
+                    SELECT id FROM accounting_period
+                    WHERE tenant_id = $1
+                      AND period_start_time IS NOT NULL
+                      AND period_end_time   IS NOT NULL
+                      AND NOT (period_end_time < $2 OR period_start_time > $3)
+                    """,
+                    tenant_id, body.period_start_time, body.period_end_time,
+                )
+            else:
+                overlap = await conn.fetchrow(
+                    """
+                    SELECT id FROM accounting_period
+                    WHERE tenant_id = $1
+                      AND period_start_time IS NULL
+                      AND NOT (period_end < $2 OR period_start > $3)
+                    """,
+                    tenant_id, body.period_start, body.period_end,
+                )
             if overlap:
                 raise APIError(
                     "Ya existe un cierre para este período o uno que se superpone.",
@@ -271,7 +286,10 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             )
 
             # 3. Open tables check — skip for past periods (mesas actuales no pertenecen al período)
-            is_past_period = body.period_end < date.today()
+            # Use Bogota date so the check is correct even when the server runs in UTC.
+            from zoneinfo import ZoneInfo
+            today_bogota = datetime.now(ZoneInfo("America/Bogota")).date()
+            is_past_period = body.period_end < today_bogota
             if not is_past_period and preview["openTablesCount"] > 0:
                 raise APIError(
                     f"Hay {preview['openTablesCount']} mesa(s) con cuenta abierta. "
