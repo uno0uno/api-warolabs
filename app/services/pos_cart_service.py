@@ -962,9 +962,14 @@ async def complete_pos_order(
                     async with get_db_connection() as _profile_conn:
                         _profile_row = await _profile_conn.fetchrow(
                             """
-                            SELECT display_name, address, city, phone_number
-                            FROM tenant_public_profiles
-                            WHERE tenant_id = $1
+                            SELECT
+                                COALESCE(p.display_name, t.name) AS display_name,
+                                p.address,
+                                p.city,
+                                p.phone_number
+                            FROM tenants t
+                            LEFT JOIN tenant_public_profiles p ON p.tenant_id = t.id
+                            WHERE t.id = $1
                             """,
                             _tenant_id
                         )
