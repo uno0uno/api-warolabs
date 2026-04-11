@@ -12,6 +12,8 @@ from app.models.customer import (
     CustomerSearchResponse,
     CustomerSummary,
     CustomerQuerySearchResponse,
+    CustomerUpdate,
+    CustomerUpdateResponse,
     TopProduct,
     CustomerInsights,
     CustomerInsightsResponse
@@ -434,3 +436,73 @@ async def get_customer_insights(
     except Exception as e:
         logger.error(f"Error in get_customer_insights: {str(e)}")
         raise APIError(f"Error fetching customer insights: {str(e)}", status_code=500)
+
+
+async def update_customer(
+    request: Request,
+    customer_id: UUID,
+    update_data: CustomerUpdate,
+) -> CustomerUpdateResponse:
+    """
+    Update name, email, and/or phone_number of a customer profile.
+    Only fields explicitly provided (non-None) are updated.
+    Scoped to the current tenant — only updates customers who are members.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise APIError("No tenant context found", status_code=400)
+
+        # Verify the customer belongs to this tenant
+        async with get_db_connection() as conn:
+            member_check = await conn.fetchrow(
+                """
+                SELECT p.id FROM profile p
+                JOIN tenant_members tm ON tm.user_id = p.id
+                WHERE p.id = $1 AND tm.tenant_id = $2 AND tm.role = 'customer'
+                """,
+                customer_id, tenant_id
+            )
+            if not member_check:
+                raise APIError("Customer not found", status_code=404)
+
+            # Build SET clause dynamically — only update provided fields
+            fields = {}
+            if update_data.name is not None:
+                fields['name'] = update_data.name.strip() or None
+            if update_data.email is not None:
+                fields['email'] = update_data.email.strip() or None
+            if update_data.phone_number is not None:
+                phone = update_data.phone_number.strip().replace(' ', '').replace('-', '')
+                fields['phone_number'] = phone
+
+            if not fields:
+                raise APIError("No fields to update", status_code=400)
+
+            set_parts = [f"{col} = ${i+2}" for i, col in enumerate(fields)]
+            values = list(fields.values())
+            query = f"""
+                UPDATE profile
+                SET {', '.join(set_parts)}, updated_at = NOW()
+                WHERE id = $1
+                RETURNING id, phone_number, name, email, created_at, updated_at
+            """
+            row = await conn.fetchrow(query, customer_id, *values)
+
+        updated = Customer(
+            id=row['id'],
+            phone_number=row['phone_number'],
+            name=row['name'],
+            email=row['email'],
+            created_at=row['created_at'],
+            updated_at=row['updated_at'],
+        )
+        return CustomerUpdateResponse(success=True, data=updated)
+
+    except APIError:
+        raise
+    except Exception as e:
+        logger.error(f"Error in update_customer: {str(e)}")
+        raise APIError(f"Error updating customer: {str(e)}", status_code=500)

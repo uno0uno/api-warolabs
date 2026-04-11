@@ -7,14 +7,17 @@ from app.services.customers_service import (
     search_or_create_customer,
     search_customer_by_phone,
     search_customers_by_query,
-    get_customer_insights
+    get_customer_insights,
+    update_customer,
 )
 from app.models.customer import (
     CustomerSearchOrCreate,
     CustomerResponse,
     CustomerSearchResponse,
     CustomerQuerySearchResponse,
-    CustomerInsightsResponse
+    CustomerInsightsResponse,
+    CustomerUpdate,
+    CustomerUpdateResponse,
 )
 
 router = APIRouter()
@@ -92,6 +95,19 @@ async def search_customers_by_query_endpoint(
     ```
     """
     return await search_customers_by_query(request, q, limit)
+
+
+@router.patch("/{customer_id}", response_model=CustomerUpdateResponse, status_code=200)
+async def update_customer_endpoint(
+    request: Request,
+    customer_id: UUID,
+    update_data: CustomerUpdate,
+):
+    """
+    Update name, email, and/or phone_number of a customer.
+    Only provided fields are updated. Customer must belong to the current tenant.
+    """
+    return await update_customer(request, customer_id, update_data)
 
 
 @router.get("/{customer_id}/insights", response_model=CustomerInsightsResponse, status_code=200)

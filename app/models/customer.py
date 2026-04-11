@@ -54,6 +54,18 @@ class CustomerSummary(BaseModel):
     email: Optional[str] = None
 
 
+class CustomerUpdate(BaseModel):
+    """Editable customer fields — all optional, only provided fields are updated"""
+    name: Optional[str] = Field(None, max_length=255)
+    email: Optional[str] = Field(None)
+    phone_number: Optional[str] = Field(None, min_length=7, max_length=20)
+
+
+class CustomerUpdateResponse(BaseModel):
+    success: bool = True
+    data: Customer
+
+
 class CustomerQuerySearchResponse(BaseModel):
     """Response for partial-match customer search"""
     success: bool = True
