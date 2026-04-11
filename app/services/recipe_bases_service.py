@@ -502,6 +502,11 @@ async def update_recipe_base_type(
                         ingredient_data.base_quantity,
                         ingredient_data.unit
                     )
+                    if base_qty >= 1_000_000_000_000:
+                        raise APIError(
+                            "La cantidad convertida es demasiado grande. Verifica la unidad y la cantidad ingresada.",
+                            status_code=422,
+                        )
                     await conn.execute(
                         insert_ingredient_query,
                         recipe_base_id,
