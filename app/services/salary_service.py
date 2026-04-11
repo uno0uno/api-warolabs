@@ -338,17 +338,17 @@ async def configure_employee_salary(
 
         # Calculate base and total salary
         if config.salary_type == 'smmlv':
-            if not config.minimum_wage_multiplier:
+            if config.minimum_wage_multiplier is None:
                 raise ValidationError("minimum_wage_multiplier is required for SMMLV salary type")
             base_salary = config.minimum_wage_multiplier * smmlv
             total_salary = base_salary
         elif config.salary_type == 'hourly':
-            if not config.hourly_rate:
+            if config.hourly_rate is None:
                 raise ValidationError("hourly_rate is required for hourly salary type")
             base_salary = config.hourly_rate
             total_salary = base_salary
         else:  # fixed
-            if not config.fixed_amount:
+            if config.fixed_amount is None:
                 raise ValidationError("fixed_amount is required for fixed salary type")
             base_salary = config.fixed_amount
             total_salary = base_salary
