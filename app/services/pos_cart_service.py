@@ -953,6 +953,29 @@ async def complete_pos_order(
         # Send receipt email if requested — fire-and-forget, never blocks or fails the order
         if receipt_email:
             try:
+                # Look up tenant public profile for business branding in the receipt
+                _business_name = None
+                _business_address = None
+                _business_city = None
+                _business_phone = None
+                try:
+                    async with get_db_connection() as _profile_conn:
+                        _profile_row = await _profile_conn.fetchrow(
+                            """
+                            SELECT display_name, address, city, phone_number
+                            FROM tenant_public_profiles
+                            WHERE tenant_id = $1
+                            """,
+                            _tenant_id
+                        )
+                        if _profile_row:
+                            _business_name = _profile_row['display_name']
+                            _business_address = _profile_row['address']
+                            _business_city = _profile_row['city']
+                            _business_phone = _profile_row['phone_number']
+                except Exception as _profile_err:
+                    logger.warning(f"Could not fetch tenant profile for receipt: {_profile_err}")
+
                 asyncio.create_task(
                     send_pos_receipt_email(
                         customer_email=receipt_email,
@@ -961,6 +984,10 @@ async def complete_pos_order(
                         payment_method=payment_method,
                         items=_items,
                         order_date=_order_date,
+                        business_name=_business_name,
+                        business_address=_business_address,
+                        business_city=_business_city,
+                        business_phone=_business_phone,
                     )
                 )
             except Exception as _email_err:

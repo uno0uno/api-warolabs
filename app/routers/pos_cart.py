@@ -179,6 +179,10 @@ class SendReceiptRequest(BaseModel):
     total_amount: float
     payment_method: str
     items: List[Dict[str, Any]] = Field(default_factory=list)
+    business_name: Optional[str] = None
+    business_address: Optional[str] = None
+    business_city: Optional[str] = None
+    business_phone: Optional[str] = None
 
 
 @router.post("/receipt-email")
@@ -194,5 +198,9 @@ async def send_receipt_email(receipt_data: SendReceiptRequest):
         payment_method=receipt_data.payment_method,
         items=receipt_data.items,
         order_date=datetime.utcnow(),
+        business_name=receipt_data.business_name,
+        business_address=receipt_data.business_address,
+        business_city=receipt_data.business_city,
+        business_phone=receipt_data.business_phone,
     )
     return {"success": success}

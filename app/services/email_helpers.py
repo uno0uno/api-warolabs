@@ -469,6 +469,10 @@ async def send_pos_receipt_email(
     payment_method: str,
     items: List[Dict[str, Any]],
     order_date: datetime,
+    business_name: Optional[str] = None,
+    business_address: Optional[str] = None,
+    business_city: Optional[str] = None,
+    business_phone: Optional[str] = None,
 ) -> bool:
     """
     Send a POS receipt email to the customer after a point-of-sale order completes.
@@ -485,13 +489,17 @@ async def send_pos_receipt_email(
             payment_method=payment_method,
             items=items,
             order_date=order_date,
+            business_name=business_name,
+            business_address=business_address,
+            business_city=business_city,
+            business_phone=business_phone,
         )
-        subject = get_pos_receipt_subject(order_number)
+        subject = get_pos_receipt_subject(order_number, business_name=business_name)
 
         ses_service = AWSSESService()
         success = await ses_service.send_email(
             from_email=settings.email_from or "hola@warocol.com",
-            from_name="WARO Colombia",
+            from_name=business_name or "WARO Colombia",
             to_emails=[customer_email],
             subject=subject,
             html_body=None,
