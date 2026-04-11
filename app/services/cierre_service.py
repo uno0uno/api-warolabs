@@ -248,20 +248,37 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
 
         async with get_db_connection(use_transaction=True) as conn:
             # 1. Overlap check
-            # When exact timestamps are provided, compare TIMESTAMPTZ windows so that
-            # two shifts on the same calendar date but different hours don't conflict.
+            #
+            # Four cases to cover:
+            #   A) new=date-only   vs existing=date-only   → date range overlap
+            #   B) new=timestamped vs existing=timestamped → TIMESTAMPTZ window overlap
+            #   C) new=timestamped vs existing=date-only   → same date = already fully closed
+            #   D) new=date-only   vs existing=timestamped → same date = orders already counted
+            #
             if body.period_start_time and body.period_end_time:
+                # Case B: timestamp vs timestamp
                 overlap = await conn.fetchrow(
                     """
                     SELECT id FROM accounting_period
                     WHERE tenant_id = $1
-                      AND period_start_time IS NOT NULL
-                      AND period_end_time   IS NOT NULL
+                      AND period_start_time IS NOT NULL AND period_end_time IS NOT NULL
                       AND NOT (period_end_time < $2 OR period_start_time > $3)
                     """,
                     tenant_id, body.period_start_time, body.period_end_time,
                 )
+                # Case C: timestamp vs existing date-only (same calendar dates = already closed)
+                if not overlap:
+                    overlap = await conn.fetchrow(
+                        """
+                        SELECT id FROM accounting_period
+                        WHERE tenant_id = $1
+                          AND period_start_time IS NULL
+                          AND NOT (period_end < $2 OR period_start > $3)
+                        """,
+                        tenant_id, body.period_start, body.period_end,
+                    )
             else:
+                # Case A: date-only vs date-only
                 overlap = await conn.fetchrow(
                     """
                     SELECT id FROM accounting_period
@@ -271,6 +288,17 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                     """,
                     tenant_id, body.period_start, body.period_end,
                 )
+                # Case D: date-only vs existing timestamped (orders already in a prior shift close)
+                if not overlap:
+                    overlap = await conn.fetchrow(
+                        """
+                        SELECT id FROM accounting_period
+                        WHERE tenant_id = $1
+                          AND period_start_time IS NOT NULL AND period_end_time IS NOT NULL
+                          AND NOT (period_end < $2 OR period_start > $3)
+                        """,
+                        tenant_id, body.period_start, body.period_end,
+                    )
             if overlap:
                 raise APIError(
                     "Ya existe un cierre para este período o uno que se superpone.",
