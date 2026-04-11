@@ -104,9 +104,12 @@ async def _compute_preview(
         """
         SELECT COUNT(*) AS open_tables_count
         FROM table_sessions
-        WHERE tenant_id = $1 AND closed_at IS NULL
+        WHERE tenant_id = $1
+          AND closed_at IS NULL
+          AND opened_at::date >= $2
+          AND opened_at::date <= $3
         """,
-        tenant_id,
+        tenant_id, period_start, period_end,
     )
 
     total_cash = float(sales_row["total_cash"])
