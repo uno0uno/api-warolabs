@@ -94,3 +94,13 @@ async def get_cierre(request: Request, cierre_id: UUID):
     Returns 404 if not found or belongs to a different tenant.
     """
     return await cierre_service.get_cierre(request, cierre_id)
+
+
+@router.delete("/{cierre_id}")
+async def delete_cierre(request: Request, cierre_id: UUID):
+    """
+    Soft-delete a closed period (sets deleted_at on accounting_period).
+    The record is hidden from all list/detail queries but data is preserved.
+    Returns 404 if not found or already deleted.
+    """
+    return await cierre_service.delete_cierre(request, cierre_id)

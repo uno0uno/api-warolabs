@@ -451,6 +451,7 @@ async def list_cierres(
                 FROM closing_summary cs
                 JOIN accounting_period ap ON ap.id = cs.accounting_period_id
                 WHERE cs.tenant_id = $1
+                  AND ap.deleted_at IS NULL
                 {date_filter}
                 ORDER BY ap.period_start DESC
                 """,
@@ -490,7 +491,7 @@ async def get_cierre(request: Request, cierre_id: UUID) -> dict:
                     cs.notes
                 FROM closing_summary cs
                 JOIN accounting_period ap ON ap.id = cs.accounting_period_id
-                WHERE cs.id = $1 AND cs.tenant_id = $2
+                WHERE cs.id = $1 AND cs.tenant_id = $2 AND ap.deleted_at IS NULL
                 """,
                 cierre_id, tenant_id,
             )
@@ -525,6 +526,44 @@ async def get_cierre(request: Request, cierre_id: UUID) -> dict:
     except Exception as exc:
         logger.error(f"Error in get_cierre: {exc}")
         raise APIError(f"Error in get_cierre: {exc}", status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# DELETE /cierre/{cierre_id}  — soft delete
+# ---------------------------------------------------------------------------
+
+async def delete_cierre(request: Request, cierre_id: UUID) -> dict:
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=True) as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT ap.id AS ap_id
+                FROM closing_summary cs
+                JOIN accounting_period ap ON ap.id = cs.accounting_period_id
+                WHERE cs.id = $1 AND cs.tenant_id = $2 AND ap.deleted_at IS NULL
+                """,
+                cierre_id, tenant_id,
+            )
+            if not row:
+                raise APIError("Cierre no encontrado", status_code=404)
+
+            await conn.execute(
+                "UPDATE accounting_period SET deleted_at = NOW() WHERE id = $1 AND tenant_id = $2",
+                row["ap_id"], tenant_id,
+            )
+
+        return {"success": True, "data": None}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in delete_cierre: {exc}")
+        raise APIError(f"Error in delete_cierre: {exc}", status_code=500)
 
 
 # ---------------------------------------------------------------------------
