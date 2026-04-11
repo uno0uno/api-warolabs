@@ -64,6 +64,7 @@ async def get_ingredients_list(
     is_resale: Optional[bool] = None,
     base_only: Optional[bool] = None,
     tenant_only: Optional[bool] = None,
+    show_archived: Optional[bool] = None,
 ) -> IngredientsListResponse:
     """
     Fetches a list of ingredients from the database with tenant isolation,
@@ -124,10 +125,10 @@ async def get_ingredients_list(
                 LEFT JOIN ingredient_global_hierarchy igh ON igh.variant_id = i.id
                 LEFT JOIN ingredients hb ON hb.id = igh.base_id
                 LEFT JOIN ingredients parent_i ON parent_i.id = i.parent_id
-                WHERE (i.tenant_id IS NULL OR i.tenant_id = $1)
+                WHERE (i.tenant_id IS NULL OR i.tenant_id = $1) AND i.is_active = TRUE
             """
 
-            count_query = "SELECT COUNT(*) FROM ingredients WHERE (tenant_id IS NULL OR tenant_id = $1)"
+            count_query = "SELECT COUNT(*) FROM ingredients WHERE (tenant_id IS NULL OR tenant_id = $1) AND is_active = TRUE"
 
             # Separate params for base query (includes tenant_id) and count query (also includes tenant_id)
             base_params = [tenant_id]
@@ -185,6 +186,11 @@ async def get_ingredients_list(
                 # Return only tenant-scoped custom ingredients (excludes global catalog)
                 base_query += " AND i.tenant_id IS NOT NULL"
                 count_query += " AND tenant_id IS NOT NULL"
+
+            if show_archived:
+                # Override the is_active=TRUE filter added in the base WHERE clause
+                base_query = base_query.replace("AND i.is_active = TRUE", "AND i.is_active = FALSE")
+                count_query = count_query.replace("AND is_active = TRUE", "AND is_active = FALSE")
 
             # Add pagination
             offset = (page - 1) * limit
@@ -628,3 +634,143 @@ def _build_standard_purchase_units(base_unit: str, peso_unidad_gr: Optional[floa
 
     # "und" or unknown: no extra purchase units needed
     return []
+
+
+# ── Archive / Restore / Hard Delete ──────────────────────────────────────────
+
+async def archive_tenant_ingredient(ingredient_id: str, tenant_id: str) -> Dict[str, Any]:
+    """
+    Archive a tenant ingredient: set is_active=False and atomically remove it from
+    all active recipe/modifier definitions (product_recipes, base_recipe_templates,
+    modifier_recipes, product_recipe_modifications, modifiers.ingredient_id).
+
+    Historical records (order_item_ingredients, tenant_purchase_items,
+    tenant_ingredient_movements, tenant_inventory) are preserved intact.
+
+    Returns a summary of rows removed per table for the confirmation UI.
+    """
+    async with get_db_connection() as conn:
+        ingredient = await conn.fetchrow(
+            "SELECT id, name, is_active FROM ingredients WHERE id = $1 AND tenant_id = $2",
+            ingredient_id, tenant_id,
+        )
+        if not ingredient:
+            raise HTTPException(status_code=404, detail="Ingredient not found")
+        if not ingredient["is_active"]:
+            raise HTTPException(status_code=409, detail="Ingredient is already archived")
+
+        # Count affected rows before deleting (for UI summary)
+        pr  = await conn.fetchval("SELECT COUNT(*) FROM product_recipes              WHERE ingredient_id = $1", ingredient_id)
+        brt = await conn.fetchval("SELECT COUNT(*) FROM base_recipe_templates        WHERE ingredient_id = $1", ingredient_id)
+        mr  = await conn.fetchval("SELECT COUNT(*) FROM modifier_recipes             WHERE ingredient_id = $1", ingredient_id)
+        prm = await conn.fetchval("SELECT COUNT(*) FROM product_recipe_modifications WHERE ingredient_id = $1", ingredient_id)
+        mod = await conn.fetchval("SELECT COUNT(*) FROM modifiers                    WHERE ingredient_id = $1", ingredient_id)
+
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE ingredients SET is_active = FALSE, updated_at = NOW() WHERE id = $1",
+                ingredient_id,
+            )
+            await conn.execute("DELETE FROM product_recipes              WHERE ingredient_id = $1", ingredient_id)
+            await conn.execute("DELETE FROM base_recipe_templates        WHERE ingredient_id = $1", ingredient_id)
+            await conn.execute("DELETE FROM modifier_recipes             WHERE ingredient_id = $1", ingredient_id)
+            await conn.execute("DELETE FROM product_recipe_modifications WHERE ingredient_id = $1", ingredient_id)
+            await conn.execute("UPDATE modifiers SET ingredient_id = NULL WHERE ingredient_id = $1", ingredient_id)
+
+    return {
+        "success": True,
+        "archived": True,
+        "removed": {
+            "product_recipes": int(pr),
+            "base_recipe_templates": int(brt),
+            "modifier_recipes": int(mr),
+            "product_recipe_modifications": int(prm),
+            "modifiers_direct_link": int(mod),
+        },
+    }
+
+
+async def restore_tenant_ingredient(ingredient_id: str, tenant_id: str) -> Dict[str, Any]:
+    """
+    Restore an archived ingredient: set is_active=True.
+    Does NOT automatically re-associate to recipes/modifiers — user must re-link manually.
+    Returns 409 if another active ingredient with the same name already exists.
+    """
+    async with get_db_connection() as conn:
+        ingredient = await conn.fetchrow(
+            "SELECT id, name, is_active FROM ingredients WHERE id = $1 AND tenant_id = $2",
+            ingredient_id, tenant_id,
+        )
+        if not ingredient:
+            raise HTTPException(status_code=404, detail="Ingredient not found")
+        if ingredient["is_active"]:
+            raise HTTPException(status_code=409, detail="Ingredient is already active")
+
+        conflict = await conn.fetchval(
+            """SELECT id FROM ingredients
+               WHERE tenant_id = $1 AND LOWER(name) = LOWER($2)
+                 AND is_active = TRUE AND id != $3""",
+            tenant_id, ingredient["name"], ingredient_id,
+        )
+        if conflict:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Ya existe un ingrediente activo con el nombre '{ingredient['name']}'. Cambia el nombre antes de restaurar.",
+            )
+
+        await conn.execute(
+            "UPDATE ingredients SET is_active = TRUE, updated_at = NOW() WHERE id = $1",
+            ingredient_id,
+        )
+
+    return {"success": True, "restored": True}
+
+
+async def hard_delete_tenant_ingredient(ingredient_id: str, tenant_id: str) -> Dict[str, Any]:
+    """
+    Hard delete a tenant ingredient — only allowed when zero historical records exist.
+
+    Checks 6 NO ACTION FK tables. If any has rows → 409 with suggest_archive=True.
+    CASCADE FK tables (product_recipes, base_recipe_templates, ingredient_purchase_units,
+    product_recipe_modifications, ingredient_global_hierarchy) are handled automatically by DB.
+    """
+    BLOCKING_TABLES: List[tuple] = [
+        ("modifier_recipes",            "Recetas de modificadores"),
+        ("order_item_ingredients",      "Historial de ventas"),
+        ("tenant_ingredient_movements", "Movimientos de inventario"),
+        ("tenant_inventory",            "Inventario activo"),
+        ("tenant_purchase_items",       "Órdenes de compra"),
+        ("tenant_supplier_prices",      "Precios de proveedores"),
+    ]
+
+    async with get_db_connection() as conn:
+        ingredient = await conn.fetchrow(
+            "SELECT id, name FROM ingredients WHERE id = $1 AND tenant_id = $2",
+            ingredient_id, tenant_id,
+        )
+        if not ingredient:
+            raise HTTPException(status_code=404, detail="Ingredient not found")
+
+        blocking = []
+        for table, label in BLOCKING_TABLES:
+            count = await conn.fetchval(
+                f"SELECT COUNT(*) FROM {table} WHERE ingredient_id = $1", ingredient_id
+            )
+            if count > 0:
+                blocking.append({"table": table, "label": label, "count": int(count)})
+
+        if blocking:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "can_delete": False,
+                    "suggest_archive": True,
+                    "message": "Este ingrediente tiene registros asociados. Puedes archivarlo para ocultarlo sin perder el historial.",
+                    "blocking": blocking,
+                },
+            )
+
+        # Safe to delete — CASCADE handles associated metadata tables
+        await conn.execute("DELETE FROM ingredients WHERE id = $1", ingredient_id)
+
+    return {"success": True, "deleted_id": ingredient_id}

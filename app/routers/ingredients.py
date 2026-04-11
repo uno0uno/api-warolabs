@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Request, Response, Query, Body, HTTPException
 from typing import Any, Dict, Optional
 from uuid import UUID
-from app.services.ingredients_service import get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name, create_tenant_ingredient, update_tenant_ingredient
+from app.services.ingredients_service import get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name, create_tenant_ingredient, update_tenant_ingredient, archive_tenant_ingredient, restore_tenant_ingredient, hard_delete_tenant_ingredient
 from app.models.ingredient import IngredientsListResponse, TenantIngredientCreate, TenantIngredientUpdate
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -61,13 +61,14 @@ async def get_ingredients_endpoint(
     is_resale: Optional[bool] = Query(default=None, description="Filter resale ingredients only"),
     base_only: Optional[bool] = Query(default=None, description="When true, exclude variant ingredients (those with a base assigned)"),
     tenant_only: Optional[bool] = Query(default=None, description="When true, return only tenant-scoped custom ingredients"),
+    show_archived: Optional[bool] = Query(default=None, description="When true, return archived (is_active=false) ingredients instead of active ones"),
 ):
     """
     Get ingredients list with tenant isolation
     Requires valid session with tenant context
     """
     return await get_ingredients_list(
-        request, response, page, limit, search, category, supplier_id, type, is_resale, base_only, tenant_only
+        request, response, page, limit, search, category, supplier_id, type, is_resale, base_only, tenant_only, show_archived
     )
 
 
@@ -95,6 +96,52 @@ async def get_ingredient_by_id(ingredient_id: UUID):
             "unit_weight_gr": float(row["unit_weight_gr"]) if row["unit_weight_gr"] is not None else None,
         }
     }
+
+
+@router.patch("/{ingredient_id}/archive", status_code=200)
+async def archive_ingredient_endpoint(
+    ingredient_id: UUID,
+    request: Request,
+) -> Dict[str, Any]:
+    """
+    Archive a tenant ingredient: set is_active=False and remove from all active
+    recipe/modifier definitions. Historical records are preserved intact.
+    Returns counts of associations removed.
+    """
+    session_context = require_valid_session(request)
+    if not session_context.tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant context required")
+    return await archive_tenant_ingredient(str(ingredient_id), str(session_context.tenant_id))
+
+
+@router.patch("/{ingredient_id}/restore", status_code=200)
+async def restore_ingredient_endpoint(
+    ingredient_id: UUID,
+    request: Request,
+) -> Dict[str, Any]:
+    """
+    Restore an archived ingredient: set is_active=True.
+    Does NOT re-associate to recipes/modifiers — user must re-link manually.
+    """
+    session_context = require_valid_session(request)
+    if not session_context.tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant context required")
+    return await restore_tenant_ingredient(str(ingredient_id), str(session_context.tenant_id))
+
+
+@router.delete("/{ingredient_id}", status_code=200)
+async def delete_ingredient_endpoint(
+    ingredient_id: UUID,
+    request: Request,
+) -> Dict[str, Any]:
+    """
+    Hard delete a tenant ingredient — only allowed when zero historical records exist.
+    Returns 409 with suggest_archive=True if any blocking records are found.
+    """
+    session_context = require_valid_session(request)
+    if not session_context.tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant context required")
+    return await hard_delete_tenant_ingredient(str(ingredient_id), str(session_context.tenant_id))
 
 
 @router.patch("/{ingredient_id}", status_code=200)
