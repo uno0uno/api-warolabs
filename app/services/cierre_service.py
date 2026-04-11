@@ -216,8 +216,9 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             # 2. Preview aggregation (completed only — cash already received)
             preview = await _compute_preview(conn, tenant_id, body.period_start, body.period_end, completed_only=True)
 
-            # 3. Open tables check
-            if preview["openTablesCount"] > 0:
+            # 3. Open tables check — skip for past periods (mesas actuales no pertenecen al período)
+            is_past_period = body.period_end < date.today()
+            if not is_past_period and preview["openTablesCount"] > 0:
                 raise APIError(
                     f"Hay {preview['openTablesCount']} mesa(s) con cuenta abierta. "
                     "Cierra todas las mesas antes de registrar el cierre del día.",
@@ -486,6 +487,48 @@ async def get_cierre_mensual(request: Request, year: int, month: int) -> dict:
     except Exception as exc:
         logger.error(f"Error in get_cierre_mensual: {exc}")
         raise APIError(f"Error in get_cierre_mensual: {exc}", status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# GET /cierre/ultimo
+# ---------------------------------------------------------------------------
+
+async def get_ultimo_cierre(request: Request) -> dict:
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=False) as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    cs.id, cs.accounting_period_id, cs.tenant_id,
+                    ap.period_start, ap.period_end, ap.closed_at,
+                    cs.total_sales, cs.items_sold,
+                    cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
+                    cs.gastos_efectivo, cs.cash_expected, cs.cash_counted, cs.cash_difference,
+                    cs.notes
+                FROM closing_summary cs
+                JOIN accounting_period ap ON ap.id = cs.accounting_period_id
+                WHERE cs.tenant_id = $1
+                ORDER BY ap.period_end DESC, ap.closed_at DESC
+                LIMIT 1
+                """,
+                tenant_id,
+            )
+
+        if not row:
+            return {"success": True, "data": None}
+
+        return {"success": True, "data": _row_to_dict(row)}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in get_ultimo_cierre: {exc}")
+        raise APIError(f"Error in get_ultimo_cierre: {exc}", status_code=500)
 
 
 # ---------------------------------------------------------------------------

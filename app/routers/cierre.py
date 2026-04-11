@@ -70,6 +70,15 @@ async def get_cierre_mensual(
     return await cierre_service.get_cierre_mensual(request, year, month)
 
 
+@router.get("/ultimo")
+async def get_ultimo_cierre(request: Request):
+    """
+    Returns the most recent closed period for the tenant, or null if none exists.
+    Used by the new-cierre wizard to pre-fill the date range automatically.
+    """
+    return await cierre_service.get_ultimo_cierre(request)
+
+
 @router.get("/{cierre_id}")
 async def get_cierre(request: Request, cierre_id: UUID):
     """
