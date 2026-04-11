@@ -11,6 +11,7 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from app.services.waros_service import evaluate_and_award
+from app.services.email_helpers import send_pos_receipt_email
 import logging
 
 logger = logging.getLogger(__name__)
@@ -558,6 +559,7 @@ async def complete_pos_order(
     customer_id: UUID,
     credit_due_date: Optional[date] = None,
     payment_method_id: Optional[UUID] = None,
+    receipt_email: Optional[str] = None,
 ) -> dict:
     """
     Complete a POS order:
@@ -919,6 +921,10 @@ async def complete_pos_order(
                 _order_id = order_id
                 _customer_id = customer_id
                 _tenant_id = tenant_id
+                _items = items
+                _order_date = order_row['created_at']
+                _order_number = int(order_number)
+                _total_amount = float(cart_row['total_amount'])
                 _result = {
                     "success": True,
                     "message": "Order completed successfully",
@@ -943,6 +949,22 @@ async def complete_pos_order(
                 )
             except Exception as _waros_err:
                 logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
+
+        # Send receipt email if requested — fire-and-forget, never blocks or fails the order
+        if receipt_email:
+            try:
+                asyncio.create_task(
+                    send_pos_receipt_email(
+                        customer_email=receipt_email,
+                        order_number=_order_number,
+                        total_amount=_total_amount,
+                        payment_method=payment_method,
+                        items=_items,
+                        order_date=_order_date,
+                    )
+                )
+            except Exception as _email_err:
+                logger.warning(f"Could not schedule receipt email: {_email_err}")
 
         return _result
 

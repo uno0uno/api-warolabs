@@ -11,6 +11,10 @@ from app.templates.order_confirmation_template import (
     get_order_accepted_text,
     get_order_accepted_subject,
 )
+from app.templates.pos_receipt_template import (
+    get_pos_receipt_text,
+    get_pos_receipt_subject,
+)
 from app.templates.negocio_welcome_template import (
     get_negocio_welcome_text,
     get_negocio_welcome_subject,
@@ -455,4 +459,52 @@ async def send_order_accepted_email(
 
     except Exception as e:
         logger.error(f"Error sending order accepted email for order #{order_number}: {e}")
+        return False
+
+
+async def send_pos_receipt_email(
+    customer_email: str,
+    order_number: int,
+    total_amount: float,
+    payment_method: str,
+    items: List[Dict[str, Any]],
+    order_date: datetime,
+) -> bool:
+    """
+    Send a POS receipt email to the customer after a point-of-sale order completes.
+
+    Called fire-and-forget from complete_pos_order() — never raises, never blocks the order.
+
+    Returns:
+        True if sent successfully, False otherwise.
+    """
+    try:
+        text_body = get_pos_receipt_text(
+            order_number=order_number,
+            total_amount=total_amount,
+            payment_method=payment_method,
+            items=items,
+            order_date=order_date,
+        )
+        subject = get_pos_receipt_subject(order_number)
+
+        ses_service = AWSSESService()
+        success = await ses_service.send_email(
+            from_email=settings.email_from or "hola@warocol.com",
+            from_name="WARO Colombia",
+            to_emails=[customer_email],
+            subject=subject,
+            html_body=None,
+            text_body=text_body,
+        )
+
+        if success:
+            logger.info(f"POS receipt email sent for order #{order_number} to {customer_email}")
+        else:
+            logger.warning(f"SES returned failure for POS receipt email #{order_number}")
+
+        return success
+
+    except Exception as e:
+        logger.error(f"Error sending POS receipt email for order #{order_number}: {e}")
         return False

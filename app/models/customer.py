@@ -51,6 +51,7 @@ class CustomerSummary(BaseModel):
     id: UUID
     name: Optional[str] = None
     phone_number: Optional[str] = None
+    email: Optional[str] = None
 
 
 class CustomerQuerySearchResponse(BaseModel):

@@ -296,7 +296,8 @@ async def search_customers_by_query(
                 SELECT DISTINCT
                     p.id,
                     p.name,
-                    p.phone_number
+                    p.phone_number,
+                    p.email
                 FROM profile p
                 JOIN tenant_members tm ON tm.user_id = p.id
                 WHERE tm.tenant_id = $1
@@ -312,7 +313,8 @@ async def search_customers_by_query(
                 CustomerSummary(
                     id=row['id'],
                     name=row['name'],
-                    phone_number=row['phone_number']
+                    phone_number=row['phone_number'],
+                    email=row['email']
                 )
                 for row in rows
             ]
