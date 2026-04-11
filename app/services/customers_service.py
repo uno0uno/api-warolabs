@@ -504,5 +504,10 @@ async def update_customer(
     except APIError:
         raise
     except Exception as e:
-        logger.error(f"Error in update_customer: {str(e)}")
-        raise APIError(f"Error updating customer: {str(e)}", status_code=500)
+        err_str = str(e)
+        if 'profile_email_key' in err_str or ('duplicate key' in err_str and 'email' in err_str):
+            raise APIError("Este correo ya está registrado en otro perfil", status_code=409)
+        if 'profile_phone_number_key' in err_str or ('duplicate key' in err_str and 'phone_number' in err_str):
+            raise APIError("Este número de teléfono ya está registrado en otro perfil", status_code=409)
+        logger.error(f"Error in update_customer: {err_str}")
+        raise APIError(f"Error al actualizar el cliente", status_code=500)
