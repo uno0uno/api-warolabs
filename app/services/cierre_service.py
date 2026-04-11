@@ -280,6 +280,7 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 """
                 SELECT id FROM accounting_period
                 WHERE tenant_id = $1
+                  AND deleted_at IS NULL
                   AND NOT (
                     COALESCE(
                         period_end_time,
