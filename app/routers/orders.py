@@ -39,20 +39,13 @@ async def get_orders_metrics(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     payment_method: Optional[str] = Query(None),
+    payment_method_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None)
 ):
-    """
-    Get sales metrics: total sales, average ticket, orders count by status
-
-    Query parameters:
-    - date_from: Start date (YYYY-MM-DD)
-    - date_to: End date (YYYY-MM-DD)
-    - payment_method: Filter by payment method (cash, card, digital)
-    - status: Filter by status (completed, cancelled, pending)
-    """
     return await orders_service.get_orders_metrics(
         request, date_from=date_from, date_to=date_to,
-        payment_method=payment_method, status=status
+        payment_method=payment_method, payment_method_id=payment_method_id,
+        status=status
     )
 
 
@@ -92,30 +85,19 @@ async def export_orders(
     search: Optional[str] = Query(None),
     search_field: Optional[str] = Query(None),
     payment_method: Optional[str] = Query(None),
+    payment_method_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     sort_field: str = Query("order_date"),
     sort_direction: str = Query("desc"),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None)
 ):
-    """
-    Export all orders based on filters and send via email to the requesting user
-
-    Query parameters:
-    - search: Search term
-    - search_field: Field to search in (order_number, customer_name, customer_phone)
-    - payment_method: Filter by payment method (cash, card, digital)
-    - status: Filter by status (completed, cancelled, pending)
-    - sort_field: Field to sort by
-    - sort_direction: Sort direction (asc, desc)
-    - date_from: Start date (YYYY-MM-DD)
-    - date_to: End date (YYYY-MM-DD)
-    """
     return await orders_service.export_orders_to_email(
         request,
         search=search,
         search_field=search_field,
         payment_method=payment_method,
+        payment_method_id=payment_method_id,
         status=status,
         sort_field=sort_field,
         sort_direction=sort_direction,
@@ -132,27 +114,13 @@ async def get_orders(
     search: Optional[str] = Query(None),
     search_field: Optional[str] = Query(None),
     payment_method: Optional[str] = Query(None),
+    payment_method_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     sort_field: str = Query("order_date"),
     sort_direction: str = Query("desc"),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None)
 ):
-    """
-    Get list of orders with filters and pagination
-
-    Query parameters:
-    - limit: Number of orders to return (1-250, default 50)
-    - offset: Number of orders to skip (default 0)
-    - search: Search term
-    - search_field: Field to search in (order_number, customer_name, customer_phone)
-    - payment_method: Filter by payment method (cash, card, digital)
-    - status: Filter by status (completed, cancelled)
-    - sort_field: Field to sort by (order_number, order_date, total_amount, customer_name, payment_method)
-    - sort_direction: Sort direction (asc, desc)
-    - date_from: Start date (YYYY-MM-DD)
-    - date_to: End date (YYYY-MM-DD)
-    """
     return await orders_service.get_orders_list(
         request,
         limit=limit,
@@ -160,6 +128,7 @@ async def get_orders(
         search=search,
         search_field=search_field,
         payment_method=payment_method,
+        payment_method_id=payment_method_id,
         status=status,
         sort_field=sort_field,
         sort_direction=sort_direction,

@@ -38,6 +38,7 @@ async def get_orders_list(
     search: Optional[str] = None,
     search_field: Optional[str] = None,
     payment_method: Optional[str] = None,
+    payment_method_id: Optional[str] = None,
     status: Optional[str] = None,
     sort_field: str = "order_date",
     sort_direction: str = "desc",
@@ -81,6 +82,12 @@ async def get_orders_list(
                 param_count += 1
                 where_conditions.append(f"o.payment_method = ${param_count}")
                 params.append(payment_method)
+
+            # Payment method ID filter (specific custom method)
+            if payment_method_id:
+                param_count += 1
+                where_conditions.append(f"o.payment_method_id = ${param_count}::uuid")
+                params.append(payment_method_id)
 
             # Status filter
             if status:
@@ -878,6 +885,7 @@ async def get_orders_metrics(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     payment_method: Optional[str] = None,
+    payment_method_id: Optional[str] = None,
     status: Optional[str] = None
 ) -> dict:
     """
@@ -913,6 +921,11 @@ async def get_orders_metrics(
                 param_count += 1
                 where_conditions.append(f"payment_method = ${param_count}")
                 params.append(payment_method)
+
+            if payment_method_id:
+                param_count += 1
+                where_conditions.append(f"payment_method_id = ${param_count}::uuid")
+                params.append(payment_method_id)
 
             if status:
                 param_count += 1
@@ -1108,6 +1121,7 @@ async def export_orders_to_email(
     search: Optional[str] = None,
     search_field: Optional[str] = None,
     payment_method: Optional[str] = None,
+    payment_method_id: Optional[str] = None,
     status: Optional[str] = None,
     sort_field: str = "order_date",
     sort_direction: str = "desc",
@@ -1153,6 +1167,12 @@ async def export_orders_to_email(
                 param_count += 1
                 where_conditions.append(f"o.payment_method = ${param_count}")
                 params.append(payment_method)
+
+            # Payment method ID filter (specific custom method)
+            if payment_method_id:
+                param_count += 1
+                where_conditions.append(f"o.payment_method_id = ${param_count}::uuid")
+                params.append(payment_method_id)
 
             # Status filter
             if status:
