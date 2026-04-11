@@ -1202,6 +1202,7 @@ async def export_orders_to_email(
                     o.total_amount,
                     o.status,
                     o.payment_method,
+                    COALESCE(pmg.name, o.payment_method) AS payment_method_display,
                     p.name as customer_name,
                     p.phone_number as customer_phone,
                     (
@@ -1211,6 +1212,8 @@ async def export_orders_to_email(
                     ) as items_count
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
+                LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id AND pm.tenant_id = $1
+                LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id AND pmg.tenant_id = $1
                 WHERE {where_clause}
                 ORDER BY {sort_column} {sort_direction}
             """
@@ -1219,13 +1222,6 @@ async def export_orders_to_email(
 
             if not orders_rows:
                 raise APIError("No hay ventas para exportar con los filtros seleccionados", status_code=404)
-
-            # Payment method labels
-            payment_labels = {
-                'cash': 'Efectivo',
-                'card': 'Tarjeta',
-                'digital': 'Digital'
-            }
 
             # Status labels
             status_labels = {
@@ -1275,7 +1271,7 @@ async def export_orders_to_email(
                     row['customer_name'] or 'Sin nombre',
                     row['customer_phone'] or '',
                     row['items_count'],
-                    payment_labels.get(row['payment_method'], row['payment_method']),
+                    row['payment_method_display'] or row['payment_method'] or '',
                     total_amount,
                     status_labels.get(row['status'], row['status'])
                 ])
@@ -1294,7 +1290,7 @@ async def export_orders_to_email(
             if status:
                 filter_desc.append(f"Estado: {status_labels.get(status, status)}")
             if payment_method:
-                filter_desc.append(f"Método de pago: {payment_labels.get(payment_method, payment_method)}")
+                filter_desc.append(f"Método de pago: {payment_method}")
             if search:
                 filter_desc.append(f"Búsqueda: {search}")
 
