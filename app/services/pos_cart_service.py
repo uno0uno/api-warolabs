@@ -775,6 +775,14 @@ async def complete_pos_order(
                                     f"(Modifier: {modifier['name']}, Order #{order_number})"
                                 )
 
+                                # 5c. Capture modifier ingredient snapshot
+                                await _capture_modifier_ingredient_snapshot(
+                                    conn, order_item_id,
+                                    modifier_ingredient, modifier['id'],
+                                    float(item['quantity']), float(modifier_qty),
+                                    tenant_id
+                                )
+
                     # 6. ALWAYS update inventory for all products (no controla_stock check)
                     # Get ALL ingredients for this product:
                     # - Direct ingredients from product_recipes
@@ -891,6 +899,12 @@ async def complete_pos_order(
                             f"(Order #{order_number})"
                         )
 
+                    # 6b. Capture ingredient snapshot for order_item_ingredients
+                    await _capture_order_item_ingredients(
+                        conn, order_item_id, item['product']['id'],
+                        float(item['quantity']), tenant_id
+                    )
+
                 # 7. Mark cart as completed
                 complete_cart_query = """
                     UPDATE pos_carts
@@ -937,3 +951,156 @@ async def complete_pos_order(
     except Exception as e:
         logger.error(f"Error completing order: {str(e)}")
         raise APIError(f"Error completing order: {str(e)}", status_code=500)
+
+
+# ── order_item_ingredients helpers ────────────────────────────────────────────
+
+async def _get_last_purchase_prices(conn, ingredient_ids: List[str], tenant_id: str) -> dict:
+    """
+    Fetch the most recent unit_cost from tenant_purchase_items for each ingredient_id.
+    Returns a dict { ingredient_id_str: unit_cost_float }.
+    Missing ingredients get None.
+    """
+    if not ingredient_ids:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (tpi.ingredient_id)
+            tpi.ingredient_id::text,
+            tpi.unit_cost
+        FROM tenant_purchase_items tpi
+        JOIN tenant_purchases tp ON tp.id = tpi.purchase_id AND tp.tenant_id = $1
+        WHERE tpi.ingredient_id = ANY($2::uuid[])
+          AND tpi.unit_cost IS NOT NULL
+        ORDER BY tpi.ingredient_id, tp.created_at DESC
+        """,
+        tenant_id,
+        ingredient_ids,
+    )
+    return {r["ingredient_id"]: float(r["unit_cost"]) for r in rows}
+
+
+async def _capture_order_item_ingredients(
+    conn,
+    order_item_id,
+    product_id,
+    item_quantity: float,
+    tenant_id: str,
+) -> None:
+    """
+    Insert ingredient snapshots into order_item_ingredients for a given order_item.
+
+    Sources:
+    - product_recipes (source_type = 'product_recipe')
+    - product_base_recipes → base_recipe_templates (source_type = 'base_recipe')
+
+    Idempotent via ON CONFLICT (order_item_id, ingredient_id) DO NOTHING.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT
+            pr.id::text        AS source_id,
+            'PRODUCT_RECIPE'   AS source_type,
+            pr.ingredient_id,
+            i.name             AS ingredient_name,
+            pr.quantity,
+            pr.unit
+        FROM product_recipes pr
+        JOIN ingredients i ON i.id = pr.ingredient_id
+        WHERE pr.product_id = $1
+
+        UNION ALL
+
+        SELECT
+            brt.id::text       AS source_id,
+            'PRODUCT_RECIPE'   AS source_type,
+            brt.ingredient_id,
+            i.name             AS ingredient_name,
+            brt.base_quantity  AS quantity,
+            brt.unit
+        FROM product_base_recipes pbr
+        JOIN base_recipe_templates brt ON brt.product_base_type_id = pbr.product_base_type_id
+        JOIN ingredients i ON i.id = brt.ingredient_id
+        WHERE pbr.product_id = $1
+        """,
+        product_id,
+    )
+
+    if not rows:
+        return
+
+    ingredient_ids = [str(r["ingredient_id"]) for r in rows]
+    prices = await _get_last_purchase_prices(conn, ingredient_ids, tenant_id)
+
+    for r in rows:
+        ingredient_id_str = str(r["ingredient_id"])
+        quantity = float(r["quantity"]) * item_quantity
+        unit_cost = prices.get(ingredient_id_str)
+        total_cost = quantity * unit_cost if unit_cost is not None else None
+
+        await conn.execute(
+            """
+            INSERT INTO order_item_ingredients (
+                order_item_id, ingredient_id, ingredient_name,
+                quantity, unit, unit_cost, total_cost,
+                source_type, source_id, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, NOW())
+            ON CONFLICT (order_item_id, ingredient_id) DO NOTHING
+            """,
+            order_item_id,
+            r["ingredient_id"],
+            r["ingredient_name"],
+            quantity,
+            r["unit"] or "und",
+            unit_cost,
+            total_cost,
+            r["source_type"],
+            r["source_id"],
+        )
+
+
+async def _capture_modifier_ingredient_snapshot(
+    conn,
+    order_item_id,
+    modifier_ingredient,
+    modifier_id,
+    item_quantity: float,
+    modifier_qty: float,
+    tenant_id: str,
+) -> None:
+    """
+    Insert a single ingredient snapshot for a modifier that has ingredient_id set.
+    source_type = 'MODIFIER_RECIPE', source_id = modifier_id.
+    Idempotent via ON CONFLICT (order_item_id, ingredient_id) DO NOTHING.
+    """
+    ing_qty = modifier_ingredient.get("ingredient_quantity")
+    if not ing_qty:
+        return
+
+    ingredient_id = modifier_ingredient["ingredient_id"]
+    ingredient_id_str = str(ingredient_id)
+    prices = await _get_last_purchase_prices(conn, [ingredient_id_str], tenant_id)
+
+    quantity = float(ing_qty) * item_quantity * modifier_qty
+    unit_cost = prices.get(ingredient_id_str)
+    total_cost = quantity * unit_cost if unit_cost is not None else None
+
+    await conn.execute(
+        """
+        INSERT INTO order_item_ingredients (
+            order_item_id, ingredient_id, ingredient_name,
+            quantity, unit, unit_cost, total_cost,
+            source_type, source_id, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, NOW())
+        ON CONFLICT (order_item_id, ingredient_id) DO NOTHING
+        """,
+        order_item_id,
+        ingredient_id,
+        modifier_ingredient["ingredient_name"],
+        quantity,
+        modifier_ingredient["ingredient_unit"] or "und",
+        unit_cost,
+        total_cost,
+        "MODIFIER_RECIPE",
+        str(modifier_id),
+    )
