@@ -247,58 +247,50 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection(use_transaction=True) as conn:
-            # 1. Overlap check
-            #
-            # Four cases to cover:
-            #   A) new=date-only   vs existing=date-only   → date range overlap
-            #   B) new=timestamped vs existing=timestamped → TIMESTAMPTZ window overlap
-            #   C) new=timestamped vs existing=date-only   → same date = already fully closed
-            #   D) new=date-only   vs existing=timestamped → same date = orders already counted
-            #
+            # 0. Validation: multi-day periods require exact timestamps
+            if body.period_start != body.period_end and not (body.period_start_time and body.period_end_time):
+                raise APIError(
+                    "Para períodos de varios días debes especificar hora de inicio y fin exactas.",
+                    status_code=422,
+                )
+
+            # 1. Unified overlap check using effective time windows.
+            #    Date-only cierres (single day) are treated as 00:00–23:59:59 Bogotá.
+            #    Timestamped cierres use their exact TIMESTAMPTZ values.
+            #    This allows multiple non-overlapping shifts on the same day.
+            from zoneinfo import ZoneInfo
+            bog = ZoneInfo("America/Bogota")
             if body.period_start_time and body.period_end_time:
-                # Case B: timestamp vs timestamp
-                overlap = await conn.fetchrow(
-                    """
-                    SELECT id FROM accounting_period
-                    WHERE tenant_id = $1
-                      AND period_start_time IS NOT NULL AND period_end_time IS NOT NULL
-                      AND NOT (period_end_time < $2 OR period_start_time > $3)
-                    """,
-                    tenant_id, body.period_start_time, body.period_end_time,
-                )
-                # Case C: timestamp vs existing date-only (same calendar dates = already closed)
-                if not overlap:
-                    overlap = await conn.fetchrow(
-                        """
-                        SELECT id FROM accounting_period
-                        WHERE tenant_id = $1
-                          AND period_start_time IS NULL
-                          AND NOT (period_end < $2 OR period_start > $3)
-                        """,
-                        tenant_id, body.period_start, body.period_end,
-                    )
+                eff_start = body.period_start_time
+                eff_end   = body.period_end_time
             else:
-                # Case A: date-only vs date-only
-                overlap = await conn.fetchrow(
-                    """
-                    SELECT id FROM accounting_period
-                    WHERE tenant_id = $1
-                      AND period_start_time IS NULL
-                      AND NOT (period_end < $2 OR period_start > $3)
-                    """,
-                    tenant_id, body.period_start, body.period_end,
+                eff_start = datetime(
+                    body.period_start.year, body.period_start.month, body.period_start.day,
+                    0, 0, 0, tzinfo=bog,
                 )
-                # Case D: date-only vs existing timestamped (orders already in a prior shift close)
-                if not overlap:
-                    overlap = await conn.fetchrow(
-                        """
-                        SELECT id FROM accounting_period
-                        WHERE tenant_id = $1
-                          AND period_start_time IS NOT NULL AND period_end_time IS NOT NULL
-                          AND NOT (period_end < $2 OR period_start > $3)
-                        """,
-                        tenant_id, body.period_start, body.period_end,
-                    )
+                eff_end = datetime(
+                    body.period_end.year, body.period_end.month, body.period_end.day,
+                    23, 59, 59, tzinfo=bog,
+                )
+
+            overlap = await conn.fetchrow(
+                """
+                SELECT id FROM accounting_period
+                WHERE tenant_id = $1
+                  AND NOT (
+                    COALESCE(
+                        period_end_time,
+                        (period_end::timestamp + INTERVAL '23:59:59') AT TIME ZONE 'America/Bogota'
+                    ) <= $2
+                    OR
+                    COALESCE(
+                        period_start_time,
+                        period_start::timestamp AT TIME ZONE 'America/Bogota'
+                    ) >= $3
+                  )
+                """,
+                tenant_id, eff_start, eff_end,
+            )
             if overlap:
                 raise APIError(
                     "Ya existe un cierre para este período o uno que se superpone.",
