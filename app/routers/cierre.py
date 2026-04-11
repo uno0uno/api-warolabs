@@ -7,7 +7,7 @@ Issue: https://github.com/uno0uno/warocol.com/issues/311
 from fastapi import APIRouter, Request, Query
 from typing import Optional
 from uuid import UUID
-from datetime import date
+from datetime import date, datetime
 from app.models.cierre import CierreCreate
 from app.services import cierre_service
 
@@ -20,6 +20,8 @@ async def cierre_preview(
     period_start: date = Query(..., alias="period_start"),
     period_end: date = Query(..., alias="period_end"),
     completed_only: bool = Query(False, alias="completed_only"),
+    period_start_time: Optional[datetime] = Query(None, alias="period_start_time"),
+    period_end_time: Optional[datetime] = Query(None, alias="period_end_time"),
 ):
     """
     Cierre X — non-destructive daily summary.
@@ -27,8 +29,14 @@ async def cierre_preview(
     Returns sales breakdown by payment method, gastos en efectivo,
     cash_expected, and open_tables_count.
     Safe to call multiple times — no writes.
+    When period_start_time / period_end_time are provided, order filtering uses
+    exact TIMESTAMPTZ comparison (supports cross-midnight shifts).
     """
-    return await cierre_service.get_cierre_preview(request, period_start, period_end, completed_only)
+    return await cierre_service.get_cierre_preview(
+        request, period_start, period_end, completed_only,
+        period_start_time=period_start_time,
+        period_end_time=period_end_time,
+    )
 
 
 @router.post("")

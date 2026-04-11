@@ -7,7 +7,7 @@ Issue: https://github.com/uno0uno/warocol.com/issues/311
 import logging
 from typing import Any, Dict, List, Optional
 from uuid import UUID
-from datetime import date
+from datetime import date, datetime
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -21,12 +21,40 @@ logger = logging.getLogger(__name__)
 # Shared — aggregation queries
 # ---------------------------------------------------------------------------
 
+def _build_order_date_filter(
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime],
+    period_end_time: Optional[datetime],
+    param_offset: int = 2,
+):
+    """
+    Returns (sql_fragment, [p_start, p_end]) for order_date filtering.
+
+    When exact timestamps are provided, compares directly against order_date
+    (TIMESTAMPTZ).  Otherwise, truncates order_date to the Bogota calendar date
+    before comparing (legacy behaviour).
+    """
+    p2 = f"${param_offset}"
+    p3 = f"${param_offset + 1}"
+    if period_start_time and period_end_time:
+        sql = f"AND order_date >= {p2} AND order_date <= {p3}"
+        return sql, [period_start_time, period_end_time]
+    sql = (
+        f"AND (order_date AT TIME ZONE 'America/Bogota')::date >= {p2} "
+        f"AND (order_date AT TIME ZONE 'America/Bogota')::date <= {p3}"
+    )
+    return sql, [period_start, period_end]
+
+
 async def _compute_preview(
     conn,
     tenant_id: UUID,
     period_start: date,
     period_end: date,
     completed_only: bool = False,
+    period_start_time: Optional[datetime] = None,
+    period_end_time: Optional[datetime] = None,
 ) -> dict:
     """
     Runs the three aggregation queries (sales, gastos, open tables) and returns
@@ -35,8 +63,14 @@ async def _compute_preview(
     completed_only=True  → only 'completed' orders (used for the actual Cierre Z)
     completed_only=False → 'completed' + 'pending' (used for Cierre X preview so
                            open-table orders are visible)
+
+    When period_start_time / period_end_time are supplied the order filter uses
+    exact TIMESTAMPTZ comparison, enabling cross-midnight shift closing.
     """
     status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
+    date_filter, date_params = _build_order_date_filter(
+        period_start, period_end, period_start_time, period_end_time
+    )
     sales_row = await conn.fetchrow(
         f"""
         SELECT
@@ -49,10 +83,9 @@ async def _compute_preview(
         FROM orders
         WHERE tenant_id = $1
           {status_filter}
-          AND (order_date AT TIME ZONE 'America/Bogota')::date >= $2
-          AND (order_date AT TIME ZONE 'America/Bogota')::date <= $3
+          {date_filter}
         """,
-        tenant_id, period_start, period_end,
+        tenant_id, *date_params,
     )
 
     gastos_row = await conn.fetchrow(
@@ -103,6 +136,8 @@ async def _compute_breakdown_rows(
     period_start: date,
     period_end: date,
     completed_only: bool = False,
+    period_start_time: Optional[datetime] = None,
+    period_end_time: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """
     Compute per-method payment totals for the period via UNION ALL:
@@ -110,8 +145,12 @@ async def _compute_breakdown_rows(
       - Legacy orders (payment_method_id IS NULL): group by payment_method VARCHAR slug
 
     Returns list of {group_slug, method_name, total}, excluding zero-total rows.
+    When period_start_time / period_end_time are supplied, uses exact TIMESTAMPTZ comparison.
     """
     status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
+    date_filter, date_params = _build_order_date_filter(
+        period_start, period_end, period_start_time, period_end_time
+    )
     rows = await conn.fetch(
         f"""
         SELECT
@@ -123,8 +162,7 @@ async def _compute_breakdown_rows(
         JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
           {status_filter}
-          AND (o.order_date AT TIME ZONE 'America/Bogota')::date >= $2
-          AND (o.order_date AT TIME ZONE 'America/Bogota')::date <= $3
+          {date_filter}
           AND o.payment_method_id IS NOT NULL
         GROUP BY pmg.slug, pm.name
 
@@ -137,13 +175,12 @@ async def _compute_breakdown_rows(
         FROM orders o
         WHERE o.tenant_id = $1
           {status_filter}
-          AND (o.order_date AT TIME ZONE 'America/Bogota')::date >= $2
-          AND (o.order_date AT TIME ZONE 'America/Bogota')::date <= $3
+          {date_filter}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NOT NULL
         GROUP BY o.payment_method
         """,
-        tenant_id, period_start, period_end,
+        tenant_id, *date_params,
     )
     return [
         {
@@ -165,6 +202,8 @@ async def get_cierre_preview(
     period_start: date,
     period_end: date,
     completed_only: bool = False,
+    period_start_time: Optional[datetime] = None,
+    period_end_time: Optional[datetime] = None,
 ) -> dict:
     try:
         session_context = require_valid_session(request)
@@ -173,8 +212,18 @@ async def get_cierre_preview(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection(use_transaction=False) as conn:
-            preview = await _compute_preview(conn, tenant_id, period_start, period_end, completed_only=completed_only)
-            breakdown = await _compute_breakdown_rows(conn, tenant_id, period_start, period_end, completed_only=completed_only)
+            preview = await _compute_preview(
+                conn, tenant_id, period_start, period_end,
+                completed_only=completed_only,
+                period_start_time=period_start_time,
+                period_end_time=period_end_time,
+            )
+            breakdown = await _compute_breakdown_rows(
+                conn, tenant_id, period_start, period_end,
+                completed_only=completed_only,
+                period_start_time=period_start_time,
+                period_end_time=period_end_time,
+            )
             preview["breakdown"] = breakdown
 
         return {"success": True, "data": preview}
@@ -214,7 +263,12 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 )
 
             # 2. Preview aggregation (completed only — cash already received)
-            preview = await _compute_preview(conn, tenant_id, body.period_start, body.period_end, completed_only=True)
+            preview = await _compute_preview(
+                conn, tenant_id, body.period_start, body.period_end,
+                completed_only=True,
+                period_start_time=body.period_start_time,
+                period_end_time=body.period_end_time,
+            )
 
             # 3. Open tables check — skip for past periods (mesas actuales no pertenecen al período)
             is_past_period = body.period_end < date.today()
@@ -228,11 +282,13 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             # 4. INSERT accounting_period
             period_row = await conn.fetchrow(
                 """
-                INSERT INTO accounting_period (tenant_id, period_start, period_end)
-                VALUES ($1, $2, $3)
+                INSERT INTO accounting_period
+                    (tenant_id, period_start, period_end, period_start_time, period_end_time)
+                VALUES ($1, $2, $3, $4, $5)
                 RETURNING id, closed_at
                 """,
                 tenant_id, body.period_start, body.period_end,
+                body.period_start_time, body.period_end_time,
             )
             period_id = period_row["id"]
             closed_at = period_row["closed_at"]
@@ -267,7 +323,10 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
 
             # 6. Compute and persist payment breakdown
             breakdown_rows = await _compute_breakdown_rows(
-                conn, tenant_id, body.period_start, body.period_end, completed_only=True
+                conn, tenant_id, body.period_start, body.period_end,
+                completed_only=True,
+                period_start_time=body.period_start_time,
+                period_end_time=body.period_end_time,
             )
             if breakdown_rows:
                 await conn.execute(
@@ -289,6 +348,8 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 "tenantId":             str(tenant_id),
                 "periodStart":          body.period_start.isoformat(),
                 "periodEnd":            body.period_end.isoformat(),
+                "periodStartTime":      body.period_start_time.isoformat() if body.period_start_time else None,
+                "periodEndTime":        body.period_end_time.isoformat()   if body.period_end_time   else None,
                 "totalSales":           preview["totalSales"],
                 "itemsSold":            preview["itemsSold"],
                 "totalCash":            preview["totalCash"],
@@ -341,7 +402,7 @@ async def list_cierres(
                 f"""
                 SELECT
                     cs.id, cs.accounting_period_id, cs.tenant_id,
-                    ap.period_start, ap.period_end, ap.closed_at,
+                    ap.period_start, ap.period_end, ap.period_start_time, ap.period_end_time, ap.closed_at,
                     cs.total_sales, cs.items_sold,
                     cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
                     cs.gastos_efectivo, cs.cash_expected, cs.cash_counted, cs.cash_difference,
@@ -381,7 +442,7 @@ async def get_cierre(request: Request, cierre_id: UUID) -> dict:
                 """
                 SELECT
                     cs.id, cs.accounting_period_id, cs.tenant_id,
-                    ap.period_start, ap.period_end, ap.closed_at,
+                    ap.period_start, ap.period_end, ap.period_start_time, ap.period_end_time, ap.closed_at,
                     cs.total_sales, cs.items_sold,
                     cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
                     cs.gastos_efectivo, cs.cash_expected, cs.cash_counted, cs.cash_difference,
@@ -447,7 +508,7 @@ async def get_cierre_mensual(request: Request, year: int, month: int) -> dict:
                 """
                 SELECT
                     cs.id, cs.accounting_period_id, cs.tenant_id,
-                    ap.period_start, ap.period_end, ap.closed_at,
+                    ap.period_start, ap.period_end, ap.period_start_time, ap.period_end_time, ap.closed_at,
                     cs.total_sales, cs.items_sold,
                     cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
                     cs.gastos_efectivo, cs.cash_expected, cs.cash_counted, cs.cash_difference,
@@ -505,7 +566,7 @@ async def get_ultimo_cierre(request: Request) -> dict:
                 """
                 SELECT
                     cs.id, cs.accounting_period_id, cs.tenant_id,
-                    ap.period_start, ap.period_end, ap.closed_at,
+                    ap.period_start, ap.period_end, ap.period_start_time, ap.period_end_time, ap.closed_at,
                     cs.total_sales, cs.items_sold,
                     cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
                     cs.gastos_efectivo, cs.cash_expected, cs.cash_counted, cs.cash_difference,
@@ -542,6 +603,8 @@ def _row_to_dict(row) -> dict:
         "tenantId":             str(row["tenant_id"]),
         "periodStart":          row["period_start"].isoformat(),
         "periodEnd":            row["period_end"].isoformat(),
+        "periodStartTime":      row["period_start_time"].isoformat() if row["period_start_time"] else None,
+        "periodEndTime":        row["period_end_time"].isoformat()   if row["period_end_time"]   else None,
         "totalSales":           float(row["total_sales"]),
         "itemsSold":            int(row["items_sold"]),
         "totalCash":            float(row["total_cash"]),

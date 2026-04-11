@@ -11,6 +11,10 @@ from uuid import UUID
 class CierreCreate(BaseModel):
     period_start: date = Field(alias='periodStart')
     period_end: date = Field(alias='periodEnd')
+    # Optional exact timestamps — when provided, order filtering uses these
+    # instead of the date-truncated comparison (supports cross-midnight shifts).
+    period_start_time: Optional[datetime] = Field(None, alias='periodStartTime')
+    period_end_time: Optional[datetime] = Field(None, alias='periodEndTime')
     cash_counted: float = Field(alias='cashCounted')
     notes: Optional[str] = None
 
