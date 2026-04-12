@@ -279,6 +279,7 @@ async def get_expense_by_id(
                     e.frequency,
                     e.recurring_end_date,
                     e.payment_method,
+                    e.payment_method_id::text as payment_method_id,
                     c.id as cat_id,
                     c.category_code,
                     c.category_name,
@@ -351,10 +352,12 @@ async def get_expense_by_id(
                 isRecurring=full_expense['is_recurring'],
                 frequency=full_expense['frequency'],
                 recurringEndDate=full_expense['recurring_end_date'],
+                paymentMethod=full_expense['payment_method'],
+                paymentMethodId=full_expense['payment_method_id'],
                 category=category,
                 attachments=attachments
             )
-            
+
             return ExpenseResponse(data=expense)
 
     except AuthenticationError:

@@ -55,6 +55,7 @@ class ExpenseBase(BaseModel):
     frequency: Optional[RecurrenceFrequency] = None
     recurring_end_date: Optional[date] = Field(None, alias='recurringEndDate')
     payment_method: Optional[str] = Field('cash', alias='paymentMethod')
+    payment_method_id: Optional[str] = Field(None, alias='paymentMethodId')
 
     class Config:
         populate_by_name = True
