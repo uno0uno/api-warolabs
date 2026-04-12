@@ -614,6 +614,19 @@ async def create_expense_json(
             if not category_exists:
                 raise HTTPException(status_code=400, detail="Invalid expense category")
 
+            # Resolve sub-method UUID → group slug
+            payment_method_raw = expense_data.payment_method or 'cash'
+            payment_method_id: Optional[str] = None
+            if payment_method_raw and len(payment_method_raw) == 36 and '-' in payment_method_raw:
+                pm_row = await conn.fetchrow("""
+                    SELECT pmg.slug FROM payment_methods pm
+                    JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+                    WHERE pm.id = $1::uuid
+                """, payment_method_raw)
+                if pm_row:
+                    payment_method_id = payment_method_raw
+                    payment_method_raw = pm_row["slug"]
+
             # Insert expense
             row = await conn.fetchrow("""
                 INSERT INTO tenant_expenses (
@@ -627,8 +640,9 @@ async def create_expense_json(
                     is_recurring,
                     frequency,
                     recurring_end_date,
-                    payment_method
-                ) VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9, $10)
+                    payment_method,
+                    payment_method_id
+                ) VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9, $10, $11::uuid)
                 RETURNING id, created_at
             """,
                 tenant_id,
@@ -640,7 +654,8 @@ async def create_expense_json(
                 expense_data.is_recurring,
                 expense_data.frequency,
                 expense_data.recurring_end_date,
-                expense_data.payment_method or 'cash'
+                payment_method_raw,
+                payment_method_id
             )
 
             expense_id = row['id']
@@ -1095,8 +1110,22 @@ async def update_expense_json(
                 param_count += 1
 
             if expense_data.payment_method is not None:
+                upd_payment_method = expense_data.payment_method
+                upd_payment_method_id = None
+                if upd_payment_method and len(upd_payment_method) == 36 and '-' in upd_payment_method:
+                    pm_row = await conn.fetchrow("""
+                        SELECT pmg.slug FROM payment_methods pm
+                        JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+                        WHERE pm.id = $1::uuid
+                    """, upd_payment_method)
+                    if pm_row:
+                        upd_payment_method_id = upd_payment_method
+                        upd_payment_method = pm_row["slug"]
                 update_fields.append(f"payment_method = ${param_count}")
-                update_values.append(expense_data.payment_method)
+                update_values.append(upd_payment_method)
+                param_count += 1
+                update_fields.append(f"payment_method_id = ${param_count}::uuid")
+                update_values.append(upd_payment_method_id)
                 param_count += 1
 
             if update_fields:
