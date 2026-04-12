@@ -169,6 +169,21 @@ async def create_direct_purchase(
                 # 1. Generate purchase number with WR-CD prefix
                 purchase_number = await get_next_direct_purchase_number(conn, tenant_id)
 
+                # Resolve payment_method: if it looks like a UUID (sub-method ID),
+                # fetch the parent group slug so the column stores a stable identifier.
+                if payment_method and len(payment_method) == 36 and '-' in payment_method:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT pmg.slug
+                        FROM payment_methods pm
+                        JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+                        WHERE pm.id = $1::uuid
+                        """,
+                        payment_method,
+                    )
+                    if row:
+                        payment_method = row["slug"]
+
                 # 2. Calculate totals from items
                 total_amount = sum(
                     float(item.get('quantity', 0)) * float(item.get('unit_cost', 0))
