@@ -26,6 +26,25 @@ from app.services.aws_s3_service import AWSS3Service
 logger = logging.getLogger(__name__)
 
 
+async def get_next_expense_number(conn, tenant_id: UUID) -> str:
+    """Generate the next WR-GTO-YYYY-NNNN number for a tenant."""
+    current_year = datetime.now().year
+    prefix = f'WR-GTO-{current_year}-'
+    last = await conn.fetchrow("""
+        SELECT expense_number FROM tenant_expenses
+        WHERE tenant_id = $1 AND expense_number LIKE $2
+        ORDER BY expense_number DESC LIMIT 1
+    """, tenant_id, f'{prefix}%')
+    if last and last['expense_number']:
+        try:
+            next_number = int(last['expense_number'].split('-')[-1]) + 1
+        except (ValueError, IndexError):
+            next_number = 1
+    else:
+        next_number = 1
+    return f"{prefix}{next_number:04d}"
+
+
 def _parse_date(value):
     """Parse ISO 8601 date string safely on Python < 3.11 (handles Z suffix)."""
     if not value:
@@ -102,6 +121,7 @@ async def get_expenses_list(
                     e.amount,
                     e.description,
                     e.source_system,
+                    e.expense_number,
                     e.created_at,
                     e.transaction_date,
                     e.is_recurring,
@@ -133,7 +153,7 @@ async def get_expenses_list(
                 param_count += 1
                 
             if search:
-                base_query += f" AND (LOWER(e.description) LIKE LOWER(${param_count}))"
+                base_query += f" AND (LOWER(e.description) LIKE LOWER(${param_count}) OR LOWER(e.expense_number) LIKE LOWER(${param_count}))"
                 params.append(f"%{search}%")
                 param_count += 1
             
@@ -220,6 +240,7 @@ async def get_expenses_list(
                     amount=float(row['amount']),
                     description=row['description'],
                     sourceSystem=row['source_system'],
+                    expenseNumber=row['expense_number'],
                     createdAt=row['created_at'],
                     transactionDate=row['transaction_date'],
                     isRecurring=row['is_recurring'],
@@ -273,6 +294,7 @@ async def get_expense_by_id(
                     e.amount,
                     e.description,
                     e.source_system,
+                    e.expense_number,
                     e.created_at,
                     e.transaction_date,
                     e.is_recurring,
@@ -347,6 +369,7 @@ async def get_expense_by_id(
                 amount=float(full_expense['amount']),
                 description=full_expense['description'],
                 sourceSystem=full_expense['source_system'],
+                expenseNumber=full_expense['expense_number'],
                 createdAt=full_expense['created_at'],
                 transactionDate=full_expense['transaction_date'],
                 isRecurring=full_expense['is_recurring'],
@@ -438,6 +461,9 @@ async def create_expense(
             if not category_exists:
                 raise HTTPException(status_code=400, detail="Invalid expense category")
 
+            # Generate expense number inside the same connection
+            expense_number = await get_next_expense_number(conn, tenant_id)
+
             # Insert expense with recurring fields
             row = await conn.fetchrow("""
                 INSERT INTO tenant_expenses (
@@ -448,10 +474,11 @@ async def create_expense(
                     description,
                     transaction_date,
                     source_system,
+                    expense_number,
                     is_recurring,
                     frequency,
                     recurring_end_date
-                ) VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9)
+                ) VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9, $10)
                 RETURNING id, created_at
             """,
                 tenant_id,
@@ -460,6 +487,7 @@ async def create_expense(
                 amount,
                 description,
                 trans_date,
+                expense_number,
                 is_recurring_bool,
                 frequency.lower() if frequency else None,
                 recurring_end_date_parsed
@@ -525,6 +553,7 @@ async def create_expense(
                     e.amount,
                     e.description,
                     e.source_system,
+                    e.expense_number,
                     e.created_at,
                     e.transaction_date,
                     e.is_recurring,
@@ -540,7 +569,7 @@ async def create_expense(
                 JOIN expense_categories c ON e.expense_category_id = c.id
                 WHERE e.id = $1
             """, expense_id)
-            
+
             category = ExpenseCategory(
                 id=full_expense['cat_id'],
                 categoryCode=full_expense['category_code'],
@@ -548,7 +577,7 @@ async def create_expense(
                 description=full_expense['cat_description'],
                 isActive=full_expense['cat_active']
             )
-            
+
             expense = Expense(
                 id=full_expense['id'],
                 tenantId=full_expense['tenant_id'],
@@ -557,6 +586,7 @@ async def create_expense(
                 amount=float(full_expense['amount']),
                 description=full_expense['description'],
                 sourceSystem=full_expense['source_system'],
+                expenseNumber=full_expense['expense_number'],
                 createdAt=full_expense['created_at'],
                 transactionDate=full_expense['transaction_date'],
                 isRecurring=full_expense['is_recurring'],
@@ -565,7 +595,7 @@ async def create_expense(
                 paymentMethod=full_expense['payment_method'],
                 category=category
             )
-            
+
             return ExpenseResponse(data=expense)
 
     except AuthenticationError:
@@ -630,6 +660,9 @@ async def create_expense_json(
                     payment_method_id = payment_method_raw
                     payment_method_raw = pm_row["slug"]
 
+            # Generate expense number inside the same connection
+            expense_number = await get_next_expense_number(conn, tenant_id)
+
             # Insert expense
             row = await conn.fetchrow("""
                 INSERT INTO tenant_expenses (
@@ -640,12 +673,13 @@ async def create_expense_json(
                     description,
                     transaction_date,
                     source_system,
+                    expense_number,
                     is_recurring,
                     frequency,
                     recurring_end_date,
                     payment_method,
                     payment_method_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9, $10, $11::uuid)
+                ) VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9, $10, $11, $12::uuid)
                 RETURNING id, created_at
             """,
                 tenant_id,
@@ -654,6 +688,7 @@ async def create_expense_json(
                 expense_data.amount,
                 expense_data.description,
                 expense_data.transaction_date,
+                expense_number,
                 expense_data.is_recurring,
                 expense_data.frequency,
                 expense_data.recurring_end_date,
@@ -673,6 +708,7 @@ async def create_expense_json(
                     e.amount,
                     e.description,
                     e.source_system,
+                    e.expense_number,
                     e.created_at,
                     e.transaction_date,
                     e.is_recurring,
@@ -705,6 +741,7 @@ async def create_expense_json(
                 amount=full_expense['amount'],
                 description=full_expense['description'],
                 sourceSystem=full_expense['source_system'],
+                expenseNumber=full_expense['expense_number'],
                 createdAt=full_expense['created_at'],
                 transactionDate=full_expense['transaction_date'],
                 isRecurring=full_expense['is_recurring'],

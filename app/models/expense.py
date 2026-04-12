@@ -83,6 +83,7 @@ class Expense(ExpenseBase):
     tenant_id: UUID = Field(alias='tenantId')
     month_year: str = Field(alias='monthYear')
     source_system: Optional[str] = Field(None, alias='sourceSystem')
+    expense_number: Optional[str] = Field(None, alias='expenseNumber')
     created_at: datetime = Field(alias='createdAt')
     category: Optional[ExpenseCategory] = None
     attachments: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
