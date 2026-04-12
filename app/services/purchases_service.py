@@ -21,7 +21,7 @@ from app.models.purchase import (
 )
 from app.services.email_helpers import send_quotation_email
 from app.services.gemini_service import process_invoice
-from app.services.ingredients_service import create_ai_ingredient
+from app.services.ingredients_service import match_ingredient_by_name
 
 async def get_purchases_list(
     request: Request,
@@ -932,67 +932,24 @@ async def extract_invoice_data(request: Request, file: UploadFile) -> dict:
     finally:
         await file.close()
 
-    # Fetch ingredient catalog to pass to Gemini for matching - Optimize: only take names to reduce token count
-    catalog = []
+    # Process with Gemini (extraction only — no catalog in prompt)
     try:
-        async with get_db_connection() as conn:
-            # We only send ID and Name to Gemini to save tokens and avoid 504 timeouts
-            # If the catalog is very large, this can still be a problem. 
-            # Optimization: limit to top ingredients or those most frequently used.
-            rows = await conn.fetch(
-                "SELECT id, name, unit FROM ingredients ORDER BY name"
-            )
-            catalog = [
-                {"id": str(r["id"]), "name": r["name"], "unit": r["unit"]}
-                for r in rows
-            ]
-            
-            # If catalog is too large (> 500 items), Gemini might struggle/timeout.
-            # We'll trim it or let the backend do the fuzzy matching later.
-            if len(catalog) > 500:
-                logger.warning(f"Catalog too large ({len(catalog)} items). Trimming for Gemini prompt.")
-                # In a more advanced version, we'd use vector search here.
-                # For now, we'll just send the first 500.
-                catalog = catalog[:500]
-                
-    except Exception as e:
-        logger.warning(f"Could not fetch ingredient catalog for OCR matching: {e}")
+        data = await process_invoice(file_bytes, file.content_type)
 
-    # Process with Gemini (catalog injected into prompt)
-    try:
-        # model name fix: gemini-2.0-flash is the current stable flash model
-        data = await process_invoice(file_bytes, file.content_type, catalog=catalog)
-
-        # For items where Gemini flagged a new ingredient, create it automatically
+        # Server-side ingredient matching via pg_trgm (replaces Gemini catalog lookup)
         if data.get("items"):
             async with get_db_connection() as conn:
                 for item in data["items"]:
-                    match = item.get("ingredient_match") or {}
-                    matched_id = match.get("id")
-                    should_create = match.get("should_create", False)
-                    suggested_name = match.get("suggested_name")
-                    suggested_unit = match.get("suggested_unit")
+                    detected_name = item.get("detected_ingredient") or item.get("descripcion") or ""
+                    if not detected_name:
+                        continue
 
-                    if matched_id:
-                        # Gemini found an existing ingredient - enrich it from catalog
-                        cat_item = next((c for c in catalog if c["id"] == matched_id), None)
-                        if cat_item:
-                            item["matched_ingredient"] = cat_item
-                        item["detected_ingredient_id"] = matched_id
-                    elif should_create and suggested_name and suggested_unit:
-                        # Gemini is confident this is a new ingredient — create it (Global)
-                        peso = item.get("peso_unidad_gr")
-                        base_name = match.get("suggested_base_name")
-                        res = await create_ai_ingredient(
-                            conn, suggested_name, suggested_unit,
-                            tenant_id=None,
-                            peso_unidad_gr=float(peso) if peso else None,
-                            suggested_base_name=base_name
-                        )
-                        if res:
-                            item["matched_ingredient"] = res
-                            item["detected_ingredient_id"] = res["id"]
-                            item["detected_ingredient"] = res["name"]
+                    match = await match_ingredient_by_name(conn, detected_name, threshold=0.35)
+                    if match and match["score"] >= 0.35:
+                        item["matched_ingredient"] = match
+                        item["detected_ingredient_id"] = match["id"]
+                    else:
+                        item["match_status"] = "unmatched"
 
         return {
             "success": True,

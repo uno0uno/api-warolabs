@@ -71,125 +71,50 @@ def _fix_item_unit_prices(data: dict) -> None:
 async def process_invoice(
     image_bytes: bytes,
     mime_type: str = "image/jpeg",
-    catalog: Optional[List[Dict]] = None
 ) -> dict:
     """
-    Process an invoice image using Google Gemini 2.5 Flash Lite.
-    Returns structured JSON data. Retries once on per-minute 429 quota errors.
-
-    If `catalog` is provided (list of {id, name, unit} dicts), Gemini will also
-    attempt to match each item against the catalog and flag new ingredients.
+    Process an invoice image using Google Gemini 2.5 Flash.
+    Returns structured JSON data with raw extracted items (no catalog matching).
+    Ingredient matching is done server-side via pg_trgm after this call.
+    Retries once on per-minute 429 quota errors.
     """
     if not settings.google_api_key:
         logger.error("Google API Key not found")
         raise HTTPException(status_code=500, detail="Google API Key not configured")
-
-    # Build catalog context block for the prompt
-    catalog_block = ""
-    if catalog:
-        lines = [f"{i['id']}|{i['name']}|{i['unit']}" for i in catalog]
-        catalog_block = (
-            "\n\nCATÁLOGO DE INGREDIENTES DEL SISTEMA (id|nombre|unidad_base):\n"
-            + "\n".join(lines)
-            + "\n\nUsa este catálogo para rellenar el campo 'ingredient_match' de cada item."
-        )
-
-    ingredient_match_schema = """
-                    "detected_ingredient": "Nombre normalizado del ingrediente (corregido y sin marcas)",
-                    "ingredient_match": {
-                        "id": "UUID del catálogo si hay coincidencia, sino null",
-                        "confidence": 0.0,
-                        "should_create": false,
-                        "suggested_name": null,
-                        "suggested_unit": null,
-                        "suggested_base_name": null
-                    }"""
-
-    ingredient_match_rules = """
-        REGLAS PARA ingredient_match (aplica SOLO si se proporcionó catálogo):
-
-        9. "detected_ingredient": nombre del producto limpio, sin cantidad ni marca comercial.
-           Ej: "JAMON SDW ZENU X 450 G" → "Jamón" o "Jamón de sándwich".
-
-        10. "ingredient_match.id": UUID del ingrediente del catálogo que mejor coincide con el
-            producto de la factura. Usa coincidencia semántica, no exacta.
-            Ej: "Aceite Gira 1L" → coincide con "Aceite de girasol" (id del catálogo).
-            Si no hay ninguna coincidencia razonable → null.
-
-        11. "ingredient_match.confidence": número entre 0 y 1 que indica tu certeza de la
-            coincidencia. 1.0 = exacto, 0.5 = probable, 0.0 = sin coincidencia.
-
-        12. "ingredient_match.should_create": true SOLO cuando SE CUMPLEN AMBAS CONDICIONES:
-            a) confidence < 0.4 (no encontraste coincidencia suficiente en el catálogo), Y
-            b) El producto es claramente un ingrediente de cocina real.
-
-            SIEMPRE debe ser false (nunca crear) si el ítem cumple CUALQUIERA de estas condiciones:
-            - Es un código PLU, referencia interna, o solo números: "22 / P", "PLU-123", "REF 445"
-            - La descripción está visiblemente truncada o termina a mitad de palabra: "JUGOS CALIFORNI", "PROD VA..."
-            - Es una agrupación genérica sin producto específico: "PRODUCTOS VARIOS", "VARIOS", "MIXTO", "SURTIDO", "MISCELANEOS"
-            - Es un servicio, transporte o cobro: contiene SERVICIO, DOMICILIO, FLETE, TRANSPORTE, COBRO, CARGO, COMISION
-            - La descripción tiene 2 palabras o menos Y ninguna es un ingrediente reconocible de cocina o suministro.
-
-            NOTA: Suministros como papel parafinado, papel aluminio, o bolsas de empaque específico SÍ se deben crear si el confidence es bajo.
-
-        13. "ingredient_match.suggested_name": si should_create=true, escribe el nombre
-            normalizado del nuevo ingrediente en español, sin marca, sin cantidad.
-            Ej: "Leche entera". Si should_create=false → null.
-
-        14. "ingredient_match.suggested_unit": si should_create=true, elige la unidad base
-            más apropiada. IMPORTANTE: usa EXACTAMENTE estos valores:
-            - Sólidos pesables (carnes, quesos, verduras, harinas, etc.) → "gr"
-            - Líquidos (aceites, salsas, lácteos, bebidas, etc.) → "ml"
-            - Unidades contables (huevos, panes, porciones individuales, etc.) → "und"
-            Si should_create=false → null.
-
-        15. "ingredient_match.suggested_base_name": si should_create=true, indica el nombre
-            genérico BASE del que este producto es una variante específica.
-            REGLA DE ORO: Si el producto tiene especificaciones (marca, tamaño, tipo, material), el base es el genérico.
-            Ejemplos:
-            - "Bolsa Aluminio 1/25" → base = "Bolsa"
-            - "Aceite de oliva extra virgen" → base = "Aceite de oliva"
-            - "Leche entera 1L" → base = "Leche"
-            - "Arroz Diana 1kg" → base = "Arroz"
-            - "Sal" (ya es el genérico) → null
-            Si el ingrediente ES el genérico (no tiene un base más amplio) → null.
-            Si should_create=false → null.
-    """
 
     max_attempts = 2
     for attempt in range(1, max_attempts + 1):
       try:
         client = genai.Client(api_key=settings.google_api_key)
 
-        prompt = f"""
+        prompt = """
         Contexto: Eres un asistente contable experto en restaurantes colombianos.
         Tarea: Analiza la imagen adjunta (factura de proveedor).
         Salida: Genera UNICAMENTE un objeto JSON válido con la siguiente estructura.
 
         Esquema JSON:
-        {{
+        {
             "proveedor": "Nombre del proveedor o Razón Social",
             "nit": "Número de identificación tributaria si es visible",
             "fecha": "YYYY-MM-DD",
             "numero_factura": "Número de la factura",
             "total_factura": 0,
             "items": [
-                {{
+                {
                     "descripcion": "Nombre del producto tal como aparece en la factura",
+                    "detected_ingredient": "Nombre normalizado del ingrediente, sin marca ni cantidad",
                     "cantidad": 1.0,
                     "precio_unitario": 0,
                     "total": 0,
-                    "peso_unidad_gr": null,
-                    {ingredient_match_schema}
-                }}
+                    "peso_unidad_gr": null
+                }
             ],
             "subtotal": 0,
             "iva": 0,
             "forma_pago": "Efectivo/Credito/etc",
             "observaciones": "Observaciones si las hay",
             "advertencia": "Si la imagen es borrosa o ilegible, escribe 'ILEGIBLE', sino deja null"
-        }}
-        {catalog_block}
+        }
 
         REGLAS CRÍTICAS PARA LOS ITEMS:
 
@@ -220,25 +145,27 @@ async def process_invoice(
              "QUESO TAJADO"               → peso_unidad_gr: null
              "HUEVOS AA X 30 UND"         → peso_unidad_gr: null
 
-        4. Si la descripción contiene el peso del producto, inclúyelo tal cual en "descripcion",
+        4. "detected_ingredient": nombre normalizado del producto, en español, sin marca, sin
+           cantidad, sin peso. Ej: "JAMON SDW ZENU X 450 G" → "Jamón de sándwich".
+
+        5. Si la descripción contiene el peso del producto, inclúyelo tal cual en "descripcion",
            NO lo uses como cantidad.
 
-        5. Si ves "IVA" o "Impoconsumo", ignóralos en el precio_unitario, extrae el valor neto.
+        6. Si ves "IVA" o "Impoconsumo", ignóralos en el precio_unitario, extrae el valor neto.
 
-        6. Corrige errores tipográficos obvios de OCR (ej. "T0mate" → "Tomate").
+        7. Corrige errores tipográficos obvios de OCR (ej. "T0mate" → "Tomate").
 
-        7. Las facturas colombianas usan puntos para miles (10.000) y comas para decimales (1,50)
+        8. Las facturas colombianas usan puntos para miles (10.000) y comas para decimales (1,50)
            O VICEVERSA. Usa el contexto (valores de facturas típicas) para decidir.
 
-        8. Todos los valores numéricos sin símbolos de moneda ($, COP, etc.).
+        9. Todos los valores numéricos sin símbolos de moneda ($, COP, etc.).
 
-        8b. DETECCIÓN DE CÓDIGO PLU MAL INTERPRETADO COMO CANTIDAD:
+        9b. DETECCIÓN DE CÓDIGO PLU MAL INTERPRETADO COMO CANTIDAD:
             Algunas facturas colombianas imprimen un código PLU o referencia interna
             en la columna de cantidad. Si ves que `cantidad` > 500 Y `precio_unitario` < 10,
             es muy probable que `cantidad` sea un código PLU, no una cantidad real.
             En ese caso: corrige cantidad = 1 y precio_unitario = total_linea.
             Ejemplo: "11000 | 1 | 11.000" donde 11000 es el PLU → cantidad=1, precio_unitario=11000.
-        {ingredient_match_rules if catalog else ""}
         """
 
         response = client.models.generate_content(
@@ -251,7 +178,8 @@ async def process_invoice(
                 )
             ],
             config=types.GenerateContentConfig(
-                response_mime_type="application/json"
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(thinking_budget=0)
             )
         )
 
