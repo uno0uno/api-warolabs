@@ -170,7 +170,8 @@ async def create_direct_purchase(
                 purchase_number = await get_next_direct_purchase_number(conn, tenant_id)
 
                 # Resolve payment_method: if it looks like a UUID (sub-method ID),
-                # fetch the parent group slug so the column stores a stable identifier.
+                # store the parent group slug in payment_method and the UUID in payment_method_id.
+                payment_method_id: Optional[str] = None
                 if payment_method and len(payment_method) == 36 and '-' in payment_method:
                     row = await conn.fetchrow(
                         """
@@ -182,6 +183,7 @@ async def create_direct_purchase(
                         payment_method,
                     )
                     if row:
+                        payment_method_id = payment_method
                         payment_method = row["slug"]
 
                 # 2. Calculate totals from items
@@ -215,6 +217,7 @@ async def create_direct_purchase(
                         payment_type,
                         payment_terms,
                         payment_method,
+                        payment_method_id,
                         payment_reference,
                         payment_amount,
                         payment_date,
@@ -223,9 +226,9 @@ async def create_direct_purchase(
                         received_by,
                         paid_at
                     ) VALUES (
-                        $1, $2, $3, COALESCE($19, NOW()), $4, 0, $5, $6, $7, $8, $9, $10,
-                        $11, $12, $13, $14, $15, $16, TRUE, NOW(), $17,
-                        CASE WHEN $18 THEN NOW() ELSE NULL END
+                        $1, $2, $3, COALESCE($20, NOW()), $4, 0, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13, $14::uuid, $15, $16, $17, TRUE, NOW(), $18,
+                        CASE WHEN $19 THEN NOW() ELSE NULL END
                     )
                     RETURNING id
                 """,
@@ -242,6 +245,7 @@ async def create_direct_purchase(
                     payment_type,
                     payment_terms,
                     payment_method,
+                    payment_method_id,
                     payment_reference,
                     payment_amount,
                     _parse_date(payment_date),
@@ -506,6 +510,7 @@ async def get_direct_purchases_list(
                     tp.updated_at,
                     tp.payment_type,
                     tp.payment_method,
+                    tp.payment_method_id::text as payment_method_id,
                     tp.payment_reference,
                     tp.payment_amount,
                     tp.payment_date,
