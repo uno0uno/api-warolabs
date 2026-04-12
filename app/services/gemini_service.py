@@ -178,8 +178,7 @@ async def process_invoice(
                 )
             ],
             config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                thinking_config=types.ThinkingConfig(thinking_budget=0)
+                response_mime_type="application/json"
             )
         )
 
