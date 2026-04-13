@@ -666,11 +666,26 @@ async def archive_tenant_ingredient(ingredient_id: str, tenant_id: str) -> Dict[
         prm = await conn.fetchval("SELECT COUNT(*) FROM product_recipe_modifications WHERE ingredient_id = $1", ingredient_id)
         mod = await conn.fetchval("SELECT COUNT(*) FROM modifiers                    WHERE ingredient_id = $1", ingredient_id)
 
+        # Capture resale product IDs BEFORE the transaction (product_recipes rows still exist here)
+        resale_rows = await conn.fetch(
+            """SELECT p.id FROM product p
+               JOIN product_recipes pr ON pr.product_id = p.id
+               WHERE pr.ingredient_id = $1 AND p.is_resale = true AND p.tenant_id = $2""",
+            ingredient_id, tenant_id,
+        )
+        resale_ids = [str(row["id"]) for row in resale_rows]
+
         async with conn.transaction():
             await conn.execute(
                 "UPDATE ingredients SET is_active = FALSE, updated_at = NOW() WHERE id = $1",
                 ingredient_id,
             )
+            # Deactivate orphaned resale products before their recipe rows are deleted
+            if resale_ids:
+                await conn.execute(
+                    "UPDATE product SET is_available = false WHERE id = ANY($1::uuid[]) AND is_resale = true",
+                    resale_ids,
+                )
             await conn.execute("DELETE FROM product_recipes              WHERE ingredient_id = $1", ingredient_id)
             await conn.execute("DELETE FROM base_recipe_templates        WHERE ingredient_id = $1", ingredient_id)
             await conn.execute("DELETE FROM modifier_recipes             WHERE ingredient_id = $1", ingredient_id)
@@ -686,6 +701,7 @@ async def archive_tenant_ingredient(ingredient_id: str, tenant_id: str) -> Dict[
             "modifier_recipes": int(mr),
             "product_recipe_modifications": int(prm),
             "modifiers_direct_link": int(mod),
+            "resale_products_deactivated": len(resale_ids),
         },
     }
 
