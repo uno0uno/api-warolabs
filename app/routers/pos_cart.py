@@ -148,6 +148,8 @@ class CompleteOrderRequest(BaseModel):
     receipt_email: Optional[str] = Field(None, description="Optional customer email to send receipt to after order completes")
     discount_type: Optional[str] = Field(None, description="'percent' | 'fixed'")
     discount_value: Optional[float] = Field(None, description="10 for 10%, 5000 for $5,000 COP")
+    split_mode: bool = Field(False, description="True when using split payment — creates order with payment_status='partial'")
+    split_first_amount: float = Field(0.0, description="Amount for the first split payment (used only when split_mode=True)")
 
 
 @router.post("/{cart_id}/complete")
@@ -174,6 +176,8 @@ async def complete_order(
         order_data.receipt_email,
         order_data.discount_type,
         order_data.discount_value,
+        order_data.split_mode,
+        order_data.split_first_amount,
     )
 
 

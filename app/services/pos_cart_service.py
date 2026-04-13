@@ -738,6 +738,8 @@ async def complete_pos_order(
     receipt_email: Optional[str] = None,
     discount_type: Optional[str] = None,
     discount_value: Optional[float] = None,
+    split_mode: bool = False,
+    split_first_amount: float = 0.0,
 ) -> dict:
     """
     Complete a POS order:
@@ -797,8 +799,13 @@ async def complete_pos_order(
                     raise APIError("Cannot complete order with empty cart", status_code=400)
 
                 # 3. Create order record (use customer_id from parameter)
-                # Compute payment_status: credit orders start as 'credit'; all others 'paid'
-                payment_status = 'credit' if payment_method == 'credit' else 'paid'
+                # Compute payment_status
+                if split_mode:
+                    payment_status = 'partial'
+                elif payment_method == 'credit':
+                    payment_status = 'credit'
+                else:
+                    payment_status = 'paid'
 
                 # Compute discount if provided
                 cart_subtotal = float(cart_row['total_amount'])
@@ -1112,15 +1119,38 @@ async def complete_pos_order(
                         float(item['quantity']), tenant_id
                     )
 
-                # 7. Mark cart as completed
-                complete_cart_query = """
-                    UPDATE pos_carts
-                    SET status = 'completed', updated_at = NOW()
-                    WHERE id = $1
-                """
-                await conn.execute(complete_cart_query, cart_id)
+                # 7a. In split mode: record first payment; cart stays active
+                _split_paid_total = 0.0
+                _split_remaining = float(_discounted_total)
+                _split_is_complete = False
+                if split_mode and split_first_amount > 0:
+                    await conn.execute(
+                        """
+                        INSERT INTO order_payments
+                            (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id)
+                        VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid)
+                        """,
+                        order_id, tenant_id, split_first_amount, payment_method,
+                        str(payment_method_id) if payment_method_id else None,
+                        str(user_id) if user_id else None,
+                    )
+                    _split_paid_total = split_first_amount
+                    _split_remaining = max(0.0, float(_discounted_total) - split_first_amount)
+                    _split_is_complete = _split_remaining <= 0.01
 
-                logger.info(f"Order #{order_number} completed successfully")
+                # 7b. Mark cart completed — skip in split mode unless fully paid
+                if not split_mode or _split_is_complete:
+                    await conn.execute(
+                        "UPDATE pos_carts SET status = 'completed', updated_at = NOW() WHERE id = $1",
+                        cart_id
+                    )
+                    if _split_is_complete:
+                        await conn.execute(
+                            "UPDATE orders SET payment_status = 'paid' WHERE id = $1",
+                            order_id
+                        )
+
+                logger.info(f"Order #{order_number} created (split_mode={split_mode})")
 
                 # Capture values needed after the transaction closes
                 _order_id = order_id
@@ -1129,19 +1159,21 @@ async def complete_pos_order(
                 _items = items
                 _order_date = order_row['created_at']
                 _order_number = int(order_number)
-                _total_amount = float(cart_row['total_amount'])
+                _total_amount = float(_discounted_total)
                 _result = {
                     "success": True,
                     "message": "Order completed successfully",
                     "data": {
                         "order_id": str(order_id),
                         "order_number": int(order_number),
-                        "total_amount": float(cart_row['total_amount']),
+                        "total_amount": float(_discounted_total),
                         "payment_method": payment_method,
                         "payment_status": payment_status,
                         "credit_due_date": str(credit_due_date) if credit_due_date is not None else None,
                         "items_count": len(items),
-                        "created_at": order_row['created_at'].isoformat()
+                        "created_at": order_row['created_at'].isoformat(),
+                        # Split mode extras
+                        **({"paid_total": _split_paid_total, "remaining": _split_remaining, "is_complete": _split_is_complete, "payment_id": None} if split_mode else {}),
                     }
                 }
 
