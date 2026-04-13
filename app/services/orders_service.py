@@ -958,7 +958,9 @@ async def get_orders_metrics(
                     COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled_orders,
                     COUNT(*) FILTER (WHERE status = 'pending') as pending_orders,
                     COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) as total_sales,
-                    COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) as avg_ticket
+                    COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) as avg_ticket,
+                    COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0) as discount_count,
+                    COALESCE(SUM(discount_amount) FILTER (WHERE status = 'completed' AND discount_amount > 0), 0) as total_discount_amount
                 FROM orders
                 WHERE {where_clause}
             """
@@ -974,6 +976,8 @@ async def get_orders_metrics(
                     "cancelled_orders": row['cancelled_orders'],
                     "pending_orders": row['pending_orders'],
                     "avg_ticket": float(row['avg_ticket']),
+                    "discount_count": int(row['discount_count']),
+                    "total_discount_amount": float(row['total_discount_amount']),
                 }
             }
 
@@ -1033,6 +1037,8 @@ async def get_orders_dashboard(
                     COUNT(*) FILTER (WHERE status = 'completed'{main_filter_sql}) as main_completed,
                     COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_sales,
                     COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_avg_ticket,
+                    COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0{main_filter_sql}) as main_discount_count,
+                    COALESCE(SUM(discount_amount) FILTER (WHERE status = 'completed' AND discount_amount > 0{main_filter_sql}), 0) as main_total_discount,
 
                     -- Month-to-date (with optional payment/status filters)
                     COUNT(*) FILTER (
@@ -1111,6 +1117,8 @@ async def get_orders_dashboard(
                         "total_sales": main_sales,
                         "completed_orders": row['main_completed'],
                         "avg_ticket": float(row['main_avg_ticket']),
+                        "discount_count": int(row['main_discount_count']),
+                        "total_discount_amount": float(row['main_total_discount']),
                     },
                     "month": {
                         "total_sales": float(row['month_sales']),
