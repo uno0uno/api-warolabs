@@ -16,6 +16,28 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _distribute_discount(items: List[dict], discount_amount: float) -> List[dict]:
+    """Distribute discount proportionally across items by subtotal. Remainder goes to largest item."""
+    total_subtotal = sum(item['subtotal'] for item in items)
+    if total_subtotal <= 0 or discount_amount <= 0:
+        for item in items:
+            item['discount_allocated'] = 0
+            item['net_total'] = float(item['subtotal'])
+        return items
+    allocated_total = 0.0
+    for item in items:
+        share = float(item['subtotal']) / total_subtotal
+        item['discount_allocated'] = round(discount_amount * share)
+        item['net_total'] = float(item['subtotal']) - item['discount_allocated']
+        allocated_total += item['discount_allocated']
+    remainder = round(discount_amount) - round(allocated_total)
+    if remainder != 0:
+        largest = max(items, key=lambda x: x['subtotal'])
+        largest['discount_allocated'] += remainder
+        largest['net_total'] -= remainder
+    return items
+
+
 async def list_tables(request: Request) -> dict:
     """
     List all active tables for tenant with current status, session duration, and running total.
@@ -266,7 +288,7 @@ async def open_session(request: Request, table_id: UUID) -> dict:
         raise APIError(f"Error opening session: {e}", status_code=500)
 
 
-async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None) -> dict:
+async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None) -> dict:
     """
     Close the active session for a table.
     If payment_method is provided, marks all pending orders as completed with that payment method.
@@ -311,32 +333,99 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
 
                     payment_status = 'credit' if payment_method == 'credit' else 'paid'
 
+                    # Compute discount if provided
+                    _discount_amount = None
+                    if discount_type and discount_value is not None and discount_value > 0:
+                        # Sum all pending order totals for this session
+                        session_total_row = await conn.fetchrow(
+                            "SELECT COALESCE(SUM(total_amount), 0) AS total FROM orders WHERE table_session_id = $1 AND status = 'pending'",
+                            session_row["id"],
+                        )
+                        session_total = float(session_total_row["total"])
+                        if session_total > 0:
+                            if discount_type == 'percent':
+                                _discount_amount = round(session_total * discount_value / 100)
+                            else:
+                                _discount_amount = min(round(discount_value), round(session_total))
+
+                    # If discount applies, distribute proportionally across all pending order_items
+                    if _discount_amount:
+                        item_rows = await conn.fetch(
+                            """
+                            SELECT oi.id, oi.subtotal
+                            FROM order_items oi
+                            JOIN orders o ON o.id = oi.order_id
+                            WHERE o.table_session_id = $1 AND o.status = 'pending'
+                            """,
+                            session_row["id"],
+                        )
+                        items_for_dist = [
+                            {"id": str(row["id"]), "subtotal": float(row["subtotal"])}
+                            for row in item_rows
+                        ]
+                        items_for_dist = _distribute_discount(items_for_dist, float(_discount_amount))
+                        for item in items_for_dist:
+                            await conn.execute(
+                                "UPDATE order_items SET discount_allocated = $2, net_total = $3 WHERE id = $1::uuid",
+                                item["id"],
+                                item["discount_allocated"],
+                                item["net_total"],
+                            )
+
                     completed_count = await conn.fetchval(
                         "SELECT COUNT(*) FROM orders WHERE table_session_id = $1 AND status = 'pending'",
                         session_row["id"],
                     )
-                    await conn.execute(
-                        """
-                        UPDATE orders
-                        SET status = 'completed',
-                            payment_method = $2,
-                            payment_status = $3,
-                            credit_due_date = $4,
-                            customer_id = COALESCE($5::uuid, customer_id),
-                            payment_method_id = $6
-                        WHERE table_session_id = $1 AND status = 'pending'
-                        """,
-                        session_row["id"],
-                        payment_method,
-                        payment_status,
-                        credit_due_date,
-                        customer_id,
-                        payment_method_id,
-                    )
+
+                    if _discount_amount:
+                        await conn.execute(
+                            """
+                            UPDATE orders
+                            SET status = 'completed',
+                                payment_method = $2,
+                                payment_status = $3,
+                                credit_due_date = $4,
+                                customer_id = COALESCE($5::uuid, customer_id),
+                                payment_method_id = $6,
+                                discount_type = $7,
+                                discount_value = $8,
+                                discount_amount = $9,
+                                total_amount = total_amount - $9
+                            WHERE table_session_id = $1 AND status = 'pending'
+                            """,
+                            session_row["id"],
+                            payment_method,
+                            payment_status,
+                            credit_due_date,
+                            customer_id,
+                            payment_method_id,
+                            discount_type,
+                            discount_value,
+                            _discount_amount,
+                        )
+                    else:
+                        await conn.execute(
+                            """
+                            UPDATE orders
+                            SET status = 'completed',
+                                payment_method = $2,
+                                payment_status = $3,
+                                credit_due_date = $4,
+                                customer_id = COALESCE($5::uuid, customer_id),
+                                payment_method_id = $6
+                            WHERE table_session_id = $1 AND status = 'pending'
+                            """,
+                            session_row["id"],
+                            payment_method,
+                            payment_status,
+                            credit_due_date,
+                            customer_id,
+                            payment_method_id,
+                        )
                     logger.info(
                         f"[close_session] Marked {completed_count} orders as completed "
-                        f"(payment_method={payment_method}, payment_status={payment_status}) "
-                        f"for session {session_row['id']}"
+                        f"(payment_method={payment_method}, payment_status={payment_status}, "
+                        f"discount_amount={_discount_amount}) for session {session_row['id']}"
                     )
                 else:
                     completed_count = 0

@@ -17,6 +17,42 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _distribute_discount(items: List[dict], discount_amount: float) -> List[dict]:
+    """
+    Distribute a discount proportionally across cart items based on each item's
+    share of the total subtotal. Rounding remainder assigned to the largest item.
+
+    Args:
+        items: list of dicts with at least a 'subtotal' key (float)
+        discount_amount: total discount to distribute (already computed, in COP integer)
+
+    Returns:
+        Same list with 'discount_allocated' and 'net_total' added to each item.
+    """
+    total_subtotal = sum(item['subtotal'] for item in items)
+    if total_subtotal <= 0 or discount_amount <= 0:
+        for item in items:
+            item['discount_allocated'] = 0.0
+            item['net_total'] = float(item['subtotal'])
+        return items
+
+    allocated_total = 0.0
+    for item in items:
+        share = float(item['subtotal']) / total_subtotal
+        item['discount_allocated'] = round(discount_amount * share)
+        item['net_total'] = float(item['subtotal']) - item['discount_allocated']
+        allocated_total += item['discount_allocated']
+
+    # Assign rounding remainder to the item with the largest subtotal
+    remainder = round(discount_amount) - round(allocated_total)
+    if remainder != 0:
+        largest = max(items, key=lambda x: x['subtotal'])
+        largest['discount_allocated'] += remainder
+        largest['net_total'] -= remainder
+
+    return items
+
+
 async def get_or_create_active_cart(
     request: Request,
     customer_id: UUID,
@@ -560,6 +596,8 @@ async def complete_pos_order(
     credit_due_date: Optional[date] = None,
     payment_method_id: Optional[UUID] = None,
     receipt_email: Optional[str] = None,
+    discount_type: Optional[str] = None,
+    discount_value: Optional[float] = None,
 ) -> dict:
     """
     Complete a POS order:
@@ -622,13 +660,32 @@ async def complete_pos_order(
                 # Compute payment_status: credit orders start as 'credit'; all others 'paid'
                 payment_status = 'credit' if payment_method == 'credit' else 'paid'
 
+                # Compute discount if provided
+                cart_subtotal = float(cart_row['total_amount'])
+                _discount_amount = None  # type: Optional[float]
+                _discounted_total = cart_subtotal
+                if discount_type and discount_value is not None and discount_value > 0:
+                    if discount_type == 'percent':
+                        _discount_amount = round(cart_subtotal * discount_value / 100)
+                    else:  # fixed
+                        _discount_amount = min(round(discount_value), round(cart_subtotal))
+                    _discounted_total = cart_subtotal - _discount_amount
+
+                # Pre-compute per-item discount distribution if discount applies
+                _item_subtotals = [
+                    {'subtotal': float(item['subtotal']), '_idx': i}
+                    for i, item in enumerate(items)
+                ]
+                if _discount_amount:
+                    _item_subtotals = _distribute_discount(_item_subtotals, _discount_amount)
+
                 order_query = """
                     INSERT INTO orders (
                         user_id, tenant_id, customer_id, payment_method, pos_cart_id,
                         order_date, total_amount, status, payment_status, credit_due_date,
-                        payment_method_id
+                        payment_method_id, discount_type, discount_value, discount_amount
                     )
-                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9)
+                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12)
                     RETURNING id, order_number, created_at
                 """
                 order_row = await conn.fetchrow(
@@ -638,10 +695,13 @@ async def complete_pos_order(
                     customer_id,  # Use parameter instead of cart_row
                     payment_method,
                     cart_id,
-                    cart_row['total_amount'],
+                    _discounted_total,
                     payment_status,
                     credit_due_date,
                     payment_method_id,
+                    discount_type,
+                    discount_value,
+                    _discount_amount,
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']
@@ -649,13 +709,16 @@ async def complete_pos_order(
                 logger.info(f"Created order #{order_number} from cart {cart_id}")
 
                 # 4. Copy cart items to order_items
-                for item in items:
+                for i, item in enumerate(items):
+                    _da = _item_subtotals[i]['discount_allocated'] if _discount_amount else None
+                    _nt = _item_subtotals[i]['net_total'] if _discount_amount else None
                     # Insert order item
                     order_item_query = """
                         INSERT INTO order_items (
-                            order_id, product_id, quantity, price_at_purchase, subtotal
+                            order_id, product_id, quantity, price_at_purchase, subtotal,
+                            discount_allocated, net_total
                         )
-                        VALUES ($1, $2, $3, $4, $5)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
                         RETURNING id
                     """
                     order_item_row = await conn.fetchrow(
@@ -664,7 +727,9 @@ async def complete_pos_order(
                         item['product']['id'],
                         item['quantity'],
                         item['product']['price'],
-                        item['subtotal']
+                        item['subtotal'],
+                        _da,
+                        _nt,
                     )
                     order_item_id = order_item_row['id']
 

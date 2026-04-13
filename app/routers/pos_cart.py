@@ -146,6 +146,8 @@ class CompleteOrderRequest(BaseModel):
     credit_due_date: Optional[date] = Field(None, description="Optional due date for credit orders (only used when payment_method='credit')")
     payment_method_id: Optional[UUID] = Field(None, description="UUID of the selected payment_methods row (nullable if group-level only)")
     receipt_email: Optional[str] = Field(None, description="Optional customer email to send receipt to after order completes")
+    discount_type: Optional[str] = Field(None, description="'percent' | 'fixed'")
+    discount_value: Optional[float] = Field(None, description="10 for 10%, 5000 for $5,000 COP")
 
 
 @router.post("/{cart_id}/complete")
@@ -170,6 +172,8 @@ async def complete_order(
         order_data.credit_due_date,
         order_data.payment_method_id,
         order_data.receipt_email,
+        order_data.discount_type,
+        order_data.discount_value,
     )
 
 
