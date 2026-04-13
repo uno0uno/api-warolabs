@@ -3,7 +3,7 @@ POS Cart Service
 Handles cart persistence for POS system
 """
 import asyncio
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 from datetime import date
 from fastapi import Request
@@ -586,6 +586,143 @@ async def update_cart_total(conn, cart_id: UUID):
         WHERE id = $1
     """
     await conn.execute(total_query, cart_id)
+
+
+async def add_order_payment(
+    request: Request,
+    cart_id: str,
+    amount: float,
+    payment_method: str,
+    payment_method_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Add a partial payment to a POS cart's underlying order.
+    Supports split payments (Mode 1: by amount, Mode 2: equal split).
+    When paid_total >= total_amount, completes the order automatically.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        payment_id = None
+        paid_total = 0.0
+        remaining = 0.0
+        is_complete = False
+        order_id = None
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # 1. Fetch cart and linked order — row-level lock
+                cart_row = await conn.fetchrow(
+                    """
+                    SELECT pc.id, pc.tenant_id, pc.order_id
+                    FROM pos_carts pc
+                    WHERE pc.id = $1 AND pc.tenant_id = $2
+                    FOR UPDATE
+                    """,
+                    cart_id, tenant_id
+                )
+
+                if not cart_row:
+                    raise APIError("Cart not found", status_code=404)
+
+                order_id = cart_row["order_id"]
+                if not order_id:
+                    raise APIError("Cart has no associated order — complete a partial order first", status_code=400)
+
+                # 2. Fetch order
+                order_row = await conn.fetchrow(
+                    """
+                    SELECT id, total_amount, status, payment_status
+                    FROM orders
+                    WHERE id = $1 AND tenant_id = $2
+                    FOR UPDATE
+                    """,
+                    order_id, tenant_id
+                )
+
+                if not order_row:
+                    raise APIError("Order not found", status_code=404)
+
+                if order_row["status"] == "cancelled":
+                    raise APIError("Cannot add payment to a cancelled order", status_code=409)
+
+                if order_row["status"] == "completed" and order_row["payment_status"] == "paid":
+                    raise APIError("Order is already fully paid", status_code=409)
+
+                total_amount = float(order_row["total_amount"])
+
+                # 3. Insert payment record
+                user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+                payment_row = await conn.fetchrow(
+                    """
+                    INSERT INTO order_payments
+                        (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id)
+                    VALUES
+                        ($1, $2, $3, $4, $5::uuid, $6::uuid)
+                    RETURNING id
+                    """,
+                    order_id, tenant_id, amount, payment_method,
+                    payment_method_id,
+                    user_id,
+                )
+                payment_id = str(payment_row["id"])
+
+                # 4. Compute paid total
+                paid_total_row = await conn.fetchrow(
+                    "SELECT COALESCE(SUM(amount), 0) AS paid_total FROM order_payments WHERE order_id = $1",
+                    order_id
+                )
+                paid_total = float(paid_total_row["paid_total"])
+                remaining = max(0.0, total_amount - paid_total)
+                is_complete = remaining <= 0.01  # tolerance for rounding
+
+                # 5. Update order status
+                if is_complete:
+                    await conn.execute(
+                        """
+                        UPDATE orders
+                        SET status = 'completed',
+                            payment_method = $2,
+                            payment_method_id = $3::uuid,
+                            payment_status = 'paid',
+                            order_date = COALESCE(order_date, now())
+                        WHERE id = $1
+                        """,
+                        order_id, payment_method,
+                        payment_method_id,
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE orders SET payment_status = 'partial' WHERE id = $1",
+                        order_id
+                    )
+
+        # 6. Fire-and-forget side effects OUTSIDE transaction (only on completion)
+        if is_complete:
+            try:
+                asyncio.create_task(evaluate_and_award(order_id, tenant_id))
+            except Exception as _w_err:
+                logger.warning(f"Could not schedule waros for order {order_id}: {_w_err}")
+
+        return {
+            "success": True,
+            "data": {
+                "payment_id": payment_id,
+                "paid_total": paid_total,
+                "remaining": remaining,
+                "is_complete": is_complete,
+            }
+        }
+
+    except (AuthenticationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error adding order payment: {str(e)}")
+        raise APIError(f"Error adding payment: {str(e)}", status_code=500)
 
 
 async def complete_pos_order(

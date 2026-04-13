@@ -191,6 +191,19 @@ class SendReceiptRequest(BaseModel):
     subtotal: float = 0.0
 
 
+class AddPaymentRequest(BaseModel):
+    amount: float = Field(..., gt=0, description="Amount for this payment")
+    payment_method: str = Field(..., description="cash | card | digital | credit or custom slug")
+    payment_method_id: Optional[str] = Field(None, description="UUID of payment_methods row")
+
+
+class AddPaymentResponse(BaseModel):
+    paid_total: float
+    remaining: float
+    is_complete: bool
+    payment_id: str
+
+
 @router.post("/receipt-email")
 async def send_receipt_email(receipt_data: SendReceiptRequest):
     """
@@ -212,3 +225,22 @@ async def send_receipt_email(receipt_data: SendReceiptRequest):
         subtotal=receipt_data.subtotal,
     )
     return {"success": success}
+
+
+@router.post("/{cart_id}/payments", response_model=None)
+async def add_cart_payment(
+    cart_id: str,
+    payment_data: AddPaymentRequest,
+    request: Request,
+):
+    """
+    Add a partial payment to a cart's order.
+    Supports split payments — call multiple times until is_complete=True.
+    """
+    return await pos_cart_service.add_order_payment(
+        request=request,
+        cart_id=cart_id,
+        amount=payment_data.amount,
+        payment_method=payment_data.payment_method,
+        payment_method_id=payment_data.payment_method_id,
+    )

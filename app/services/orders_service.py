@@ -3,7 +3,7 @@ Orders Service
 Handles listing and filtering of POS orders
 """
 import asyncio
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from uuid import UUID
 from fastapi import Request
 from app.database import get_db_connection
@@ -1080,9 +1080,27 @@ async def get_orders_dashboard(
             main_sales = float(row['main_sales'])
             commission_savings = round(main_sales * (commission_rate / 100))
 
-            # Payment breakdown — COALESCE pattern handles both modern (FK) and legacy (VARCHAR) orders
+            # Payment breakdown — UNION ALL: order_payments (split) + legacy orders
             breakdown_rows = await conn.fetch(
                 """
+                -- Split orders: amounts from order_payments
+                SELECT
+                    COALESCE(pmg.slug, op.payment_method)  AS group_slug,
+                    COALESCE(pmg.name, op.payment_method)  AS group_name,
+                    COALESCE(SUM(op.amount), 0)             AS total,
+                    COUNT(DISTINCT op.order_id)             AS order_count
+                FROM order_payments op
+                JOIN orders o ON o.id = op.order_id
+                LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
+                LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+                WHERE o.tenant_id = $1
+                  AND o.status = 'completed'
+                  AND (o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
+                GROUP BY COALESCE(pmg.slug, op.payment_method), COALESCE(pmg.name, op.payment_method)
+
+                UNION ALL
+
+                -- Legacy orders (no rows in order_payments): use orders.total_amount
                 SELECT
                     COALESCE(pmg.slug, o.payment_method)  AS group_slug,
                     COALESCE(pmg.name, o.payment_method)  AS group_name,
@@ -1094,21 +1112,29 @@ async def get_orders_dashboard(
                 WHERE o.tenant_id = $1
                   AND o.status = 'completed'
                   AND (o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
+                  AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = o.id)
                 GROUP BY COALESCE(pmg.slug, o.payment_method), COALESCE(pmg.name, o.payment_method)
-                ORDER BY total DESC
                 """,
-                tenant_id,
+                tenant_id, tenant_id,
             )
-            payment_breakdown = [
-                {
-                    "group_slug":  r["group_slug"],
-                    "group_name":  r["group_name"],
-                    "total":       float(r["total"]),
-                    "order_count": int(r["order_count"]),
-                }
-                for r in breakdown_rows
-                if r["group_slug"] is not None
-            ]
+            # Aggregate across UNION ALL branches in Python to avoid double-counting
+            bd_agg: Dict[str, Any] = {}
+            for r in breakdown_rows:
+                slug = r["group_slug"]
+                if slug is None:
+                    continue
+                if slug not in bd_agg:
+                    bd_agg[slug] = {
+                        "group_slug":  slug,
+                        "group_name":  r["group_name"],
+                        "total":       float(r["total"]),
+                        "order_count": int(r["order_count"]),
+                    }
+                else:
+                    entry = bd_agg[slug]
+                    entry["total"] = float(entry["total"]) + float(r["total"])
+                    entry["order_count"] = int(entry["order_count"]) + int(r["order_count"])
+            payment_breakdown = sorted(bd_agg.values(), key=lambda x: x["total"], reverse=True)
 
             return {
                 "success": True,

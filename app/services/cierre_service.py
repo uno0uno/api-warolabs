@@ -74,12 +74,8 @@ async def _compute_preview(
     sales_row = await conn.fetchrow(
         f"""
         SELECT
-            COALESCE(SUM(total_amount), 0)                                              AS total_sales,
-            COALESCE(COUNT(*), 0)                                                       AS items_sold,
-            COALESCE(SUM(total_amount) FILTER (WHERE payment_method = 'cash'),    0)    AS total_cash,
-            COALESCE(SUM(total_amount) FILTER (WHERE payment_method = 'card'),    0)    AS total_card,
-            COALESCE(SUM(total_amount) FILTER (WHERE payment_method = 'digital'), 0)    AS total_digital,
-            COALESCE(SUM(total_amount) FILTER (WHERE payment_method = 'credit'),  0)    AS total_credit
+            COALESCE(SUM(total_amount), 0)  AS total_sales,
+            COALESCE(COUNT(*), 0)           AS items_sold
         FROM orders
         WHERE tenant_id = $1
           {status_filter}
@@ -87,6 +83,44 @@ async def _compute_preview(
         """,
         tenant_id, *date_params,
     )
+
+    # Payment method totals — COALESCE split vs legacy:
+    # Split orders: sum from order_payments rows
+    # Legacy orders (no order_payments rows): use orders.total_amount + orders.payment_method
+    method_rows = await conn.fetch(
+        f"""
+        SELECT
+            op.payment_method AS method,
+            COALESCE(SUM(op.amount), 0) AS total
+        FROM order_payments op
+        JOIN orders o ON o.id = op.order_id
+        WHERE o.tenant_id = $1
+          {status_filter.replace('status', 'o.status')}
+          {date_filter.replace('order_date', 'o.order_date')}
+        GROUP BY op.payment_method
+
+        UNION ALL
+
+        SELECT
+            payment_method AS method,
+            COALESCE(SUM(total_amount), 0) AS total
+        FROM orders
+        WHERE tenant_id = $1
+          {status_filter}
+          {date_filter}
+          AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = orders.id)
+          AND payment_method IS NOT NULL
+        GROUP BY payment_method
+        """,
+        tenant_id, *date_params, tenant_id, *date_params,
+    )
+
+    # Aggregate method totals in Python to handle UNION ALL correctly
+    method_totals: Dict[str, float] = {}
+    for row in method_rows:
+        m = row["method"]
+        if m:
+            method_totals[m] = method_totals.get(m, 0.0) + float(row["total"])
 
     gastos_row = await conn.fetchrow(
         """
@@ -112,7 +146,7 @@ async def _compute_preview(
         tenant_id, period_start, period_end,
     )
 
-    total_cash = float(sales_row["total_cash"])
+    total_cash = method_totals.get("cash", 0.0)
     gastos_efectivo = float(gastos_row["gastos_efectivo"])
     cash_expected = total_cash - gastos_efectivo
 
@@ -120,9 +154,9 @@ async def _compute_preview(
         "totalSales":       float(sales_row["total_sales"]),
         "itemsSold":        int(sales_row["items_sold"]),
         "totalCash":        total_cash,
-        "totalCard":        float(sales_row["total_card"]),
-        "totalDigital":     float(sales_row["total_digital"]),
-        "totalCredit":      float(sales_row["total_credit"]),
+        "totalCard":        method_totals.get("card", 0.0),
+        "totalDigital":     method_totals.get("digital", 0.0),
+        "totalCredit":      method_totals.get("credit", 0.0),
         "gastosEfectivo":   gastos_efectivo,
         "cashExpected":     cash_expected,
         "openTablesCount":  int(open_tables_row["open_tables_count"]),
@@ -156,6 +190,23 @@ async def _compute_breakdown_rows(
     )
     rows = await conn.fetch(
         f"""
+        -- Split orders: read from order_payments (with FK method → group)
+        SELECT
+            COALESCE(pmg.slug, op.payment_method)  AS group_slug,
+            COALESCE(pm.name, op.payment_method)   AS method_name,
+            COALESCE(SUM(op.amount), 0)             AS total
+        FROM order_payments op
+        JOIN orders o ON o.id = op.order_id
+        LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
+        LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+        WHERE o.tenant_id = $1
+          {status_filter.replace('status', 'o.status')}
+          {date_filter.replace('order_date', 'o.order_date')}
+        GROUP BY COALESCE(pmg.slug, op.payment_method), COALESCE(pm.name, op.payment_method)
+
+        UNION ALL
+
+        -- Legacy orders with FK method (no order_payments rows)
         SELECT
             pmg.slug        AS group_slug,
             pm.name         AS method_name,
@@ -167,10 +218,12 @@ async def _compute_breakdown_rows(
           {status_filter}
           {date_filter}
           AND o.payment_method_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = o.id)
         GROUP BY pmg.slug, pm.name
 
         UNION ALL
 
+        -- Legacy orders with VARCHAR method only (no order_payments rows)
         SELECT
             o.payment_method AS group_slug,
             o.payment_method AS method_name,
@@ -181,19 +234,26 @@ async def _compute_breakdown_rows(
           {date_filter}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = o.id)
         GROUP BY o.payment_method
         """,
-        tenant_id, *date_params,
+        tenant_id, *date_params, tenant_id, *date_params, tenant_id, *date_params,
     )
-    return [
-        {
-            "group_slug":  row["group_slug"],
-            "method_name": row["method_name"],
-            "total":       float(row["total"]),
-        }
-        for row in rows
-        if float(row["total"]) > 0
-    ]
+    # Aggregate across UNION ALL branches — same group_slug+method_name can appear
+    # from both the order_payments branch and a legacy branch.
+    aggregated: Dict[tuple, Dict[str, Any]] = {}
+    for row in rows:
+        key = (row["group_slug"], row["method_name"])
+        total = float(row["total"])
+        if key not in aggregated:
+            aggregated[key] = {
+                "group_slug":  row["group_slug"],
+                "method_name": row["method_name"],
+                "total":       total,
+            }
+        else:
+            aggregated[key]["total"] += total
+    return [r for r in aggregated.values() if r["total"] > 0]
 
 
 # ---------------------------------------------------------------------------
