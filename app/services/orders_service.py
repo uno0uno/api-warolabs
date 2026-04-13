@@ -266,6 +266,27 @@ async def get_order_by_id(
             if not order_row:
                 raise APIError("Order not found", status_code=404)
 
+            # Fetch split payments if any
+            payments_rows = await conn.fetch(
+                """
+                SELECT id, amount, payment_method, payment_method_id, paid_at
+                FROM order_payments
+                WHERE order_id = $1
+                ORDER BY paid_at ASC
+                """,
+                order_id
+            )
+            split_payments = [
+                {
+                    "id": str(r['id']),
+                    "amount": float(r['amount']),
+                    "payment_method": r['payment_method'],
+                    "payment_method_id": str(r['payment_method_id']) if r['payment_method_id'] else None,
+                    "paid_at": r['paid_at'].isoformat(),
+                }
+                for r in payments_rows
+            ]
+
             return {
                 "success": True,
                 "data": {
@@ -289,7 +310,8 @@ async def get_order_by_id(
                         "name": order_row['customer_name'],
                         "phone": order_row['customer_phone']
                     },
-                    "items_count": order_row['items_count']
+                    "items_count": order_row['items_count'],
+                    "split_payments": split_payments,
                 }
             }
 
