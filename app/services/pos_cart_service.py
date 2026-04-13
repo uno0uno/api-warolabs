@@ -615,12 +615,12 @@ async def add_order_payment(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
-                # 1. Fetch cart and linked order — row-level lock
+                # 1. Lock cart row
                 cart_row = await conn.fetchrow(
                     """
-                    SELECT pc.id, pc.tenant_id, pc.order_id
-                    FROM pos_carts pc
-                    WHERE pc.id = $1 AND pc.tenant_id = $2
+                    SELECT id, tenant_id
+                    FROM pos_carts
+                    WHERE id = $1 AND tenant_id = $2
                     FOR UPDATE
                     """,
                     cart_id, tenant_id
@@ -629,20 +629,23 @@ async def add_order_payment(
                 if not cart_row:
                     raise APIError("Cart not found", status_code=404)
 
-                order_id = cart_row["order_id"]
-                if not order_id:
-                    raise APIError("Cart has no associated order — complete a partial order first", status_code=400)
-
-                # 2. Fetch order
+                # 2. Fetch + lock the order linked to this cart via pos_cart_id
                 order_row = await conn.fetchrow(
                     """
                     SELECT id, total_amount, status, payment_status
                     FROM orders
-                    WHERE id = $1 AND tenant_id = $2
+                    WHERE pos_cart_id = $1 AND tenant_id = $2
+                    ORDER BY created_at DESC
+                    LIMIT 1
                     FOR UPDATE
                     """,
-                    order_id, tenant_id
+                    cart_id, tenant_id
                 )
+
+                if not order_row:
+                    raise APIError("No order found for this cart — complete the order first", status_code=400)
+
+                order_id = order_row["id"]
 
                 if not order_row:
                     raise APIError("Order not found", status_code=404)
