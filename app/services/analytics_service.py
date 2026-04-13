@@ -138,7 +138,7 @@ async def _get_menu_analysis_for_tenant(
                     c.name as category_name,
                     COUNT(DISTINCT oi.id) as order_count,
                     SUM(oi.quantity) as total_units_sold,
-                    SUM(oi.subtotal) as total_revenue,
+                    SUM(COALESCE(oi.net_total, oi.subtotal)) as total_revenue,
                     AVG(oi.price_at_purchase) as avg_price
                 FROM product p
                 LEFT JOIN categories c ON p.category_id = c.id
@@ -399,7 +399,7 @@ async def _get_food_cost_for_tenant(
             ),
             period_costs AS (
                 SELECT
-                    SUM(oi.subtotal) as revenue,
+                    SUM(COALESCE(oi.net_total, oi.subtotal)) as revenue,
                     SUM(oi.quantity * prc.real_cost) as total_cost,
                     CASE
                         WHEN DATE(o.order_date AT TIME ZONE 'America/Bogota') >= $2
