@@ -473,6 +473,8 @@ async def send_pos_receipt_email(
     business_address: Optional[str] = None,
     business_city: Optional[str] = None,
     business_phone: Optional[str] = None,
+    discount_amount: float = 0.0,
+    subtotal: float = 0.0,
 ) -> bool:
     """
     Send a POS receipt email to the customer after a point-of-sale order completes.
@@ -493,6 +495,8 @@ async def send_pos_receipt_email(
             business_address=business_address,
             business_city=business_city,
             business_phone=business_phone,
+            discount_amount=discount_amount,
+            subtotal=subtotal,
         )
         subject = get_pos_receipt_subject(order_number, business_name=business_name)
 

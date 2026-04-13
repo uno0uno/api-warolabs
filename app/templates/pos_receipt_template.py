@@ -49,6 +49,8 @@ def get_pos_receipt_text(
     business_address: Optional[str] = None,
     business_city: Optional[str] = None,
     business_phone: Optional[str] = None,
+    discount_amount: float = 0.0,
+    subtotal: float = 0.0,
 ) -> str:
     date_str = _format_bogota_date(order_date)
     payment_label = _PAYMENT_LABELS.get(payment_method, payment_method)
@@ -80,6 +82,16 @@ def get_pos_receipt_text(
         items_lines.append(line)
     items_block = "\n".join(items_lines)
 
+    # Build discount block when applicable
+    if discount_amount > 0 and subtotal > 0:
+        discount_block = (
+            f"--------------------------------\n"
+            f"Subtotal: {_format_cop(subtotal)}\n"
+            f"Descuento: -{_format_cop(discount_amount)}\n"
+        )
+    else:
+        discount_block = ""
+
     return f"""\
 {header_block}
 ================================
@@ -88,7 +100,7 @@ Fecha: {date_str}
 --------------------------------
 PRODUCTOS
 {items_block}
---------------------------------
+{discount_block}--------------------------------
 TOTAL: {_format_cop(total_amount)}
 Método de pago: {payment_label}
 ================================

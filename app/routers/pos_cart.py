@@ -187,6 +187,8 @@ class SendReceiptRequest(BaseModel):
     business_address: Optional[str] = None
     business_city: Optional[str] = None
     business_phone: Optional[str] = None
+    discount_amount: float = 0.0
+    subtotal: float = 0.0
 
 
 @router.post("/receipt-email")
@@ -206,5 +208,7 @@ async def send_receipt_email(receipt_data: SendReceiptRequest):
         business_address=receipt_data.business_address,
         business_city=receipt_data.business_city,
         business_phone=receipt_data.business_phone,
+        discount_amount=receipt_data.discount_amount,
+        subtotal=receipt_data.subtotal,
     )
     return {"success": success}

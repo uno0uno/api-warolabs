@@ -1058,6 +1058,8 @@ async def complete_pos_order(
                         business_address=_business_address,
                         business_city=_business_city,
                         business_phone=_business_phone,
+                        discount_amount=float(_discount_amount) if _discount_amount else 0.0,
+                        subtotal=float(cart_subtotal) if _discount_amount else 0.0,
                     )
                 )
             except Exception as _email_err:
