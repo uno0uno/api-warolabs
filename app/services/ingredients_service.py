@@ -786,7 +786,21 @@ async def hard_delete_tenant_ingredient(ingredient_id: str, tenant_id: str) -> D
                 },
             )
 
-        # Safe to delete — CASCADE handles associated metadata tables
+        # Capture resale product IDs BEFORE delete (CASCADE will remove product_recipes rows)
+        resale_rows = await conn.fetch(
+            """SELECT p.id FROM product p
+               JOIN product_recipes pr ON pr.product_id = p.id
+               WHERE pr.ingredient_id = $1 AND p.is_resale = true AND p.tenant_id = $2""",
+            ingredient_id, tenant_id,
+        )
+        resale_ids = [str(row["id"]) for row in resale_rows]
+
+        # Deactivate orphaned resale products then delete (CASCADE handles product_recipes)
+        if resale_ids:
+            await conn.execute(
+                "UPDATE product SET is_available = false WHERE id = ANY($1::uuid[]) AND is_resale = true",
+                resale_ids,
+            )
         await conn.execute("DELETE FROM ingredients WHERE id = $1", ingredient_id)
 
-    return {"success": True, "deleted_id": ingredient_id}
+    return {"success": True, "deleted_id": ingredient_id, "resale_products_deactivated": len(resale_ids)}
