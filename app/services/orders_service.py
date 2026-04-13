@@ -112,7 +112,7 @@ async def get_orders_list(
             where_clause = " AND ".join(where_conditions)
 
             # Validate sort field
-            allowed_sort_fields = ["order_number", "order_date", "total_amount", "customer_name", "payment_method"]
+            allowed_sort_fields = ["order_number", "order_date", "total_amount", "customer_name", "payment_method", "discount_amount"]
             if sort_field not in allowed_sort_fields:
                 sort_field = "order_date"
 
@@ -124,7 +124,8 @@ async def get_orders_list(
                 "order_date": "o.order_date",
                 "total_amount": "o.total_amount",
                 "customer_name": "p.name",
-                "payment_method": "o.payment_method"
+                "payment_method": "o.payment_method",
+                "discount_amount": "o.discount_amount"
             }
             sort_column = sort_column_map.get(sort_field, "o.order_date")
 
@@ -147,6 +148,7 @@ async def get_orders_list(
                     o.payment_status,
                     o.credit_due_date,
                     o.credit_paid_amount,
+                    o.discount_amount,
                     o.pos_cart_id,
                     o.table_session_id,
                     p.id as customer_id,
@@ -181,6 +183,7 @@ async def get_orders_list(
                     "payment_status": row['payment_status'],
                     "credit_due_date": str(row['credit_due_date']) if row['credit_due_date'] is not None else None,
                     "credit_paid_amount": float(row['credit_paid_amount']) if row['credit_paid_amount'] is not None else 0.0,
+                    "discount_amount": float(row['discount_amount']) if row['discount_amount'] is not None else 0.0,
                     "pos_cart_id": str(row['pos_cart_id']) if row['pos_cart_id'] else None,
                     "source": "mesa" if row['table_session_id'] else "pos",
                     "customer": {
