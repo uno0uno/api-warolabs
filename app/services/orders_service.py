@@ -241,6 +241,9 @@ async def get_order_by_id(
                     o.payment_status,
                     o.credit_due_date,
                     o.credit_paid_amount,
+                    o.discount_amount,
+                    o.discount_type,
+                    o.discount_value,
                     o.pos_cart_id,
                     o.table_session_id,
                     p.id as customer_id,
@@ -276,6 +279,9 @@ async def get_order_by_id(
                     "payment_status": order_row['payment_status'],
                     "credit_due_date": str(order_row['credit_due_date']) if order_row['credit_due_date'] is not None else None,
                     "credit_paid_amount": float(order_row['credit_paid_amount']) if order_row['credit_paid_amount'] is not None else 0.0,
+                    "discount_amount": float(order_row['discount_amount']) if order_row['discount_amount'] is not None else 0.0,
+                    "discount_type": order_row['discount_type'],
+                    "discount_value": float(order_row['discount_value']) if order_row['discount_value'] is not None else None,
                     "pos_cart_id": str(order_row['pos_cart_id']) if order_row['pos_cart_id'] else None,
                     "source": "mesa" if order_row['table_session_id'] else "pos",
                     "customer": {
@@ -507,6 +513,8 @@ async def get_order_items(
                     oi.quantity,
                     oi.price_at_purchase,
                     oi.subtotal,
+                    oi.discount_allocated,
+                    oi.net_total,
                     p.id as product_id,
                     p.name as product_name,
                     p.description as product_description
@@ -546,6 +554,8 @@ async def get_order_items(
                     "quantity": item_row['quantity'],
                     "price_at_purchase": float(item_row['price_at_purchase']),
                     "subtotal": float(item_row['subtotal']),
+                    "discount_allocated": float(item_row['discount_allocated']) if item_row['discount_allocated'] is not None else 0.0,
+                    "net_total": float(item_row['net_total']) if item_row['net_total'] is not None else None,
                     "product": {
                         "id": str(item_row['product_id']) if item_row['product_id'] else None,
                         "name": item_row['product_name'],
