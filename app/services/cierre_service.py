@@ -112,7 +112,7 @@ async def _compute_preview(
           AND payment_method IS NOT NULL
         GROUP BY payment_method
         """,
-        tenant_id, *date_params, tenant_id, *date_params,
+        tenant_id, *date_params,
     )
 
     # Aggregate method totals in Python to handle UNION ALL correctly
@@ -239,7 +239,7 @@ async def _compute_breakdown_rows(
           AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = o.id)
         GROUP BY o.payment_method
         """,
-        tenant_id, *date_params, tenant_id, *date_params, tenant_id, *date_params,
+        tenant_id, *date_params,
     )
     # Aggregate across UNION ALL branches — same group_slug+method_name can appear
     # from both the order_payments branch and a legacy branch.
