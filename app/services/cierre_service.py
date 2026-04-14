@@ -141,6 +141,7 @@ async def _compute_preview(
         JOIN tables t ON t.id = ts.table_id
         WHERE ts.tenant_id = $1
           AND ts.closed_at IS NULL
+          AND ts.is_discarded = FALSE
           AND ts.opened_at::date >= $2
           AND ts.opened_at::date <= $3
           AND t.is_bar IS FALSE

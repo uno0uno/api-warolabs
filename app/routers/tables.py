@@ -175,3 +175,27 @@ async def request_bill(request: Request, table_id: UUID):
     Returns 409 if table is not open.
     """
     return await tables_service.request_bill(request, table_id)
+
+
+@router.delete("/{table_id}/session")
+async def discard_session(request: Request, table_id: UUID):
+    """
+    Discard the active session: hard-delete all pending orders/items,
+    soft-close the session (is_discarded=TRUE, closed_at=now()), reset table to free.
+    Returns 404 if no open session. Returns 409 for bar table or completed orders.
+
+    Issue: https://github.com/uno0uno/warocol.com/issues/337
+    """
+    return await tables_service.discard_table_session(request, table_id)
+
+
+@router.post("/{table_id}/session/reopen")
+async def reopen_session(request: Request, table_id: UUID):
+    """
+    Reopen the most recent non-discarded closed session for a table.
+    Returns 409 for bar table or if table already has an open session.
+    Returns 404 if no closed session exists to reopen.
+
+    Issue: https://github.com/uno0uno/warocol.com/issues/337
+    """
+    return await tables_service.reopen_table_session(request, table_id)

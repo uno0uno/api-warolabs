@@ -118,7 +118,23 @@ async def list_tables(request: Request) -> dict:
                          FROM orders o
                          WHERE o.table_session_id = ts.id),
                         0
-                    ) AS running_total
+                    ) AS running_total,
+                    (SELECT ts2.closed_at
+                     FROM table_sessions ts2
+                     WHERE ts2.table_id = t.id
+                       AND ts2.tenant_id = $1
+                       AND ts2.closed_at IS NOT NULL
+                       AND ts2.is_discarded = FALSE
+                     ORDER BY ts2.closed_at DESC
+                     LIMIT 1) AS last_closed_at,
+                    (SELECT ts3.id
+                     FROM table_sessions ts3
+                     WHERE ts3.table_id = t.id
+                       AND ts3.tenant_id = $1
+                       AND ts3.closed_at IS NOT NULL
+                       AND ts3.is_discarded = FALSE
+                     ORDER BY ts3.closed_at DESC
+                     LIMIT 1) AS last_closed_session_id
                 FROM tables t
                 LEFT JOIN table_sessions ts
                     ON ts.table_id = t.id
@@ -955,6 +971,191 @@ async def request_bill(request: Request, table_id: UUID) -> dict:
         raise APIError(f"Error requesting bill: {e}", status_code=500)
 
 
+async def discard_table_session(request: Request, table_id: UUID) -> dict:
+    """
+    Discard the active session for a table.
+    Hard-deletes all pending orders/items, soft-closes the session (is_discarded=TRUE),
+    and resets the table status to 'free'.
+    Returns 404 if no open session. Returns 409 for bar table or completed orders.
+
+    Issue: https://github.com/uno0uno/warocol.com/issues/337
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                table_row = await conn.fetchrow(
+                    "SELECT id, is_bar FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
+                    table_id,
+                    tenant_id,
+                )
+                if not table_row:
+                    raise NotFoundError("Table not found")
+
+                if table_row["is_bar"]:
+                    raise APIError("La Barra no puede ser descartada", status_code=409)
+
+                session_row = await conn.fetchrow(
+                    "SELECT id FROM table_sessions WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL",
+                    table_id,
+                    tenant_id,
+                )
+                if not session_row:
+                    raise NotFoundError("No open session found for this table")
+
+                session_id = session_row["id"]
+
+                # Guard: cannot discard a session that has completed orders
+                completed_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM orders WHERE table_session_id = $1 AND status = 'completed'",
+                    session_id,
+                )
+                if completed_count and completed_count > 0:
+                    raise APIError(
+                        "No se puede descartar una sesión con órdenes completadas",
+                        status_code=409,
+                    )
+
+                # Hard-delete pending orders (cascade: modifiers → items → orders)
+                await conn.execute(
+                    """
+                    DELETE FROM order_item_modifiers
+                    WHERE order_item_id IN (
+                        SELECT oi.id FROM order_items oi
+                        JOIN orders o ON o.id = oi.order_id
+                        WHERE o.table_session_id = $1 AND o.status = 'pending'
+                    )
+                    """,
+                    session_id,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM order_items
+                    WHERE order_id IN (
+                        SELECT id FROM orders
+                        WHERE table_session_id = $1 AND status = 'pending'
+                    )
+                    """,
+                    session_id,
+                )
+                await conn.execute(
+                    "DELETE FROM orders WHERE table_session_id = $1 AND status = 'pending'",
+                    session_id,
+                )
+
+                # Soft-close and mark as discarded
+                await conn.execute(
+                    "UPDATE table_sessions SET is_discarded = TRUE, closed_at = now() WHERE id = $1",
+                    session_id,
+                )
+
+                # Reset table status
+                await conn.execute(
+                    "UPDATE tables SET status = 'free' WHERE id = $1 AND tenant_id = $2",
+                    table_id,
+                    tenant_id,
+                )
+
+        logger.info(f"[discard_table_session] Session {session_id} discarded for table {table_id}")
+        return {
+            "success": True,
+            "data": {
+                "session_id": str(session_id),
+                "table_id": str(table_id),
+            },
+        }
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error discarding session for table {table_id}: {e}")
+        raise APIError(f"Error discarding session: {e}", status_code=500)
+
+
+async def reopen_table_session(request: Request, table_id: UUID) -> dict:
+    """
+    Reopen the most recent non-discarded closed session for a table.
+    Sets closed_at = NULL and restores table status to 'open'.
+    Returns 409 for bar table or if table already has an open session.
+    Returns 404 if no closed session exists to reopen.
+
+    Issue: https://github.com/uno0uno/warocol.com/issues/337
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                table_row = await conn.fetchrow(
+                    "SELECT id, is_bar, status FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
+                    table_id,
+                    tenant_id,
+                )
+                if not table_row:
+                    raise NotFoundError("Table not found")
+
+                if table_row["is_bar"]:
+                    raise APIError("La Barra no puede reabrir sesiones", status_code=409)
+
+                if table_row["status"] == "open":
+                    raise APIError("La mesa ya tiene una sesión abierta", status_code=409)
+
+                # Find the most recent non-discarded closed session
+                closed_session = await conn.fetchrow(
+                    """
+                    SELECT id, closed_at
+                    FROM table_sessions
+                    WHERE table_id = $1
+                      AND tenant_id = $2
+                      AND closed_at IS NOT NULL
+                      AND is_discarded = FALSE
+                    ORDER BY closed_at DESC
+                    LIMIT 1
+                    """,
+                    table_id,
+                    tenant_id,
+                )
+                if not closed_session:
+                    raise NotFoundError("No hay sesión cerrada para reabrir")
+
+                session_id = closed_session["id"]
+
+                # Reopen: clear closed_at
+                await conn.execute(
+                    "UPDATE table_sessions SET closed_at = NULL WHERE id = $1",
+                    session_id,
+                )
+
+                # Restore table status to open
+                await conn.execute(
+                    "UPDATE tables SET status = 'open' WHERE id = $1 AND tenant_id = $2",
+                    table_id,
+                    tenant_id,
+                )
+
+        logger.info(f"[reopen_table_session] Session {session_id} reopened for table {table_id}")
+        return {
+            "success": True,
+            "data": {
+                "session_id": str(session_id),
+                "table_id": str(table_id),
+            },
+        }
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error reopening session for table {table_id}: {e}")
+        raise APIError(f"Error reopening session: {e}", status_code=500)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _format_table_row(row: dict) -> dict:
@@ -967,6 +1168,8 @@ def _format_table_row(row: dict) -> dict:
         "is_bar": bool(row["is_bar"]) if row.get("is_bar") is not None else False,
         "created_at": row["created_at"].isoformat(),
         "session": None,
+        "last_closed_at": row["last_closed_at"].isoformat() if row.get("last_closed_at") else None,
+        "last_closed_session_id": str(row["last_closed_session_id"]) if row.get("last_closed_session_id") else None,
     }
     if row["session_id"]:
         result["session"] = {
