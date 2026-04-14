@@ -38,9 +38,56 @@ def _distribute_discount(items: List[dict], discount_amount: float) -> List[dict
     return items
 
 
+async def _ensure_bar_table(conn, tenant_id) -> None:
+    """
+    Ensure a permanent bar table and its open session exist for the tenant.
+    Called from list_tables — idempotent no-op if bar already exists.
+    """
+    bar_row = await conn.fetchrow(
+        "SELECT id, status FROM tables WHERE tenant_id = $1 AND is_bar IS TRUE AND is_active = true LIMIT 1",
+        tenant_id,
+    )
+    if not bar_row:
+        bar_row = await conn.fetchrow(
+            """
+            INSERT INTO tables (tenant_id, name, capacity, status, is_bar)
+            VALUES ($1, 'Barra', NULL, 'open', TRUE)
+            RETURNING id, status
+            """,
+            tenant_id,
+        )
+
+    bar_table_id = bar_row["id"]
+
+    # Ensure an open session exists for the bar
+    open_session = await conn.fetchrow(
+        "SELECT id FROM table_sessions WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL LIMIT 1",
+        bar_table_id,
+        tenant_id,
+    )
+    if not open_session:
+        await conn.execute(
+            """
+            INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id)
+            VALUES ($1, $2, NULL)
+            """,
+            bar_table_id,
+            tenant_id,
+        )
+
+    # Ensure bar table status is 'open'
+    if bar_row["status"] != "open":
+        await conn.execute(
+            "UPDATE tables SET status = 'open' WHERE id = $1 AND tenant_id = $2",
+            bar_table_id,
+            tenant_id,
+        )
+
+
 async def list_tables(request: Request) -> dict:
     """
     List all active tables for tenant with current status, session duration, and running total.
+    Auto-creates the permanent Barra table + session if it doesn't exist yet.
     """
     try:
         session_context = require_valid_session(request)
@@ -48,7 +95,10 @@ async def list_tables(request: Request) -> dict:
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
-        async with get_db_connection(use_transaction=False) as conn:
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                await _ensure_bar_table(conn, tenant_id)
+
             rows = await conn.fetch(
                 """
                 SELECT
@@ -57,6 +107,7 @@ async def list_tables(request: Request) -> dict:
                     t.capacity,
                     t.status,
                     t.is_active,
+                    t.is_bar,
                     t.created_at,
                     ts.id            AS session_id,
                     ts.opened_at,
@@ -75,7 +126,7 @@ async def list_tables(request: Request) -> dict:
                     AND ts.closed_at IS NULL
                 WHERE t.tenant_id = $1
                   AND t.is_active = true
-                ORDER BY t.name
+                ORDER BY t.is_bar DESC, t.name
                 """,
                 tenant_id,
             )
@@ -189,12 +240,15 @@ async def soft_delete_table(request: Request, table_id: UUID) -> dict:
 
         async with get_db_connection() as conn:
             existing = await conn.fetchrow(
-                "SELECT id FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true",
+                "SELECT id, is_bar FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true",
                 table_id,
                 tenant_id,
             )
             if not existing:
                 raise NotFoundError("Table not found")
+
+            if existing["is_bar"]:
+                raise APIError("La Barra no puede ser desactivada", status_code=409)
 
             open_session = await conn.fetchrow(
                 "SELECT id FROM table_sessions WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL",
@@ -302,7 +356,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
         async with get_db_connection() as conn:
             async with conn.transaction():
                 table_row = await conn.fetchrow(
-                    "SELECT id FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
+                    "SELECT id, is_bar FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
                     table_id,
                     tenant_id,
                 )
@@ -316,6 +370,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 )
                 if not session_row:
                     raise NotFoundError("No open session found for this table")
+
+                is_bar_table = bool(table_row["is_bar"])
 
                 # Mark pending orders as completed if payment_method provided
                 if payment_method:
@@ -441,12 +497,25 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     session_row["id"],
                 )
 
-                # Reset table status to free
-                await conn.execute(
-                    "UPDATE tables SET status = 'free' WHERE id = $1 AND tenant_id = $2",
-                    table_id,
-                    tenant_id,
-                )
+                if is_bar_table:
+                    # Bar table: immediately reopen a new session so the bar is always active.
+                    # Do NOT reset status to 'free' — bar stays 'open'.
+                    await conn.execute(
+                        """
+                        INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id)
+                        VALUES ($1, $2, NULL)
+                        """,
+                        table_id,
+                        tenant_id,
+                    )
+                    logger.info(f"Bar session rotated: {session_row['id']} for table {table_id}")
+                else:
+                    # Reset table status to free
+                    await conn.execute(
+                        "UPDATE tables SET status = 'free' WHERE id = $1 AND tenant_id = $2",
+                        table_id,
+                        tenant_id,
+                    )
 
         logger.info(f"Session closed: {session_row['id']} for table {table_id}")
         return {
@@ -895,6 +964,7 @@ def _format_table_row(row: dict) -> dict:
         "capacity": row["capacity"],
         "status": row["status"],
         "is_active": row["is_active"],
+        "is_bar": bool(row["is_bar"]) if row.get("is_bar") is not None else False,
         "created_at": row["created_at"].isoformat(),
         "session": None,
     }

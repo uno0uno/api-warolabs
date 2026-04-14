@@ -151,6 +151,7 @@ async def get_orders_list(
                     o.discount_amount,
                     o.pos_cart_id,
                     o.table_session_id,
+                    t_meta.is_bar as is_bar,
                     p.id as customer_id,
                     p.name as customer_name,
                     p.phone_number as customer_phone,
@@ -167,6 +168,8 @@ async def get_orders_list(
                     COUNT(*) OVER() as total_count
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
+                LEFT JOIN table_sessions ts_meta ON ts_meta.id = o.table_session_id
+                LEFT JOIN tables t_meta ON t_meta.id = ts_meta.table_id
                 WHERE {where_clause}
                 ORDER BY {sort_column} {sort_direction}
                 LIMIT ${limit_param} OFFSET ${offset_param}
@@ -190,7 +193,11 @@ async def get_orders_list(
                     "credit_paid_amount": float(row['credit_paid_amount']) if row['credit_paid_amount'] is not None else 0.0,
                     "discount_amount": float(row['discount_amount']) if row['discount_amount'] is not None else 0.0,
                     "pos_cart_id": str(row['pos_cart_id']) if row['pos_cart_id'] else None,
-                    "source": "mesa" if row['table_session_id'] else "pos",
+                    "source": (
+                        "barra" if row['table_session_id'] and row['is_bar'] else
+                        "mesa" if row['table_session_id'] else
+                        "pos"
+                    ),
                     "customer": {
                         "id": str(row['customer_id']) if row['customer_id'] else None,
                         "name": row['customer_name'],
@@ -252,6 +259,7 @@ async def get_order_by_id(
                     o.discount_value,
                     o.pos_cart_id,
                     o.table_session_id,
+                    t_meta2.is_bar as is_bar,
                     p.id as customer_id,
                     p.name as customer_name,
                     p.phone_number as customer_phone,
@@ -262,6 +270,8 @@ async def get_order_by_id(
                     ) as items_count
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
+                LEFT JOIN table_sessions ts_meta2 ON ts_meta2.id = o.table_session_id
+                LEFT JOIN tables t_meta2 ON t_meta2.id = ts_meta2.table_id
                 WHERE o.id = $1 AND o.tenant_id = $2
                   AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
 
@@ -310,7 +320,11 @@ async def get_order_by_id(
                     "discount_type": order_row['discount_type'],
                     "discount_value": float(order_row['discount_value']) if order_row['discount_value'] is not None else None,
                     "pos_cart_id": str(order_row['pos_cart_id']) if order_row['pos_cart_id'] else None,
-                    "source": "mesa" if order_row['table_session_id'] else "pos",
+                    "source": (
+                        "barra" if order_row['table_session_id'] and order_row['is_bar'] else
+                        "mesa" if order_row['table_session_id'] else
+                        "pos"
+                    ),
                     "customer": {
                         "id": str(order_row['customer_id']) if order_row['customer_id'] else None,
                         "name": order_row['customer_name'],

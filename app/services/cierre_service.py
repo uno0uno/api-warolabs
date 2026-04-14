@@ -137,11 +137,13 @@ async def _compute_preview(
     open_tables_row = await conn.fetchrow(
         """
         SELECT COUNT(*) AS open_tables_count
-        FROM table_sessions
-        WHERE tenant_id = $1
-          AND closed_at IS NULL
-          AND opened_at::date >= $2
-          AND opened_at::date <= $3
+        FROM table_sessions ts
+        JOIN tables t ON t.id = ts.table_id
+        WHERE ts.tenant_id = $1
+          AND ts.closed_at IS NULL
+          AND ts.opened_at::date >= $2
+          AND ts.opened_at::date <= $3
+          AND t.is_bar IS FALSE
         """,
         tenant_id, period_start, period_end,
     )
