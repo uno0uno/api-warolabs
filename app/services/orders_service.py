@@ -159,6 +159,11 @@ async def get_orders_list(
                         FROM order_items oi
                         WHERE oi.order_id = o.id
                     ) as items_count,
+                    (
+                        SELECT COUNT(*)
+                        FROM order_payments op
+                        WHERE op.order_id = o.id
+                    ) as split_payments_count,
                     COUNT(*) OVER() as total_count
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
@@ -191,7 +196,8 @@ async def get_orders_list(
                         "name": row['customer_name'],
                         "phone": row['customer_phone']
                     },
-                    "items_count": row['items_count']
+                    "items_count": row['items_count'],
+                    "split_payments_count": int(row['split_payments_count'])
                 }
                 for row in orders_rows
             ]
