@@ -1157,7 +1157,7 @@ async def get_orders_dashboard(
                   AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = o.id)
                 GROUP BY COALESCE(pmg.slug, o.payment_method), COALESCE(pmg.name, o.payment_method)
                 """,
-                tenant_id, tenant_id,
+                tenant_id,
             )
             # Aggregate across UNION ALL branches in Python to avoid double-counting
             bd_agg: Dict[str, Any] = {}
