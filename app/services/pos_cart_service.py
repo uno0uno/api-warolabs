@@ -740,6 +740,7 @@ async def complete_pos_order(
     discount_value: Optional[float] = None,
     split_mode: bool = False,
     split_first_amount: float = 0.0,
+    table_session_id: Optional[UUID] = None,
 ) -> dict:
     """
     Complete a POS order:
@@ -830,9 +831,10 @@ async def complete_pos_order(
                     INSERT INTO orders (
                         user_id, tenant_id, customer_id, payment_method, pos_cart_id,
                         order_date, total_amount, status, payment_status, credit_due_date,
-                        payment_method_id, discount_type, discount_value, discount_amount
+                        payment_method_id, discount_type, discount_value, discount_amount,
+                        table_session_id
                     )
-                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12)
+                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12, $13)
                     RETURNING id, order_number, created_at
                 """
                 order_row = await conn.fetchrow(
@@ -849,6 +851,7 @@ async def complete_pos_order(
                     discount_type,
                     discount_value,
                     _discount_amount,
+                    table_session_id,
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']

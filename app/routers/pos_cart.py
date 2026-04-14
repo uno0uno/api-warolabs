@@ -150,6 +150,7 @@ class CompleteOrderRequest(BaseModel):
     discount_value: Optional[float] = Field(None, description="10 for 10%, 5000 for $5,000 COP")
     split_mode: bool = Field(False, description="True when using split payment — creates order with payment_status='partial'")
     split_first_amount: float = Field(0.0, description="Amount for the first split payment (used only when split_mode=True)")
+    table_session_id: Optional[UUID] = Field(None, description="Bar/table session ID — links the order to a session for source tracking")
 
 
 @router.post("/{cart_id}/complete")
@@ -178,6 +179,7 @@ async def complete_order(
         order_data.discount_value,
         order_data.split_mode,
         order_data.split_first_amount,
+        order_data.table_session_id,
     )
 
 
