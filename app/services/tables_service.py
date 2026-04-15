@@ -1156,6 +1156,125 @@ async def reopen_table_session(request: Request, table_id: UUID) -> dict:
         raise APIError(f"Error reopening session: {e}", status_code=500)
 
 
+async def move_table_session(request: Request, source_table_id: UUID, target_table_id: UUID) -> dict:
+    """
+    Transfer all pending orders from source table's open session to a new session on target table.
+    - Source session is closed; target gets a new session.
+    - Completed orders stay on source session for billing history integrity.
+    - Returns 400 if source == target.
+    - Returns 404 if source/target table not found or source has no open session.
+    - Returns 409 if source is a bar table, target is a bar table, or target is occupied.
+
+    Issue: https://github.com/uno0uno/warocol.com/issues/314
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        if source_table_id == target_table_id:
+            raise APIError("source and target are the same table", status_code=400)
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # 1. Lock + validate source table
+                source = await conn.fetchrow(
+                    "SELECT id, name, status, is_bar FROM tables "
+                    "WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
+                    source_table_id, tenant_id,
+                )
+                if not source:
+                    raise NotFoundError("source table not found")
+                if source["is_bar"]:
+                    raise APIError("cannot move bar table session", status_code=409)
+
+                # 2. Fetch source open session
+                source_session = await conn.fetchrow(
+                    "SELECT id FROM table_sessions "
+                    "WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL LIMIT 1",
+                    source_table_id, tenant_id,
+                )
+                if not source_session:
+                    raise NotFoundError("source table has no open session")
+
+                # 3. Lock + validate target table
+                target = await conn.fetchrow(
+                    "SELECT id, name, status, is_bar FROM tables "
+                    "WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
+                    target_table_id, tenant_id,
+                )
+                if not target:
+                    raise NotFoundError("target table not found")
+                if target["is_bar"]:
+                    raise APIError("cannot move to bar table", status_code=409)
+
+                # 4. Check target has no open session
+                target_open = await conn.fetchrow(
+                    "SELECT id FROM table_sessions "
+                    "WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL LIMIT 1",
+                    target_table_id, tenant_id,
+                )
+                if target_open:
+                    raise APIError("target table is occupied", status_code=409)
+
+                # 5. Create new session on target
+                new_session = await conn.fetchrow(
+                    "INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id) "
+                    "VALUES ($1, $2, $3) RETURNING id",
+                    target_table_id, tenant_id, user_id,
+                )
+                new_session_id = new_session["id"]
+
+                # 6. Reassign pending orders from source session to new target session
+                result = await conn.execute(
+                    "UPDATE orders SET table_session_id = $1 "
+                    "WHERE table_session_id = $2 AND payment_status = 'open'",
+                    new_session_id, source_session["id"],
+                )
+                orders_transferred = int(result.split()[-1])
+
+                # 7. Close source session
+                await conn.execute(
+                    "UPDATE table_sessions SET closed_at = now() WHERE id = $1",
+                    source_session["id"],
+                )
+
+                # 8. Update table statuses
+                await conn.execute(
+                    "UPDATE tables SET status = 'free' WHERE id = $1 AND tenant_id = $2",
+                    source_table_id, tenant_id,
+                )
+                await conn.execute(
+                    "UPDATE tables SET status = 'open' WHERE id = $1 AND tenant_id = $2",
+                    target_table_id, tenant_id,
+                )
+
+        logger.info(
+            f"[move_table_session] {source_table_id} → {target_table_id}: "
+            f"{orders_transferred} orders transferred, new session {new_session_id}"
+        )
+        return {
+            "success": True,
+            "data": {
+                "source_table_id": str(source_table_id),
+                "source_table_name": source["name"],
+                "source_session_id": str(source_session["id"]),
+                "target_table_id": str(target_table_id),
+                "target_table_name": target["name"],
+                "target_session_id": str(new_session_id),
+                "orders_transferred": orders_transferred,
+            },
+        }
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error moving table session {source_table_id} → {target_table_id}: {e}")
+        raise APIError(f"Error moving table session: {e}", status_code=500)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _format_table_row(row: dict) -> dict:

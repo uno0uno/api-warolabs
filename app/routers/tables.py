@@ -199,3 +199,21 @@ async def reopen_session(request: Request, table_id: UUID):
     Issue: https://github.com/uno0uno/warocol.com/issues/337
     """
     return await tables_service.reopen_table_session(request, table_id)
+
+
+class MoveTableRequest(BaseModel):
+    target_table_id: UUID
+
+
+@router.post("/{source_table_id}/move")
+async def move_table_session(request: Request, source_table_id: UUID, body: MoveTableRequest):
+    """
+    Transfer all pending orders from source table's open session to target table.
+    - Source session is closed; target gets a new session.
+    - Returns 400 if source == target.
+    - Returns 404 if source has no open session.
+    - Returns 409 if source is a bar table, or target is occupied.
+
+    Issue: https://github.com/uno0uno/warocol.com/issues/314
+    """
+    return await tables_service.move_table_session(request, source_table_id, body.target_table_id)
