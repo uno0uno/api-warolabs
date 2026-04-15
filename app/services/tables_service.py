@@ -1230,7 +1230,7 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
                 # 6. Reassign pending orders from source session to new target session
                 result = await conn.execute(
                     "UPDATE orders SET table_session_id = $1 "
-                    "WHERE table_session_id = $2 AND payment_status = 'open'",
+                    "WHERE table_session_id = $2 AND status = 'pending'",
                     new_session_id, source_session["id"],
                 )
                 orders_transferred = int(result.split()[-1])
