@@ -29,6 +29,120 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# GL helper — Auto-posting compras-directas → GL (#106)
+# ---------------------------------------------------------------------------
+
+async def _post_purchase_gl_entry(
+    conn,
+    tenant_id: UUID,
+    purchase_id: UUID,
+    total_amount: float,
+    purchase_date,            # datetime or date
+    description: str,
+    payment_method_id: Optional[UUID],
+) -> None:
+    """
+    Post GL entry for a received purchase:
+        Déb 1435 Inventarios   ←  total_amount
+        Cré <payment account>  →  total_amount
+
+    Credit account resolution (two-level, migration 028):
+        1. payment_methods.gl_account_code       (individual override)
+        2. payment_method_groups.gl_account_code  (group default)
+        3. Hardcoded fallback: 2205 Proveedores   (no payment method set)
+
+    Silently skips if: total_amount <= 0, account missing, period closed.
+    Caller MUST wrap in try/except for graceful degrade.
+    """
+    amount = Decimal(str(total_amount))
+    if amount <= 0:
+        logger.info(f"[GL] Purchase {purchase_id}: zero amount — skip GL post")
+        return
+
+    entry_date = purchase_date.date() if hasattr(purchase_date, 'date') else purchase_date
+    period_year = entry_date.year
+    period_month = entry_date.month
+
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id, period_year, period_month,
+    )
+    if closed:
+        logger.warning(
+            f"[GL] Period {period_year}-{period_month:02d} closed — "
+            f"skip GL post for purchase {purchase_id}"
+        )
+        return
+
+    debit_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, "1435",
+    )
+    if not debit_acct:
+        logger.warning(f"[GL] Account 1435 not found for tenant {tenant_id} — skip GL post")
+        return
+
+    # Two-level credit account lookup (migration 028)
+    credit_code = None
+    if payment_method_id:
+        row = await conn.fetchrow(
+            """SELECT pm.gl_account_code AS method_code,
+                      pmg.gl_account_code AS group_code
+               FROM payment_methods pm
+               JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+               WHERE pm.id = $1""",
+            payment_method_id,
+        )
+        if row:
+            credit_code = row["method_code"] or row["group_code"]
+
+    if not credit_code:
+        credit_code = "2205"  # Fallback: Proveedores nacionales
+
+    credit_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, credit_code,
+    )
+    if not credit_acct:
+        logger.warning(
+            f"[GL] Credit account {credit_code} not found for tenant {tenant_id} — skip GL post"
+        )
+        return
+
+    amt = float(amount)
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'inventario', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, entry_date, period_year, period_month,
+            description, purchase_id, amt, amt,
+        )
+        entry_id = entry_row["id"]
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, $3, 0, $4, 0)""",
+            entry_id, debit_acct["id"], amt, description,
+        )
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, 0, $3, $4, 1)""",
+            entry_id, credit_acct["id"], amt, description,
+        )
+
+    logger.info(
+        f"[GL] ✅ Posted purchase entry {entry_id} for purchase {purchase_id} "
+        f"(debit=1435, credit={credit_code}, amount={amt})"
+    )
+
+
 def calculate_changes_summary(before: List[Dict], after: List[Dict]) -> Dict:
     """
     Genera resumen legible de cambios entre items antes y después de una edición.
@@ -442,7 +556,23 @@ async def create_direct_purchase(
                         None
                     )
 
-                # 6. Attachments are now uploaded via separate endpoint
+                # 6. GL auto-post — Déb 1435 / Cré <payment account> (#106)
+                #    SAVEPOINT: GL failure never rolls back the purchase save.
+                try:
+                    async with conn.transaction():
+                        await _post_purchase_gl_entry(
+                            conn, tenant_id, purchase_id,
+                            total_amount,
+                            purchase_row['purchase_date'],
+                            f"Compra directa {purchase_number}",
+                            UUID(payment_method_id) if payment_method_id else None,
+                        )
+                except Exception as _gl_err:
+                    logger.warning(
+                        f"[GL] purchase GL post failed for {purchase_id}: {_gl_err}"
+                    )
+
+                # 7. Attachments are now uploaded via separate endpoint
                 # POST /suppliers/purchases/{purchase_id}/attachments
 
                 return {

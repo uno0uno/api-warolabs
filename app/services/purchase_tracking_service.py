@@ -1027,6 +1027,29 @@ async def transition_to_received(
                     except Exception as discord_error:
                         logger.error(f"Failed to send Discord notification for purchase reception: {discord_error}")
 
+                # GL auto-post — Déb 1435 / Cré <payment account> (#106)
+                # SAVEPOINT: GL failure never rolls back the purchase transition.
+                try:
+                    from app.services.direct_purchase_service import _post_purchase_gl_entry
+                    gl_row = await conn.fetchrow(
+                        """SELECT total_amount, purchase_date, purchase_number, payment_method_id
+                           FROM tenant_purchases WHERE id = $1""",
+                        purchase_id,
+                    )
+                    if gl_row and gl_row["total_amount"]:
+                        async with conn.transaction():
+                            await _post_purchase_gl_entry(
+                                conn, tenant_id, purchase_id,
+                                float(gl_row["total_amount"]),
+                                gl_row["purchase_date"],
+                                f"Compra recibida {gl_row['purchase_number'] or purchase_id}",
+                                gl_row["payment_method_id"],
+                            )
+                except Exception as _gl_err:
+                    logger.warning(
+                        f"[GL] purchase GL post failed for {purchase_id}: {_gl_err}"
+                    )
+
                 return {"success": True, "message": f"Purchase {target_status}"}
 
     except AuthenticationError:
