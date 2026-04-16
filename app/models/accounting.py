@@ -168,3 +168,7 @@ class AccountTemplatesListResponse(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+class JournalEntryVoidRequest(BaseModel):
+    reason: str
