@@ -4,6 +4,15 @@ from typing import Optional, List, Dict, Any
 from uuid import UUID
 from enum import Enum
 
+class ExpenseType(str, Enum):
+    """Expense classification type"""
+    COST = "cost"
+    ADMIN_EXPENSE = "admin_expense"
+    SALES_EXPENSE = "sales_expense"
+
+    class Config:
+        use_enum_values = True
+
 class RecurrenceFrequency(str, Enum):
     """Expense recurrence frequency options"""
     WEEKLY = "weekly"
@@ -56,6 +65,7 @@ class ExpenseBase(BaseModel):
     recurring_end_date: Optional[date] = Field(None, alias='recurringEndDate')
     payment_method: Optional[str] = Field('cash', alias='paymentMethod')
     payment_method_id: Optional[str] = Field(None, alias='paymentMethodId')
+    expense_type: Optional[ExpenseType] = Field(None, alias='expenseType')
 
     class Config:
         populate_by_name = True
@@ -73,6 +83,7 @@ class ExpenseUpdate(BaseModel):
     frequency: Optional[RecurrenceFrequency] = None
     recurring_end_date: Optional[date] = Field(None, alias='recurringEndDate')
     payment_method: Optional[str] = Field(None, alias='paymentMethod')
+    expense_type: Optional[ExpenseType] = Field(None, alias='expenseType')
 
     class Config:
         populate_by_name = True

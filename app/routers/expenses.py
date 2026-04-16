@@ -46,13 +46,14 @@ async def get_expenses_endpoint(
     limit: int = Query(default=50, ge=1, le=250, description="Items per page"),
     month_year: Optional[str] = Query(default=None, description="Filter by YYYY-MM"),
     category_id: Optional[UUID] = Query(default=None, description="Filter by Category ID"),
-    search: Optional[str] = Query(default=None, description="Search term in description")
+    search: Optional[str] = Query(default=None, description="Search term in description"),
+    expense_type: Optional[str] = Query(default=None, description="Filter by expense type: cost, admin_expense, sales_expense")
 ):
     """
     Get expenses list with tenant isolation and stats
     """
     return await get_expenses_list(
-        request, response, page, limit, month_year, category_id, search
+        request, response, page, limit, month_year, category_id, search, expense_type
     )
 
 @router.get("/{expense_id}", response_model=ExpenseResponse)

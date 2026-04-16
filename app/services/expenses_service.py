@@ -98,7 +98,8 @@ async def get_expenses_list(
     limit: int = 50,
     month_year: Optional[str] = None,
     category_id: Optional[UUID] = None,
-    search: Optional[str] = None
+    search: Optional[str] = None,
+    expense_type: Optional[str] = None
 ) -> ExpensesListResponse:
     """
     Get expenses list with tenant isolation
@@ -128,6 +129,7 @@ async def get_expenses_list(
                     e.frequency,
                     e.recurring_end_date,
                     e.payment_method,
+                    e.expense_type,
                     c.id as cat_id,
                     c.category_code,
                     c.category_name,
@@ -155,6 +157,11 @@ async def get_expenses_list(
             if search:
                 base_query += f" AND (LOWER(e.description) LIKE LOWER(${param_count}) OR LOWER(e.expense_number) LIKE LOWER(${param_count}))"
                 params.append(f"%{search}%")
+                param_count += 1
+
+            if expense_type:
+                base_query += f" AND e.expense_type = ${param_count}"
+                params.append(expense_type)
                 param_count += 1
             
             # Count query for pagination
@@ -247,6 +254,7 @@ async def get_expenses_list(
                     frequency=row['frequency'],
                     recurringEndDate=row['recurring_end_date'],
                     paymentMethod=row['payment_method'],
+                    expenseType=row['expense_type'],
                     category=category
                 ))
                 
@@ -302,6 +310,7 @@ async def get_expense_by_id(
                     e.recurring_end_date,
                     e.payment_method,
                     e.payment_method_id::text as payment_method_id,
+                    e.expense_type,
                     c.id as cat_id,
                     c.category_code,
                     c.category_name,
@@ -377,6 +386,7 @@ async def get_expense_by_id(
                 recurringEndDate=full_expense['recurring_end_date'],
                 paymentMethod=full_expense['payment_method'],
                 paymentMethodId=full_expense['payment_method_id'],
+                expenseType=full_expense['expense_type'],
                 category=category,
                 attachments=attachments
             )
@@ -678,8 +688,9 @@ async def create_expense_json(
                     frequency,
                     recurring_end_date,
                     payment_method,
-                    payment_method_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9, $10, $11, $12::uuid)
+                    payment_method_id,
+                    expense_type
+                ) VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9, $10, $11, $12::uuid, $13)
                 RETURNING id, created_at
             """,
                 tenant_id,
@@ -693,7 +704,8 @@ async def create_expense_json(
                 expense_data.frequency,
                 expense_data.recurring_end_date,
                 payment_method_raw,
-                payment_method_id
+                payment_method_id,
+                expense_data.expense_type
             )
 
             expense_id = row['id']
@@ -715,6 +727,7 @@ async def create_expense_json(
                     e.frequency,
                     e.recurring_end_date,
                     e.payment_method,
+                    e.expense_type,
                     c.id as cat_id,
                     c.category_code,
                     c.category_name,
@@ -748,6 +761,7 @@ async def create_expense_json(
                 frequency=full_expense['frequency'],
                 recurringEndDate=full_expense['recurring_end_date'],
                 paymentMethod=full_expense['payment_method'],
+                expenseType=full_expense['expense_type'],
                 category=category
             )
 
@@ -1168,6 +1182,11 @@ async def update_expense_json(
                 update_values.append(upd_payment_method_id)
                 param_count += 1
 
+            if expense_data.expense_type is not None:
+                update_fields.append(f"expense_type = ${param_count}")
+                update_values.append(expense_data.expense_type)
+                param_count += 1
+
             if update_fields:
                 update_values.extend([expense_id, tenant_id])
                 await conn.execute(f"""
@@ -1182,7 +1201,7 @@ async def update_expense_json(
                     e.id, e.tenant_id, e.expense_category_id, e.month_year,
                     e.amount, e.description, e.source_system, e.created_at,
                     e.transaction_date, e.is_recurring, e.frequency, e.recurring_end_date,
-                    e.payment_method,
+                    e.payment_method, e.expense_type,
                     c.id as cat_id, c.category_code, c.category_name,
                     c.description as cat_description, c.is_active as cat_active
                 FROM tenant_expenses e
