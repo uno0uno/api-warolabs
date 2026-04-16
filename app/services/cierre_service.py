@@ -5,6 +5,7 @@ Preview (Cierre X), create close (Cierre Z), list, and detail.
 Issue: https://github.com/uno0uno/warocol.com/issues/311
 """
 import logging
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 from datetime import date, datetime
@@ -15,6 +16,283 @@ from app.core.exceptions import AuthenticationError, APIError
 from app.models.cierre import CierreCreate
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# GL helpers — Auto-posting ventas/arqueo → GL (#378)
+# ---------------------------------------------------------------------------
+
+# Payment slug → PUC debit account code
+_SLUG_DEBIT_CODE: Dict[str, str] = {
+    "cash":    "1105",   # Caja general
+    "digital": "1110",   # Bancos (Nequi, Daviplata)
+    "card":    "1110",   # Bancos
+    "credit":  "1305",   # Clientes (fiado — accounts receivable)
+}
+
+INGRESOS_CODE = "4135"   # Comercio al por menor
+
+
+async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
+    """
+    Return tax config for the tenant.  Falls back to all-disabled defaults
+    if no row exists (safe for tenants created before migration 027).
+    """
+    row = await conn.fetchrow(
+        """SELECT inc_applicable, inc_rate,   inc_gl_account_code,
+                  liquor_tax_applicable, liquor_tax_rate, liquor_tax_gl_account_code,
+                  iva_applicable, iva_rate, iva_gl_account_code
+           FROM tenant_tax_config WHERE tenant_id = $1""",
+        tenant_id,
+    )
+    if row:
+        return dict(row)
+    return {
+        "inc_applicable":         False,
+        "inc_rate":               Decimal("0.0800"),
+        "inc_gl_account_code":    "2408",
+        "liquor_tax_applicable":  False,
+        "liquor_tax_rate":        Decimal("0.0000"),
+        "liquor_tax_gl_account_code": "2408",
+        "iva_applicable":         False,
+        "iva_rate":               Decimal("0.1900"),
+        "iva_gl_account_code":    "2408",
+    }
+
+
+async def _post_cierre_gl_entry(
+    conn,
+    tenant_id: UUID,
+    summary_id: UUID,
+    period_date: date,
+    breakdown_rows: List[Dict],
+    tax_config: Dict[str, Any],
+) -> None:
+    """
+    Post a multi-line GL entry for a cierre (arqueo / ventas).
+
+    Debit lines : one per payment slug that has a non-zero total.
+    Credit lines: split between 4135 (net income) and 2408 (tax payable)
+                  if INC or IVA is enabled for this tenant; otherwise a single
+                  credit to 4135 for the full amount.
+
+    Silently skips if: total_sales is zero, any required account is missing,
+    or the period is already closed.
+    Caller MUST wrap in try/except for graceful degrade.
+    """
+    # Aggregate totals per payment slug from breakdown
+    slug_totals: Dict[str, Decimal] = {}
+    for row in breakdown_rows:
+        slug = row.get("group_slug", "")
+        total = Decimal(str(row.get("total", 0)))
+        if total > 0:
+            slug_totals[slug] = slug_totals.get(slug, Decimal("0")) + total
+
+    total_sales = sum(slug_totals.values())
+    if total_sales <= 0:
+        logger.info(f"[GL] Cierre {summary_id}: zero sales — skip GL post")
+        return
+
+    # Check period open
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id, period_date.year, period_date.month,
+    )
+    if closed:
+        logger.warning(
+            f"[GL] Period {period_date.year}-{period_date.month:02d} closed — "
+            f"skip GL post for cierre {summary_id}"
+        )
+        return
+
+    # Resolve debit account UUIDs
+    debit_accounts: Dict[str, Any] = {}
+    for slug, amount in slug_totals.items():
+        code = _SLUG_DEBIT_CODE.get(slug)
+        if not code:
+            logger.warning(f"[GL] Unknown payment slug '{slug}' — skip debit line")
+            continue
+        acct = await conn.fetchrow(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+            tenant_id, code,
+        )
+        if not acct:
+            logger.warning(
+                f"[GL] Debit account {code} not found for tenant {tenant_id} — "
+                f"skip GL post for cierre {summary_id}"
+            )
+            return
+        debit_accounts[slug] = {"id": acct["id"], "code": code, "amount": amount}
+
+    # Resolve credit account(s)
+    ingresos_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, INGRESOS_CODE,
+    )
+    if not ingresos_acct:
+        logger.warning(
+            f"[GL] Ingresos account {INGRESOS_CODE} not found for tenant {tenant_id} — "
+            f"skip GL post for cierre {summary_id}"
+        )
+        return
+
+    # Determine tax split
+    tax_amount = Decimal("0")
+    tax_acct_id = None
+    if tax_config.get("inc_applicable"):
+        rate = Decimal(str(tax_config["inc_rate"]))
+        tax_amount = total_sales - (total_sales / (1 + rate))
+        tax_code = str(tax_config["inc_gl_account_code"])
+        tax_row = await conn.fetchrow(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+            tenant_id, tax_code,
+        )
+        if tax_row:
+            tax_acct_id = tax_row["id"]
+    elif tax_config.get("iva_applicable"):
+        rate = Decimal(str(tax_config["iva_rate"]))
+        tax_amount = total_sales - (total_sales / (1 + rate))
+        tax_code = str(tax_config["iva_gl_account_code"])
+        tax_row = await conn.fetchrow(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+            tenant_id, tax_code,
+        )
+        if tax_row:
+            tax_acct_id = tax_row["id"]
+
+    net_income = total_sales - tax_amount
+    ts = float(total_sales)
+
+    description = f"Cierre {period_date.isoformat()} — ventas"
+
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'ventas', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, period_date, period_date.year, period_date.month,
+            description, summary_id, ts, ts,
+        )
+        entry_id = entry_row["id"]
+
+        # Debit lines — one per payment method
+        line_order = 0
+        for slug, info in debit_accounts.items():
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, $3, 0, $4, $5)""",
+                entry_id, info["id"], float(info["amount"]),
+                f"{description} ({slug})", line_order,
+            )
+            line_order += 1
+
+        # Credit line — net income to 4135
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, 0, $3, $4, $5)""",
+            entry_id, ingresos_acct["id"], float(net_income),
+            f"{description} — ingreso neto", line_order,
+        )
+        line_order += 1
+
+        # Credit line — tax payable (if applicable and account resolved)
+        if tax_amount > 0 and tax_acct_id:
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, $4, $5)""",
+                entry_id, tax_acct_id, float(tax_amount),
+                f"{description} — impuesto", line_order,
+            )
+
+    logger.info(
+        f"[GL] ✅ Posted cierre entry {entry_id} for summary {summary_id} "
+        f"(total={ts}, net={float(net_income)}, tax={float(tax_amount)})"
+    )
+
+
+async def _void_cierre_gl_entry(
+    conn,
+    tenant_id: UUID,
+    summary_id: UUID,
+    reason: str = "Cierre eliminado",
+) -> None:
+    """
+    Find and void the most recent posted ventas GL entry for this cierre.
+    Silently skips if no entry found (pre-#378 cierre) or period is closed.
+    Caller MUST wrap in try/except for graceful degrade.
+    """
+    entry = await conn.fetchrow(
+        """SELECT id, entry_date, period_year, period_month, description,
+                  total_debit, total_credit
+           FROM tenant_journal_entries
+           WHERE tenant_id = $1 AND source_module = 'ventas' AND source_id = $2
+                 AND status = 'posted'
+           ORDER BY created_at DESC
+           LIMIT 1""",
+        tenant_id, summary_id,
+    )
+    if not entry:
+        logger.info(f"[GL] No posted GL entry for cierre {summary_id} — skip void")
+        return
+
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id, entry["period_year"], entry["period_month"],
+    )
+    if closed:
+        logger.warning(
+            f"[GL] Period {entry['period_year']}-{entry['period_month']:02d} closed — "
+            f"skip GL void for cierre {summary_id}"
+        )
+        return
+
+    original_lines = await conn.fetch(
+        """SELECT account_id, debit, credit, description, line_order
+           FROM tenant_journal_lines
+           WHERE journal_entry_id = $1 ORDER BY line_order""",
+        entry["id"],
+    )
+
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE tenant_journal_entries SET status = 'voided', voided_at = NOW() WHERE id = $1",
+            entry["id"],
+        )
+        rev_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'system', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, entry["entry_date"], entry["period_year"], entry["period_month"],
+            f"Reversión: {entry['description']} — {reason}",
+            entry["id"],
+            float(entry["total_debit"]), float(entry["total_credit"]),
+        )
+        rev_id = rev_row["id"]
+        for line in original_lines:
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, $3, $4, $5, $6)""",
+                rev_id, line["account_id"],
+                float(line["credit"]), float(line["debit"]),
+                line["description"], line["line_order"],
+            )
+
+    logger.info(
+        f"[GL] ✅ Voided cierre GL entry {entry['id']} → reversing {rev_id} "
+        f"for cierre {summary_id}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +723,20 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                     [r["total"] for r in breakdown_rows],
                 )
 
+            # 7. GL auto-post — ventas/arqueo → GL (#378)
+            #    SAVEPOINT: GL failure never rolls back the cierre save.
+            try:
+                async with conn.transaction():
+                    tax_cfg = await _get_tenant_tax_config(conn, tenant_id)
+                    await _post_cierre_gl_entry(
+                        conn, tenant_id, summary_row["id"],
+                        body.period_start, breakdown_rows or [], tax_cfg,
+                    )
+            except Exception as _gl_err:
+                logger.warning(
+                    f"[GL] cierre GL post failed for {summary_row['id']}: {_gl_err}"
+                )
+
         return {
             "success": True,
             "data": {
@@ -606,7 +898,7 @@ async def delete_cierre(request: Request, cierre_id: UUID) -> dict:
         async with get_db_connection(use_transaction=True) as conn:
             row = await conn.fetchrow(
                 """
-                SELECT ap.id AS ap_id
+                SELECT cs.id AS summary_id, ap.id AS ap_id
                 FROM closing_summary cs
                 JOIN accounting_period ap ON ap.id = cs.accounting_period_id
                 WHERE cs.id = $1 AND cs.tenant_id = $2 AND ap.deleted_at IS NULL
@@ -615,6 +907,17 @@ async def delete_cierre(request: Request, cierre_id: UUID) -> dict:
             )
             if not row:
                 raise APIError("Cierre no encontrado", status_code=404)
+
+            # GL void — SAVEPOINT: GL failure never blocks the cierre delete.
+            try:
+                async with conn.transaction():
+                    await _void_cierre_gl_entry(
+                        conn, tenant_id, row["summary_id"], reason="Cierre eliminado"
+                    )
+            except Exception as _gl_err:
+                logger.warning(
+                    f"[GL] cierre GL void failed for {row['summary_id']}: {_gl_err}"
+                )
 
             await conn.execute(
                 "UPDATE accounting_period SET deleted_at = NOW() WHERE id = $1 AND tenant_id = $2",
