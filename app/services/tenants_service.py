@@ -1,3 +1,4 @@
+import re
 import logging
 from datetime import datetime
 from fastapi import Request
@@ -7,7 +8,8 @@ from app.core.exceptions import AuthenticationError, AuthorizationError, Validat
 from app.models.auth import Tenant, UserTenantsResponse
 from app.models.tenant import (
     TenantMembersResponse, TenantMemberDetail, TenantMemberProfile,
-    DeleteMemberResponse, UpdateMemberRoleResponse, PendingInvitation
+    DeleteMemberResponse, UpdateMemberRoleResponse, PendingInvitation,
+    TenantCreate, TenantCreateResponse, Tenant as TenantModel,
 )
 
 logger = logging.getLogger(__name__)
@@ -324,3 +326,88 @@ async def update_member_role(request: Request, member_id: str, new_role: str) ->
     except Exception as e:
         logger.error(f"❌ Error updating member role: {e}", exc_info=True)
         raise ValidationError("Error al actualizar rol")
+
+
+def _generate_slug(name: str) -> str:
+    """Convert a tenant name into a URL-safe slug. Handles Spanish characters."""
+    slug = name.lower()
+    slug = re.sub(r'[áàäâã]', 'a', slug)
+    slug = re.sub(r'[éèëê]', 'e', slug)
+    slug = re.sub(r'[íìïî]', 'i', slug)
+    slug = re.sub(r'[óòöôõ]', 'o', slug)
+    slug = re.sub(r'[úùüû]', 'u', slug)
+    slug = re.sub(r'ñ', 'n', slug)
+    slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+    slug = re.sub(r'[\s-]+', '-', slug)
+    return slug.strip('-')
+
+
+async def create_tenant(request: Request, body: TenantCreate) -> TenantCreateResponse:
+    """
+    Create a new tenant for the authenticated user.
+
+    Creates tenant + tenant_public_profiles + adds creator as superuser
+    + seeds PUC colombiano accounts (52 accounts via seed_tenant_accounts()).
+    All in a single transaction.
+    """
+    try:
+        session_context = require_valid_session(request)
+        user_id = session_context.user_id
+        if not user_id:
+            raise AuthenticationError("Sesión no válida")
+
+        base_slug = _generate_slug(body.name)
+
+        async with get_db_connection() as conn:
+            # Ensure slug uniqueness — append counter if taken
+            slug = base_slug
+            counter = 1
+            while await conn.fetchval("SELECT 1 FROM tenants WHERE slug = $1", slug):
+                slug = f"{base_slug}-{counter}"
+                counter += 1
+
+            async with conn.transaction():
+                # 1. Create tenant
+                tenant_row = await conn.fetchrow(
+                    """INSERT INTO tenants (name, slug, created_at)
+                       VALUES ($1, $2, NOW())
+                       RETURNING id, name, slug, created_at""",
+                    body.name, slug
+                )
+                tenant_id = tenant_row['id']
+
+                # 2. Create minimal public profile
+                await conn.execute(
+                    """INSERT INTO tenant_public_profiles
+                           (tenant_id, display_name, slug,
+                            is_active, is_manually_open, welcome_email_sent, tables_enabled)
+                       VALUES ($1, $2, $3, true, false, false, false)""",
+                    tenant_id, body.name, slug
+                )
+
+                # 3. Add creator as superuser
+                await conn.execute(
+                    """INSERT INTO tenant_members (id, tenant_id, user_id, role)
+                       VALUES (gen_random_uuid(), $1, $2, 'superuser')""",
+                    tenant_id, user_id
+                )
+
+                # 4. Seed PUC colombiano accounts (52 accounts from account_templates)
+                await conn.execute("SELECT seed_tenant_accounts($1)", tenant_id)
+
+            logger.info(f"✅ Tenant created: {body.name} ({slug}) by user {user_id}")
+
+            return TenantCreateResponse(
+                data=TenantModel(
+                    id=tenant_row['id'],
+                    name=tenant_row['name'],
+                    slug=tenant_row['slug'],
+                    created_at=tenant_row['created_at'],
+                )
+            )
+
+    except AuthenticationError:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error creating tenant: {e}", exc_info=True)
+        raise
