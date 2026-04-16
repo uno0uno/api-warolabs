@@ -5,10 +5,12 @@ from uuid import UUID
 from enum import Enum
 
 class ExpenseType(str, Enum):
-    """Expense classification type"""
-    COST = "cost"
-    ADMIN_EXPENSE = "admin_expense"
-    SALES_EXPENSE = "sales_expense"
+    """Expense classification type — aligned with NIIF/IFRS and LATAM standards"""
+    COGS = "cogs"                           # Costo de ventas (compras directas, ingredientes)
+    ADMIN_EXPENSE = "admin_expense"         # Gasto administrativo
+    SALES_EXPENSE = "sales_expense"         # Gasto de ventas
+    FINANCIAL_EXPENSE = "financial_expense" # Gasto financiero (intereses, comisiones, fees)
+    OTHER_EXPENSE = "other_expense"         # Otro gasto no operacional
 
     class Config:
         use_enum_values = True
