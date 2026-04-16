@@ -12,6 +12,7 @@ from app.services.accounting_service import (
     post_journal_entry,
     void_journal_entry,
     get_trial_balance,
+    get_pl_statement,
 )
 from app.models.accounting import (
     TenantAccountCreate,
@@ -23,6 +24,7 @@ from app.models.accounting import (
     JournalEntriesListResponse,
     JournalEntryVoidRequest,
     TrialBalanceResponse,
+    PLStatementResponse,
 )
 
 router = APIRouter()
@@ -168,4 +170,35 @@ async def get_trial_balance_endpoint(
         period_start=period_start,
         period_end=period_end,
         include_zero_balances=include_zero_balances,
+    )
+
+
+# ---------------------------------------------------------------------------
+# P&L Statement (#383)
+# ---------------------------------------------------------------------------
+
+@router.get("/pl-statement", response_model=PLStatementResponse)
+async def get_pl_statement_endpoint(
+    request: Request,
+    year: int = Query(..., ge=2020, le=2100),
+    month: int = Query(..., ge=1, le=12),
+    compare_previous: bool = Query(False, alias="comparePrevious"),
+):
+    """
+    Monthly P&L statement for the authenticated tenant.
+
+    Revenue  = SUM of all non-deleted cierres in the calendar month.
+    COGS     = expenses with expense_type='cogs' + received purchases in the month.
+    Opex     = expenses by category (RENT, UTILITIES, MAINTENANCE, other).
+    Payroll  = confirmed salary_payments for the period.
+    Provisions = Colombian law rates applied to latest employee salary configs.
+
+    If comparePrevious=true, also returns the prior calendar month data.
+    All values in COP (Colombian pesos). Returns zeros for periods with no activity.
+    """
+    return await get_pl_statement(
+        request,
+        year=year,
+        month=month,
+        compare_previous=compare_previous,
     )

@@ -203,3 +203,81 @@ class TrialBalanceResponse(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+# --- P&L Statement (#383) ---
+
+class PLRevenue(BaseModel):
+    food_beverage_sales: float = Field(alias='foodBeverageSales')
+    total: float
+
+    class Config:
+        populate_by_name = True
+
+
+class PLCogs(BaseModel):
+    food_cost: float = Field(alias='foodCost')
+    total: float
+
+    class Config:
+        populate_by_name = True
+
+
+class PLOperatingExpenses(BaseModel):
+    payroll: float
+    rent: float
+    utilities: float
+    maintenance: float
+    other: float
+    total: float
+
+    class Config:
+        populate_by_name = True
+
+
+class PLProvisions(BaseModel):
+    cesantias: float
+    prima: float
+    vacaciones: float
+    intereses_cesantias: float = Field(alias='interesesCesantias')
+    total: float
+
+    class Config:
+        populate_by_name = True
+
+
+class PLPrimeCost(BaseModel):
+    food_cost_pct: float = Field(alias='foodCostPct')
+    labor_pct: float = Field(alias='laborPct')
+    total_pct: float = Field(alias='totalPct')
+    benchmark_pct: float = Field(default=65.0, alias='benchmarkPct')
+    status: str  # 'ok' | 'warning'
+
+    class Config:
+        populate_by_name = True
+
+
+class PLPeriodData(BaseModel):
+    period: str  # 'YYYY-MM'
+    revenue: PLRevenue
+    cogs: PLCogs
+    gross_profit: float = Field(alias='grossProfit')
+    gross_margin_pct: float = Field(alias='grossMarginPct')
+    operating_expenses: PLOperatingExpenses = Field(alias='operatingExpenses')
+    ebitda: float
+    ebitda_margin_pct: float = Field(alias='ebitdaMarginPct')
+    provisions: PLProvisions
+    net_income: float = Field(alias='netIncome')
+    prime_cost: PLPrimeCost = Field(alias='primeCost')
+
+    class Config:
+        populate_by_name = True
+
+
+class PLStatementResponse(BaseModel):
+    success: bool = True
+    current: PLPeriodData
+    previous: Optional[PLPeriodData] = None
+
+    class Config:
+        populate_by_name = True

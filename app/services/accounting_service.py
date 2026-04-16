@@ -21,6 +21,13 @@ from app.models.accounting import (
     JournalEntriesListResponse,
     TrialBalanceRow,
     TrialBalanceResponse,
+    PLRevenue,
+    PLCogs,
+    PLOperatingExpenses,
+    PLProvisions,
+    PLPrimeCost,
+    PLPeriodData,
+    PLStatementResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -922,3 +929,249 @@ async def get_trial_balance(
     except Exception as e:
         logger.error(f"❌ Error computing trial balance: {e}", exc_info=True)
         raise ValidationError("Error al calcular balance de comprobación")
+
+
+# --- P&L Statement (#383) ---
+
+# Colombian law provision rates (Decreto 2663/1950 — Código Sustantivo del Trabajo)
+_CESANTIAS_RATE      = Decimal('0.0833')   # 1/12 of annual salary
+_PRIMA_RATE          = Decimal('0.0833')   # 1/12
+_VACACIONES_RATE     = Decimal('0.0417')   # 15 days/year ÷ 12
+_INTERESES_CES_RATE  = Decimal('0.0100')   # 12% annual ÷ 12
+
+# Expense category codes → P&L operating expense bucket
+_OPEX_CATEGORY_MAP = {
+    'RENT':         'rent',
+    'UTILITIES':    'utilities',
+    'MAINTENANCE':  'maintenance',
+}
+# All other categories fall into 'other'
+
+_PRIME_COST_BENCHMARK = Decimal('65.0')
+
+
+async def _compute_pl_for_period(
+    conn,
+    tenant_id: UUID,
+    year: int,
+    month: int,
+) -> PLPeriodData:
+    """
+    Compute the full P&L for a single calendar month.
+    All monetary values in Decimal; converted to float at return time.
+
+    Revenue  = SUM(closing_summary.total_sales) for non-deleted cierres in the month
+    COGS     = SUM(tenant_expenses.amount WHERE expense_type = 'cogs') in month_year
+               + SUM(tenant_purchases.total_amount WHERE received in month) [if any]
+    Opex     = SUM(tenant_expenses.amount) grouped by expense_categories.category_code
+    Payroll  = SUM(salary_payments.payment_amount WHERE status='paid') in period_month
+    Prov base= SUM(latest employee_salaries.total_salary) for active employees
+    """
+    month_str = f"{year}-{month:02d}"
+    month_start = f"{year}-{month:02d}-01"
+    # Last day: first day of next month - 1
+    if month == 12:
+        month_end = f"{year + 1}-01-01"
+    else:
+        month_end = f"{year}-{month + 1:02d}-01"
+
+    # --- Revenue ---
+    rev_row = await conn.fetchrow(
+        """
+        SELECT COALESCE(SUM(cs.total_sales), 0) AS total_sales
+        FROM closing_summary cs
+        JOIN accounting_period ap ON ap.id = cs.accounting_period_id
+        WHERE ap.tenant_id = $1
+          AND ap.period_start >= $2::date
+          AND ap.period_start <  $3::date
+          AND ap.deleted_at IS NULL
+        """,
+        tenant_id, month_start, month_end,
+    )
+    revenue = Decimal(str(rev_row['total_sales']))
+
+    # --- COGS from expenses (expense_type = 'cogs') ---
+    cogs_exp_row = await conn.fetchrow(
+        """
+        SELECT COALESCE(SUM(te.amount), 0) AS total
+        FROM tenant_expenses te
+        WHERE te.tenant_id = $1
+          AND te.month_year = $2
+          AND te.expense_type = 'cogs'
+        """,
+        tenant_id, month_str,
+    )
+    cogs_from_expenses = Decimal(str(cogs_exp_row['total']))
+
+    # --- COGS from received purchases ---
+    cogs_purch_row = await conn.fetchrow(
+        """
+        SELECT COALESCE(SUM(tp.total_amount), 0) AS total
+        FROM tenant_purchases tp
+        WHERE tp.tenant_id = $1
+          AND tp.received_at >= $2::timestamptz
+          AND tp.received_at <  $3::timestamptz
+          AND tp.status IN ('received', 'verified', 'invoiced', 'paid')
+        """,
+        tenant_id, month_start, month_end,
+    )
+    cogs_from_purchases = Decimal(str(cogs_purch_row['total']))
+
+    food_cost = cogs_from_expenses + cogs_from_purchases
+
+    # --- Operating expenses by category ---
+    opex_rows = await conn.fetch(
+        """
+        SELECT ec.category_code, COALESCE(SUM(te.amount), 0) AS total
+        FROM tenant_expenses te
+        JOIN expense_categories ec ON ec.id = te.expense_category_id
+        WHERE te.tenant_id = $1
+          AND te.month_year = $2
+          AND (te.expense_type IS NULL OR te.expense_type != 'cogs')
+        GROUP BY ec.category_code
+        """,
+        tenant_id, month_str,
+    )
+
+    opex_buckets: dict = {'rent': Decimal('0'), 'utilities': Decimal('0'),
+                          'maintenance': Decimal('0'), 'other': Decimal('0')}
+    for row in opex_rows:
+        bucket = _OPEX_CATEGORY_MAP.get(row['category_code'], 'other')
+        opex_buckets[bucket] += Decimal(str(row['total']))
+
+    # --- Payroll ---
+    payroll_row = await conn.fetchrow(
+        """
+        SELECT COALESCE(SUM(sp.payment_amount), 0) AS total
+        FROM salary_payments sp
+        JOIN tenant_members tm ON tm.id = sp.tenant_member_id
+        WHERE tm.tenant_id = $1
+          AND sp.period_month = $2
+          AND sp.status = 'paid'
+        """,
+        tenant_id, month_str,
+    )
+    payroll = Decimal(str(payroll_row['total']))
+
+    # --- Provisions base: latest salary config per employee ≤ target month ---
+    prov_base_row = await conn.fetchrow(
+        """
+        SELECT COALESCE(SUM(es.total_salary), 0) AS total
+        FROM employee_salaries es
+        JOIN tenant_members tm ON tm.id = es.tenant_member_id
+        WHERE tm.tenant_id = $1
+          AND es.period_month = (
+              SELECT MAX(es2.period_month)
+              FROM employee_salaries es2
+              WHERE es2.tenant_member_id = es.tenant_member_id
+                AND es2.period_month <= $2
+          )
+        """,
+        tenant_id, month_str,
+    )
+    prov_base = Decimal(str(prov_base_row['total']))
+
+    # --- Calculations ---
+    cesantias     = (prov_base * _CESANTIAS_RATE).quantize(Decimal('1'))
+    prima         = (prov_base * _PRIMA_RATE).quantize(Decimal('1'))
+    vacaciones    = (prov_base * _VACACIONES_RATE).quantize(Decimal('1'))
+    intereses_ces = (prov_base * _INTERESES_CES_RATE).quantize(Decimal('1'))
+    provisions_total = cesantias + prima + vacaciones + intereses_ces
+
+    opex_total = sum(opex_buckets.values())
+    # Add payroll into opex for EBITDA calc (payroll is an operating expense)
+    gross_profit    = revenue - food_cost
+    ebitda          = gross_profit - opex_total - payroll
+    net_income      = ebitda - provisions_total
+
+    def _pct(num: Decimal, den: Decimal) -> float:
+        if den == 0:
+            return 0.0
+        return float((num / den * 100).quantize(Decimal('0.1')))
+
+    gross_margin_pct  = _pct(gross_profit, revenue)
+    ebitda_margin_pct = _pct(ebitda, revenue)
+    food_cost_pct     = _pct(food_cost, revenue)
+    labor_pct         = _pct(payroll, revenue)
+    prime_cost_pct    = food_cost_pct + labor_pct
+    prime_status      = 'ok' if Decimal(str(prime_cost_pct)) <= _PRIME_COST_BENCHMARK else 'warning'
+
+    return PLPeriodData(**{
+        'period': month_str,
+        'revenue': PLRevenue(**{
+            'foodBeverageSales': float(revenue),
+            'total':             float(revenue),
+        }),
+        'cogs': PLCogs(**{
+            'foodCost': float(food_cost),
+            'total':    float(food_cost),
+        }),
+        'grossProfit':      float(gross_profit),
+        'grossMarginPct':   gross_margin_pct,
+        'operatingExpenses': PLOperatingExpenses(**{
+            'payroll':      float(payroll),
+            'rent':         float(opex_buckets['rent']),
+            'utilities':    float(opex_buckets['utilities']),
+            'maintenance':  float(opex_buckets['maintenance']),
+            'other':        float(opex_buckets['other']),
+            'total':        float(opex_total + payroll),
+        }),
+        'ebitda':           float(ebitda),
+        'ebitdaMarginPct':  ebitda_margin_pct,
+        'provisions': PLProvisions(**{
+            'cesantias':          float(cesantias),
+            'prima':              float(prima),
+            'vacaciones':         float(vacaciones),
+            'interesesCesantias': float(intereses_ces),
+            'total':              float(provisions_total),
+        }),
+        'netIncome': float(net_income),
+        'primeCost': PLPrimeCost(**{
+            'foodCostPct':   food_cost_pct,
+            'laborPct':      labor_pct,
+            'totalPct':      prime_cost_pct,
+            'benchmarkPct':  65.0,
+            'status':        prime_status,
+        }),
+    })
+
+
+async def get_pl_statement(
+    request: Request,
+    year: int,
+    month: int,
+    compare_previous: bool = False,
+) -> PLStatementResponse:
+    """
+    Monthly P&L statement for the authenticated tenant.
+    If compare_previous=True, also computes the prior calendar month.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("No hay un tenant seleccionado")
+
+        if not (1 <= month <= 12):
+            raise ValidationError("El mes debe estar entre 1 y 12")
+
+        async with get_db_connection() as conn:
+            current = await _compute_pl_for_period(conn, tenant_id, year, month)
+
+            previous = None
+            if compare_previous:
+                prev_month = month - 1 if month > 1 else 12
+                prev_year  = year if month > 1 else year - 1
+                previous = await _compute_pl_for_period(conn, tenant_id, prev_year, prev_month)
+
+        logger.info(
+            f"📊 P&L statement computed for tenant {tenant_id}: "
+            f"{year}-{month:02d}, compare_previous={compare_previous}"
+        )
+        return PLStatementResponse(current=current, previous=previous)
+
+    except (AuthenticationError, AuthorizationError, ValidationError):
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error computing P&L statement: {e}", exc_info=True)
+        raise ValidationError("Error al calcular estado de resultados")
