@@ -11,6 +11,7 @@ from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from app.services.aws_ses_service import ses_service
 from app.services.waros_service import evaluate_and_award
+from app.services.cierre_service import assert_order_not_in_closed_monthly_period
 from datetime import datetime, date
 import csv
 
@@ -365,6 +366,27 @@ async def bulk_update_order_status(
         ids = [_UUID(oid) for oid in order_ids]
 
         async with get_db_connection() as conn:
+            # Guard: fail fast if any order falls in a closed monthly accounting period (#362)
+            closed_check = await conn.fetchrow(
+                """
+                SELECT 1 FROM orders o
+                JOIN tenant_monthly_periods mp
+                    ON mp.tenant_id = o.tenant_id
+                    AND EXTRACT(YEAR  FROM o.order_date AT TIME ZONE 'America/Bogota') = mp.year
+                    AND EXTRACT(MONTH FROM o.order_date AT TIME ZONE 'America/Bogota') = mp.month
+                    AND mp.status = 'closed'
+                WHERE o.id = ANY($1) AND o.tenant_id = $2
+                LIMIT 1
+                """,
+                ids, tenant_id,
+            )
+            if closed_check:
+                raise APIError(
+                    "Una o más órdenes pertenecen a un período contable cerrado. "
+                    "Contacta a tu contador para realizar correcciones.",
+                    status_code=409,
+                )
+
             # Fetch current state of all orders before updating
             order_rows = await conn.fetch(
                 """SELECT id, status, order_number, table_session_id, pos_cart_id, payment_status
@@ -461,12 +483,15 @@ async def update_order_status(
 
         async with get_db_connection() as conn:
             row = await conn.fetchrow(
-                """SELECT id, status, order_number, table_session_id, pos_cart_id, payment_status
+                """SELECT id, status, order_number, table_session_id, pos_cart_id, payment_status, order_date
                    FROM orders WHERE id = $1 AND tenant_id = $2""",
                 order_id, tenant_id
             )
             if not row:
                 raise APIError("Orden no encontrada", status_code=404)
+
+            # Guard: block mutation if order falls in a closed monthly accounting period (#362)
+            await assert_order_not_in_closed_monthly_period(conn, tenant_id, row['order_date'])
 
             old_status = row['status']
             order_number = int(row['order_number'])
@@ -1489,13 +1514,16 @@ async def delete_order_item(
             async with conn.transaction():
                 # Verify order exists and get order number
                 order_query = """
-                    SELECT id, order_number FROM orders
+                    SELECT id, order_number, order_date FROM orders
                     WHERE id = $1 AND tenant_id = $2 AND pos_cart_id IS NOT NULL
                 """
                 order_row = await conn.fetchrow(order_query, order_id, tenant_id)
 
                 if not order_row:
                     raise APIError("Order not found", status_code=404)
+
+                # Guard: block mutation if order falls in a closed monthly accounting period (#362)
+                await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_row['order_date'])
 
                 order_number = order_row['order_number']
 
@@ -1798,13 +1826,16 @@ async def delete_order_item_modifier(
             async with conn.transaction():
                 # Verify order exists and get order number
                 order_query = """
-                    SELECT id, order_number FROM orders
+                    SELECT id, order_number, order_date FROM orders
                     WHERE id = $1 AND tenant_id = $2 AND pos_cart_id IS NOT NULL
                 """
                 order_row = await conn.fetchrow(order_query, order_id, tenant_id)
 
                 if not order_row:
                     raise APIError("Order not found", status_code=404)
+
+                # Guard: block mutation if order falls in a closed monthly accounting period (#362)
+                await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_row['order_date'])
 
                 order_number = order_row['order_number']
 
@@ -2188,6 +2219,9 @@ async def create_manual_order(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
+                # Guard: block creation if order_date falls in a closed monthly accounting period (#362)
+                await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_datetime)
+
                 # Compute total server-side — never trust client total
                 total_amount = sum(
                     float(item["quantity"]) * float(item["unit_price"])

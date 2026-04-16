@@ -8,7 +8,7 @@ import logging
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 from datetime import date, datetime
-from fastapi import Request
+from fastapi import Request, Response
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
@@ -762,3 +762,156 @@ def _row_to_dict(row) -> dict:
         "notes":                row["notes"],
         "closedAt":             row["closed_at"].isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Monthly Accounting Period — #362
+# ---------------------------------------------------------------------------
+
+def _monthly_period_to_dict(row) -> dict:
+    return {
+        "id":         str(row["id"]),
+        "tenantId":   str(row["tenant_id"]),
+        "year":       row["year"],
+        "month":      row["month"],
+        "status":     row["status"],
+        "closedBy":   str(row["closed_by"]) if row["closed_by"] else None,
+        "closedAt":   row["closed_at"].isoformat() if row["closed_at"] else None,
+        "notes":      row["notes"],
+        "createdAt":  row["created_at"].isoformat(),
+    }
+
+
+async def get_monthly_period(request: Request, response: Response, year: int, month: int) -> dict:
+    """Get or create a monthly period record for the given year/month."""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=True) as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id, tenant_id, year, month, status, closed_by, closed_at, notes, created_at
+                FROM tenant_monthly_periods
+                WHERE tenant_id = $1 AND year = $2 AND month = $3
+                """,
+                tenant_id, year, month,
+            )
+            if not row:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO tenant_monthly_periods (tenant_id, year, month, status)
+                    VALUES ($1, $2, $3, 'open')
+                    RETURNING id, tenant_id, year, month, status, closed_by, closed_at, notes, created_at
+                    """,
+                    tenant_id, year, month,
+                )
+
+        return {"success": True, "data": _monthly_period_to_dict(row)}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in get_monthly_period: {exc}")
+        raise APIError(f"Error in get_monthly_period: {exc}", status_code=500)
+
+
+async def close_monthly_period(
+    request: Request,
+    response: Response,
+    year: int,
+    month: int,
+    notes: Optional[str] = None,
+) -> dict:
+    """Close a monthly accounting period. Raises 409 if already closed."""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=True) as conn:
+            existing = await conn.fetchrow(
+                """
+                SELECT id, status FROM tenant_monthly_periods
+                WHERE tenant_id = $1 AND year = $2 AND month = $3
+                """,
+                tenant_id, year, month,
+            )
+
+            if existing and existing["status"] == "closed":
+                raise APIError(
+                    f"El período {year}-{month:02d} ya está cerrado.",
+                    status_code=409,
+                )
+
+            if existing:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE tenant_monthly_periods
+                    SET status = 'closed', closed_by = $4, closed_at = NOW(), notes = $5
+                    WHERE tenant_id = $1 AND year = $2 AND month = $3
+                    RETURNING id, tenant_id, year, month, status, closed_by, closed_at, notes, created_at
+                    """,
+                    tenant_id, year, month, user_id, notes,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO tenant_monthly_periods
+                        (tenant_id, year, month, status, closed_by, closed_at, notes)
+                    VALUES ($1, $2, $3, 'closed', $4, NOW(), $5)
+                    RETURNING id, tenant_id, year, month, status, closed_by, closed_at, notes, created_at
+                    """,
+                    tenant_id, year, month, user_id, notes,
+                )
+
+        return {"success": True, "data": _monthly_period_to_dict(row)}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in close_monthly_period: {exc}")
+        raise APIError(f"Error in close_monthly_period: {exc}", status_code=500)
+
+
+async def assert_order_not_in_closed_monthly_period(conn, tenant_id, order_date) -> None:
+    """
+    Raises APIError(409) if the given order_date falls in a closed monthly period.
+    This is the guard used by all order mutation functions.
+    order_date can be a date, datetime, or date string 'YYYY-MM-DD'.
+    """
+    if order_date is None:
+        return
+
+    # Extract year and month from order_date
+    if isinstance(order_date, str):
+        # Parse 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS' strings
+        try:
+            d = datetime.fromisoformat(order_date)
+        except ValueError:
+            return
+        year = d.year
+        month = d.month
+    elif hasattr(order_date, "year") and hasattr(order_date, "month"):
+        year = order_date.year
+        month = order_date.month
+    else:
+        return
+
+    row = await conn.fetchrow(
+        """
+        SELECT id FROM tenant_monthly_periods
+        WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'
+        """,
+        tenant_id, year, month,
+    )
+    if row:
+        raise APIError(
+            "Este pedido pertenece a un período contable cerrado. "
+            "Contacta a tu contador para realizar correcciones.",
+            status_code=409,
+        )

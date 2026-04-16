@@ -73,3 +73,37 @@ class CierreDetailResponse(BaseModel):
 class CierreListResponse(BaseModel):
     success: bool = True
     data: List[ClosingSummaryOut]
+
+
+# ---------------------------------------------------------------------------
+# Monthly Accounting Period — #362
+# ---------------------------------------------------------------------------
+
+class MonthlyPeriodClose(BaseModel):
+    notes: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class MonthlyPeriod(BaseModel):
+    id: UUID
+    tenant_id: UUID = Field(alias='tenantId')
+    year: int
+    month: int
+    status: str  # 'open' | 'closed'
+    closed_by: Optional[UUID] = Field(None, alias='closedBy')
+    closed_at: Optional[datetime] = Field(None, alias='closedAt')
+    notes: Optional[str] = None
+    created_at: datetime = Field(alias='createdAt')
+
+    class Config:
+        populate_by_name = True
+
+
+class MonthlyPeriodResponse(BaseModel):
+    success: bool = True
+    data: MonthlyPeriod
+
+    class Config:
+        populate_by_name = True

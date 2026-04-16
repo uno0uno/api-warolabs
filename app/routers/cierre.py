@@ -4,11 +4,11 @@ Daily accounting close: preview (Cierre X) and final close wizard (Cierre Z).
 
 Issue: https://github.com/uno0uno/warocol.com/issues/311
 """
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Request, Response, Query
 from typing import Optional
 from uuid import UUID
 from datetime import date, datetime
-from app.models.cierre import CierreCreate
+from app.models.cierre import CierreCreate, MonthlyPeriodClose
 from app.services import cierre_service
 
 router = APIRouter(prefix="/cierre", tags=["cierre"])
@@ -76,6 +76,39 @@ async def get_cierre_mensual(
     Returns totals + list of individual daily closes + coverage metadata.
     """
     return await cierre_service.get_cierre_mensual(request, year, month)
+
+
+@router.get("/mensual/{year}/{month}/status")
+async def get_monthly_period_status(
+    year: int,
+    month: int,
+    request: Request,
+    response: Response,
+):
+    """
+    Get (or lazily create) the monthly accounting period record for the given year/month.
+    Returns status 'open' or 'closed' plus metadata.
+    Issue: #362
+    """
+    return await cierre_service.get_monthly_period(request, response, year, month)
+
+
+@router.post("/mensual/{year}/{month}/close")
+async def close_monthly_period_endpoint(
+    year: int,
+    month: int,
+    request: Request,
+    response: Response,
+    body: Optional[MonthlyPeriodClose] = None,
+):
+    """
+    Close a monthly accounting period.
+    Once closed, all orders whose order_date falls in that month become immutable.
+    Returns 409 if the period is already closed.
+    Issue: #362
+    """
+    notes = body.notes if body else None
+    return await cierre_service.close_monthly_period(request, response, year, month, notes)
 
 
 @router.get("/ultimo")
