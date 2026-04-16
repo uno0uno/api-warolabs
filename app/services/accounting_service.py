@@ -28,6 +28,9 @@ from app.models.accounting import (
     PLPrimeCost,
     PLPeriodData,
     PLStatementResponse,
+    ProvisionsBreakdown,
+    ProvisionsPreviewResponse,
+    ProvisionsPostResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -1175,3 +1178,281 @@ async def get_pl_statement(
     except Exception as e:
         logger.error(f"❌ Error computing P&L statement: {e}", exc_info=True)
         raise ValidationError("Error al calcular estado de resultados")
+
+
+# --- Provisions (#384) ---
+
+# Colombian law 2026 constants (update annually)
+_SMMLV_2026            = Decimal('1423500')
+_AUXILIO_TRANSPORT_2026 = Decimal('200650')
+_SMMLV_TRANSPORT_THRESHOLD = _SMMLV_2026 * 2  # 2,847,000
+
+# Provision rates (Código Sustantivo del Trabajo)
+_PROV_CESANTIAS   = Decimal('0.0833')
+_PROV_INTERESES   = Decimal('0.0100')
+_PROV_PRIMA       = Decimal('0.0833')
+_PROV_VACACIONES  = Decimal('0.0417')
+
+# PUC account codes for provisions
+_PROV_DEBIT_CODE  = '5105'  # Gastos de personal — sueldos
+_PROV_CREDIT_CODES = {
+    'cesantias':  '2610',
+    'intereses':  '2615',
+    'prima':      '2620',
+    'vacaciones': '2625',
+}
+
+
+async def _calculate_provisions(conn, tenant_id: UUID, year: int, month: int) -> dict:
+    """
+    Compute provision amounts for the given calendar month.
+
+    Payroll base  = latest total_salary per active employee (period_month ≤ YYYY-MM)
+    Transport base = payroll_base + auxilio_transporte for employees earning ≤ 2×SMMLV
+                    (used for cesantías, intereses, prima — NOT vacaciones)
+    Vacation base  = payroll_base only (per Corte Suprema de Justicia)
+
+    Returns a dict with all bases and provision amounts as Decimal.
+    """
+    month_str = f"{year}-{month:02d}"
+
+    rows = await conn.fetch(
+        """
+        SELECT es.total_salary
+        FROM employee_salaries es
+        JOIN tenant_members tm ON tm.id = es.tenant_member_id
+        WHERE tm.tenant_id = $1
+          AND es.period_month = (
+              SELECT MAX(es2.period_month)
+              FROM employee_salaries es2
+              WHERE es2.tenant_member_id = es.tenant_member_id
+                AND es2.period_month <= $2
+          )
+        """,
+        tenant_id, month_str,
+    )
+
+    payroll_base   = Decimal('0')
+    transport_base = Decimal('0')
+
+    for r in rows:
+        sal = Decimal(str(r['total_salary']))
+        payroll_base += sal
+        transport_base += sal
+        if sal <= _SMMLV_TRANSPORT_THRESHOLD:
+            transport_base += _AUXILIO_TRANSPORT_2026
+
+    vacation_base = payroll_base  # transport NOT included for vacaciones
+
+    cesantias  = (transport_base * _PROV_CESANTIAS).quantize(Decimal('1'))
+    intereses  = (transport_base * _PROV_INTERESES).quantize(Decimal('1'))
+    prima      = (transport_base * _PROV_PRIMA).quantize(Decimal('1'))
+    vacaciones = (vacation_base  * _PROV_VACACIONES).quantize(Decimal('1'))
+
+    return {
+        'month_str':      month_str,
+        'employee_count': len(rows),
+        'payroll_base':   payroll_base,
+        'transport_base': transport_base,
+        'vacation_base':  vacation_base,
+        'cesantias':      cesantias,
+        'intereses':      intereses,
+        'prima':          prima,
+        'vacaciones':     vacaciones,
+        'total':          cesantias + intereses + prima + vacaciones,
+    }
+
+
+async def preview_provisions(
+    request: Request,
+    year: int,
+    month: int,
+) -> ProvisionsPreviewResponse:
+    """
+    Calculate provisions for a calendar month without writing to the GL.
+    Used for P&L preview and close checklist summary.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("No hay un tenant seleccionado")
+
+        if not (1 <= month <= 12):
+            raise ValidationError("El mes debe estar entre 1 y 12")
+
+        async with get_db_connection() as conn:
+            p = await _calculate_provisions(conn, tenant_id, year, month)
+
+        return ProvisionsPreviewResponse(**{
+            'period':         p['month_str'],
+            'payrollBase':    float(p['payroll_base']),
+            'transportBase':  float(p['transport_base']),
+            'vacationBase':   float(p['vacation_base']),
+            'employeeCount':  p['employee_count'],
+            'provisions': ProvisionsBreakdown(**{
+                'cesantias':          float(p['cesantias']),
+                'interesesCesantias': float(p['intereses']),
+                'prima':              float(p['prima']),
+                'vacaciones':         float(p['vacaciones']),
+                'total':              float(p['total']),
+            }),
+        })
+
+    except (AuthenticationError, AuthorizationError, ValidationError):
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error previewing provisions: {e}", exc_info=True)
+        raise ValidationError("Error al calcular provisiones")
+
+
+async def post_provisions(
+    request: Request,
+    year: int,
+    month: int,
+) -> ProvisionsPostResponse:
+    """
+    Calculate and post 4 GL entries (one per provision type) for the given month.
+    If entries for this period already exist (status=posted), they are voided first.
+    Uses source_module='nomina' (within DB CHECK constraint).
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("No hay un tenant seleccionado")
+
+        if not (1 <= month <= 12):
+            raise ValidationError("El mes debe estar entre 1 y 12")
+
+        month_str = f"{year}-{month:02d}"
+        desc_prefix = f"Provisiones nómina {month_str}"
+
+        async with get_db_connection() as conn:
+            # 1. Void any previously posted provision entries for this period
+            voided = await conn.fetchval(
+                """
+                UPDATE tenant_journal_entries
+                SET status = 'voided', voided_at = NOW()
+                WHERE tenant_id = $1
+                  AND source_module = 'nomina'
+                  AND description LIKE $2
+                  AND status = 'posted'
+                RETURNING id
+                """,
+                tenant_id, f"{desc_prefix}%",
+            )
+            voided_count = 1 if voided else 0
+            # Count all voided in this batch
+            voided_rows = await conn.fetch(
+                """
+                SELECT id FROM tenant_journal_entries
+                WHERE tenant_id = $1
+                  AND source_module = 'nomina'
+                  AND description LIKE $2
+                  AND status = 'voided'
+                  AND voided_at >= NOW() - INTERVAL '5 seconds'
+                """,
+                tenant_id, f"{desc_prefix}%",
+            )
+            voided_count = len(voided_rows)
+
+            # 2. Calculate provision amounts
+            p = await _calculate_provisions(conn, tenant_id, year, month)
+
+            # 3. Resolve debit account (5105)
+            debit_acct = await conn.fetchrow(
+                "SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code=$2 AND is_active=TRUE",
+                tenant_id, _PROV_DEBIT_CODE,
+            )
+            if not debit_acct:
+                raise ValidationError(
+                    f"Cuenta {_PROV_DEBIT_CODE} no encontrada — configure el PUC del tenant"
+                )
+
+            # 4. Post one GL entry per provision type
+            provision_items = [
+                ('cesantias',  p['cesantias'],  '2610', f"{desc_prefix} — Cesantías"),
+                ('intereses',  p['intereses'],  '2615', f"{desc_prefix} — Intereses cesantías"),
+                ('prima',      p['prima'],      '2620', f"{desc_prefix} — Prima de servicios"),
+                ('vacaciones', p['vacaciones'], '2625', f"{desc_prefix} — Vacaciones"),
+            ]
+
+            entry_ids: List[str] = []
+            entry_date = f"{year}-{month:02d}-01"
+
+            for _key, amount, credit_code, description in provision_items:
+                if amount == 0:
+                    continue  # skip zero-amount entries
+
+                credit_acct = await conn.fetchrow(
+                    "SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code=$2 AND is_active=TRUE",
+                    tenant_id, credit_code,
+                )
+                if not credit_acct:
+                    logger.warning(
+                        f"[GL] Cuenta {credit_code} no encontrada para tenant {tenant_id} — "
+                        f"saltando provisión {_key}"
+                    )
+                    continue
+
+                amount_f = float(amount)
+
+                entry_row = await conn.fetchrow(
+                    """
+                    INSERT INTO tenant_journal_entries
+                        (tenant_id, entry_date, period_year, period_month,
+                         description, source_module, status,
+                         total_debit, total_credit)
+                    VALUES ($1, $2, $3, $4, $5, 'nomina', 'posted', $6, $6)
+                    RETURNING id
+                    """,
+                    tenant_id, entry_date, year, month,
+                    description, amount_f,
+                )
+                entry_id = entry_row['id']
+
+                # Debit 5105
+                await conn.execute(
+                    """
+                    INSERT INTO tenant_journal_lines
+                        (journal_entry_id, account_id, debit, credit, description, line_order)
+                    VALUES ($1, $2, $3, 0, $4, 1)
+                    """,
+                    entry_id, debit_acct['id'], amount_f, description,
+                )
+                # Credit 261X
+                await conn.execute(
+                    """
+                    INSERT INTO tenant_journal_lines
+                        (journal_entry_id, account_id, debit, credit, description, line_order)
+                    VALUES ($1, $2, 0, $3, $4, 2)
+                    """,
+                    entry_id, credit_acct['id'], amount_f, description,
+                )
+
+                entry_ids.append(str(entry_id))
+
+        logger.info(
+            f"📋 Provisions posted for tenant {tenant_id}: {month_str} — "
+            f"{len(entry_ids)} entries, {voided_count} voided"
+        )
+
+        return ProvisionsPostResponse(**{
+            'period': month_str,
+            'provisions': ProvisionsBreakdown(**{
+                'cesantias':          float(p['cesantias']),
+                'interesesCesantias': float(p['intereses']),
+                'prima':              float(p['prima']),
+                'vacaciones':         float(p['vacaciones']),
+                'total':              float(p['total']),
+            }),
+            'journalEntryIds': entry_ids,
+            'voidedCount':     voided_count,
+        })
+
+    except (AuthenticationError, AuthorizationError, ValidationError):
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error posting provisions: {e}", exc_info=True)
+        raise ValidationError("Error al postear provisiones de nómina")

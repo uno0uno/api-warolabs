@@ -281,3 +281,40 @@ class PLStatementResponse(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+# --- Provisions (#384) ---
+
+class ProvisionsBreakdown(BaseModel):
+    cesantias: float
+    intereses_cesantias: float = Field(alias='interesesCesantias')
+    prima: float
+    vacaciones: float
+    total: float
+
+    class Config:
+        populate_by_name = True
+
+
+class ProvisionsPreviewResponse(BaseModel):
+    success: bool = True
+    period: str  # 'YYYY-MM'
+    payroll_base: float = Field(alias='payrollBase')
+    transport_base: float = Field(alias='transportBase')
+    vacation_base: float = Field(alias='vacationBase')
+    employee_count: int = Field(alias='employeeCount')
+    provisions: ProvisionsBreakdown
+
+    class Config:
+        populate_by_name = True
+
+
+class ProvisionsPostResponse(BaseModel):
+    success: bool = True
+    period: str  # 'YYYY-MM'
+    provisions: ProvisionsBreakdown
+    journal_entry_ids: List[str] = Field(alias='journalEntryIds')
+    voided_count: int = Field(alias='voidedCount')
+
+    class Config:
+        populate_by_name = True

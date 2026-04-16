@@ -13,6 +13,8 @@ from app.services.accounting_service import (
     void_journal_entry,
     get_trial_balance,
     get_pl_statement,
+    preview_provisions,
+    post_provisions,
 )
 from app.models.accounting import (
     TenantAccountCreate,
@@ -25,6 +27,8 @@ from app.models.accounting import (
     JournalEntryVoidRequest,
     TrialBalanceResponse,
     PLStatementResponse,
+    ProvisionsPreviewResponse,
+    ProvisionsPostResponse,
 )
 
 router = APIRouter()
@@ -202,3 +206,36 @@ async def get_pl_statement_endpoint(
         month=month,
         compare_previous=compare_previous,
     )
+
+
+# ---------------------------------------------------------------------------
+# Provisions (#384)
+# ---------------------------------------------------------------------------
+
+@router.get("/provisions/preview", response_model=ProvisionsPreviewResponse)
+async def preview_provisions_endpoint(
+    request: Request,
+    year: int = Query(..., ge=2020, le=2100),
+    month: int = Query(..., ge=1, le=12),
+):
+    """
+    Calculate nómina provisions for the given month without posting to GL.
+    Returns cesantías, intereses sobre cesantías, prima de servicios, vacaciones.
+    Auxilio de transporte (200,650 COP) applied to employees earning ≤ 2×SMMLV.
+    """
+    return await preview_provisions(request, year=year, month=month)
+
+
+@router.post("/provisions/post", response_model=ProvisionsPostResponse)
+async def post_provisions_endpoint(
+    request: Request,
+    year: int = Query(..., ge=2020, le=2100),
+    month: int = Query(..., ge=1, le=12),
+):
+    """
+    Calculate and post 4 GL entries for nómina provisions (one per provision type).
+    Debit: 5105 Gastos de personal. Credit: 2610/2615/2620/2625.
+    If provision entries for this period were already posted, they are voided first.
+    source_module = 'nomina'. Safe to re-run.
+    """
+    return await post_provisions(request, year=year, month=month)
