@@ -172,3 +172,34 @@ class AccountTemplatesListResponse(BaseModel):
 
 class JournalEntryVoidRequest(BaseModel):
     reason: str
+
+
+# --- Trial Balance (#379) ---
+
+class TrialBalanceRow(BaseModel):
+    account_id: str = Field(alias='accountId')
+    code: str
+    name: str
+    account_class: str = Field(alias='class')
+    account_type: str  = Field(alias='accountType')
+    normal_balance: str = Field(alias='normalBalance')
+    opening_balance: float = Field(alias='openingBalance')
+    period_debits: float   = Field(alias='periodDebits')
+    period_credits: float  = Field(alias='periodCredits')
+    closing_balance: float = Field(alias='closingBalance')
+
+    class Config:
+        populate_by_name = True
+
+
+class TrialBalanceResponse(BaseModel):
+    success: bool = True
+    period_start: str  = Field(alias='periodStart')
+    period_end: str    = Field(alias='periodEnd')
+    rows: List[TrialBalanceRow]
+    total_debits: float  = Field(alias='totalDebits')
+    total_credits: float = Field(alias='totalCredits')
+    is_balanced: bool    = Field(alias='isBalanced')
+
+    class Config:
+        populate_by_name = True

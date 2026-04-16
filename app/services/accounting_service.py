@@ -19,6 +19,8 @@ from app.models.accounting import (
     JournalLine,
     JournalEntryResponse,
     JournalEntriesListResponse,
+    TrialBalanceRow,
+    TrialBalanceResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -789,3 +791,134 @@ async def void_journal_entry(
     except Exception as e:
         logger.error(f"❌ Error voiding journal entry: {e}", exc_info=True)
         raise ValidationError("Error al anular asiento contable")
+
+
+# --- Trial Balance (#379) ---
+
+async def get_trial_balance(
+    request: Request,
+    period_start: str,
+    period_end: str,
+    include_zero_balances: bool = False,
+) -> TrialBalanceResponse:
+    """
+    Compute the trial balance for the authenticated tenant.
+
+    opening_balance = sum of all posted lines BEFORE period_start
+    period_debits / period_credits = posted lines within [period_start, period_end]
+    closing_balance = opening ± period net  (sign depends on normal_balance)
+
+    A single SQL pass uses FILTER (WHERE ...) aggregates so we hit the index once.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("No hay un tenant seleccionado")
+
+        async with get_db_connection() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    ta.id                AS account_id,
+                    ta.code,
+                    ta.name,
+                    ta.account_class,
+                    ta.account_type,
+                    ta.normal_balance,
+                    -- Opening: all POSTED lines BEFORE period_start
+                    COALESCE(SUM(jl.debit)  FILTER (
+                        WHERE je.status = 'posted'
+                          AND je.entry_date < $2
+                    ), 0)                AS open_debits,
+                    COALESCE(SUM(jl.credit) FILTER (
+                        WHERE je.status = 'posted'
+                          AND je.entry_date < $2
+                    ), 0)                AS open_credits,
+                    -- Period: POSTED lines within [period_start, period_end]
+                    COALESCE(SUM(jl.debit)  FILTER (
+                        WHERE je.status = 'posted'
+                          AND je.entry_date >= $2
+                          AND je.entry_date <= $3
+                    ), 0)                AS period_debits,
+                    COALESCE(SUM(jl.credit) FILTER (
+                        WHERE je.status = 'posted'
+                          AND je.entry_date >= $2
+                          AND je.entry_date <= $3
+                    ), 0)                AS period_credits
+                FROM tenant_accounts ta
+                LEFT JOIN tenant_journal_lines jl ON jl.account_id = ta.id
+                LEFT JOIN tenant_journal_entries je ON je.id = jl.journal_entry_id
+                                                    AND je.tenant_id = $1
+                WHERE ta.tenant_id = $1
+                  AND ta.is_active = TRUE
+                  AND ta.is_detail = TRUE
+                GROUP BY ta.id, ta.code, ta.name, ta.account_class,
+                         ta.account_type, ta.normal_balance
+                ORDER BY ta.code
+                """,
+                tenant_id,
+                period_start,
+                period_end,
+            )
+
+        result_rows: List[TrialBalanceRow] = []
+        total_debits = Decimal('0')
+        total_credits = Decimal('0')
+
+        for r in rows:
+            open_deb = Decimal(str(r['open_debits']))
+            open_cre = Decimal(str(r['open_credits']))
+            p_deb    = Decimal(str(r['period_debits']))
+            p_cre    = Decimal(str(r['period_credits']))
+
+            # Opening balance — depends on which side is "normal"
+            if r['normal_balance'] == 'debit':
+                opening = open_deb - open_cre
+                closing = opening + p_deb - p_cre
+            else:
+                opening = open_cre - open_deb
+                closing = opening + p_cre - p_deb
+
+            # Skip fully-zero accounts unless caller wants them
+            if not include_zero_balances:
+                if opening == 0 and p_deb == 0 and p_cre == 0 and closing == 0:
+                    continue
+
+            total_debits  += p_deb
+            total_credits += p_cre
+
+            result_rows.append(TrialBalanceRow(**{
+                'accountId':     str(r['account_id']),
+                'code':          r['code'],
+                'name':          r['name'],
+                'class':         r['account_class'],
+                'accountType':   r['account_type'],
+                'normalBalance': r['normal_balance'],
+                'openingBalance': float(opening),
+                'periodDebits':   float(p_deb),
+                'periodCredits':  float(p_cre),
+                'closingBalance': float(closing),
+            }))
+
+        is_balanced = abs(total_debits - total_credits) < Decimal('0.01')
+
+        logger.info(
+            f"📊 Trial balance computed for tenant {tenant_id}: "
+            f"{len(result_rows)} accounts, balanced={is_balanced}"
+        )
+
+        return TrialBalanceResponse(**{
+            'periodStart':  period_start,
+            'periodEnd':    period_end,
+            'rows':         result_rows,
+            'totalDebits':  float(total_debits),
+            'totalCredits': float(total_credits),
+            'isBalanced':   is_balanced,
+        })
+
+    except (AuthenticationError, AuthorizationError, ValidationError):
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error computing trial balance: {e}", exc_info=True)
+        raise ValidationError("Error al calcular balance de comprobación")

@@ -11,6 +11,7 @@ from app.services.accounting_service import (
     get_journal_entry,
     post_journal_entry,
     void_journal_entry,
+    get_trial_balance,
 )
 from app.models.accounting import (
     TenantAccountCreate,
@@ -21,6 +22,7 @@ from app.models.accounting import (
     JournalEntryResponse,
     JournalEntriesListResponse,
     JournalEntryVoidRequest,
+    TrialBalanceResponse,
 )
 
 router = APIRouter()
@@ -140,3 +142,30 @@ async def void_journal_entry_endpoint(
     Returns the reversing entry. Requires reason text.
     """
     return await void_journal_entry(request, entry_id, body.reason)
+
+
+# ---------------------------------------------------------------------------
+# Trial Balance (#379)
+# ---------------------------------------------------------------------------
+
+@router.get("/trial-balance", response_model=TrialBalanceResponse)
+async def get_trial_balance_endpoint(
+    request: Request,
+    period_start: str = Query(..., alias="periodStart", description="YYYY-MM-DD"),
+    period_end: str = Query(..., alias="periodEnd", description="YYYY-MM-DD"),
+    include_zero_balances: bool = Query(False, alias="includeZeroBalances"),
+):
+    """
+    Compute the trial balance for the tenant between periodStart and periodEnd.
+
+    opening_balance = net movement of all POSTED lines before periodStart.
+    closing_balance = opening ± net period activity (sign follows normal_balance).
+    Only detail accounts (is_detail=TRUE) are included.
+    Zero-balance accounts are excluded by default (includeZeroBalances=false).
+    """
+    return await get_trial_balance(
+        request,
+        period_start=period_start,
+        period_end=period_end,
+        include_zero_balances=include_zero_balances,
+    )
