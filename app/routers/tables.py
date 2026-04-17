@@ -98,6 +98,14 @@ class CloseSessionRequest(BaseModel):
     payment_method_id: Optional[UUID] = Field(None, description="UUID of the selected payment_methods row (nullable if group-level only)")
     discount_type: Optional[str] = Field(None, description="'percent' | 'fixed'")
     discount_value: Optional[float] = Field(None, description="10 for 10%, 5000 for $5,000 COP")
+    split_mode: bool = Field(False, description="True when using split payment — keeps session open, marks orders as partial")
+    split_first_amount: float = Field(0.0, description="Amount for the first split payment (used only when split_mode=True)")
+
+
+class AddSessionPaymentRequest(BaseModel):
+    amount: float = Field(..., description="Amount for this partial payment")
+    payment_method: str = Field(..., description="cash | card | digital")
+    payment_method_id: Optional[UUID] = Field(None, description="UUID of the selected payment_methods row")
 
 
 @router.post("/{table_id}/close")
@@ -105,6 +113,7 @@ async def close_session(request: Request, table_id: UUID, body: CloseSessionRequ
     """
     Close the active session (status: open/bill_requested → free).
     If payment_method is provided, all pending orders are marked as completed.
+    If split_mode=True, marks orders as partial and records first payment without closing the session.
     Returns 404 if no open session exists.
     """
     return await tables_service.close_session(
@@ -112,6 +121,20 @@ async def close_session(request: Request, table_id: UUID, body: CloseSessionRequ
         body.payment_method, body.customer_id,
         body.credit_due_date, body.payment_method_id,
         body.discount_type, body.discount_value,
+        body.split_mode, body.split_first_amount,
+    )
+
+
+@router.post("/{table_id}/payments")
+async def add_session_payment(request: Request, table_id: UUID, body: AddSessionPaymentRequest):
+    """
+    Add a partial payment to an open mesa session's split payment.
+    When total paid >= session total, closes the session automatically.
+    Returns 404 if no open session or no partial orders exist.
+    """
+    return await tables_service.add_session_payment(
+        request, table_id,
+        body.amount, body.payment_method, body.payment_method_id,
     )
 
 

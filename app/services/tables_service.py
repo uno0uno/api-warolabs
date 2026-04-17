@@ -358,7 +358,7 @@ async def open_session(request: Request, table_id: UUID) -> dict:
         raise APIError(f"Error opening session: {e}", status_code=500)
 
 
-async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None) -> dict:
+async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None, split_mode: bool = False, split_first_amount: float = 0.0) -> dict:
     """
     Close the active session for a table.
     If payment_method is provided, marks all pending orders as completed with that payment method.
@@ -403,7 +403,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 status_code=400
                             )
 
-                    payment_status = 'credit' if payment_method == 'credit' else 'paid'
+                    payment_status = 'credit' if payment_method == 'credit' else ('partial' if split_mode else 'paid')
 
                     # Compute discount if provided
                     _discount_amount = None
@@ -499,6 +499,35 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         f"(payment_method={payment_method}, payment_status={payment_status}, "
                         f"discount_amount={_discount_amount}) for session {session_row['id']}"
                     )
+
+                    # In split_mode: record first payment proportionally across session orders
+                    # and keep session open
+                    if split_mode and split_first_amount > 0:
+                        user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+                        order_rows = await conn.fetch(
+                            "SELECT id, total_amount FROM orders WHERE table_session_id = $1 AND status = 'completed' ORDER BY created_at",
+                            session_row["id"],
+                        )
+                        session_total = sum(float(r["total_amount"]) for r in order_rows)
+                        if session_total > 0 and order_rows:
+                            remaining_payment = split_first_amount
+                            for i, ord_row in enumerate(order_rows):
+                                if i == len(order_rows) - 1:
+                                    portion = remaining_payment
+                                else:
+                                    portion = round(split_first_amount * float(ord_row["total_amount"]) / session_total)
+                                    remaining_payment -= portion
+                                await conn.execute(
+                                    """
+                                    INSERT INTO order_payments
+                                        (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id)
+                                    VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid)
+                                    """,
+                                    ord_row["id"], tenant_id, portion, payment_method,
+                                    str(payment_method_id) if payment_method_id else None,
+                                    str(user_id) if user_id else None,
+                                )
+
                 else:
                     completed_count = 0
 
@@ -507,31 +536,60 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     session_row["id"],
                 )
 
-                # Close session
-                await conn.execute(
-                    "UPDATE table_sessions SET closed_at = now() WHERE id = $1",
+                if not split_mode:
+                    # Close session
+                    await conn.execute(
+                        "UPDATE table_sessions SET closed_at = now() WHERE id = $1",
+                        session_row["id"],
+                    )
+
+                    if is_bar_table:
+                        # Bar table: immediately reopen a new session so the bar is always active.
+                        # Do NOT reset status to 'free' — bar stays 'open'.
+                        await conn.execute(
+                            """
+                            INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id)
+                            VALUES ($1, $2, NULL)
+                            """,
+                            table_id,
+                            tenant_id,
+                        )
+                        logger.info(f"Bar session rotated: {session_row['id']} for table {table_id}")
+                    else:
+                        # Reset table status to free
+                        await conn.execute(
+                            "UPDATE tables SET status = 'free' WHERE id = $1 AND tenant_id = $2",
+                            table_id,
+                            tenant_id,
+                        )
+
+        if split_mode:
+            # Compute paid_total and remaining for the split response
+            async with get_db_connection() as conn2:
+                order_rows = await conn2.fetch(
+                    "SELECT id, total_amount FROM orders WHERE table_session_id = $1",
                     session_row["id"],
                 )
-
-                if is_bar_table:
-                    # Bar table: immediately reopen a new session so the bar is always active.
-                    # Do NOT reset status to 'free' — bar stays 'open'.
-                    await conn.execute(
-                        """
-                        INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id)
-                        VALUES ($1, $2, NULL)
-                        """,
-                        table_id,
-                        tenant_id,
-                    )
-                    logger.info(f"Bar session rotated: {session_row['id']} for table {table_id}")
-                else:
-                    # Reset table status to free
-                    await conn.execute(
-                        "UPDATE tables SET status = 'free' WHERE id = $1 AND tenant_id = $2",
-                        table_id,
-                        tenant_id,
-                    )
+                session_total = sum(float(r["total_amount"]) for r in order_rows)
+                order_ids = [r["id"] for r in order_rows]
+                paid_row = await conn2.fetchrow(
+                    "SELECT COALESCE(SUM(amount), 0) AS paid FROM order_payments WHERE order_id = ANY($1)",
+                    order_ids,
+                )
+                paid_total = float(paid_row["paid"])
+                remaining = max(0.0, session_total - paid_total)
+                is_complete = remaining <= 0.01
+            logger.info(f"Split payment recorded for session {session_row['id']}: paid={paid_total}, remaining={remaining}")
+            return {
+                "success": True,
+                "data": {
+                    "session_id": str(session_row["id"]),
+                    "table_id": str(table_id),
+                    "paid_total": paid_total,
+                    "remaining": remaining,
+                    "is_complete": is_complete,
+                },
+            }
 
         logger.info(f"Session closed: {session_row['id']} for table {table_id}")
         return {
@@ -549,6 +607,113 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
     except Exception as e:
         logger.error(f"Error closing session for table {table_id}: {e}")
         raise APIError(f"Error closing session: {e}", status_code=500)
+
+
+async def add_session_payment(
+    request: Request,
+    table_id: UUID,
+    amount: float,
+    payment_method: str,
+    payment_method_id: Optional[UUID] = None,
+) -> dict:
+    """
+    Add a partial payment to an open mesa session that is in split payment mode.
+    Distributes the payment proportionally across session orders.
+    When total paid >= session total, closes the session and marks all orders as paid.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # Get open session
+                session_row = await conn.fetchrow(
+                    "SELECT id FROM table_sessions WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL FOR UPDATE",
+                    table_id, tenant_id,
+                )
+                if not session_row:
+                    raise NotFoundError("No open session found for this table")
+
+                # Get all completed (partial) orders for this session
+                order_rows = await conn.fetch(
+                    "SELECT id, total_amount FROM orders WHERE table_session_id = $1 AND status = 'completed' ORDER BY created_at",
+                    session_row["id"],
+                )
+                if not order_rows:
+                    raise APIError("No split payment orders found for this session — call close with split_mode=True first", status_code=400)
+
+                session_total = sum(float(r["total_amount"]) for r in order_rows)
+                order_ids = [r["id"] for r in order_rows]
+
+                # Distribute this payment proportionally
+                remaining_payment = amount
+                for i, ord_row in enumerate(order_rows):
+                    if i == len(order_rows) - 1:
+                        portion = remaining_payment
+                    else:
+                        portion = round(amount * float(ord_row["total_amount"]) / session_total)
+                        remaining_payment -= portion
+                    await conn.execute(
+                        """
+                        INSERT INTO order_payments
+                            (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id)
+                        VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid)
+                        """,
+                        ord_row["id"], tenant_id, portion, payment_method,
+                        str(payment_method_id) if payment_method_id else None,
+                        str(user_id) if user_id else None,
+                    )
+
+                # Recompute paid total
+                paid_row = await conn.fetchrow(
+                    "SELECT COALESCE(SUM(amount), 0) AS paid FROM order_payments WHERE order_id = ANY($1)",
+                    order_ids,
+                )
+                paid_total = float(paid_row["paid"])
+                remaining = max(0.0, session_total - paid_total)
+                is_complete = remaining <= 0.01
+
+                if is_complete:
+                    # Mark all orders as fully paid
+                    await conn.execute(
+                        "UPDATE orders SET payment_status = 'paid' WHERE table_session_id = $1 AND status = 'completed' AND payment_status = 'partial'",
+                        session_row["id"],
+                    )
+                    # Close the session
+                    await conn.execute(
+                        "UPDATE table_sessions SET closed_at = now() WHERE id = $1",
+                        session_row["id"],
+                    )
+                    # Reset table to free
+                    await conn.execute(
+                        "UPDATE tables SET status = 'free' WHERE id = $1 AND tenant_id = $2",
+                        table_id, tenant_id,
+                    )
+                    logger.info(f"Session {session_row['id']} closed via split payment (fully paid)")
+
+                payment_id = None  # payments are distributed; return None as placeholder
+
+        return {
+            "success": True,
+            "data": {
+                "session_id": str(session_row["id"]),
+                "paid_total": paid_total,
+                "remaining": remaining,
+                "is_complete": is_complete,
+                "payment_id": str(payment_id) if payment_id else "split",
+            },
+        }
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error adding session payment for table {table_id}: {e}")
+        raise APIError(f"Error adding session payment: {e}", status_code=500)
 
 
 async def get_current_session(request: Request, table_id: UUID) -> dict:
