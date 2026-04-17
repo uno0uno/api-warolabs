@@ -547,17 +547,39 @@ async def list_journal_entries(
                 *params,
             )
 
+            # Opening balance: net of all POSTED lines for this account before date_from
+            opening_balance: Optional[float] = None
+            if account_id is not None:
+                ob_params: list = [tenant_id, account_id]
+                ob_date_cond = ""
+                if date_from:
+                    ob_params.append(date.fromisoformat(date_from))
+                    ob_date_cond = f"AND je.entry_date < ${len(ob_params)}"
+                ob_row = await conn.fetchrow(
+                    f"""SELECT COALESCE(SUM(jl.debit), 0) - COALESCE(SUM(jl.credit), 0) AS net
+                        FROM tenant_journal_lines jl
+                        JOIN tenant_journal_entries je ON je.id = jl.journal_entry_id
+                        WHERE je.tenant_id = $1
+                          AND jl.account_id = $2
+                          AND je.status = 'posted'
+                          {ob_date_cond}""",
+                    *ob_params,
+                )
+                opening_balance = float(ob_row["net"]) if ob_row else 0.0
+
             offset = (page - 1) * limit
             params.append(limit)
             params.append(offset)
+            # Ledger view (account_id filter): sort ASC so running balance accumulates naturally
+            sort_order = "ASC" if account_id is not None else "DESC"
             rows = await conn.fetch(
-                base_query + f" ORDER BY je.entry_date DESC, je.created_at DESC "
+                base_query + f" ORDER BY je.entry_date {sort_order}, je.created_at {sort_order} "
                              f"LIMIT ${len(params) - 1} OFFSET ${len(params)}",
                 *params,
             )
 
         entries = [_row_to_journal_entry(r) for r in rows]
-        return JournalEntriesListResponse(data=entries, total=total)
+        return JournalEntriesListResponse(data=entries, total=total, opening_balance=opening_balance)
 
     except AuthenticationError:
         raise

@@ -157,6 +157,7 @@ class JournalEntriesListResponse(BaseModel):
     success: bool = True
     data: List[JournalEntry]
     total: int
+    opening_balance: Optional[float] = Field(None, alias='openingBalance')
 
     class Config:
         populate_by_name = True
