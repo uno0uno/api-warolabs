@@ -12,6 +12,7 @@ from app.models.tenant_public_profile import (
     ToggleProfileRequest,
     ToggleProfileResponse
 )
+from app.models.tax_config import TaxConfigUpdate
 from app.core.exceptions import AuthenticationError
 from typing import Optional
 
@@ -104,6 +105,39 @@ async def toggle_public_profile_endpoint(
         request,
         toggle_data.is_active
     )
+
+
+@router.get("/tax-config")
+async def get_tax_config_endpoint(request: Request):
+    """
+    Get the fiscal tax configuration for the active tenant.
+    If no row exists, inserts defaults and returns them.
+
+    **Requires authentication**
+    """
+    return await tenant_config_service.get_tax_config(request)
+
+
+@router.put("/tax-config")
+async def update_tax_config_endpoint(
+    request: Request,
+    data: TaxConfigUpdate = Body(...),
+):
+    """
+    Update the fiscal tax configuration for the active tenant.
+
+    Request body:
+    {
+        "inc_applicable": true,
+        "inc_included_in_price": true,
+        "iva_applicable": false,
+        "iva_included_in_price": false,
+        "liquor_tax_applicable": false
+    }
+
+    **Requires authentication**
+    """
+    return await tenant_config_service.update_tax_config(request, data)
 
 
 ALLOWED_IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/webp'}

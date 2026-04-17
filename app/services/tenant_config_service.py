@@ -491,3 +491,87 @@ async def upload_tenant_image(
         raise HTTPException(status_code=500, detail="Failed to upload image")
 
     return public_url
+
+
+async def get_tax_config(request: Request) -> dict:
+    """
+    Return the tax configuration for the active tenant.
+    If no row exists yet, inserts defaults and returns them.
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM tenant_tax_config WHERE tenant_id = $1",
+                tenant_id,
+            )
+            if not row:
+                await conn.execute(
+                    "INSERT INTO tenant_tax_config (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                    tenant_id,
+                )
+                row = await conn.fetchrow(
+                    "SELECT * FROM tenant_tax_config WHERE tenant_id = $1",
+                    tenant_id,
+                )
+
+            return {"success": True, "data": dict(row)}
+
+    except AuthenticationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error fetching tax config: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching tax config: {str(e)}")
+
+
+async def update_tax_config(request: Request, data) -> dict:
+    """
+    Upsert the tax configuration for the active tenant.
+    Accepts a TaxConfigUpdate-shaped object.
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO tenant_tax_config (
+                    tenant_id,
+                    inc_applicable, inc_included_in_price,
+                    iva_applicable, iva_included_in_price,
+                    liquor_tax_applicable
+                )
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (tenant_id) DO UPDATE SET
+                    inc_applicable        = EXCLUDED.inc_applicable,
+                    inc_included_in_price = EXCLUDED.inc_included_in_price,
+                    iva_applicable        = EXCLUDED.iva_applicable,
+                    iva_included_in_price = EXCLUDED.iva_included_in_price,
+                    liquor_tax_applicable = EXCLUDED.liquor_tax_applicable,
+                    updated_at            = NOW()
+                RETURNING *
+                """,
+                tenant_id,
+                data.inc_applicable,
+                data.inc_included_in_price,
+                data.iva_applicable,
+                data.iva_included_in_price,
+                data.liquor_tax_applicable,
+            )
+
+            return {"success": True, "data": dict(row)}
+
+    except AuthenticationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating tax config: {e}")
+        raise HTTPException(status_code=500, detail=f"Error updating tax config: {str(e)}")
