@@ -7,10 +7,12 @@ Issue: https://github.com/uno0uno/warocol.com/issues/298
 from typing import Optional, List
 from uuid import UUID
 from datetime import date
+from decimal import Decimal
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError
+from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry
 import logging
 
 logger = logging.getLogger(__name__)
@@ -499,6 +501,29 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         f"(payment_method={payment_method}, payment_status={payment_status}, "
                         f"discount_amount={_discount_amount}) for session {session_row['id']}"
                     )
+
+                    # GL journal entries — one per order, atomic with session close
+                    # Failure is swallowed: GL must never block the close
+                    try:
+                        completed_orders = await conn.fetch(
+                            "SELECT id, total_amount, payment_method, payment_method_id, order_date "
+                            "FROM orders WHERE table_session_id = $1 AND status = 'completed'",
+                            session_row["id"],
+                        )
+                        tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        for ord_row in completed_orders:
+                            await _post_order_gl_entry(
+                                conn=conn,
+                                tenant_id=tenant_id,
+                                order_id=ord_row["id"],
+                                order_date=ord_row["order_date"].date(),
+                                total_amount=Decimal(str(ord_row["total_amount"])),
+                                payment_method=ord_row["payment_method"] or payment_method or "digital",
+                                payment_method_id=ord_row["payment_method_id"],
+                                tax_config=tax_config,
+                            )
+                    except Exception as _gl_exc:
+                        logger.error(f"GL entries failed for session {session_row['id']}: {_gl_exc}")
 
                     # In split_mode: record first payment proportionally across session orders
                     # and keep session open
