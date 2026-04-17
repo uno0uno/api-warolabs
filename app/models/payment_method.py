@@ -19,6 +19,7 @@ class PaymentMethodGroup(BaseModel):
     triggersCartera: bool
     isActive: bool
     sortOrder: int
+    glAccountCode: Optional[str] = None
 
 
 class PaymentMethodGroupWithCount(PaymentMethodGroup):
@@ -70,6 +71,7 @@ class PatchGroupRequest(BaseModel):
     isActive: Optional[bool] = None
     sortOrder: Optional[int] = None
     triggersCartera: Optional[bool] = None
+    glAccountCode: Optional[str] = None
 
 
 class CreateMethodRequest(BaseModel):

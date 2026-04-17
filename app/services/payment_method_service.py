@@ -42,6 +42,7 @@ async def list_groups(request: Request) -> dict:
                 pmg.triggers_cartera,
                 pmg.is_active,
                 pmg.sort_order,
+                pmg.gl_account_code,
                 COUNT(pm.id) FILTER (
                     WHERE pm.is_active = true AND pm.tenant_id = $1
                 ) AS method_count
@@ -63,6 +64,7 @@ async def list_groups(request: Request) -> dict:
             "triggersCartera": row["triggers_cartera"],
             "isActive": row["is_active"],
             "sortOrder": row["sort_order"],
+            "glAccountCode": row["gl_account_code"],
             "methodCount": row["method_count"],
         }
         for row in rows
@@ -149,12 +151,16 @@ async def patch_group(request: Request, group_id: UUID, body: PatchGroupRequest)
             updates.append(f"triggers_cartera = ${idx}")
             params.append(body.triggersCartera)
             idx += 1
+        if body.glAccountCode is not None:
+            updates.append(f"gl_account_code = ${idx}")
+            params.append(body.glAccountCode if body.glAccountCode != "" else None)
+            idx += 1
 
         if not updates:
             # Nothing to update — return current state
             row = await conn.fetchrow(
                 """
-                SELECT id, tenant_id, name, slug, triggers_cartera, is_active, sort_order
+                SELECT id, tenant_id, name, slug, triggers_cartera, is_active, sort_order, gl_account_code
                 FROM payment_method_groups WHERE id = $1
                 """,
                 group_id,
@@ -166,7 +172,7 @@ async def patch_group(request: Request, group_id: UUID, body: PatchGroupRequest)
                 UPDATE payment_method_groups
                 SET {', '.join(updates)}
                 WHERE id = ${idx}
-                RETURNING id, tenant_id, name, slug, triggers_cartera, is_active, sort_order
+                RETURNING id, tenant_id, name, slug, triggers_cartera, is_active, sort_order, gl_account_code
                 """,
                 *params,
             )
@@ -181,6 +187,7 @@ async def patch_group(request: Request, group_id: UUID, body: PatchGroupRequest)
             "triggersCartera": row["triggers_cartera"],
             "isActive": row["is_active"],
             "sortOrder": row["sort_order"],
+            "glAccountCode": row["gl_account_code"],
         },
     }
 
