@@ -40,23 +40,27 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
     """
     row = await conn.fetchrow(
         """SELECT inc_applicable, inc_rate,   inc_gl_account_code,
+                  inc_included_in_price,
                   liquor_tax_applicable, liquor_tax_rate, liquor_tax_gl_account_code,
-                  iva_applicable, iva_rate, iva_gl_account_code
+                  iva_applicable, iva_rate, iva_gl_account_code,
+                  iva_included_in_price
            FROM tenant_tax_config WHERE tenant_id = $1""",
         tenant_id,
     )
     if row:
         return dict(row)
     return {
-        "inc_applicable":         False,
-        "inc_rate":               Decimal("0.0800"),
-        "inc_gl_account_code":    "2408",
-        "liquor_tax_applicable":  False,
-        "liquor_tax_rate":        Decimal("0.0000"),
+        "inc_applicable":             False,
+        "inc_rate":                   Decimal("0.0800"),
+        "inc_gl_account_code":        "2495",
+        "inc_included_in_price":      True,
+        "liquor_tax_applicable":      False,
+        "liquor_tax_rate":            Decimal("0.0000"),
         "liquor_tax_gl_account_code": "2408",
-        "iva_applicable":         False,
-        "iva_rate":               Decimal("0.1900"),
-        "iva_gl_account_code":    "2408",
+        "iva_applicable":             False,
+        "iva_rate":                   Decimal("0.1900"),
+        "iva_gl_account_code":        "2408",
+        "iva_included_in_price":      False,
     }
 
 
@@ -214,6 +218,177 @@ async def _post_cierre_gl_entry(
     logger.info(
         f"[GL] ✅ Posted cierre entry {entry_id} for summary {summary_id} "
         f"(total={ts}, net={float(net_income)}, tax={float(tax_amount)})"
+    )
+
+
+async def _post_order_gl_entry(
+    conn,
+    tenant_id: UUID,
+    order_id: UUID,
+    order_date: date,
+    total_amount: Decimal,
+    payment_method: str,
+    payment_method_id: Optional[UUID],
+    tax_config: Dict[str, Any],
+) -> None:
+    """
+    Post a double-entry GL journal entry for a single completed order (POS or domicilio).
+
+    source_module = 'orden' (distinguishable from cierre 'ventas' entries)
+    source_id     = order_id
+
+    DR  [payment account]    debit_total   (1105 Caja / 1110 Bancos / 1305 Clientes)
+    CR  4135 Ingresos        net_revenue
+    CR  2495/2408 Impuesto   tax_amount    (only if tax enabled and account resolved)
+
+    Tax modes (per tenant_tax_config):
+      inc_included_in_price=True  (default): price already includes tax — extract formula
+      inc_included_in_price=False           : tax added on top — additive formula
+
+    Idempotent: skips if an 'orden' entry already exists for this order_id.
+    Caller MUST wrap in try/except — GL failure must never roll back the order.
+    """
+    # ── Idempotency guard ──────────────────────────────────────────────────
+    existing = await conn.fetchval(
+        """SELECT id FROM tenant_journal_entries
+           WHERE source_module = 'orden' AND source_id = $1 AND tenant_id = $2""",
+        order_id, tenant_id,
+    )
+    if existing:
+        logger.info(f"[GL] Order {order_id}: entry already exists — skip (idempotent)")
+        return
+
+    if total_amount <= 0:
+        logger.info(f"[GL] Order {order_id}: zero amount — skip GL post")
+        return
+
+    # ── Resolve debit account: specific method → group → slug fallback ────
+    debit_code = None
+    if payment_method_id:
+        pm_row = await conn.fetchrow(
+            """SELECT COALESCE(pm.gl_account_code, pmg.gl_account_code) AS code
+               FROM payment_methods pm
+               JOIN payment_method_groups pmg ON pm.group_id = pmg.id
+               WHERE pm.id = $1""",
+            payment_method_id,
+        )
+        if pm_row and pm_row["code"]:
+            debit_code = pm_row["code"]
+    if not debit_code:
+        debit_code = _SLUG_DEBIT_CODE.get(payment_method or "", "1105")
+
+    debit_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, debit_code,
+    )
+    if not debit_acct:
+        logger.warning(
+            f"[GL] Debit account {debit_code} not found for tenant {tenant_id} — "
+            f"skip GL post for order {order_id}"
+        )
+        return
+
+    # ── Resolve 4135 Ingresos ──────────────────────────────────────────────
+    ingresos_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, INGRESOS_CODE,
+    )
+    if not ingresos_acct:
+        logger.warning(
+            f"[GL] Ingresos account {INGRESOS_CODE} not found for tenant {tenant_id} — "
+            f"skip GL post for order {order_id}"
+        )
+        return
+
+    # ── Tax calculation — two modes ────────────────────────────────────────
+    tax_amount = Decimal("0")
+    tax_acct_id = None
+    debit_total = total_amount   # may increase in additive mode
+
+    if tax_config.get("inc_applicable"):
+        rate = Decimal(str(tax_config["inc_rate"]))
+        tax_code = str(tax_config["inc_gl_account_code"])
+        if tax_config.get("inc_included_in_price", True):
+            # Extractive: price already contains the tax
+            tax_amount = total_amount - (total_amount / (1 + rate))
+            net_revenue = total_amount / (1 + rate)
+        else:
+            # Additive: tax is on top of the base price
+            tax_amount = total_amount * rate
+            net_revenue = total_amount
+            debit_total = total_amount + tax_amount
+        tax_row = await conn.fetchrow(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+            tenant_id, tax_code,
+        )
+        if tax_row:
+            tax_acct_id = tax_row["id"]
+    elif tax_config.get("iva_applicable"):
+        rate = Decimal(str(tax_config["iva_rate"]))
+        tax_code = str(tax_config["iva_gl_account_code"])
+        if tax_config.get("iva_included_in_price", False):
+            tax_amount = total_amount - (total_amount / (1 + rate))
+            net_revenue = total_amount / (1 + rate)
+        else:
+            tax_amount = total_amount * rate
+            net_revenue = total_amount
+            debit_total = total_amount + tax_amount
+        tax_row = await conn.fetchrow(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+            tenant_id, tax_code,
+        )
+        if tax_row:
+            tax_acct_id = tax_row["id"]
+    else:
+        net_revenue = total_amount
+
+    dt = float(debit_total)
+    description = f"Venta {order_date.isoformat()} — orden {order_id}"
+
+    # ── Insert entry + lines (savepoint if inside outer transaction) ───────
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'orden', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, order_date, order_date.year, order_date.month,
+            description, order_id, dt, dt,
+        )
+        entry_id = entry_row["id"]
+
+        # Debit line — payment account
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, $3, 0, $4, 0)""",
+            entry_id, debit_acct["id"], dt, description,
+        )
+
+        # Credit line — net revenue to 4135
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, 0, $3, $4, 1)""",
+            entry_id, ingresos_acct["id"], float(net_revenue),
+            f"{description} — ingreso neto",
+        )
+
+        # Credit line — tax payable (if applicable and account resolved)
+        if tax_amount > 0 and tax_acct_id:
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, $4, 2)""",
+                entry_id, tax_acct_id, float(tax_amount),
+                f"{description} — impuesto",
+            )
+
+    logger.info(
+        f"[GL] ✅ Posted order entry {entry_id} for order {order_id} "
+        f"(total={dt}, net={float(net_revenue)}, tax={float(tax_amount)})"
     )
 
 
