@@ -85,3 +85,4 @@ class PatchMethodRequest(BaseModel):
     groupId: Optional[str] = None
     isActive: Optional[bool] = None
     sortOrder: Optional[int] = None
+    glAccountCode: Optional[str] = None

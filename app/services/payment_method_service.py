@@ -202,7 +202,7 @@ async def list_methods(request: Request) -> dict:
     async with get_db_connection(use_transaction=False) as conn:
         rows = await conn.fetch(
             """
-            SELECT pm.id, pm.tenant_id, pm.group_id, pm.name, pm.is_active, pm.sort_order
+            SELECT pm.id, pm.tenant_id, pm.group_id, pm.name, pm.is_active, pm.sort_order, pm.gl_account_code
             FROM payment_methods pm
             WHERE pm.tenant_id = $1
             ORDER BY pm.sort_order, pm.name
@@ -218,6 +218,7 @@ async def list_methods(request: Request) -> dict:
             "name": row["name"],
             "isActive": row["is_active"],
             "sortOrder": row["sort_order"],
+            "glAccountCode": row["gl_account_code"],
         }
         for row in rows
     ]
@@ -326,10 +327,14 @@ async def patch_method(request: Request, method_id: UUID, body: PatchMethodReque
             updates.append(f"group_id = ${idx}")
             params.append(new_group_id)
             idx += 1
+        if body.glAccountCode is not None:
+            updates.append(f"gl_account_code = ${idx}")
+            params.append(body.glAccountCode if body.glAccountCode != "" else None)
+            idx += 1
 
         if not updates:
             row = await conn.fetchrow(
-                "SELECT id, tenant_id, group_id, name, is_active, sort_order FROM payment_methods WHERE id = $1",
+                "SELECT id, tenant_id, group_id, name, is_active, sort_order, gl_account_code FROM payment_methods WHERE id = $1",
                 method_id,
             )
         else:
@@ -339,7 +344,7 @@ async def patch_method(request: Request, method_id: UUID, body: PatchMethodReque
                 UPDATE payment_methods
                 SET {', '.join(updates)}
                 WHERE id = ${idx}
-                RETURNING id, tenant_id, group_id, name, is_active, sort_order
+                RETURNING id, tenant_id, group_id, name, is_active, sort_order, gl_account_code
                 """,
                 *params,
             )
@@ -353,6 +358,7 @@ async def patch_method(request: Request, method_id: UUID, body: PatchMethodReque
             "name": row["name"],
             "isActive": row["is_active"],
             "sortOrder": row["sort_order"],
+            "glAccountCode": row["gl_account_code"],
         },
     }
 
