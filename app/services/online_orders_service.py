@@ -3,6 +3,7 @@ Online Orders Service
 Authenticated, tenant-scoped listing of online orders for restaurant operators.
 """
 import asyncio
+from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 from fastapi import Request
@@ -11,6 +12,7 @@ from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError, ValidationError
 from app.services.email_helpers import send_order_accepted_email
 from app.services.waros_service import evaluate_and_award
+from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry
 import logging
 
 logger = logging.getLogger(__name__)
@@ -440,6 +442,27 @@ async def update_order_status(
                 except Exception as _stock_err:
                     logger.error(f"Stock deduction failed for order {order_id}: {_stock_err}")
 
+                # GL journal entry — atomic with the order, failure never blocks
+                try:
+                    order_for_gl = await conn.fetchrow(
+                        "SELECT total_amount, payment_method, payment_method_id, order_date FROM orders WHERE id = $1",
+                        order_id,
+                    )
+                    tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                    await _post_order_gl_entry(
+                        conn=conn,
+                        tenant_id=tenant_id,
+                        order_id=order_id,
+                        order_date=order_for_gl["order_date"].date(),
+                        total_amount=Decimal(str(order_for_gl["total_amount"])),
+                        payment_method=order_for_gl["payment_method"] or "digital",
+                        payment_method_id=order_for_gl["payment_method_id"],
+                        tax_config=tax_config,
+                    )
+                except Exception as e:
+                    logger.error(f"GL entry failed for online order {order_id}: {e}")
+                    # Do NOT re-raise — status update completes regardless
+
                 # Fire acceptance email (non-blocking — does not delay the response)
                 email_row = await conn.fetchrow(
                     """
@@ -522,6 +545,27 @@ async def update_order_status(
                     await _deduct_stock_for_order(conn, order_id, tenant_id, changed_by)
                 except Exception as _stock_err:
                     logger.error(f"Stock deduction failed for order {order_id}: {_stock_err}")
+
+                # GL journal entry — atomic with the order, failure never blocks
+                try:
+                    order_for_gl = await conn.fetchrow(
+                        "SELECT total_amount, payment_method, payment_method_id, order_date FROM orders WHERE id = $1",
+                        order_id,
+                    )
+                    tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                    await _post_order_gl_entry(
+                        conn=conn,
+                        tenant_id=tenant_id,
+                        order_id=order_id,
+                        order_date=order_for_gl["order_date"].date(),
+                        total_amount=Decimal(str(order_for_gl["total_amount"])),
+                        payment_method=order_for_gl["payment_method"] or "digital",
+                        payment_method_id=order_for_gl["payment_method_id"],
+                        tax_config=tax_config,
+                    )
+                except Exception as e:
+                    logger.error(f"GL entry failed for online order {order_id}: {e}")
+                    # Do NOT re-raise — status update completes regardless
 
             # Award waros for direct completed transition (fire-and-forget — never blocks)
             if new_status == "completed" and order_customer_id:
