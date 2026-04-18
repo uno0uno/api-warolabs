@@ -6,6 +6,9 @@ Handles the simplified flow for immediate stock updates (Compras Directas)
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_BOG = ZoneInfo("America/Bogota")
 
 
 def _parse_date(date_str: Optional[str]) -> Optional[datetime]:
@@ -60,7 +63,12 @@ async def _post_purchase_gl_entry(
         logger.info(f"[GL] Purchase {purchase_id}: zero amount — skip GL post")
         return
 
-    entry_date = purchase_date.date() if hasattr(purchase_date, 'date') else purchase_date
+    if hasattr(purchase_date, 'tzinfo') and purchase_date.tzinfo is not None:
+        entry_date = purchase_date.astimezone(_BOG).date()
+    elif hasattr(purchase_date, 'date'):
+        entry_date = purchase_date.date()
+    else:
+        entry_date = purchase_date
     period_year = entry_date.year
     period_month = entry_date.month
 
@@ -344,7 +352,7 @@ async def create_direct_purchase(
                         $11, $12, $13, $14::uuid, $15, $16, $17, TRUE, NOW(), $18,
                         CASE WHEN $19 THEN NOW() ELSE NULL END
                     )
-                    RETURNING id
+                    RETURNING id, purchase_date
                 """,
                     tenant_id,
                     supplier_id,
