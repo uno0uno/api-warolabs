@@ -15,6 +15,7 @@ from app.core.exceptions import AuthenticationError, APIError, NotFoundError, Va
 from app.services.email_helpers import send_order_accepted_email
 from app.services.waros_service import evaluate_and_award
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
+from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 import logging
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,13 @@ async def _deduct_stock_for_order(conn, order_id: UUID, tenant_id, changed_by) -
         order_number = item["order_number"]
 
         for ingredient in ingredients:
-            quantity_to_deduct = float(item["quantity"]) * float(ingredient["quantity"])
+            resolved_qty = await resolve_recipe_quantity_to_base_unit(
+                conn,
+                ingredient["ingredient_id"],
+                float(ingredient["quantity"]),
+                ingredient["unit"] or "",
+            )
+            quantity_to_deduct = float(item["quantity"]) * resolved_qty
 
             stock_row = await conn.fetchrow(
                 "SELECT current_stock FROM tenant_inventory WHERE ingredient_id = $1 AND tenant_id = $2",

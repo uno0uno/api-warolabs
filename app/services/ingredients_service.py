@@ -312,6 +312,12 @@ async def create_tenant_ingredient(
             detail=f"Invalid unit '{data.unit}'. Must be one of: {', '.join(sorted(ALLOWED_UNITS))}"
         )
 
+    if (data.is_resale or False) and data.unit != "und":
+        raise HTTPException(
+            status_code=422,
+            detail="Resale ingredients must use unit 'und'. Change the unit to 'und' before marking as resale."
+        )
+
     parent_uuid = None
     parent_name = None
     if data.parent_id:
@@ -427,6 +433,28 @@ async def update_tenant_ingredient(
 
     if data.is_resale is not None:
         updates["is_resale"] = data.is_resale
+
+    # Resale guard: is_resale=True requires unit='und'
+    # Check the effective unit: either the one being set now, or the existing one in DB
+    effective_unit = updates.get("unit") or row["unit"]
+    effective_is_resale = updates.get("is_resale")
+    if effective_is_resale is None:
+        effective_is_resale = False  # not being changed; existing value doesn't block
+    if effective_is_resale and effective_unit != "und":
+        raise HTTPException(
+            status_code=422,
+            detail="Resale ingredients must use unit 'und'. Change the unit to 'und' before marking as resale."
+        )
+    # Also block changing unit away from 'und' on an already-resale ingredient
+    if "unit" in updates and updates["unit"] != "und":
+        current_is_resale = await conn.fetchval(
+            "SELECT is_resale FROM ingredients WHERE id = $1", ingredient_id
+        )
+        if current_is_resale:
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot change unit on a resale ingredient. Disable resale first."
+            )
 
     # parent_id: empty string means clear it, a UUID string sets it
     parent_name = None

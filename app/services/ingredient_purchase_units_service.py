@@ -72,6 +72,42 @@ async def resolve_to_base_unit(
     return float(quantity), unit
 
 
+async def resolve_recipe_quantity_to_base_unit(
+    conn,
+    ingredient_id: UUID,
+    recipe_qty: float,
+    recipe_unit: str,
+) -> float:
+    """
+    Converts a recipe quantity to the ingredient's base unit.
+    - If recipe_unit == ingredient.unit → returns recipe_qty unchanged.
+    - If recipe_unit in ('gr', 'ml') and ingredient.unit == 'und'
+      and ingredient.unit_weight_gr > 0 → returns recipe_qty / unit_weight_gr.
+    - Otherwise → returns recipe_qty unchanged (logs a warning).
+    """
+    row = await conn.fetchrow(
+        "SELECT unit, unit_weight_gr FROM ingredients WHERE id = $1",
+        ingredient_id
+    )
+    if not row:
+        return recipe_qty
+    base_unit = row["unit"]
+    if recipe_unit == base_unit:
+        return recipe_qty
+    if recipe_unit in ("gr", "ml") and base_unit == "und" and row["unit_weight_gr"] and float(row["unit_weight_gr"]) > 0:
+        converted = recipe_qty / float(row["unit_weight_gr"])
+        logger.info(
+            f"Recipe unit conversion: {recipe_qty} {recipe_unit} → {converted:.4f} und "
+            f"(unit_weight_gr={row['unit_weight_gr']}, ingredient={ingredient_id})"
+        )
+        return converted
+    logger.warning(
+        f"No recipe unit conversion for '{recipe_unit}' → '{base_unit}' on ingredient {ingredient_id}. "
+        f"Returning recipe_qty unchanged."
+    )
+    return recipe_qty
+
+
 async def get_purchase_units_by_ingredient(
     request: Request,
     response: Response,
