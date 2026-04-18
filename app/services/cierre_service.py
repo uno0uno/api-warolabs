@@ -346,7 +346,7 @@ async def _post_order_gl_entry(
         net_revenue = total_amount
 
     dt = float(debit_total)
-    description = f"Venta #{order_number}" if order_number else f"Venta {order_date.isoformat()} — orden {order_id}"
+    description = f"#{order_number}" if order_number else f"Venta {order_date.isoformat()} — orden {order_id}"
 
     # ── Insert entry + lines (savepoint if inside outer transaction) ───────
     async with conn.transaction():
@@ -467,7 +467,7 @@ async def _post_order_cogs_gl_entry(
 
     # ── Insert entry + 2 lines ─────────────────────────────────────────────
     amount = float(total_cogs)
-    description = f"CMV Venta #{order_number}" if order_number else f"CMV {order_date.isoformat()} — orden {order_id}"
+    description = f"CMV #{order_number}" if order_number else f"CMV {order_date.isoformat()} — orden {order_id}"
 
     async with conn.transaction():
         entry_row = await conn.fetchrow(

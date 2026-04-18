@@ -572,7 +572,7 @@ async def create_direct_purchase(
                             conn, tenant_id, purchase_id,
                             total_amount,
                             purchase_row['purchase_date'],
-                            f"Compra directa {purchase_number}",
+                            purchase_number,
                             UUID(payment_method_id) if payment_method_id else None,
                         )
                 except Exception as _gl_err:
