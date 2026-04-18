@@ -14,7 +14,7 @@ from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError, ValidationError
 from app.services.email_helpers import send_order_accepted_email
 from app.services.waros_service import evaluate_and_award
-from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry
+from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
 import logging
 
 logger = logging.getLogger(__name__)
@@ -465,6 +465,17 @@ async def update_order_status(
                     logger.error(f"GL entry failed for online order {order_id}: {e}")
                     # Do NOT re-raise — status update completes regardless
 
+                # COGS GL entry — DR 6135 Costo de ventas / CR 1435 Inventarios
+                try:
+                    await _post_order_cogs_gl_entry(
+                        conn=conn,
+                        tenant_id=tenant_id,
+                        order_id=order_id,
+                        order_date=order_for_gl["order_date"].astimezone(_BOG).date(),
+                    )
+                except Exception as e:
+                    logger.error(f"COGS GL entry failed for online order {order_id}: {e}")
+
                 # Fire acceptance email (non-blocking — does not delay the response)
                 email_row = await conn.fetchrow(
                     """
@@ -568,6 +579,17 @@ async def update_order_status(
                 except Exception as e:
                     logger.error(f"GL entry failed for online order {order_id}: {e}")
                     # Do NOT re-raise — status update completes regardless
+
+                # COGS GL entry — DR 6135 Costo de ventas / CR 1435 Inventarios
+                try:
+                    await _post_order_cogs_gl_entry(
+                        conn=conn,
+                        tenant_id=tenant_id,
+                        order_id=order_id,
+                        order_date=order_for_gl["order_date"].astimezone(_BOG).date(),
+                    )
+                except Exception as e:
+                    logger.error(f"COGS GL entry failed for online order {order_id}: {e}")
 
             # Award waros for direct completed transition (fire-and-forget — never blocks)
             if new_status == "completed" and order_customer_id:

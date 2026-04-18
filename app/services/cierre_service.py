@@ -30,7 +30,9 @@ _SLUG_DEBIT_CODE: Dict[str, str] = {
     "credit":  "1305",   # Clientes (fiado — accounts receivable)
 }
 
-INGRESOS_CODE = "4135"   # Comercio al por menor
+INGRESOS_CODE   = "4135"   # Comercio al por menor
+COGS_CODE       = "6135"   # Costo de ventas
+INVENTARIO_CODE = "1435"   # Inventarios — materia prima y suministros
 
 
 async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
@@ -389,6 +391,113 @@ async def _post_order_gl_entry(
     logger.info(
         f"[GL] ✅ Posted order entry {entry_id} for order {order_id} "
         f"(total={dt}, net={float(net_revenue)}, tax={float(tax_amount)})"
+    )
+
+
+async def _post_order_cogs_gl_entry(
+    conn,
+    tenant_id: UUID,
+    order_id: UUID,
+    order_date: date,
+) -> None:
+    """
+    Post a COGS GL journal entry for a completed order.
+
+    DR  6135 Costo de ventas      total_ingredient_cost
+    CR  1435 Inventarios          total_ingredient_cost
+
+    Cost basis: sum of order_item_ingredients.total_cost (captured at sale time
+    using last purchase unit_cost × quantity consumed).
+
+    Rules:
+    - Only posts if total ingredient cost > 0 (skip if no purchase history)
+    - Idempotent: skips if source_module='orden_cogs' entry already exists
+    - Missing 6135 or 1435 account → warning logged, no exception raised
+    - Failure must never block order completion — caller wraps in try/except
+    """
+    # ── Idempotency guard ──────────────────────────────────────────────────
+    existing = await conn.fetchval(
+        """SELECT id FROM tenant_journal_entries
+           WHERE source_module = 'orden_cogs' AND source_id = $1 AND tenant_id = $2""",
+        order_id, tenant_id,
+    )
+    if existing:
+        logger.info(f"[GL] COGS Order {order_id}: entry already exists — skip (idempotent)")
+        return
+
+    # ── Sum ingredient cost from order_item_ingredients ───────────────────
+    total_cogs = await conn.fetchval(
+        """SELECT COALESCE(SUM(oii.total_cost), 0)
+           FROM order_item_ingredients oii
+           JOIN order_items oi ON oi.id = oii.order_item_id
+           WHERE oi.order_id = $1
+             AND oii.total_cost IS NOT NULL
+             AND oii.total_cost > 0""",
+        order_id,
+    )
+    if not total_cogs or float(total_cogs) <= 0:
+        logger.info(f"[GL] Order {order_id}: no ingredient cost data — skip COGS entry")
+        return
+
+    # ── Resolve 6135 Costo de ventas ───────────────────────────────────────
+    cogs_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, COGS_CODE,
+    )
+    if not cogs_acct:
+        logger.warning(
+            f"[GL] COGS account {COGS_CODE} not found for tenant {tenant_id} — "
+            f"skip COGS entry for order {order_id}"
+        )
+        return
+
+    # ── Resolve 1435 Inventarios ───────────────────────────────────────────
+    inv_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, INVENTARIO_CODE,
+    )
+    if not inv_acct:
+        logger.warning(
+            f"[GL] Inventory account {INVENTARIO_CODE} not found for tenant {tenant_id} — "
+            f"skip COGS entry for order {order_id}"
+        )
+        return
+
+    # ── Insert entry + 2 lines ─────────────────────────────────────────────
+    amount = float(total_cogs)
+    description = f"CMV {order_date.isoformat()} — orden {order_id}"
+
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'orden_cogs', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, order_date, order_date.year, order_date.month,
+            description, order_id, amount, amount,
+        )
+        entry_id = entry_row["id"]
+
+        # Debit — 6135 Costo de ventas
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, $3, 0, $4, 0)""",
+            entry_id, cogs_acct["id"], amount, description,
+        )
+
+        # Credit — 1435 Inventarios
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, 0, $3, $4, 1)""",
+            entry_id, inv_acct["id"], amount, description,
+        )
+
+    logger.info(
+        f"[GL] ✅ Posted COGS entry {entry_id} for order {order_id} (cogs={amount})"
     )
 
 

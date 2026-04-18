@@ -14,7 +14,7 @@ from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError
-from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry
+from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
 import logging
 
 logger = logging.getLogger(__name__)
@@ -523,6 +523,12 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 payment_method=ord_row["payment_method"] or payment_method or "digital",
                                 payment_method_id=ord_row["payment_method_id"],
                                 tax_config=tax_config,
+                            )
+                            await _post_order_cogs_gl_entry(
+                                conn=conn,
+                                tenant_id=tenant_id,
+                                order_id=ord_row["id"],
+                                order_date=ord_row["order_date"].astimezone(_BOG).date(),
                             )
                     except Exception as _gl_exc:
                         logger.error(f"GL entries failed for session {session_row['id']}: {_gl_exc}")
