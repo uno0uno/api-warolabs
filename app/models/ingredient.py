@@ -42,6 +42,7 @@ class TenantIngredientCreate(BaseModel):
     costo_unitario: Optional[float] = Field(default=None, ge=0)
     parent_id: Optional[str] = Field(default=None, description="UUID of a global base ingredient")
     is_resale: Optional[bool] = Field(default=False, description="Mark as resale product — will appear in /menu/reventa")
+    unit_weight_gr: Optional[float] = Field(default=None, ge=0, description="Weight in grams of 1 base unit (only for 'und' ingredients)")
     purchase_units: List[PurchaseUnitInput] = Field(default_factory=list, description="Purchase units to create with the ingredient")
 
 

@@ -340,10 +340,10 @@ async def create_tenant_ingredient(
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO ingredients (name, unit, type, category, costo_unitario, parent_id, tenant_id, is_resale)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO ingredients (name, unit, type, category, costo_unitario, parent_id, tenant_id, is_resale, unit_weight_gr)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id::text, name, unit, type, category, costo_unitario,
-                      parent_id::text, tenant_id::text, is_resale, created_at
+                      parent_id::text, tenant_id::text, is_resale, unit_weight_gr, created_at
             """,
             name,
             data.unit,
@@ -353,6 +353,7 @@ async def create_tenant_ingredient(
             parent_uuid,
             tenant_id,
             data.is_resale or False,
+            data.unit_weight_gr if data.unit == "und" else None,
         )
     except asyncpg.UniqueViolationError:
         raise HTTPException(
