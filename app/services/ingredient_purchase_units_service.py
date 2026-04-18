@@ -80,10 +80,12 @@ async def resolve_recipe_quantity_to_base_unit(
 ) -> float:
     """
     Converts a recipe quantity to the ingredient's base unit.
-    - If recipe_unit == ingredient.unit → returns recipe_qty unchanged.
-    - If recipe_unit in ('gr', 'ml') and ingredient.unit == 'und'
-      and ingredient.unit_weight_gr > 0 → returns recipe_qty / unit_weight_gr.
-    - Otherwise → returns recipe_qty unchanged (logs a warning).
+
+    Supported conversions (requires unit_weight_gr > 0 on the ingredient):
+    - recipe in gr/ml, stock in und → qty / unit_weight_gr  (e.g. 360 gr ÷ 180 gr/und = 2 und)
+    - recipe in und, stock in gr/ml → qty * unit_weight_gr  (e.g. 1 und × 750 ml/und = 750 ml)
+
+    Otherwise returns recipe_qty unchanged.
     """
     row = await conn.fetchrow(
         "SELECT unit, unit_weight_gr FROM ingredients WHERE id = $1",
@@ -94,13 +96,23 @@ async def resolve_recipe_quantity_to_base_unit(
     base_unit = row["unit"]
     if recipe_unit == base_unit:
         return recipe_qty
-    if recipe_unit in ("gr", "ml") and base_unit == "und" and row["unit_weight_gr"] and float(row["unit_weight_gr"]) > 0:
-        converted = recipe_qty / float(row["unit_weight_gr"])
-        logger.info(
-            f"Recipe unit conversion: {recipe_qty} {recipe_unit} → {converted:.4f} und "
-            f"(unit_weight_gr={row['unit_weight_gr']}, ingredient={ingredient_id})"
-        )
-        return converted
+    weight = row["unit_weight_gr"]
+    if weight and float(weight) > 0:
+        w = float(weight)
+        if recipe_unit in ("gr", "ml") and base_unit == "und":
+            converted = recipe_qty / w
+            logger.info(
+                f"Recipe unit conversion: {recipe_qty} {recipe_unit} → {converted:.4f} und "
+                f"(unit_weight_gr={weight}, ingredient={ingredient_id})"
+            )
+            return converted
+        if recipe_unit == "und" and base_unit in ("gr", "ml"):
+            converted = recipe_qty * w
+            logger.info(
+                f"Recipe unit conversion: {recipe_qty} und → {converted:.4f} {base_unit} "
+                f"(unit_weight_gr={weight}, ingredient={ingredient_id})"
+            )
+            return converted
     logger.warning(
         f"No recipe unit conversion for '{recipe_unit}' → '{base_unit}' on ingredient {ingredient_id}. "
         f"Returning recipe_qty unchanged."
