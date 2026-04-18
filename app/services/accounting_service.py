@@ -848,6 +848,9 @@ async def get_trial_balance(
         if not tenant_id:
             raise AuthenticationError("No hay un tenant seleccionado")
 
+        start_date = date.fromisoformat(period_start)
+        end_date   = date.fromisoformat(period_end)
+
         async with get_db_connection() as conn:
             rows = await conn.fetch(
                 """
@@ -890,8 +893,8 @@ async def get_trial_balance(
                 ORDER BY ta.code
                 """,
                 tenant_id,
-                period_start,
-                period_end,
+                start_date,
+                end_date,
             )
 
         result_rows: List[TrialBalanceRow] = []
