@@ -924,11 +924,18 @@ async def complete_pos_order(
                             modifier_ingredient = await conn.fetchrow(modifier_ingredient_query, modifier['id'])
 
                             if modifier_ingredient and modifier_ingredient['ingredient_id'] and modifier_ingredient['ingredient_quantity']:
+                                # Apply gr → und conversion if modifier unit differs from ingredient base unit
+                                resolved_mod_qty = await resolve_recipe_quantity_to_base_unit(
+                                    conn,
+                                    modifier_ingredient['ingredient_id'],
+                                    float(modifier_ingredient['ingredient_quantity']),
+                                    modifier_ingredient['ingredient_unit'] or "",
+                                )
                                 # Calculate total quantity: item_qty * modifier_qty * ingredient_quantity
                                 total_deduction = (
                                     float(item['quantity']) *
                                     float(modifier_qty) *
-                                    float(modifier_ingredient['ingredient_quantity'])
+                                    resolved_mod_qty
                                 )
 
                                 # Get current stock
