@@ -1171,6 +1171,7 @@ async def complete_pos_order(
                         payment_method=payment_method,
                         payment_method_id=payment_method_id,
                         tax_config=tax_config,
+                        order_number=int(order_number),
                     )
                 except Exception as e:
                     logger.error(f"GL entry failed for POS order {order_id}: {e}")
@@ -1183,6 +1184,7 @@ async def complete_pos_order(
                         tenant_id=tenant_id,
                         order_id=order_id,
                         order_date=order_row['created_at'].astimezone(_BOG).date(),
+                        order_number=int(order_number),
                     )
                 except Exception as e:
                     logger.error(f"COGS GL entry failed for POS order {order_id}: {e}")

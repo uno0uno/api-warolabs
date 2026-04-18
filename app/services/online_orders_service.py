@@ -447,7 +447,7 @@ async def update_order_status(
                 # GL journal entry — atomic with the order, failure never blocks
                 try:
                     order_for_gl = await conn.fetchrow(
-                        "SELECT total_amount, payment_method, payment_method_id, order_date FROM orders WHERE id = $1",
+                        "SELECT order_number, total_amount, payment_method, payment_method_id, order_date FROM orders WHERE id = $1",
                         order_id,
                     )
                     tax_config = await _get_tenant_tax_config(conn, tenant_id)
@@ -460,6 +460,7 @@ async def update_order_status(
                         payment_method=order_for_gl["payment_method"] or "digital",
                         payment_method_id=order_for_gl["payment_method_id"],
                         tax_config=tax_config,
+                        order_number=int(order_for_gl["order_number"]),
                     )
                 except Exception as e:
                     logger.error(f"GL entry failed for online order {order_id}: {e}")
@@ -472,6 +473,7 @@ async def update_order_status(
                         tenant_id=tenant_id,
                         order_id=order_id,
                         order_date=order_for_gl["order_date"].astimezone(_BOG).date(),
+                        order_number=int(order_for_gl["order_number"]),
                     )
                 except Exception as e:
                     logger.error(f"COGS GL entry failed for online order {order_id}: {e}")
@@ -562,7 +564,7 @@ async def update_order_status(
                 # GL journal entry — atomic with the order, failure never blocks
                 try:
                     order_for_gl = await conn.fetchrow(
-                        "SELECT total_amount, payment_method, payment_method_id, order_date FROM orders WHERE id = $1",
+                        "SELECT order_number, total_amount, payment_method, payment_method_id, order_date FROM orders WHERE id = $1",
                         order_id,
                     )
                     tax_config = await _get_tenant_tax_config(conn, tenant_id)
@@ -575,6 +577,7 @@ async def update_order_status(
                         payment_method=order_for_gl["payment_method"] or "digital",
                         payment_method_id=order_for_gl["payment_method_id"],
                         tax_config=tax_config,
+                        order_number=int(order_for_gl["order_number"]),
                     )
                 except Exception as e:
                     logger.error(f"GL entry failed for online order {order_id}: {e}")
@@ -587,6 +590,7 @@ async def update_order_status(
                         tenant_id=tenant_id,
                         order_id=order_id,
                         order_date=order_for_gl["order_date"].astimezone(_BOG).date(),
+                        order_number=int(order_for_gl["order_number"]),
                     )
                 except Exception as e:
                     logger.error(f"COGS GL entry failed for online order {order_id}: {e}")

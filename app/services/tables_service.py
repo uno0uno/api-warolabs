@@ -508,7 +508,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     # Failure is swallowed: GL must never block the close
                     try:
                         completed_orders = await conn.fetch(
-                            "SELECT id, total_amount, payment_method, payment_method_id, order_date "
+                            "SELECT id, order_number, total_amount, payment_method, payment_method_id, order_date "
                             "FROM orders WHERE table_session_id = $1 AND status = 'completed'",
                             session_row["id"],
                         )
@@ -523,12 +523,14 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 payment_method=ord_row["payment_method"] or payment_method or "digital",
                                 payment_method_id=ord_row["payment_method_id"],
                                 tax_config=tax_config,
+                                order_number=int(ord_row["order_number"]),
                             )
                             await _post_order_cogs_gl_entry(
                                 conn=conn,
                                 tenant_id=tenant_id,
                                 order_id=ord_row["id"],
                                 order_date=ord_row["order_date"].astimezone(_BOG).date(),
+                                order_number=int(ord_row["order_number"]),
                             )
                     except Exception as _gl_exc:
                         logger.error(f"GL entries failed for session {session_row['id']}: {_gl_exc}")

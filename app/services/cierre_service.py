@@ -232,6 +232,7 @@ async def _post_order_gl_entry(
     payment_method: str,
     payment_method_id: Optional[UUID],
     tax_config: Dict[str, Any],
+    order_number: Optional[int] = None,
 ) -> None:
     """
     Post a double-entry GL journal entry for a single completed order (POS or domicilio).
@@ -345,7 +346,7 @@ async def _post_order_gl_entry(
         net_revenue = total_amount
 
     dt = float(debit_total)
-    description = f"Venta {order_date.isoformat()} — orden {order_id}"
+    description = f"Venta #{order_number}" if order_number else f"Venta {order_date.isoformat()} — orden {order_id}"
 
     # ── Insert entry + lines (savepoint if inside outer transaction) ───────
     async with conn.transaction():
@@ -399,6 +400,7 @@ async def _post_order_cogs_gl_entry(
     tenant_id: UUID,
     order_id: UUID,
     order_date: date,
+    order_number: Optional[int] = None,
 ) -> None:
     """
     Post a COGS GL journal entry for a completed order.
@@ -465,7 +467,7 @@ async def _post_order_cogs_gl_entry(
 
     # ── Insert entry + 2 lines ─────────────────────────────────────────────
     amount = float(total_cogs)
-    description = f"CMV {order_date.isoformat()} — orden {order_id}"
+    description = f"CMV Venta #{order_number}" if order_number else f"CMV {order_date.isoformat()} — orden {order_id}"
 
     async with conn.transaction():
         entry_row = await conn.fetchrow(
