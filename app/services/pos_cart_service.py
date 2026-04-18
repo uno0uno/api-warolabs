@@ -1378,7 +1378,13 @@ async def _capture_order_item_ingredients(
 
     for r in rows:
         ingredient_id_str = str(r["ingredient_id"])
-        quantity = float(r["quantity"]) * item_quantity
+        resolved_qty = await resolve_recipe_quantity_to_base_unit(
+            conn,
+            r["ingredient_id"],
+            float(r["quantity"]),
+            r["unit"] or "",
+        )
+        quantity = resolved_qty * item_quantity
         unit_cost = prices.get(ingredient_id_str)
         total_cost = quantity * unit_cost if unit_cost is not None else None
 
@@ -1425,7 +1431,13 @@ async def _capture_modifier_ingredient_snapshot(
     ingredient_id_str = str(ingredient_id)
     prices = await _get_last_purchase_prices(conn, [ingredient_id_str], tenant_id)
 
-    quantity = float(ing_qty) * item_quantity * modifier_qty
+    resolved_ing_qty = await resolve_recipe_quantity_to_base_unit(
+        conn,
+        ingredient_id,
+        float(ing_qty),
+        modifier_ingredient.get("ingredient_unit") or "",
+    )
+    quantity = resolved_ing_qty * item_quantity * modifier_qty
     unit_cost = prices.get(ingredient_id_str)
     total_cost = quantity * unit_cost if unit_cost is not None else None
 
