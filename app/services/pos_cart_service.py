@@ -7,7 +7,9 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 from datetime import date
+from zoneinfo import ZoneInfo
 from fastapi import Request
+_BOG = ZoneInfo("America/Bogota")
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
@@ -1164,7 +1166,7 @@ async def complete_pos_order(
                         conn=conn,
                         tenant_id=tenant_id,
                         order_id=order_id,
-                        order_date=order_row['created_at'].date(),
+                        order_date=order_row['created_at'].astimezone(_BOG).date(),
                         total_amount=Decimal(str(_discounted_total)),
                         payment_method=payment_method,
                         payment_method_id=payment_method_id,

@@ -8,6 +8,8 @@ from typing import Optional, List
 from uuid import UUID
 from datetime import date
 from decimal import Decimal
+from zoneinfo import ZoneInfo
+_BOG = ZoneInfo("America/Bogota")
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -516,7 +518,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 conn=conn,
                                 tenant_id=tenant_id,
                                 order_id=ord_row["id"],
-                                order_date=ord_row["order_date"].date(),
+                                order_date=ord_row["order_date"].astimezone(_BOG).date(),
                                 total_amount=Decimal(str(ord_row["total_amount"])),
                                 payment_method=ord_row["payment_method"] or payment_method or "digital",
                                 payment_method_id=ord_row["payment_method_id"],

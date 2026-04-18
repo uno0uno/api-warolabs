@@ -6,7 +6,9 @@ import asyncio
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
+from zoneinfo import ZoneInfo
 from fastapi import Request
+_BOG = ZoneInfo("America/Bogota")
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError, ValidationError
@@ -453,7 +455,7 @@ async def update_order_status(
                         conn=conn,
                         tenant_id=tenant_id,
                         order_id=order_id,
-                        order_date=order_for_gl["order_date"].date(),
+                        order_date=order_for_gl["order_date"].astimezone(_BOG).date(),
                         total_amount=Decimal(str(order_for_gl["total_amount"])),
                         payment_method=order_for_gl["payment_method"] or "digital",
                         payment_method_id=order_for_gl["payment_method_id"],
@@ -557,7 +559,7 @@ async def update_order_status(
                         conn=conn,
                         tenant_id=tenant_id,
                         order_id=order_id,
-                        order_date=order_for_gl["order_date"].date(),
+                        order_date=order_for_gl["order_date"].astimezone(_BOG).date(),
                         total_amount=Decimal(str(order_for_gl["total_amount"])),
                         payment_method=order_for_gl["payment_method"] or "digital",
                         payment_method_id=order_for_gl["payment_method_id"],
