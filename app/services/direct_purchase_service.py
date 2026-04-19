@@ -10,6 +10,18 @@ from zoneinfo import ZoneInfo
 
 _BOG = ZoneInfo("America/Bogota")
 
+# Catalog units matching backend PURCHASE_UNIT_CATALOG
+# Used to convert catalog keys (lt, kg, galon…) to base units (ml, gr)
+_CATALOG_TO_BASE: Dict[str, Any] = {
+    'kg':         {'factor': 1000,  'base': 'gr'},
+    'libra':      {'factor': 500,   'base': 'gr'},
+    'arroba':     {'factor': 12500, 'base': 'gr'},
+    'bulto_25kg': {'factor': 25000, 'base': 'gr'},
+    'lt':         {'factor': 1000,  'base': 'ml'},
+    'botella':    {'factor': 750,   'base': 'ml'},
+    'galon':      {'factor': 3785,  'base': 'ml'},
+}
+
 
 def _parse_date(date_str: Optional[str]) -> Optional[datetime]:
     """Parse ISO date string, handling JS-style 'Z' timezone suffix."""
@@ -418,9 +430,9 @@ async def create_direct_purchase(
                         logger.error(f"Invalid ingredient_id format: {ingredient_id_str}")
                         continue
 
-                    # Get ingredient base unit
+                    # Get ingredient base unit and weight info for catalog conversions
                     ingredient = await conn.fetchrow("""
-                        SELECT unit FROM ingredients WHERE id = $1
+                        SELECT unit, unit_weight_gr, unit_weight_unit FROM ingredients WHERE id = $1
                     """, ingredient_id)
 
                     if not ingredient:
@@ -446,6 +458,20 @@ async def create_direct_purchase(
 
                         if conversion_row:
                             conversion_factor = float(conversion_row['conversion_factor'])
+                        else:
+                            # Fallback: catalog unit (lt, kg, galon…) — two-step conversion for und ingredients
+                            catalog_entry = _CATALOG_TO_BASE.get(purchase_unit)
+                            if catalog_entry:
+                                cat_factor = catalog_entry['factor']
+                                cat_base = catalog_entry['base']
+                                w = float(ingredient['unit_weight_gr'] or 0)
+                                ing_weight_unit = ingredient['unit_weight_unit'] or ''
+                                if base_unit == 'und' and cat_base == ing_weight_unit and w > 0:
+                                    # e.g. 1 galon = 3785 ml, 1 und = 250 ml → factor = 3785/250 = 15.14
+                                    conversion_factor = cat_factor / w
+                                elif cat_base == base_unit:
+                                    # e.g. ingredient unit is ml, purchase unit is lt → factor = 1000
+                                    conversion_factor = float(cat_factor)
 
                     # Calculate base unit quantity
                     base_quantity = purchase_quantity * conversion_factor
@@ -1073,9 +1099,9 @@ async def update_direct_purchase(
                         logger.error(f"Invalid ingredient_id format: {ingredient_id_str}")
                         continue
 
-                    # Get ingredient base unit
+                    # Get ingredient base unit and weight info for catalog conversions
                     ingredient = await conn.fetchrow("""
-                        SELECT unit FROM ingredients WHERE id = $1
+                        SELECT unit, unit_weight_gr, unit_weight_unit FROM ingredients WHERE id = $1
                     """, ingredient_id)
 
                     if not ingredient:
@@ -1101,6 +1127,18 @@ async def update_direct_purchase(
 
                         if conversion_row:
                             conversion_factor = float(conversion_row['conversion_factor'])
+                        else:
+                            # Fallback: catalog unit (lt, kg, galon…) — two-step conversion for und ingredients
+                            catalog_entry = _CATALOG_TO_BASE.get(purchase_unit)
+                            if catalog_entry:
+                                cat_factor = catalog_entry['factor']
+                                cat_base = catalog_entry['base']
+                                w = float(ingredient['unit_weight_gr'] or 0)
+                                ing_weight_unit = ingredient['unit_weight_unit'] or ''
+                                if base_unit == 'und' and cat_base == ing_weight_unit and w > 0:
+                                    conversion_factor = cat_factor / w
+                                elif cat_base == base_unit:
+                                    conversion_factor = float(cat_factor)
 
                     # Calculate base unit quantity
                     base_quantity = purchase_quantity * conversion_factor
