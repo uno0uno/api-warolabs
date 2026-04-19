@@ -548,15 +548,30 @@ async def list_journal_entries(
             )
 
             # Opening balance: net of all POSTED lines for this account before date_from
+            # Sign depends on account normal_balance:
+            #   debit-normal  (Activos, Gastos, Costos): net = debit - credit
+            #   credit-normal (Pasivos, Patrimonio, Ingresos): net = credit - debit
             opening_balance: Optional[float] = None
             if account_id is not None:
+                acct_row = await conn.fetchrow(
+                    "SELECT normal_balance FROM tenant_accounts WHERE id = $1",
+                    account_id,
+                )
+                normal_balance = acct_row["normal_balance"] if acct_row else "debit"
+
                 ob_params: list = [tenant_id, account_id]
                 ob_date_cond = ""
                 if date_from:
                     ob_params.append(date.fromisoformat(date_from))
                     ob_date_cond = f"AND je.entry_date < ${len(ob_params)}"
+
+                if normal_balance == "debit":
+                    net_formula = "COALESCE(SUM(jl.debit), 0) - COALESCE(SUM(jl.credit), 0)"
+                else:
+                    net_formula = "COALESCE(SUM(jl.credit), 0) - COALESCE(SUM(jl.debit), 0)"
+
                 ob_row = await conn.fetchrow(
-                    f"""SELECT COALESCE(SUM(jl.debit), 0) - COALESCE(SUM(jl.credit), 0) AS net
+                    f"""SELECT {net_formula} AS net
                         FROM tenant_journal_lines jl
                         JOIN tenant_journal_entries je ON je.id = jl.journal_entry_id
                         WHERE je.tenant_id = $1
