@@ -63,6 +63,7 @@ class ProductBase(BaseModel):
     is_combo: bool = Field(False, description="Whether product is a combo")
     is_resale: bool = Field(False, description="Whether product is a resale product (not prepared)")
     allow_modifiers: bool = Field(True, description="Whether product allows modifiers")
+    tax_category: str = Field("standard", description="Tax classification: standard (INC/IVA), liquor (IVA licores 5%), exempt (no tax)")
 
 class ProductCreate(ProductBase):
     """Create product with recipe"""
@@ -98,6 +99,7 @@ class ProductUpdate(BaseModel):
     is_combo: Optional[bool] = None
     is_resale: Optional[bool] = None
     allow_modifiers: Optional[bool] = None
+    tax_category: Optional[str] = Field(None, description="Tax classification: standard, liquor, exempt")
     ingredients: Optional[List[RecipeIngredientBase]] = Field(None, description="Updated recipe ingredients")
 
 class Product(ProductBase):

@@ -51,9 +51,10 @@ async def create_product_with_recipe(
                 product_query = """
                     INSERT INTO product (
                         name, description, price, category_id, product_base_type_id, preparation_time,
-                        controla_stock, is_available, is_available_online, is_combo, is_resale, allow_modifiers, tenant_id
+                        controla_stock, is_available, is_available_online, is_combo, is_resale, allow_modifiers,
+                        tax_category, tenant_id
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                     RETURNING id, created_at, updated_at
                 """
                 product_result = await conn.fetchrow(
@@ -70,6 +71,7 @@ async def create_product_with_recipe(
                     product_data.is_combo,
                     product_data.is_resale,
                     product_data.allow_modifiers,
+                    product_data.tax_category,
                     tenant_id
                 )
 
@@ -191,7 +193,9 @@ async def get_product_by_id(
                     p.is_available,
                     p.is_available_online,
                     p.is_combo,
+                    p.is_resale,
                     p.allow_modifiers,
+                    p.tax_category,
                     p.costo_calculado,
                     p.precio_sugerido,
                     p.margen_objetivo,
@@ -413,6 +417,7 @@ async def get_products_list(
                     p.is_combo,
                     p.is_resale,
                     p.allow_modifiers,
+                    p.tax_category,
                     COALESCE(dc.direct_cost, 0) + COALESCE(bc.base_cost, 0) as costo_calculado,
                     p.precio_sugerido,
                     p.margen_objetivo,
