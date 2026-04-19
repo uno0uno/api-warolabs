@@ -79,8 +79,9 @@ class Ingredient(IngredientBase):
     hierarchy_base_id: Optional[str] = None
     hierarchy_base_name: Optional[str] = None
     has_variants: Optional[int] = None  # count of variants via ingredient_global_hierarchy
-    is_custom: Optional[bool] = None   # True when ingredient is tenant-scoped (not global)
-    parent_name: Optional[str] = None  # name of the global base ingredient (when parent_id is set)
+    is_custom: Optional[bool] = None
+    is_resale: Optional[bool] = None
+    parent_name: Optional[str] = None
     default_purchase_unit_label: Optional[str] = None
     default_purchase_unit_factor: Optional[float] = None
     unit_weight_unit: Optional[str] = None  # 'gr' or 'ml'
