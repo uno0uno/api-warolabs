@@ -5,6 +5,17 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 import logging
 from app.core.exceptions import AuthenticationError
+# Catalog of standard purchase units and their conversion to gr or ml base unit
+# Mirrors PURCHASE_UNIT_CATALOG in ingredients_service.py
+_CATALOG_TO_BASE: dict = {
+    'kg':         {'factor': 1000,  'base': 'gr'},
+    'libra':      {'factor': 500,   'base': 'gr'},
+    'arroba':     {'factor': 12500, 'base': 'gr'},
+    'bulto_25kg': {'factor': 25000, 'base': 'gr'},
+    'lt':         {'factor': 1000,  'base': 'ml'},
+    'botella':    {'factor': 750,   'base': 'ml'},
+    'galon':      {'factor': 3785,  'base': 'ml'},
+}
 from app.models.ingredient import (
     IngredientPurchaseUnit,
     IngredientPurchaseUnitCreate,
@@ -111,6 +122,19 @@ async def resolve_recipe_quantity_to_base_unit(
             logger.info(
                 f"Recipe unit conversion: {recipe_qty} und → {converted:.4f} {base_unit} "
                 f"(unit_weight_gr={weight}, ingredient={ingredient_id})"
+            )
+            return converted
+        # Two-step: catalog unit (lt, kg, botella…) → gr/ml → und
+        # e.g. 2 lt on a und ingredient with unit_weight_gr=750 ml/und
+        #      → 2 * 1000 ml = 2000 ml → 2000 / 750 = 2.667 und
+        catalog_entry = _CATALOG_TO_BASE.get(recipe_unit)
+        if catalog_entry and base_unit == "und" and catalog_entry["base"] in ("gr", "ml"):
+            qty_base = recipe_qty * catalog_entry["factor"]
+            converted = qty_base / w
+            logger.info(
+                f"Recipe unit conversion (2-step): {recipe_qty} {recipe_unit} "
+                f"→ {qty_base} {catalog_entry['base']} → {converted:.4f} und "
+                f"(catalog_factor={catalog_entry['factor']}, unit_weight_gr={weight}, ingredient={ingredient_id})"
             )
             return converted
     logger.warning(
