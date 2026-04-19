@@ -30,7 +30,7 @@ _SLUG_DEBIT_CODE: Dict[str, str] = {
     "credit":  "1305",   # Clientes (fiado — accounts receivable)
 }
 
-INGRESOS_CODE   = "4135"   # Comercio al por menor
+INGRESOS_CODE   = "4175"   # Servicios de restaurante y similares
 COGS_CODE       = "6135"   # Costo de ventas
 INVENTARIO_CODE = "1435"   # Inventarios — materia prima y suministros
 
