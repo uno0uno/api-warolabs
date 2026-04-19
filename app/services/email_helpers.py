@@ -475,6 +475,9 @@ async def send_pos_receipt_email(
     business_phone: Optional[str] = None,
     discount_amount: float = 0.0,
     subtotal: float = 0.0,
+    standard_tax: float = 0.0,
+    liquor_tax: float = 0.0,
+    standard_tax_label: str = "Impuesto",
 ) -> bool:
     """
     Send a POS receipt email to the customer after a point-of-sale order completes.
@@ -497,6 +500,9 @@ async def send_pos_receipt_email(
             business_phone=business_phone,
             discount_amount=discount_amount,
             subtotal=subtotal,
+            standard_tax=standard_tax,
+            liquor_tax=liquor_tax,
+            standard_tax_label=standard_tax_label,
         )
         subject = get_pos_receipt_subject(order_number, business_name=business_name)
 

@@ -195,6 +195,9 @@ class SendReceiptRequest(BaseModel):
     business_phone: Optional[str] = None
     discount_amount: float = 0.0
     subtotal: float = 0.0
+    standard_tax: float = 0.0
+    liquor_tax: float = 0.0
+    standard_tax_label: str = "Impuesto"
 
 
 class AddPaymentRequest(BaseModel):
@@ -229,6 +232,9 @@ async def send_receipt_email(receipt_data: SendReceiptRequest):
         business_phone=receipt_data.business_phone,
         discount_amount=receipt_data.discount_amount,
         subtotal=receipt_data.subtotal,
+        standard_tax=receipt_data.standard_tax,
+        liquor_tax=receipt_data.liquor_tax,
+        standard_tax_label=receipt_data.standard_tax_label,
     )
     return {"success": success}
 

@@ -1173,9 +1173,11 @@ async def complete_pos_order(
 
                 logger.info(f"Order #{order_number} created (split_mode={split_mode})")
 
-                # GL journal entry — atomic with the order, failure never blocks
+                # Tax config — fetched once, used for GL entry and receipt breakdown
+                tax_config = await _get_tenant_tax_config(conn, tenant_id)
+
+                # GL journal entry — failure never blocks order completion
                 try:
-                    tax_config = await _get_tenant_tax_config(conn, tenant_id)
                     await _post_order_gl_entry(
                         conn=conn,
                         tenant_id=tenant_id,
@@ -1203,6 +1205,44 @@ async def complete_pos_order(
                 except Exception as e:
                     logger.error(f"COGS GL entry failed for POS order {order_id}: {e}")
 
+                # Compute tax breakdown for receipt display
+                _standard_tax = 0.0
+                _liquor_tax = 0.0
+                _standard_tax_label = "Impuesto"
+                try:
+                    items_tax_rows = await conn.fetch(
+                        """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
+                                  COALESCE(oi.subtotal, 0) AS subtotal
+                           FROM order_items oi
+                           JOIN product p ON p.id = oi.product_id
+                           WHERE oi.order_id = $1""",
+                        order_id
+                    )
+                    std_subtotal = sum(float(r['subtotal']) for r in items_tax_rows if r['tax_category'] == 'standard')
+                    liq_subtotal = sum(float(r['subtotal']) for r in items_tax_rows if r['tax_category'] == 'liquor')
+
+                    if tax_config.get('inc_applicable') and std_subtotal > 0:
+                        rate = float(tax_config['inc_rate'])
+                        if tax_config.get('inc_included_in_price'):
+                            _standard_tax = round(std_subtotal * rate / (1 + rate))
+                        else:
+                            _standard_tax = round(std_subtotal * rate)
+                        pct = round(rate * 100)
+                        _standard_tax_label = f"INC {pct}%"
+                    elif tax_config.get('iva_applicable') and std_subtotal > 0:
+                        rate = float(tax_config['iva_rate'])
+                        if tax_config.get('iva_included_in_price'):
+                            _standard_tax = round(std_subtotal * rate / (1 + rate))
+                        else:
+                            _standard_tax = round(std_subtotal * rate)
+                        pct = round(rate * 100)
+                        _standard_tax_label = f"IVA {pct}%"
+
+                    if tax_config.get('liquor_tax_applicable') and liq_subtotal > 0:
+                        _liquor_tax = round(liq_subtotal * 0.05)
+                except Exception as e:
+                    logger.warning(f"Tax breakdown computation failed for order {order_id}: {e}")
+
                 # Capture values needed after the transaction closes
                 _order_id = order_id
                 _customer_id = customer_id
@@ -1223,6 +1263,9 @@ async def complete_pos_order(
                         "credit_due_date": str(credit_due_date) if credit_due_date is not None else None,
                         "items_count": len(items),
                         "created_at": order_row['created_at'].isoformat(),
+                        "standard_tax": _standard_tax,
+                        "liquor_tax": _liquor_tax,
+                        "standard_tax_label": _standard_tax_label,
                         # Split mode extras
                         **({"paid_total": _split_paid_total, "remaining": _split_remaining, "is_complete": _split_is_complete, "payment_id": None} if split_mode else {}),
                     }

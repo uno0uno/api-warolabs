@@ -51,6 +51,9 @@ def get_pos_receipt_text(
     business_phone: Optional[str] = None,
     discount_amount: float = 0.0,
     subtotal: float = 0.0,
+    standard_tax: float = 0.0,
+    liquor_tax: float = 0.0,
+    standard_tax_label: str = "Impuesto",
 ) -> str:
     date_str = _format_bogota_date(order_date)
     payment_label = _PAYMENT_LABELS.get(payment_method, payment_method)
@@ -82,15 +85,16 @@ def get_pos_receipt_text(
         items_lines.append(line)
     items_block = "\n".join(items_lines)
 
-    # Build discount block when applicable
+    # Build totals block
+    totals_lines = []
     if discount_amount > 0 and subtotal > 0:
-        discount_block = (
-            f"--------------------------------\n"
-            f"Subtotal: {_format_cop(subtotal)}\n"
-            f"Descuento: -{_format_cop(discount_amount)}\n"
-        )
-    else:
-        discount_block = ""
+        totals_lines.append(f"Subtotal: {_format_cop(subtotal)}")
+        totals_lines.append(f"Descuento: -{_format_cop(discount_amount)}")
+    if standard_tax > 0:
+        totals_lines.append(f"{standard_tax_label}: {_format_cop(standard_tax)}")
+    if liquor_tax > 0:
+        totals_lines.append(f"IVA licores 5%: {_format_cop(liquor_tax)}")
+    totals_block = ("\n".join(totals_lines) + "\n") if totals_lines else ""
 
     return f"""\
 {header_block}
@@ -100,8 +104,8 @@ Fecha: {date_str}
 --------------------------------
 PRODUCTOS
 {items_block}
-{discount_block}--------------------------------
-TOTAL: {_format_cop(total_amount)}
+--------------------------------
+{totals_block}TOTAL: {_format_cop(total_amount)}
 Método de pago: {payment_label}
 ================================
 
