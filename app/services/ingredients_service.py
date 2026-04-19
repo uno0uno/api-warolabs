@@ -102,7 +102,19 @@ async def get_ingredients_list(
                         WHERE base_id = i.id
                     ), 0) AS has_variants,
                     (i.tenant_id IS NOT NULL) AS is_custom,
-                    parent_i.name       AS parent_name
+                    parent_i.name       AS parent_name,
+                    (
+                        SELECT purchase_unit_label
+                        FROM ingredient_purchase_units
+                        WHERE ingredient_id = i.id AND is_default = TRUE AND is_active = TRUE
+                        LIMIT 1
+                    ) AS default_purchase_unit_label,
+                    (
+                        SELECT CAST(conversion_factor AS float)
+                        FROM ingredient_purchase_units
+                        WHERE ingredient_id = i.id AND is_default = TRUE AND is_active = TRUE
+                        LIMIT 1
+                    ) AS default_purchase_unit_factor
                 FROM ingredients i
                 LEFT JOIN (
                     SELECT

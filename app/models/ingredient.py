@@ -78,6 +78,8 @@ class Ingredient(IngredientBase):
     has_variants: Optional[int] = None  # count of variants via ingredient_global_hierarchy
     is_custom: Optional[bool] = None   # True when ingredient is tenant-scoped (not global)
     parent_name: Optional[str] = None  # name of the global base ingredient (when parent_id is set)
+    default_purchase_unit_label: Optional[str] = None   # label of the default purchase unit
+    default_purchase_unit_factor: Optional[float] = None  # conversion factor of the default purchase unit
 
     class Config:
         from_attributes = True
