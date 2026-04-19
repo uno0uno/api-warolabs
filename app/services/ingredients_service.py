@@ -92,6 +92,7 @@ async def get_ingredients_list(
                     CAST(i.minimum_order_quantity AS float) as minimum_order_quantity,
                     CAST(i.unit_weight_gr AS float) as unit_weight_gr,
                     i.unit_weight_unit,
+                    i.is_resale,
                     i.created_at,
                     i.updated_at,
                     CAST(COALESCE(tsp.unit_price, tim.cost_per_unit) AS float) as price,
