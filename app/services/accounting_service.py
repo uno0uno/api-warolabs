@@ -532,14 +532,28 @@ async def list_journal_entries(
             )
 
         where_clause = " AND ".join(conditions)
-        base_query = f"""
-            SELECT je.id, je.tenant_id, je.entry_date, je.period_year, je.period_month,
-                   je.description, je.reference, je.source_module, je.source_id,
-                   je.status, je.total_debit, je.total_credit, je.created_by,
-                   je.posted_at, je.voided_at, je.created_at
-            FROM tenant_journal_entries je
-            WHERE {where_clause}
-        """
+        if account_id is not None:
+            # Ledger view: return line-level debit/credit for the specific account,
+            # not the entry totals (which reflect the full multi-account entry).
+            base_query = f"""
+                SELECT je.id, je.tenant_id, je.entry_date, je.period_year, je.period_month,
+                       je.description, je.reference, je.source_module, je.source_id,
+                       je.status, jl.debit AS total_debit, jl.credit AS total_credit,
+                       je.created_by, je.posted_at, je.voided_at, je.created_at
+                FROM tenant_journal_entries je
+                JOIN tenant_journal_lines jl
+                  ON jl.journal_entry_id = je.id AND jl.account_id = ${len(params)}
+                WHERE {where_clause}
+            """
+        else:
+            base_query = f"""
+                SELECT je.id, je.tenant_id, je.entry_date, je.period_year, je.period_month,
+                       je.description, je.reference, je.source_module, je.source_id,
+                       je.status, je.total_debit, je.total_credit, je.created_by,
+                       je.posted_at, je.voided_at, je.created_at
+                FROM tenant_journal_entries je
+                WHERE {where_clause}
+            """
 
         async with get_db_connection() as conn:
             total = await conn.fetchval(
