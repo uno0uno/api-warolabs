@@ -15,6 +15,8 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
+from app.services.pos_cart_service import _capture_order_item_ingredients
+from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 import logging
 
 logger = logging.getLogger(__name__)
@@ -1111,6 +1113,73 @@ async def add_tab_items(
                             mod.get("price", 0),
                             1,
                         )
+
+                    # Capture ingredient cost snapshot (needed for COGS GL at close)
+                    try:
+                        await _capture_order_item_ingredients(
+                            conn, order_item_id, item["product_id"],
+                            float(item["quantity"]), str(tenant_id)
+                        )
+                    except Exception as _snap_exc:
+                        logger.error(f"[tab] ingredient snapshot failed for item {order_item_id}: {_snap_exc}")
+
+                    # Deduct inventory for each ingredient in the product recipe
+                    try:
+                        ingredients = await conn.fetch(
+                            """
+                            SELECT pr.ingredient_id, pr.quantity, pr.unit, i.name as ingredient_name
+                            FROM product_recipes pr
+                            JOIN ingredients i ON i.id = pr.ingredient_id
+                            WHERE pr.product_id = $1
+                            UNION ALL
+                            SELECT brt.ingredient_id, brt.base_quantity AS quantity, brt.unit, i.name as ingredient_name
+                            FROM product_base_recipes pbr
+                            JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+                            JOIN ingredients i ON i.id = brt.ingredient_id
+                            WHERE pbr.product_id = $1
+                            """,
+                            item["product_id"],
+                        )
+                        for ing in ingredients:
+                            resolved_qty = await resolve_recipe_quantity_to_base_unit(
+                                conn, ing["ingredient_id"],
+                                float(ing["quantity"]), ing["unit"] or "",
+                            )
+                            qty_to_deduct = float(item["quantity"]) * resolved_qty
+                            stock_row = await conn.fetchrow(
+                                "SELECT current_stock FROM tenant_inventory WHERE ingredient_id = $1 AND tenant_id = $2",
+                                ing["ingredient_id"], tenant_id,
+                            )
+                            if stock_row:
+                                prev = float(stock_row["current_stock"] or 0)
+                                new_stock = prev - qty_to_deduct
+                                await conn.execute(
+                                    "UPDATE tenant_inventory SET current_stock = $1, last_updated = NOW() WHERE ingredient_id = $2 AND tenant_id = $3",
+                                    new_stock, ing["ingredient_id"], tenant_id,
+                                )
+                            else:
+                                new_stock = -qty_to_deduct
+                                await conn.execute(
+                                    "INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock, last_updated) VALUES ($1, $2, $3, 0, NOW())",
+                                    tenant_id, ing["ingredient_id"], new_stock,
+                                )
+                            await conn.execute(
+                                """
+                                INSERT INTO tenant_ingredient_movements (
+                                    tenant_id, ingredient_id, movement_type, quantity_change,
+                                    unit, previous_stock, new_stock, reference_table, reference_id,
+                                    reason, created_by, created_at
+                                ) VALUES ($1, $2, 'consumption', $3, $4, $5, $6, 'orders', $7, $8, $9, NOW())
+                                """,
+                                tenant_id, ing["ingredient_id"], -qty_to_deduct,
+                                ing["unit"] or "und",
+                                float(stock_row["current_stock"] or 0) if stock_row else 0.0,
+                                new_stock, order_id,
+                                f"Venta de {item['quantity']}x (mesa {table_id}) - Orden #{order_number}",
+                                user_id,
+                            )
+                    except Exception as _inv_exc:
+                        logger.error(f"[tab] inventory deduction failed for item {order_item_id}: {_inv_exc}")
 
         logger.info(f"Tab items added: order {order_id} for table {table_id}")
         return {
