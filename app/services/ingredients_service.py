@@ -91,6 +91,7 @@ async def get_ingredients_list(
                     i.description,
                     CAST(i.minimum_order_quantity AS float) as minimum_order_quantity,
                     CAST(i.unit_weight_gr AS float) as unit_weight_gr,
+                    i.unit_weight_unit,
                     i.created_at,
                     i.updated_at,
                     CAST(COALESCE(tsp.unit_price, tim.cost_per_unit) AS float) as price,
@@ -352,10 +353,10 @@ async def create_tenant_ingredient(
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO ingredients (name, unit, type, category, costo_unitario, parent_id, tenant_id, is_resale, unit_weight_gr)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO ingredients (name, unit, type, category, costo_unitario, parent_id, tenant_id, is_resale, unit_weight_gr, unit_weight_unit)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING id::text, name, unit, type, category, costo_unitario,
-                      parent_id::text, tenant_id::text, is_resale, unit_weight_gr, created_at
+                      parent_id::text, tenant_id::text, is_resale, unit_weight_gr, unit_weight_unit, created_at
             """,
             name,
             data.unit,
@@ -365,7 +366,8 @@ async def create_tenant_ingredient(
             parent_uuid,
             tenant_id,
             data.is_resale or False,
-            data.unit_weight_gr if data.unit == "und" else None,
+            data.unit_weight_gr if data.unit in ("und", "gr", "ml") else None,
+            (data.unit_weight_unit or "gr") if data.unit in ("und", "gr", "ml") else None,
         )
     except asyncpg.UniqueViolationError:
         raise HTTPException(
@@ -446,6 +448,11 @@ async def update_tenant_ingredient(
 
     if data.is_resale is not None:
         updates["is_resale"] = data.is_resale
+
+    if data.unit_weight_gr is not None:
+        updates["unit_weight_gr"] = data.unit_weight_gr
+    if data.unit_weight_unit is not None:
+        updates["unit_weight_unit"] = data.unit_weight_unit
 
     # Resale guard: is_resale=True requires unit='und'
     # Check the effective unit: either the one being set now, or the existing one in DB
