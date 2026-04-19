@@ -303,47 +303,92 @@ async def _post_order_gl_entry(
         )
         return
 
-    # ── Tax calculation — two modes ────────────────────────────────────────
-    tax_amount = Decimal("0")
-    tax_acct_id = None
-    debit_total = total_amount   # may increase in additive mode
+    # ── Fetch order items with per-product tax_category ──────────────────
+    order_items = await conn.fetch(
+        """SELECT
+               COALESCE(oi.subtotal, 0) AS subtotal,
+               COALESCE(p.tax_category, pv_p.tax_category, 'standard') AS tax_category
+           FROM order_items oi
+           LEFT JOIN product p ON p.id = oi.product_id
+           LEFT JOIN product_variants pv ON pv.id = oi.variant_id
+           LEFT JOIN product pv_p ON pv_p.id = pv.product_id
+           WHERE oi.order_id = $1""",
+        order_id,
+    )
 
-    if tax_config.get("inc_applicable"):
+    # ── Accumulate subtotals per tax category ─────────────────────────────
+    standard_subtotal = Decimal("0")
+    liquor_subtotal   = Decimal("0")
+    for item in order_items:
+        cat = item["tax_category"] or "standard"
+        sub = Decimal(str(item["subtotal"]))
+        if cat == "liquor":
+            liquor_subtotal += sub
+        elif cat == "exempt":
+            pass  # $0 tax contribution
+        else:  # standard (or unknown — fall back to standard)
+            standard_subtotal += sub
+    # No items at all → treat total as standard (backwards-compatible fallback)
+    if not order_items:
+        standard_subtotal = total_amount
+
+    # ── Calculate taxes per category ──────────────────────────────────────
+    standard_tax     = Decimal("0")
+    liquor_tax       = Decimal("0")
+    standard_acct_id = None
+    liquor_acct_id   = None
+    standard_is_additive = False
+
+    if tax_config.get("inc_applicable") and standard_subtotal > 0:
         rate = Decimal(str(tax_config["inc_rate"]))
         tax_code = str(tax_config["inc_gl_account_code"])
         if tax_config.get("inc_included_in_price", True):
-            # Extractive: price already contains the tax
-            tax_amount = total_amount - (total_amount / (1 + rate))
-            net_revenue = total_amount / (1 + rate)
+            # Extractive: price already includes INC
+            standard_tax = standard_subtotal - (standard_subtotal / (1 + rate))
         else:
-            # Additive: tax is on top of the base price
-            tax_amount = total_amount * rate
-            net_revenue = total_amount
-            debit_total = total_amount + tax_amount
+            # Additive: INC charged on top of base price
+            standard_tax = standard_subtotal * rate
+            standard_is_additive = True
         tax_row = await conn.fetchrow(
             "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
             tenant_id, tax_code,
         )
         if tax_row:
-            tax_acct_id = tax_row["id"]
-    elif tax_config.get("iva_applicable"):
+            standard_acct_id = tax_row["id"]
+
+    elif tax_config.get("iva_applicable") and standard_subtotal > 0:
         rate = Decimal(str(tax_config["iva_rate"]))
         tax_code = str(tax_config["iva_gl_account_code"])
         if tax_config.get("iva_included_in_price", False):
-            tax_amount = total_amount - (total_amount / (1 + rate))
-            net_revenue = total_amount / (1 + rate)
+            standard_tax = standard_subtotal - (standard_subtotal / (1 + rate))
         else:
-            tax_amount = total_amount * rate
-            net_revenue = total_amount
-            debit_total = total_amount + tax_amount
+            standard_tax = standard_subtotal * rate
+            standard_is_additive = True
         tax_row = await conn.fetchrow(
             "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
             tenant_id, tax_code,
         )
         if tax_row:
-            tax_acct_id = tax_row["id"]
-    else:
-        net_revenue = total_amount
+            standard_acct_id = tax_row["id"]
+
+    if tax_config.get("liquor_tax_applicable") and liquor_subtotal > 0:
+        rate = Decimal(str(tax_config["liquor_tax_rate"]))
+        tax_code = str(tax_config["liquor_tax_gl_account_code"])
+        liquor_tax = liquor_subtotal * rate  # IVA licores — always additive (external VAT)
+        tax_row = await conn.fetchrow(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+            tenant_id, tax_code,
+        )
+        if tax_row:
+            liquor_acct_id = tax_row["id"]
+
+    # ── Compute debit_total and net_revenue ───────────────────────────────
+    # Additive taxes (non-included INC/IVA, liquor) increase what the customer pays.
+    # Extractive taxes are already embedded in total_amount.
+    additive_extra = (standard_tax if standard_is_additive else Decimal("0")) + liquor_tax
+    debit_total    = total_amount + additive_extra
+    net_revenue    = debit_total - standard_tax - liquor_tax
+    # Invariant: DR debit_total = CR net_revenue + CR standard_tax + CR liquor_tax ✓
 
     dt = float(debit_total)
     description = f"#{order_number}" if order_number else f"Venta {order_date.isoformat()} — orden {order_id}"
@@ -379,19 +424,32 @@ async def _post_order_gl_entry(
             f"{description} — ingreso neto",
         )
 
-        # Credit line — tax payable (if applicable and account resolved)
-        if tax_amount > 0 and tax_acct_id:
+        # Credit lines — one per active tax type (INC/IVA standard + IVA licores)
+        line_order = 2
+        if standard_tax > 0 and standard_acct_id:
             await conn.execute(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)
-                   VALUES ($1, $2, 0, $3, $4, 2)""",
-                entry_id, tax_acct_id, float(tax_amount),
-                f"{description} — impuesto",
+                   VALUES ($1, $2, 0, $3, $4, $5)""",
+                entry_id, standard_acct_id, float(standard_tax),
+                f"{description} — INC/IVA",
+                line_order,
+            )
+            line_order += 1
+        if liquor_tax > 0 and liquor_acct_id:
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, $4, $5)""",
+                entry_id, liquor_acct_id, float(liquor_tax),
+                f"{description} — IVA licores",
+                line_order,
             )
 
     logger.info(
         f"[GL] ✅ Posted order entry {entry_id} for order {order_id} "
-        f"(total={dt}, net={float(net_revenue)}, tax={float(tax_amount)})"
+        f"(total={dt}, net={float(net_revenue)}, "
+        f"inc={float(standard_tax)}, liquor={float(liquor_tax)})"
     )
 
 
