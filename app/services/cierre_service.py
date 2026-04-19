@@ -304,9 +304,13 @@ async def _post_order_gl_entry(
         return
 
     # ── Fetch order items with per-product tax_category ──────────────────
+    # Use net_total (post-discount) when available, falling back to subtotal.
+    # This ensures INC/IVA is calculated on the amount actually charged to the
+    # customer, not the pre-discount gross price (NIIF 15 para. 47 — transaction
+    # price is net of trade discounts; Art. 454 ET for IVA; consistent for INC).
     order_items = await conn.fetch(
         """SELECT
-               COALESCE(oi.subtotal, 0) AS subtotal,
+               COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal,
                COALESCE(p.tax_category, pv_p.tax_category, 'standard') AS tax_category
            FROM order_items oi
            LEFT JOIN product p ON p.id = oi.product_id
