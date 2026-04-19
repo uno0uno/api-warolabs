@@ -11,7 +11,7 @@ from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from app.services.aws_ses_service import ses_service
 from app.services.waros_service import evaluate_and_award
-from app.services.cierre_service import assert_order_not_in_closed_monthly_period
+from app.services.cierre_service import assert_order_not_in_closed_monthly_period, _get_tenant_tax_config
 from datetime import datetime, date
 import csv
 
@@ -30,6 +30,48 @@ def parse_date(date_str: Optional[str]) -> Optional[date]:
         return None
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_tax_breakdown(
+    items_rows: List[Any],
+    tax_config: Dict[str, Any],
+) -> tuple:
+    """
+    Compute standard_tax, liquor_tax, and standard_tax_label from a list of rows
+    with .tax_category and .subtotal fields.
+
+    Works with both item-level rows (one row per order item) and pre-aggregated
+    rows (one row per tax_category, subtotal already summed by SQL).
+
+    Returns: (standard_tax: float, liquor_tax: float, standard_tax_label: str)
+    """
+    std_subtotal = sum(float(r['subtotal']) for r in items_rows if r['tax_category'] == 'standard')
+    liq_subtotal = sum(float(r['subtotal']) for r in items_rows if r['tax_category'] == 'liquor')
+
+    standard_tax = 0.0
+    liquor_tax = 0.0
+    standard_tax_label = "Impuesto"
+
+    if tax_config.get('inc_applicable') and std_subtotal > 0:
+        rate = float(tax_config['inc_rate'])
+        if tax_config.get('inc_included_in_price'):
+            standard_tax = round(std_subtotal * rate / (1 + rate))
+        else:
+            standard_tax = round(std_subtotal * rate)
+        standard_tax_label = f"INC {round(rate * 100)}%"
+    elif tax_config.get('iva_applicable') and std_subtotal > 0:
+        rate = float(tax_config['iva_rate'])
+        if tax_config.get('iva_included_in_price'):
+            standard_tax = round(std_subtotal * rate / (1 + rate))
+        else:
+            standard_tax = round(std_subtotal * rate)
+        standard_tax_label = f"IVA {round(rate * 100)}%"
+
+    if tax_config.get('liquor_tax_applicable') and liq_subtotal > 0:
+        liq_rate = float(tax_config.get('liquor_tax_rate') or 0.05)
+        liquor_tax = round(liq_subtotal * liq_rate)
+
+    return float(standard_tax), float(liquor_tax), standard_tax_label
 
 
 async def get_orders_list(
@@ -304,6 +346,24 @@ async def get_order_by_id(
                 for r in payments_rows
             ]
 
+            # Tax breakdown
+            _std_tax = 0.0
+            _liq_tax = 0.0
+            _tax_label = "Impuesto"
+            try:
+                tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                items_rows = await conn.fetch(
+                    """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
+                              COALESCE(oi.subtotal, 0) AS subtotal
+                       FROM order_items oi
+                       JOIN product p ON p.id = oi.product_id
+                       WHERE oi.order_id = $1""",
+                    order_id
+                )
+                _std_tax, _liq_tax, _tax_label = _compute_tax_breakdown(items_rows, tax_config)
+            except Exception as _e:
+                logger.warning(f"Tax breakdown failed for order {order_id}: {_e}")
+
             return {
                 "success": True,
                 "data": {
@@ -333,6 +393,9 @@ async def get_order_by_id(
                     },
                     "items_count": order_row['items_count'],
                     "split_payments": split_payments,
+                    "standard_tax": _std_tax,
+                    "liquor_tax": _liq_tax,
+                    "standard_tax_label": _tax_label,
                 }
             }
 
@@ -1034,6 +1097,48 @@ async def get_orders_metrics(
 
             row = await conn.fetchrow(metrics_query, *params)
 
+            # Tax aggregate — sum subtotals by tax_category for completed orders in same date range
+            _total_std_tax = 0.0
+            _total_liq_tax = 0.0
+            _tax_label = "Impuesto"
+            try:
+                tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                # Rebuild WHERE without payment_method_id for tax query (order_items has no that filter)
+                tax_where = ["o.tenant_id = $1", "o.status = 'completed'",
+                             "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"]
+                tax_params: List[Any] = [tenant_id]
+                tax_pc = 1
+                if parsed_date_from:
+                    tax_pc += 1
+                    tax_where.append(f"o.order_date >= (${tax_pc}::timestamp AT TIME ZONE 'America/Bogota')")
+                    tax_params.append(parsed_date_from)
+                if parsed_date_to:
+                    tax_pc += 1
+                    tax_where.append(f"o.order_date < ((${tax_pc}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')")
+                    tax_params.append(parsed_date_to)
+                if payment_method:
+                    tax_pc += 1
+                    tax_where.append(f"o.payment_method = ${tax_pc}")
+                    tax_params.append(payment_method)
+                if payment_method_id:
+                    tax_pc += 1
+                    tax_where.append(f"o.payment_method_id = ${tax_pc}::uuid")
+                    tax_params.append(payment_method_id)
+                tax_where_sql = " AND ".join(tax_where)
+                tax_rows = await conn.fetch(
+                    f"""SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
+                               COALESCE(SUM(oi.subtotal), 0) AS subtotal
+                        FROM order_items oi
+                        JOIN product p ON p.id = oi.product_id
+                        JOIN orders o ON o.id = oi.order_id
+                        WHERE {tax_where_sql}
+                        GROUP BY COALESCE(p.tax_category, 'standard')""",
+                    *tax_params
+                )
+                _total_std_tax, _total_liq_tax, _tax_label = _compute_tax_breakdown(tax_rows, tax_config)
+            except Exception as _e:
+                logger.warning(f"Tax metrics computation failed: {_e}")
+
             return {
                 "success": True,
                 "data": {
@@ -1045,6 +1150,9 @@ async def get_orders_metrics(
                     "avg_ticket": float(row['avg_ticket']),
                     "discount_count": int(row['discount_count']),
                     "total_discount_amount": float(row['total_discount_amount']),
+                    "total_standard_tax": _total_std_tax,
+                    "total_liquor_tax": _total_liq_tax,
+                    "standard_tax_label": _tax_label,
                 }
             }
 
@@ -1203,6 +1311,46 @@ async def get_orders_dashboard(
                     entry["order_count"] = int(entry["order_count"]) + int(r["order_count"])
             payment_breakdown = sorted(bd_agg.values(), key=lambda x: x["total"], reverse=True)
 
+            # Tax aggregates — all-time, month-to-date, year-to-date
+            _main_std = 0.0
+            _main_liq = 0.0
+            _month_std = 0.0
+            _month_liq = 0.0
+            _year_std = 0.0
+            _year_liq = 0.0
+            _tax_label = "Impuesto"
+            _base_filter = "o.tenant_id = $1 AND o.status = 'completed' AND (o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"
+            _tax_select = """
+                SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
+                       COALESCE(SUM(oi.subtotal), 0) AS subtotal
+                FROM order_items oi
+                JOIN product p ON p.id = oi.product_id
+                JOIN orders o ON o.id = oi.order_id
+            """
+            try:
+                tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                main_tax_rows = await conn.fetch(
+                    f"{_tax_select} WHERE {_base_filter} GROUP BY COALESCE(p.tax_category, 'standard')",
+                    tenant_id
+                )
+                month_tax_rows = await conn.fetch(
+                    f"""{_tax_select} WHERE {_base_filter}
+                        AND DATE(o.order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Bogota')::date
+                        GROUP BY COALESCE(p.tax_category, 'standard')""",
+                    tenant_id
+                )
+                year_tax_rows = await conn.fetch(
+                    f"""{_tax_select} WHERE {_base_filter}
+                        AND DATE(o.order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('year', NOW() AT TIME ZONE 'America/Bogota')::date
+                        GROUP BY COALESCE(p.tax_category, 'standard')""",
+                    tenant_id
+                )
+                _main_std, _main_liq, _tax_label = _compute_tax_breakdown(main_tax_rows, tax_config)
+                _month_std, _month_liq, _ = _compute_tax_breakdown(month_tax_rows, tax_config)
+                _year_std, _year_liq, _ = _compute_tax_breakdown(year_tax_rows, tax_config)
+            except Exception as _e:
+                logger.warning(f"Tax dashboard computation failed: {_e}")
+
             return {
                 "success": True,
                 "data": {
@@ -1212,18 +1360,25 @@ async def get_orders_dashboard(
                         "avg_ticket": float(row['main_avg_ticket']),
                         "discount_count": int(row['main_discount_count']),
                         "total_discount_amount": float(row['main_total_discount']),
+                        "total_standard_tax": _main_std,
+                        "total_liquor_tax": _main_liq,
                     },
                     "month": {
                         "total_sales": float(row['month_sales']),
                         "completed_orders": row['month_completed'],
+                        "total_standard_tax": _month_std,
+                        "total_liquor_tax": _month_liq,
                     },
                     "year": {
                         "total_sales": float(row['year_sales']),
                         "completed_orders": row['year_completed'],
+                        "total_standard_tax": _year_std,
+                        "total_liquor_tax": _year_liq,
                     },
                     "commission_savings": commission_savings,
                     "commission_rate": commission_rate,
                     "payment_breakdown": payment_breakdown,
+                    "standard_tax_label": _tax_label,
                 }
             }
 
