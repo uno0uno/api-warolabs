@@ -536,6 +536,8 @@ async def configure_employee_salary(
         # Validate employment type constraints
         if config.employment_type == 'daily' and config.daily_rate is None:
             raise ValidationError("daily_rate is required for daily employment type")
+        if config.employment_type == 'contractor' and str(config.salary_type) == 'smmlv':
+            raise ValidationError("Contractors cannot use SMMLV salary type — use fixed or hourly")
 
         # Calculate base and total salary
         if config.salary_type == 'smmlv':
