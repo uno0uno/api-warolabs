@@ -4,14 +4,14 @@ Handles employee salary configuration and payment management
 """
 import logging
 import json
-from fastapi import Request, UploadFile, HTTPException
+from fastapi import Request, UploadFile
 from typing import List, Optional, Dict, Any
 from uuid import UUID, uuid4
 from decimal import Decimal
 from datetime import datetime
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
-from app.core.exceptions import ValidationError, NotFoundError, AuthorizationError
+from app.core.exceptions import ValidationError, NotFoundError
 from app.services.aws_s3_service import AWSS3Service
 import asyncpg
 from app.models.salary import (
@@ -34,17 +34,23 @@ logger = logging.getLogger(__name__)
 # SMMLV 2026 - Should be fetched from database
 DEFAULT_SMMLV = Decimal('1423500')
 
-# GL account codes for salary/payroll
+# GL account codes for salary/payroll — debit side (expense)
 _SALARY_DEBIT_CODE = {
     "employee":   "5105",  # Sueldos de personal
     "contractor": "5199",  # Otros gastos y honorarios
     "daily":      "5105",  # Sueldos de personal (jornalero)
 }
-_SALARY_CREDIT_CODE = {
+
+# Slug fallback for credit side (cash/bank) — used when payment_method is not a UUID
+# or when payment_methods.gl_account_code is null in DB
+_SALARY_CREDIT_SLUG_FALLBACK = {
     "cash":     "1105",  # Caja general
     "transfer": "1110",  # Bancos
     "check":    "1110",  # Bancos
     "other":    "1110",  # Bancos
+    "card":     "1110",  # Bancos (datáfono)
+    "digital":  "1110",  # Bancos (Nequi, Daviplata, PSE)
+    "credit":   "1305",  # Clientes (fiado)
 }
 
 
@@ -93,6 +99,40 @@ async def get_current_smmlv(conn, tenant_id: UUID) -> Decimal:
         tenant_id, current_period
     )
     return Decimal(str(result)) if result else DEFAULT_SMMLV
+
+
+async def _resolve_salary_credit_gl_code(conn, payment_method: Optional[str]) -> str:
+    """
+    Resolve the GL account code for the credit side of a salary payment.
+    Mirrors the same cascade used by _post_order_gl_entry in cierre_service.py:
+      1. If payment_method is a UUID → query payment_methods JOIN payment_method_groups
+         for COALESCE(pm.gl_account_code, pmg.gl_account_code)
+      2. Fall back to slug-based dict (_SALARY_CREDIT_SLUG_FALLBACK)
+      3. Ultimate fallback: "1110" (Bancos)
+    """
+    if payment_method:
+        try:
+            UUID(payment_method)
+            is_uuid = True
+        except (ValueError, AttributeError):
+            is_uuid = False
+
+        if is_uuid:
+            row = await conn.fetchrow(
+                """SELECT COALESCE(pm.gl_account_code, pmg.gl_account_code) AS code
+                   FROM payment_methods pm
+                   JOIN payment_method_groups pmg ON pm.group_id = pmg.id
+                   WHERE pm.id = $1""",
+                UUID(payment_method),
+            )
+            if row and row["code"]:
+                return row["code"]
+
+        slug_code = _SALARY_CREDIT_SLUG_FALLBACK.get(payment_method)
+        if slug_code:
+            return slug_code
+
+    return "1110"
 
 
 async def _post_salary_gl_entry(
@@ -146,8 +186,8 @@ async def _post_salary_gl_entry(
         logger.warning(f"[GL] Debit account {debit_code} not found for tenant {tenant_id} — skip salary GL")
         return
 
-    # Resolve credit account (cash/bank)
-    credit_code = _SALARY_CREDIT_CODE.get(payment_method or "other", "1110")
+    # Resolve credit account (cash/bank) — dynamic UUID-aware lookup
+    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
     credit_acct = await conn.fetchrow(
         "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
         tenant_id, credit_code,
@@ -1198,7 +1238,7 @@ async def update_salary_payment(
             raise ValidationError("No fields to update")
 
         # Add updated_at
-        update_fields.append(f"updated_at = NOW()")
+        update_fields.append("updated_at = NOW()")
 
         # Execute UPDATE
         params.extend([payment_id, tenant_id])

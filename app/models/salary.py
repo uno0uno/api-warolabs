@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
-from typing import Optional, List, Literal
+from typing import Optional, List
 from uuid import UUID
 from decimal import Decimal
 from enum import Enum
@@ -81,7 +81,7 @@ class SalaryPaymentBase(BaseModel):
     """Base model for salary payments"""
     period_month: str = Field(..., description="Payment period in YYYY-MM format")
     payment_amount: Decimal = Field(..., gt=0, description="Amount paid")
-    payment_method: Optional[PaymentMethod] = Field(None, description="Payment method")
+    payment_method: Optional[str] = Field(None, description="Payment method — UUID or slug (cash, card, digital, credit)")
     payment_reference: Optional[str] = Field(None, description="Payment reference number")
     payment_date: datetime = Field(..., description="Date of payment")
     notes: Optional[str] = Field(None, description="Additional notes")
