@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 from typing import Optional, List, Literal
 from uuid import UUID
@@ -15,6 +15,13 @@ class SalaryType(str, Enum):
     SMMLV = "smmlv"
     FIXED = "fixed"
     HOURLY = "hourly"
+
+
+class EmploymentType(str, Enum):
+    """Employment contract type"""
+    EMPLOYEE = "employee"       # Contrato laboral — DR 5105 Sueldos
+    CONTRACTOR = "contractor"   # Prestación de servicios — DR 5199 Honorarios
+    DAILY = "daily"             # Jornalero — pago por días × tarifa diaria
 
 
 class PaymentMethod(str, Enum):
@@ -44,6 +51,8 @@ class EmployeeSalaryConfigBase(BaseModel):
     hourly_rate: Optional[Decimal] = Field(None, ge=0, description="Hourly rate amount")
     payment_frequency: PaymentFrequency = Field(default=PaymentFrequency.MONTHLY, description="Payment frequency")
     notes: Optional[str] = Field(None, description="Additional notes")
+    employment_type: Optional[EmploymentType] = Field(None, description="Employment contract type")
+    daily_rate: Optional[Decimal] = Field(None, ge=0, description="Daily rate for jornalero workers")
 
 
 class EmployeeSalaryConfigCreate(EmployeeSalaryConfigBase):
@@ -53,6 +62,8 @@ class EmployeeSalaryConfigCreate(EmployeeSalaryConfigBase):
 
 class EmployeeSalaryConfig(EmployeeSalaryConfigBase):
     """Full employee salary config model"""
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
+
     id: UUID
     tenant_member_id: UUID
     period_month: str
@@ -60,10 +71,6 @@ class EmployeeSalaryConfig(EmployeeSalaryConfigBase):
     total_salary: Decimal
     calculated_salary: Optional[Decimal] = Field(None, description="Calculated salary based on type")
     created_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
-        use_enum_values = True
 
 
 # =============================================================================
@@ -79,6 +86,7 @@ class SalaryPaymentBase(BaseModel):
     payment_date: datetime = Field(..., description="Date of payment")
     notes: Optional[str] = Field(None, description="Additional notes")
     status: str = Field(default="paid", description="Payment status: pending, paid, cancelled")
+    days_worked: Optional[int] = Field(None, ge=1, le=31, description="Days worked (for daily workers)")
 
 
 class SalaryPaymentCreate(SalaryPaymentBase):
@@ -100,14 +108,13 @@ class SalaryPayment(SalaryPaymentBase):
     id: UUID
     tenant_id: UUID
     tenant_member_id: UUID
+    days_worked: Optional[int] = None
     created_by: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
     attachments: List["SalaryAttachment"] = Field(default_factory=list)
 
-    class Config:
-        from_attributes = True
-        use_enum_values = True
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
 
 
 # =============================================================================
@@ -138,8 +145,7 @@ class SalaryAttachment(SalaryAttachmentBase):
     uploaded_by: Optional[UUID] = None
     uploaded_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # =============================================================================
@@ -165,14 +171,15 @@ class EmployeeWithSalary(BaseModel):
     payment_frequency: Optional[str] = None
     calculated_salary: Optional[Decimal] = None
     salary_notes: Optional[str] = None
+    employment_type: Optional[str] = None
+    daily_rate: Optional[Decimal] = None
 
     # Last payment info
     last_payment_date: Optional[datetime] = None
     last_payment_amount: Optional[Decimal] = None
     last_payment_period: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class EmployeeDetailWithPayments(EmployeeWithSalary):

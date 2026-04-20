@@ -34,6 +34,19 @@ logger = logging.getLogger(__name__)
 # SMMLV 2026 - Should be fetched from database
 DEFAULT_SMMLV = Decimal('1423500')
 
+# GL account codes for salary/payroll
+_SALARY_DEBIT_CODE = {
+    "employee":   "5105",  # Sueldos de personal
+    "contractor": "5199",  # Otros gastos y honorarios
+    "daily":      "5105",  # Sueldos de personal (jornalero)
+}
+_SALARY_CREDIT_CODE = {
+    "cash":     "1105",  # Caja general
+    "transfer": "1110",  # Bancos
+    "check":    "1110",  # Bancos
+    "other":    "1110",  # Bancos
+}
+
 
 def get_color_for_name(name: str) -> str:
     """Generate a consistent color based on name"""
@@ -82,6 +95,101 @@ async def get_current_smmlv(conn, tenant_id: UUID) -> Decimal:
     return Decimal(str(result)) if result else DEFAULT_SMMLV
 
 
+async def _post_salary_gl_entry(
+    conn,
+    tenant_id: UUID,
+    payment_id: UUID,
+    payment_date,
+    payment_amount: Decimal,
+    employment_type: Optional[str],
+    payment_method: Optional[str],
+    description: str,
+) -> None:
+    """
+    Post a double-entry GL journal entry for a salary payment.
+    DR: 5105 (employee/daily) or 5199 (contractor)
+    CR: 1105 (cash) or 1110 (transfer/other)
+    Silently skips if accounts missing, period closed, or already posted.
+    Caller MUST wrap in try/except.
+    """
+    if payment_amount <= 0:
+        return
+
+    # Idempotency check
+    already_posted = await conn.fetchval(
+        """SELECT 1 FROM tenant_journal_entries
+           WHERE tenant_id = $1 AND source_module = 'nomina' AND source_id = $2 AND status = 'posted'""",
+        tenant_id, payment_id
+    )
+    if already_posted:
+        logger.info(f"[GL] Salary payment {payment_id} already posted — skip")
+        return
+
+    # Check period open
+    entry_date = payment_date.date() if hasattr(payment_date, 'date') else payment_date
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id, entry_date.year, entry_date.month,
+    )
+    if closed:
+        logger.warning(f"[GL] Period {entry_date.year}-{entry_date.month:02d} closed — skip GL for salary payment {payment_id}")
+        return
+
+    # Resolve debit account (expense)
+    debit_code = _SALARY_DEBIT_CODE.get(employment_type or "employee", "5105")
+    debit_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, debit_code,
+    )
+    if not debit_acct:
+        logger.warning(f"[GL] Debit account {debit_code} not found for tenant {tenant_id} — skip salary GL")
+        return
+
+    # Resolve credit account (cash/bank)
+    credit_code = _SALARY_CREDIT_CODE.get(payment_method or "other", "1110")
+    credit_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, credit_code,
+    )
+    if not credit_acct:
+        logger.warning(f"[GL] Credit account {credit_code} not found for tenant {tenant_id} — skip salary GL")
+        return
+
+    amt = float(payment_amount)
+
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'nomina', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, entry_date, entry_date.year, entry_date.month,
+            description, payment_id, amt, amt,
+        )
+        entry_id = entry_row["id"]
+
+        # Debit line — expense account
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, $3, 0, $4, 0)""",
+            entry_id, debit_acct["id"], amt, description,
+        )
+
+        # Credit line — cash/bank account
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, 0, $3, $4, 1)""",
+            entry_id, credit_acct["id"], amt, description,
+        )
+
+    logger.info(f"[GL] Posted salary entry {entry_id} for payment {payment_id} (amount={amt}, debit={debit_code}, credit={credit_code})")
+
+
 async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResponse:
     """Get all employees with their salary configuration"""
     session = require_valid_session(request)
@@ -105,6 +213,8 @@ async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResp
                 es.hourly_rate,
                 es.payment_frequency,
                 es.notes as salary_notes,
+                es.employment_type,
+                es.daily_rate,
                 (SELECT payment_date FROM salary_payments sp
                  WHERE sp.tenant_member_id = tm.id
                  ORDER BY payment_date DESC LIMIT 1) as last_payment_date,
@@ -152,6 +262,8 @@ async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResp
                 hourly_rate=Decimal(str(row['hourly_rate'])) if row.get('hourly_rate') else None,
                 calculated_salary=calculated_salary,
                 salary_notes=row['salary_notes'],
+                employment_type=row['employment_type'],
+                daily_rate=Decimal(str(row['daily_rate'])) if row.get('daily_rate') else None,
                 last_payment_date=row['last_payment_date'],
                 last_payment_amount=Decimal(str(row['last_payment_amount'])) if row['last_payment_amount'] else None,
                 last_payment_period=row['last_payment_period']
@@ -186,7 +298,9 @@ async def get_employee_salary_detail(request: Request, employee_id: UUID) -> Emp
                 es.minimum_wage_multiplier as multiplier,
                 es.fixed_amount,
                 es.hourly_rate,
-                es.notes as salary_notes
+                es.notes as salary_notes,
+                es.employment_type,
+                es.daily_rate
             FROM tenant_members tm
             JOIN profile p ON p.id = tm.user_id
             LEFT JOIN employee_salaries es ON es.tenant_member_id = tm.id
@@ -221,6 +335,7 @@ async def get_employee_salary_detail(request: Request, employee_id: UUID) -> Emp
                 sp.payment_date,
                 sp.notes,
                 sp.status,
+                sp.days_worked,
                 sp.created_by,
                 sp.created_at,
                 sp.updated_at
@@ -270,6 +385,7 @@ async def get_employee_salary_detail(request: Request, employee_id: UUID) -> Emp
                 payment_date=prow['payment_date'],
                 notes=prow['notes'],
                 status=prow.get('status', 'paid'),
+                days_worked=prow.get('days_worked'),
                 created_by=prow['created_by'],
                 created_at=prow['created_at'],
                 updated_at=prow['updated_at'],
@@ -302,6 +418,8 @@ async def get_employee_salary_detail(request: Request, employee_id: UUID) -> Emp
             hourly_rate=Decimal(str(row['hourly_rate'])) if row.get('hourly_rate') else None,
             calculated_salary=calculated_salary,
             salary_notes=row['salary_notes'],
+            employment_type=row['employment_type'],
+            daily_rate=Decimal(str(row['daily_rate'])) if row.get('daily_rate') else None,
             payments=payments,
             total_paid_this_year=Decimal(str(total_paid)) if total_paid else Decimal('0'),
             payments_count=len(payments)
@@ -336,6 +454,10 @@ async def configure_employee_salary(
         if not employee:
             raise NotFoundError("Employee not found")
 
+        # Validate employment type constraints
+        if config.employment_type == 'daily' and config.daily_rate is None:
+            raise ValidationError("daily_rate is required for daily employment type")
+
         # Calculate base and total salary
         if config.salary_type == 'smmlv':
             if config.minimum_wage_multiplier is None:
@@ -358,9 +480,9 @@ async def configure_employee_salary(
             INSERT INTO employee_salaries (
                 id, tenant_member_id, period_month, salary_type,
                 minimum_wage_multiplier, fixed_amount, hourly_rate, base_salary,
-                total_salary, notes, created_at
+                total_salary, notes, employment_type, daily_rate, created_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
             ON CONFLICT (tenant_member_id, period_month)
             DO UPDATE SET
                 salary_type = EXCLUDED.salary_type,
@@ -369,10 +491,12 @@ async def configure_employee_salary(
                 hourly_rate = EXCLUDED.hourly_rate,
                 base_salary = EXCLUDED.base_salary,
                 total_salary = EXCLUDED.total_salary,
-                notes = EXCLUDED.notes
+                notes = EXCLUDED.notes,
+                employment_type = EXCLUDED.employment_type,
+                daily_rate = EXCLUDED.daily_rate
             RETURNING id, tenant_member_id, period_month, salary_type,
                       minimum_wage_multiplier, fixed_amount, hourly_rate, base_salary,
-                      total_salary, notes, created_at
+                      total_salary, notes, employment_type, daily_rate, created_at
         """
 
         row = await conn.fetchrow(
@@ -386,7 +510,9 @@ async def configure_employee_salary(
             config.hourly_rate,
             base_salary,
             total_salary,
-            config.notes
+            config.notes,
+            config.employment_type,
+            config.daily_rate
         )
 
         salary_config = EmployeeSalaryConfig(
@@ -401,6 +527,8 @@ async def configure_employee_salary(
             total_salary=Decimal(str(row['total_salary'])),
             calculated_salary=total_salary,
             notes=row['notes'],
+            employment_type=row['employment_type'],
+            daily_rate=Decimal(str(row['daily_rate'])) if row.get('daily_rate') else None,
             created_at=row['created_at']
         )
 
@@ -427,18 +555,32 @@ async def record_salary_payment_json(
         if not employee:
             raise NotFoundError("Employee not found")
 
+        # Fetch salary config to get employment_type and daily_rate
+        salary_config = await conn.fetchrow(
+            """SELECT employment_type, daily_rate FROM employee_salaries
+               WHERE tenant_member_id = $1 ORDER BY period_month DESC LIMIT 1""",
+            payment_data.tenant_member_id
+        )
+        employment_type = salary_config['employment_type'] if salary_config else 'employee'
+        daily_rate = Decimal(str(salary_config['daily_rate'])) if salary_config and salary_config['daily_rate'] else None
+
+        # Auto-calculate amount for daily workers
+        payment_amount = payment_data.payment_amount
+        if employment_type == 'daily' and payment_data.days_worked and daily_rate:
+            payment_amount = Decimal(str(payment_data.days_worked)) * daily_rate
+
         # Create payment
         payment_id = uuid4()
         insert_query = """
             INSERT INTO salary_payments (
                 id, tenant_id, tenant_member_id, period_month,
                 payment_amount, payment_method, payment_reference,
-                payment_date, notes, status, created_by, created_at, updated_at
+                payment_date, notes, status, days_worked, created_by, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
             RETURNING id, tenant_id, tenant_member_id, period_month,
                       payment_amount, payment_method, payment_reference,
-                      payment_date, notes, status, created_by, created_at, updated_at
+                      payment_date, notes, status, days_worked, created_by, created_at, updated_at
         """
 
         row = await conn.fetchrow(
@@ -447,14 +589,36 @@ async def record_salary_payment_json(
             tenant_id,
             payment_data.tenant_member_id,
             payment_data.period_month,
-            payment_data.payment_amount,
+            payment_amount,
             payment_data.payment_method,
             payment_data.payment_reference,
             payment_data.payment_date,
             payment_data.notes,
             payment_data.status if hasattr(payment_data, 'status') else 'paid',
+            payment_data.days_worked,
             user_id
         )
+
+        # Post GL entry (graceful degrade — never blocks payment)
+        try:
+            employee_name_row = await conn.fetchrow(
+                """SELECT p.name FROM tenant_members tm JOIN profile p ON p.id = tm.user_id WHERE tm.id = $1""",
+                payment_data.tenant_member_id
+            )
+            emp_name = employee_name_row['name'] if employee_name_row else 'Empleado'
+            gl_description = f"Salario {payment_data.period_month} — {emp_name}"
+            await _post_salary_gl_entry(
+                conn=conn,
+                tenant_id=tenant_id,
+                payment_id=payment_id,
+                payment_date=payment_data.payment_date,
+                payment_amount=payment_amount,
+                employment_type=employment_type,
+                payment_method=str(payment_data.payment_method) if payment_data.payment_method else None,
+                description=gl_description,
+            )
+        except Exception as gl_err:
+            logger.warning(f"[GL] Salary GL posting failed for payment {payment_id}: {gl_err}")
 
         payment = SalaryPayment(
             id=row['id'],
@@ -467,13 +631,14 @@ async def record_salary_payment_json(
             payment_date=row['payment_date'],
             notes=row['notes'],
             status=row.get('status', 'paid'),
+            days_worked=row.get('days_worked'),
             created_by=row['created_by'],
             created_at=row['created_at'],
             updated_at=row['updated_at'],
             attachments=[]
         )
 
-        logger.info(f"Salary payment recorded for employee {payment_data.tenant_member_id}: {payment_data.payment_amount}")
+        logger.info(f"Salary payment recorded for employee {payment_data.tenant_member_id}: {payment_amount}")
 
         return SalaryPaymentResponse(success=True, data=payment)
 
@@ -487,6 +652,7 @@ async def record_salary_payment(
     period_month: str,
     payment_reference: Optional[str] = None,
     notes: Optional[str] = None,
+    days_worked: Optional[int] = None,
     attachments: List[UploadFile] = []
 ) -> SalaryPaymentResponse:
     """Record a salary payment with optional attachments"""
@@ -503,18 +669,32 @@ async def record_salary_payment(
         if not employee:
             raise NotFoundError("Employee not found")
 
+        # Fetch salary config to get employment_type and daily_rate
+        salary_config_row = await conn.fetchrow(
+            """SELECT employment_type, daily_rate FROM employee_salaries
+               WHERE tenant_member_id = $1 ORDER BY period_month DESC LIMIT 1""",
+            tenant_member_id
+        )
+        mp_employment_type = salary_config_row['employment_type'] if salary_config_row else 'employee'
+        mp_daily_rate = Decimal(str(salary_config_row['daily_rate'])) if salary_config_row and salary_config_row['daily_rate'] else None
+
+        # Auto-calculate amount for daily workers
+        actual_payment_amount = payment_amount
+        if mp_employment_type == 'daily' and days_worked and mp_daily_rate:
+            actual_payment_amount = Decimal(str(days_worked)) * mp_daily_rate
+
         # Create payment
         payment_id = uuid4()
         insert_query = """
             INSERT INTO salary_payments (
                 id, tenant_id, tenant_member_id, period_month,
                 payment_amount, payment_method, payment_reference,
-                payment_date, notes, created_by, created_at, updated_at
+                payment_date, notes, days_worked, created_by, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
             RETURNING id, tenant_id, tenant_member_id, period_month,
                       payment_amount, payment_method, payment_reference,
-                      payment_date, notes, created_by, created_at, updated_at
+                      payment_date, notes, days_worked, created_by, created_at, updated_at
         """
 
         row = await conn.fetchrow(
@@ -523,11 +703,12 @@ async def record_salary_payment(
             tenant_id,
             tenant_member_id,
             period_month,
-            payment_amount,
+            actual_payment_amount,
             payment_method,
             payment_reference,
             payment_date,
             notes,
+            days_worked,
             user_id
         )
 
@@ -592,6 +773,27 @@ async def record_salary_payment(
                     except Exception as e:
                         logger.error(f"Error uploading attachment: {e}")
 
+        # Post GL entry (graceful degrade — never blocks payment)
+        try:
+            mp_emp_name_row = await conn.fetchrow(
+                """SELECT p.name FROM tenant_members tm JOIN profile p ON p.id = tm.user_id WHERE tm.id = $1""",
+                tenant_member_id
+            )
+            mp_emp_name = mp_emp_name_row['name'] if mp_emp_name_row else 'Empleado'
+            mp_gl_description = f"Salario {period_month} — {mp_emp_name}"
+            await _post_salary_gl_entry(
+                conn=conn,
+                tenant_id=tenant_id,
+                payment_id=payment_id,
+                payment_date=payment_date,
+                payment_amount=actual_payment_amount,
+                employment_type=mp_employment_type,
+                payment_method=str(payment_method) if payment_method else None,
+                description=mp_gl_description,
+            )
+        except Exception as gl_err:
+            logger.warning(f"[GL] Salary GL posting failed for payment {payment_id}: {gl_err}")
+
         payment = SalaryPayment(
             id=row['id'],
             tenant_id=row['tenant_id'],
@@ -602,13 +804,14 @@ async def record_salary_payment(
             payment_reference=row['payment_reference'],
             payment_date=row['payment_date'],
             notes=row['notes'],
+            days_worked=row.get('days_worked'),
             created_by=row['created_by'],
             created_at=row['created_at'],
             updated_at=row['updated_at'],
             attachments=uploaded_attachments
         )
 
-        logger.info(f"Salary payment recorded for employee {tenant_member_id}: {payment_amount}")
+        logger.info(f"Salary payment recorded for employee {tenant_member_id}: {actual_payment_amount}")
 
         return SalaryPaymentResponse(success=True, data=payment)
 
@@ -761,6 +964,7 @@ async def get_payment_detail(request: Request, payment_id: UUID) -> Dict[str, An
             'payment_date': row['payment_date'].isoformat() if row['payment_date'] else None,
             'notes': row['notes'],
             'status': row.get('status', 'paid'),
+            'days_worked': row.get('days_worked'),
             'created_by': str(row['created_by']) if row['created_by'] else None,
             'created_at': row['created_at'].isoformat() if row['created_at'] else None,
             'updated_at': row['updated_at'].isoformat() if row['updated_at'] else None,
