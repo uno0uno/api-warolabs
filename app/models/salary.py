@@ -87,6 +87,8 @@ class SalaryPaymentBase(BaseModel):
     notes: Optional[str] = Field(None, description="Additional notes")
     status: str = Field(default="paid", description="Payment status: pending, paid, cancelled")
     days_worked: Optional[int] = Field(None, ge=1, le=31, description="Days worked (for daily workers)")
+    withholding_rate: Optional[Decimal] = Field(None, ge=0, le=1, description="Withholding rate 0–1 (e.g. 0.10 = 10%)")
+    withholding_amount: Optional[Decimal] = Field(None, ge=0, description="Amount withheld for DIAN (account 2367)")
 
 
 class SalaryPaymentCreate(SalaryPaymentBase):

@@ -144,11 +144,20 @@ async def _post_salary_gl_entry(
     employment_type: Optional[str],
     payment_method: Optional[str],
     description: str,
+    withholding_amount: Optional[Decimal] = None,
 ) -> None:
     """
     Post a double-entry GL journal entry for a salary payment.
-    DR: 5105 (employee/daily) or 5199 (contractor)
-    CR: 1105 (cash) or 1110 (transfer/other)
+
+    Without withholding (2 lines):
+      DR: 5105 (employee/daily) or 5199 (contractor)  — gross
+      CR: 1105/1110 (cash/bank)                        — gross
+
+    With withholding (3 lines, contractors only):
+      DR: 5199 Honorarios                              — gross
+      CR: 1110 Bancos                                  — net (gross − withholding)
+      CR: 2367 Retención en la fuente por pagar        — withholding
+
     Silently skips if accounts missing, period closed, or already posted.
     Caller MUST wrap in try/except.
     """
@@ -196,7 +205,21 @@ async def _post_salary_gl_entry(
         logger.warning(f"[GL] Credit account {credit_code} not found for tenant {tenant_id} — skip salary GL")
         return
 
-    amt = float(payment_amount)
+    gross_amt = float(payment_amount)
+    use_withholding = withholding_amount and withholding_amount > 0
+
+    if use_withholding:
+        wh_amt = float(withholding_amount or 0)
+        net_amt = gross_amt - wh_amt
+
+        # Resolve account 2367 — Retención en la fuente por pagar
+        wh_acct = await conn.fetchrow(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2367' AND is_active = true",
+            tenant_id,
+        )
+        if not wh_acct:
+            logger.warning(f"[GL] Withholding account 2367 not found for tenant {tenant_id} — posting without withholding split")
+            use_withholding = False
 
     async with conn.transaction():
         entry_row = await conn.fetchrow(
@@ -207,27 +230,43 @@ async def _post_salary_gl_entry(
                VALUES ($1, $2, $3, $4, $5, 'nomina', $6, 'posted', $7, $8, NOW())
                RETURNING id""",
             tenant_id, entry_date, entry_date.year, entry_date.month,
-            description, payment_id, amt, amt,
+            description, payment_id, gross_amt, gross_amt,
         )
         entry_id = entry_row["id"]
 
-        # Debit line — expense account
+        # Debit line — expense account (always gross)
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, $3, 0, $4, 0)""",
-            entry_id, debit_acct["id"], amt, description,
+            entry_id, debit_acct["id"], gross_amt, description,
         )
 
-        # Credit line — cash/bank account
-        await conn.execute(
-            """INSERT INTO tenant_journal_lines
-                   (journal_entry_id, account_id, debit, credit, description, line_order)
-               VALUES ($1, $2, 0, $3, $4, 1)""",
-            entry_id, credit_acct["id"], amt, description,
-        )
-
-    logger.info(f"[GL] Posted salary entry {entry_id} for payment {payment_id} (amount={amt}, debit={debit_code}, credit={credit_code})")
+        if use_withholding:
+            # Credit line 1 — cash/bank (net amount)
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, $4, 1)""",
+                entry_id, credit_acct["id"], net_amt, description,
+            )
+            # Credit line 2 — 2367 Retención en la fuente por pagar
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, $4, 2)""",
+                entry_id, wh_acct["id"], wh_amt, f"Retefuente — {description}",
+            )
+            logger.info(f"[GL] Posted salary entry {entry_id} for payment {payment_id} (gross={gross_amt}, net={net_amt}, wh={wh_amt}, debit={debit_code}, credit={credit_code}, wh_acct=2367)")
+        else:
+            # Credit line — cash/bank (full amount)
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, $4, 1)""",
+                entry_id, credit_acct["id"], gross_amt, description,
+            )
+            logger.info(f"[GL] Posted salary entry {entry_id} for payment {payment_id} (amount={gross_amt}, debit={debit_code}, credit={credit_code})")
 
 
 async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResponse:
@@ -609,18 +648,29 @@ async def record_salary_payment_json(
         if employment_type == 'daily' and payment_data.days_worked and daily_rate:
             payment_amount = Decimal(str(payment_data.days_worked)) * daily_rate
 
+        # Resolve withholding fields (only valid for contractors)
+        withholding_rate = getattr(payment_data, 'withholding_rate', None)
+        withholding_amount = getattr(payment_data, 'withholding_amount', None)
+        if employment_type != 'contractor':
+            withholding_rate = None
+            withholding_amount = None
+
         # Create payment
         payment_id = uuid4()
         insert_query = """
             INSERT INTO salary_payments (
                 id, tenant_id, tenant_member_id, period_month,
                 payment_amount, payment_method, payment_reference,
-                payment_date, notes, status, days_worked, created_by, created_at, updated_at
+                payment_date, notes, status, days_worked,
+                withholding_rate, withholding_amount,
+                created_by, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
             RETURNING id, tenant_id, tenant_member_id, period_month,
                       payment_amount, payment_method, payment_reference,
-                      payment_date, notes, status, days_worked, created_by, created_at, updated_at
+                      payment_date, notes, status, days_worked,
+                      withholding_rate, withholding_amount,
+                      created_by, created_at, updated_at
         """
 
         row = await conn.fetchrow(
@@ -636,6 +686,8 @@ async def record_salary_payment_json(
             payment_data.notes,
             payment_data.status if hasattr(payment_data, 'status') else 'paid',
             payment_data.days_worked,
+            withholding_rate,
+            withholding_amount,
             user_id
         )
 
@@ -656,6 +708,7 @@ async def record_salary_payment_json(
                 employment_type=employment_type,
                 payment_method=str(payment_data.payment_method) if payment_data.payment_method else None,
                 description=gl_description,
+                withholding_amount=withholding_amount,
             )
         except Exception as gl_err:
             logger.warning(f"[GL] Salary GL posting failed for payment {payment_id}: {gl_err}")
@@ -672,6 +725,8 @@ async def record_salary_payment_json(
             notes=row['notes'],
             status=row.get('status', 'paid'),
             days_worked=row.get('days_worked'),
+            withholding_rate=Decimal(str(row['withholding_rate'])) if row['withholding_rate'] is not None else None,
+            withholding_amount=Decimal(str(row['withholding_amount'])) if row['withholding_amount'] is not None else None,
             created_by=row['created_by'],
             created_at=row['created_at'],
             updated_at=row['updated_at'],
@@ -693,6 +748,8 @@ async def record_salary_payment(
     payment_reference: Optional[str] = None,
     notes: Optional[str] = None,
     days_worked: Optional[int] = None,
+    withholding_rate: Optional[Decimal] = None,
+    withholding_amount: Optional[Decimal] = None,
     attachments: List[UploadFile] = []
 ) -> SalaryPaymentResponse:
     """Record a salary payment with optional attachments"""
@@ -723,18 +780,26 @@ async def record_salary_payment(
         if mp_employment_type == 'daily' and days_worked and mp_daily_rate:
             actual_payment_amount = Decimal(str(days_worked)) * mp_daily_rate
 
+        # Withholding only applies to contractors
+        mp_withholding_rate = withholding_rate if mp_employment_type == 'contractor' else None
+        mp_withholding_amount = withholding_amount if mp_employment_type == 'contractor' else None
+
         # Create payment
         payment_id = uuid4()
         insert_query = """
             INSERT INTO salary_payments (
                 id, tenant_id, tenant_member_id, period_month,
                 payment_amount, payment_method, payment_reference,
-                payment_date, notes, days_worked, created_by, created_at, updated_at
+                payment_date, notes, days_worked,
+                withholding_rate, withholding_amount,
+                created_by, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
             RETURNING id, tenant_id, tenant_member_id, period_month,
                       payment_amount, payment_method, payment_reference,
-                      payment_date, notes, days_worked, created_by, created_at, updated_at
+                      payment_date, notes, days_worked,
+                      withholding_rate, withholding_amount,
+                      created_by, created_at, updated_at
         """
 
         row = await conn.fetchrow(
@@ -749,6 +814,8 @@ async def record_salary_payment(
             payment_date,
             notes,
             days_worked,
+            mp_withholding_rate,
+            mp_withholding_amount,
             user_id
         )
 
@@ -830,6 +897,7 @@ async def record_salary_payment(
                 employment_type=mp_employment_type,
                 payment_method=str(payment_method) if payment_method else None,
                 description=mp_gl_description,
+                withholding_amount=mp_withholding_amount,
             )
         except Exception as gl_err:
             logger.warning(f"[GL] Salary GL posting failed for payment {payment_id}: {gl_err}")
@@ -845,6 +913,8 @@ async def record_salary_payment(
             payment_date=row['payment_date'],
             notes=row['notes'],
             days_worked=row.get('days_worked'),
+            withholding_rate=Decimal(str(row['withholding_rate'])) if row['withholding_rate'] is not None else None,
+            withholding_amount=Decimal(str(row['withholding_amount'])) if row['withholding_amount'] is not None else None,
             created_by=row['created_by'],
             created_at=row['created_at'],
             updated_at=row['updated_at'],
