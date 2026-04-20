@@ -7,8 +7,8 @@ import json
 from fastapi import Request, UploadFile
 from typing import List, Optional, Dict, Any
 from uuid import UUID, uuid4
-from decimal import Decimal
-from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
+from datetime import datetime, date
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import ValidationError, NotFoundError
@@ -267,6 +267,159 @@ async def _post_salary_gl_entry(
                 entry_id, credit_acct["id"], gross_amt, description,
             )
             logger.info(f"[GL] Posted salary entry {entry_id} for payment {payment_id} (amount={gross_amt}, debit={debit_code}, credit={credit_code})")
+
+
+async def _post_provision_gl_entries(
+    conn,
+    tenant_id: UUID,
+    payment_id: UUID,
+    period_month: str,
+    employment_type: Optional[str],
+    gross_salary: Decimal,
+) -> None:
+    """
+    Post monthly social benefit provision GL entries after a salary payment.
+
+    DR 5106 Gasto prima de servicios         CR 2620 Prima de servicios
+    DR 5107 Gasto cesantías                  CR 2610 Cesantías consolidadas
+    DR 5108 Gasto intereses sobre cesantías  CR 2615 Intereses sobre cesantías
+    DR 5109 Gasto vacaciones                 CR 2625 Vacaciones consolidadas
+
+    Graceful degrade — never raises, never blocks the payment flow.
+    Skips for 'contractor' employment type.
+    Caller MUST wrap in try/except.
+    """
+    if employment_type == "contractor":
+        return
+    if gross_salary <= 0:
+        return
+
+    # Idempotency: skip if provision GL already posted for this payment
+    already_posted = await conn.fetchval(
+        """SELECT 1 FROM tenant_journal_entries
+           WHERE tenant_id = $1 AND source_module = 'nomina_provision' AND source_id = $2""",
+        tenant_id, payment_id,
+    )
+    if already_posted:
+        logger.info(f"[provision_gl] Provision GL for payment {payment_id} already posted — skip")
+        return
+
+    # Calculate provisions
+    prima      = (gross_salary / 12).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    cesantias  = (gross_salary / 12).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    vacaciones = (gross_salary / 24).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    # YTD cesantías for interest calc: sum cesantias from salary_provisions for same tenant in current calendar year
+    year = period_month[:4]
+    ytd_row = await conn.fetchval(
+        """SELECT COALESCE(SUM(cesantias), 0)
+           FROM salary_provisions
+           WHERE tenant_id = $1 AND period_month LIKE $2""",
+        tenant_id, f"{year}-%",
+    )
+    ytd_cesantias = Decimal(str(ytd_row)) if ytd_row else Decimal("0")
+    int_cesantias = ((ytd_cesantias + cesantias) * Decimal("0.01") / 12).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+
+    # Upsert salary_provisions row (persists even if GL fails)
+    existing_prov = await conn.fetchval(
+        "SELECT 1 FROM salary_provisions WHERE payment_id = $1",
+        payment_id,
+    )
+    if not existing_prov:
+        await conn.execute(
+            """INSERT INTO salary_provisions
+                   (tenant_id, payment_id, period_month, employment_type,
+                    gross_salary, prima, cesantias, int_cesantias, vacaciones)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               ON CONFLICT (payment_id) DO NOTHING""",
+            tenant_id, payment_id, period_month,
+            employment_type or "employee",
+            gross_salary, prima, cesantias, int_cesantias, vacaciones,
+        )
+
+    # Check accounting period is open
+    today = date.today()
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id, today.year, today.month,
+    )
+    if closed:
+        logger.warning(
+            f"[provision_gl] Period {today.year}-{today.month:02d} closed — skip GL for provision on payment {payment_id}"
+        )
+        return
+
+    # Resolve GL accounts — expense (DR) and provision (CR)
+    # pairs: (dr_code, cr_code, amount, description)
+    provision_pairs = [
+        ("5106", "2620", prima,         "Provisión prima de servicios"),
+        ("5107", "2610", cesantias,     "Provisión cesantías"),
+        ("5108", "2615", int_cesantias, "Provisión intereses sobre cesantías"),
+        ("5109", "2625", vacaciones,    "Provisión vacaciones"),
+    ]
+
+    lines = []
+    for dr_code, cr_code, amount, description in provision_pairs:
+        if amount <= 0:
+            continue
+        dr_acct = await conn.fetchval(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+            tenant_id, dr_code,
+        )
+        cr_acct = await conn.fetchval(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+            tenant_id, cr_code,
+        )
+        if not dr_acct or not cr_acct:
+            logger.warning(
+                f"[provision_gl] Missing account {dr_code} or {cr_code} for tenant {tenant_id} — skip {description}"
+            )
+            continue
+        lines.append((dr_acct, cr_acct, float(amount), description))
+
+    if not lines:
+        return
+
+    total_debit = sum(l[2] for l in lines)
+
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'nomina_provision', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, today, today.year, today.month,
+            f"Provisión prestaciones sociales — {period_month}",
+            payment_id, total_debit, total_debit,
+        )
+        entry_id = entry_row["id"]
+
+        line_order = 0
+        for dr_acct, cr_acct, amount, description in lines:
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, $3, 0, $4, $5)""",
+                entry_id, dr_acct, amount, description, line_order,
+            )
+            line_order += 1
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, $4, $5)""",
+                entry_id, cr_acct, amount, description, line_order,
+            )
+            line_order += 1
+
+    logger.info(
+        f"[provision_gl] Posted provision entry {entry_id} for payment {payment_id} "
+        f"(prima={prima}, cesantias={cesantias}, int_cesantias={int_cesantias}, vacaciones={vacaciones})"
+    )
 
 
 async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResponse:
@@ -715,6 +868,19 @@ async def record_salary_payment_json(
         except Exception as gl_err:
             logger.warning(f"[GL] Salary GL posting failed for payment {payment_id}: {gl_err}")
 
+        # Post social benefit provisions (graceful degrade — never blocks payment)
+        try:
+            await _post_provision_gl_entries(
+                conn=conn,
+                tenant_id=tenant_id,
+                payment_id=payment_id,
+                period_month=payment_data.period_month,
+                employment_type=employment_type,
+                gross_salary=payment_amount,
+            )
+        except Exception as prov_err:
+            logger.warning(f"[provision_gl] Provision GL posting failed for payment {payment_id}: {prov_err}")
+
         payment = SalaryPayment(
             id=row['id'],
             tenant_id=row['tenant_id'],
@@ -904,6 +1070,19 @@ async def record_salary_payment(
         except Exception as gl_err:
             logger.warning(f"[GL] Salary GL posting failed for payment {payment_id}: {gl_err}")
 
+        # Post social benefit provisions (graceful degrade — never blocks payment)
+        try:
+            await _post_provision_gl_entries(
+                conn=conn,
+                tenant_id=tenant_id,
+                payment_id=payment_id,
+                period_month=period_month,
+                employment_type=mp_employment_type,
+                gross_salary=actual_payment_amount,
+            )
+        except Exception as prov_err:
+            logger.warning(f"[provision_gl] Provision GL posting failed for payment {payment_id}: {prov_err}")
+
         payment = SalaryPayment(
             id=row['id'],
             tenant_id=row['tenant_id'],
@@ -1065,6 +1244,23 @@ async def get_payment_detail(request: Request, payment_id: UUID) -> Dict[str, An
             for a in att_rows
         ]
 
+        # Get provisions (may not exist for contractor payments or old payments)
+        prov_row = await conn.fetchrow(
+            "SELECT * FROM salary_provisions WHERE payment_id = $1",
+            payment_id
+        )
+        provisions = None
+        if prov_row:
+            provisions = {
+                'prima':         float(prov_row['prima']),
+                'cesantias':     float(prov_row['cesantias']),
+                'int_cesantias': float(prov_row['int_cesantias']),
+                'vacaciones':    float(prov_row['vacaciones']),
+                'gross_salary':  float(prov_row['gross_salary']),
+                'period_month':  prov_row['period_month'],
+                'employment_type': prov_row['employment_type'],
+            }
+
         payment_data = {
             'id': str(row['id']),
             'tenant_id': str(row['tenant_id']),
@@ -1080,7 +1276,8 @@ async def get_payment_detail(request: Request, payment_id: UUID) -> Dict[str, An
             'created_by': str(row['created_by']) if row['created_by'] else None,
             'created_at': row['created_at'].isoformat() if row['created_at'] else None,
             'updated_at': row['updated_at'].isoformat() if row['updated_at'] else None,
-            'attachments': attachments
+            'attachments': attachments,
+            'provisions': provisions,
         }
 
         employee_data = {
