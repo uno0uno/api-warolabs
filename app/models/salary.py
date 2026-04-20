@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
@@ -241,3 +241,49 @@ class PayrollSummaryResponse(BaseModel):
 
 # Forward reference update
 SalaryPayment.model_rebuild()
+
+
+# =============================================================================
+# PRIMA DE SERVICIOS MODELS
+# =============================================================================
+
+class PrimaPaymentCreate(BaseModel):
+    semestre: str  # '2025-S1' or '2025-S2'
+    gross_salary: Decimal
+    days_worked: Optional[int] = 180  # days in the semester (180 = full semester)
+    payment_method: Optional[str] = None
+    payment_date: Optional[datetime] = None
+    notes: Optional[str] = None
+
+    @field_validator('semestre')
+    @classmethod
+    def validate_semestre(cls, v: str) -> str:
+        import re
+        if not re.match(r'^\d{4}-S[12]$', v):
+            raise ValueError("semestre must be in format 'YYYY-S1' or 'YYYY-S2'")
+        return v
+
+
+class PrimaPayment(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    tenant_id: UUID
+    tenant_member_id: UUID
+    semestre: str
+    gross_salary: Decimal
+    days_worked: int
+    prima_amount: Decimal
+    payment_method: Optional[str] = None
+    payment_date: datetime
+    notes: Optional[str] = None
+    created_at: datetime
+
+
+class PrimaPaymentListResponse(BaseModel):
+    success: bool = True
+    data: List[PrimaPayment]
+
+
+class PrimaPaymentResponse(BaseModel):
+    success: bool = True
+    data: PrimaPayment

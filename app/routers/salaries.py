@@ -20,7 +20,9 @@ from app.services.salary_service import (
     update_salary_payment,
     get_salary_payment_history,
     upload_salary_payment_attachments,
-    delete_salary_payment_attachment
+    delete_salary_payment_attachment,
+    record_prima_payment,
+    get_prima_payments,
 )
 from app.models.salary import (
     EmployeesWithSalaryResponse,
@@ -29,7 +31,10 @@ from app.models.salary import (
     SalaryPaymentResponse,
     SalaryPaymentsListResponse,
     EmployeeSalaryConfigCreate,
-    SalaryPaymentCreate
+    SalaryPaymentCreate,
+    PrimaPaymentCreate,
+    PrimaPaymentResponse,
+    PrimaPaymentListResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -187,3 +192,34 @@ async def delete_payment_attachment_endpoint(
     Delete a salary payment attachment
     """
     return await delete_salary_payment_attachment(request, attachment_id)
+
+
+# =============================================================================
+# PRIMA DE SERVICIOS ENDPOINTS
+# =============================================================================
+
+@router.post("/employees/{member_id}/prima", response_model=PrimaPaymentResponse)
+async def post_prima_payment_endpoint(
+    request: Request,
+    member_id: UUID,
+    data: PrimaPaymentCreate,
+):
+    """
+    Register prima de servicios payment for an employee.
+    Only valid for employment_type='employee'.
+    Returns 400 for daily/contractor workers.
+    Returns 409 if prima for the same semestre was already paid.
+    GL entry: DR 2620 / CR bank account (graceful degrade on failure).
+    """
+    return await record_prima_payment(request, member_id, data)
+
+
+@router.get("/employees/{member_id}/prima", response_model=PrimaPaymentListResponse)
+async def get_prima_payments_endpoint(
+    request: Request,
+    member_id: UUID,
+):
+    """
+    List prima de servicios payments for an employee, ordered by payment_date DESC.
+    """
+    return await get_prima_payments(request, member_id)

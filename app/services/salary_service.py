@@ -26,7 +26,11 @@ from app.models.salary import (
     EmployeeDetailWithPayments,
     EmployeeSalaryConfig,
     SalaryPayment,
-    SalaryAttachment
+    SalaryAttachment,
+    PrimaPayment,
+    PrimaPaymentCreate,
+    PrimaPaymentResponse,
+    PrimaPaymentListResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -1669,6 +1673,242 @@ async def upload_salary_payment_attachments(
             'uploaded': len(uploaded_files),
             'files': uploaded_files
         }
+
+
+async def _post_prima_payment_gl_entry(
+    conn,
+    tenant_id: UUID,
+    prima_payment_id: UUID,
+    prima_amount: Decimal,
+    payment_method: Optional[str],
+    payment_date: Any,
+    semestre: str,
+) -> None:
+    """
+    Post prima de servicios disbursement GL entry.
+    DR 2620 (Provisión prima de servicios) / CR bank account
+
+    This is a balance-sheet entry — liquidates the accrued liability.
+    Graceful degrade — never raises. Caller MUST wrap in try/except.
+    """
+    if prima_amount <= 0:
+        return
+
+    # Idempotency check
+    already_posted = await conn.fetchval(
+        """SELECT 1 FROM tenant_journal_entries
+           WHERE tenant_id = $1 AND source_module = 'nomina_prima' AND source_id = $2""",
+        tenant_id, prima_payment_id,
+    )
+    if already_posted:
+        logger.info(f"[prima_gl] Prima payment {prima_payment_id} already posted — skip")
+        return
+
+    # Resolve entry date
+    entry_date = payment_date.date() if hasattr(payment_date, 'date') else (payment_date or date.today())
+
+    # Check period open
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id, entry_date.year, entry_date.month,
+    )
+    if closed:
+        logger.warning(
+            f"[prima_gl] Period {entry_date.year}-{entry_date.month:02d} closed — skip GL for prima payment {prima_payment_id}"
+        )
+        return
+
+    # Resolve DR account: 2620 (Provisión prima de servicios) — debit liquidates liability
+    dr_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2620' AND is_active = true",
+        tenant_id,
+    )
+    if not dr_acct:
+        logger.warning(f"[prima_gl] DR account 2620 not found for tenant {tenant_id} — skip prima GL")
+        return
+
+    # Resolve CR account: bank/cash (dynamic, same as salary credit resolution)
+    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
+    cr_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, credit_code,
+    )
+    if not cr_acct:
+        logger.warning(
+            f"[prima_gl] CR account {credit_code} not found for tenant {tenant_id} — skip prima GL"
+        )
+        return
+
+    amount_float = float(prima_amount)
+
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'nomina_prima', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, entry_date, entry_date.year, entry_date.month,
+            f"Pago prima de servicios — {semestre}",
+            prima_payment_id, amount_float, amount_float,
+        )
+        entry_id = entry_row["id"]
+
+        # DR line — 2620 Provisión prima de servicios (debit liquidates the liability)
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, $3, 0, $4, 0)""",
+            entry_id, dr_acct["id"], amount_float, f"Prima de servicios {semestre}",
+        )
+        # CR line — bank/cash
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, 0, $3, $4, 1)""",
+            entry_id, cr_acct["id"], amount_float, f"Prima de servicios {semestre}",
+        )
+
+    logger.info(
+        f"[prima_gl] Posted prima entry {entry_id} for payment {prima_payment_id} "
+        f"(amount={amount_float}, DR=2620, CR={credit_code}, semestre={semestre})"
+    )
+
+
+async def record_prima_payment(
+    request: Request,
+    member_id: UUID,
+    data: PrimaPaymentCreate,
+) -> PrimaPaymentResponse:
+    """Register prima de servicios payment for an employee."""
+    from fastapi import HTTPException as _HTTPException
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        # Verify employee belongs to tenant
+        member = await conn.fetchrow(
+            "SELECT id FROM tenant_members WHERE id = $1 AND tenant_id = $2",
+            member_id, tenant_id,
+        )
+        if not member:
+            raise _HTTPException(status_code=404, detail="Employee not found")
+
+        # Verify employment_type is 'employee'
+        emp = await conn.fetchrow(
+            """SELECT employment_type FROM employee_salaries
+               WHERE tenant_member_id = $1 ORDER BY period_month DESC LIMIT 1""",
+            member_id,
+        )
+        if not emp or emp['employment_type'] != 'employee':
+            raise _HTTPException(
+                status_code=400,
+                detail="Prima de servicios only applies to employees (employment_type='employee')"
+            )
+
+        # Calculate prima_amount: (gross_salary / 180) * days_worked
+        days = data.days_worked if data.days_worked else 180
+        prima_amount = (
+            data.gross_salary / Decimal('180') * Decimal(days)
+        ).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        payment_date = data.payment_date or datetime.now()
+
+        # Insert prima_payment (unique constraint on tenant_member_id + semestre prevents duplicates)
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO prima_payments
+                    (tenant_id, tenant_member_id, semestre, gross_salary, days_worked,
+                     prima_amount, payment_method, payment_date, notes)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                RETURNING *
+                """,
+                tenant_id, member_id, data.semestre, data.gross_salary, days,
+                prima_amount, data.payment_method, payment_date, data.notes,
+            )
+        except Exception as e:
+            if 'unique' in str(e).lower():
+                raise _HTTPException(
+                    status_code=409,
+                    detail=f"Prima for semestre {data.semestre} already paid for this employee"
+                )
+            raise
+
+        payment_id = row['id']
+
+        # Post GL entry (graceful degrade — never blocks payment)
+        try:
+            await _post_prima_payment_gl_entry(
+                conn=conn,
+                tenant_id=tenant_id,
+                prima_payment_id=payment_id,
+                prima_amount=prima_amount,
+                payment_method=data.payment_method,
+                payment_date=payment_date,
+                semestre=data.semestre,
+            )
+        except Exception as gl_err:
+            logger.warning(f"[prima_gl] GL post failed for prima payment {payment_id}: {gl_err}")
+
+        prima = PrimaPayment(
+            id=row['id'],
+            tenant_id=row['tenant_id'],
+            tenant_member_id=row['tenant_member_id'],
+            semestre=row['semestre'],
+            gross_salary=Decimal(str(row['gross_salary'])),
+            days_worked=row['days_worked'],
+            prima_amount=Decimal(str(row['prima_amount'])),
+            payment_method=row['payment_method'],
+            payment_date=row['payment_date'],
+            notes=row['notes'],
+            created_at=row['created_at'],
+        )
+
+        logger.info(
+            f"Prima payment recorded for employee {member_id}: "
+            f"semestre={data.semestre}, amount={prima_amount}"
+        )
+
+        return PrimaPaymentResponse(success=True, data=prima)
+
+
+async def get_prima_payments(
+    request: Request,
+    member_id: UUID,
+) -> PrimaPaymentListResponse:
+    """List prima de servicios payments for an employee, ordered by payment_date DESC."""
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM prima_payments
+               WHERE tenant_member_id = $1 AND tenant_id = $2
+               ORDER BY payment_date DESC""",
+            member_id, tenant_id,
+        )
+
+        payments: List[PrimaPayment] = [
+            PrimaPayment(
+                id=r['id'],
+                tenant_id=r['tenant_id'],
+                tenant_member_id=r['tenant_member_id'],
+                semestre=r['semestre'],
+                gross_salary=Decimal(str(r['gross_salary'])),
+                days_worked=r['days_worked'],
+                prima_amount=Decimal(str(r['prima_amount'])),
+                payment_method=r['payment_method'],
+                payment_date=r['payment_date'],
+                notes=r['notes'],
+                created_at=r['created_at'],
+            )
+            for r in rows
+        ]
+
+        return PrimaPaymentListResponse(success=True, data=payments)
 
 
 async def delete_salary_payment_attachment(
