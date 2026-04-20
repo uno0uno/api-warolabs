@@ -11,13 +11,6 @@ class ApiTokenCreate(BaseModel):
     expires_in_days: Optional[int] = Field(default=None, ge=1, le=365, description="Dias hasta expirar (null = no expira)")
 
 
-class ApiTokenCreatedResponse(BaseModel):
-    """Response cuando se crea un token - incluye el token completo (unica vez que se muestra)"""
-    success: bool = True
-    message: str = "API token created successfully"
-    data: "ApiTokenWithSecret"
-
-
 class ApiTokenWithSecret(BaseModel):
     """Token recien creado con el secret visible (solo se muestra una vez)"""
     id: UUID
@@ -30,6 +23,13 @@ class ApiTokenWithSecret(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+class ApiTokenCreatedResponse(BaseModel):
+    """Response cuando se crea un token - incluye el token completo (unica vez que se muestra)"""
+    success: bool = True
+    message: str = "API token created successfully"
+    data: ApiTokenWithSecret
 
 
 class ApiToken(BaseModel):
