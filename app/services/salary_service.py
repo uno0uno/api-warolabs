@@ -31,6 +31,14 @@ from app.models.salary import (
     PrimaPaymentCreate,
     PrimaPaymentResponse,
     PrimaPaymentListResponse,
+    CesantiasPayment,
+    CesantiasPaymentCreate,
+    CesantiasPaymentResponse,
+    CesantiasPaymentListResponse,
+    IntCesantiasPayment,
+    IntCesantiasPaymentCreate,
+    IntCesantiasPaymentResponse,
+    IntCesantiasPaymentListResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -1949,3 +1957,495 @@ async def delete_salary_payment_attachment(
         logger.info(f"Deleted attachment {attachment_id}")
 
         return {'success': True, 'message': 'Attachment deleted successfully'}
+
+
+# =============================================================================
+# CESANTÍAS GL HELPER
+# =============================================================================
+
+async def _post_cesantias_payment_gl_entry(
+    conn,
+    tenant_id: UUID,
+    cesantias_payment_id: UUID,
+    cesantias_amount: Decimal,
+    payment_method: Optional[str],
+    payment_date: Any,
+    anio: int,
+) -> None:
+    """
+    Post cesantías consignation GL entry.
+    DR 2610 (Cesantías consolidadas) / CR bank account
+
+    This is a balance-sheet entry — liquidates the accrued liability.
+    Graceful degrade — never raises. Caller MUST wrap in try/except.
+    """
+    if cesantias_amount <= 0:
+        return
+
+    # Idempotency check
+    already_posted = await conn.fetchval(
+        """SELECT 1 FROM tenant_journal_entries
+           WHERE tenant_id = $1 AND source_module = 'nomina_cesantias' AND source_id = $2""",
+        tenant_id, cesantias_payment_id,
+    )
+    if already_posted:
+        logger.info(f"[cesantias_gl] Cesantias payment {cesantias_payment_id} already posted — skip")
+        return
+
+    # Resolve entry date
+    entry_date = payment_date.date() if hasattr(payment_date, 'date') else (payment_date or date.today())
+
+    # Check period open
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id, entry_date.year, entry_date.month,
+    )
+    if closed:
+        logger.warning(
+            f"[cesantias_gl] Period {entry_date.year}-{entry_date.month:02d} closed — skip GL for cesantias payment {cesantias_payment_id}"
+        )
+        return
+
+    # Resolve DR account: 2610 (Cesantías consolidadas) — debit liquidates liability
+    dr_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2610' AND is_active = true",
+        tenant_id,
+    )
+    if not dr_acct:
+        logger.warning(f"[cesantias_gl] DR account 2610 not found for tenant {tenant_id} — skip cesantias GL")
+        return
+
+    # Resolve CR account: bank/cash
+    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
+    cr_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, credit_code,
+    )
+    if not cr_acct:
+        logger.warning(
+            f"[cesantias_gl] CR account {credit_code} not found for tenant {tenant_id} — skip cesantias GL"
+        )
+        return
+
+    amount_float = float(cesantias_amount)
+
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'nomina_cesantias', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, entry_date, entry_date.year, entry_date.month,
+            f"Consignación cesantías — {anio}",
+            cesantias_payment_id, amount_float, amount_float,
+        )
+        entry_id = entry_row["id"]
+
+        # DR line — 2610 Cesantías consolidadas (debit liquidates the liability)
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, $3, 0, $4, 0)""",
+            entry_id, dr_acct["id"], amount_float, f"Cesantías {anio}",
+        )
+        # CR line — bank/cash
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, 0, $3, $4, 1)""",
+            entry_id, cr_acct["id"], amount_float, f"Cesantías {anio}",
+        )
+
+    logger.info(
+        f"[cesantias_gl] Posted cesantias entry {entry_id} for payment {cesantias_payment_id} "
+        f"(amount={amount_float}, DR=2610, CR={credit_code}, anio={anio})"
+    )
+
+
+# =============================================================================
+# INTERESES SOBRE CESANTÍAS GL HELPER
+# =============================================================================
+
+async def _post_int_cesantias_payment_gl_entry(
+    conn,
+    tenant_id: UUID,
+    int_cesantias_payment_id: UUID,
+    int_cesantias_amount: Decimal,
+    payment_method: Optional[str],
+    payment_date: Any,
+    anio: int,
+) -> None:
+    """
+    Post intereses sobre cesantías GL entry.
+    DR 2615 (Intereses sobre cesantías) / CR bank account
+
+    This is a balance-sheet entry — liquidates the accrued liability.
+    Graceful degrade — never raises. Caller MUST wrap in try/except.
+    """
+    if int_cesantias_amount <= 0:
+        return
+
+    # Idempotency check
+    already_posted = await conn.fetchval(
+        """SELECT 1 FROM tenant_journal_entries
+           WHERE tenant_id = $1 AND source_module = 'nomina_int_cesantias' AND source_id = $2""",
+        tenant_id, int_cesantias_payment_id,
+    )
+    if already_posted:
+        logger.info(f"[int_cesantias_gl] Int cesantias payment {int_cesantias_payment_id} already posted — skip")
+        return
+
+    # Resolve entry date
+    entry_date = payment_date.date() if hasattr(payment_date, 'date') else (payment_date or date.today())
+
+    # Check period open
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id, entry_date.year, entry_date.month,
+    )
+    if closed:
+        logger.warning(
+            f"[int_cesantias_gl] Period {entry_date.year}-{entry_date.month:02d} closed — skip GL for int_cesantias payment {int_cesantias_payment_id}"
+        )
+        return
+
+    # Resolve DR account: 2615 (Intereses sobre cesantías) — debit liquidates liability
+    dr_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2615' AND is_active = true",
+        tenant_id,
+    )
+    if not dr_acct:
+        logger.warning(f"[int_cesantias_gl] DR account 2615 not found for tenant {tenant_id} — skip int_cesantias GL")
+        return
+
+    # Resolve CR account: bank/cash
+    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
+    cr_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, credit_code,
+    )
+    if not cr_acct:
+        logger.warning(
+            f"[int_cesantias_gl] CR account {credit_code} not found for tenant {tenant_id} — skip int_cesantias GL"
+        )
+        return
+
+    amount_float = float(int_cesantias_amount)
+
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'nomina_int_cesantias', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, entry_date, entry_date.year, entry_date.month,
+            f"Pago intereses sobre cesantías — {anio}",
+            int_cesantias_payment_id, amount_float, amount_float,
+        )
+        entry_id = entry_row["id"]
+
+        # DR line — 2615 Intereses sobre cesantías (debit liquidates the liability)
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, $3, 0, $4, 0)""",
+            entry_id, dr_acct["id"], amount_float, f"Intereses sobre cesantías {anio}",
+        )
+        # CR line — bank/cash
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, 0, $3, $4, 1)""",
+            entry_id, cr_acct["id"], amount_float, f"Intereses sobre cesantías {anio}",
+        )
+
+    logger.info(
+        f"[int_cesantias_gl] Posted int_cesantias entry {entry_id} for payment {int_cesantias_payment_id} "
+        f"(amount={amount_float}, DR=2615, CR={credit_code}, anio={anio})"
+    )
+
+
+# =============================================================================
+# CESANTÍAS SERVICE FUNCTIONS
+# =============================================================================
+
+async def record_cesantias_payment(
+    request: Request,
+    member_id: UUID,
+    data: CesantiasPaymentCreate,
+) -> CesantiasPaymentResponse:
+    """Register cesantías consignation payment for an employee."""
+    from fastapi import HTTPException as _HTTPException
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        # Verify employee belongs to tenant
+        member = await conn.fetchrow(
+            "SELECT id FROM tenant_members WHERE id = $1 AND tenant_id = $2",
+            member_id, tenant_id,
+        )
+        if not member:
+            raise _HTTPException(status_code=404, detail="Employee not found")
+
+        # Verify employment_type is 'employee' or 'daily'
+        emp = await conn.fetchrow(
+            """SELECT employment_type FROM employee_salaries
+               WHERE tenant_member_id = $1 ORDER BY period_month DESC LIMIT 1""",
+            member_id,
+        )
+        if not emp or emp['employment_type'] not in ('employee', 'daily'):
+            raise _HTTPException(
+                status_code=400,
+                detail="Cesantías only apply to employees and daily workers (employment_type='employee' or 'daily')"
+            )
+
+        # Calculate cesantias_amount: (gross_salary / 360) * days_worked
+        days = data.days_worked if data.days_worked else 360
+        cesantias_amount = (
+            data.gross_salary / Decimal('360') * Decimal(days)
+        ).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        payment_date = data.payment_date or datetime.now()
+
+        # Insert cesantias_payment (unique constraint on tenant_member_id + anio prevents duplicates)
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO cesantias_payments
+                    (tenant_id, tenant_member_id, anio, gross_salary, days_worked,
+                     cesantias_amount, fondo_name, payment_method, payment_date, notes)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                RETURNING *
+                """,
+                tenant_id, member_id, data.anio, data.gross_salary, days,
+                cesantias_amount, data.fondo_name, data.payment_method, payment_date, data.notes,
+            )
+        except Exception as e:
+            if 'unique' in str(e).lower():
+                raise _HTTPException(
+                    status_code=409,
+                    detail=f"Cesantías for year {data.anio} already paid for this employee"
+                )
+            raise
+
+        payment_id = row['id']
+
+        # Post GL entry (graceful degrade — never blocks payment)
+        try:
+            await _post_cesantias_payment_gl_entry(
+                conn=conn,
+                tenant_id=tenant_id,
+                cesantias_payment_id=payment_id,
+                cesantias_amount=cesantias_amount,
+                payment_method=data.payment_method,
+                payment_date=payment_date,
+                anio=data.anio,
+            )
+        except Exception as gl_err:
+            logger.warning(f"[cesantias_gl] GL post failed for cesantias payment {payment_id}: {gl_err}")
+
+        cesantias = CesantiasPayment(
+            id=row['id'],
+            tenant_id=row['tenant_id'],
+            tenant_member_id=row['tenant_member_id'],
+            anio=row['anio'],
+            gross_salary=Decimal(str(row['gross_salary'])),
+            days_worked=row['days_worked'],
+            cesantias_amount=Decimal(str(row['cesantias_amount'])),
+            fondo_name=row['fondo_name'],
+            payment_method=row['payment_method'],
+            payment_date=row['payment_date'],
+            notes=row['notes'],
+            created_at=row['created_at'],
+        )
+
+        logger.info(
+            f"Cesantias payment recorded for employee {member_id}: "
+            f"anio={data.anio}, amount={cesantias_amount}"
+        )
+
+        return CesantiasPaymentResponse(success=True, data=cesantias)
+
+
+async def get_cesantias_payments(
+    request: Request,
+    member_id: UUID,
+) -> CesantiasPaymentListResponse:
+    """List cesantías payments for an employee, ordered by anio DESC."""
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM cesantias_payments
+               WHERE tenant_member_id = $1 AND tenant_id = $2
+               ORDER BY anio DESC""",
+            member_id, tenant_id,
+        )
+
+        payments: List[CesantiasPayment] = [
+            CesantiasPayment(
+                id=r['id'],
+                tenant_id=r['tenant_id'],
+                tenant_member_id=r['tenant_member_id'],
+                anio=r['anio'],
+                gross_salary=Decimal(str(r['gross_salary'])),
+                days_worked=r['days_worked'],
+                cesantias_amount=Decimal(str(r['cesantias_amount'])),
+                fondo_name=r['fondo_name'],
+                payment_method=r['payment_method'],
+                payment_date=r['payment_date'],
+                notes=r['notes'],
+                created_at=r['created_at'],
+            )
+            for r in rows
+        ]
+
+        return CesantiasPaymentListResponse(success=True, data=payments)
+
+
+# =============================================================================
+# INTERESES SOBRE CESANTÍAS SERVICE FUNCTIONS
+# =============================================================================
+
+async def record_int_cesantias_payment(
+    request: Request,
+    member_id: UUID,
+    data: IntCesantiasPaymentCreate,
+) -> IntCesantiasPaymentResponse:
+    """Register intereses sobre cesantías payment for an employee."""
+    from fastapi import HTTPException as _HTTPException
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        # Verify employee belongs to tenant
+        member = await conn.fetchrow(
+            "SELECT id FROM tenant_members WHERE id = $1 AND tenant_id = $2",
+            member_id, tenant_id,
+        )
+        if not member:
+            raise _HTTPException(status_code=404, detail="Employee not found")
+
+        # Verify employment_type is 'employee' or 'daily'
+        emp = await conn.fetchrow(
+            """SELECT employment_type FROM employee_salaries
+               WHERE tenant_member_id = $1 ORDER BY period_month DESC LIMIT 1""",
+            member_id,
+        )
+        if not emp or emp['employment_type'] not in ('employee', 'daily'):
+            raise _HTTPException(
+                status_code=400,
+                detail="Intereses sobre cesantías only apply to employees and daily workers (employment_type='employee' or 'daily')"
+            )
+
+        # Calculate int_cesantias_amount: base * 0.12, or use provided value
+        if data.int_cesantias_amount is not None:
+            int_cesantias_amount = data.int_cesantias_amount.quantize(
+                Decimal('0.01'), rounding=ROUND_HALF_UP
+            )
+        else:
+            int_cesantias_amount = (
+                data.cesantias_base * Decimal('0.12')
+            ).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        payment_date = data.payment_date or datetime.now()
+
+        # Insert int_cesantias_payment (unique constraint on tenant_member_id + anio prevents duplicates)
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO int_cesantias_payments
+                    (tenant_id, tenant_member_id, anio, cesantias_base,
+                     int_cesantias_amount, payment_method, payment_date, notes)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING *
+                """,
+                tenant_id, member_id, data.anio, data.cesantias_base,
+                int_cesantias_amount, data.payment_method, payment_date, data.notes,
+            )
+        except Exception as e:
+            if 'unique' in str(e).lower():
+                raise _HTTPException(
+                    status_code=409,
+                    detail=f"Intereses sobre cesantías for year {data.anio} already paid for this employee"
+                )
+            raise
+
+        payment_id = row['id']
+
+        # Post GL entry (graceful degrade — never blocks payment)
+        try:
+            await _post_int_cesantias_payment_gl_entry(
+                conn=conn,
+                tenant_id=tenant_id,
+                int_cesantias_payment_id=payment_id,
+                int_cesantias_amount=int_cesantias_amount,
+                payment_method=data.payment_method,
+                payment_date=payment_date,
+                anio=data.anio,
+            )
+        except Exception as gl_err:
+            logger.warning(f"[int_cesantias_gl] GL post failed for int_cesantias payment {payment_id}: {gl_err}")
+
+        int_cesantias = IntCesantiasPayment(
+            id=row['id'],
+            tenant_id=row['tenant_id'],
+            tenant_member_id=row['tenant_member_id'],
+            anio=row['anio'],
+            cesantias_base=Decimal(str(row['cesantias_base'])),
+            int_cesantias_amount=Decimal(str(row['int_cesantias_amount'])),
+            payment_method=row['payment_method'],
+            payment_date=row['payment_date'],
+            notes=row['notes'],
+            created_at=row['created_at'],
+        )
+
+        logger.info(
+            f"Int cesantias payment recorded for employee {member_id}: "
+            f"anio={data.anio}, amount={int_cesantias_amount}"
+        )
+
+        return IntCesantiasPaymentResponse(success=True, data=int_cesantias)
+
+
+async def get_int_cesantias_payments(
+    request: Request,
+    member_id: UUID,
+) -> IntCesantiasPaymentListResponse:
+    """List intereses sobre cesantías payments for an employee, ordered by anio DESC."""
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM int_cesantias_payments
+               WHERE tenant_member_id = $1 AND tenant_id = $2
+               ORDER BY anio DESC""",
+            member_id, tenant_id,
+        )
+
+        payments: List[IntCesantiasPayment] = [
+            IntCesantiasPayment(
+                id=r['id'],
+                tenant_id=r['tenant_id'],
+                tenant_member_id=r['tenant_member_id'],
+                anio=r['anio'],
+                cesantias_base=Decimal(str(r['cesantias_base'])),
+                int_cesantias_amount=Decimal(str(r['int_cesantias_amount'])),
+                payment_method=r['payment_method'],
+                payment_date=r['payment_date'],
+                notes=r['notes'],
+                created_at=r['created_at'],
+            )
+            for r in rows
+        ]
+
+        return IntCesantiasPaymentListResponse(success=True, data=payments)

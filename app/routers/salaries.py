@@ -23,6 +23,10 @@ from app.services.salary_service import (
     delete_salary_payment_attachment,
     record_prima_payment,
     get_prima_payments,
+    record_cesantias_payment,
+    get_cesantias_payments,
+    record_int_cesantias_payment,
+    get_int_cesantias_payments,
 )
 from app.models.salary import (
     EmployeesWithSalaryResponse,
@@ -35,6 +39,12 @@ from app.models.salary import (
     PrimaPaymentCreate,
     PrimaPaymentResponse,
     PrimaPaymentListResponse,
+    CesantiasPaymentCreate,
+    CesantiasPaymentResponse,
+    CesantiasPaymentListResponse,
+    IntCesantiasPaymentCreate,
+    IntCesantiasPaymentResponse,
+    IntCesantiasPaymentListResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -223,3 +233,65 @@ async def get_prima_payments_endpoint(
     List prima de servicios payments for an employee, ordered by payment_date DESC.
     """
     return await get_prima_payments(request, member_id)
+
+
+# =============================================================================
+# CESANTÍAS ENDPOINTS
+# =============================================================================
+
+@router.post("/employees/{member_id}/cesantias", response_model=CesantiasPaymentResponse)
+async def post_cesantias_payment_endpoint(
+    request: Request,
+    member_id: UUID,
+    data: CesantiasPaymentCreate,
+):
+    """
+    Register cesantías consignation payment for an employee.
+    Only valid for employment_type='employee' or 'daily'.
+    Returns 400 for contractor workers.
+    Returns 409 if cesantías for the same anio was already paid.
+    GL entry: DR 2610 / CR bank account (graceful degrade on failure).
+    """
+    return await record_cesantias_payment(request, member_id, data)
+
+
+@router.get("/employees/{member_id}/cesantias", response_model=CesantiasPaymentListResponse)
+async def get_cesantias_payments_endpoint(
+    request: Request,
+    member_id: UUID,
+):
+    """
+    List cesantías payments for an employee, ordered by anio DESC.
+    """
+    return await get_cesantias_payments(request, member_id)
+
+
+# =============================================================================
+# INTERESES SOBRE CESANTÍAS ENDPOINTS
+# =============================================================================
+
+@router.post("/employees/{member_id}/int-cesantias", response_model=IntCesantiasPaymentResponse)
+async def post_int_cesantias_payment_endpoint(
+    request: Request,
+    member_id: UUID,
+    data: IntCesantiasPaymentCreate,
+):
+    """
+    Register intereses sobre cesantías payment for an employee.
+    Only valid for employment_type='employee' or 'daily'.
+    Returns 400 for contractor workers.
+    Returns 409 if interest for the same anio was already paid.
+    GL entry: DR 2615 / CR bank account (graceful degrade on failure).
+    """
+    return await record_int_cesantias_payment(request, member_id, data)
+
+
+@router.get("/employees/{member_id}/int-cesantias", response_model=IntCesantiasPaymentListResponse)
+async def get_int_cesantias_payments_endpoint(
+    request: Request,
+    member_id: UUID,
+):
+    """
+    List intereses sobre cesantías payments for an employee, ordered by anio DESC.
+    """
+    return await get_int_cesantias_payments(request, member_id)

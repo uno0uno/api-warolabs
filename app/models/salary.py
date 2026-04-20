@@ -287,3 +287,94 @@ class PrimaPaymentListResponse(BaseModel):
 class PrimaPaymentResponse(BaseModel):
     success: bool = True
     data: PrimaPayment
+
+
+# =============================================================================
+# CESANTÍAS MODELS
+# =============================================================================
+
+class CesantiasPaymentCreate(BaseModel):
+    anio: int
+    gross_salary: Decimal
+    days_worked: Optional[int] = 360
+    fondo_name: Optional[str] = None
+    payment_method: Optional[str] = None
+    payment_date: Optional[datetime] = None
+    notes: Optional[str] = None
+
+    @field_validator('anio')
+    @classmethod
+    def validate_anio(cls, v: int) -> int:
+        if v < 2000 or v > 2100:
+            raise ValueError("anio must be a valid year (2000–2100)")
+        return v
+
+
+class CesantiasPayment(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    tenant_id: UUID
+    tenant_member_id: UUID
+    anio: int
+    gross_salary: Decimal
+    days_worked: int
+    cesantias_amount: Decimal
+    fondo_name: Optional[str] = None
+    payment_method: Optional[str] = None
+    payment_date: datetime
+    notes: Optional[str] = None
+    created_at: datetime
+
+
+class CesantiasPaymentListResponse(BaseModel):
+    success: bool = True
+    data: List[CesantiasPayment]
+
+
+class CesantiasPaymentResponse(BaseModel):
+    success: bool = True
+    data: CesantiasPayment
+
+
+# =============================================================================
+# INTERESES SOBRE CESANTÍAS MODELS
+# =============================================================================
+
+class IntCesantiasPaymentCreate(BaseModel):
+    anio: int
+    cesantias_base: Decimal
+    int_cesantias_amount: Optional[Decimal] = None  # if None, calculate as base * 0.12
+    payment_method: Optional[str] = None
+    payment_date: Optional[datetime] = None
+    notes: Optional[str] = None
+
+    @field_validator('anio')
+    @classmethod
+    def validate_anio(cls, v: int) -> int:
+        if v < 2000 or v > 2100:
+            raise ValueError("anio must be a valid year (2000–2100)")
+        return v
+
+
+class IntCesantiasPayment(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    tenant_id: UUID
+    tenant_member_id: UUID
+    anio: int
+    cesantias_base: Decimal
+    int_cesantias_amount: Decimal
+    payment_method: Optional[str] = None
+    payment_date: datetime
+    notes: Optional[str] = None
+    created_at: datetime
+
+
+class IntCesantiasPaymentListResponse(BaseModel):
+    success: bool = True
+    data: List[IntCesantiasPayment]
+
+
+class IntCesantiasPaymentResponse(BaseModel):
+    success: bool = True
+    data: IntCesantiasPayment
