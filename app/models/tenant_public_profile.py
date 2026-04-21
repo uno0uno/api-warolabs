@@ -65,6 +65,10 @@ class TenantPublicProfileBase(BaseModel):
     # Table management module flag
     tables_enabled: bool = Field(False, description="Whether the table management module is enabled for this tenant")
 
+    # KDS / Comandas module flags
+    comandas_enabled: bool = Field(False, description="Whether the comandas/KDS module is enabled. When false, system behaves exactly as today.")
+    kds_enabled: bool = Field(False, description="Whether KDS station screens (/cocina/[id]) are enabled. Requires comandas_enabled=true.")
+
 class TenantPublicProfileCreate(TenantPublicProfileBase):
     """Create tenant public profile"""
     tenant_id: UUID = Field(..., description="Tenant ID")
@@ -99,6 +103,8 @@ class TenantPublicProfileUpdate(BaseModel):
     estimated_preparation_time: Optional[int] = None
     is_manually_open: Optional[bool] = None
     tables_enabled: Optional[bool] = None
+    comandas_enabled: Optional[bool] = None
+    kds_enabled: Optional[bool] = None
 
 class TenantPublicProfile(TenantPublicProfileBase):
     """Complete tenant public profile with all fields"""

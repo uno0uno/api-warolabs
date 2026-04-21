@@ -69,9 +69,10 @@ async def upsert_public_profile(
                         seo_title, seo_description,
                         accepts_online_orders, min_order_amount, estimated_preparation_time,
                         tables_enabled,
+                        comandas_enabled, kds_enabled,
                         updated_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, CURRENT_TIMESTAMP)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, CURRENT_TIMESTAMP)
                     ON CONFLICT (tenant_id)
                     DO UPDATE SET
                         slug = EXCLUDED.slug,
@@ -95,6 +96,8 @@ async def upsert_public_profile(
                         min_order_amount = EXCLUDED.min_order_amount,
                         estimated_preparation_time = EXCLUDED.estimated_preparation_time,
                         tables_enabled = EXCLUDED.tables_enabled,
+                        comandas_enabled = EXCLUDED.comandas_enabled,
+                        kds_enabled = EXCLUDED.kds_enabled,
                         updated_at = CURRENT_TIMESTAMP
                     RETURNING *
                 """
@@ -122,7 +125,9 @@ async def upsert_public_profile(
                     profile_data.accepts_online_orders,
                     profile_data.min_order_amount,
                     profile_data.estimated_preparation_time,
-                    profile_data.tables_enabled
+                    profile_data.tables_enabled,
+                    profile_data.comandas_enabled,
+                    profile_data.kds_enabled
                 )
 
                 profile = TenantPublicProfile(**dict(result))
