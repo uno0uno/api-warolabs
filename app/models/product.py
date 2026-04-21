@@ -1,6 +1,6 @@
 # Product models for menu management
 from pydantic import BaseModel, Field, model_validator
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Dict, Any
 from uuid import UUID
 from datetime import datetime
 from decimal import Decimal
@@ -64,6 +64,8 @@ class ProductBase(BaseModel):
     is_resale: bool = Field(False, description="Whether product is a resale product (not prepared)")
     allow_modifiers: bool = Field(True, description="Whether product allows modifiers")
     tax_category: Literal['standard', 'liquor', 'exempt'] = Field("standard", description="Tax classification: standard (INC/IVA), liquor (IVA licores 5%), exempt (no tax)")
+    station_id: Optional[UUID] = None
+    kitchen_name: Optional[str] = Field(None, max_length=100)
 
 class ProductCreate(ProductBase):
     """Create product with recipe"""
@@ -101,6 +103,8 @@ class ProductUpdate(BaseModel):
     allow_modifiers: Optional[bool] = None
     tax_category: Optional[Literal['standard', 'liquor', 'exempt']] = Field(None, description="Tax classification: standard, liquor, exempt")
     ingredients: Optional[List[RecipeIngredientBase]] = Field(None, description="Updated recipe ingredients")
+    station_id: Optional[UUID] = None
+    kitchen_name: Optional[str] = Field(None, max_length=100)
 
 class Product(ProductBase):
     """Complete product with calculated fields"""
@@ -111,6 +115,9 @@ class Product(ProductBase):
     margen_objetivo: Optional[Decimal] = Field(None, description="Target margin")
     created_at: datetime
     updated_at: datetime
+
+    # Station routing
+    station: Optional[Dict[str, Any]] = None
 
     # Related data
     category_name: Optional[str] = None

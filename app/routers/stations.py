@@ -44,8 +44,13 @@ class ReorderRequest(BaseModel):
     items: List[ReorderItem] = Field(..., min_length=1)
 
 
-# IMPORTANT: static paths (/active, /reorder) are registered BEFORE parameterized
-# paths (/{station_id}) to prevent FastAPI from trying to parse literal strings as UUIDs.
+class SetCategoryStationRequest(BaseModel):
+    station_id: Optional[UUID] = None
+
+
+# IMPORTANT: static paths (/active, /reorder, /categories) are registered BEFORE
+# parameterized paths (/{station_id}) to prevent FastAPI from trying to parse
+# literal strings as UUIDs.
 
 
 @router.get("")
@@ -70,6 +75,24 @@ async def reorder_stations_endpoint(request: Request, body: ReorderRequest):
 async def create_station_endpoint(request: Request, body: CreateStationRequest):
     """Create a new kitchen station for the tenant."""
     return await stations_service.create_station(request, body)
+
+
+@router.get("/categories")
+async def list_category_stations_endpoint(request: Request):
+    """List all category→station assignments for the tenant."""
+    return await stations_service.get_category_stations(request)
+
+
+@router.post("/categories/{category_id}")
+async def set_category_station_endpoint(request: Request, category_id: UUID, body: SetCategoryStationRequest):
+    """Assign (or clear) a kitchen station for a category (UPSERT). Pass station_id=null to clear."""
+    return await stations_service.set_category_station(request, category_id, body.station_id)
+
+
+@router.delete("/categories/{category_id}")
+async def delete_category_station_endpoint(request: Request, category_id: UUID):
+    """Remove the station assignment for a category."""
+    return await stations_service.delete_category_station(request, category_id)
 
 
 @router.patch("/{station_id}")

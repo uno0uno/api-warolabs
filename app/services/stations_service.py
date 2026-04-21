@@ -193,6 +193,142 @@ async def toggle_station(request: Request, station_id: UUID, is_active: bool) ->
         return {"success": True, "data": dict(row)}
 
 
+async def get_category_stations(request: Request) -> dict:
+    """Return all category→station assignments for the tenant."""
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                tcs.category_id,
+                c.name AS category_name,
+                tcs.station_id,
+                ks.name AS station_name,
+                ks.color AS station_color
+            FROM tenant_category_stations tcs
+            JOIN categories c ON tcs.category_id = c.id
+            JOIN kitchen_stations ks ON tcs.station_id = ks.id
+            WHERE tcs.tenant_id = $1
+            ORDER BY c.name
+            """,
+            tenant_id,
+        )
+        return {"success": True, "data": [dict(r) for r in rows]}
+
+
+async def set_category_station(request: Request, category_id: UUID, station_id: Optional[UUID]) -> dict:
+    """
+    Assign a kitchen station to a category for this tenant (UPSERT).
+    Pass station_id=None to clear the assignment (calls delete_category_station logic).
+    """
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    if station_id is None:
+        return await _delete_category_station_conn(tenant_id, category_id, None)
+
+    async with get_db_connection() as conn:
+        # Verify station belongs to this tenant
+        exists = await conn.fetchval(
+            "SELECT 1 FROM kitchen_stations WHERE id = $1 AND tenant_id = $2",
+            station_id, tenant_id,
+        )
+        if not exists:
+            raise HTTPException(status_code=404, detail="Station not found")
+
+        row = await conn.fetchrow(
+            """
+            INSERT INTO tenant_category_stations (tenant_id, category_id, station_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (tenant_id, category_id)
+            DO UPDATE SET station_id = EXCLUDED.station_id, updated_at = now()
+            RETURNING *
+            """,
+            tenant_id, category_id, station_id,
+        )
+        logger.info(f"Category {category_id} assigned to station {station_id} for tenant {tenant_id}")
+        return {"success": True, "data": dict(row)}
+
+
+async def delete_category_station(request: Request, category_id: UUID) -> dict:
+    """Remove the station assignment for a category."""
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    async with get_db_connection() as conn:
+        deleted = await conn.fetchval(
+            """
+            DELETE FROM tenant_category_stations
+            WHERE tenant_id = $1 AND category_id = $2
+            RETURNING 1
+            """,
+            tenant_id, category_id,
+        )
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        logger.info(f"Category {category_id} station assignment removed for tenant {tenant_id}")
+        return {"success": True, "message": "Assignment removed"}
+
+
+async def _delete_category_station_conn(tenant_id: UUID, category_id: UUID, _conn) -> dict:
+    """Internal helper: delete category assignment using an existing or new connection."""
+    async with get_db_connection() as conn:
+        deleted = await conn.fetchval(
+            """
+            DELETE FROM tenant_category_stations
+            WHERE tenant_id = $1 AND category_id = $2
+            RETURNING 1
+            """,
+            tenant_id, category_id,
+        )
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        return {"success": True, "message": "Assignment removed"}
+
+
+async def get_effective_station(product_id: UUID, tenant_id: UUID, conn) -> Optional[UUID]:
+    """
+    Two-tier station routing cascade:
+      Tier 1 — product.station_id (explicit override)
+      Tier 2 — tenant_category_stations for the product's category
+      Fallback — None (no comanda generated)
+
+    Takes an existing asyncpg connection so it can run inside fire_comandas() transactions.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT p.station_id, p.category_id
+        FROM product p
+        WHERE p.id = $1 AND p.tenant_id = $2
+        """,
+        product_id, tenant_id,
+    )
+    if not row:
+        return None
+
+    # Tier 1: explicit product-level override
+    if row['station_id']:
+        return row['station_id']
+
+    # Tier 2: category-level mapping for this tenant
+    category_station = await conn.fetchval(
+        """
+        SELECT station_id FROM tenant_category_stations
+        WHERE tenant_id = $1 AND category_id = $2
+        """,
+        tenant_id, row['category_id'],
+    )
+    return category_station  # None if no mapping
+
+
 async def reorder_stations(request: Request, items: List) -> dict:
     """
     Bulk-update display_order for multiple stations in a single query.

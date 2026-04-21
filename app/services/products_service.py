@@ -52,9 +52,9 @@ async def create_product_with_recipe(
                     INSERT INTO product (
                         name, description, price, category_id, product_base_type_id, preparation_time,
                         controla_stock, is_available, is_available_online, is_combo, is_resale, allow_modifiers,
-                        tax_category, tenant_id
+                        tax_category, tenant_id, station_id, kitchen_name
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                     RETURNING id, created_at, updated_at
                 """
                 product_result = await conn.fetchrow(
@@ -72,7 +72,9 @@ async def create_product_with_recipe(
                     product_data.is_resale,
                     product_data.allow_modifiers,
                     product_data.tax_category,
-                    tenant_id
+                    tenant_id,
+                    product_data.station_id,
+                    product_data.kitchen_name,
                 )
 
                 product_id = product_result['id']
@@ -202,6 +204,11 @@ async def get_product_by_id(
                     p.tenant_id,
                     p.created_at,
                     p.updated_at,
+                    p.station_id,
+                    p.kitchen_name,
+                    ks.id as ks_id,
+                    ks.name as station_name,
+                    ks.color as station_color,
                     -- Calculated fields
                     CASE
                         WHEN p.costo_calculado > 0
@@ -211,6 +218,7 @@ async def get_product_by_id(
                     (p.price - COALESCE(p.costo_calculado, 0)) as margen_valor
                 FROM product p
                 LEFT JOIN categories c ON p.category_id = c.id
+                LEFT JOIN kitchen_stations ks ON p.station_id = ks.id
                 WHERE p.id = $1 AND p.tenant_id = $2
             """
 
@@ -325,6 +333,19 @@ async def get_product_by_id(
 
             # Build product dict
             product_dict = dict(product_row)
+            # Build nested station object from joined kitchen_stations columns
+            if product_dict.get('ks_id'):
+                product_dict['station'] = {
+                    'id': product_dict['ks_id'],
+                    'name': product_dict['station_name'],
+                    'color': product_dict['station_color'],
+                }
+            else:
+                product_dict['station'] = None
+            # Remove flat station columns (not part of Product model)
+            product_dict.pop('ks_id', None)
+            product_dict.pop('station_name', None)
+            product_dict.pop('station_color', None)
             product_dict['ingredients'] = [dict(row) for row in recipe_rows]
             product_dict['recipe_base_ids'] = [row['product_base_type_id'] for row in recipe_base_rows]
             product_dict['modifier_groups'] = modifier_groups
@@ -423,11 +444,17 @@ async def get_products_list(
                     p.margen_objetivo,
                     p.tenant_id,
                     p.created_at,
-                    p.updated_at
+                    p.updated_at,
+                    p.station_id,
+                    p.kitchen_name,
+                    ks.id as ks_id,
+                    ks.name as station_name,
+                    ks.color as station_color
                 FROM product p
                 LEFT JOIN categories c ON p.category_id = c.id
                 LEFT JOIN direct_costs dc ON p.id = dc.product_id
                 LEFT JOIN base_costs bc ON p.id = bc.product_id
+                LEFT JOIN kitchen_stations ks ON p.station_id = ks.id
                 WHERE p.tenant_id = $1
             """
 
@@ -612,6 +639,19 @@ async def get_products_list(
                         product_dict['modifier_groups'] = []
                 else:
                     product_dict['modifier_groups'] = []  # Empty for list view
+
+                # Build nested station object from joined kitchen_stations columns
+                if product_dict.get('ks_id'):
+                    product_dict['station'] = {
+                        'id': product_dict['ks_id'],
+                        'name': product_dict['station_name'],
+                        'color': product_dict['station_color'],
+                    }
+                else:
+                    product_dict['station'] = None
+                product_dict.pop('ks_id', None)
+                product_dict.pop('station_name', None)
+                product_dict.pop('station_color', None)
 
                 products.append(Product(**product_dict))
 
