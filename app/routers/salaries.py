@@ -387,7 +387,7 @@ async def get_dotacion_payments_endpoint(
 # PILA ENDPOINTS
 # =============================================================================
 
-@router.get("/salaries/pila/pending", response_model=PilaPendingResponse)
+@router.get("/pila/pending", response_model=PilaPendingResponse)
 async def get_pila_pending_endpoint(request: Request):
     """
     Return periods with net positive SS liability in accounts 237005 and 237010.
@@ -396,7 +396,7 @@ async def get_pila_pending_endpoint(request: Request):
     return await get_pila_pending(request)
 
 
-@router.post("/salaries/pila", response_model=PilaPaymentResponse)
+@router.post("/pila", response_model=PilaPaymentResponse)
 async def post_pila_payment_endpoint(
     request: Request,
     data: PilaPaymentCreate,
@@ -409,7 +409,7 @@ async def post_pila_payment_endpoint(
     return await record_pila_payment(request, data)
 
 
-@router.get("/salaries/pila", response_model=PilaPaymentListResponse)
+@router.get("/pila", response_model=PilaPaymentListResponse)
 async def get_pila_payments_endpoint(request: Request):
     """
     List all PILA payments for the tenant, ordered by payment_date DESC.
