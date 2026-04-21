@@ -161,11 +161,13 @@ async def _post_salary_gl_entry(
     payment_method: Optional[str],
     description: str,
     withholding_amount: Optional[Decimal] = None,
+    net_pay: Optional[Decimal] = None,
+    employee_ss: Optional[Decimal] = None,
 ) -> None:
     """
     Post a double-entry GL journal entry for a salary payment.
 
-    Without withholding (2 lines):
+    Without withholding or SS (2 lines):
       DR: 5105 (employee/daily) or 5199 (contractor)  — gross
       CR: 1105/1110 (cash/bank)                        — gross
 
@@ -173,6 +175,11 @@ async def _post_salary_gl_entry(
       DR: 5199 Honorarios                              — gross
       CR: 1110 Bancos                                  — net (gross − withholding)
       CR: 2367 Retención en la fuente por pagar        — withholding
+
+    With SS deductions (3 lines, employees/daily):
+      DR: 5105 Sueldos                                 — gross
+      CR: 1110 Bancos                                  — net_pay (gross − employee_ss)
+      CR: 2370 Retenciones y aportes de nómina         — employee_ss
 
     Silently skips if accounts missing, period closed, or already posted.
     Caller MUST wrap in try/except.
@@ -223,6 +230,7 @@ async def _post_salary_gl_entry(
 
     gross_amt = float(payment_amount)
     use_withholding = withholding_amount and withholding_amount > 0
+    use_ss = net_pay is not None and employee_ss is not None and employee_ss > 0
 
     if use_withholding:
         wh_amt = float(withholding_amount or 0)
@@ -236,6 +244,15 @@ async def _post_salary_gl_entry(
         if not wh_acct:
             logger.warning(f"[GL] Withholding account 2367 not found for tenant {tenant_id} — posting without withholding split")
             use_withholding = False
+
+    if use_ss:
+        ss_acct = await conn.fetchrow(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2370' AND is_active = true",
+            tenant_id,
+        )
+        if not ss_acct:
+            logger.warning(f"[GL] SS account 2370 not found for tenant {tenant_id} — posting gross without SS split")
+            use_ss = False
 
     async with conn.transaction():
         entry_row = await conn.fetchrow(
@@ -274,6 +291,24 @@ async def _post_salary_gl_entry(
                 entry_id, wh_acct["id"], wh_amt, f"Retefuente — {description}",
             )
             logger.info(f"[GL] Posted salary entry {entry_id} for payment {payment_id} (gross={gross_amt}, net={net_amt}, wh={wh_amt}, debit={debit_code}, credit={credit_code}, wh_acct=2367)")
+        elif use_ss:
+            net_amt_ss = float(net_pay)
+            ss_emp_amt = float(employee_ss)
+            # Credit line 1 — cash/bank (net: gross − employee SS)
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, $4, 1)""",
+                entry_id, credit_acct["id"], net_amt_ss, description,
+            )
+            # Credit line 2 — 2370 employee SS deduction
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, $4, 2)""",
+                entry_id, ss_acct["id"], ss_emp_amt, f"SS empleado — {description}",
+            )
+            logger.info(f"[GL] Posted salary entry {entry_id} for payment {payment_id} (gross={gross_amt}, net={net_amt_ss}, ss_emp={ss_emp_amt}, debit={debit_code}, credit={credit_code})")
         else:
             # Credit line — cash/bank (full amount)
             await conn.execute(
@@ -438,6 +473,104 @@ async def _post_provision_gl_entries(
     )
 
 
+async def _post_ss_gl_entry(
+    conn,
+    tenant_id: UUID,
+    payment_id: UUID,
+    payment_date,
+    employee_health: Decimal,
+    employee_pension: Decimal,
+    employer_health: Decimal,
+    employer_pension: Decimal,
+    employer_arl: Decimal,
+    employer_caja: Decimal,
+    description: str,
+) -> None:
+    """
+    Post SS/parafiscales GL entry for a salary payment.
+
+    Entry 1 — source_module='nomina_ss' (employer contributions):
+      DR 5120  Aportes EPS/ARL/AFP/Caja   employer_total
+      CR 2370  SS y parafiscales por pagar employer_total
+
+    Employee deductions (employee_health + employee_pension) are credited to 2370
+    via the main salary entry — see _post_salary_gl_entry with net_pay.
+
+    Graceful degrade — never raises, never blocks payment.
+    """
+    employer_total = employer_health + employer_pension + employer_arl + employer_caja
+    if employer_total <= 0:
+        return
+
+    # Idempotency: skip if already posted for this payment
+    already_posted = await conn.fetchval(
+        """SELECT 1 FROM tenant_journal_entries
+           WHERE tenant_id = $1 AND source_module = 'nomina_ss' AND source_id = $2 AND status = 'posted'""",
+        tenant_id, payment_id
+    )
+    if already_posted:
+        logger.info(f"[ss_gl] SS entry for payment {payment_id} already posted — skip")
+        return
+
+    # Check period open
+    entry_date = payment_date.date() if hasattr(payment_date, 'date') else payment_date
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id, entry_date.year, entry_date.month,
+    )
+    if closed:
+        logger.warning(f"[ss_gl] Period closed — skip SS GL for payment {payment_id}")
+        return
+
+    # Resolve accounts
+    debit_acct = await conn.fetchval(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '5120' AND is_active = true",
+        tenant_id,
+    )
+    credit_acct = await conn.fetchval(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2370' AND is_active = true",
+        tenant_id,
+    )
+    if not debit_acct or not credit_acct:
+        logger.warning(f"[ss_gl] Missing account 5120 or 2370 for tenant {tenant_id} — skip SS GL")
+        return
+
+    emp_total = float(employer_total)
+    ss_description = f"Aportes SS empleador — {description}"
+
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'nomina_ss', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, entry_date, entry_date.year, entry_date.month,
+            ss_description, payment_id, emp_total, emp_total,
+        )
+        entry_id = entry_row["id"]
+
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, $3, 0, $4, 0)""",
+            entry_id, debit_acct, emp_total, ss_description,
+        )
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, 0, $3, $4, 1)""",
+            entry_id, credit_acct, emp_total, ss_description,
+        )
+
+    logger.info(
+        f"[ss_gl] Posted SS entry {entry_id} for payment {payment_id} "
+        f"(employer: health={employer_health}, pension={employer_pension}, arl={employer_arl}, caja={employer_caja})"
+    )
+
+
 async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResponse:
     """Get all employees with their salary configuration"""
     session = require_valid_session(request)
@@ -463,6 +596,7 @@ async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResp
                 es.notes as salary_notes,
                 es.employment_type,
                 es.daily_rate,
+                es.arl_rate,
                 (SELECT payment_date FROM salary_payments sp
                  WHERE sp.tenant_member_id = tm.id
                  ORDER BY payment_date DESC LIMIT 1) as last_payment_date,
@@ -512,6 +646,7 @@ async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResp
                 salary_notes=row['salary_notes'],
                 employment_type=row['employment_type'],
                 daily_rate=Decimal(str(row['daily_rate'])) if row.get('daily_rate') else None,
+                arl_rate=Decimal(str(row['arl_rate'])) if row.get('arl_rate') else None,
                 last_payment_date=row['last_payment_date'],
                 last_payment_amount=Decimal(str(row['last_payment_amount'])) if row['last_payment_amount'] else None,
                 last_payment_period=row['last_payment_period']
@@ -806,9 +941,9 @@ async def record_salary_payment_json(
         if not employee:
             raise NotFoundError("Employee not found")
 
-        # Fetch salary config to get employment_type and daily_rate
+        # Fetch salary config to get employment_type, daily_rate, and arl_rate
         salary_config = await conn.fetchrow(
-            """SELECT employment_type, daily_rate FROM employee_salaries
+            """SELECT employment_type, daily_rate, arl_rate FROM employee_salaries
                WHERE tenant_member_id = $1 ORDER BY period_month DESC LIMIT 1""",
             payment_data.tenant_member_id
         )
@@ -827,6 +962,36 @@ async def record_salary_payment_json(
             withholding_rate = None
             withholding_amount = None
 
+        # Calculate SS/parafiscales (employees and daily workers, when ss_enabled)
+        ss_enabled = getattr(payment_data, 'ss_enabled', False) and employment_type != 'contractor'
+        Q = Decimal('0.01')
+        employee_health = Decimal('0')
+        employee_pension = Decimal('0')
+        employer_health = Decimal('0')
+        employer_pension = Decimal('0')
+        employer_arl = Decimal('0')
+        employer_caja = Decimal('0')
+        net_pay = None
+
+        if ss_enabled:
+            arl_rate = getattr(payment_data, 'arl_rate', None)
+            if arl_rate is None and salary_config and salary_config.get('arl_rate'):
+                arl_rate = Decimal(str(salary_config['arl_rate']))
+            if arl_rate is None:
+                arl_rate = Decimal('0.005220')
+
+            caja_rate = getattr(payment_data, 'caja_rate', None)
+            if caja_rate is None:
+                caja_rate = Decimal('0.04')
+
+            employee_health  = (payment_amount * Decimal('0.04')).quantize(Q)
+            employee_pension = (payment_amount * Decimal('0.04')).quantize(Q)
+            employer_health  = (payment_amount * Decimal('0.085')).quantize(Q)
+            employer_pension = (payment_amount * Decimal('0.12')).quantize(Q)
+            employer_arl     = (payment_amount * arl_rate).quantize(Q)
+            employer_caja    = (payment_amount * caja_rate).quantize(Q)
+            net_pay          = payment_amount - employee_health - employee_pension
+
         # Create payment
         payment_id = uuid4()
         insert_query = """
@@ -834,14 +999,14 @@ async def record_salary_payment_json(
                 id, tenant_id, tenant_member_id, period_month,
                 payment_amount, payment_method, payment_reference,
                 payment_date, notes, status, days_worked,
-                withholding_rate, withholding_amount,
+                withholding_rate, withholding_amount, net_pay,
                 created_by, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
             RETURNING id, tenant_id, tenant_member_id, period_month,
                       payment_amount, payment_method, payment_reference,
                       payment_date, notes, status, days_worked,
-                      withholding_rate, withholding_amount,
+                      withholding_rate, withholding_amount, net_pay,
                       created_by, created_at, updated_at
         """
 
@@ -860,6 +1025,7 @@ async def record_salary_payment_json(
             payment_data.days_worked,
             withholding_rate,
             withholding_amount,
+            net_pay,
             user_id
         )
 
@@ -871,6 +1037,7 @@ async def record_salary_payment_json(
             )
             emp_name = employee_name_row['name'] if employee_name_row else 'Empleado'
             gl_description = f"Salario {payment_data.period_month} — {emp_name}"
+            employee_ss = (employee_health + employee_pension) if ss_enabled else None
             await _post_salary_gl_entry(
                 conn=conn,
                 tenant_id=tenant_id,
@@ -881,6 +1048,8 @@ async def record_salary_payment_json(
                 payment_method=str(payment_data.payment_method) if payment_data.payment_method else None,
                 description=gl_description,
                 withholding_amount=withholding_amount,
+                net_pay=net_pay,
+                employee_ss=employee_ss,
             )
         except Exception as gl_err:
             logger.warning(f"[GL] Salary GL posting failed for payment {payment_id}: {gl_err}")
@@ -898,6 +1067,37 @@ async def record_salary_payment_json(
         except Exception as prov_err:
             logger.warning(f"[provision_gl] Provision GL posting failed for payment {payment_id}: {prov_err}")
 
+        # Post SS employer contributions GL (graceful degrade — never blocks payment)
+        if ss_enabled:
+            try:
+                await _post_ss_gl_entry(
+                    conn=conn,
+                    tenant_id=tenant_id,
+                    payment_id=payment_id,
+                    payment_date=payment_data.payment_date,
+                    employee_health=employee_health,
+                    employee_pension=employee_pension,
+                    employer_health=employer_health,
+                    employer_pension=employer_pension,
+                    employer_arl=employer_arl,
+                    employer_caja=employer_caja,
+                    description=gl_description,
+                )
+                # Store SS amounts in salary_provisions
+                await conn.execute(
+                    """UPDATE salary_provisions SET
+                           employee_health=$1, employee_pension=$2,
+                           employer_health=$3, employer_pension=$4,
+                           employer_arl=$5, employer_caja=$6, net_pay=$7
+                       WHERE payment_id=$8""",
+                    employee_health, employee_pension,
+                    employer_health, employer_pension,
+                    employer_arl, employer_caja, net_pay,
+                    payment_id,
+                )
+            except Exception as ss_err:
+                logger.warning(f"[ss_gl] SS GL posting failed for payment {payment_id}: {ss_err}")
+
         payment = SalaryPayment(
             id=row['id'],
             tenant_id=row['tenant_id'],
@@ -910,6 +1110,7 @@ async def record_salary_payment_json(
             notes=row['notes'],
             status=row.get('status', 'paid'),
             days_worked=row.get('days_worked'),
+            net_pay=Decimal(str(row['net_pay'])) if row.get('net_pay') is not None else None,
             withholding_rate=Decimal(str(row['withholding_rate'])) if row['withholding_rate'] is not None else None,
             withholding_amount=Decimal(str(row['withholding_amount'])) if row['withholding_amount'] is not None else None,
             created_by=row['created_by'],

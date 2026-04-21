@@ -89,6 +89,9 @@ class SalaryPaymentBase(BaseModel):
     days_worked: Optional[int] = Field(None, ge=1, le=31, description="Days worked (for daily workers)")
     withholding_rate: Optional[Decimal] = Field(None, ge=0, le=1, description="Withholding rate 0–1 (e.g. 0.10 = 10%)")
     withholding_amount: Optional[Decimal] = Field(None, ge=0, description="Amount withheld for DIAN (account 2367)")
+    ss_enabled: Optional[bool] = Field(False, description="Whether to apply SS/parafiscales deductions on this payment")
+    arl_rate: Optional[Decimal] = Field(None, ge=0, le=Decimal('0.07'), description="ARL rate 0–0.07 (default 0.00522 = clase I)")
+    caja_rate: Optional[Decimal] = Field(None, ge=0, le=Decimal('0.04'), description="Caja Compensación rate (default 0.04)")
 
 
 class SalaryPaymentCreate(SalaryPaymentBase):
@@ -111,6 +114,7 @@ class SalaryPayment(SalaryPaymentBase):
     tenant_id: UUID
     tenant_member_id: UUID
     days_worked: Optional[int] = None
+    net_pay: Optional[Decimal] = None
     created_by: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
@@ -176,6 +180,7 @@ class EmployeeWithSalary(BaseModel):
     salary_notes: Optional[str] = None
     employment_type: Optional[str] = None
     daily_rate: Optional[Decimal] = None
+    arl_rate: Optional[Decimal] = None
 
     # Last payment info
     last_payment_date: Optional[datetime] = None
