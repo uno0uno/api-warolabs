@@ -1818,16 +1818,18 @@ async def record_prima_payment(
         if not member:
             raise _HTTPException(status_code=404, detail="Employee not found")
 
-        # Verify employment_type is 'employee'
+        # Verify employment_type is 'employee' or 'daily'
+        # Per Sentencia C-825/06 (Corte Constitucional), jornaleros/ocasionales are entitled
+        # to prima de servicios proportionally. Only contractors are excluded.
         emp = await conn.fetchrow(
             """SELECT employment_type FROM employee_salaries
                WHERE tenant_member_id = $1 ORDER BY period_month DESC LIMIT 1""",
             member_id,
         )
-        if not emp or emp['employment_type'] != 'employee':
+        if not emp or emp['employment_type'] == 'contractor':
             raise _HTTPException(
                 status_code=400,
-                detail="Prima de servicios only applies to employees (employment_type='employee')"
+                detail="Prima de servicios only applies to employees and daily workers (not contractors)"
             )
 
         # Calculate prima_amount: (gross_salary / 180) * days_worked
