@@ -31,6 +31,9 @@ from app.services.salary_service import (
     get_vacaciones_payments,
     record_dotacion_payment,
     get_dotacion_payments,
+    record_pila_payment,
+    get_pila_payments,
+    get_pila_pending,
 )
 from app.models.salary import (
     EmployeesWithSalaryResponse,
@@ -55,6 +58,10 @@ from app.models.salary import (
     DotacionPaymentCreate,
     DotacionPaymentResponse,
     DotacionPaymentListResponse,
+    PilaPaymentCreate,
+    PilaPaymentResponse,
+    PilaPaymentListResponse,
+    PilaPendingResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -362,3 +369,37 @@ async def get_dotacion_payments_endpoint(
     List dotación payments for an employee, ordered by year DESC, period DESC.
     """
     return await get_dotacion_payments(request, member_id)
+
+
+# =============================================================================
+# PILA ENDPOINTS
+# =============================================================================
+
+@router.get("/salaries/pila/pending", response_model=PilaPendingResponse)
+async def get_pila_pending_endpoint(request: Request):
+    """
+    Return periods with net positive SS liability in accounts 237005 and 237010.
+    Used to pre-calculate suggested PILA amounts before payment.
+    """
+    return await get_pila_pending(request)
+
+
+@router.post("/salaries/pila", response_model=PilaPaymentResponse)
+async def post_pila_payment_endpoint(
+    request: Request,
+    data: PilaPaymentCreate,
+):
+    """
+    Register a PILA disbursement for a given period.
+    Posts GL entry: DR 237005 (employee SS) + DR 237010 (employer SS) / CR bank.
+    Multiple payments per period are allowed (partial or catch-up payments).
+    """
+    return await record_pila_payment(request, data)
+
+
+@router.get("/salaries/pila", response_model=PilaPaymentListResponse)
+async def get_pila_payments_endpoint(request: Request):
+    """
+    List all PILA payments for the tenant, ordered by payment_date DESC.
+    """
+    return await get_pila_payments(request)

@@ -482,3 +482,61 @@ class DotacionPaymentListResponse(BaseModel):
 class DotacionPaymentResponse(BaseModel):
     success: bool = True
     data: DotacionPayment
+
+
+# =============================================================================
+# PILA PAYMENT MODELS
+# =============================================================================
+
+class PilaPaymentCreate(BaseModel):
+    period_month: str = Field(..., description="Period in YYYY-MM format")
+    employee_ss_amount: Decimal = Field(default=Decimal('0'), ge=0, description="Employee SS amount (237005)")
+    employer_ss_amount: Decimal = Field(default=Decimal('0'), ge=0, description="Employer SS amount (237010)")
+    total_amount: Decimal = Field(..., gt=0, description="Total PILA disbursement amount")
+    payment_method: Optional[str] = Field(None, description="Payment method — UUID or slug")
+    payment_date: Optional[datetime] = Field(None, description="Date of PILA payment")
+    notes: Optional[str] = Field(None, description="Additional notes")
+
+    @field_validator('period_month')
+    @classmethod
+    def validate_period_month(cls, v: str) -> str:
+        import re
+        if not re.match(r'^\d{4}-\d{2}$', v):
+            raise ValueError("period_month must be in YYYY-MM format")
+        return v
+
+
+class PilaPayment(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    tenant_id: UUID
+    period_month: str
+    employee_ss_amount: Decimal
+    employer_ss_amount: Decimal
+    total_amount: Decimal
+    payment_method: Optional[str] = None
+    payment_date: datetime
+    notes: Optional[str] = None
+    created_at: datetime
+
+
+class PilaPaymentListResponse(BaseModel):
+    success: bool = True
+    data: List[PilaPayment]
+
+
+class PilaPaymentResponse(BaseModel):
+    success: bool = True
+    data: PilaPayment
+
+
+class PilaPendingByPeriod(BaseModel):
+    period_month: str
+    employee_ss_pending: Decimal
+    employer_ss_pending: Decimal
+    total_pending: Decimal
+
+
+class PilaPendingResponse(BaseModel):
+    success: bool = True
+    data: List[PilaPendingByPeriod]

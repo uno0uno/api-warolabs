@@ -3145,3 +3145,273 @@ async def get_dotacion_payments(
         ]
 
         return DotacionPaymentListResponse(success=True, data=payments)
+
+
+# =============================================================================
+# PILA PAYMENTS
+# =============================================================================
+
+async def _post_pila_gl_entry(
+    conn,
+    tenant_id: UUID,
+    pila_payment_id: UUID,
+    employee_ss_amount: Decimal,
+    employer_ss_amount: Decimal,
+    total_amount: Decimal,
+    payment_method: Optional[str],
+    payment_date: Any,
+    period_month: str,
+) -> None:
+    """
+    Post PILA disbursement GL entry (3 lines).
+    DR 237005 (employee SS) + DR 237010 (employer SS) / CR bank
+
+    Clears accumulated SS liabilities for the given period.
+    Graceful degrade — never raises.
+    """
+    if total_amount <= 0:
+        return
+
+    # Idempotency check
+    already_posted = await conn.fetchval(
+        """SELECT 1 FROM tenant_journal_entries
+           WHERE tenant_id = $1 AND source_module = 'nomina_pila' AND source_id = $2""",
+        tenant_id, pila_payment_id,
+    )
+    if already_posted:
+        logger.info(f"[pila_gl] PILA payment {pila_payment_id} already posted — skip")
+        return
+
+    # Resolve entry date
+    entry_date = payment_date.date() if hasattr(payment_date, 'date') else (payment_date or date.today())
+
+    # Check period open
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id, entry_date.year, entry_date.month,
+    )
+    if closed:
+        logger.warning(
+            f"[pila_gl] Period {entry_date.year}-{entry_date.month:02d} closed — skip GL for PILA {pila_payment_id}"
+        )
+        return
+
+    # Resolve DR accounts: 237005 (employee SS) and 237010 (employer SS)
+    dr_237005 = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '237005' AND is_active = true",
+        tenant_id,
+    )
+    dr_237010 = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '237010' AND is_active = true",
+        tenant_id,
+    )
+    if not dr_237005 or not dr_237010:
+        logger.warning(f"[pila_gl] DR accounts 237005/237010 not found for tenant {tenant_id} — skip PILA GL")
+        return
+
+    # Resolve CR account: bank/cash
+    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
+    cr_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, credit_code,
+    )
+    if not cr_acct:
+        logger.warning(f"[pila_gl] CR account {credit_code} not found for tenant {tenant_id} — skip PILA GL")
+        return
+
+    emp_float = float(employee_ss_amount)
+    emp_er_float = float(employer_ss_amount)
+    total_float = float(total_amount)
+
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'nomina_pila', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, entry_date, entry_date.year, entry_date.month,
+            f"Pago PILA — {period_month}",
+            pila_payment_id, total_float, total_float,
+        )
+        entry_id = entry_row["id"]
+
+        # DR line 1 — 237005 Aportes SS empleado (clears liability)
+        if emp_float > 0:
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, $3, 0, $4, 0)""",
+                entry_id, dr_237005["id"], emp_float, f"PILA empleado {period_month}",
+            )
+
+        # DR line 2 — 237010 Aportes SS empleador (clears liability)
+        if emp_er_float > 0:
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, $3, 0, $4, 1)""",
+                entry_id, dr_237010["id"], emp_er_float, f"PILA empleador {period_month}",
+            )
+
+        # CR line — bank/cash
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, 0, $3, $4, 2)""",
+            entry_id, cr_acct["id"], total_float, f"PILA {period_month}",
+        )
+
+    logger.info(
+        f"[pila_gl] Posted PILA entry {entry_id} for payment {pila_payment_id} "
+        f"(total={total_float}, DR237005={emp_float}, DR237010={emp_er_float}, CR={credit_code}, {period_month})"
+    )
+
+
+async def record_pila_payment(
+    request: Request,
+    data,
+) -> 'PilaPaymentResponse':
+    """Register a PILA disbursement — clears 237005 + 237010 liability for a period."""
+    from app.models.salary import PilaPayment, PilaPaymentResponse
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        payment_date = data.payment_date or datetime.now()
+
+        row = await conn.fetchrow(
+            """INSERT INTO pila_payments
+                   (tenant_id, period_month, employee_ss_amount, employer_ss_amount,
+                    total_amount, payment_method, payment_date, notes)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               RETURNING *""",
+            tenant_id, data.period_month,
+            data.employee_ss_amount, data.employer_ss_amount,
+            data.total_amount, data.payment_method, payment_date, data.notes,
+        )
+
+        payment_id = row["id"]
+
+        # Post GL entry (graceful degrade)
+        try:
+            await _post_pila_gl_entry(
+                conn=conn,
+                tenant_id=tenant_id,
+                pila_payment_id=payment_id,
+                employee_ss_amount=data.employee_ss_amount,
+                employer_ss_amount=data.employer_ss_amount,
+                total_amount=data.total_amount,
+                payment_method=data.payment_method,
+                payment_date=payment_date,
+                period_month=data.period_month,
+            )
+        except Exception as e:
+            logger.error(f"[pila_gl] GL post failed for PILA payment {payment_id}: {e}")
+
+        return PilaPaymentResponse(
+            success=True,
+            data=PilaPayment(
+                id=row["id"],
+                tenant_id=row["tenant_id"],
+                period_month=row["period_month"],
+                employee_ss_amount=Decimal(str(row["employee_ss_amount"])),
+                employer_ss_amount=Decimal(str(row["employer_ss_amount"])),
+                total_amount=Decimal(str(row["total_amount"])),
+                payment_method=row["payment_method"],
+                payment_date=row["payment_date"],
+                notes=row["notes"],
+                created_at=row["created_at"],
+            ),
+        )
+
+
+async def get_pila_payments(
+    request: Request,
+) -> 'PilaPaymentListResponse':
+    """List all PILA payments for the tenant, ordered by payment_date DESC."""
+    from app.models.salary import PilaPayment, PilaPaymentListResponse
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM pila_payments
+               WHERE tenant_id = $1
+               ORDER BY payment_date DESC, created_at DESC""",
+            tenant_id,
+        )
+
+        payments: List[PilaPayment] = [
+            PilaPayment(
+                id=r["id"],
+                tenant_id=r["tenant_id"],
+                period_month=r["period_month"],
+                employee_ss_amount=Decimal(str(r["employee_ss_amount"])),
+                employer_ss_amount=Decimal(str(r["employer_ss_amount"])),
+                total_amount=Decimal(str(r["total_amount"])),
+                payment_method=r["payment_method"],
+                payment_date=r["payment_date"],
+                notes=r["notes"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
+        return PilaPaymentListResponse(success=True, data=payments)
+
+
+async def get_pila_pending(
+    request: Request,
+) -> 'PilaPendingResponse':
+    """
+    Return periods with a net positive SS liability (i.e., PILA not yet fully paid).
+
+    Queries the net credit balance of accounts 237005 and 237010 from tenant_journal_lines,
+    grouped by period_year + period_month. Only returns periods where the net liability > 0.
+    """
+    from app.models.salary import PilaPendingByPeriod, PilaPendingResponse
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            """SELECT
+                 LPAD(tje.period_year::text, 4, '0') || '-' ||
+                 LPAD(tje.period_month::text, 2, '0') AS period_month,
+                 ta.code,
+                 SUM(tjl.credit) - COALESCE(SUM(tjl.debit), 0) AS net_liability
+               FROM tenant_journal_lines tjl
+               JOIN tenant_journal_entries tje ON tje.id = tjl.journal_entry_id
+               JOIN tenant_accounts ta ON ta.id = tjl.account_id
+               WHERE ta.tenant_id = $1
+                 AND ta.code IN ('237005', '237010')
+               GROUP BY tje.period_year, tje.period_month, ta.code
+               HAVING SUM(tjl.credit) - COALESCE(SUM(tjl.debit), 0) > 0
+               ORDER BY tje.period_year, tje.period_month, ta.code""",
+            tenant_id,
+        )
+
+        # Pivot: group by period_month, split by code
+        period_map: Dict[str, Dict[str, Decimal]] = {}
+        for r in rows:
+            pm = r["period_month"]
+            code = r["code"]
+            net = Decimal(str(r["net_liability"]))
+            if pm not in period_map:
+                period_map[pm] = {"237005": Decimal("0"), "237010": Decimal("0")}
+            period_map[pm][code] = net
+
+        pending: List[PilaPendingByPeriod] = [
+            PilaPendingByPeriod(
+                period_month=pm,
+                employee_ss_pending=vals["237005"],
+                employer_ss_pending=vals["237010"],
+                total_pending=vals["237005"] + vals["237010"],
+            )
+            for pm, vals in sorted(period_map.items())
+        ]
+
+        return PilaPendingResponse(success=True, data=pending)
