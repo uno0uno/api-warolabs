@@ -39,6 +39,10 @@ from app.models.salary import (
     IntCesantiasPaymentCreate,
     IntCesantiasPaymentResponse,
     IntCesantiasPaymentListResponse,
+    VacacionesPayment,
+    VacacionesPaymentCreate,
+    VacacionesPaymentResponse,
+    VacacionesPaymentListResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -2449,3 +2453,241 @@ async def get_int_cesantias_payments(
         ]
 
         return IntCesantiasPaymentListResponse(success=True, data=payments)
+
+
+# =============================================================================
+# VACACIONES GL HELPER
+# =============================================================================
+
+async def _post_vacaciones_payment_gl_entry(
+    conn,
+    tenant_id: UUID,
+    vacaciones_payment_id: UUID,
+    vacaciones_amount: Decimal,
+    payment_method: Optional[str],
+    payment_date: Any,
+    anio: int,
+) -> None:
+    """
+    Post vacaciones cash compensation GL entry.
+    DR 2625 (Vacaciones consolidadas) / CR bank account
+
+    This is a balance-sheet entry — liquidates the accrued liability.
+    Graceful degrade — never raises. Caller MUST wrap in try/except.
+    """
+    if vacaciones_amount <= 0:
+        return
+
+    # Idempotency check
+    already_posted = await conn.fetchval(
+        """SELECT 1 FROM tenant_journal_entries
+           WHERE tenant_id = $1 AND source_module = 'nomina_vacaciones' AND source_id = $2""",
+        tenant_id, vacaciones_payment_id,
+    )
+    if already_posted:
+        logger.info(f"[vacaciones_gl] Payment {vacaciones_payment_id} already posted — skip")
+        return
+
+    # Resolve entry date
+    entry_date = payment_date.date() if hasattr(payment_date, 'date') else (payment_date or date.today())
+
+    # Check period open
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id, entry_date.year, entry_date.month,
+    )
+    if closed:
+        logger.warning(
+            f"[vacaciones_gl] Period {entry_date.year}-{entry_date.month:02d} closed — skip GL for vacaciones payment {vacaciones_payment_id}"
+        )
+        return
+
+    # Resolve DR account: 2625 (Vacaciones consolidadas) — debit liquidates liability
+    dr_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2625' AND is_active = true",
+        tenant_id,
+    )
+    if not dr_acct:
+        logger.warning(f"[vacaciones_gl] DR account 2625 not found for tenant {tenant_id} — skip GL")
+        return
+
+    # Resolve CR account: bank/cash
+    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
+    cr_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, credit_code,
+    )
+    if not cr_acct:
+        logger.warning(
+            f"[vacaciones_gl] CR account {credit_code} not found for tenant {tenant_id} — skip GL"
+        )
+        return
+
+    amount_float = float(vacaciones_amount)
+
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'nomina_vacaciones', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, entry_date, entry_date.year, entry_date.month,
+            f"Compensación vacaciones — {anio}",
+            vacaciones_payment_id, amount_float, amount_float,
+        )
+        entry_id = entry_row["id"]
+
+        # DR line — 2625 Vacaciones consolidadas (debit liquidates the liability)
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, $3, 0, $4, 0)""",
+            entry_id, dr_acct["id"], amount_float, f"Vacaciones {anio}",
+        )
+        # CR line — bank/cash
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, 0, $3, $4, 1)""",
+            entry_id, cr_acct["id"], amount_float, f"Vacaciones {anio}",
+        )
+
+    logger.info(
+        f"[vacaciones_gl] Posted entry {entry_id} for payment {vacaciones_payment_id} "
+        f"(amount={amount_float}, DR=2625, CR={credit_code}, anio={anio})"
+    )
+
+
+# =============================================================================
+# VACACIONES SERVICE FUNCTIONS
+# =============================================================================
+
+async def record_vacaciones_payment(
+    request: Request,
+    member_id: UUID,
+    data: VacacionesPaymentCreate,
+) -> VacacionesPaymentResponse:
+    """Register vacation cash compensation payment for an employee or daily worker."""
+    from fastapi import HTTPException as _HTTPException
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        # Verify employment type — only employee and daily are eligible
+        member = await conn.fetchrow(
+            """SELECT es.employment_type
+               FROM employee_salaries es
+               JOIN tenant_members tm ON tm.id = $1
+               WHERE es.tenant_member_id = $1 AND es.tenant_id = $2
+               ORDER BY es.created_at DESC
+               LIMIT 1""",
+            member_id, tenant_id,
+        )
+        if not member:
+            raise _HTTPException(status_code=404, detail="Employee salary config not found")
+
+        employment_type = member["employment_type"]
+        if employment_type not in ("employee", "daily"):
+            raise _HTTPException(
+                status_code=400,
+                detail="Vacation payment only applies to employees and daily workers (not contractors)",
+            )
+
+        # Calculate vacaciones_amount: (gross_salary * days_worked) / 720
+        # 720 = 360 days/year * 2 (since 15 days of vacation per 360 days worked)
+        days = data.days_worked if data.days_worked else 360
+        vacaciones_amount = (
+            data.gross_salary * Decimal(days) / Decimal("720")
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        payment_date = data.payment_date or datetime.now()
+
+        try:
+            row = await conn.fetchrow(
+                """INSERT INTO vacaciones_payments
+                       (tenant_id, tenant_member_id, anio, gross_salary, days_worked,
+                        vacaciones_amount, payment_method, payment_date, notes)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                   RETURNING *""",
+                tenant_id, member_id, data.anio, data.gross_salary, days,
+                vacaciones_amount, data.payment_method, payment_date, data.notes,
+            )
+        except Exception as e:
+            if "unique" in str(e).lower() or "ux_vacaciones" in str(e).lower():
+                raise _HTTPException(
+                    status_code=409,
+                    detail=f"Vacation payment for year {data.anio} already paid for this employee",
+                )
+            raise
+
+        payment_id = row["id"]
+
+        # Post GL entry (graceful degrade)
+        try:
+            await _post_vacaciones_payment_gl_entry(
+                conn=conn,
+                tenant_id=tenant_id,
+                vacaciones_payment_id=payment_id,
+                vacaciones_amount=vacaciones_amount,
+                payment_method=data.payment_method,
+                payment_date=payment_date,
+                anio=data.anio,
+            )
+        except Exception as e:
+            logger.error(f"[vacaciones_gl] GL post failed for payment {payment_id}: {e}")
+
+        return VacacionesPaymentResponse(
+            success=True,
+            data=VacacionesPayment(
+                id=row["id"],
+                tenant_id=row["tenant_id"],
+                tenant_member_id=row["tenant_member_id"],
+                anio=row["anio"],
+                gross_salary=Decimal(str(row["gross_salary"])),
+                days_worked=row["days_worked"],
+                vacaciones_amount=Decimal(str(row["vacaciones_amount"])),
+                payment_method=row["payment_method"],
+                payment_date=row["payment_date"],
+                notes=row["notes"],
+                created_at=row["created_at"],
+            ),
+        )
+
+
+async def get_vacaciones_payments(
+    request: Request,
+    member_id: UUID,
+) -> VacacionesPaymentListResponse:
+    """List vacation payments for an employee, ordered by anio DESC."""
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM vacaciones_payments
+               WHERE tenant_member_id = $1 AND tenant_id = $2
+               ORDER BY anio DESC""",
+            member_id, tenant_id,
+        )
+
+        payments: List[VacacionesPayment] = [
+            VacacionesPayment(
+                id=r["id"],
+                tenant_id=r["tenant_id"],
+                tenant_member_id=r["tenant_member_id"],
+                anio=r["anio"],
+                gross_salary=Decimal(str(r["gross_salary"])),
+                days_worked=r["days_worked"],
+                vacaciones_amount=Decimal(str(r["vacaciones_amount"])),
+                payment_method=r["payment_method"],
+                payment_date=r["payment_date"],
+                notes=r["notes"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
+        return VacacionesPaymentListResponse(success=True, data=payments)

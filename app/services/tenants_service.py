@@ -347,7 +347,7 @@ async def create_tenant(request: Request, body: TenantCreate) -> TenantCreateRes
     Create a new tenant for the authenticated user.
 
     Creates tenant + tenant_public_profiles + adds creator as superuser
-    + seeds PUC colombiano accounts (52 accounts via seed_tenant_accounts()).
+    + seeds PUC colombiano accounts (all active account_templates via seed_tenant_accounts()).
     All in a single transaction.
     """
     try:
@@ -392,7 +392,7 @@ async def create_tenant(request: Request, body: TenantCreate) -> TenantCreateRes
                     tenant_id, user_id
                 )
 
-                # 4. Seed PUC colombiano accounts (52 accounts from account_templates)
+                # 4. Seed PUC colombiano accounts (all active account_templates)
                 await conn.execute("SELECT seed_tenant_accounts($1)", tenant_id)
 
             logger.info(f"✅ Tenant created: {body.name} ({slug}) by user {user_id}")

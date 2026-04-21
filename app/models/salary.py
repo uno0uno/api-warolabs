@@ -378,3 +378,48 @@ class IntCesantiasPaymentListResponse(BaseModel):
 class IntCesantiasPaymentResponse(BaseModel):
     success: bool = True
     data: IntCesantiasPayment
+
+
+# =============================================================================
+# VACACIONES MODELS
+# =============================================================================
+
+class VacacionesPaymentCreate(BaseModel):
+    anio: int
+    gross_salary: Decimal
+    days_worked: Optional[int] = 360
+    payment_method: Optional[str] = None
+    payment_date: Optional[datetime] = None
+    notes: Optional[str] = None
+
+    @field_validator('anio')
+    @classmethod
+    def validate_anio(cls, v: int) -> int:
+        if v < 2000 or v > 2100:
+            raise ValueError("anio must be a valid year (2000–2100)")
+        return v
+
+
+class VacacionesPayment(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    tenant_id: UUID
+    tenant_member_id: UUID
+    anio: int
+    gross_salary: Decimal
+    days_worked: int
+    vacaciones_amount: Decimal
+    payment_method: Optional[str] = None
+    payment_date: datetime
+    notes: Optional[str] = None
+    created_at: datetime
+
+
+class VacacionesPaymentListResponse(BaseModel):
+    success: bool = True
+    data: List[VacacionesPayment]
+
+
+class VacacionesPaymentResponse(BaseModel):
+    success: bool = True
+    data: VacacionesPayment

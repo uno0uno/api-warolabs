@@ -27,6 +27,8 @@ from app.services.salary_service import (
     get_cesantias_payments,
     record_int_cesantias_payment,
     get_int_cesantias_payments,
+    record_vacaciones_payment,
+    get_vacaciones_payments,
 )
 from app.models.salary import (
     EmployeesWithSalaryResponse,
@@ -45,6 +47,9 @@ from app.models.salary import (
     IntCesantiasPaymentCreate,
     IntCesantiasPaymentResponse,
     IntCesantiasPaymentListResponse,
+    VacacionesPaymentCreate,
+    VacacionesPaymentResponse,
+    VacacionesPaymentListResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -295,3 +300,31 @@ async def get_int_cesantias_payments_endpoint(
     List intereses sobre cesantías payments for an employee, ordered by anio DESC.
     """
     return await get_int_cesantias_payments(request, member_id)
+
+
+# =============================================================================
+# VACACIONES ENDPOINTS
+# =============================================================================
+
+@router.post("/employees/{member_id}/vacaciones", response_model=VacacionesPaymentResponse)
+async def post_vacaciones_payment_endpoint(
+    request: Request,
+    member_id: UUID,
+    data: VacacionesPaymentCreate,
+):
+    """
+    Register vacation cash compensation payment for an employee or daily worker.
+    Posts GL entry: DR 2625 (Vacaciones consolidadas) / CR bank account.
+    """
+    return await record_vacaciones_payment(request, member_id, data)
+
+
+@router.get("/employees/{member_id}/vacaciones", response_model=VacacionesPaymentListResponse)
+async def get_vacaciones_payments_endpoint(
+    request: Request,
+    member_id: UUID,
+):
+    """
+    List vacation payments for an employee, ordered by anio DESC.
+    """
+    return await get_vacaciones_payments(request, member_id)
