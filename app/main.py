@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, admin_ingredients, admin_orders, menu, tables, credit, cartera, cierre, payment_methods, accounting
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, admin_ingredients, admin_orders, menu, tables, credit, cartera, cierre, payment_methods, accounting, stations
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -194,6 +194,7 @@ app.include_router(v1_ordering.customer_router_v1)  # V1 customer validate — A
 app.include_router(v1_ordering.product_router_v1)   # V1 product detail + modifiers — API key auth
 app.include_router(public_restaurant.router, prefix="/public/restaurant", tags=["public-restaurant"])
 app.include_router(tenant_config.router, prefix="/api/tenant", tags=["tenant-config"])
+app.include_router(stations.router, prefix="/api/stations", tags=["stations"])
 app.include_router(tables.router, prefix="/tables", tags=["tables"])
 app.include_router(customer_portal.router)  # Customer portal (authenticated via JWT cookie)
 app.include_router(leads.router, prefix="/leads", tags=["leads"])  # Public lead capture
