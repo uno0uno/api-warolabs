@@ -179,7 +179,7 @@ async def _post_salary_gl_entry(
     With SS deductions (3 lines, employees/daily):
       DR: 5105 Sueldos                                 — gross
       CR: 1110 Bancos                                  — net_pay (gross − employee_ss)
-      CR: 2370 Retenciones y aportes de nómina         — employee_ss
+      CR: 237005 Aportes SS empleado (EPS + AFP)       — employee_ss
 
     Silently skips if accounts missing, period closed, or already posted.
     Caller MUST wrap in try/except.
@@ -247,11 +247,11 @@ async def _post_salary_gl_entry(
 
     if use_ss:
         ss_acct = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2370' AND is_active = true",
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '237005' AND is_active = true",
             tenant_id,
         )
         if not ss_acct:
-            logger.warning(f"[GL] SS account 2370 not found for tenant {tenant_id} — posting gross without SS split")
+            logger.warning(f"[GL] SS account 237005 not found for tenant {tenant_id} — posting gross without SS split")
             use_ss = False
 
     async with conn.transaction():
@@ -490,10 +490,10 @@ async def _post_ss_gl_entry(
     Post SS/parafiscales GL entry for a salary payment.
 
     Entry 1 — source_module='nomina_ss' (employer contributions):
-      DR 5120  Aportes EPS/ARL/AFP/Caja   employer_total
-      CR 2370  SS y parafiscales por pagar employer_total
+      DR 5120   Aportes EPS/ARL/AFP/Caja              employer_total
+      CR 237010 Aportes SS empleador (EPS+AFP+ARL+Caja) employer_total
 
-    Employee deductions (employee_health + employee_pension) are credited to 2370
+    Employee deductions (employee_health + employee_pension) are credited to 237005
     via the main salary entry — see _post_salary_gl_entry with net_pay.
 
     Graceful degrade — never raises, never blocks payment.
@@ -529,11 +529,11 @@ async def _post_ss_gl_entry(
         tenant_id,
     )
     credit_acct = await conn.fetchval(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2370' AND is_active = true",
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '237010' AND is_active = true",
         tenant_id,
     )
     if not debit_acct or not credit_acct:
-        logger.warning(f"[ss_gl] Missing account 5120 or 2370 for tenant {tenant_id} — skip SS GL")
+        logger.warning(f"[ss_gl] Missing account 5120 or 237010 for tenant {tenant_id} — skip SS GL")
         return
 
     emp_total = float(employer_total)
