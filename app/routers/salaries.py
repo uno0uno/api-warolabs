@@ -29,6 +29,8 @@ from app.services.salary_service import (
     get_int_cesantias_payments,
     record_vacaciones_payment,
     get_vacaciones_payments,
+    record_dotacion_payment,
+    get_dotacion_payments,
 )
 from app.models.salary import (
     EmployeesWithSalaryResponse,
@@ -50,6 +52,9 @@ from app.models.salary import (
     VacacionesPaymentCreate,
     VacacionesPaymentResponse,
     VacacionesPaymentListResponse,
+    DotacionPaymentCreate,
+    DotacionPaymentResponse,
+    DotacionPaymentListResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -330,3 +335,30 @@ async def get_vacaciones_payments_endpoint(
     List vacation payments for an employee, ordered by anio DESC.
     """
     return await get_vacaciones_payments(request, member_id)
+
+
+@router.post("/employees/{member_id}/dotacion", response_model=DotacionPaymentResponse)
+async def post_dotacion_payment_endpoint(
+    request: Request,
+    member_id: UUID,
+    data: DotacionPaymentCreate,
+):
+    """
+    Register dotación (uniform/supply) payment for an eligible employee.
+    Eligibility: employment_type = employee AND base_salary <= 2 × SMMLV.
+    Posts GL entry: DR 5115 (Dotación al personal) / CR bank account.
+    Returns 409 if dotación for the same period+year was already registered.
+    Returns 400 if employee is not eligible.
+    """
+    return await record_dotacion_payment(request, member_id, data)
+
+
+@router.get("/employees/{member_id}/dotacion", response_model=DotacionPaymentListResponse)
+async def get_dotacion_payments_endpoint(
+    request: Request,
+    member_id: UUID,
+):
+    """
+    List dotación payments for an employee, ordered by year DESC, period DESC.
+    """
+    return await get_dotacion_payments(request, member_id)

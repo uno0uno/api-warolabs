@@ -2904,3 +2904,244 @@ async def get_vacaciones_payments(
         ]
 
         return VacacionesPaymentListResponse(success=True, data=payments)
+
+
+# =============================================================================
+# DOTACIÓN PAYMENTS
+# =============================================================================
+
+async def _post_dotacion_gl_entry(
+    conn,
+    tenant_id: UUID,
+    dotacion_payment_id: UUID,
+    total_amount: Decimal,
+    payment_method: Optional[str],
+    payment_date: Any,
+    period: str,
+    year: int,
+) -> None:
+    """
+    Post dotación GL entry.
+    DR 5115 (Dotación al personal) / CR bank account
+
+    Direct expense — no prior provision.
+    Graceful degrade — never raises.
+    """
+    if total_amount <= 0:
+        return
+
+    # Idempotency check
+    already_posted = await conn.fetchval(
+        """SELECT 1 FROM tenant_journal_entries
+           WHERE tenant_id = $1 AND source_module = 'nomina_dotacion' AND source_id = $2""",
+        tenant_id, dotacion_payment_id,
+    )
+    if already_posted:
+        logger.info(f"[dotacion_gl] Dotación payment {dotacion_payment_id} already posted — skip")
+        return
+
+    # Resolve entry date
+    entry_date = payment_date.date() if hasattr(payment_date, 'date') else (payment_date or date.today())
+
+    # Check period open
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id, entry_date.year, entry_date.month,
+    )
+    if closed:
+        logger.warning(
+            f"[dotacion_gl] Period {entry_date.year}-{entry_date.month:02d} closed — skip GL for dotacion {dotacion_payment_id}"
+        )
+        return
+
+    # Resolve DR account: 5115 (Dotación al personal)
+    dr_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '5115' AND is_active = true",
+        tenant_id,
+    )
+    if not dr_acct:
+        logger.warning(f"[dotacion_gl] DR account 5115 not found for tenant {tenant_id} — skip dotacion GL")
+        return
+
+    # Resolve CR account: bank/cash
+    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
+    cr_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, credit_code,
+    )
+    if not cr_acct:
+        logger.warning(
+            f"[dotacion_gl] CR account {credit_code} not found for tenant {tenant_id} — skip dotacion GL"
+        )
+        return
+
+    amount_float = float(total_amount)
+    period_label = {'APR': 'Apr', 'AUG': 'Ago', 'DEC': 'Dic'}.get(period, period)
+
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'nomina_dotacion', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id, entry_date, entry_date.year, entry_date.month,
+            f"Dotación al personal — {period_label} {year}",
+            dotacion_payment_id, amount_float, amount_float,
+        )
+        entry_id = entry_row["id"]
+
+        # DR line — 5115 Dotación al personal
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, $3, 0, $4, 0)""",
+            entry_id, dr_acct["id"], amount_float, f"Dotación {period_label} {year}",
+        )
+        # CR line — bank/cash
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, 0, $3, $4, 1)""",
+            entry_id, cr_acct["id"], amount_float, f"Dotación {period_label} {year}",
+        )
+
+    logger.info(
+        f"[dotacion_gl] Posted dotacion entry {entry_id} for payment {dotacion_payment_id} "
+        f"(amount={amount_float}, DR=5115, CR={credit_code}, {period} {year})"
+    )
+
+
+async def record_dotacion_payment(
+    request: Request,
+    member_id: UUID,
+    data,
+) -> 'DotacionPaymentResponse':
+    """Register dotación (uniform/supply) payment for an eligible employee."""
+    from fastapi import HTTPException as _HTTPException
+    from app.models.salary import DotacionPayment, DotacionPaymentResponse
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        # Verify employment type — only 'employee' qualifies (not daily, not contractor)
+        member = await conn.fetchrow(
+            """SELECT es.employment_type, es.base_salary
+               FROM employee_salaries es
+               WHERE es.tenant_member_id = $1 AND es.tenant_id = $2
+               ORDER BY es.created_at DESC
+               LIMIT 1""",
+            member_id, tenant_id,
+        )
+        if not member:
+            raise _HTTPException(status_code=404, detail="Employee salary config not found")
+
+        employment_type = member["employment_type"]
+        if employment_type != "employee":
+            raise _HTTPException(
+                status_code=400,
+                detail="Dotación only applies to employees under a labor contract (not contractors or daily workers)",
+            )
+
+        # Eligibility: base_salary <= 2 × SMMLV
+        smmlv = await get_current_smmlv(conn, tenant_id)
+        base_salary = Decimal(str(member["base_salary"])) if member["base_salary"] else Decimal("0")
+        if base_salary > smmlv * 2:
+            raise _HTTPException(
+                status_code=400,
+                detail=f"Employee salary ({base_salary:,.0f}) exceeds 2 × SMMLV ({smmlv * 2:,.0f}) — not eligible for dotación",
+            )
+
+        payment_date = data.payment_date or datetime.now()
+
+        try:
+            row = await conn.fetchrow(
+                """INSERT INTO salary_dotacion_payments
+                       (tenant_id, tenant_member_id, period, year, items_description,
+                        total_amount, payment_method, payment_date, notes)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                   RETURNING *""",
+                tenant_id, member_id, data.period, data.year, data.items_description,
+                data.total_amount, data.payment_method, payment_date, data.notes,
+            )
+        except Exception as e:
+            if "unique" in str(e).lower() or "ux_dotacion" in str(e).lower():
+                raise _HTTPException(
+                    status_code=409,
+                    detail=f"Dotación for {data.period} {data.year} already registered for this employee",
+                )
+            raise
+
+        payment_id = row["id"]
+
+        # Post GL entry (graceful degrade)
+        try:
+            await _post_dotacion_gl_entry(
+                conn=conn,
+                tenant_id=tenant_id,
+                dotacion_payment_id=payment_id,
+                total_amount=data.total_amount,
+                payment_method=data.payment_method,
+                payment_date=payment_date,
+                period=data.period,
+                year=data.year,
+            )
+        except Exception as e:
+            logger.error(f"[dotacion_gl] GL post failed for payment {payment_id}: {e}")
+
+        return DotacionPaymentResponse(
+            success=True,
+            data=DotacionPayment(
+                id=row["id"],
+                tenant_id=row["tenant_id"],
+                tenant_member_id=row["tenant_member_id"],
+                period=row["period"],
+                year=row["year"],
+                items_description=row["items_description"],
+                total_amount=Decimal(str(row["total_amount"])),
+                payment_method=row["payment_method"],
+                payment_date=row["payment_date"],
+                notes=row["notes"],
+                created_at=row["created_at"],
+            ),
+        )
+
+
+async def get_dotacion_payments(
+    request: Request,
+    member_id: UUID,
+) -> 'DotacionPaymentListResponse':
+    """List dotación payments for an employee, ordered by year DESC, period DESC."""
+    from app.models.salary import DotacionPayment, DotacionPaymentListResponse
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM salary_dotacion_payments
+               WHERE tenant_member_id = $1 AND tenant_id = $2
+               ORDER BY year DESC,
+                 CASE period WHEN 'DEC' THEN 3 WHEN 'AUG' THEN 2 ELSE 1 END DESC""",
+            member_id, tenant_id,
+        )
+
+        payments: List[DotacionPayment] = [
+            DotacionPayment(
+                id=r["id"],
+                tenant_id=r["tenant_id"],
+                tenant_member_id=r["tenant_member_id"],
+                period=r["period"],
+                year=r["year"],
+                items_description=r["items_description"],
+                total_amount=Decimal(str(r["total_amount"])),
+                payment_method=r["payment_method"],
+                payment_date=r["payment_date"],
+                notes=r["notes"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
+        return DotacionPaymentListResponse(success=True, data=payments)

@@ -429,3 +429,56 @@ class VacacionesPaymentListResponse(BaseModel):
 class VacacionesPaymentResponse(BaseModel):
     success: bool = True
     data: VacacionesPayment
+
+
+# =============================================================================
+# DOTACIÓN MODELS
+# =============================================================================
+
+class DotacionPaymentCreate(BaseModel):
+    period: str = Field(..., description="Period slot: APR, AUG, or DEC")
+    year: int = Field(..., description="Year (2000–2100)")
+    items_description: Optional[str] = Field(None, description="Description of items delivered")
+    total_amount: Decimal = Field(..., gt=0, description="Total value of dotación delivered")
+    payment_method: Optional[str] = Field(None, description="Payment method — UUID or slug")
+    payment_date: Optional[datetime] = Field(None, description="Date of delivery/payment")
+    notes: Optional[str] = Field(None, description="Additional notes")
+
+    @field_validator('period')
+    @classmethod
+    def validate_period(cls, v: str) -> str:
+        if v not in ('APR', 'AUG', 'DEC'):
+            raise ValueError("period must be 'APR', 'AUG', or 'DEC'")
+        return v
+
+    @field_validator('year')
+    @classmethod
+    def validate_year(cls, v: int) -> int:
+        if v < 2000 or v > 2100:
+            raise ValueError("year must be between 2000 and 2100")
+        return v
+
+
+class DotacionPayment(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    tenant_id: UUID
+    tenant_member_id: UUID
+    period: str
+    year: int
+    items_description: Optional[str] = None
+    total_amount: Decimal
+    payment_method: Optional[str] = None
+    payment_date: datetime
+    notes: Optional[str] = None
+    created_at: datetime
+
+
+class DotacionPaymentListResponse(BaseModel):
+    success: bool = True
+    data: List[DotacionPayment]
+
+
+class DotacionPaymentResponse(BaseModel):
+    success: bool = True
+    data: DotacionPayment
