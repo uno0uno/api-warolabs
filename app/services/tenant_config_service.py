@@ -171,7 +171,7 @@ async def update_public_profile(
 
         async with get_db_connection() as conn:
             # Check if profile exists
-            exists_query = "SELECT id FROM tenant_public_profiles WHERE tenant_id = $1"
+            exists_query = "SELECT id, comandas_enabled FROM tenant_public_profiles WHERE tenant_id = $1"
             exists = await conn.fetchrow(exists_query, tenant_id)
 
             if not exists:
@@ -192,8 +192,9 @@ async def update_public_profile(
                         phone_number, email, address, city, neighborhood,
                         business_hours, social_media,
                         accepts_online_orders, min_order_amount, estimated_preparation_time,
-                        is_manually_open
-                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                        is_manually_open,
+                        comandas_enabled, kds_enabled
+                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                     RETURNING *
                 """
                 result = await conn.fetchrow(
@@ -215,6 +216,8 @@ async def update_public_profile(
                     data_dict.get('min_order_amount', 0),
                     data_dict.get('estimated_preparation_time', 30),
                     data_dict.get('is_manually_open', True),
+                    data_dict.get('comandas_enabled', False),
+                    data_dict.get('kds_enabled', False),
                 )
 
                 profile_data_dict = dict(result)
@@ -240,6 +243,16 @@ async def update_public_profile(
 
             # Only update fields that were provided
             data_dict = profile_data.model_dump(exclude_unset=True)
+
+            # Cross-field validation: kds_enabled requires comandas_enabled
+            if data_dict.get('kds_enabled') is True:
+                current_comandas = exists['comandas_enabled'] if exists else False
+                new_comandas = data_dict.get('comandas_enabled', current_comandas)
+                if not new_comandas:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="kds_enabled requiere que comandas_enabled sea true"
+                    )
 
             # Validate slug if it's being changed
             if 'slug' in data_dict:

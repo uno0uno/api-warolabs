@@ -380,8 +380,9 @@ async def create_tenant(request: Request, body: TenantCreate) -> TenantCreateRes
                 await conn.execute(
                     """INSERT INTO tenant_public_profiles
                            (tenant_id, display_name, slug,
-                            is_active, is_manually_open, welcome_email_sent, tables_enabled)
-                       VALUES ($1, $2, $3, true, false, false, false)""",
+                            is_active, is_manually_open, welcome_email_sent, tables_enabled,
+                            comandas_enabled, kds_enabled)
+                       VALUES ($1, $2, $3, true, false, false, false, false, false)""",
                     tenant_id, body.name, slug
                 )
 
