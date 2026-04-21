@@ -604,4 +604,101 @@ class OvertimePaymentListResponse(BaseModel):
 
 class OvertimePaymentResponse(BaseModel):
     success: bool = True
-    data: OvertimePayment
+    data: Optional['OvertimePayment'] = None
+
+
+# =============================================================================
+# LIQUIDACIÓN DE CONTRATO MODELS
+# =============================================================================
+
+class LiquidacionCause(str, Enum):
+    SIN_JUSTA_CAUSA = "sin_justa_causa"
+    JUSTA_CAUSA = "justa_causa"
+    RENUNCIA = "renuncia"
+
+
+class LiquidacionCalculateRequest(BaseModel):
+    contract_start_date: str = Field(..., description="YYYY-MM-DD")
+    termination_date: str = Field(..., description="YYYY-MM-DD")
+    cause: LiquidacionCause
+    base_salary: Decimal = Field(..., gt=0)
+    employment_type: str = Field(..., description="employee | daily | contractor")
+
+    @field_validator('contract_start_date', 'termination_date')
+    @classmethod
+    def validate_date_format(cls, v: str) -> str:
+        from datetime import date
+        try:
+            date.fromisoformat(v)
+        except ValueError:
+            raise ValueError("Date must be in YYYY-MM-DD format")
+        return v
+
+
+class LiquidacionBreakdown(BaseModel):
+    days_worked: int
+    cesantias_amount: Decimal
+    prima_amount: Decimal
+    vacaciones_amount: Decimal
+    int_cesantias_amount: Decimal
+    indemnizacion_amount: Decimal
+    total_amount: Decimal
+
+
+class LiquidacionCalculateResponse(BaseModel):
+    success: bool = True
+    data: Optional[LiquidacionBreakdown] = None
+
+
+class LiquidacionCreate(BaseModel):
+    contract_start_date: str = Field(..., description="YYYY-MM-DD")
+    termination_date: str = Field(..., description="YYYY-MM-DD")
+    cause: LiquidacionCause
+    base_salary: Decimal = Field(..., gt=0)
+    employment_type: str = Field(..., description="employee | daily | contractor")
+    cesantias_amount: Decimal = Field(..., ge=0)
+    prima_amount: Decimal = Field(..., ge=0)
+    vacaciones_amount: Decimal = Field(..., ge=0)
+    int_cesantias_amount: Decimal = Field(..., ge=0)
+    indemnizacion_amount: Decimal = Field(..., ge=0)
+    total_amount: Decimal = Field(..., gt=0)
+    payment_method: Optional[str] = None
+    payment_date: Optional[str] = None
+    notes: Optional[str] = None
+
+    @field_validator('contract_start_date', 'termination_date')
+    @classmethod
+    def validate_date_format(cls, v: str) -> str:
+        from datetime import date
+        try:
+            date.fromisoformat(v)
+        except ValueError:
+            raise ValueError("Date must be in YYYY-MM-DD format")
+        return v
+
+
+class LiquidacionRecord(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    tenant_id: UUID
+    tenant_member_id: UUID
+    contract_start_date: str
+    termination_date: str
+    cause: str
+    days_worked: int
+    base_salary: Decimal
+    cesantias_amount: Decimal
+    prima_amount: Decimal
+    vacaciones_amount: Decimal
+    int_cesantias_amount: Decimal
+    indemnizacion_amount: Decimal
+    total_amount: Decimal
+    payment_method: Optional[str] = None
+    payment_date: datetime
+    notes: Optional[str] = None
+    created_at: datetime
+
+
+class LiquidacionResponse(BaseModel):
+    success: bool = True
+    data: Optional[LiquidacionRecord] = None

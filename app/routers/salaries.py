@@ -36,6 +36,9 @@ from app.services.salary_service import (
     get_pila_pending,
     record_overtime_payment,
     get_overtime_payments,
+    calculate_liquidacion,
+    record_liquidacion,
+    get_liquidacion,
 )
 from app.models.salary import (
     EmployeesWithSalaryResponse,
@@ -67,6 +70,10 @@ from app.models.salary import (
     OvertimePaymentCreate,
     OvertimePaymentResponse,
     OvertimePaymentListResponse,
+    LiquidacionCalculateRequest,
+    LiquidacionCalculateResponse,
+    LiquidacionCreate,
+    LiquidacionResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -438,3 +445,45 @@ async def get_overtime_payments_endpoint(
     List overtime payments for an employee, ordered by payment_date DESC.
     """
     return await get_overtime_payments(request, member_id)
+
+
+# =============================================================================
+# LIQUIDACIÓN DE CONTRATO ENDPOINTS
+# =============================================================================
+
+@router.post("/employees/{member_id}/liquidacion/calculate", response_model=LiquidacionCalculateResponse)
+async def calculate_liquidacion_endpoint(
+    request: Request,
+    member_id: UUID,
+    data: LiquidacionCalculateRequest,
+):
+    """
+    Preview liquidación breakdown without writing to DB.
+    Returns cesantías, prima, vacaciones, intereses, indemnización, and total.
+    """
+    return await calculate_liquidacion(request, member_id, data)
+
+
+@router.post("/employees/{member_id}/liquidacion", response_model=LiquidacionResponse)
+async def record_liquidacion_endpoint(
+    request: Request,
+    member_id: UUID,
+    data: LiquidacionCreate,
+):
+    """
+    Register contract liquidation. Marks employee as terminated (is_active=false).
+    Returns 409 if liquidación already exists for this employee.
+    GL entry: DR 2610+2620+2625+2615+(5198 if indemnización) / CR bank (graceful degrade).
+    """
+    return await record_liquidacion(request, member_id, data)
+
+
+@router.get("/employees/{member_id}/liquidacion", response_model=LiquidacionResponse)
+async def get_liquidacion_endpoint(
+    request: Request,
+    member_id: UUID,
+):
+    """
+    Get liquidación record for an employee. Returns data=null if none exists.
+    """
+    return await get_liquidacion(request, member_id)

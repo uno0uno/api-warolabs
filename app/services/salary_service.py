@@ -3643,3 +3643,334 @@ async def get_overtime_payments(request: Request, member_id: UUID) -> 'OvertimeP
         ]
 
         return OvertimePaymentListResponse(success=True, data=payments)
+
+
+# =============================================================================
+# LIQUIDACIÓN DE CONTRATO
+# =============================================================================
+
+def _calculate_liquidacion_breakdown(
+    base_salary: Decimal,
+    contract_start_date: date,
+    termination_date: date,
+    cause: str,
+    employment_type: str,
+) -> dict:
+    """
+    Pure calculator — no DB access.
+    Returns dict with breakdown fields and totals.
+
+    Colombian law:
+      cesantías      = salary × days / 360
+      prima          = salary × days / 360
+      vacaciones     = salary × days / 720
+      int_cesantias  = cesantías × 12% × days / 360
+      indemnización  (only for employee + sin_justa_causa):
+        < 365 days  → 30 days salary
+        year 1–5    → 30 + 20×(years-1)
+        year 1+ cap → max when years > 5: 30 + 20×4 + 15×(years-5)
+    """
+    days_worked = (termination_date - contract_start_date).days
+    if days_worked <= 0:
+        days_worked = 1
+
+    daily_salary = base_salary / Decimal('30')
+
+    cesantias = (base_salary * Decimal(str(days_worked)) / Decimal('360')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    prima = (base_salary * Decimal(str(days_worked)) / Decimal('360')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    vacaciones = (base_salary * Decimal(str(days_worked)) / Decimal('720')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    int_cesantias = (cesantias * Decimal('0.12') * Decimal(str(days_worked)) / Decimal('360')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    indemnizacion = Decimal('0')
+    if cause == 'sin_justa_causa' and employment_type == 'employee':
+        if days_worked < 365:
+            indemnizacion = (daily_salary * Decimal('30')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        else:
+            years = days_worked / 365.0
+            if years <= 5:
+                indemnizacion = (daily_salary * (Decimal('30') + Decimal('20') * Decimal(str(years - 1)))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            else:
+                indemnizacion = (daily_salary * (Decimal('30') + Decimal('20') * Decimal('4') + Decimal('15') * Decimal(str(years - 5)))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    total = (cesantias + prima + vacaciones + int_cesantias + indemnizacion).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    return {
+        'days_worked': days_worked,
+        'cesantias_amount': cesantias,
+        'prima_amount': prima,
+        'vacaciones_amount': vacaciones,
+        'int_cesantias_amount': int_cesantias,
+        'indemnizacion_amount': indemnizacion,
+        'total_amount': total,
+    }
+
+
+async def calculate_liquidacion(request: Request, member_id: UUID, data) -> 'LiquidacionCalculateResponse':
+    """
+    Read-only preview — calculates breakdown without writing to DB.
+    """
+    from app.models.salary import LiquidacionCalculateResponse, LiquidacionBreakdown
+    require_valid_session(request)
+
+    contract_start = date.fromisoformat(data.contract_start_date)
+    termination = date.fromisoformat(data.termination_date)
+    if termination <= contract_start:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="termination_date must be after contract_start_date")
+
+    breakdown = _calculate_liquidacion_breakdown(
+        base_salary=data.base_salary,
+        contract_start_date=contract_start,
+        termination_date=termination,
+        cause=data.cause.value if hasattr(data.cause, 'value') else data.cause,
+        employment_type=data.employment_type,
+    )
+
+    return LiquidacionCalculateResponse(
+        success=True,
+        data=LiquidacionBreakdown(**breakdown),
+    )
+
+
+async def _post_liquidacion_gl_entry(
+    conn,
+    tenant_id: UUID,
+    liquidacion_id: UUID,
+    breakdown: dict,
+    payment_date: datetime,
+    payment_method: Optional[str],
+    member_name: str,
+) -> None:
+    """
+    Post compound GL entry for liquidación.
+
+    DR 2610 Cesantías consolidadas     (cesantias_amount)
+    DR 2620 Prima de servicios         (prima_amount)
+    DR 2625 Vacaciones consolidadas    (vacaciones_amount)
+    DR 2615 Intereses sobre cesantías  (int_cesantias_amount)
+    DR 5198 Indemnizaciones al personal (indemnizacion_amount, if > 0)
+    CR 1110 Banco / Caja               (total_amount)
+    """
+    try:
+        entry_date = payment_date.date() if hasattr(payment_date, 'date') else payment_date
+        description = f"Liquidación contrato — {member_name}"
+        total_debit = float(breakdown['total_amount'])
+
+        # Resolve account IDs
+        acct_2610 = await conn.fetchrow("SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code='2610'", tenant_id)
+        acct_2620 = await conn.fetchrow("SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code='2620'", tenant_id)
+        acct_2625 = await conn.fetchrow("SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code='2625'", tenant_id)
+        acct_2615 = await conn.fetchrow("SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code='2615'", tenant_id)
+        acct_5198 = await conn.fetchrow("SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code='5198'", tenant_id)
+
+        # Resolve bank account from payment_method (same logic as other GL helpers)
+        bank_codes = ['1110', '1120', '1105']
+        credit_acct = None
+        for code in bank_codes:
+            credit_acct = await conn.fetchrow("SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code=$2", tenant_id, code)
+            if credit_acct:
+                break
+
+        if not credit_acct:
+            logger.error(f"[GL] No bank account found for liquidación {liquidacion_id}")
+            return
+
+        idempotency_check = await conn.fetchrow(
+            "SELECT id FROM tenant_journal_entries WHERE tenant_id=$1 AND source_module='nomina_liquidacion' AND source_id=$2",
+            tenant_id, liquidacion_id,
+        )
+        if idempotency_check:
+            logger.info(f"[GL] Liquidación entry already posted for {liquidacion_id}")
+            return
+
+        async with conn.transaction():
+            entry_row = await conn.fetchrow(
+                """INSERT INTO tenant_journal_entries
+                       (tenant_id, entry_date, period_year, period_month,
+                        description, source_module, source_id, status,
+                        total_debit, total_credit, posted_at)
+                   VALUES ($1, $2, $3, $4, $5, 'nomina_liquidacion', $6, 'posted', $7, $8, NOW())
+                   RETURNING id""",
+                tenant_id, entry_date, entry_date.year, entry_date.month,
+                description, liquidacion_id, total_debit, total_debit,
+            )
+            entry_id = entry_row['id']
+            line_order = 0
+
+            # DR lines for liability settlements
+            dr_lines = [
+                (acct_2610, breakdown['cesantias_amount'], 'Cesantías liquidación'),
+                (acct_2620, breakdown['prima_amount'], 'Prima liquidación'),
+                (acct_2625, breakdown['vacaciones_amount'], 'Vacaciones liquidación'),
+                (acct_2615, breakdown['int_cesantias_amount'], 'Intereses cesantías liquidación'),
+            ]
+            if breakdown['indemnizacion_amount'] > 0 and acct_5198:
+                dr_lines.append((acct_5198, breakdown['indemnizacion_amount'], 'Indemnización sin justa causa'))
+
+            for acct, amount, desc in dr_lines:
+                if acct and float(amount) > 0:
+                    await conn.execute(
+                        """INSERT INTO tenant_journal_lines
+                               (journal_entry_id, account_id, debit, credit, description, line_order)
+                           VALUES ($1, $2, $3, 0, $4, $5)""",
+                        entry_id, acct['id'], float(amount), desc, line_order,
+                    )
+                    line_order += 1
+
+            # CR line — bank
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, $4, $5)""",
+                entry_id, credit_acct['id'], total_debit, description, line_order,
+            )
+
+        logger.info(f"[GL] Posted liquidación entry {entry_id} for liquidacion_id={liquidacion_id}, total={total_debit}")
+
+    except Exception as exc:
+        logger.error(f"[GL] Failed to post liquidación entry for {liquidacion_id}: {exc}")
+
+
+async def record_liquidacion(request: Request, member_id: UUID, data) -> 'LiquidacionResponse':
+    """
+    Record contract liquidation, mark employee as terminated, post compound GL entry.
+    Returns 409 if liquidación already exists for this employee.
+    """
+    from app.models.salary import LiquidacionResponse, LiquidacionRecord
+    from fastapi import HTTPException
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    contract_start = date.fromisoformat(data.contract_start_date)
+    termination = date.fromisoformat(data.termination_date)
+    if termination <= contract_start:
+        raise HTTPException(status_code=400, detail="termination_date must be after contract_start_date")
+
+    cause = data.cause.value if hasattr(data.cause, 'value') else data.cause
+    breakdown = _calculate_liquidacion_breakdown(
+        base_salary=data.base_salary,
+        contract_start_date=contract_start,
+        termination_date=termination,
+        cause=cause,
+        employment_type=data.employment_type,
+    )
+
+    payment_date_dt = datetime.now()
+    if data.payment_date:
+        try:
+            payment_date_dt = datetime.fromisoformat(data.payment_date.replace('Z', '+00:00'))
+        except ValueError:
+            pass
+
+    async with get_db_connection() as conn:
+        # Verify member belongs to tenant
+        member_row = await conn.fetchrow(
+            "SELECT id, full_name FROM tenant_members WHERE id=$1 AND tenant_id=$2",
+            member_id, tenant_id,
+        )
+        if not member_row:
+            raise HTTPException(status_code=404, detail="Employee not found in this tenant")
+
+        # Check for existing liquidación
+        existing = await conn.fetchrow(
+            "SELECT id FROM salary_liquidaciones WHERE tenant_member_id=$1",
+            member_id,
+        )
+        if existing:
+            raise HTTPException(status_code=409, detail="Liquidación already registered for this employee")
+
+        # Insert liquidación record
+        row = await conn.fetchrow(
+            """INSERT INTO salary_liquidaciones
+                   (tenant_id, tenant_member_id, contract_start_date, termination_date, cause,
+                    days_worked, base_salary, cesantias_amount, prima_amount, vacaciones_amount,
+                    int_cesantias_amount, indemnizacion_amount, total_amount,
+                    payment_method, payment_date, notes, created_by)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+               RETURNING *""",
+            tenant_id, member_id,
+            contract_start, termination, cause,
+            breakdown['days_worked'], float(data.base_salary),
+            float(breakdown['cesantias_amount']), float(breakdown['prima_amount']),
+            float(breakdown['vacaciones_amount']), float(breakdown['int_cesantias_amount']),
+            float(breakdown['indemnizacion_amount']), float(breakdown['total_amount']),
+            data.payment_method, payment_date_dt, data.notes,
+            session.user_id if hasattr(session, 'user_id') else None,
+        )
+
+        # Mark employee as terminated
+        await conn.execute(
+            "UPDATE tenant_members SET is_active=false, terminated_at=$1 WHERE id=$2",
+            payment_date_dt, member_id,
+        )
+
+        await _post_liquidacion_gl_entry(
+            conn=conn,
+            tenant_id=tenant_id,
+            liquidacion_id=row['id'],
+            breakdown=breakdown,
+            payment_date=payment_date_dt,
+            payment_method=data.payment_method,
+            member_name=member_row['full_name'] or str(member_id),
+        )
+
+        record = LiquidacionRecord(
+            id=row['id'],
+            tenant_id=row['tenant_id'],
+            tenant_member_id=row['tenant_member_id'],
+            contract_start_date=str(row['contract_start_date']),
+            termination_date=str(row['termination_date']),
+            cause=row['cause'],
+            days_worked=row['days_worked'],
+            base_salary=Decimal(str(row['base_salary'])),
+            cesantias_amount=Decimal(str(row['cesantias_amount'])),
+            prima_amount=Decimal(str(row['prima_amount'])),
+            vacaciones_amount=Decimal(str(row['vacaciones_amount'])),
+            int_cesantias_amount=Decimal(str(row['int_cesantias_amount'])),
+            indemnizacion_amount=Decimal(str(row['indemnizacion_amount'])),
+            total_amount=Decimal(str(row['total_amount'])),
+            payment_method=row['payment_method'],
+            payment_date=row['payment_date'],
+            notes=row['notes'],
+            created_at=row['created_at'],
+        )
+        return LiquidacionResponse(success=True, data=record)
+
+
+async def get_liquidacion(request: Request, member_id: UUID) -> 'LiquidacionResponse':
+    """
+    Get the liquidación record for an employee, or return success=True, data=None if none.
+    """
+    from app.models.salary import LiquidacionResponse, LiquidacionRecord
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM salary_liquidaciones WHERE tenant_id=$1 AND tenant_member_id=$2",
+            tenant_id, member_id,
+        )
+        if not row:
+            return LiquidacionResponse(success=True, data=None)
+
+        record = LiquidacionRecord(
+            id=row['id'],
+            tenant_id=row['tenant_id'],
+            tenant_member_id=row['tenant_member_id'],
+            contract_start_date=str(row['contract_start_date']),
+            termination_date=str(row['termination_date']),
+            cause=row['cause'],
+            days_worked=row['days_worked'],
+            base_salary=Decimal(str(row['base_salary'])),
+            cesantias_amount=Decimal(str(row['cesantias_amount'])),
+            prima_amount=Decimal(str(row['prima_amount'])),
+            vacaciones_amount=Decimal(str(row['vacaciones_amount'])),
+            int_cesantias_amount=Decimal(str(row['int_cesantias_amount'])),
+            indemnizacion_amount=Decimal(str(row['indemnizacion_amount'])),
+            total_amount=Decimal(str(row['total_amount'])),
+            payment_method=row['payment_method'],
+            payment_date=row['payment_date'],
+            notes=row['notes'],
+            created_at=row['created_at'],
+        )
+        return LiquidacionResponse(success=True, data=record)
