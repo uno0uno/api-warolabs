@@ -190,12 +190,14 @@ async def get_payment_history_endpoint(
 async def upload_payment_attachments_endpoint(
     payment_id: UUID,
     request: Request,
-    files: List[UploadFile] = File(...)
+    files: List[UploadFile] = File(...),
+    label: Optional[str] = Form(None)
 ):
     """
-    Upload attachments for a salary payment
+    Upload attachments for a salary payment.
+    label: optional purpose tag — 'pila' stores files under salaries/{tenant}/pila/ subfolder.
     """
-    return await upload_salary_payment_attachments(request, payment_id, files)
+    return await upload_salary_payment_attachments(request, payment_id, files, label=label)
 
 
 @router.delete("/payments/attachments/{attachment_id}")

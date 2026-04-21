@@ -130,6 +130,7 @@ class SalaryAttachmentBase(BaseModel):
     file_size: Optional[int] = Field(None, description="File size in bytes")
     mime_type: Optional[str] = Field(None, description="MIME type")
     s3_key: Optional[str] = Field(None, description="S3 key for the file")
+    label: Optional[str] = Field(None, description="Purpose tag, e.g. 'pila' for PILA/social security proof")
 
 
 class SalaryAttachmentCreate(SalaryAttachmentBase):

@@ -600,7 +600,7 @@ async def get_employee_salary_detail(request: Request, employee_id: UUID) -> Emp
             # Get attachments for this payment
             attachments_query = """
                 SELECT id, tenant_id, salary_payment_id, path, file_name,
-                       file_size, mime_type, s3_key, uploaded_by, uploaded_at
+                       file_size, mime_type, s3_key, uploaded_by, uploaded_at, label
                 FROM salary_attachments
                 WHERE salary_payment_id = $1
             """
@@ -617,7 +617,8 @@ async def get_employee_salary_detail(request: Request, employee_id: UUID) -> Emp
                     mime_type=a['mime_type'],
                     s3_key=a['s3_key'],
                     uploaded_by=a['uploaded_by'],
-                    uploaded_at=a['uploaded_at']
+                    uploaded_at=a['uploaded_at'],
+                    label=a['label']
                 )
                 for a in attachment_rows
             ]
@@ -1189,7 +1190,8 @@ async def get_salary_payments(
                     mime_type=a['mime_type'],
                     s3_key=a['s3_key'],
                     uploaded_by=a['uploaded_by'],
-                    uploaded_at=a['uploaded_at']
+                    uploaded_at=a['uploaded_at'],
+                    label=a['label']
                 )
                 for a in att_rows
             ]
@@ -1609,10 +1611,13 @@ async def get_salary_payment_history(
 async def upload_salary_payment_attachments(
     request: Request,
     payment_id: UUID,
-    files: List[UploadFile]
+    files: List[UploadFile],
+    label: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Upload attachments for existing salary payment
+    Upload attachments for existing salary payment.
+    label: optional purpose tag (e.g. 'pila' for PILA/social security proof).
+           PILA files are stored under salaries/{tenant_id}/pila/ subfolder.
     """
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -1633,8 +1638,12 @@ async def upload_salary_payment_attachments(
 
         for file in files:
             try:
-                # Upload to S3
-                s3_key = f"salaries/{tenant_id}/{uuid4()}_{file.filename}"
+                # Branch S3 path by label: PILA files go to dedicated subfolder
+                if label == 'pila':
+                    s3_key = f"salaries/{tenant_id}/pila/{uuid4()}_{file.filename}"
+                else:
+                    s3_key = f"salaries/{tenant_id}/{uuid4()}_{file.filename}"
+
                 uploaded_key = await s3_service.upload_file_with_key(
                     file_content=await file.read(),
                     s3_key=s3_key,
@@ -1652,18 +1661,18 @@ async def upload_salary_payment_attachments(
                     logger.error(f"Failed to generate presigned URL for {file.filename}")
                     continue
 
-                # Insert into database
+                # Insert into database with optional label
                 attachment_id = await conn.fetchval("""
                     INSERT INTO salary_attachments (
                         id, tenant_id, salary_payment_id,
                         path, file_name, file_size, mime_type, s3_key,
-                        uploaded_by
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        uploaded_by, label
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     RETURNING id
                 """,
                     uuid4(), tenant_id, payment_id,
                     s3_url, file.filename, file.size, file.content_type, uploaded_key,
-                    user_id
+                    user_id, label
                 )
 
                 uploaded_files.append({
@@ -1671,14 +1680,15 @@ async def upload_salary_payment_attachments(
                     'fileName': file.filename,
                     'fileSize': file.size,
                     'mimeType': file.content_type,
-                    's3Url': s3_url
+                    's3Url': s3_url,
+                    'label': label
                 })
 
             except Exception as e:
                 logger.error(f"Error uploading file {file.filename}: {e}")
                 continue
 
-        logger.info(f"Uploaded {len(uploaded_files)} attachments to payment {payment_id}")
+        logger.info(f"Uploaded {len(uploaded_files)} attachments to payment {payment_id} (label={label})")
 
         return {
             'success': True,
