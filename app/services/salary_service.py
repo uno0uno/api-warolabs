@@ -2793,8 +2793,8 @@ async def record_vacaciones_payment(
         member = await conn.fetchrow(
             """SELECT es.employment_type
                FROM employee_salaries es
-               JOIN tenant_members tm ON tm.id = $1
-               WHERE es.tenant_member_id = $1 AND es.tenant_id = $2
+               JOIN tenant_members tm ON tm.id = es.tenant_member_id
+               WHERE es.tenant_member_id = $1 AND tm.tenant_id = $2
                ORDER BY es.created_at DESC
                LIMIT 1""",
             member_id, tenant_id,
@@ -3030,7 +3030,8 @@ async def record_dotacion_payment(
         member = await conn.fetchrow(
             """SELECT es.employment_type, es.base_salary
                FROM employee_salaries es
-               WHERE es.tenant_member_id = $1 AND es.tenant_id = $2
+               JOIN tenant_members tm ON tm.id = es.tenant_member_id
+               WHERE es.tenant_member_id = $1 AND tm.tenant_id = $2
                ORDER BY es.created_at DESC
                LIMIT 1""",
             member_id, tenant_id,
