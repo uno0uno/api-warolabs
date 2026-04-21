@@ -34,6 +34,8 @@ from app.services.salary_service import (
     record_pila_payment,
     get_pila_payments,
     get_pila_pending,
+    record_overtime_payment,
+    get_overtime_payments,
 )
 from app.models.salary import (
     EmployeesWithSalaryResponse,
@@ -62,6 +64,9 @@ from app.models.salary import (
     PilaPaymentResponse,
     PilaPaymentListResponse,
     PilaPendingResponse,
+    OvertimePaymentCreate,
+    OvertimePaymentResponse,
+    OvertimePaymentListResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -403,3 +408,33 @@ async def get_pila_payments_endpoint(request: Request):
     List all PILA payments for the tenant, ordered by payment_date DESC.
     """
     return await get_pila_payments(request)
+
+
+# =============================================================================
+# OVERTIME (HORAS EXTRAS) ENDPOINTS
+# =============================================================================
+
+@router.post("/employees/{member_id}/horas-extras", response_model=OvertimePaymentResponse)
+async def post_overtime_payment_endpoint(
+    request: Request,
+    member_id: UUID,
+    data: OvertimePaymentCreate,
+):
+    """
+    Register an overtime payment for an employee.
+    All employment types are eligible.
+    Multiple payments per period_month are allowed.
+    GL entry: DR 5110 (Gastos horas extras) / CR bank account (graceful degrade on failure).
+    """
+    return await record_overtime_payment(request, member_id, data)
+
+
+@router.get("/employees/{member_id}/horas-extras", response_model=OvertimePaymentListResponse)
+async def get_overtime_payments_endpoint(
+    request: Request,
+    member_id: UUID,
+):
+    """
+    List overtime payments for an employee, ordered by payment_date DESC.
+    """
+    return await get_overtime_payments(request, member_id)

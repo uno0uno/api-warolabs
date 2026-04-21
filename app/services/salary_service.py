@@ -3415,3 +3415,231 @@ async def get_pila_pending(
         ]
 
         return PilaPendingResponse(success=True, data=pending)
+
+
+# =============================================================================
+# OVERTIME (HORAS EXTRAS) — GL + CRUD
+# =============================================================================
+
+async def _post_overtime_gl_entry(
+    conn,
+    tenant_id: UUID,
+    overtime_payment_id: UUID,
+    total_amount: Decimal,
+    payment_date,
+    payment_method: Optional[str],
+) -> None:
+    """
+    Post GL entry for overtime payment.
+    DR 5110 (Gastos de personal — horas extras) / CR bank account
+    source_module = 'nomina_horas_extras'
+    Graceful degrade: never raises.
+    """
+    try:
+        # Idempotency check
+        existing = await conn.fetchval(
+            """SELECT id FROM tenant_journal_entries
+               WHERE tenant_id = $1 AND source_module = 'nomina_horas_extras' AND source_id = $2""",
+            tenant_id, overtime_payment_id,
+        )
+        if existing:
+            logger.info(f"[overtime_gl] Payment {overtime_payment_id} already posted — skip")
+            return
+
+        # Check period closure
+        entry_date = payment_date if hasattr(payment_date, 'year') else datetime.now()
+        period_closed = await conn.fetchval(
+            """SELECT id FROM accounting_periods
+               WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+            tenant_id, entry_date.year, entry_date.month,
+        )
+        if period_closed:
+            logger.info(
+                f"[overtime_gl] Period {entry_date.year}-{entry_date.month:02d} closed "
+                f"— skip GL for overtime payment {overtime_payment_id}"
+            )
+            return
+
+        # Resolve DR account: 5110 (Gastos de personal — horas extras)
+        dr_account_id = await conn.fetchval(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '5110' AND is_active = true",
+            tenant_id,
+        )
+        if not dr_account_id:
+            logger.warning(f"[overtime_gl] DR account 5110 not found for tenant {tenant_id} — skip overtime GL")
+            return
+
+        # Resolve CR account (bank) — same pattern as dotación
+        cr_account_id = None
+        credit_code = "1110"
+        if payment_method:
+            pm_row = await conn.fetchrow(
+                """SELECT gl_account_id FROM payment_method_gl_accounts
+                   WHERE tenant_id = $1 AND (payment_method_id::text = $2 OR slug = $2)
+                   LIMIT 1""",
+                tenant_id, str(payment_method),
+            )
+            if pm_row and pm_row['gl_account_id']:
+                cr_account_id = pm_row['gl_account_id']
+                acc_code = await conn.fetchval(
+                    "SELECT code FROM tenant_accounts WHERE id = $1", cr_account_id
+                )
+                if acc_code:
+                    credit_code = acc_code
+
+        if not cr_account_id:
+            cr_account_id = await conn.fetchval(
+                "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '1110' AND is_active = true",
+                tenant_id,
+            )
+        if not cr_account_id:
+            logger.warning(f"[overtime_gl] CR account not found for tenant {tenant_id} — skip overtime GL")
+            return
+
+        amount_float = float(total_amount)
+
+        # Create journal entry
+        entry_id = await conn.fetchval(
+            """INSERT INTO tenant_journal_entries
+               (tenant_id, entry_date, description, total_debit, total_credit,
+                source_module, source_id, status, created_by, created_at)
+               VALUES ($1, $2, $3, $4, $5, 'nomina_horas_extras', $6, 'posted', NULL, NOW())
+               RETURNING id""",
+            tenant_id,
+            entry_date,
+            f"Horas extras — {entry_date.strftime('%Y-%m')}",
+            amount_float,
+            amount_float,
+            overtime_payment_id,
+        )
+
+        # DR line — 5110 Gastos de personal — horas extras
+        await conn.execute(
+            """INSERT INTO tenant_journal_entry_lines
+               (entry_id, account_id, debit, credit, description)
+               VALUES ($1, $2, $3, 0, 'Gasto horas extras')""",
+            entry_id, dr_account_id, amount_float,
+        )
+
+        # CR line — bank account
+        await conn.execute(
+            """INSERT INTO tenant_journal_entry_lines
+               (entry_id, account_id, debit, credit, description)
+               VALUES ($1, $2, 0, $3, 'Pago horas extras')""",
+            entry_id, cr_account_id, amount_float,
+        )
+
+        logger.info(
+            f"[overtime_gl] Posted entry {entry_id} for payment {overtime_payment_id} "
+            f"(amount={amount_float}, DR=5110, CR={credit_code})"
+        )
+
+    except Exception as exc:
+        logger.error(f"[overtime_gl] GL entry failed for payment {overtime_payment_id}: {exc}", exc_info=True)
+
+
+async def record_overtime_payment(request: Request, member_id: UUID, data) -> 'OvertimePaymentResponse':
+    """
+    Register an overtime payment for an employee and post GL entry DR 5110 / CR bank.
+    All employment types are eligible for overtime.
+    Multiple payments per period_month are allowed.
+    """
+    from fastapi import HTTPException as _HTTPException
+    from app.models.salary import OvertimePaymentResponse, OvertimePayment
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        # Verify employee belongs to tenant
+        member = await conn.fetchrow(
+            """SELECT tm.id FROM tenant_members tm
+               WHERE tm.id = $1 AND tm.tenant_id = $2""",
+            member_id, tenant_id,
+        )
+        if not member:
+            raise _HTTPException(status_code=404, detail="Employee not found")
+
+        payment_date = data.payment_date or datetime.now()
+
+        row = await conn.fetchrow(
+            """INSERT INTO salary_overtime_payments
+               (tenant_id, tenant_member_id, period_month,
+                hours_diurna, hours_nocturna, hours_dominical_diurna, hours_dominical_nocturna,
+                base_hourly_rate, total_amount, payment_method, payment_date, notes)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+               RETURNING *""",
+            tenant_id, member_id, data.period_month,
+            float(data.hours_diurna), float(data.hours_nocturna),
+            float(data.hours_dominical_diurna), float(data.hours_dominical_nocturna),
+            float(data.base_hourly_rate), float(data.total_amount),
+            data.payment_method, payment_date, data.notes,
+        )
+
+        payment_id = row['id']
+
+        await _post_overtime_gl_entry(
+            conn=conn,
+            tenant_id=tenant_id,
+            overtime_payment_id=payment_id,
+            total_amount=data.total_amount,
+            payment_date=payment_date,
+            payment_method=data.payment_method,
+        )
+
+        payment = OvertimePayment(
+            id=row['id'],
+            tenant_id=row['tenant_id'],
+            tenant_member_id=row['tenant_member_id'],
+            period_month=row['period_month'],
+            hours_diurna=Decimal(str(row['hours_diurna'])),
+            hours_nocturna=Decimal(str(row['hours_nocturna'])),
+            hours_dominical_diurna=Decimal(str(row['hours_dominical_diurna'])),
+            hours_dominical_nocturna=Decimal(str(row['hours_dominical_nocturna'])),
+            base_hourly_rate=Decimal(str(row['base_hourly_rate'])),
+            total_amount=Decimal(str(row['total_amount'])),
+            payment_method=row['payment_method'],
+            payment_date=row['payment_date'],
+            notes=row['notes'],
+            created_at=row['created_at'],
+        )
+
+        return OvertimePaymentResponse(success=True, data=payment)
+
+
+async def get_overtime_payments(request: Request, member_id: UUID) -> 'OvertimePaymentListResponse':
+    """
+    List all overtime payments for an employee, ordered by payment_date DESC.
+    """
+    from app.models.salary import OvertimePaymentListResponse, OvertimePayment
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM salary_overtime_payments
+               WHERE tenant_id = $1 AND tenant_member_id = $2
+               ORDER BY payment_date DESC""",
+            tenant_id, member_id,
+        )
+
+        payments = [
+            OvertimePayment(
+                id=r['id'],
+                tenant_id=r['tenant_id'],
+                tenant_member_id=r['tenant_member_id'],
+                period_month=r['period_month'],
+                hours_diurna=Decimal(str(r['hours_diurna'])),
+                hours_nocturna=Decimal(str(r['hours_nocturna'])),
+                hours_dominical_diurna=Decimal(str(r['hours_dominical_diurna'])),
+                hours_dominical_nocturna=Decimal(str(r['hours_dominical_nocturna'])),
+                base_hourly_rate=Decimal(str(r['base_hourly_rate'])),
+                total_amount=Decimal(str(r['total_amount'])),
+                payment_method=r['payment_method'],
+                payment_date=r['payment_date'],
+                notes=r['notes'],
+                created_at=r['created_at'],
+            )
+            for r in rows
+        ]
+
+        return OvertimePaymentListResponse(success=True, data=payments)

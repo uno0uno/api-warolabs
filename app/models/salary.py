@@ -540,3 +540,68 @@ class PilaPendingByPeriod(BaseModel):
 class PilaPendingResponse(BaseModel):
     success: bool = True
     data: List[PilaPendingByPeriod]
+
+
+# =============================================================================
+# OVERTIME (HORAS EXTRAS) PAYMENT MODELS
+# =============================================================================
+
+class OvertimePaymentCreate(BaseModel):
+    period_month: str = Field(..., description="Period in YYYY-MM format")
+    hours_diurna: Decimal = Field(default=Decimal('0'), ge=0, description="Overtime diurna hours (+25%)")
+    hours_nocturna: Decimal = Field(default=Decimal('0'), ge=0, description="Overtime nocturna hours (+75%)")
+    hours_dominical_diurna: Decimal = Field(default=Decimal('0'), ge=0, description="Dominical/festivo diurna hours (+100%)")
+    hours_dominical_nocturna: Decimal = Field(default=Decimal('0'), ge=0, description="Dominical/festivo nocturna hours (+150%)")
+    base_hourly_rate: Decimal = Field(..., gt=0, description="Base hourly rate used for this payment")
+    total_amount: Decimal = Field(..., gt=0, description="Total overtime amount (pre-calculated by client)")
+    payment_method: Optional[str] = Field(None, description="Payment method — UUID or slug")
+    payment_date: Optional[datetime] = Field(None, description="Date of payment")
+    notes: Optional[str] = Field(None, description="Additional notes")
+
+    @field_validator('period_month')
+    @classmethod
+    def validate_period_month(cls, v: str) -> str:
+        import re
+        if not re.match(r'^\d{4}-\d{2}$', v):
+            raise ValueError("period_month must be in YYYY-MM format")
+        return v
+
+    from pydantic import model_validator
+
+    @model_validator(mode='after')
+    def check_at_least_one_hour(self) -> 'OvertimePaymentCreate':
+        total_hours = (
+            self.hours_diurna + self.hours_nocturna
+            + self.hours_dominical_diurna + self.hours_dominical_nocturna
+        )
+        if total_hours <= 0:
+            raise ValueError("At least one hours field must be greater than zero")
+        return self
+
+
+class OvertimePayment(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    tenant_id: UUID
+    tenant_member_id: UUID
+    period_month: str
+    hours_diurna: Decimal
+    hours_nocturna: Decimal
+    hours_dominical_diurna: Decimal
+    hours_dominical_nocturna: Decimal
+    base_hourly_rate: Decimal
+    total_amount: Decimal
+    payment_method: Optional[str] = None
+    payment_date: datetime
+    notes: Optional[str] = None
+    created_at: datetime
+
+
+class OvertimePaymentListResponse(BaseModel):
+    success: bool = True
+    data: List[OvertimePayment]
+
+
+class OvertimePaymentResponse(BaseModel):
+    success: bool = True
+    data: OvertimePayment
