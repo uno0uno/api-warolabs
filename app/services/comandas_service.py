@@ -7,16 +7,41 @@ and atomically creates comandas + comanda_items, marking items as 'sent'.
 Industry reference: Toast "Send" button, Square "Fire course".
 
 Issue: https://github.com/uno0uno/warocol.com/issues/413
+Issue: https://github.com/uno0uno/warocol.com/issues/416
 """
 from typing import Optional, List, Dict, Any
 from uuid import UUID
+from datetime import datetime, timezone, timedelta
 import json
 import logging
 
 from app.database import get_db_connection
 from app.services.stations_service import get_effective_station
+from app.core.middleware import require_valid_session
+from app.core.exceptions import AuthenticationError, APIError, NotFoundError, ValidationError
+from fastapi import Request
 
 logger = logging.getLogger(__name__)
+
+# Allowed status transitions — any move not in this map is rejected with 422.
+# 'recall' (delivered → ready) is handled by recall_comanda() separately.
+ALLOWED_TRANSITIONS: Dict[str, List[str]] = {
+    'pending':   ['preparing', 'cancelled'],
+    'preparing': ['ready', 'cancelled'],
+    'ready':     ['delivered'],
+    'delivered': [],
+    'cancelled': [],
+}
+
+
+async def _check_comandas_enabled(conn, tenant_id: UUID) -> None:
+    """Raises APIError(403) if tenant does not have comandas_enabled = true."""
+    enabled = await conn.fetchval(
+        "SELECT comandas_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+        tenant_id,
+    )
+    if not enabled:
+        raise APIError("Comandas no están habilitadas para este tenant", status_code=403)
 
 
 async def fire_comandas(
@@ -238,3 +263,556 @@ async def _fire_with_conn(
         f"comandas={len(created_comandas)}"
     )
     return created_comandas
+
+
+def _compute_alert_level(fired_at: Optional[datetime], threshold_1_min: Optional[int], threshold_2_min: Optional[int]) -> int:
+    """
+    Compute alert level (0=normal, 1=warning, 2=critical) from elapsed time vs thresholds.
+    Returns 0 if fired_at is None.
+    """
+    if not fired_at:
+        return 0
+    now_utc = datetime.now(timezone.utc)
+    # fired_at may be timezone-aware (timestamptz from PG); ensure comparison is valid
+    if fired_at.tzinfo is None:
+        fired_at = fired_at.replace(tzinfo=timezone.utc)
+    elapsed = int((now_utc - fired_at).total_seconds())
+    t1 = (threshold_1_min or 8) * 60
+    t2 = (threshold_2_min or 15) * 60
+    if elapsed > t2:
+        return 2
+    if elapsed > t1:
+        return 1
+    return 0
+
+
+async def get_comandas_for_kds(
+    request: Request,
+    station_id: Optional[UUID] = None,
+    status_filter: Optional[str] = None,
+    date: Optional[str] = None,
+    source_type: Optional[str] = None,
+) -> dict:
+    """
+    Returns active comandas for the tenant, optionally filtered by station, status,
+    source_type, and date. Computes elapsed_seconds and alert_level server-side.
+    Active statuses default: 'pending', 'preparing', 'ready'.
+    Terminal: 'delivered', 'cancelled'.
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            await _check_comandas_enabled(conn, tenant_id)
+
+            # Build WHERE clause dynamically
+            where_conditions = ["c.tenant_id = $1"]
+            params: List[Any] = [tenant_id]
+            param_count = 1
+
+            # Default: active statuses only (override if status_filter provided)
+            if not status_filter:
+                where_conditions.append("c.status IN ('pending', 'preparing', 'ready')")
+            else:
+                param_count += 1
+                where_conditions.append(f"c.status = ${param_count}")
+                params.append(status_filter)
+
+            if station_id:
+                param_count += 1
+                where_conditions.append(f"c.station_id = ${param_count}")
+                params.append(station_id)
+
+            if source_type:
+                param_count += 1
+                where_conditions.append(f"c.source_type = ${param_count}")
+                params.append(source_type)
+
+            # Date filter — default to CURRENT_DATE when not provided
+            if date:
+                param_count += 1
+                where_conditions.append(
+                    f"DATE(c.fired_at AT TIME ZONE 'UTC') = ${param_count}::date"
+                )
+                params.append(date)
+            else:
+                where_conditions.append("DATE(c.fired_at AT TIME ZONE 'UTC') = CURRENT_DATE")
+
+            where_clause = " AND ".join(where_conditions)
+
+            rows = await conn.fetch(f"""
+                SELECT
+                    c.id, c.comanda_number, c.status, c.source_type, c.table_display_name,
+                    c.notes, c.fired_at, c.preparing_at, c.ready_at, c.delivered_at, c.created_at,
+                    ks.id as station_id,
+                    ks.name as station_name, ks.kitchen_name as station_kitchen_name,
+                    ks.color as station_color,
+                    ks.alert_threshold_1_min, ks.alert_threshold_2_min
+                FROM comandas c
+                JOIN kitchen_stations ks ON ks.id = c.station_id
+                WHERE {where_clause}
+                ORDER BY c.fired_at ASC
+            """, *params)
+
+            comandas = []
+            for row in rows:
+                c_data = dict(row)
+
+                # Compute elapsed_seconds and alert_level server-side
+                elapsed_seconds = None
+                if c_data.get('fired_at'):
+                    fired_at = c_data['fired_at']
+                    if fired_at.tzinfo is None:
+                        fired_at = fired_at.replace(tzinfo=timezone.utc)
+                    elapsed_seconds = int((datetime.now(timezone.utc) - fired_at).total_seconds())
+
+                c_data['elapsed_seconds'] = elapsed_seconds
+                c_data['alert_level'] = _compute_alert_level(
+                    c_data.get('fired_at'),
+                    c_data.get('alert_threshold_1_min'),
+                    c_data.get('alert_threshold_2_min'),
+                )
+
+                # Remove raw threshold fields — not needed in response
+                c_data.pop('alert_threshold_1_min', None)
+                c_data.pop('alert_threshold_2_min', None)
+
+                # Fetch items for this comanda
+                item_rows = await conn.fetch("""
+                    SELECT id, order_item_id, kitchen_name, quantity, notes,
+                           modifiers_snapshot, status, ready_at, created_at
+                    FROM comanda_items
+                    WHERE comanda_id = $1
+                    ORDER BY created_at ASC
+                """, row['id'])
+
+                c_data['items'] = [dict(ir) for ir in item_rows]
+                comandas.append(c_data)
+
+            return {"success": True, "data": comandas}
+
+    except (AuthenticationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error fetching active comandas: {str(e)}")
+        raise APIError(f"Error al obtener comandas del KDS: {str(e)}", status_code=500)
+
+
+async def get_comanda_detail(
+    request: Request,
+    comanda_id: UUID,
+) -> dict:
+    """
+    Returns full detail for a single comanda, including nested items,
+    station info, timing, elapsed_seconds, and alert_level.
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            await _check_comandas_enabled(conn, tenant_id)
+
+            row = await conn.fetchrow("""
+                SELECT
+                    c.id, c.comanda_number, c.status, c.source_type, c.table_display_name,
+                    c.notes, c.fired_at, c.preparing_at, c.ready_at, c.delivered_at, c.created_at,
+                    ks.id as station_id,
+                    ks.name as station_name, ks.kitchen_name as station_kitchen_name,
+                    ks.color as station_color,
+                    ks.alert_threshold_1_min, ks.alert_threshold_2_min
+                FROM comandas c
+                JOIN kitchen_stations ks ON ks.id = c.station_id
+                WHERE c.id = $1 AND c.tenant_id = $2
+            """, comanda_id, tenant_id)
+
+            if not row:
+                raise NotFoundError(f"Comanda {comanda_id} no encontrada")
+
+            c_data = dict(row)
+
+            # Compute elapsed_seconds and alert_level
+            elapsed_seconds = None
+            if c_data.get('fired_at'):
+                fired_at = c_data['fired_at']
+                if fired_at.tzinfo is None:
+                    fired_at = fired_at.replace(tzinfo=timezone.utc)
+                elapsed_seconds = int((datetime.now(timezone.utc) - fired_at).total_seconds())
+
+            c_data['elapsed_seconds'] = elapsed_seconds
+            c_data['alert_level'] = _compute_alert_level(
+                c_data.get('fired_at'),
+                c_data.get('alert_threshold_1_min'),
+                c_data.get('alert_threshold_2_min'),
+            )
+            c_data.pop('alert_threshold_1_min', None)
+            c_data.pop('alert_threshold_2_min', None)
+
+            # Fetch nested items
+            item_rows = await conn.fetch("""
+                SELECT id, order_item_id, kitchen_name, quantity, notes,
+                       modifiers_snapshot, status, ready_at, created_at
+                FROM comanda_items
+                WHERE comanda_id = $1
+                ORDER BY created_at ASC
+            """, comanda_id)
+
+            c_data['items'] = [dict(ir) for ir in item_rows]
+
+            return {"success": True, "data": c_data}
+
+    except (AuthenticationError, NotFoundError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error fetching comanda detail {comanda_id}: {str(e)}")
+        raise APIError(f"Error al obtener detalle de comanda: {str(e)}", status_code=500)
+
+
+async def update_comanda_status(
+    request: Request,
+    comanda_id: UUID,
+    new_status: str
+) -> dict:
+    """
+    Updates comanda status and sets appropriate timestamps.
+    Enforces allowed-transition map — raises 422 for illegal transitions.
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+
+        async with get_db_connection() as conn:
+            await _check_comandas_enabled(conn, tenant_id)
+
+            # Fetch current comanda (verify ownership)
+            row = await conn.fetchrow(
+                "SELECT id, status FROM comandas WHERE id = $1 AND tenant_id = $2",
+                comanda_id, tenant_id
+            )
+            if not row:
+                raise NotFoundError(f"Comanda {comanda_id} no encontrada")
+
+            current_status = row['status']
+            allowed_next = ALLOWED_TRANSITIONS.get(current_status, [])
+
+            if new_status not in allowed_next:
+                raise ValidationError(
+                    f"Transición inválida: {current_status} → {new_status}. "
+                    f"Transiciones permitidas desde '{current_status}': {allowed_next}"
+                )
+
+            sql_updates = ["status = $1", "updated_at = NOW()"]
+            params: List[Any] = [new_status, comanda_id, tenant_id]
+
+            if new_status == 'preparing':
+                sql_updates.append("preparing_at = NOW()")
+            elif new_status == 'ready':
+                sql_updates.append("ready_at = NOW()")
+            elif new_status == 'delivered':
+                sql_updates.append("delivered_at = NOW()")
+
+            await conn.execute(f"""
+                UPDATE comandas
+                SET {', '.join(sql_updates)}
+                WHERE id = $2 AND tenant_id = $3
+            """, *params)
+
+            return {"success": True, "message": f"Comanda actualizada a {new_status}"}
+
+    except (AuthenticationError, NotFoundError, ValidationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating comanda status: {str(e)}")
+        raise APIError(f"Error al actualizar comanda: {str(e)}", status_code=500)
+
+
+async def recall_comanda(
+    request: Request,
+    comanda_id: UUID
+) -> dict:
+    """Reverts a 'delivered' comanda back to 'ready' (15 min window)."""
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+
+        async with get_db_connection() as conn:
+            await _check_comandas_enabled(conn, tenant_id)
+
+            row = await conn.fetchrow("""
+                SELECT id, status, delivered_at
+                FROM comandas
+                WHERE id = $1 AND tenant_id = $2
+            """, comanda_id, tenant_id)
+
+            if not row:
+                raise NotFoundError(f"Comanda {comanda_id} no encontrada")
+            if row['status'] != 'delivered':
+                raise ValidationError("Solo se pueden recuperar comandas que ya fueron entregadas")
+
+            # 15-minute window check
+            if row['delivered_at'] and (datetime.now(timezone.utc) - row['delivered_at']) > timedelta(minutes=15):
+                raise ValidationError("La ventana de recuperación de 15 minutos ha expirado")
+
+            await conn.execute("""
+                UPDATE comandas
+                SET status = 'ready', delivered_at = NULL, updated_at = NOW()
+                WHERE id = $1 AND tenant_id = $2
+            """, comanda_id, tenant_id)
+
+            return {"success": True, "message": "Comanda recuperada y marcada como lista"}
+
+    except (AuthenticationError, NotFoundError, ValidationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error recalling comanda {comanda_id}: {str(e)}")
+        raise APIError(f"Error al recuperar comanda: {str(e)}", status_code=500)
+
+
+async def update_comanda_item_status(
+    request: Request,
+    comanda_id: UUID,
+    item_id: UUID,
+    new_status: str
+) -> dict:
+    """
+    Updates individual comanda item status to 'ready'.
+
+    Side effects (atomic, single transaction):
+    1. Sets comanda_items.status = 'ready', ready_at = now()
+    2. Sets order_items.fulfillment_status = 'ready', ready_at = now() for the linked order_item
+    3. If ALL items in the comanda are now 'ready' → auto-advances comanda to 'ready'
+    """
+    allowed = {'ready'}
+    if new_status not in allowed:
+        raise ValidationError(f"Estado de ítem inválido: {new_status}. Solo se permite: 'ready'")
+
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+
+        async with get_db_connection() as conn:
+            await _check_comandas_enabled(conn, tenant_id)
+
+            # Verify item belongs to this comanda and tenant owns it
+            item_row = await conn.fetchrow("""
+                SELECT ci.id, ci.comanda_id, ci.order_item_id
+                FROM comanda_items ci
+                JOIN comandas c ON c.id = ci.comanda_id
+                WHERE ci.id = $1
+                  AND ci.comanda_id = $2
+                  AND c.tenant_id = $3
+            """, item_id, comanda_id, tenant_id)
+
+            if not item_row:
+                raise NotFoundError(
+                    f"Ítem {item_id} no encontrado en comanda {comanda_id}"
+                )
+
+            order_item_id = item_row['order_item_id']
+
+            async with conn.transaction():
+                # 1. Update comanda_items
+                await conn.execute("""
+                    UPDATE comanda_items
+                    SET status = 'ready', ready_at = now()
+                    WHERE id = $1
+                """, item_id)
+
+                # 2. Update linked order_items fulfillment
+                await conn.execute("""
+                    UPDATE order_items
+                    SET fulfillment_status = 'ready', ready_at = now()
+                    WHERE id = $1
+                """, order_item_id)
+
+                # 3. Check if ALL items in this comanda are now 'ready'
+                pending_count = await conn.fetchval("""
+                    SELECT COUNT(*)
+                    FROM comanda_items
+                    WHERE comanda_id = $1
+                      AND status != 'ready'
+                """, comanda_id)
+
+                if pending_count == 0:
+                    # Auto-advance comanda to 'ready'
+                    await conn.execute("""
+                        UPDATE comandas
+                        SET status = 'ready', ready_at = now(), updated_at = now()
+                        WHERE id = $1 AND tenant_id = $2
+                          AND status NOT IN ('delivered', 'cancelled')
+                    """, comanda_id, tenant_id)
+                    logger.info(
+                        f"update_comanda_item_status: all items ready — "
+                        f"auto-advanced comanda {comanda_id} to 'ready'"
+                    )
+
+            return {
+                "success": True,
+                "message": f"Ítem actualizado a {new_status}",
+                "comanda_auto_ready": pending_count == 0,
+            }
+
+    except (AuthenticationError, NotFoundError, ValidationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating comanda item status: {str(e)}")
+        raise APIError(f"Error al actualizar ítem de comanda: {str(e)}", status_code=500)
+
+
+async def get_comanda_history(
+    request: Request,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    station_id: Optional[UUID] = None,
+    status_filter: Optional[str] = None,
+    source_type: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+) -> dict:
+    """
+    Returns paginated history of all comandas for the tenant.
+    Includes delivered and cancelled orders.
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+
+        async with get_db_connection() as conn:
+            where_conditions = ["c.tenant_id = $1"]
+            params: List[Any] = [tenant_id]
+            param_count = 1
+
+            if date_from:
+                param_count += 1
+                where_conditions.append(f"c.fired_at >= ${param_count}::timestamptz")
+                params.append(date_from)
+            if date_to:
+                param_count += 1
+                where_conditions.append(f"c.fired_at <= ${param_count}::timestamptz")
+                params.append(date_to)
+            if station_id:
+                param_count += 1
+                where_conditions.append(f"c.station_id = ${param_count}")
+                params.append(station_id)
+            if status_filter:
+                param_count += 1
+                where_conditions.append(f"c.status = ${param_count}")
+                params.append(status_filter)
+            if source_type:
+                param_count += 1
+                where_conditions.append(f"c.source_type = ${param_count}")
+                params.append(source_type)
+
+            where_clause = " AND ".join(where_conditions)
+
+            # Count total
+            total_count = await conn.fetchval(
+                f"SELECT COUNT(*) FROM comandas c WHERE {where_clause}", *params
+            )
+
+            # Fetch rows
+            rows = await conn.fetch(f"""
+                SELECT
+                    c.id, c.comanda_number, c.status, c.source_type, c.table_display_name,
+                    c.notes, c.fired_at, c.preparing_at, c.ready_at, c.delivered_at, c.created_at,
+                    ks.name as station_name
+                FROM comandas c
+                JOIN kitchen_stations ks ON ks.id = c.station_id
+                WHERE {where_clause}
+                ORDER BY c.fired_at DESC
+                LIMIT ${param_count + 1} OFFSET ${param_count + 2}
+            """, *params, limit, offset)
+
+            comandas = []
+            for row in rows:
+                c_data = dict(row)
+                comandas.append(c_data)
+
+            return {
+                "success": True,
+                "data": comandas,
+                "pagination": {
+                    "total": total_count,
+                    "limit": limit,
+                    "offset": offset,
+                    "has_more": (offset + limit) < total_count
+                }
+            }
+
+    except AuthenticationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error fetching comanda history: {str(e)}")
+        raise APIError(f"Error al obtener historial de comandas: {str(e)}", status_code=500)
+
+
+async def get_comanda_summary(
+    request: Request,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None
+) -> dict:
+    """
+    Returns aggregated daily stats per kitchen station.
+    Calculates avg prep time (fired_at -> ready_at).
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+
+        async with get_db_connection() as conn:
+            where_conditions = ["c.tenant_id = $1"]
+            params: List[Any] = [tenant_id]
+            param_count = 1
+
+            if date_from:
+                param_count += 1
+                where_conditions.append(f"c.fired_at >= ${param_count}::timestamptz")
+                params.append(date_from)
+            if date_to:
+                param_count += 1
+                where_conditions.append(f"c.fired_at <= ${param_count}::timestamptz")
+                params.append(date_to)
+
+            where_clause = " AND ".join(where_conditions)
+
+            # Aggregate stats
+            stats = await conn.fetch(f"""
+                SELECT
+                    ks.id as station_id,
+                    ks.name as station_name,
+                    ks.kitchen_name as station_short_name,
+                    COUNT(c.id) as total_comandas,
+                    AVG(EXTRACT(EPOCH FROM (c.ready_at - c.fired_at))) FILTER (WHERE c.ready_at IS NOT NULL) as avg_prep_time_seconds,
+                    COUNT(c.id) FILTER (WHERE c.status = 'delivered') as delivered_count
+                FROM kitchen_stations ks
+                LEFT JOIN comandas c ON c.station_id = ks.id AND {where_clause}
+                WHERE ks.tenant_id = $1
+                GROUP BY ks.id, ks.name, ks.kitchen_name
+                ORDER BY ks.display_order ASC
+            """, *params)
+
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "station_id": str(s['station_id']),
+                        "station_name": s['station_name'],
+                        "station_short_name": s['station_short_name'],
+                        "total_comandas": s['total_comandas'],
+                        "delivered_count": s['delivered_count'],
+                        "avg_prep_time_seconds": round(float(s['avg_prep_time_seconds']), 1) if s['avg_prep_time_seconds'] else None
+                    }
+                    for s in stats
+                ]
+            }
+
+    except AuthenticationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error fetching comanda summary: {str(e)}")
+        raise APIError(f"Error al obtener resumen de cocina: {str(e)}", status_code=500)
