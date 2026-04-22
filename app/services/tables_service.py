@@ -17,6 +17,7 @@ from app.core.exceptions import AuthenticationError, APIError, NotFoundError
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
 from app.services.pos_cart_service import _capture_order_item_ingredients
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
+from app.services.comandas_service import fire_comandas
 import logging
 
 logger = logging.getLogger(__name__)
@@ -125,6 +126,14 @@ async def list_tables(request: Request) -> dict:
                          WHERE o.table_session_id = ts.id),
                         0
                     ) AS running_total,
+                    COALESCE(
+                        (SELECT COUNT(*)
+                         FROM orders o2
+                         JOIN order_items oi ON oi.order_id = o2.id
+                         WHERE o2.table_session_id = ts.id
+                           AND oi.fulfillment_status = 'new'),
+                        0
+                    ) AS unfired_count,
                     (SELECT ts2.closed_at
                      FROM table_sessions ts2
                      WHERE ts2.table_id = t.id
@@ -600,6 +609,31 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             tenant_id,
                         )
 
+                # Auto-fire hook: if comandas enabled, fire all 'new' items for this session
+                # This ensures any items added but not explicitly fired get sent at checkout
+                try:
+                    _prof = await conn.fetchrow(
+                        "SELECT comandas_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                        tenant_id
+                    )
+                    if _prof and _prof["comandas_enabled"]:
+                        # Find all pending orders for this session (they might have been completed just above)
+                        # We need to fire them. fire_comandas handles 'new' status check.
+                        session_orders = await conn.fetch(
+                            "SELECT id FROM orders WHERE table_session_id = $1",
+                            session_row["id"]
+                        )
+                        for _order in session_orders:
+                            await fire_comandas(
+                                order_id=_order["id"],
+                                tenant_id=tenant_id,
+                                source_type='table',
+                                table_display_name=table_row["name"],
+                                conn=conn
+                            )
+                except Exception as _fe:
+                    logger.error(f"Auto-fire failed during close_session for table {table_id}: {_fe}")
+
         if split_mode:
             # Compute paid_total and remaining for the split response
             async with get_db_connection() as conn2:
@@ -822,6 +856,8 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     oi.quantity,
                     oi.price_at_purchase,
                     oi.subtotal,
+                    oi.fulfillment_status,
+                    oi.sent_at,
                     p.name AS product_name
                 FROM order_items oi
                 JOIN orders o ON o.id = oi.order_id
@@ -860,11 +896,13 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                 ],
                 "tab_items": [
                     {
-                        "order_item_id": str(r["order_item_id"]),
-                        "product_name": r["product_name"],
-                        "quantity": int(r["quantity"]),
-                        "unit_price": float(r["subtotal"]) / int(r["quantity"]) if int(r["quantity"]) > 0 else float(r["price_at_purchase"]),
+                        "id": str(r["order_item_id"]),
+                        "productName": r["product_name"],
+                        "quantity": r["quantity"],
+                        "unitPrice": float(r["price_at_purchase"]),
                         "subtotal": float(r["subtotal"]),
+                        "fulfillmentStatus": r["fulfillment_status"],
+                        "sentAt": r["sent_at"].isoformat() if r["sent_at"] else None,
                     }
                     for r in tab_items
                 ],
@@ -1181,6 +1219,12 @@ async def add_tab_items(
                     except Exception as _inv_exc:
                         logger.error(f"[tab] inventory deduction failed for item {order_item_id}: {_inv_exc}")
 
+        # Auto-fire comandas if enabled
+        try:
+            await fire_table_items(request, table_id)
+        except Exception as _fe:
+            logger.error(f"[add_tab_items] Auto-fire failed for table {table_id}: {_fe}")
+
         logger.info(f"Tab items added: order {order_id} for table {table_id}")
         return {
             "success": True,
@@ -1230,6 +1274,12 @@ async def request_bill(request: Request, table_id: UUID) -> dict:
                     table_id,
                     tenant_id,
                 )
+
+        # Auto-fire any remaining 'new' items when requesting bill (Issue #419)
+        try:
+            await fire_table_items(request, table_id)
+        except Exception as _fe:
+            logger.error(f"[request_bill] Auto-fire failed for table {table_id}: {_fe}")
 
         return {"success": True, "data": {"table_id": str(table_id), "status": "bill_requested"}}
 
@@ -1565,6 +1615,7 @@ def _format_table_row(row: dict) -> dict:
             "opened_at": row["opened_at"].isoformat(),
             "duration_minutes": round(float(row["session_duration_minutes"]), 1),
             "running_total": float(row["running_total"]),
+            "unfired_count": int(row["unfired_count"]) if row.get("unfired_count") is not None else 0,
         }
     return result
 
@@ -1622,6 +1673,78 @@ async def clear_tab(request: Request, table_id: UUID) -> dict:
     except Exception as e:
         logger.error(f"Error clearing tab for table {table_id}: {e}")
         raise APIError(f"Error clearing tab: {e}", status_code=500)
+
+
+async def fire_table_items(request: Request, table_id: UUID) -> dict:
+    """
+    Explicitly fire all 'new' items in the current table session to the KDS.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # 1. Check if comandas are enabled
+            prof = await conn.fetchrow(
+                "SELECT comandas_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                tenant_id
+            )
+            if not prof or not prof["comandas_enabled"]:
+                return {"success": True, "comandas": [], "fired_items_count": 0, "message": "KDS disabled"}
+
+            # 2. Get active session and table name
+            table_row = await conn.fetchrow(
+                "SELECT id, name FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true",
+                table_id, tenant_id
+            )
+            if not table_row:
+                raise NotFoundError("Table not found")
+
+            session_row = await conn.fetchrow(
+                "SELECT id FROM table_sessions WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL",
+                table_id, tenant_id
+            )
+            if not session_row:
+                raise NotFoundError("No open session found")
+
+            # 3. Fire each pending order in this session
+            orders = await conn.fetch(
+                "SELECT id FROM orders WHERE table_session_id = $1",
+                session_row["id"]
+            )
+
+            all_comandas = []
+            total_fired = 0
+
+            # Use a single connection for all fire calls if possible, or let fire_comandas handle it
+            # Since we are already in a connection, we can pass it if we wrap in a transaction
+            async with conn.transaction():
+                for ord_row in orders:
+                    res = await fire_comandas(
+                        order_id=ord_row["id"],
+                        tenant_id=tenant_id,
+                        source_type='table',
+                        table_display_name=table_row["name"],
+                        conn=conn
+                    )
+                    all_comandas.extend(res)
+                    total_fired += sum(len(c.get('items', [])) for c in res)
+
+        return {
+            "success": True,
+            "data": {
+                "comandas": all_comandas,
+                "fired_items_count": total_fired
+            }
+        }
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error firing table {table_id}: {e}")
+        raise APIError(f"Error firing table: {e}", status_code=500)
 
 
 def _format_table_simple(row: dict) -> dict:
