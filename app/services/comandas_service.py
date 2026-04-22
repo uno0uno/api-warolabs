@@ -816,3 +816,102 @@ async def get_comanda_summary(
     except Exception as e:
         logger.error(f"Error fetching comanda summary: {str(e)}")
         raise APIError(f"Error al obtener resumen de cocina: {str(e)}", status_code=500)
+
+
+async def get_daily_stats(
+    request: Request,
+    date: Optional[str] = None,
+    station_id: Optional[UUID] = None,
+) -> Dict[str, Any]:
+    """
+    Returns daily performance stats per kitchen station for a single date.
+    Includes total/delivered/cancelled counts, avg prep time, delay counts
+    (vs per-station thresholds), and source breakdown.
+
+    Issue: https://github.com/uno0uno/warocol.com/issues/424
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            await _check_comandas_enabled(conn, tenant_id)
+
+            date_str = date if date else datetime.now(timezone.utc).date().isoformat()
+
+            rows = await conn.fetch(
+                """
+                SELECT
+                    ks.id AS station_id,
+                    ks.name AS station_name,
+                    ks.color AS station_color,
+                    ks.kitchen_name AS station_kitchen_name,
+                    COUNT(c.id) AS total_count,
+                    COUNT(c.id) FILTER (WHERE c.status = 'delivered') AS delivered_count,
+                    COUNT(c.id) FILTER (WHERE c.status = 'cancelled') AS cancelled_count,
+                    AVG(EXTRACT(EPOCH FROM (c.ready_at - c.fired_at))) FILTER (WHERE c.ready_at IS NOT NULL) AS avg_prep_time_seconds,
+                    COUNT(c.id) FILTER (
+                        WHERE c.ready_at IS NULL
+                        AND EXTRACT(EPOCH FROM (NOW() - c.fired_at)) / 60 > ks.alert_threshold_1_min
+                    ) + COUNT(c.id) FILTER (
+                        WHERE c.ready_at IS NOT NULL
+                        AND EXTRACT(EPOCH FROM (c.ready_at - c.fired_at)) / 60 > ks.alert_threshold_1_min
+                    ) AS delayed_count,
+                    COUNT(c.id) FILTER (
+                        WHERE c.ready_at IS NULL
+                        AND EXTRACT(EPOCH FROM (NOW() - c.fired_at)) / 60 > ks.alert_threshold_2_min
+                    ) + COUNT(c.id) FILTER (
+                        WHERE c.ready_at IS NOT NULL
+                        AND EXTRACT(EPOCH FROM (c.ready_at - c.fired_at)) / 60 > ks.alert_threshold_2_min
+                    ) AS very_delayed_count,
+                    COUNT(c.id) FILTER (WHERE c.source_type = 'table') AS source_table,
+                    COUNT(c.id) FILTER (WHERE c.source_type = 'pos') AS source_pos,
+                    COUNT(c.id) FILTER (WHERE c.source_type = 'delivery') AS source_delivery,
+                    COUNT(c.id) FILTER (WHERE c.source_type = 'pickup') AS source_pickup
+                FROM kitchen_stations ks
+                LEFT JOIN comandas c ON c.station_id = ks.id
+                    AND c.tenant_id = $1
+                    AND DATE(c.fired_at) = $2::date
+                WHERE ks.tenant_id = $1
+                    AND ks.is_active = TRUE
+                    AND ($3::uuid IS NULL OR ks.id = $3)
+                GROUP BY ks.id, ks.name, ks.color, ks.kitchen_name, ks.alert_threshold_1_min, ks.alert_threshold_2_min
+                ORDER BY ks.display_order
+                """,
+                tenant_id, date_str, station_id,
+            )
+
+            return {
+                "date": date_str,
+                "stations": [
+                    {
+                        "station": {
+                            "id": str(row["station_id"]),
+                            "name": row["station_name"],
+                            "color": row["station_color"],
+                            "kitchen_name": row["station_kitchen_name"],
+                        },
+                        "total_count": row["total_count"] or 0,
+                        "delivered_count": row["delivered_count"] or 0,
+                        "cancelled_count": row["cancelled_count"] or 0,
+                        "avg_prep_time_seconds": round(float(row["avg_prep_time_seconds"]), 1) if row["avg_prep_time_seconds"] else None,
+                        "delayed_count": row["delayed_count"] or 0,
+                        "very_delayed_count": row["very_delayed_count"] or 0,
+                        "by_source": {
+                            "table": row["source_table"] or 0,
+                            "pos": row["source_pos"] or 0,
+                            "delivery": row["source_delivery"] or 0,
+                            "pickup": row["source_pickup"] or 0,
+                        },
+                    }
+                    for row in rows
+                ],
+            }
+
+    except (AuthenticationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error fetching daily stats: {str(e)}")
+        raise APIError(f"Error al obtener estadísticas diarias: {str(e)}", status_code=500)

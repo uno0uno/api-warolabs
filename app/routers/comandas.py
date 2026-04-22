@@ -45,7 +45,7 @@ async def list_comanda_history(
     date_to: Optional[str] = Query(None, description="ISO format date to"),
     station_id: Optional[UUID] = Query(None),
     status: Optional[str] = Query(None),
-    source: Optional[str] = Query(None),
+    source_type: Optional[str] = Query(None, description="Filter by source: table | pos | delivery | pickup"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0)
 ):
@@ -53,7 +53,7 @@ async def list_comanda_history(
     List all historical comandas with pagination and filters.
     """
     return await comandas_service.get_comanda_history(
-        request, date_from, date_to, station_id, status, source, limit, offset
+        request, date_from, date_to, station_id, status, source_type, limit, offset
     )
 
 
@@ -67,6 +67,19 @@ async def get_comanda_summary(
     Get aggregated performance stats per station.
     """
     return await comandas_service.get_comanda_summary(request, date_from, date_to)
+
+
+@router.get("/stats")
+async def get_stats_endpoint(
+    request: Request,
+    date: Optional[str] = Query(None, description="ISO date YYYY-MM-DD, defaults to today"),
+    station_id: Optional[UUID] = Query(None, description="Filter to a single station"),
+):
+    """
+    Daily performance stats per kitchen station.
+    Returns total/delivered/cancelled counts, avg prep time, delay counts, and source breakdown.
+    """
+    return await comandas_service.get_daily_stats(request, date, station_id)
 
 
 @router.get("")

@@ -6,7 +6,7 @@ Pydantic models for fire_comandas() engine and comanda management.
 Issue: https://github.com/uno0uno/warocol.com/issues/413
 Issue: https://github.com/uno0uno/warocol.com/issues/416
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Any, Dict, Literal
 from uuid import UUID
 from datetime import datetime
@@ -74,3 +74,33 @@ class ComandaItemStatusUpdateRequest(BaseModel):
     Items only move pending → ready.
     """
     status: Literal['ready']
+
+
+class StationInfo(BaseModel):
+    id: UUID
+    name: str
+    color: Optional[str] = None
+    kitchen_name: Optional[str] = None
+
+
+class BySource(BaseModel):
+    table: int = 0
+    pos: int = 0
+    delivery: int = 0
+    pickup: int = 0
+
+
+class StationStats(BaseModel):
+    station: StationInfo
+    total_count: int = 0
+    delivered_count: int = 0
+    cancelled_count: int = 0
+    avg_prep_time_seconds: Optional[float] = None
+    delayed_count: int = 0
+    very_delayed_count: int = 0
+    by_source: BySource = Field(default_factory=BySource)
+
+
+class ComandaStatsResponse(BaseModel):
+    date: str
+    stations: List[StationStats] = []
