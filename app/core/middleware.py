@@ -114,6 +114,18 @@ async def tenant_detection_middleware(request: Request, call_next):
             response = await call_next(request)
             return response
 
+        # Skip tenant detection for KDS public GET endpoints (UUID-secured, no session/tenant required)
+        kds_public_path = (
+            request.method == 'GET' and (
+                request.url.path.startswith('/api/stations/') or
+                request.url.path.startswith('/api/comandas')
+            )
+        )
+        if kds_public_path:
+            request.state.tenant_context = TenantContext()
+            response = await call_next(request)
+            return response
+
         # Check for API key authentication - if present, get tenant from token
         api_key = extract_api_key(request)
         if api_key:
@@ -378,10 +390,18 @@ async def session_validation_middleware(request: Request, call_next):
         ]
 
         # Public prefixes (no session required)
+        # /api/stations GET-only: KDS screen fetches station metadata by UUID (no session, UUID-secured)
+        # /api/comandas GET-only: KDS screen polls active comandas by station_id (no session, UUID-secured)
         public_prefixes = ['/blog', '/supplier-portal', '/public/restaurant']
+        kds_public = (
+            request.method == 'GET' and (
+                path.startswith('/api/stations/') or
+                path.startswith('/api/comandas')
+            )
+        )
 
         # Handle exact root path separately
-        if path == '/' or any(path.startswith(endpoint) for endpoint in public_endpoints) or any(path.startswith(prefix) for prefix in public_prefixes):
+        if path == '/' or any(path.startswith(endpoint) for endpoint in public_endpoints) or any(path.startswith(prefix) for prefix in public_prefixes) or kds_public:
             request.state.session_context = SessionContext()
             request.state.api_key_context = ApiKeyContext()
             return await call_next(request)

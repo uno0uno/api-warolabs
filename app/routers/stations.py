@@ -4,11 +4,12 @@ CRUD and toggle endpoints for kitchen station (preparation point) management.
 
 Issue: https://github.com/uno0uno/warocol.com/issues/411
 """
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, HTTPException
 from typing import Optional, List
 from uuid import UUID
 from pydantic import BaseModel, Field
 from app.services import stations_service
+from app.database import get_db_connection
 
 router = APIRouter(tags=["Stations"])
 
@@ -93,6 +94,41 @@ async def set_category_station_endpoint(request: Request, category_id: UUID, bod
 async def delete_category_station_endpoint(request: Request, category_id: UUID):
     """Remove the station assignment for a category."""
     return await stations_service.delete_category_station(request, category_id)
+
+
+@router.get("/{station_id}")
+async def get_station_public_endpoint(station_id: UUID):
+    """
+    Public endpoint — returns station metadata for the KDS screen.
+    No session required; the station UUID acts as the access token.
+    Issue: https://github.com/uno0uno/warocol.com/issues/422
+    """
+    async with get_db_connection(use_transaction=False) as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                id, name, kitchen_name, color, is_active,
+                alert_threshold_1_min, alert_threshold_2_min,
+                tenant_id
+            FROM kitchen_stations
+            WHERE id = $1 AND is_active = true
+            """,
+            station_id,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Station not found")
+
+    # Fetch kds_enabled from the tenant profile
+    async with get_db_connection(use_transaction=False) as conn:
+        kds_enabled = await conn.fetchval(
+            "SELECT kds_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+            row["tenant_id"],
+        )
+
+    data = dict(row)
+    data.pop("tenant_id", None)
+    data["kds_enabled"] = bool(kds_enabled)
+    return {"success": True, "data": data}
 
 
 @router.patch("/{station_id}")
