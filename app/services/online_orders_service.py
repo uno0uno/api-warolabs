@@ -16,6 +16,7 @@ from app.services.email_helpers import send_order_accepted_email
 from app.services.waros_service import evaluate_and_award
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
+from app.services.comandas_service import fire_comandas
 import logging
 
 logger = logging.getLogger(__name__)
@@ -434,6 +435,28 @@ async def update_order_status(
                     "completed", order_id, tenant_id,
                 )
 
+                # Auto-fire hook for auto-completed orders (they skip 'preparing')
+                try:
+                    _prof = await conn.fetchrow(
+                        "SELECT comandas_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                        tenant_id
+                    )
+                    if _prof and _prof["comandas_enabled"]:
+                        _order_type_row = await conn.fetchrow(
+                            "SELECT oc.order_type FROM online_carts oc JOIN orders o ON o.online_cart_id = oc.id WHERE o.id = $1",
+                            order_id
+                        )
+                        _tbl_name = 'Domicilio' if _order_type_row and _order_type_row['order_type'] == 'delivery' else 'Pickup'
+                        await fire_comandas(
+                            order_id=order_id,
+                            tenant_id=tenant_id,
+                            source_type='delivery',
+                            table_display_name=_tbl_name,
+                            conn=conn
+                        )
+                except Exception as _fe:
+                    logger.error(f"Auto-fire failed for auto-completed online order {order_id}: {_fe}")
+
                 # 5b. INSERT second history row
                 auto_history_row = await conn.fetchrow(
                     """
@@ -610,6 +633,29 @@ async def update_order_status(
                     )
                 except Exception as _waros_err:
                     logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
+
+            # Auto-fire hook for regular transitions to 'preparing'
+            if new_status == "preparing":
+                try:
+                    _prof = await conn.fetchrow(
+                        "SELECT comandas_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                        tenant_id
+                    )
+                    if _prof and _prof["comandas_enabled"]:
+                        _order_type_row = await conn.fetchrow(
+                            "SELECT oc.order_type FROM online_carts oc JOIN orders o ON o.online_cart_id = oc.id WHERE o.id = $1",
+                            order_id
+                        )
+                        _tbl_name = 'Domicilio' if _order_type_row and _order_type_row['order_type'] == 'delivery' else 'Pickup'
+                        await fire_comandas(
+                            order_id=order_id,
+                            tenant_id=tenant_id,
+                            source_type='delivery',
+                            table_display_name=_tbl_name,
+                            conn=conn
+                        )
+                except Exception as _fe:
+                    logger.error(f"Auto-fire failed for online order {order_id} (preparing): {_fe}")
 
             return {
                 "success": True,

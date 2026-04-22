@@ -533,7 +533,7 @@ async def update_order_status(
     payment_method: Optional[str] = None,
 ) -> dict:
     """Update the status of an order (mesa orders only)."""
-    allowed = {"completed", "cancelled", "pending"}
+    allowed = {"completed", "cancelled", "pending", "preparing"}
     if status not in allowed:
         raise APIError(f"Estado inválido. Valores permitidos: {', '.join(allowed)}", status_code=400)
 
@@ -600,6 +600,27 @@ async def update_order_status(
                          AND tenant_id = $2""",
                     row['table_session_id'], tenant_id
                 )
+
+            # Auto-fire hook for manual orders transitioning to 'preparing'
+            if status == "preparing":
+                try:
+                    # Check if comandas are enabled
+                    prof = await conn.fetchrow(
+                        "SELECT comandas_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                        tenant_id
+                    )
+                    if prof and prof["comandas_enabled"]:
+                        # Manual orders are treated as 'delivery' (generic out-of-table order)
+                        from app.services.comandas_service import fire_comandas
+                        await fire_comandas(
+                            order_id=order_id,
+                            tenant_id=tenant_id,
+                            source_type='delivery',
+                            table_display_name='Domicilio',
+                            conn=conn
+                        )
+                except Exception as _fe:
+                    logger.error(f"Auto-fire failed for manual order {order_id} (preparing): {_fe}")
 
         return {"success": True, "message": f"Estado actualizado a {status}"}
 

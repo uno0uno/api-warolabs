@@ -1829,3 +1829,152 @@ async def _get_churn_risk_for_tenant(
         "min_orders": min_orders,
         "customers": customers,
     }
+
+async def get_kitchen_metrics(
+    request: Request,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None
+) -> dict:
+    """
+    Get kitchen performance metrics: avg prep time, station load, and delays.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        parsed_date_from = parse_date(date_from)
+        parsed_date_to = parse_date(date_to)
+
+        if not parsed_date_from or not parsed_date_to:
+            today = datetime.now().date()
+            parsed_date_to = today
+            parsed_date_from = today - timedelta(days=7)
+
+        async with get_db_connection() as conn:
+            # 1. Summary Metrics & Station Breakdown
+            # Uses kitchen_stations left join to include stations even if they had no orders in period
+            query_stations = """
+                WITH station_stats AS (
+                    SELECT 
+                        c.station_id,
+                        COUNT(c.id) as total_orders,
+                        AVG(EXTRACT(EPOCH FROM (c.ready_at - c.fired_at)) / 60) as avg_prep_min,
+                        COUNT(CASE 
+                            WHEN EXTRACT(EPOCH FROM (c.ready_at - c.fired_at)) / 60 > ks.alert_threshold_2_min 
+                            THEN 1 END) as late_orders
+                    FROM comandas c
+                    JOIN kitchen_stations ks ON c.station_id = ks.id
+                    WHERE c.tenant_id = $1
+                        AND DATE(c.fired_at AT TIME ZONE 'America/Bogota') >= $2
+                        AND DATE(c.fired_at AT TIME ZONE 'America/Bogota') <= $3
+                        AND c.status IN ('ready', 'delivered')
+                        AND c.ready_at IS NOT NULL
+                    GROUP BY c.station_id, ks.alert_threshold_2_min
+                )
+                SELECT 
+                    ks.id,
+                    ks.name,
+                    ks.color,
+                    COALESCE(ss.total_orders, 0) as total_orders,
+                    COALESCE(ss.avg_prep_min, 0) as avg_prep_min,
+                    COALESCE(ss.late_orders, 0) as late_orders
+                FROM kitchen_stations ks
+                LEFT JOIN station_stats ss ON ks.id = ss.station_id
+                WHERE ks.tenant_id = $1 AND ks.is_active = true
+                ORDER BY ks.display_order
+            """
+            
+            station_rows = await conn.fetch(query_stations, tenant_id, parsed_date_from, parsed_date_to)
+            
+            station_metrics = []
+            total_orders = 0
+            total_prep_sum = 0
+            late_orders_count = 0
+            
+            for row in station_rows:
+                total_orders += row['total_orders']
+                total_prep_sum += (row['avg_prep_min'] * row['total_orders'])
+                late_orders_count += row['late_orders']
+                
+                station_metrics.append({
+                    "id": str(row['id']),
+                    "name": row['name'],
+                    "color": row['color'],
+                    "total_orders": row['total_orders'],
+                    "avg_prep_min": round(float(row['avg_prep_min']), 1),
+                    "late_orders": row['late_orders'],
+                    "efficiency_pct": round((1 - (row['late_orders'] / max(1, row['total_orders']))) * 100, 1)
+                })
+
+            avg_prep_time = round(total_prep_sum / max(1, total_orders), 1)
+
+            # 2. Daily/Hourly Volume (Peak Hours)
+            query_volume = """
+                SELECT 
+                    EXTRACT(HOUR FROM fired_at AT TIME ZONE 'America/Bogota')::int as hour,
+                    COUNT(id) as count
+                FROM comandas
+                WHERE tenant_id = $1
+                    AND DATE(fired_at AT TIME ZONE 'America/Bogota') >= $2
+                    AND DATE(fired_at AT TIME ZONE 'America/Bogota') <= $3
+                GROUP BY hour
+                ORDER BY hour
+            """
+            volume_rows = await conn.fetch(query_volume, tenant_id, parsed_date_from, parsed_date_to)
+            volume_by_hour = {row['hour']: row['count'] for row in volume_rows}
+            
+            # Fill missing hours
+            peak_hours = []
+            for h in range(24):
+                peak_hours.append({"hour": h, "orders": volume_by_hour.get(h, 0)})
+
+            # 3. Slowest Products (Top 10)
+            query_products = """
+                SELECT 
+                    ci.kitchen_name as name,
+                    COUNT(ci.id) as total_qty,
+                    AVG(EXTRACT(EPOCH FROM (ci.ready_at - c.fired_at)) / 60) as avg_prep_min
+                FROM comanda_items ci
+                JOIN comandas c ON ci.comanda_id = c.id
+                WHERE c.tenant_id = $1
+                    AND DATE(c.fired_at AT TIME ZONE 'America/Bogota') >= $2
+                    AND DATE(c.fired_at AT TIME ZONE 'America/Bogota') <= $3
+                    AND ci.status = 'ready'
+                    AND ci.ready_at IS NOT NULL
+                GROUP BY ci.kitchen_name
+                ORDER BY avg_prep_min DESC
+                LIMIT 10
+            """
+            product_rows = await conn.fetch(query_products, tenant_id, parsed_date_from, parsed_date_to)
+            slowest_products = [{
+                "name": r['name'],
+                "total_qty": float(r['total_qty']),
+                "avg_prep_min": round(float(r['avg_prep_min']), 1)
+            } for r in product_rows]
+
+            return {
+                "success": True,
+                "data": {
+                    "summary": {
+                        "total_orders": total_orders,
+                        "avg_prep_min": avg_prep_time,
+                        "late_orders": late_orders_count,
+                        "late_pct": round((late_orders_count / max(1, total_orders)) * 100, 1)
+                    },
+                    "stations": station_metrics,
+                    "peak_hours": peak_hours,
+                    "slowest_products": slowest_products,
+                    "period": {
+                        "from": parsed_date_from.isoformat(),
+                        "to": parsed_date_to.isoformat()
+                    }
+                }
+            }
+
+    except AuthenticationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting kitchen metrics: {str(e)}")
+        raise APIError(f"Error getting kitchen metrics: {str(e)}", status_code=500)

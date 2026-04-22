@@ -247,7 +247,7 @@ async def set_category_station(request: Request, category_id: UUID, station_id: 
             INSERT INTO tenant_category_stations (tenant_id, category_id, station_id)
             VALUES ($1, $2, $3)
             ON CONFLICT (tenant_id, category_id)
-            DO UPDATE SET station_id = EXCLUDED.station_id, updated_at = now()
+            DO UPDATE SET station_id = EXCLUDED.station_id
             RETURNING *
             """,
             tenant_id, category_id, station_id,
@@ -264,16 +264,13 @@ async def delete_category_station(request: Request, category_id: UUID) -> dict:
         raise AuthenticationError("Tenant ID is required")
 
     async with get_db_connection() as conn:
-        deleted = await conn.fetchval(
+        await conn.execute(
             """
             DELETE FROM tenant_category_stations
             WHERE tenant_id = $1 AND category_id = $2
-            RETURNING 1
             """,
             tenant_id, category_id,
         )
-        if not deleted:
-            raise HTTPException(status_code=404, detail="Assignment not found")
         logger.info(f"Category {category_id} station assignment removed for tenant {tenant_id}")
         return {"success": True, "message": "Assignment removed"}
 
@@ -281,16 +278,13 @@ async def delete_category_station(request: Request, category_id: UUID) -> dict:
 async def _delete_category_station_conn(tenant_id: UUID, category_id: UUID, _conn) -> dict:
     """Internal helper: delete category assignment using an existing or new connection."""
     async with get_db_connection() as conn:
-        deleted = await conn.fetchval(
+        await conn.execute(
             """
             DELETE FROM tenant_category_stations
             WHERE tenant_id = $1 AND category_id = $2
-            RETURNING 1
             """,
             tenant_id, category_id,
         )
-        if not deleted:
-            raise HTTPException(status_code=404, detail="Assignment not found")
         return {"success": True, "message": "Assignment removed"}
 
 

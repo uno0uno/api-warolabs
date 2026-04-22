@@ -200,6 +200,15 @@ async def request_bill(request: Request, table_id: UUID):
     return await tables_service.request_bill(request, table_id)
 
 
+@router.post("/{table_id}/fire")
+async def fire_table_items(request: Request, table_id: UUID):
+    """
+    Explicitly fire all 'new' items in the table session to the kitchen.
+    Returns comanda summaries and fired item count.
+    """
+    return await tables_service.fire_table_items(request, table_id)
+
+
 @router.delete("/{table_id}/session")
 async def discard_session(request: Request, table_id: UUID):
     """

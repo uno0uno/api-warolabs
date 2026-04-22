@@ -183,6 +183,15 @@ async def complete_order(
     )
 
 
+@router.post("/{cart_id}/fire")
+async def fire_pos_cart(request: Request, cart_id: UUID):
+    """
+    Explicitly fire all 'new' items in a POS cart/order to the kitchen.
+    Returns comanda summaries and fired item count.
+    """
+    return await pos_cart_service.fire_pos_cart(request, cart_id)
+
+
 class SendReceiptRequest(BaseModel):
     email: str = Field(..., description="Customer email to send receipt to")
     order_number: int

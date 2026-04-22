@@ -129,3 +129,23 @@ async def resolve_data_quality_alert(
     return await analytics_service.resolve_data_quality_alert(
         request, alert_id, resolve_data
     )
+
+
+@router.get("/kitchen")
+async def get_kitchen_metrics(
+    request: Request,
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None)
+):
+    """
+    Get kitchen performance metrics: avg prep time, station load, and late orders.
+
+    Query parameters:
+    - date_from: Start date (YYYY-MM-DD)
+    - date_to: End date (YYYY-MM-DD)
+    """
+    return await analytics_service.get_kitchen_metrics(
+        request,
+        date_from=date_from,
+        date_to=date_to
+    )

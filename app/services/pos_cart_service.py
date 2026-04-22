@@ -17,6 +17,7 @@ from app.services.waros_service import evaluate_and_award
 from app.services.email_helpers import send_pos_receipt_email
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
+from app.services.comandas_service import fire_comandas
 import logging
 
 logger = logging.getLogger(__name__)
@@ -1140,6 +1141,23 @@ async def complete_pos_order(
                         float(item['quantity']), tenant_id
                     )
 
+                # Auto-fire hook for POS counter (direct checkout)
+                try:
+                    _prof = await conn.fetchrow(
+                        "SELECT comandas_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                        tenant_id
+                    )
+                    if _prof and _prof["comandas_enabled"]:
+                        await fire_comandas(
+                            order_id=order_id,
+                            tenant_id=tenant_id,
+                            source_type='pos',
+                            table_display_name='Mostrador',
+                            conn=conn
+                        )
+                except Exception as _fe:
+                    logger.error(f"Auto-fire failed for POS order {order_id}: {_fe}")
+
                 # 7a. In split mode: record first payment; cart stays active
                 _split_paid_total = 0.0
                 _split_remaining = float(_discounted_total)
@@ -1503,3 +1521,71 @@ async def _capture_modifier_ingredient_snapshot(
         "MODIFIER_RECIPE",
         str(modifier_id),
     )
+
+
+async def fire_pos_cart(request: Request, cart_id: UUID) -> dict:
+    """
+    Explicitly fire all 'new' items in a POS cart to the kitchen stations.
+    This is used when a restaurant wants to 'fire' the order before payment.
+    Since POS carts don't have orders yet until 'complete', we cannot fire them
+    directly using fire_comandas (which requires an order_id).
+    
+    HOWEVER, for consistency with the issue spec which asks for cart fire,
+    we have two options:
+    1. Create a dummy 'provisional' order to fire.
+    2. Change fire_comandas to work with carts (too complex).
+    3. Industry standard: most POS systems (except table ones) send to kitchen
+       at the moment of payment (auto-fire).
+    
+    GIVEN the issue requirement: "Endpoint 2 — Counter/POS fire ... same as mesa fire
+    but scoped to a pos_cart's order." This implies the order MUST exist.
+    
+    If no order exists for the cart, we return error.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            # 1. Check if comandas are enabled
+            prof = await conn.fetchrow(
+                "SELECT comandas_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                tenant_id
+            )
+            if not prof or not prof["comandas_enabled"]:
+                return {"success": True, "comandas": [], "fired_items_count": 0, "message": "KDS disabled"}
+
+            # 2. Find the most recent order linked to this cart
+            order_row = await conn.fetchrow(
+                "SELECT id FROM orders WHERE pos_cart_id = $1 AND tenant_id = $2 ORDER BY created_at DESC LIMIT 1",
+                cart_id, tenant_id
+            )
+            if not order_row:
+                raise APIError("No se encontró una orden asociada a este carrito. Complete la orden primero.", status_code=400)
+
+            # 3. Fire
+            async with conn.transaction():
+                comandas = await fire_comandas(
+                    order_id=order_row["id"],
+                    tenant_id=tenant_id,
+                    source_type='pos',
+                    table_display_name='Mostrador',
+                    conn=conn
+                )
+
+        total_fired = sum(len(c.get('items', [])) for c in comandas)
+        return {
+            "success": True,
+            "data": {
+                "comandas": comandas,
+                "fired_items_count": total_fired
+            }
+        }
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error firing POS cart {cart_id}: {e}")
+        raise APIError(f"Error firing POS cart: {e}", status_code=500)
