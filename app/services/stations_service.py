@@ -290,8 +290,7 @@ async def _delete_category_station_conn(tenant_id: UUID, category_id: UUID, _con
 
 async def get_effective_station(product_id: UUID, tenant_id: UUID, conn) -> Optional[UUID]:
     """
-    Two-tier station routing cascade:
-      Tier 1 — product.station_id (explicit override)
+    Category-only station routing:
       Tier 2 — tenant_category_stations for the product's category
       Fallback — None (no comanda generated)
 
@@ -299,7 +298,7 @@ async def get_effective_station(product_id: UUID, tenant_id: UUID, conn) -> Opti
     """
     row = await conn.fetchrow(
         """
-        SELECT p.station_id, p.category_id
+        SELECT p.category_id
         FROM product p
         WHERE p.id = $1 AND p.tenant_id = $2
         """,
@@ -308,11 +307,7 @@ async def get_effective_station(product_id: UUID, tenant_id: UUID, conn) -> Opti
     if not row:
         return None
 
-    # Tier 1: explicit product-level override
-    if row['station_id']:
-        return row['station_id']
-
-    # Tier 2: category-level mapping for this tenant
+    # Category-level mapping for this tenant
     category_station = await conn.fetchval(
         """
         SELECT station_id FROM tenant_category_stations
