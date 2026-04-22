@@ -580,16 +580,27 @@ async def update_comanda_item_status(
     new_status: str
 ) -> dict:
     """
-    Updates individual comanda item status to 'ready'.
+    Updates individual comanda item status.
+
+    Allowed transitions:
+    - pending/ready → 'ready'     (kitchen marks item done)
+    - any non-terminal → 'cancelled'  (item voided from POS tab)
 
     Side effects (atomic, single transaction):
-    1. Sets comanda_items.status = 'ready', ready_at = now()
-    2. Sets order_items.fulfillment_status = 'ready', ready_at = now() for the linked order_item
-    3. If ALL items in the comanda are now 'ready' → auto-advances comanda to 'ready'
+    For 'ready':
+      1. Sets comanda_items.status = 'ready', ready_at = now()
+      2. Sets order_items.fulfillment_status = 'ready', ready_at = now()
+      3. If ALL non-cancelled items are now 'ready' → auto-advances comanda to 'ready'
+    For 'cancelled':
+      1. Sets comanda_items.status = 'cancelled', cancelled_at = now()
+      2. Sets order_items.fulfillment_status = 'cancelled' (if row still exists)
+      3. If ALL items are now 'cancelled' → auto-cancels comanda
     """
-    allowed = {'ready'}
+    allowed = {'ready', 'cancelled'}
     if new_status not in allowed:
-        raise ValidationError(f"Estado de ítem inválido: {new_status}. Solo se permite: 'ready'")
+        raise ValidationError(
+            f"Estado de ítem inválido: {new_status}. Permitidos: {allowed}"
+        )
 
     try:
         session = require_valid_session(request)
@@ -600,7 +611,7 @@ async def update_comanda_item_status(
 
             # Verify item belongs to this comanda and tenant owns it
             item_row = await conn.fetchrow("""
-                SELECT ci.id, ci.comanda_id, ci.order_item_id
+                SELECT ci.id, ci.comanda_id, ci.order_item_id, ci.status AS current_status
                 FROM comanda_items ci
                 JOIN comandas c ON c.id = ci.comanda_id
                 WHERE ci.id = $1
@@ -614,47 +625,85 @@ async def update_comanda_item_status(
                 )
 
             order_item_id = item_row['order_item_id']
+            comanda_auto_updated = False
 
             async with conn.transaction():
-                # 1. Update comanda_items
-                await conn.execute("""
-                    UPDATE comanda_items
-                    SET status = 'ready', ready_at = now()
-                    WHERE id = $1
-                """, item_id)
-
-                # 2. Update linked order_items fulfillment
-                await conn.execute("""
-                    UPDATE order_items
-                    SET fulfillment_status = 'ready', ready_at = now()
-                    WHERE id = $1
-                """, order_item_id)
-
-                # 3. Check if ALL items in this comanda are now 'ready'
-                pending_count = await conn.fetchval("""
-                    SELECT COUNT(*)
-                    FROM comanda_items
-                    WHERE comanda_id = $1
-                      AND status != 'ready'
-                """, comanda_id)
-
-                if pending_count == 0:
-                    # Auto-advance comanda to 'ready'
+                if new_status == 'ready':
+                    # 1. Mark item ready
                     await conn.execute("""
-                        UPDATE comandas
-                        SET status = 'ready', ready_at = now(), updated_at = now()
-                        WHERE id = $1 AND tenant_id = $2
-                          AND status NOT IN ('delivered', 'cancelled')
-                    """, comanda_id, tenant_id)
-                    logger.info(
-                        f"update_comanda_item_status: all items ready — "
-                        f"auto-advanced comanda {comanda_id} to 'ready'"
-                    )
+                        UPDATE comanda_items
+                        SET status = 'ready', ready_at = now()
+                        WHERE id = $1
+                    """, item_id)
+
+                    # 2. Mirror on order_item
+                    await conn.execute("""
+                        UPDATE order_items
+                        SET fulfillment_status = 'ready', ready_at = now()
+                        WHERE id = $1
+                    """, order_item_id)
+
+                    # 3. Auto-advance comanda if all non-cancelled items are ready
+                    non_ready_count = await conn.fetchval("""
+                        SELECT COUNT(*)
+                        FROM comanda_items
+                        WHERE comanda_id = $1
+                          AND status NOT IN ('ready', 'cancelled')
+                    """, comanda_id)
+
+                    if non_ready_count == 0:
+                        await conn.execute("""
+                            UPDATE comandas
+                            SET status = 'ready', ready_at = now(), updated_at = now()
+                            WHERE id = $1 AND tenant_id = $2
+                              AND status NOT IN ('delivered', 'cancelled')
+                        """, comanda_id, tenant_id)
+                        comanda_auto_updated = True
+                        logger.info(
+                            f"update_comanda_item_status: all active items ready — "
+                            f"auto-advanced comanda {comanda_id} to 'ready'"
+                        )
+
+                else:  # cancelled
+                    # 1. Mark item cancelled
+                    await conn.execute("""
+                        UPDATE comanda_items
+                        SET status = 'cancelled', cancelled_at = now()
+                        WHERE id = $1
+                    """, item_id)
+
+                    # 2. Mirror on order_item (may already be deleted — ignore if gone)
+                    await conn.execute("""
+                        UPDATE order_items
+                        SET fulfillment_status = 'cancelled'
+                        WHERE id = $1
+                    """, order_item_id)
+
+                    # 3. Auto-cancel comanda if ALL items are now cancelled
+                    active_count = await conn.fetchval("""
+                        SELECT COUNT(*)
+                        FROM comanda_items
+                        WHERE comanda_id = $1
+                          AND status != 'cancelled'
+                    """, comanda_id)
+
+                    if active_count == 0:
+                        await conn.execute("""
+                            UPDATE comandas
+                            SET status = 'cancelled', updated_at = now()
+                            WHERE id = $1 AND tenant_id = $2
+                              AND status NOT IN ('delivered', 'cancelled')
+                        """, comanda_id, tenant_id)
+                        comanda_auto_updated = True
+                        logger.info(
+                            f"update_comanda_item_status: all items cancelled — "
+                            f"auto-cancelled comanda {comanda_id}"
+                        )
 
             return {
                 "success": True,
                 "message": f"Ítem actualizado a {new_status}",
-                "comanda_auto_ready": pending_count == 0,
+                "comanda_auto_updated": comanda_auto_updated,
             }
 
     except (AuthenticationError, NotFoundError, ValidationError, APIError) as e:

@@ -71,9 +71,9 @@ class ComandaStatusUpdateRequest(BaseModel):
 class ComandaItemStatusUpdateRequest(BaseModel):
     """
     Request body for PATCH /{comanda_id}/items/{item_id}/status.
-    Items only move pending → ready.
+    Items move pending → ready (kitchen done) or any non-terminal → cancelled (voided from POS).
     """
-    status: Literal['ready']
+    status: Literal['ready', 'cancelled']
 
 
 class StationInfo(BaseModel):

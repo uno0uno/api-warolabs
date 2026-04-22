@@ -941,6 +941,49 @@ async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID)
             if not row:
                 raise NotFoundError("Order item not found or session already closed")
 
+            # Cancel linked comanda_item BEFORE deleting order_item (FK: no cascade).
+            # If comandas are disabled no row will be found — no-op, continues as before.
+            comanda_item_row = await conn.fetchrow(
+                "SELECT id, comanda_id FROM comanda_items WHERE order_item_id = $1",
+                order_item_id,
+            )
+            if comanda_item_row:
+                await conn.execute(
+                    """
+                    UPDATE comanda_items
+                       SET status = 'cancelled', cancelled_at = now()
+                     WHERE id = $1
+                       AND status NOT IN ('cancelled')
+                    """,
+                    comanda_item_row["id"],
+                )
+                await conn.execute(
+                    """
+                    UPDATE order_items
+                       SET fulfillment_status = 'cancelled'
+                     WHERE id = $1
+                    """,
+                    order_item_id,
+                )
+                # Auto-cancel the parent comanda if every item is now cancelled.
+                active_count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM comanda_items
+                     WHERE comanda_id = $1 AND status != 'cancelled'
+                    """,
+                    comanda_item_row["comanda_id"],
+                )
+                if active_count == 0:
+                    await conn.execute(
+                        """
+                        UPDATE comandas
+                           SET status = 'cancelled', updated_at = now()
+                         WHERE id = $1
+                           AND status NOT IN ('delivered', 'cancelled')
+                        """,
+                        comanda_item_row["comanda_id"],
+                    )
+
             await conn.execute("DELETE FROM order_items WHERE id = $1", order_item_id)
             new_total = max(0.0, float(row["total_amount"]) - float(row["subtotal"]))
             await conn.execute(
