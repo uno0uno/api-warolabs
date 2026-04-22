@@ -218,7 +218,8 @@ async def get_product_by_id(
                     (p.price - COALESCE(p.costo_calculado, 0)) as margen_valor
                 FROM product p
                 LEFT JOIN categories c ON p.category_id = c.id
-                LEFT JOIN kitchen_stations ks ON p.station_id = ks.id
+                LEFT JOIN tenant_category_stations tcs ON tcs.category_id = p.category_id AND tcs.tenant_id = p.tenant_id
+                LEFT JOIN kitchen_stations ks ON ks.id = tcs.station_id
                 WHERE p.id = $1 AND p.tenant_id = $2
             """
 
@@ -454,7 +455,8 @@ async def get_products_list(
                 LEFT JOIN categories c ON p.category_id = c.id
                 LEFT JOIN direct_costs dc ON p.id = dc.product_id
                 LEFT JOIN base_costs bc ON p.id = bc.product_id
-                LEFT JOIN kitchen_stations ks ON p.station_id = ks.id
+                LEFT JOIN tenant_category_stations tcs ON tcs.category_id = p.category_id AND tcs.tenant_id = p.tenant_id
+                LEFT JOIN kitchen_stations ks ON ks.id = tcs.station_id
                 WHERE p.tenant_id = $1
             """
 
