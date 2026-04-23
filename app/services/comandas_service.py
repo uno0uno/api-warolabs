@@ -548,17 +548,16 @@ async def update_comanda_status(
                 WHERE id = $2 AND tenant_id = $3
             """, *params)
 
-            # Propagate 'preparing' back to order_items so POS badge updates
-            if new_status == 'preparing':
+            # Propagate status back to order_items so POS badge updates
+            if new_status in ('preparing', 'ready', 'delivered'):
                 await conn.execute("""
                     UPDATE order_items oi
-                    SET fulfillment_status = 'preparing'
+                    SET fulfillment_status = $2
                     FROM comanda_items ci
                     WHERE ci.comanda_id = $1
                       AND ci.order_item_id = oi.id
                       AND ci.status != 'cancelled'
-                      AND oi.fulfillment_status = 'sent'
-                """, comanda_id)
+                """, comanda_id, new_status)
 
             return {"success": True, "message": f"Comanda actualizada a {new_status}"}
 
@@ -617,16 +616,15 @@ async def bulk_update_comanda_status(
                     *params,
                 )
 
-                if new_status == 'preparing':
+                if new_status in ('preparing', 'ready', 'delivered'):
                     await conn.execute("""
                         UPDATE order_items oi
-                        SET fulfillment_status = 'preparing'
+                        SET fulfillment_status = $2
                         FROM comanda_items ci
                         WHERE ci.comanda_id = $1
                           AND ci.order_item_id = oi.id
                           AND ci.status != 'cancelled'
-                          AND oi.fulfillment_status = 'sent'
-                    """, row['id'])
+                    """, row['id'], new_status)
 
                 updated += 1
 
