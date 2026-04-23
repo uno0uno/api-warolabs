@@ -984,9 +984,10 @@ async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID)
                         comanda_item_row["comanda_id"],
                     )
 
-                # Release FK before deleting order_item (no ON DELETE CASCADE on comanda_items)
+                # Nullify FK so order_item can be deleted while the cancelled
+                # comanda_item row persists for KDS display (strikethrough in UI).
                 await conn.execute(
-                    "DELETE FROM comanda_items WHERE id = $1",
+                    "UPDATE comanda_items SET order_item_id = NULL WHERE id = $1",
                     comanda_item_row["id"],
                 )
 
