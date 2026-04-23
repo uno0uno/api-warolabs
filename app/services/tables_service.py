@@ -631,6 +631,16 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 table_display_name=table_row["name"],
                                 conn=conn
                             )
+
+                        # Auto-deliver: mark all non-terminal comandas as delivered when session closes
+                        session_order_ids = [_o["id"] for _o in session_orders]
+                        await conn.execute("""
+                            UPDATE comandas
+                            SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
+                            WHERE order_id = ANY($1::uuid[])
+                              AND tenant_id = $2
+                              AND status IN ('pending', 'preparing', 'ready')
+                        """, session_order_ids, tenant_id)
                 except Exception as _fe:
                     logger.error(f"Auto-fire failed during close_session for table {table_id}: {_fe}")
 
