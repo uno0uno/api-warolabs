@@ -361,7 +361,7 @@ async def get_comandas_for_kds(
                 # Terminal statuses: use Colombia timezone so "today" matches local business day
                 where_conditions.append(
                     "DATE(c.fired_at AT TIME ZONE 'America/Bogota') = "
-                    "CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota'"
+                    "(CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date"
                 )
 
             where_clause = " AND ".join(where_conditions)
