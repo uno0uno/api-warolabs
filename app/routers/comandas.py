@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request, Query
 from typing import Optional
 from uuid import UUID
 from app.services import comandas_service
-from app.models.comanda import ComandaStatusUpdateRequest, ComandaItemStatusUpdateRequest
+from app.models.comanda import ComandaStatusUpdateRequest, ComandaItemStatusUpdateRequest, BulkComandaStatusUpdateRequest
 
 router = APIRouter(tags=["KDS / Comandas"])
 
@@ -100,6 +100,19 @@ async def list_comandas(
     return await comandas_service.get_comandas_for_kds(
         request, station_id, status, date, source_type
     )
+
+
+@router.patch("/bulk-status")
+async def bulk_update_comanda_status(
+    request: Request,
+    body: BulkComandaStatusUpdateRequest,
+):
+    """
+    Bulk status update for multiple comandas.
+    Applies the same transition rules per comanda — skips invalid transitions.
+    Returns counts of updated and skipped.
+    """
+    return await comandas_service.bulk_update_comanda_status(request, body.comanda_ids, body.status)
 
 
 @router.get("/{comanda_id}")

@@ -68,6 +68,12 @@ class ComandaStatusUpdateRequest(BaseModel):
     status: Literal['preparing', 'ready', 'delivered', 'cancelled']
 
 
+class BulkComandaStatusUpdateRequest(BaseModel):
+    """Request body for PATCH /bulk-status."""
+    comanda_ids: List[UUID]
+    status: Literal['preparing', 'ready', 'delivered', 'cancelled']
+
+
 class ComandaItemStatusUpdateRequest(BaseModel):
     """
     Request body for PATCH /{comanda_id}/items/{item_id}/status.

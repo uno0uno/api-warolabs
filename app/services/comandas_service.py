@@ -554,6 +554,71 @@ async def update_comanda_status(
         raise APIError(f"Error al actualizar comanda: {str(e)}", status_code=500)
 
 
+async def bulk_update_comanda_status(
+    request: Request,
+    comanda_ids: List[UUID],
+    new_status: str,
+) -> dict:
+    """
+    Bulk status update for multiple comandas.
+    Applies the same ALLOWED_TRANSITIONS rules per comanda.
+    Skips (with reason) any comanda whose current state doesn't allow the transition.
+    Returns counts of updated and skipped comandas.
+    """
+    try:
+        session = require_valid_session(request)
+        tenant_id = session.tenant_id
+
+        async with get_db_connection() as conn:
+            await _check_comandas_enabled(conn, tenant_id)
+
+            rows = await conn.fetch(
+                "SELECT id, status FROM comandas WHERE id = ANY($1::uuid[]) AND tenant_id = $2",
+                comanda_ids, tenant_id,
+            )
+
+            found_ids = {row['id'] for row in rows}
+            updated, skipped = 0, 0
+
+            for row in rows:
+                current_status = row['status']
+                allowed_next = ALLOWED_TRANSITIONS.get(current_status, [])
+                if new_status not in allowed_next:
+                    skipped += 1
+                    continue
+
+                sql_updates = ["status = $1", "updated_at = NOW()"]
+                params: List[Any] = [new_status, row['id'], tenant_id]
+
+                if new_status == 'preparing':
+                    sql_updates.append("preparing_at = NOW()")
+                elif new_status == 'ready':
+                    sql_updates.append("ready_at = NOW()")
+                elif new_status == 'delivered':
+                    sql_updates.append("delivered_at = NOW()")
+
+                await conn.execute(
+                    f"UPDATE comandas SET {', '.join(sql_updates)} WHERE id = $2 AND tenant_id = $3",
+                    *params,
+                )
+                updated += 1
+
+            not_found = len(comanda_ids) - len(found_ids)
+
+            return {
+                "success": True,
+                "updated": updated,
+                "skipped": skipped + not_found,
+                "message": f"{updated} comanda(s) actualizadas a '{new_status}'",
+            }
+
+    except (AuthenticationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error in bulk_update_comanda_status: {str(e)}")
+        raise APIError(f"Error al actualizar comandas: {str(e)}", status_code=500)
+
+
 async def recall_comanda(
     request: Request,
     comanda_id: UUID
