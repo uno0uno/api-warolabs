@@ -176,9 +176,13 @@ async def _fire_with_conn(
 
     for station_id, station_items in items_by_station.items():
 
-        # 3a. comanda_number = order_number (mirrors the sales order number)
+        # 3a. comanda_number = order_number; comanda_index = per-order sequence
         comanda_number = await conn.fetchval(
             "SELECT order_number FROM orders WHERE id = $1",
+            order_id,
+        )
+        comanda_index = await conn.fetchval(
+            "SELECT COUNT(*) + 1 FROM comandas WHERE order_id = $1",
             order_id,
         )
 
@@ -187,14 +191,14 @@ async def _fire_with_conn(
             """
             INSERT INTO comandas (
                 tenant_id, order_id, station_id,
-                comanda_number, status, source_type, table_display_name
+                comanda_number, comanda_index, status, source_type, table_display_name
             )
-            VALUES ($1, $2, $3, $4, 'pending', $5, $6)
-            RETURNING id, comanda_number, station_id, status, source_type,
+            VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
+            RETURNING id, comanda_number, comanda_index, station_id, status, source_type,
                       table_display_name, notes, fired_at, ready_at, created_at
             """,
             tenant_id, order_id, station_id,
-            comanda_number, source_type, table_display_name,
+            comanda_number, comanda_index, source_type, table_display_name,
         )
         comanda_id = comanda_row['id']
 
@@ -367,7 +371,7 @@ async def get_comandas_for_kds(
 
             rows = await conn.fetch(f"""
                 SELECT
-                    c.id, c.comanda_number, c.status, c.source_type, c.table_display_name,
+                    c.id, c.comanda_number, c.comanda_index, c.status, c.source_type, c.table_display_name,
                     c.notes, c.fired_at, c.preparing_at, c.ready_at, c.delivered_at, c.created_at,
                     ks.id as station_id,
                     ks.name as station_name, ks.kitchen_name as station_kitchen_name,
@@ -442,7 +446,7 @@ async def get_comanda_detail(
 
             row = await conn.fetchrow("""
                 SELECT
-                    c.id, c.comanda_number, c.status, c.source_type, c.table_display_name,
+                    c.id, c.comanda_number, c.comanda_index, c.status, c.source_type, c.table_display_name,
                     c.notes, c.fired_at, c.preparing_at, c.ready_at, c.delivered_at, c.created_at,
                     ks.id as station_id,
                     ks.name as station_name, ks.kitchen_name as station_kitchen_name,
@@ -878,7 +882,7 @@ async def get_comanda_history(
             # Fetch rows
             rows = await conn.fetch(f"""
                 SELECT
-                    c.id, c.comanda_number, c.status, c.source_type, c.table_display_name,
+                    c.id, c.comanda_number, c.comanda_index, c.status, c.source_type, c.table_display_name,
                     c.notes, c.fired_at, c.preparing_at, c.ready_at, c.delivered_at, c.created_at,
                     ks.name as station_name
                 FROM comandas c
