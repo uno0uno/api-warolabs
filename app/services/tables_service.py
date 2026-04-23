@@ -984,6 +984,12 @@ async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID)
                         comanda_item_row["comanda_id"],
                     )
 
+                # Release FK before deleting order_item (no ON DELETE CASCADE on comanda_items)
+                await conn.execute(
+                    "DELETE FROM comanda_items WHERE id = $1",
+                    comanda_item_row["id"],
+                )
+
             await conn.execute("DELETE FROM order_items WHERE id = $1", order_item_id)
             new_total = max(0.0, float(row["total_amount"]) - float(row["subtotal"]))
             await conn.execute(
