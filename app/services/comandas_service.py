@@ -314,12 +314,25 @@ async def get_comandas_for_kds(
             param_count = 1
 
             # Default: active statuses only (override if status_filter provided)
+            ACTIVE_STATUSES = {'pending', 'preparing', 'ready'}
             if not status_filter:
                 where_conditions.append("c.status IN ('pending', 'preparing', 'ready')")
+                resolved_statuses = ACTIVE_STATUSES
             else:
-                param_count += 1
-                where_conditions.append(f"c.status = ${param_count}")
-                params.append(status_filter)
+                # Support comma-separated values: "pending,preparing,ready"
+                status_list = [s.strip() for s in status_filter.split(',') if s.strip()]
+                if len(status_list) > 1:
+                    placeholders = ', '.join(
+                        f'${param_count + i + 1}' for i in range(len(status_list))
+                    )
+                    where_conditions.append(f"c.status IN ({placeholders})")
+                    params.extend(status_list)
+                    param_count += len(status_list)
+                else:
+                    param_count += 1
+                    where_conditions.append(f"c.status = ${param_count}")
+                    params.append(status_list[0])
+                resolved_statuses = set(status_list)
 
             if station_id:
                 param_count += 1
@@ -331,15 +344,25 @@ async def get_comandas_for_kds(
                 where_conditions.append(f"c.source_type = ${param_count}")
                 params.append(source_type)
 
-            # Date filter — default to CURRENT_DATE when not provided
+            # Date filter:
+            # - Explicit date param: always apply
+            # - Active statuses (pending/preparing/ready): skip date filter — comandas fired
+            #   near midnight UTC may belong to "today" in Colombia (UTC-5) but appear as
+            #   "yesterday" in UTC. Active orders must always show regardless of date.
+            # - Terminal statuses (delivered/cancelled): default to today in Bogotá time
+            is_active_only = resolved_statuses.issubset(ACTIVE_STATUSES)
             if date:
                 param_count += 1
                 where_conditions.append(
                     f"DATE(c.fired_at AT TIME ZONE 'UTC') = ${param_count}::date"
                 )
                 params.append(date)
-            else:
-                where_conditions.append("DATE(c.fired_at AT TIME ZONE 'UTC') = CURRENT_DATE")
+            elif not is_active_only:
+                # Terminal statuses: use Colombia timezone so "today" matches local business day
+                where_conditions.append(
+                    "DATE(c.fired_at AT TIME ZONE 'America/Bogota') = "
+                    "CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota'"
+                )
 
             where_clause = " AND ".join(where_conditions)
 
