@@ -189,7 +189,7 @@ async def get_deactivate_info(request: Request, station_id: UUID) -> dict:
             """
             SELECT c.id, c.name
             FROM tenant_category_stations tcs
-            JOIN category c ON c.id = tcs.category_id
+            JOIN categories c ON c.id = tcs.category_id
             WHERE tcs.station_id = $1 AND tcs.tenant_id = $2
             ORDER BY c.name
             """,
