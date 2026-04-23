@@ -392,8 +392,12 @@ async def session_validation_middleware(request: Request, call_next):
         # Public prefixes (no session required)
         # /api/stations GET-only: KDS screen fetches station metadata by UUID (no session, UUID-secured)
         # /api/comandas GET-only: KDS screen polls active comandas by station_id (no session, UUID-secured)
+        # Only bypass when there is no session cookie — logged-in dashboard users must go through
+        # normal session validation so their tenant_id is available to the service.
         public_prefixes = ['/blog', '/supplier-portal', '/public/restaurant']
+        has_session_cookie = bool(request.cookies.get("session-token") or "session-token=" in request.headers.get("cookie", ""))
         kds_public = (
+            not has_session_cookie and
             request.method == 'GET' and (
                 path.startswith('/api/stations/') or
                 path.startswith('/api/comandas')
