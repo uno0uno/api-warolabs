@@ -11,7 +11,7 @@ from uuid import UUID
 from app.services import comandas_service
 from app.models.comanda import ComandaStatusUpdateRequest, ComandaItemStatusUpdateRequest
 
-router = APIRouter(prefix="/comandas", tags=["KDS / Comandas"])
+router = APIRouter(tags=["KDS / Comandas"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
