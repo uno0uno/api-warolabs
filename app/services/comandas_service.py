@@ -176,14 +176,15 @@ async def _fire_with_conn(
 
     for station_id, station_items in items_by_station.items():
 
-        # 3a. Generate comanda_number (per day per station, reset at midnight)
+        # 3a. Generate comanda_number (per Bogotá day per station, reset at midnight Colombia)
         comanda_number = await conn.fetchval(
             """
             SELECT COALESCE(MAX(comanda_number), 0) + 1
             FROM comandas
             WHERE station_id = $1
               AND tenant_id = $2
-              AND DATE(fired_at) = CURRENT_DATE
+              AND DATE(fired_at AT TIME ZONE 'America/Bogota') =
+                  (CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date
             """,
             station_id, tenant_id,
         )
