@@ -146,7 +146,13 @@ async def soft_delete_station_endpoint(request: Request, station_id: UUID):
     return await stations_service.soft_delete_station(request, station_id)
 
 
+@router.get("/{station_id}/deactivate-info")
+async def get_deactivate_info(request: Request, station_id: UUID):
+    """Return active-comanda count and affected categories before deactivating a station."""
+    return await stations_service.get_deactivate_info(request, station_id)
+
+
 @router.patch("/{station_id}/toggle")
 async def toggle_station_endpoint(request: Request, station_id: UUID, body: ToggleStationRequest):
-    """Toggle is_active on/off for a station (used by POS session toggle)."""
+    """Toggle is_active on/off for a station."""
     return await stations_service.toggle_station(request, station_id, body.is_active)

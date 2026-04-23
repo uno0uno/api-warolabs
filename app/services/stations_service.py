@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import Request, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
-from app.core.exceptions import AuthenticationError
+from app.core.exceptions import AuthenticationError, APIError
 import logging
 
 logger = logging.getLogger(__name__)
@@ -169,14 +169,67 @@ async def soft_delete_station(request: Request, station_id: UUID) -> dict:
         return {"success": True, "message": "Station deactivated"}
 
 
-async def toggle_station(request: Request, station_id: UUID, is_active: bool) -> dict:
-    """Toggle is_active on/off for a kitchen station."""
+async def get_deactivate_info(request: Request, station_id: UUID) -> dict:
+    """Return active-comanda count and affected categories for a station before deactivation."""
     session = require_valid_session(request)
     tenant_id = session.tenant_id
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
 
     async with get_db_connection() as conn:
+        active_count = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM comandas
+            WHERE station_id = $1 AND tenant_id = $2
+              AND status IN ('pending', 'preparing', 'ready')
+            """,
+            station_id, tenant_id,
+        )
+        cat_rows = await conn.fetch(
+            """
+            SELECT c.id, c.name
+            FROM tenant_category_stations tcs
+            JOIN category c ON c.id = tcs.category_id
+            WHERE tcs.station_id = $1 AND tcs.tenant_id = $2
+            ORDER BY c.name
+            """,
+            station_id, tenant_id,
+        )
+        return {
+            "success": True,
+            "data": {
+                "active_comandas_count": active_count,
+                "affected_categories": [{"id": str(r["id"]), "name": r["name"]} for r in cat_rows],
+            },
+        }
+
+
+async def toggle_station(request: Request, station_id: UUID, is_active: bool) -> dict:
+    """Toggle is_active on/off for a kitchen station.
+    Deactivation is blocked if the station has active comandas.
+    """
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    async with get_db_connection() as conn:
+        if not is_active:
+            active_count = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM comandas
+                WHERE station_id = $1 AND tenant_id = $2
+                  AND status IN ('pending', 'preparing', 'ready')
+                """,
+                station_id, tenant_id,
+            )
+            if active_count > 0:
+                raise APIError(
+                    f"Esta estación tiene {active_count} comanda(s) activa(s). "
+                    "Resuélvelas antes de desactivarla.",
+                    status_code=409,
+                )
+
         row = await conn.fetchrow(
             """
             UPDATE kitchen_stations
@@ -307,15 +360,19 @@ async def get_effective_station(product_id: UUID, tenant_id: UUID, conn) -> Opti
     if not row:
         return None
 
-    # Category-level mapping for this tenant
+    # Category-level mapping — only route to active stations
     category_station = await conn.fetchval(
         """
-        SELECT station_id FROM tenant_category_stations
-        WHERE tenant_id = $1 AND category_id = $2
+        SELECT tcs.station_id
+        FROM tenant_category_stations tcs
+        JOIN kitchen_stations ks ON ks.id = tcs.station_id
+        WHERE tcs.tenant_id = $1
+          AND tcs.category_id = $2
+          AND ks.is_active = true
         """,
         tenant_id, row['category_id'],
     )
-    return category_station  # None if no mapping
+    return category_station  # None if no mapping or station inactive
 
 
 async def reorder_stations(request: Request, items: List) -> dict:
