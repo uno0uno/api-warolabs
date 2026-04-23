@@ -23,6 +23,21 @@ from fastapi import Request
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_item_row(ir: Any) -> Dict[str, Any]:
+    """Convert an asyncpg comanda_items row to a serializable dict.
+    asyncpg returns JSONB columns as raw strings — parse modifiers_snapshot
+    so the frontend receives a proper array, not a JSON-encoded string.
+    """
+    d = dict(ir)
+    snap = d.get('modifiers_snapshot')
+    if isinstance(snap, str):
+        try:
+            d['modifiers_snapshot'] = json.loads(snap)
+        except (ValueError, TypeError):
+            d['modifiers_snapshot'] = None
+    return d
+
 # Allowed status transitions — any move not in this map is rejected with 422.
 # 'recall' (delivered → ready) is handled by recall_comanda() separately.
 ALLOWED_TRANSITIONS: Dict[str, List[str]] = {
@@ -228,7 +243,7 @@ async def _fire_with_conn(
                 item['quantity'],
                 json.dumps(modifiers_snapshot) if modifiers_snapshot else None,
             )
-            inserted_items.append(dict(ci_row))
+            inserted_items.append(_parse_item_row(ci_row))
 
         # 3d. Mark fired items as 'sent'
         await conn.execute(
@@ -402,7 +417,7 @@ async def get_comandas_for_kds(
                     ORDER BY created_at ASC
                 """, row['id'])
 
-                c_data['items'] = [dict(ir) for ir in item_rows]
+                c_data['items'] = [_parse_item_row(ir) for ir in item_rows]
                 comandas.append(c_data)
 
             return {"success": True, "data": comandas}
@@ -475,7 +490,7 @@ async def get_comanda_detail(
                 ORDER BY created_at ASC
             """, comanda_id)
 
-            c_data['items'] = [dict(ir) for ir in item_rows]
+            c_data['items'] = [_parse_item_row(ir) for ir in item_rows]
 
             return {"success": True, "data": c_data}
 
