@@ -344,24 +344,35 @@ async def get_comandas_for_kds(
                 where_conditions.append(f"c.source_type = ${param_count}")
                 params.append(source_type)
 
-            # Date filter:
-            # - Explicit date param: always apply
-            # - Active statuses (pending/preparing/ready): skip date filter — comandas fired
-            #   near midnight UTC may belong to "today" in Colombia (UTC-5) but appear as
-            #   "yesterday" in UTC. Active orders must always show regardless of date.
+            # Date filter logic:
+            # - Active statuses (pending/preparing/ready): NEVER add date filter — active
+            #   orders must always show regardless of when they were fired.
             # - Terminal statuses (delivered/cancelled): default to today in Bogotá time
-            is_active_only = resolved_statuses.issubset(ACTIVE_STATUSES)
+            #   to prevent the list growing unbounded.
+            # - Mixed query (both active + terminal): apply date filter ONLY to terminal
+            #   statuses so active ones are never hidden.
+            TERMINAL_STATUSES = {'delivered', 'cancelled'}
+            has_active = bool(resolved_statuses & ACTIVE_STATUSES)
+            has_terminal = bool(resolved_statuses & TERMINAL_STATUSES)
+
             if date:
                 param_count += 1
                 where_conditions.append(
                     f"DATE(c.fired_at AT TIME ZONE 'UTC') = ${param_count}::date"
                 )
                 params.append(date)
-            elif not is_active_only:
-                # Terminal statuses: use Colombia timezone so "today" matches local business day
+            elif has_terminal and not has_active:
+                # Only terminal statuses — apply date filter to all
                 where_conditions.append(
                     "DATE(c.fired_at AT TIME ZONE 'America/Bogota') = "
                     "(CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date"
+                )
+            elif has_terminal and has_active:
+                # Mixed: active statuses always visible; terminal only today
+                where_conditions.append(
+                    "(c.status IN ('pending', 'preparing', 'ready') OR "
+                    "DATE(c.fired_at AT TIME ZONE 'America/Bogota') = "
+                    "(CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date)"
                 )
 
             where_clause = " AND ".join(where_conditions)
