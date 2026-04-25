@@ -22,6 +22,8 @@ PURCHASE_UNIT_CATALOG: Dict[str, Dict[str, Any]] = {
     'lt':          {'label': 'Litro',        'conversion_factor': 1000,  'compatible_units': {'ml'}},
     'botella':     {'label': 'Botella',      'conversion_factor': 750,   'compatible_units': {'ml'}},
     'galon':       {'label': 'Galón',        'conversion_factor': 3785,  'compatible_units': {'ml'}},
+    # Piece (base unit: und)
+    'und':         {'label': 'Unidad',       'conversion_factor': 1,     'compatible_units': {'und'}},
 }
 
 
