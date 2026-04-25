@@ -11,7 +11,7 @@ Issue: https://github.com/uno0uno/warocol.com/issues/416
 """
 from typing import Optional, List, Dict, Any
 from uuid import UUID
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date as date_type
 import json
 import logging
 
@@ -363,9 +363,9 @@ async def get_comandas_for_kds(
             if date:
                 param_count += 1
                 where_conditions.append(
-                    f"DATE(c.fired_at AT TIME ZONE 'UTC') = ${param_count}::date"
+                    f"DATE(c.fired_at AT TIME ZONE 'UTC') = ${param_count}"
                 )
-                params.append(date)
+                params.append(date_type.fromisoformat(date) if isinstance(date, str) else date)
 
             where_clause = " AND ".join(where_conditions)
 
