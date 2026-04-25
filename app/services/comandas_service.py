@@ -517,7 +517,7 @@ async def update_comanda_status(
 
             # Fetch current comanda (verify ownership)
             row = await conn.fetchrow(
-                "SELECT id, status FROM comandas WHERE id = $1 AND tenant_id = $2",
+                "SELECT id, status, source_type FROM comandas WHERE id = $1 AND tenant_id = $2",
                 comanda_id, tenant_id
             )
             if not row:
@@ -532,6 +532,10 @@ async def update_comanda_status(
                     f"Transiciones permitidas desde '{current_status}': {allowed_next}"
                 )
 
+            # POS/counter comandas: skip the 'ready' holding state — auto-deliver immediately
+            if new_status == 'ready' and row['source_type'] == 'pos':
+                new_status = 'delivered'
+
             sql_updates = ["status = $1", "updated_at = NOW()"]
             params: List[Any] = [new_status, comanda_id, tenant_id]
 
@@ -540,6 +544,9 @@ async def update_comanda_status(
             elif new_status == 'ready':
                 sql_updates.append("ready_at = NOW()")
             elif new_status == 'delivered':
+                # POS path: fired as 'ready' → promoted to 'delivered', stamp both
+                if current_status == 'pending':
+                    sql_updates.append("ready_at = NOW()")
                 sql_updates.append("delivered_at = NOW()")
 
             await conn.execute(f"""
@@ -587,7 +594,7 @@ async def bulk_update_comanda_status(
             await _check_comandas_enabled(conn, tenant_id)
 
             rows = await conn.fetch(
-                "SELECT id, status FROM comandas WHERE id = ANY($1::uuid[]) AND tenant_id = $2",
+                "SELECT id, status, source_type FROM comandas WHERE id = ANY($1::uuid[]) AND tenant_id = $2",
                 comanda_ids, tenant_id,
             )
 
@@ -601,14 +608,21 @@ async def bulk_update_comanda_status(
                     skipped += 1
                     continue
 
-                sql_updates = ["status = $1", "updated_at = NOW()"]
-                params: List[Any] = [new_status, row['id'], tenant_id]
+                # POS/counter: auto-deliver when marked ready
+                effective_status = new_status
+                if new_status == 'ready' and row['source_type'] == 'pos':
+                    effective_status = 'delivered'
 
-                if new_status == 'preparing':
+                sql_updates = ["status = $1", "updated_at = NOW()"]
+                params: List[Any] = [effective_status, row['id'], tenant_id]
+
+                if effective_status == 'preparing':
                     sql_updates.append("preparing_at = NOW()")
-                elif new_status == 'ready':
+                elif effective_status == 'ready':
                     sql_updates.append("ready_at = NOW()")
-                elif new_status == 'delivered':
+                elif effective_status == 'delivered':
+                    if current_status == 'pending':
+                        sql_updates.append("ready_at = NOW()")
                     sql_updates.append("delivered_at = NOW()")
 
                 await conn.execute(
@@ -616,7 +630,7 @@ async def bulk_update_comanda_status(
                     *params,
                 )
 
-                if new_status in ('preparing', 'ready', 'delivered'):
+                if effective_status in ('preparing', 'ready', 'delivered'):
                     await conn.execute("""
                         UPDATE order_items oi
                         SET fulfillment_status = $2
@@ -624,7 +638,7 @@ async def bulk_update_comanda_status(
                         WHERE ci.comanda_id = $1
                           AND ci.order_item_id = oi.id
                           AND ci.status != 'cancelled'
-                    """, row['id'], new_status)
+                    """, row['id'], effective_status)
 
                 updated += 1
 
