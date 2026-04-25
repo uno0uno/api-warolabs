@@ -91,9 +91,11 @@ async def _ensure_bar_table(conn, tenant_id) -> None:
         )
 
 
-async def list_tables(request: Request) -> dict:
+async def list_tables(request: Request, include_inactive: bool = False) -> dict:
     """
-    List all active tables for tenant with current status, session duration, and running total.
+    List tables for the tenant.
+    When include_inactive=True (admin page), also returns deactivated (is_active=false)
+    tables that have not been permanently deleted (deleted_at IS NULL).
     Auto-creates the permanent Barra table + session if it doesn't exist yet.
     """
     try:
@@ -156,10 +158,12 @@ async def list_tables(request: Request) -> dict:
                     AND ts.tenant_id = $1
                     AND ts.closed_at IS NULL
                 WHERE t.tenant_id = $1
-                  AND t.is_active = true
-                ORDER BY t.is_bar DESC, t.name
+                  AND t.deleted_at IS NULL
+                  AND (t.is_active = true OR $2)
+                ORDER BY t.is_bar DESC, t.is_active DESC, t.name
                 """,
                 tenant_id,
+                include_inactive,
             )
 
         return {
@@ -302,6 +306,167 @@ async def soft_delete_table(request: Request, table_id: UUID) -> dict:
         raise
     except Exception as e:
         logger.error(f"Error deleting table {table_id}: {e}")
+        raise APIError(f"Error deleting table: {e}", status_code=500)
+
+
+async def activate_table(request: Request, table_id: UUID) -> dict:
+    """
+    Re-activate a deactivated table (is_active = true).
+    Returns 409 if table is permanent-deleted (deleted_at IS NOT NULL) or is bar.
+    Issue: https://github.com/uno0uno/warocol.com/issues/436
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            existing = await conn.fetchrow(
+                "SELECT id, is_bar, is_active, deleted_at FROM tables WHERE id = $1 AND tenant_id = $2",
+                table_id,
+                tenant_id,
+            )
+            if not existing:
+                raise NotFoundError("Table not found")
+
+            if existing["is_bar"]:
+                raise APIError("La Barra no puede ser modificada", status_code=409)
+
+            if existing["deleted_at"] is not None:
+                raise APIError("Esta mesa ha sido eliminada permanentemente", status_code=409)
+
+            if existing["is_active"]:
+                return {"success": True, "message": "Table already active"}
+
+            await conn.execute(
+                "UPDATE tables SET is_active = true WHERE id = $1 AND tenant_id = $2",
+                table_id,
+                tenant_id,
+            )
+
+        logger.info(f"Table activated: {table_id}")
+        return {"success": True, "message": "Table activated"}
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error activating table {table_id}: {e}")
+        raise APIError(f"Error activating table: {e}", status_code=500)
+
+
+async def deactivate_table(request: Request, table_id: UUID) -> dict:
+    """
+    Temporarily deactivate a table (is_active = false).
+    Returns 409 if table has an open session or is bar.
+    Issue: https://github.com/uno0uno/warocol.com/issues/436
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            existing = await conn.fetchrow(
+                "SELECT id, is_bar FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true AND deleted_at IS NULL",
+                table_id,
+                tenant_id,
+            )
+            if not existing:
+                raise NotFoundError("Table not found or already inactive")
+
+            if existing["is_bar"]:
+                raise APIError("La Barra no puede ser desactivada", status_code=409)
+
+            open_session = await conn.fetchrow(
+                "SELECT id FROM table_sessions WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL",
+                table_id,
+                tenant_id,
+            )
+            if open_session:
+                raise APIError("Esta mesa tiene una sesión activa. Ciérrala antes de desactivarla.", status_code=409)
+
+            await conn.execute(
+                "UPDATE tables SET is_active = false WHERE id = $1 AND tenant_id = $2",
+                table_id,
+                tenant_id,
+            )
+
+        logger.info(f"Table deactivated: {table_id}")
+        return {"success": True, "message": "Table deactivated"}
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error deactivating table {table_id}: {e}")
+        raise APIError(f"Error deactivating table: {e}", status_code=500)
+
+
+async def delete_table_permanent(request: Request, table_id: UUID) -> dict:
+    """
+    Permanently remove a table.
+    - Open session → 409 (cannot delete)
+    - No closed history → hard DELETE from DB
+    - Has closed history → soft-archive (deleted_at = now(), is_active = false)
+    Issue: https://github.com/uno0uno/warocol.com/issues/436
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            existing = await conn.fetchrow(
+                "SELECT id, is_bar, deleted_at FROM tables WHERE id = $1 AND tenant_id = $2",
+                table_id,
+                tenant_id,
+            )
+            if not existing:
+                raise NotFoundError("Table not found")
+
+            if existing["is_bar"]:
+                raise APIError("La Barra no puede ser eliminada", status_code=409)
+
+            if existing["deleted_at"] is not None:
+                raise APIError("Esta mesa ya ha sido eliminada", status_code=409)
+
+            open_session = await conn.fetchrow(
+                "SELECT id FROM table_sessions WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL",
+                table_id,
+                tenant_id,
+            )
+            if open_session:
+                raise APIError("Mesa con sesión activa. Cierra la sesión antes de eliminar.", status_code=409)
+
+            has_history = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM table_sessions WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NOT NULL AND is_discarded = FALSE)",
+                table_id,
+                tenant_id,
+            )
+
+            if has_history:
+                await conn.execute(
+                    "UPDATE tables SET deleted_at = now(), is_active = false WHERE id = $1 AND tenant_id = $2",
+                    table_id,
+                    tenant_id,
+                )
+                logger.info(f"Table archived (soft-deleted): {table_id}")
+                return {"success": True, "message": "Table archived", "archived": True}
+            else:
+                await conn.execute(
+                    "DELETE FROM tables WHERE id = $1 AND tenant_id = $2",
+                    table_id,
+                    tenant_id,
+                )
+                logger.info(f"Table hard-deleted: {table_id}")
+                return {"success": True, "message": "Table deleted", "archived": False}
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error permanently deleting table {table_id}: {e}")
         raise APIError(f"Error deleting table: {e}", status_code=500)
 
 
@@ -1665,6 +1830,7 @@ def _format_table_row(row: dict) -> dict:
         "is_active": row["is_active"],
         "is_bar": bool(row["is_bar"]) if row.get("is_bar") is not None else False,
         "created_at": row["created_at"].isoformat(),
+        "has_history": row.get("last_closed_session_id") is not None,
         "session": None,
         "last_closed_at": row["last_closed_at"].isoformat() if row.get("last_closed_at") else None,
         "last_closed_session_id": str(row["last_closed_session_id"]) if row.get("last_closed_session_id") else None,

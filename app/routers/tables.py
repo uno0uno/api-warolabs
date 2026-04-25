@@ -4,7 +4,7 @@ CRUD and session lifecycle endpoints for restaurant table management.
 
 Issue: https://github.com/uno0uno/warocol.com/issues/298
 """
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Query
 from typing import Optional, List
 from uuid import UUID
 from datetime import date
@@ -47,13 +47,13 @@ class UpdateTabItemRequest(BaseModel):
 
 
 @router.get("")
-async def list_tables(request: Request):
+async def list_tables(request: Request, include_inactive: bool = Query(False)):
     """
-    List all active tables for the tenant.
-    Each table includes current status, open session duration (minutes),
-    and running total from linked orders.
+    List tables for the tenant.
+    include_inactive=true (admin): also returns deactivated tables (is_active=false, deleted_at IS NULL).
+    Each table includes current status, session duration, running total, and has_history flag.
     """
-    return await tables_service.list_tables(request)
+    return await tables_service.list_tables(request, include_inactive=include_inactive)
 
 
 @router.post("")
@@ -73,13 +73,36 @@ async def update_table(request: Request, table_id: UUID, body: UpdateTableReques
     return await tables_service.update_table(request, table_id, body.name, body.capacity)
 
 
+@router.patch("/{table_id}/activate")
+async def activate_table(request: Request, table_id: UUID):
+    """
+    Re-activate a deactivated table (is_active = true).
+    Returns 409 if table is permanently deleted or is bar.
+    Issue: https://github.com/uno0uno/warocol.com/issues/436
+    """
+    return await tables_service.activate_table(request, table_id)
+
+
+@router.patch("/{table_id}/deactivate")
+async def deactivate_table(request: Request, table_id: UUID):
+    """
+    Temporarily deactivate a table (is_active = false).
+    Returns 409 if table has an open session or is bar.
+    Issue: https://github.com/uno0uno/warocol.com/issues/436
+    """
+    return await tables_service.deactivate_table(request, table_id)
+
+
 @router.delete("/{table_id}")
-async def soft_delete_table(request: Request, table_id: UUID):
+async def delete_table_permanent(request: Request, table_id: UUID):
     """
-    Soft-delete a table (is_active = false).
-    Returns 409 if the table has an open session.
+    Permanently remove a table.
+    - Open session → 409
+    - No history → hard DELETE from DB
+    - Has history → soft-archive (deleted_at = now(), preserves reporting data)
+    Issue: https://github.com/uno0uno/warocol.com/issues/436
     """
-    return await tables_service.soft_delete_table(request, table_id)
+    return await tables_service.delete_table_permanent(request, table_id)
 
 
 @router.post("/{table_id}/open")
