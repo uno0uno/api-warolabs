@@ -41,7 +41,7 @@ def _parse_item_row(ir: Any) -> Dict[str, Any]:
 # Allowed status transitions — any move not in this map is rejected with 422.
 # 'recall' (delivered → ready) is handled by recall_comanda() separately.
 ALLOWED_TRANSITIONS: Dict[str, List[str]] = {
-    'pending':   ['preparing', 'cancelled'],
+    'pending':   ['preparing', 'ready', 'cancelled'],
     'preparing': ['ready', 'cancelled'],
     'ready':     ['delivered'],
     'delivered': [],
