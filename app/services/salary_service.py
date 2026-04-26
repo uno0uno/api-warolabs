@@ -2188,6 +2188,7 @@ async def _post_cesantias_payment_gl_entry(
     payment_method: Optional[str],
     payment_date: Any,
     anio: int,
+    fondo_name: Optional[str] = None,
 ) -> None:
     """
     Post cesantías consignation GL entry.
@@ -2256,7 +2257,7 @@ async def _post_cesantias_payment_gl_entry(
                VALUES ($1, $2, $3, $4, $5, 'nomina_cesantias', $6, 'posted', $7, $8, NOW())
                RETURNING id""",
             tenant_id, entry_date, entry_date.year, entry_date.month,
-            f"Consignación cesantías — {anio}",
+            (f"Consignación cesantías {anio} — {fondo_name}" if fondo_name else f"Consignación cesantías — {anio}"),
             cesantias_payment_id, amount_float, amount_float,
         )
         entry_id = entry_row["id"]
@@ -2266,14 +2267,14 @@ async def _post_cesantias_payment_gl_entry(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, $3, 0, $4, 0)""",
-            entry_id, dr_acct["id"], amount_float, f"Cesantías {anio}",
+            entry_id, dr_acct["id"], amount_float, (f"Cesantías {anio} — {fondo_name}" if fondo_name else f"Cesantías {anio}"),
         )
         # CR line — bank/cash
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, 1)""",
-            entry_id, cr_acct["id"], amount_float, f"Cesantías {anio}",
+            entry_id, cr_acct["id"], amount_float, (f"Cesantías {anio} — {fondo_name}" if fondo_name else f"Cesantías {anio}"),
         )
 
     logger.info(
@@ -2464,6 +2465,7 @@ async def record_cesantias_payment(
                 payment_method=data.payment_method,
                 payment_date=payment_date,
                 anio=data.anio,
+                fondo_name=data.fondo_name,
             )
         except Exception as gl_err:
             logger.warning(f"[cesantias_gl] GL post failed for cesantias payment {payment_id}: {gl_err}")
