@@ -11,6 +11,7 @@ from app.core.exceptions import AuthenticationError, APIError
 from datetime import datetime, date, timedelta
 from statistics import mean as st_mean, quantiles
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -921,6 +922,68 @@ def _compute_anomaly(
     }
 
 
+# Max plausible unit_cost per base unit for food-service quantities.
+# Values above these thresholds with no conversion applied are physically implausible.
+_UNIT_COST_THRESHOLDS: Dict[str, float] = {
+    "ml":  500.0,
+    "l":   500.0,
+    "gr":  500.0,
+    "g":   500.0,
+    "kg":  500.0,
+    "und": 5000.0,
+}
+_DEFAULT_UNIT_COST_THRESHOLD = 2000.0
+
+
+def _check_unit_mismatch(
+    purchase_quantity: float,
+    base_quantity: float,
+    purchase_unit: str,
+    ingredient_base_unit: str,
+    unit_cost: float,
+) -> Optional[Dict[str, Any]]:
+    """
+    Structural check: flag when no unit conversion was applied (ratio ≈ 1.0)
+    AND unit_cost exceeds the plausible threshold for the ingredient's base unit.
+
+    Catches two failure modes:
+    1. purchase_unit == ingredient base_unit (e.g. "ml" == "ml") — factor stays 1.0
+    2. Unknown purchase_unit not in catalog — factor silently stays 1.0
+
+    Does NOT require price history — fires even on the first purchase of an ingredient.
+    Uses alert_type "unit_mismatch" (already declared in AlertType enum).
+    """
+    if purchase_quantity <= 0 or base_quantity <= 0 or unit_cost <= 0:
+        return None
+
+    conversion_ratio = base_quantity / purchase_quantity
+    # Ratio ≈ 1.0 means no conversion happened
+    if abs(conversion_ratio - 1.0) > 0.01:
+        return None
+
+    threshold = _UNIT_COST_THRESHOLDS.get(
+        ingredient_base_unit.lower(), _DEFAULT_UNIT_COST_THRESHOLD
+    )
+    if unit_cost <= threshold:
+        return None
+
+    return {
+        "alert_type": "unit_mismatch",
+        "severity": "critical",
+        "expected_value": None,
+        "actual_value": unit_cost,
+        "deviation_pct": None,
+        "rolling_avg": None,
+        "context": {
+            "purchase_unit": purchase_unit,
+            "ingredient_base_unit": ingredient_base_unit,
+            "purchase_quantity": purchase_quantity,
+            "base_quantity": base_quantity,
+            "unit_cost_threshold": threshold,
+        },
+    }
+
+
 async def _get_data_quality_for_tenant(tenant_id: str) -> dict:
     """Auth-agnostic core for data quality. Called by session wrapper and public API."""
     async with get_db_connection(use_transaction=False) as conn:
@@ -1031,10 +1094,14 @@ async def run_anomaly_checks_for_purchase(purchase_id: UUID, tenant_id: UUID) ->
         async with get_db_connection(use_transaction=False) as conn:
             items = await conn.fetch("""
                 SELECT
-                    tpi.id          AS purchase_item_id,
+                    tpi.id                       AS purchase_item_id,
                     tpi.ingredient_id,
-                    i.name          AS ingredient_name,
-                    tpi.unit_cost::float AS unit_cost
+                    i.name                       AS ingredient_name,
+                    i.unit                       AS ingredient_base_unit,
+                    tpi.unit_cost::float         AS unit_cost,
+                    tpi.purchase_quantity::float AS purchase_quantity,
+                    tpi.quantity::float          AS base_quantity,
+                    tpi.purchase_unit            AS purchase_unit
                 FROM tenant_purchase_items tpi
                 JOIN ingredients i ON tpi.ingredient_id = i.id
                 WHERE tpi.purchase_id = $1
@@ -1051,6 +1118,51 @@ async def run_anomaly_checks_for_purchase(purchase_id: UUID, tenant_id: UUID) ->
                 new_price = item["unit_cost"]
                 ingredient_name = item["ingredient_name"]
                 purchase_item_id = item["purchase_item_id"]
+
+                # Structural check: fires before history gate — no baseline required
+                unit_mismatch = _check_unit_mismatch(
+                    purchase_quantity=item["purchase_quantity"] or 0.0,
+                    base_quantity=item["base_quantity"] or 0.0,
+                    purchase_unit=item["purchase_unit"] or "",
+                    ingredient_base_unit=item["ingredient_base_unit"] or "",
+                    unit_cost=new_price,
+                )
+                if unit_mismatch is not None:
+                    logger.warning(
+                        f"Unit mismatch detected: {ingredient_name} | "
+                        f"purchase_unit={item['purchase_unit']} "
+                        f"base_unit={item['ingredient_base_unit']} "
+                        f"unit_cost={new_price}"
+                    )
+                    async with get_db_connection() as conn:
+                        await conn.execute("""
+                            INSERT INTO data_quality_alerts (
+                                tenant_id, purchase_item_id, ingredient_id,
+                                ingredient_name, alert_type, severity,
+                                expected_value, actual_value, deviation_pct, rolling_avg,
+                                context, resolved
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, FALSE)
+                            ON CONFLICT (purchase_item_id, tenant_id)
+                            DO UPDATE SET
+                                alert_type   = EXCLUDED.alert_type,
+                                severity     = EXCLUDED.severity,
+                                actual_value = EXCLUDED.actual_value,
+                                context      = EXCLUDED.context
+                            WHERE data_quality_alerts.resolved = FALSE
+                        """,
+                            tenant_id,
+                            purchase_item_id,
+                            ingredient_id,
+                            ingredient_name,
+                            unit_mismatch["alert_type"],
+                            unit_mismatch["severity"],
+                            unit_mismatch["expected_value"],
+                            unit_mismatch["actual_value"],
+                            unit_mismatch["deviation_pct"],
+                            unit_mismatch["rolling_avg"],
+                            json.dumps(unit_mismatch["context"]),
+                        )
+                    # Continue to also run price-deviation check below
 
                 # Fetch up to 30 prior prices for this ingredient, excluding the current purchase
                 async with get_db_connection(use_transaction=False) as conn:
