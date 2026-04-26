@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     # Cron secret — grace period reminders (issue #62)
     cron_secret: Optional[str] = Field(default=None, alias='CRON_SECRET')
 
+    # api-facturacion microservice — DIAN electronic invoicing (issue #128)
+    facturacion_api_url: str = Field(default='http://api-facturacion:8001', alias='FACTURACION_API_URL')
+
     class Config:
         env_file = ".env"
         extra = "ignore"  # Ignore extra environment variables

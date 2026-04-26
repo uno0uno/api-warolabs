@@ -2,11 +2,12 @@
 Orders Router
 Endpoints for listing and managing orders
 """
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, HTTPException, Request, Query
 from typing import Optional, List
 from uuid import UUID
 from pydantic import BaseModel, Field
-from app.services import orders_service
+from app.services import orders_service, facturacion_service
+from app.core.middleware import require_valid_session
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
@@ -344,3 +345,47 @@ async def delete_order_item_modifier(
     Also updates the item subtotal and order total.
     """
     return await orders_service.delete_order_item_modifier(request, order_id, item_id, modifier_id)
+
+
+# ── Electronic invoicing (issue #128) ─────────────────────────────────────────
+
+@router.post("/{order_id}/invoice", tags=["Invoices"])
+async def emit_order_invoice(
+    request: Request,
+    order_id: UUID,
+):
+    """
+    Emit a DIAN electronic invoice for a completed POS order.
+
+    Delegates to api-facturacion microservice via internal Docker network.
+    Idempotent: calling twice for the same order returns the existing invoice.
+
+    Returns: { order_id, invoice_number, prefix, cufe, status, pdf_presigned_url }
+    """
+    session_context = require_valid_session(request)
+    return await facturacion_service.emit_invoice(
+        order_id=str(order_id),
+        tenant_id=str(session_context.tenant_id),
+        order_type='pos',
+    )
+
+
+@router.get("/{order_id}/invoice", tags=["Invoices"])
+async def get_order_invoice(
+    request: Request,
+    order_id: UUID,
+):
+    """
+    Get the current electronic invoice for an order.
+
+    Returns invoice status, CUFE, and a fresh presigned PDF URL (1h TTL).
+    Returns 404 if no invoice has been emitted for this order yet.
+    """
+    session_context = require_valid_session(request)
+    result = await facturacion_service.get_order_invoice(
+        order_id=str(order_id),
+        tenant_id=str(session_context.tenant_id),
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="No invoice found for this order")
+    return result
