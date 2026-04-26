@@ -1,25 +1,27 @@
 """
-Facturacion Service — bridge to api-facturacion microservice (issue #128)
+Facturacion Service — bridge to api-facturacion microservice (issues #128, #129)
 
 Communicates with api-facturacion over the internal Docker network.
 Internal URL: http://api-facturacion:8001 (prod) / http://localhost:5002 (dev)
 
 Endpoints proxied:
-  POST /invoice/emit  → emit_invoice()
-  GET  electronic_invoices directly from DB → get_order_invoice()
+  POST /invoice/emit          → emit_invoice()
+  GET  electronic_invoices DB → get_order_invoice(), get_dian_status()
+  GET  electronic_invoices DB → get_documents_list()
+  GET  R2 presigned URL       → get_document_pdf_url(), get_document_xml_url()
+  Generic proxy helper        → proxy_to_facturacion()
 
-The GET does NOT call api-facturacion — it reads the DB directly and generates
-the R2 presigned URL locally (api-warolabs already has R2 credentials).
+DB-only functions do NOT call api-facturacion — they read electronic_invoices
+directly and generate R2 presigned URLs locally (api-warolabs has R2 credentials).
 """
 import httpx
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 from fastapi import HTTPException
 
 from app.config import settings
 from app.database import get_db_connection
-from app.core.middleware import require_valid_session
 from app.services.aws_s3_service import AWSS3Service
 
 logger = logging.getLogger(__name__)
@@ -91,6 +93,223 @@ async def emit_invoice(
 
     logger.info(f"Invoice emitted for order {order_id}: status={data.get('status')} cufe={data.get('cufe', '')[:16]}...")
     return data
+
+
+async def proxy_to_facturacion(
+    method: str,
+    path: str,
+    payload: Optional[Dict[str, Any]] = None,
+    timeout: float = 30.0,
+) -> Dict[str, Any]:
+    """
+    Generic proxy helper for forwarding requests to api-facturacion.
+
+    Args:
+        method:  HTTP method ('GET', 'POST', etc.)
+        path:    Path relative to facturacion_api_url (e.g. '/credit-note/emit')
+        payload: JSON body for POST requests
+        timeout: Request timeout in seconds (default 30s per issue spec)
+
+    Raises:
+        HTTPException 503 — api-facturacion unreachable or timed out
+        HTTPException <status> — api-facturacion returned a non-2xx response
+    """
+    url = f"{settings.facturacion_api_url.rstrip('/')}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            if method.upper() == 'GET':
+                resp = await client.get(url)
+            else:
+                resp = await client.post(url, json=payload or {})
+    except (httpx.TimeoutException, httpx.ConnectError) as exc:
+        logger.error(f"api-facturacion unreachable at {path}: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Electronic invoicing service is temporarily unavailable. Please try again.",
+        )
+
+    data: Dict[str, Any] = {}
+    try:
+        data = resp.json()
+    except Exception:
+        data = {'raw': resp.text}
+
+    if not resp.is_success:
+        detail = data.get('detail') or data.get('message') or resp.text[:300]
+        logger.error(f"api-facturacion error {resp.status_code} at {path}: {detail}")
+        raise HTTPException(status_code=resp.status_code, detail=str(detail))
+
+    return data
+
+
+async def get_dian_status(
+    order_id: str,
+    tenant_id: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Return the DIAN verification status for an order's invoice.
+
+    Reads electronic_invoices directly from DB — no api-facturacion call.
+    Returns None if no invoice exists for this order.
+    """
+    async with get_db_connection(use_transaction=False) as conn:
+        row = await conn.fetchrow(
+            """SELECT id, invoice_number, prefix, cufe, status,
+                      error_message, emitted_at, created_at
+               FROM electronic_invoices
+               WHERE order_id = $1 AND tenant_id = $2
+               ORDER BY created_at DESC
+               LIMIT 1""",
+            UUID(order_id), UUID(tenant_id),
+        )
+
+    if not row:
+        return None
+
+    return {
+        'order_id': order_id,
+        'invoice_id': str(row['id']),
+        'invoice_number': row['invoice_number'],
+        'prefix': row['prefix'],
+        'cufe': row['cufe'],
+        'status': row['status'],
+        'error_message': row['error_message'],
+        'emitted_at': row['emitted_at'].isoformat() if row['emitted_at'] else None,
+        'created_at': row['created_at'].isoformat() if row['created_at'] else None,
+    }
+
+
+async def get_documents_list(
+    tenant_id: str,
+    prefix: Optional[str] = None,
+    number: Optional[int] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """
+    Return a paginated list of electronic invoices for a tenant.
+
+    Optional filters: prefix (e.g. 'SETP') and invoice_number.
+    Reads electronic_invoices directly — no api-facturacion call.
+    """
+    conditions = ['tenant_id = $1']
+    params: List[Any] = [UUID(tenant_id)]
+    idx = 2
+
+    if prefix is not None:
+        conditions.append(f'prefix = ${idx}')
+        params.append(prefix)
+        idx += 1
+    if number is not None:
+        conditions.append(f'invoice_number = ${idx}')
+        params.append(number)
+        idx += 1
+
+    where = ' AND '.join(conditions)
+
+    async with get_db_connection(use_transaction=False) as conn:
+        total_row = await conn.fetchrow(
+            f'SELECT COUNT(*) AS total FROM electronic_invoices WHERE {where}',
+            *params,
+        )
+        rows = await conn.fetch(
+            f"""SELECT id, order_id, order_type, invoice_number, prefix,
+                       cufe, status, error_message, emitted_at, created_at
+                FROM electronic_invoices
+                WHERE {where}
+                ORDER BY created_at DESC
+                LIMIT ${idx} OFFSET ${idx + 1}""",
+            *params, limit, offset,
+        )
+
+    items = [
+        {
+            'id': str(r['id']),
+            'order_id': str(r['order_id']),
+            'order_type': r['order_type'],
+            'invoice_number': r['invoice_number'],
+            'prefix': r['prefix'],
+            'cufe': r['cufe'],
+            'status': r['status'],
+            'error_message': r['error_message'],
+            'emitted_at': r['emitted_at'].isoformat() if r['emitted_at'] else None,
+            'created_at': r['created_at'].isoformat() if r['created_at'] else None,
+        }
+        for r in rows
+    ]
+
+    return {
+        'total': total_row['total'],
+        'limit': limit,
+        'offset': offset,
+        'items': items,
+    }
+
+
+async def get_document_pdf_url(
+    track_id: str,
+    tenant_id: str,
+) -> Optional[str]:
+    """
+    Return a fresh R2 presigned URL for the PDF of an invoice.
+
+    track_id maps to electronic_invoices.id (UUID primary key).
+    Returns None if the invoice has no PDF yet.
+    Raises HTTPException 404 if the invoice record does not exist.
+    """
+    async with get_db_connection(use_transaction=False) as conn:
+        row = await conn.fetchrow(
+            """SELECT status, r2_pdf_key
+               FROM electronic_invoices
+               WHERE id = $1 AND tenant_id = $2""",
+            UUID(track_id), UUID(tenant_id),
+        )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+    if not row['r2_pdf_key']:
+        return None
+
+    try:
+        s3 = AWSS3Service()
+        return await s3.get_presigned_url(row['r2_pdf_key'], expiration=3600)
+    except Exception as exc:
+        logger.warning(f"Could not generate PDF presigned URL for invoice {track_id}: {exc}")
+        return None
+
+
+async def get_document_xml_url(
+    track_id: str,
+    tenant_id: str,
+) -> Optional[str]:
+    """
+    Return a fresh R2 presigned URL for the XML of an invoice.
+
+    track_id maps to electronic_invoices.id (UUID primary key).
+    Returns None if the invoice has no XML yet.
+    Raises HTTPException 404 if the invoice record does not exist.
+    """
+    async with get_db_connection(use_transaction=False) as conn:
+        row = await conn.fetchrow(
+            """SELECT status, r2_xml_key
+               FROM electronic_invoices
+               WHERE id = $1 AND tenant_id = $2""",
+            UUID(track_id), UUID(tenant_id),
+        )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+    if not row['r2_xml_key']:
+        return None
+
+    try:
+        s3 = AWSS3Service()
+        return await s3.get_presigned_url(row['r2_xml_key'], expiration=3600)
+    except Exception as exc:
+        logger.warning(f"Could not generate XML presigned URL for invoice {track_id}: {exc}")
+        return None
 
 
 async def get_order_invoice(

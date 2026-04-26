@@ -389,3 +389,24 @@ async def get_order_invoice(
     if result is None:
         raise HTTPException(status_code=404, detail="No invoice found for this order")
     return result
+
+
+@router.get("/{order_id}/invoice/dian-status", tags=["Invoices"])
+async def get_order_invoice_dian_status(
+    request: Request,
+    order_id: UUID,
+):
+    """
+    Return the DIAN verification status for an order's invoice.
+
+    Reads electronic_invoices directly from DB — no api-facturacion call needed.
+    Returns 404 if no invoice has been emitted for this order yet.
+    """
+    session_context = require_valid_session(request)
+    result = await facturacion_service.get_dian_status(
+        order_id=str(order_id),
+        tenant_id=str(session_context.tenant_id),
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="No invoice found for this order")
+    return result

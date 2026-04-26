@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, admin_ingredients, admin_orders, menu, tables, credit, cartera, cierre, payment_methods, accounting, stations, comandas
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, admin_ingredients, admin_orders, menu, tables, credit, cartera, cierre, payment_methods, accounting, stations, comandas, invoices as invoices_router, support_documents, documents as documents_router, facturacion as facturacion_router
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -207,6 +207,12 @@ app.include_router(cierre.router)   # /cierre — daily accounting close (issue 
 app.include_router(payment_methods.finanzas_router)  # /finanzas/metodos-pago — payment method groups & methods (issue #331)
 app.include_router(accounting.router, prefix="/accounting", tags=["accounting"])  # /accounting — chart of accounts CRUD (issue #375)
 app.include_router(payment_methods.pos_router)        # /pos/payment-methods — POS read-only (issue #331)
+app.include_router(invoices_router.router)            # /api/invoices/... — credit-note, debit-note, events (issue #129)
+app.include_router(support_documents.router)          # /api/support-documents/... — support docs (issue #129)
+app.include_router(documents_router.router)           # /api/documents/... — document management (issue #129)
+app.include_router(facturacion_router.acquirer_router)  # /api/acquirer — acquirer lookup (issue #129)
+app.include_router(facturacion_router.catalog_router)   # /api/facturacion/catalog/... — DIAN catalogs (issue #129)
+app.include_router(facturacion_router.payroll_router)   # /api/payroll/... — electronic payroll (issue #129)
 
 @app.get("/")
 async def root():
