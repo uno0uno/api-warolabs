@@ -1071,19 +1071,12 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                     [r["total"] for r in breakdown_rows],
                 )
 
-            # 7. GL auto-post — ventas/arqueo → GL (#378)
-            #    SAVEPOINT: GL failure never rolls back the cierre save.
-            try:
-                async with conn.transaction():
-                    tax_cfg = await _get_tenant_tax_config(conn, tenant_id)
-                    await _post_cierre_gl_entry(
-                        conn, tenant_id, summary_row["id"],
-                        body.period_start, breakdown_rows or [], tax_cfg,
-                    )
-            except Exception as _gl_err:
-                logger.warning(
-                    f"[GL] cierre GL post failed for {summary_row['id']}: {_gl_err}"
-                )
+            # GL posting for cierre is intentionally disabled.
+            # Revenue is already recorded per-order via _post_order_gl_entry()
+            # (source_module='orden') when each POS/table/online order completes.
+            # Posting again here (source_module='ventas') would double-count
+            # income in account 4175. The cierre serves as a cash reconciliation
+            # report, not as the GL trigger for revenue recognition.
 
         return {
             "success": True,
@@ -1256,16 +1249,9 @@ async def delete_cierre(request: Request, cierre_id: UUID) -> dict:
             if not row:
                 raise APIError("Cierre no encontrado", status_code=404)
 
-            # GL void — SAVEPOINT: GL failure never blocks the cierre delete.
-            try:
-                async with conn.transaction():
-                    await _void_cierre_gl_entry(
-                        conn, tenant_id, row["summary_id"], reason="Cierre eliminado"
-                    )
-            except Exception as _gl_err:
-                logger.warning(
-                    f"[GL] cierre GL void failed for {row['summary_id']}: {_gl_err}"
-                )
+            # GL void not needed: no ventas GL entry is created on cierre.
+            # Revenue GL entries (source_module='orden') are never voided on
+            # cierre delete — they remain as the permanent per-order record.
 
             await conn.execute(
                 "UPDATE accounting_period SET deleted_at = NOW() WHERE id = $1 AND tenant_id = $2",
