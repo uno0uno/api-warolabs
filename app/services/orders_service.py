@@ -957,8 +957,19 @@ async def get_customer_detail(
                           AND wt.transaction_type = 'earned'
                           AND wt.tenant_id = $1
                     )                   AS waros_earned,
+                    ei.id               AS invoice_id,
+                    ei.prefix           AS invoice_prefix,
+                    ei.invoice_number   AS invoice_number,
+                    ei.status           AS invoice_status,
+                    ei.cufe             AS invoice_cufe,
                     COUNT(*) OVER()     AS total_count
                 FROM orders o
+                LEFT JOIN LATERAL (
+                    SELECT id, prefix, invoice_number, status, cufe
+                    FROM electronic_invoices
+                    WHERE order_id = o.id AND tenant_id = $1
+                    ORDER BY created_at DESC LIMIT 1
+                ) ei ON true
                 WHERE {where_clause}
                 ORDER BY o.order_date DESC
                 LIMIT ${limit_param} OFFSET ${offset_param}
@@ -978,6 +989,11 @@ async def get_customer_detail(
                     "payment_method": row['payment_method'],
                     "status": row['status'],
                     "waros_earned": int(row['waros_earned']),
+                    "invoice_id": str(row['invoice_id']) if row['invoice_id'] else None,
+                    "invoice_prefix": row['invoice_prefix'],
+                    "invoice_number": row['invoice_number'],
+                    "invoice_status": row['invoice_status'],
+                    "invoice_cufe": row['invoice_cufe'],
                 }
                 for row in order_rows
             ]
