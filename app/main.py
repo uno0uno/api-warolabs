@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, admin_ingredients, admin_orders, menu, tables, credit, cartera, cierre, payment_methods, accounting, stations, comandas, invoices as invoices_router, support_documents, documents as documents_router, facturacion as facturacion_router
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, admin_ingredients, admin_orders, menu, tables, credit, cartera, cierre, payment_methods, accounting, stations, comandas, invoices as invoices_router, support_documents, documents as documents_router, facturacion as facturacion_router, webhooks as webhooks_router
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -69,7 +69,7 @@ def custom_openapi():
     # /online/otp is public for OTP verification
     # /online/customer is public for customer validation
     # /online/addresses is public for address management
-    public_prefixes = ["/blog", "/v1", "/public/restaurant", "/online/cart", "/online/otp", "/online/customer", "/online/addresses", "/leads"]
+    public_prefixes = ["/blog", "/v1", "/public/restaurant", "/online/cart", "/online/otp", "/online/customer", "/online/addresses", "/leads", "/api/webhooks"]
 
     # Only expose v1 endpoints in Swagger — remove everything else from the schema
     openapi_schema["paths"] = {
@@ -213,6 +213,7 @@ app.include_router(documents_router.router)           # /api/documents/... — d
 app.include_router(facturacion_router.acquirer_router)  # /api/acquirer — acquirer lookup (issue #129)
 app.include_router(facturacion_router.catalog_router)   # /api/facturacion/catalog/... — DIAN catalogs (issue #129)
 app.include_router(facturacion_router.payroll_router)   # /api/payroll/... — electronic payroll (issue #129)
+app.include_router(webhooks_router.router)              # /api/webhooks/matias — Matias webhook bridge
 
 @app.get("/")
 async def root():
