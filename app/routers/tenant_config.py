@@ -140,6 +140,93 @@ async def update_tax_config_endpoint(
     return await tenant_config_service.update_tax_config(request, data)
 
 
+@router.get("/dian-resolutions")
+async def get_dian_resolutions(request: Request):
+    """
+    Get all DIAN resolutions for the active tenant.
+    Returns resolution details with usage stats.
+    """
+    from app.core.middleware import require_valid_session
+    from app.database import get_db_connection
+
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            """SELECT id, resolution_number, prefix, date_from, date_to,
+                      from_number, to_number, current_number, is_active, document_type, created_at
+               FROM dian_resolutions
+               WHERE tenant_id = $1
+               ORDER BY is_active DESC, created_at DESC""",
+            tenant_id,
+        )
+
+    resolutions = []
+    for r in rows:
+        total_range = r['to_number'] - r['from_number'] + 1
+        used = r['current_number'] - r['from_number'] + 1 if r['current_number'] >= r['from_number'] else 0
+        usage_percent = round((used / total_range) * 100, 1) if total_range > 0 else 0
+
+        resolutions.append({
+            'id': str(r['id']),
+            'resolution_number': r['resolution_number'],
+            'prefix': r['prefix'],
+            'date_from': r['date_from'].isoformat(),
+            'date_to': r['date_to'].isoformat(),
+            'from_number': r['from_number'],
+            'to_number': r['to_number'],
+            'current_number': r['current_number'],
+            'is_active': r['is_active'],
+            'document_type': r['document_type'],
+            'total_range': total_range,
+            'used': used,
+            'usage_percent': usage_percent,
+        })
+
+    return {'success': True, 'data': resolutions}
+
+
+@router.get("/facturacion-status")
+async def get_facturacion_status(request: Request):
+    """
+    Get Matias API connection status and last emitted document.
+    """
+    from app.core.middleware import require_valid_session
+    from app.database import get_db_connection
+
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        last_doc = await conn.fetchrow(
+            """SELECT prefix, invoice_number, status, document_type, created_at
+               FROM electronic_invoices
+               WHERE tenant_id = $1
+               ORDER BY created_at DESC
+               LIMIT 1""",
+            tenant_id,
+        )
+
+    last_document = None
+    if last_doc:
+        last_document = {
+            'prefix': last_doc['prefix'],
+            'invoice_number': last_doc['invoice_number'],
+            'status': last_doc['status'],
+            'document_type': last_doc['document_type'],
+            'created_at': last_doc['created_at'].isoformat() if last_doc['created_at'] else None,
+        }
+
+    return {
+        'success': True,
+        'data': {
+            'environment': 'Habilitación (pruebas)',
+            'last_document': last_document,
+        },
+    }
+
+
 ALLOWED_IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/webp'}
 MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB
 
