@@ -54,6 +54,9 @@ def get_pos_receipt_text(
     standard_tax: float = 0.0,
     liquor_tax: float = 0.0,
     standard_tax_label: str = "Impuesto",
+    invoice_prefix: Optional[str] = None,
+    invoice_number: Optional[int] = None,
+    invoice_cufe: Optional[str] = None,
 ) -> str:
     date_str = _format_bogota_date(order_date)
     payment_label = _PAYMENT_LABELS.get(payment_method, payment_method)
@@ -96,6 +99,18 @@ def get_pos_receipt_text(
         totals_lines.append(f"IVA licores 5%: {_format_cop(liquor_tax)}")
     totals_block = ("\n".join(totals_lines) + "\n") if totals_lines else ""
 
+    # DIAN invoice section (optional)
+    invoice_block = ""
+    if invoice_prefix and invoice_number and invoice_cufe:
+        dian_url = f"https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey={invoice_cufe}"
+        invoice_block = f"""
+================================
+FACTURA ELECTRÓNICA
+{invoice_prefix}-{invoice_number}
+CUFE: {invoice_cufe}
+Verificar: {dian_url}
+================================"""
+
     return f"""\
 {header_block}
 ================================
@@ -110,4 +125,4 @@ Método de pago: {payment_label}
 ================================
 
 Gracias por tu compra.
-"""
+{invoice_block}"""

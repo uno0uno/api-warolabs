@@ -207,6 +207,9 @@ class SendReceiptRequest(BaseModel):
     standard_tax: float = 0.0
     liquor_tax: float = 0.0
     standard_tax_label: str = "Impuesto"
+    invoice_prefix: Optional[str] = None
+    invoice_number: Optional[int] = None
+    invoice_cufe: Optional[str] = None
 
 
 class AddPaymentRequest(BaseModel):
@@ -244,6 +247,9 @@ async def send_receipt_email(receipt_data: SendReceiptRequest):
         standard_tax=receipt_data.standard_tax,
         liquor_tax=receipt_data.liquor_tax,
         standard_tax_label=receipt_data.standard_tax_label,
+        invoice_prefix=receipt_data.invoice_prefix,
+        invoice_number=receipt_data.invoice_number,
+        invoice_cufe=receipt_data.invoice_cufe,
     )
     return {"success": success}
 
