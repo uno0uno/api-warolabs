@@ -25,13 +25,16 @@ async def list_documents(
     request: Request,
     prefix: Optional[str] = Query(None, description="Filter by invoice prefix (e.g. SETP)"),
     number: Optional[int] = Query(None, description="Filter by invoice number"),
+    status: Optional[str] = Query(None, description="Filter by status: accepted, pending, rejected"),
+    date_from: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
+    date_to: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> Dict[str, Any]:
     """
     List electronic invoices for the authenticated tenant.
 
-    Optional filters: prefix, invoice number.
+    Optional filters: prefix, invoice number, status, date range.
     Returns paginated list with total count.
     """
     session = require_valid_session(request)
@@ -39,6 +42,9 @@ async def list_documents(
         tenant_id=str(session.tenant_id),
         prefix=prefix,
         number=number,
+        status=status,
+        date_from=date_from,
+        date_to=date_to,
         limit=limit,
         offset=offset,
     )

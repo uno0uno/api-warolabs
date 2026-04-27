@@ -183,13 +183,16 @@ async def get_documents_list(
     tenant_id: str,
     prefix: Optional[str] = None,
     number: Optional[int] = None,
+    status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
 ) -> Dict[str, Any]:
     """
     Return a paginated list of electronic invoices for a tenant.
 
-    Optional filters: prefix (e.g. 'SETP') and invoice_number.
+    Optional filters: prefix, invoice_number, status, date range.
     Reads electronic_invoices directly — no api-facturacion call.
     """
     conditions = ['tenant_id = $1']
@@ -203,6 +206,18 @@ async def get_documents_list(
     if number is not None:
         conditions.append(f'invoice_number = ${idx}')
         params.append(number)
+        idx += 1
+    if status is not None:
+        conditions.append(f'status = ${idx}')
+        params.append(status)
+        idx += 1
+    if date_from is not None:
+        conditions.append(f'created_at >= ${idx}::date')
+        params.append(date_from)
+        idx += 1
+    if date_to is not None:
+        conditions.append(f"created_at < (${idx}::date + interval '1 day')")
+        params.append(date_to)
         idx += 1
 
     where = ' AND '.join(conditions)
