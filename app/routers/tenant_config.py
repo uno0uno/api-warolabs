@@ -140,6 +140,93 @@ async def update_tax_config_endpoint(
     return await tenant_config_service.update_tax_config(request, data)
 
 
+@router.get("/fiscal-data")
+async def get_fiscal_data(request: Request):
+    """
+    Get fiscal data for the active tenant.
+    Inserts defaults on first access if no row exists.
+    """
+    from app.core.middleware import require_valid_session
+    from app.database import get_db_connection
+
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM tenant_fiscal_data WHERE tenant_id = $1", tenant_id,
+        )
+        if not row:
+            await conn.execute(
+                "INSERT INTO tenant_fiscal_data (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                tenant_id,
+            )
+            row = await conn.fetchrow(
+                "SELECT * FROM tenant_fiscal_data WHERE tenant_id = $1", tenant_id,
+            )
+
+    return {
+        'success': True,
+        'data': {
+            'nit': row['nit'],
+            'business_name': row['business_name'],
+            'type_organization_id': row['type_organization_id'],
+            'tax_regime_id': row['tax_regime_id'],
+            'tax_level_id': row['tax_level_id'],
+            'fiscal_address': row['fiscal_address'],
+            'city': row['city'],
+            'city_id': row['city_id'],
+            'phone': row['phone'],
+            'email': row['email'],
+        },
+    }
+
+
+@router.put("/fiscal-data")
+async def update_fiscal_data(request: Request, data: dict = Body(...)):
+    """
+    Upsert fiscal data for the active tenant.
+    """
+    from app.core.middleware import require_valid_session
+    from app.database import get_db_connection
+
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        await conn.execute(
+            """INSERT INTO tenant_fiscal_data (tenant_id, nit, business_name,
+                   type_organization_id, tax_regime_id, tax_level_id,
+                   fiscal_address, city, city_id, phone, email, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+               ON CONFLICT (tenant_id) DO UPDATE SET
+                   nit = EXCLUDED.nit,
+                   business_name = EXCLUDED.business_name,
+                   type_organization_id = EXCLUDED.type_organization_id,
+                   tax_regime_id = EXCLUDED.tax_regime_id,
+                   tax_level_id = EXCLUDED.tax_level_id,
+                   fiscal_address = EXCLUDED.fiscal_address,
+                   city = EXCLUDED.city,
+                   city_id = EXCLUDED.city_id,
+                   phone = EXCLUDED.phone,
+                   email = EXCLUDED.email,
+                   updated_at = now()""",
+            tenant_id,
+            data.get('nit'),
+            data.get('business_name'),
+            data.get('type_organization_id', 1),
+            data.get('tax_regime_id', 2),
+            data.get('tax_level_id', 5),
+            data.get('fiscal_address'),
+            data.get('city'),
+            data.get('city_id', 149),
+            data.get('phone'),
+            data.get('email'),
+        )
+
+    return {'success': True, 'message': 'Datos fiscales actualizados'}
+
+
 @router.get("/dian-resolutions")
 async def get_dian_resolutions(request: Request):
     """
