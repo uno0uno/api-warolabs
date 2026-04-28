@@ -296,3 +296,24 @@ class AWSS3Service:
         except ClientError:
 
             return None
+
+    async def get_object_bytes(self, s3_key: str) -> Optional[bytes]:
+        """
+        Download an object from S3/R2 and return its bytes.
+        Returns None if the object cannot be fetched.
+        """
+        try:
+            resp = self.s3_client.get_object(
+                Bucket=self.bucket_name,
+                Key=s3_key,
+            )
+            body = resp.get("Body")
+            if not body:
+                return None
+            return body.read()
+        except ClientError as e:
+            logger.warning(f"ClientError downloading {s3_key}: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Unexpected error downloading {s3_key}: {e}")
+            return None

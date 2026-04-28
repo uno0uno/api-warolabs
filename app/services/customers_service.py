@@ -24,6 +24,71 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+async def get_customer_by_id(
+    request: Request,
+    customer_id: UUID,
+) -> CustomerUpdateResponse:
+    """
+    Fetch a customer profile by id, scoped to the current tenant (tenant_members).
+    Includes fiscal fields so the POS can reuse invoice data.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise APIError("No tenant context found", status_code=400)
+
+        async with get_db_connection() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    p.id,
+                    p.phone_number,
+                    p.name,
+                    p.email,
+                    p.fiscal_id_type,
+                    p.fiscal_id,
+                    p.fiscal_business_name,
+                    p.fiscal_email,
+                    p.created_at,
+                    p.updated_at
+                FROM profile p
+                JOIN tenant_members tm ON tm.user_id = p.id
+                WHERE p.id = $1
+                  AND tm.tenant_id = $2
+                  AND tm.role = 'customer'
+                LIMIT 1
+                """,
+                customer_id,
+                tenant_id,
+            )
+
+        if not row:
+            raise APIError("Customer not found", status_code=404)
+
+        customer = Customer(
+            id=row["id"],
+            phone_number=row["phone_number"],
+            name=row["name"],
+            email=row["email"],
+            fiscal_id_type=row["fiscal_id_type"],
+            fiscal_id=row["fiscal_id"],
+            fiscal_business_name=row["fiscal_business_name"],
+            fiscal_email=row["fiscal_email"],
+            tenant_id=tenant_id,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+        return CustomerUpdateResponse(success=True, data=customer)
+
+    except APIError:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_customer_by_id: {str(e)}")
+        raise APIError("Error fetching customer", status_code=500)
+
 
 async def search_or_create_customer(
     request: Request,
@@ -55,32 +120,24 @@ async def search_or_create_customer(
 
         async with get_db_connection() as conn:
             # Search for existing customer by phone number or email
+            base_select = """
+                SELECT
+                    id,
+                    phone_number,
+                    name,
+                    email,
+                    fiscal_id_type,
+                    fiscal_id,
+                    fiscal_business_name,
+                    fiscal_email,
+                    created_at,
+                    updated_at
+                FROM profile
+            """
             if is_email_input:
-                search_query = """
-                    SELECT
-                        id,
-                        phone_number,
-                        name,
-                        email,
-                        created_at,
-                        updated_at
-                    FROM profile
-                    WHERE email = $1
-                    LIMIT 1
-                """
+                search_query = base_select + " WHERE email = $1 LIMIT 1"
             else:
-                search_query = """
-                    SELECT
-                        id,
-                        phone_number,
-                        name,
-                        email,
-                        created_at,
-                        updated_at
-                    FROM profile
-                    WHERE phone_number = $1
-                    LIMIT 1
-                """
+                search_query = base_select + " WHERE phone_number = $1 LIMIT 1"
 
             existing_customer = await conn.fetchrow(search_query, phone_number)
 
@@ -113,11 +170,41 @@ async def search_or_create_customer(
                     )
                     logger.info(f"✅ Associated customer {existing_customer['id']} with tenant {tenant_id}")
 
+                # Backfill fiscal fields if the request brings them and they
+                # are not yet set on the profile (or differ from what we have).
+                fiscal_payload_present = customer_data.fiscal_id_type and customer_data.fiscal_id
+                if fiscal_payload_present:
+                    await conn.execute(
+                        """
+                        UPDATE profile SET
+                            fiscal_id_type = $2,
+                            fiscal_id = $3,
+                            fiscal_business_name = $4,
+                            fiscal_email = COALESCE($5, fiscal_email),
+                            updated_at = NOW()
+                        WHERE id = $1
+                        """,
+                        existing_customer['id'],
+                        customer_data.fiscal_id_type,
+                        customer_data.fiscal_id,
+                        customer_data.fiscal_business_name,
+                        customer_data.fiscal_email,
+                    )
+                    refreshed = await conn.fetchrow(
+                        base_select + " WHERE id = $1",
+                        existing_customer['id'],
+                    )
+                    existing_customer = refreshed
+
                 customer = Customer(
                     id=existing_customer['id'],
                     phone_number=existing_customer['phone_number'],
                     name=existing_customer['name'],
                     email=existing_customer['email'],
+                    fiscal_id_type=existing_customer['fiscal_id_type'],
+                    fiscal_id=existing_customer['fiscal_id'],
+                    fiscal_business_name=existing_customer['fiscal_business_name'],
+                    fiscal_email=existing_customer['fiscal_email'],
                     tenant_id=tenant_id,
                     created_at=existing_customer['created_at'],
                     updated_at=existing_customer['updated_at']
@@ -147,26 +234,34 @@ async def search_or_create_customer(
                         name,
                         email,
                         nationality_id,
+                        fiscal_id_type,
+                        fiscal_id,
+                        fiscal_business_name,
+                        fiscal_email,
                         created_at,
                         updated_at
                     )
                     VALUES (
                         gen_random_uuid(),
-                        $1,
-                        $2,
-                        $3,
+                        $1, $2, $3,
                         170,  -- Default nationality (Colombia)
-                        NOW(),
-                        NOW()
+                        $4, $5, $6, $7,
+                        NOW(), NOW()
                     )
-                    RETURNING id, phone_number, name, email, created_at, updated_at
+                    RETURNING id, phone_number, name, email,
+                              fiscal_id_type, fiscal_id, fiscal_business_name, fiscal_email,
+                              created_at, updated_at
                 """
 
                 new_customer = await conn.fetchrow(
                     create_query,
                     phone_number,
                     customer_data.name,
-                    email
+                    email,
+                    customer_data.fiscal_id_type,
+                    customer_data.fiscal_id,
+                    customer_data.fiscal_business_name,
+                    customer_data.fiscal_email,
                 )
 
                 # Associate customer with tenant
@@ -186,6 +281,10 @@ async def search_or_create_customer(
                     phone_number=new_customer['phone_number'],
                     name=new_customer['name'],
                     email=new_customer['email'],
+                    fiscal_id_type=new_customer['fiscal_id_type'],
+                    fiscal_id=new_customer['fiscal_id'],
+                    fiscal_business_name=new_customer['fiscal_business_name'],
+                    fiscal_email=new_customer['fiscal_email'],
                     tenant_id=tenant_id,
                     created_at=new_customer['created_at'],
                     updated_at=new_customer['updated_at']
@@ -232,6 +331,10 @@ async def search_customer_by_phone(
                     p.phone_number,
                     p.name,
                     p.email,
+                    p.fiscal_id_type,
+                    p.fiscal_id,
+                    p.fiscal_business_name,
+                    p.fiscal_email,
                     p.created_at,
                     p.updated_at
                 FROM profile p
@@ -247,6 +350,10 @@ async def search_customer_by_phone(
                     phone_number=result['phone_number'],
                     name=result['name'],
                     email=result['email'],
+                    fiscal_id_type=result['fiscal_id_type'],
+                    fiscal_id=result['fiscal_id'],
+                    fiscal_business_name=result['fiscal_business_name'],
+                    fiscal_email=result['fiscal_email'],
                     tenant_id=tenant_id,
                     created_at=result['created_at'],
                     updated_at=result['updated_at']
@@ -294,6 +401,8 @@ async def search_customers_by_query(
             raise APIError("No tenant context found", status_code=400)
 
         async with get_db_connection() as conn:
+            # Match against name, phone, OR fiscal_id (NIT/cédula) so users
+            # can find a customer by typing the document number.
             query = """
                 SELECT DISTINCT
                     p.id,
@@ -304,7 +413,11 @@ async def search_customers_by_query(
                 JOIN tenant_members tm ON tm.user_id = p.id
                 WHERE tm.tenant_id = $1
                   AND tm.role = 'customer'
-                  AND (p.name ILIKE $2 OR p.phone_number ILIKE $2)
+                  AND (
+                      p.name ILIKE $2
+                      OR p.phone_number ILIKE $2
+                      OR p.fiscal_id ILIKE $2
+                  )
                 ORDER BY p.name
                 LIMIT $3
             """
@@ -477,6 +590,14 @@ async def update_customer(
             if update_data.phone_number is not None:
                 phone = update_data.phone_number.strip().replace(' ', '').replace('-', '')
                 fields['phone_number'] = phone
+            if update_data.fiscal_id_type is not None:
+                fields['fiscal_id_type'] = update_data.fiscal_id_type
+            if update_data.fiscal_id is not None:
+                fields['fiscal_id'] = update_data.fiscal_id.strip() or None
+            if update_data.fiscal_business_name is not None:
+                fields['fiscal_business_name'] = update_data.fiscal_business_name.strip() or None
+            if update_data.fiscal_email is not None:
+                fields['fiscal_email'] = update_data.fiscal_email.strip() or None
 
             if not fields:
                 raise APIError("No fields to update", status_code=400)
@@ -487,7 +608,9 @@ async def update_customer(
                 UPDATE profile
                 SET {', '.join(set_parts)}, updated_at = NOW()
                 WHERE id = $1
-                RETURNING id, phone_number, name, email, created_at, updated_at
+                RETURNING id, phone_number, name, email,
+                          fiscal_id_type, fiscal_id, fiscal_business_name, fiscal_email,
+                          created_at, updated_at
             """
             row = await conn.fetchrow(query, customer_id, *values)
 
@@ -496,6 +619,10 @@ async def update_customer(
             phone_number=row['phone_number'],
             name=row['name'],
             email=row['email'],
+            fiscal_id_type=row['fiscal_id_type'],
+            fiscal_id=row['fiscal_id'],
+            fiscal_business_name=row['fiscal_business_name'],
+            fiscal_email=row['fiscal_email'],
             created_at=row['created_at'],
             updated_at=row['updated_at'],
         )

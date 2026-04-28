@@ -5,6 +5,8 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from app.services.aws_ses_service import AWSSESService
 from app.config import settings
+from app.database import get_db_connection
+from app.services.aws_s3_service import AWSS3Service
 from app.templates.order_confirmation_template import (
     get_order_confirmation_text,
     get_order_confirmation_subject,
@@ -469,6 +471,7 @@ async def send_pos_receipt_email(
     payment_method: str,
     items: List[Dict[str, Any]],
     order_date: datetime,
+    tenant_id: Optional[str] = None,
     business_name: Optional[str] = None,
     business_address: Optional[str] = None,
     business_city: Optional[str] = None,
@@ -513,14 +516,75 @@ async def send_pos_receipt_email(
         subject = get_pos_receipt_subject(order_number, business_name=business_name)
 
         ses_service = AWSSESService()
-        success = await ses_service.send_email(
-            from_email=settings.email_from or "hola@warocol.com",
-            from_name=business_name or "WARO Colombia",
-            to_emails=[customer_email],
-            subject=subject,
-            html_body=None,
-            text_body=text_body,
-        )
+        attachments: List[dict] = []
+
+        # Attach DIAN document (PDF/XML) when we have invoice identifiers and tenant context.
+        # Tenant context is required to avoid leaking invoice files.
+        if tenant_id and invoice_prefix and invoice_number:
+            try:
+                async with get_db_connection(use_transaction=False) as conn:
+                    inv_row = await conn.fetchrow(
+                        """
+                        SELECT id, r2_pdf_key, r2_xml_key, prefix, invoice_number
+                        FROM electronic_invoices
+                        WHERE tenant_id = $1
+                          AND prefix = $2
+                          AND invoice_number = $3
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """,
+                        tenant_id,
+                        invoice_prefix,
+                        int(invoice_number),
+                    )
+
+                if inv_row:
+                    track_id = str(inv_row["id"])
+                    s3 = AWSS3Service()
+
+                    if inv_row.get("r2_pdf_key"):
+                        pdf_bytes = await s3.get_object_bytes(inv_row["r2_pdf_key"])
+                        if pdf_bytes:
+                            attachments.append({
+                                "data": pdf_bytes,
+                                "filename": f"{invoice_prefix}-{invoice_number}.pdf",
+                                "content_type": "application/pdf",
+                            })
+
+                    if inv_row.get("r2_xml_key"):
+                        xml_bytes = await s3.get_object_bytes(inv_row["r2_xml_key"])
+                        if xml_bytes:
+                            attachments.append({
+                                "data": xml_bytes,
+                                "filename": f"{invoice_prefix}-{invoice_number}.xml",
+                                "content_type": "application/xml",
+                            })
+
+                    if not attachments:
+                        logger.info(
+                            f"Receipt email: invoice exists but has no files yet (track_id={track_id})"
+                        )
+            except Exception as _att_err:
+                logger.warning(f"Could not attach invoice files to receipt email: {_att_err}")
+
+        if attachments:
+            success = await ses_service.send_email_with_attachments(
+                from_email=settings.email_from or "hola@warocol.com",
+                from_name=business_name or "WARO Colombia",
+                to_emails=[customer_email],
+                subject=subject,
+                text_body=text_body,
+                attachments=attachments,
+            )
+        else:
+            success = await ses_service.send_email(
+                from_email=settings.email_from or "hola@warocol.com",
+                from_name=business_name or "WARO Colombia",
+                to_emails=[customer_email],
+                subject=subject,
+                html_body=None,
+                text_body=text_body,
+            )
 
         if success:
             logger.info(f"POS receipt email sent for order #{order_number} to {customer_email}")

@@ -138,6 +138,13 @@ async def close_session(request: Request, table_id: UUID, body: CloseSessionRequ
     If payment_method is provided, all pending orders are marked as completed.
     If split_mode=True, marks orders as partial and records first payment without closing the session.
     Returns 404 if no open session exists.
+
+    Response data includes:
+    - session_id, table_id
+    - completed_orders, pending_orders
+    - order_ids: UUID[] of completed orders
+    - order_numbers: int[] aligned with order_ids
+    - order_number: int (only when a single order was completed)
     """
     return await tables_service.close_session(
         request, table_id,

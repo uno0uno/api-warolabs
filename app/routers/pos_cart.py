@@ -9,6 +9,7 @@ from datetime import date, datetime
 from pydantic import BaseModel, Field
 from app.services import pos_cart_service
 from app.services.email_helpers import send_pos_receipt_email
+from app.core.middleware import require_valid_session
 
 router = APIRouter(prefix="/pos/cart", tags=["POS Cart"])
 
@@ -226,11 +227,12 @@ class AddPaymentResponse(BaseModel):
 
 
 @router.post("/receipt-email")
-async def send_receipt_email(receipt_data: SendReceiptRequest):
+async def send_receipt_email(request: Request, receipt_data: SendReceiptRequest):
     """
     Send a POS receipt email on demand.
     Used when the cashier types a customer email in the success modal after order completion.
     """
+    session = require_valid_session(request)
     success = await send_pos_receipt_email(
         customer_email=receipt_data.email,
         order_number=receipt_data.order_number,
@@ -238,6 +240,7 @@ async def send_receipt_email(receipt_data: SendReceiptRequest):
         payment_method=receipt_data.payment_method,
         items=receipt_data.items,
         order_date=datetime.utcnow(),
+        tenant_id=str(session.tenant_id) if session and session.tenant_id else None,
         business_name=receipt_data.business_name,
         business_address=receipt_data.business_address,
         business_city=receipt_data.business_city,

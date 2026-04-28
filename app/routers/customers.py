@@ -8,6 +8,7 @@ from app.services.customers_service import (
     search_customer_by_phone,
     search_customers_by_query,
     get_customer_insights,
+    get_customer_by_id,
     update_customer,
 )
 from app.models.customer import (
@@ -108,6 +109,18 @@ async def update_customer_endpoint(
     Only provided fields are updated. Customer must belong to the current tenant.
     """
     return await update_customer(request, customer_id, update_data)
+
+
+@router.get("/{customer_id}", response_model=CustomerUpdateResponse, status_code=200)
+async def get_customer_by_id_endpoint(
+    request: Request,
+    customer_id: UUID,
+):
+    """
+    Get a single customer by id, including fiscal fields.
+    Customer must belong to the current tenant (tenant_members).
+    """
+    return await get_customer_by_id(request, customer_id)
 
 
 @router.get("/{customer_id}/insights", response_model=CustomerInsightsResponse, status_code=200)

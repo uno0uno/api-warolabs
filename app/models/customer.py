@@ -1,10 +1,33 @@
 """
 Customer Models - Pydantic schemas for customer management
 """
-from pydantic import BaseModel, Field
-from typing import Optional, List
+from pydantic import BaseModel, Field, model_validator
+from typing import Optional, List, Literal
 from uuid import UUID
 from datetime import datetime
+
+
+# DIAN identification document types accepted on customer profile
+# (mapped to Matias identity_document_id in api_facturacion)
+FiscalIdType = Literal['CC', 'CE', 'NIT', 'PA', 'TI']
+
+
+class FiscalDataMixin(BaseModel):
+    """Optional fiscal fields used when emitting an identified electronic invoice."""
+    fiscal_id_type: Optional[FiscalIdType] = Field(None, description="DIAN doc type: CC, CE, NIT, PA, TI")
+    fiscal_id: Optional[str] = Field(None, max_length=30, description="Document number (NIT without DV)")
+    fiscal_business_name: Optional[str] = Field(None, max_length=255, description="Razón social or legal name")
+    fiscal_email: Optional[str] = Field(None, description="Email used for the invoice (overrides general email)")
+
+    @model_validator(mode='after')
+    def validate_fiscal_triplet(self):
+        any_provided = any([self.fiscal_id_type, self.fiscal_id, self.fiscal_business_name])
+        all_provided = all([self.fiscal_id_type, self.fiscal_id, self.fiscal_business_name])
+        if any_provided and not all_provided:
+            raise ValueError(
+                "fiscal_id_type, fiscal_id and fiscal_business_name must be provided together"
+            )
+        return self
 
 
 class CustomerBase(BaseModel):
@@ -14,14 +37,14 @@ class CustomerBase(BaseModel):
     email: Optional[str] = Field(None, description="Customer email")
 
 
-class CustomerSearchOrCreate(BaseModel):
+class CustomerSearchOrCreate(FiscalDataMixin):
     """Model for searching or creating a customer"""
     phone_number: str = Field(..., min_length=7, max_length=20)
     name: Optional[str] = None
     email: Optional[str] = None
 
 
-class Customer(CustomerBase):
+class Customer(CustomerBase, FiscalDataMixin):
     """Complete customer model"""
     id: UUID
     tenant_id: Optional[UUID] = None
@@ -54,7 +77,7 @@ class CustomerSummary(BaseModel):
     email: Optional[str] = None
 
 
-class CustomerUpdate(BaseModel):
+class CustomerUpdate(FiscalDataMixin):
     """Editable customer fields — all optional, only provided fields are updated"""
     name: Optional[str] = Field(None, max_length=255)
     email: Optional[str] = Field(None)

@@ -181,5 +181,70 @@ class AWSSESService:
             logger.error(f"❌ Failed to send email with attachment: {e}")
             return False
 
+    async def send_email_with_attachments(
+        self,
+        from_email: str,
+        from_name: Optional[str] = None,
+        to_emails: List[str] = None,
+        subject: str = "",
+        text_body: Optional[str] = None,
+        attachments: Optional[List[dict]] = None,
+    ) -> bool:
+        """
+        Send email with multiple attachments using AWS SES raw email.
+
+        attachments: list of { data: bytes, filename: str, content_type: str }
+        """
+        if not self.client:
+            logger.error("❌ AWS SES client not initialized - cannot send email")
+            return False
+
+        if not to_emails:
+            logger.error("❌ No recipient email addresses provided")
+            return False
+
+        try:
+            msg = MIMEMultipart('mixed')
+            source = f"{from_name} <{from_email}>" if from_name else from_email
+            msg['From'] = source
+            msg['To'] = ', '.join(to_emails)
+            msg['Subject'] = subject
+
+            if text_body:
+                msg.attach(MIMEText(text_body, 'plain', 'utf-8'))
+
+            for att in (attachments or []):
+                data = att.get("data")
+                filename = att.get("filename") or "attachment"
+                content_type = att.get("content_type") or "application/octet-stream"
+                if not data:
+                    continue
+                part = MIMEApplication(data)
+                part.add_header('Content-Disposition', 'attachment', filename=filename)
+                part.add_header('Content-Type', content_type)
+                msg.attach(part)
+
+            response = self.client.send_raw_email(
+                Source=source,
+                Destinations=to_emails,
+                RawMessage={'Data': msg.as_string()}
+            )
+
+            message_id = response['MessageId']
+            logger.info(
+                f"✅ Email with attachments sent successfully. MessageId: {message_id} "
+                f"| Attachment count: {len(attachments or [])}"
+            )
+            return True
+
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            error_message = e.response['Error']['Message']
+            logger.error(f"❌ AWS SES ClientError: {error_code} - {error_message}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Failed to send email with attachments: {e}")
+            return False
+
 # Global instance
 ses_service = AWSSESService()

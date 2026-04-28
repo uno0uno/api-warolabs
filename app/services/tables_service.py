@@ -16,6 +16,7 @@ from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
 from app.services.pos_cart_service import _capture_order_item_ingredients
+from app.services.orders_service import _compute_tax_breakdown
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas
 import logging
@@ -837,13 +838,49 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 },
             }
 
-        # Fetch completed order IDs for invoice emission (fresh connection — main conn may be released)
+        # Fetch completed order IDs (+ numbers) for downstream flows (invoice, receipts).
+        # Fresh connection — main conn may be released.
         async with get_db_connection() as conn_ids:
-            order_id_rows = await conn_ids.fetch(
-                "SELECT id FROM orders WHERE table_session_id = $1 AND status = 'completed'",
+            order_rows = await conn_ids.fetch(
+                """
+                SELECT id, order_number
+                FROM orders
+                WHERE table_session_id = $1 AND status = 'completed'
+                ORDER BY created_at
+                """,
                 session_row["id"],
             )
-        order_ids = [str(r['id']) for r in order_id_rows]
+            # Tax breakdown for the whole mesa close (aggregated across completed orders)
+            _std_tax = 0.0
+            _liq_tax = 0.0
+            _tax_label = "Impuesto"
+            try:
+                tax_config = await _get_tenant_tax_config(conn_ids, tenant_id)
+                tax_rows = await conn_ids.fetch(
+                    """
+                    SELECT
+                        COALESCE(p.tax_category, 'standard') AS tax_category,
+                        COALESCE(SUM(oi.subtotal), 0) AS subtotal
+                    FROM order_items oi
+                    JOIN orders o ON o.id = oi.order_id
+                    JOIN product p ON p.id = oi.product_id
+                    WHERE o.id = ANY($1::uuid[])
+                    GROUP BY COALESCE(p.tax_category, 'standard')
+                    """,
+                    [r["id"] for r in order_rows],
+                )
+                _std_tax, _liq_tax, _tax_label = _compute_tax_breakdown(tax_rows, tax_config)
+            except Exception as _e:
+                logger.warning(f"Tax breakdown failed for mesa close (table {table_id}): {_e}")
+        order_ids = [str(r["id"]) for r in order_rows]
+        order_numbers = [int(r["order_number"]) for r in order_rows if r["order_number"] is not None]
+
+        # Defensive: keep alignment even if order_number is unexpectedly null
+        if len(order_numbers) != len(order_ids):
+            order_numbers = [
+                int(r["order_number"]) if r["order_number"] is not None else 0
+                for r in order_rows
+            ]
 
         logger.info(f"Session closed: {session_row['id']} for table {table_id} ({len(order_ids)} orders)")
         return {
@@ -854,6 +891,11 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 "completed_orders": int(completed_count or 0),
                 "pending_orders": int(pending_count),
                 "order_ids": order_ids,
+                "order_numbers": order_numbers,
+                **({"order_number": order_numbers[0]} if len(order_numbers) == 1 else {}),
+                "standard_tax": float(_std_tax),
+                "liquor_tax": float(_liq_tax),
+                "standard_tax_label": _tax_label,
             },
         }
 
@@ -1032,6 +1074,33 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                 session_row["id"],
             )
 
+            # Tax breakdown preview for UI (mesa checkout summary)
+            _std_tax = 0.0
+            _liq_tax = 0.0
+            _tax_label = "Impuesto"
+            try:
+                from app.services.orders_service import _compute_tax_breakdown
+
+                tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                order_ids = [o["id"] for o in orders]
+                if order_ids:
+                    tax_rows = await conn.fetch(
+                        """
+                        SELECT
+                            COALESCE(p.tax_category, 'standard') AS tax_category,
+                            COALESCE(SUM(oi.subtotal), 0) AS subtotal
+                        FROM order_items oi
+                        JOIN orders o ON o.id = oi.order_id
+                        JOIN product p ON p.id = oi.product_id
+                        WHERE o.id = ANY($1::uuid[])
+                        GROUP BY COALESCE(p.tax_category, 'standard')
+                        """,
+                        order_ids,
+                    )
+                    _std_tax, _liq_tax, _tax_label = _compute_tax_breakdown(tax_rows, tax_config)
+            except Exception as _e:
+                logger.warning(f"Tax breakdown failed for mesa current session (table {table_id}): {_e}")
+
             # Fetch individual order items for this session (with IDs for edit/delete)
             tab_items = await conn.fetch(
                 """
@@ -1066,6 +1135,9 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     "duration_minutes": round(float(session_row["duration_minutes"]), 1),
                     "running_total": float(session_row["running_total"]),
                     "order_count": int(session_row["order_count"]),
+                    "standard_tax": float(_std_tax),
+                    "liquor_tax": float(_liq_tax),
+                    "standard_tax_label": _tax_label,
                 },
                 "orders": [
                     {
