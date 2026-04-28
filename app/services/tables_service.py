@@ -837,11 +837,12 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 },
             }
 
-        # Fetch completed order IDs for invoice emission
-        order_id_rows = await conn.fetch(
-            "SELECT id FROM orders WHERE table_session_id = $1 AND status = 'completed'",
-            session_row["id"],
-        )
+        # Fetch completed order IDs for invoice emission (fresh connection — main conn may be released)
+        async with get_db_connection() as conn_ids:
+            order_id_rows = await conn_ids.fetch(
+                "SELECT id FROM orders WHERE table_session_id = $1 AND status = 'completed'",
+                session_row["id"],
+            )
         order_ids = [str(r['id']) for r in order_id_rows]
 
         logger.info(f"Session closed: {session_row['id']} for table {table_id} ({len(order_ids)} orders)")
