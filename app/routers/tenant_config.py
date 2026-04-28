@@ -274,6 +274,98 @@ async def get_dian_resolutions(request: Request):
     return {'success': True, 'data': resolutions}
 
 
+@router.post("/dian-resolutions")
+async def create_dian_resolution(request: Request, data: dict = Body(...)):
+    """Create a new DIAN resolution for the active tenant."""
+    from app.core.middleware import require_valid_session
+    from app.database import get_db_connection
+    import uuid as _uuid
+
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    prefix = data.get('prefix', '').strip().upper()
+    resolution_number = data.get('resolution_number', '').strip()
+    from_number = int(data.get('from_number', 0))
+    to_number = int(data.get('to_number', 0))
+    date_from = data.get('date_from')
+    date_to = data.get('date_to')
+    document_type = data.get('document_type', 'invoice')
+    current_number = int(data.get('current_number', from_number - 1))
+
+    if not prefix or not resolution_number or from_number <= 0 or to_number <= 0:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail="Prefijo, número de resolución y rango son requeridos")
+    if from_number >= to_number:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail="El rango 'desde' debe ser menor que 'hasta'")
+
+    async with get_db_connection() as conn:
+        row_id = _uuid.uuid4()
+        await conn.execute(
+            """INSERT INTO dian_resolutions
+                   (id, tenant_id, resolution_number, prefix, date_from, date_to,
+                    from_number, to_number, current_number, is_active, document_type)
+               VALUES ($1, $2, $3, $4, $5::date, $6::date, $7, $8, $9, true, $10)""",
+            row_id, tenant_id, resolution_number, prefix,
+            date_from, date_to, from_number, to_number, current_number, document_type,
+        )
+
+    return {'success': True, 'data': {'id': str(row_id)}, 'message': 'Resolución creada'}
+
+
+@router.put("/dian-resolutions/{resolution_id}")
+async def update_dian_resolution(request: Request, resolution_id: str, data: dict = Body(...)):
+    """Update an existing DIAN resolution."""
+    from app.core.middleware import require_valid_session
+    from app.database import get_db_connection
+
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        result = await conn.execute(
+            """UPDATE dian_resolutions
+               SET resolution_number = $1, prefix = $2, date_from = $3::date, date_to = $4::date,
+                   from_number = $5, to_number = $6, current_number = $7, document_type = $8
+               WHERE id = $9::uuid AND tenant_id = $10""",
+            data.get('resolution_number'), data.get('prefix', '').strip().upper(),
+            data.get('date_from'), data.get('date_to'),
+            int(data.get('from_number', 0)), int(data.get('to_number', 0)),
+            int(data.get('current_number', 0)), data.get('document_type', 'invoice'),
+            resolution_id, tenant_id,
+        )
+
+    return {'success': True, 'message': 'Resolución actualizada'}
+
+
+@router.patch("/dian-resolutions/{resolution_id}/toggle")
+async def toggle_dian_resolution(request: Request, resolution_id: str):
+    """Toggle is_active for a DIAN resolution."""
+    from app.core.middleware import require_valid_session
+    from app.database import get_db_connection
+
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(
+            "SELECT is_active FROM dian_resolutions WHERE id = $1::uuid AND tenant_id = $2",
+            resolution_id, tenant_id,
+        )
+        if not row:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Resolución no encontrada")
+
+        new_state = not row['is_active']
+        await conn.execute(
+            "UPDATE dian_resolutions SET is_active = $1 WHERE id = $2::uuid AND tenant_id = $3",
+            new_state, resolution_id, tenant_id,
+        )
+
+    return {'success': True, 'data': {'is_active': new_state}}
+
+
 @router.get("/facturacion-status")
 async def get_facturacion_status(request: Request):
     """
