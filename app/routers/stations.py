@@ -156,3 +156,75 @@ async def get_deactivate_info(request: Request, station_id: UUID):
 async def toggle_station_endpoint(request: Request, station_id: UUID, body: ToggleStationRequest):
     """Toggle is_active on/off for a station."""
     return await stations_service.toggle_station(request, station_id, body.is_active)
+
+
+# ── KDS Token Management ────────────────────────────────────────────────────
+
+@router.post("/{station_id}/kds-token")
+async def generate_kds_token(request: Request, station_id: UUID):
+    """Generate a new KDS access token for a station. Revokes any previous active token."""
+    import secrets
+    from app.core.middleware import require_valid_session
+
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    token = secrets.token_urlsafe(36)
+
+    async with get_db_connection() as conn:
+        # Revoke any existing active token for this station
+        await conn.execute(
+            "UPDATE kds_tokens SET revoked_at = now() WHERE station_id = $1 AND revoked_at IS NULL",
+            station_id,
+        )
+        # Create new token
+        await conn.execute(
+            "INSERT INTO kds_tokens (station_id, tenant_id, token) VALUES ($1, $2, $3)",
+            station_id, tenant_id, token,
+        )
+
+    return {'success': True, 'data': {'token': token, 'station_id': str(station_id)}}
+
+
+@router.get("/{station_id}/kds-token")
+async def get_kds_token(request: Request, station_id: UUID):
+    """Get the current active KDS token for a station (masked)."""
+    from app.core.middleware import require_valid_session
+
+    session = require_valid_session(request)
+
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(
+            "SELECT token, created_at FROM kds_tokens WHERE station_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1",
+            station_id,
+        )
+
+    if not row:
+        return {'success': True, 'data': None}
+
+    token = row['token']
+    masked = token[:6] + '...' + token[-4:] if len(token) > 10 else '****'
+
+    return {
+        'success': True,
+        'data': {
+            'token_masked': masked,
+            'created_at': row['created_at'].isoformat() if row['created_at'] else None,
+        },
+    }
+
+
+@router.delete("/{station_id}/kds-token")
+async def revoke_kds_token(request: Request, station_id: UUID):
+    """Revoke all active KDS tokens for a station."""
+    from app.core.middleware import require_valid_session
+
+    require_valid_session(request)
+
+    async with get_db_connection() as conn:
+        await conn.execute(
+            "UPDATE kds_tokens SET revoked_at = now() WHERE station_id = $1 AND revoked_at IS NULL",
+            station_id,
+        )
+
+    return {'success': True, 'message': 'Token revocado'}
