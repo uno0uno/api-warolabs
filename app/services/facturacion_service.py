@@ -91,7 +91,7 @@ async def emit_invoice(
         logger.error(f"api-facturacion error {resp.status_code} for order {order_id}: {detail}")
         raise HTTPException(status_code=resp.status_code, detail=str(detail))
 
-    logger.info(f"Invoice emitted for order {order_id}: status={data.get('status')} cufe={data.get('cufe', '')[:16]}...")
+    logger.info(f"Invoice emitted for order {order_id}: status={data.get('status')} cufe={(data.get('cufe') or '')[:16]}...")
     return data
 
 

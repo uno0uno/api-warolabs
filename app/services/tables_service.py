@@ -552,7 +552,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
         async with get_db_connection() as conn:
             async with conn.transaction():
                 table_row = await conn.fetchrow(
-                    "SELECT id, is_bar FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
+                    "SELECT id, is_bar, name FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
                     table_id,
                     tenant_id,
                 )
@@ -1542,7 +1542,7 @@ async def discard_table_session(request: Request, table_id: UUID) -> dict:
         async with get_db_connection() as conn:
             async with conn.transaction():
                 table_row = await conn.fetchrow(
-                    "SELECT id, is_bar FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
+                    "SELECT id, is_bar, name FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
                     table_id,
                     tenant_id,
                 )
