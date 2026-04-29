@@ -8,10 +8,11 @@ corresponding upstream endpoints (/credit-note/emit, /debit-note/emit, /events).
 When api-facturacion is ready, replace the 503 stub body with a call to
 facturacion_service.proxy_to_facturacion().
 """
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import Any, Dict, Optional
 from uuid import UUID
 from pydantic import BaseModel, Field
+from app.core.dependencies import require_invoicing_ready
 from app.core.middleware import require_valid_session
 
 router = APIRouter(prefix="/api/invoices", tags=["Invoices"])
@@ -37,13 +38,16 @@ async def emit_credit_note(
     request: Request,
     invoice_id: UUID,
     body: CreditNoteRequest,
+    _readiness: dict = Depends(require_invoicing_ready),
 ) -> Dict[str, Any]:
     """
     Emit a DIAN credit note for an existing invoice (correction or cancellation).
 
+    Returns 403 if the tenant is not ready for electronic invoicing
+    (issue #130: missing dev flag, fiscal data, or active resolution).
+
     Stub — returns 503 until api-facturacion /credit-note/emit is implemented.
     """
-    require_valid_session(request)
     raise HTTPException(status_code=503, detail=_STUB_DETAIL)
 
 
@@ -52,13 +56,16 @@ async def emit_debit_note(
     request: Request,
     invoice_id: UUID,
     body: DebitNoteRequest,
+    _readiness: dict = Depends(require_invoicing_ready),
 ) -> Dict[str, Any]:
     """
     Emit a DIAN debit note for an existing invoice (additional charge).
 
+    Returns 403 if the tenant is not ready for electronic invoicing
+    (issue #130: missing dev flag, fiscal data, or active resolution).
+
     Stub — returns 503 until api-facturacion /debit-note/emit is implemented.
     """
-    require_valid_session(request)
     raise HTTPException(status_code=503, detail=_STUB_DETAIL)
 
 

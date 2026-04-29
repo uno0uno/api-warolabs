@@ -107,6 +107,27 @@ async def toggle_public_profile_endpoint(
     )
 
 
+@router.get("/invoicing-readiness")
+async def get_invoicing_readiness_endpoint(request: Request):
+    """
+    Return whether the active tenant can emit electronic invoices right now.
+
+    Three predicates must all be true: dev_flag_enabled, fiscal_data_complete,
+    active_resolution. See `app/services/invoicing_readiness_service.py` for
+    the full contract.
+
+    **Requires authentication**
+    """
+    from app.core.middleware import require_valid_session
+    from app.services import invoicing_readiness_service
+
+    session = require_valid_session(request)
+    payload = await invoicing_readiness_service.get_readiness(session.tenant_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return payload
+
+
 @router.get("/tax-config")
 async def get_tax_config_endpoint(request: Request):
     """

@@ -2,11 +2,12 @@
 Orders Router
 Endpoints for listing and managing orders
 """
-from fastapi import APIRouter, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from typing import Optional, List
 from uuid import UUID
 from pydantic import BaseModel, Field
 from app.services import orders_service, facturacion_service
+from app.core.dependencies import require_invoicing_ready
 from app.core.middleware import require_valid_session
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
@@ -353,12 +354,16 @@ async def delete_order_item_modifier(
 async def emit_order_invoice(
     request: Request,
     order_id: UUID,
+    _readiness: dict = Depends(require_invoicing_ready),
 ):
     """
     Emit a DIAN electronic invoice for a completed POS order.
 
     Delegates to api-facturacion microservice via internal Docker network.
     Idempotent: calling twice for the same order returns the existing invoice.
+
+    Returns 403 if the tenant is not ready for electronic invoicing
+    (issue #130: missing dev flag, fiscal data, or active resolution).
 
     Returns: { order_id, invoice_number, prefix, cufe, status, pdf_presigned_url }
     """
