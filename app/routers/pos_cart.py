@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request
 from typing import List, Optional, Any, Dict
 from uuid import UUID
 from datetime import date, datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from app.services import pos_cart_service
 from app.services.email_helpers import send_pos_receipt_email
 from app.core.middleware import require_valid_session
@@ -146,7 +146,7 @@ class CompleteOrderRequest(BaseModel):
     customer_id: UUID = Field(..., description="Customer ID to associate with the order")
     credit_due_date: Optional[date] = Field(None, description="Optional due date for credit orders (only used when payment_method='credit')")
     payment_method_id: Optional[UUID] = Field(None, description="UUID of the selected payment_methods row (nullable if group-level only)")
-    receipt_email: Optional[str] = Field(None, description="Optional customer email to send receipt to after order completes")
+    receipt_email: Optional[EmailStr] = Field(None, description="Optional customer email to send receipt to after order completes")
     discount_type: Optional[str] = Field(None, description="'percent' | 'fixed'")
     discount_value: Optional[float] = Field(None, description="10 for 10%, 5000 for $5,000 COP")
     split_mode: bool = Field(False, description="True when using split payment — creates order with payment_status='partial'")
@@ -194,7 +194,7 @@ async def fire_pos_cart(request: Request, cart_id: UUID):
 
 
 class SendReceiptRequest(BaseModel):
-    email: str = Field(..., description="Customer email to send receipt to")
+    email: EmailStr = Field(..., description="Customer email to send receipt to")
     order_number: int
     total_amount: float
     payment_method: str
