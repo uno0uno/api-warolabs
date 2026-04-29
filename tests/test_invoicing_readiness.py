@@ -26,6 +26,7 @@ def _row(
     active_resolution: bool = True,
     inc_applicable: bool = False,
     iva_applicable: bool = True,
+    tax_regime_id: int = 1,   # 1 = Responsable de IVA, 2 = No responsable
 ):
     return {
         'dev_flag_enabled':  dev_flag_enabled,
@@ -33,6 +34,7 @@ def _row(
         'business_name':     business_name,
         'phone':             phone,
         'email':             email,
+        'tax_regime_id':     tax_regime_id,
         'active_resolution': active_resolution,
         'inc_applicable':    inc_applicable,
         'iva_applicable':    iva_applicable,
@@ -87,13 +89,24 @@ class TestReadinessService:
         assert payload['ready'] is True
 
     @pytest.mark.asyncio
-    async def test_no_taxes_blocks_ready(self):
-        with _patch_db(_row(inc_applicable=False, iva_applicable=False)):
+    async def test_responsable_without_taxes_blocks_ready(self):
+        # Responsable de IVA (regime=1) without INC and without IVA → still blocks
+        with _patch_db(_row(inc_applicable=False, iva_applicable=False, tax_regime_id=1)):
             payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
 
         assert payload['checks']['taxes_configured'] is False
         assert payload['ready'] is False
         assert any('impuestos configurados' in m for m in payload['missing'])
+
+    @pytest.mark.asyncio
+    async def test_no_responsable_passes_without_taxes(self):
+        # No responsable de IVA (regime=2) emits without INC/IVA — Art. 437 ET parágrafo 3
+        with _patch_db(_row(inc_applicable=False, iva_applicable=False, tax_regime_id=2)):
+            payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
+
+        assert payload['checks']['taxes_configured'] is True
+        assert payload['ready'] is True
+        assert payload['missing'] == []
 
     @pytest.mark.asyncio
     async def test_dev_flag_off_blocks(self):
@@ -154,6 +167,7 @@ class TestReadinessService:
             active_resolution=False,
             inc_applicable=False,
             iva_applicable=False,
+            tax_regime_id=1,   # Responsable — needs taxes; if regime were 2, taxes pass
         )):
             payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
 
