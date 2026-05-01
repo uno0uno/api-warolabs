@@ -128,7 +128,7 @@ async def get_menu_by_slug(
             # 3. Get products
             products_query = """
                 SELECT
-                    p.id, p.name, p.description, p.price,
+                    p.id, p.name, p.description, p.price, p.image_url,
                     p.category_id, c.name as category_name,
                     p.is_available, p.preparation_time,
                     p.allow_modifiers,
@@ -253,7 +253,7 @@ async def get_menu_by_tenant_id(
 
             products_query = """
                 SELECT
-                    p.id, p.name, p.description, p.price,
+                    p.id, p.name, p.description, p.price, p.image_url,
                     p.category_id, c.name as category_name,
                     p.is_available, p.preparation_time,
                     p.allow_modifiers,
@@ -312,7 +312,7 @@ async def get_product_detail_by_tenant_id(tenant_id: UUID, product_id: UUID) -> 
 
             product_query = """
                 SELECT
-                    p.id, p.name, p.description, p.price,
+                    p.id, p.name, p.description, p.price, p.image_url,
                     c.name as category_name,
                     p.is_available, p.is_available_online, p.preparation_time
                 FROM product p
@@ -414,7 +414,7 @@ async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
             # 2. Get product details
             product_query = """
                 SELECT
-                    p.id, p.name, p.description, p.price,
+                    p.id, p.name, p.description, p.price, p.image_url,
                     c.name as category_name,
                     p.is_available, p.is_available_online, p.preparation_time
                 FROM product p

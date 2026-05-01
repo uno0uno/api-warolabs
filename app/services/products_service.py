@@ -9,6 +9,7 @@ from app.models.product import (
     ProductResponse, ProductStats
 )
 from app.services import menu_history_service
+from app.services.aws_s3_service import AWSS3Service
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 import logging
 
@@ -48,9 +49,9 @@ async def create_product_with_recipe(
                     INSERT INTO product (
                         name, description, price, category_id, product_base_type_id, preparation_time,
                         controla_stock, is_available, is_available_online, is_combo, is_resale, allow_modifiers,
-                        tax_category, tenant_id, station_id, kitchen_name
+                        tax_category, tenant_id, station_id, kitchen_name, image_url
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                     RETURNING id, created_at, updated_at
                 """
                 product_result = await conn.fetchrow(
@@ -71,6 +72,7 @@ async def create_product_with_recipe(
                     tenant_id,
                     product_data.station_id,
                     product_data.kitchen_name,
+                    product_data.image_url,
                 )
 
                 product_id = product_result['id']
@@ -211,6 +213,7 @@ async def get_product_by_id(
                     p.updated_at,
                     p.station_id,
                     p.kitchen_name,
+                    p.image_url,
                     ks.id as ks_id,
                     ks.name as station_name,
                     ks.color as station_color,
@@ -453,6 +456,7 @@ async def get_products_list(
                     p.updated_at,
                     p.station_id,
                     p.kitchen_name,
+                    p.image_url,
                     ks.id as ks_id,
                     ks.name as station_name,
                     ks.color as station_color
@@ -754,11 +758,16 @@ async def update_product_with_recipe(
                 update_values = []
                 param_count = 1
 
+                # Fields where None is a valid "clear this value" intent (#465).
+                # Without this, the loop below silently drops attempts to remove
+                # an image when the user clicks "Eliminar imagen" in the form.
+                NULLABLE_FIELDS = {'image_url'}
                 for field, value in product_data.dict(exclude={'ingredients', 'recipe_base_ids', 'controla_stock'}, exclude_unset=True).items():
-                    if value is not None:
-                        update_fields.append(f"{field} = ${param_count}")
-                        update_values.append(value)
-                        param_count += 1
+                    if value is None and field not in NULLABLE_FIELDS:
+                        continue
+                    update_fields.append(f"{field} = ${param_count}")
+                    update_values.append(value)
+                    param_count += 1
 
                 # Force controla_stock to always be True
                 update_fields.append("controla_stock = TRUE")
@@ -950,3 +959,41 @@ async def delete_product(
     except Exception as e:
         logger.error(f"Error deleting product: {str(e)}")
         raise APIError(f"Error deleting product: {str(e)}", status_code=500)
+
+
+async def upload_product_image(
+    request: Request,
+    file_bytes: bytes,
+    filename: str,
+    content_type: str,
+) -> Optional[str]:
+    """Upload a product hero image to Cloudflare R2 (public bucket).
+
+    Mirrors `tenant_config_service.upload_tenant_image` but writes to the
+    `product-images/{tenant_id}/{uuid}.{ext}` prefix. Validation (MIME +
+    size) is enforced at the router layer; this service only auths + uploads.
+
+    Returns the permanent public URL or raises HTTPException 500 on failure.
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="Tenant context is required")
+
+    s3_service = AWSS3Service()
+    public_url = await s3_service.upload_public_image(
+        file_bytes=file_bytes,
+        filename=filename,
+        tenant_id=str(tenant_id),
+        image_type='product',
+        content_type=content_type,
+    )
+
+    if not public_url:
+        logger.error(f"upload_product_image returned None for tenant {tenant_id}")
+        raise HTTPException(
+            status_code=500,
+            detail="No se pudo subir la imagen. Intenta de nuevo.",
+        )
+
+    return public_url
