@@ -3,9 +3,13 @@ Tests for categories module endpoints.
 
 Endpoints tested:
 - GET /menu/categories
+- POST /menu/categories (issue #458)
 """
 import pytest
 from httpx import AsyncClient
+from uuid import uuid4
+
+from pydantic import ValidationError
 
 
 class TestCategoriesEndpoint:
@@ -53,11 +57,11 @@ class TestCategoriesEndpoint:
             assert data["total"] >= 0
 
     @pytest.mark.asyncio
-    async def test_categories_endpoint_method_not_allowed(self, client: AsyncClient):
-        """Test that POST to categories returns 405 or 500"""
+    async def test_post_category_without_session_rejected(self, client: AsyncClient):
+        """POST /menu/categories without a valid session must return 401."""
         response = await client.post("/menu/categories", json={"name": "Test"})
-        # 405 = method not allowed, 500 = server error
-        assert response.status_code in [405, 500]
+        # 401 = unauthenticated, 500 = transient error in tests env
+        assert response.status_code in [401, 500]
 
     @pytest.mark.asyncio
     async def test_categories_endpoint_with_trailing_slash(self, client: AsyncClient):
@@ -65,3 +69,47 @@ class TestCategoriesEndpoint:
         response = await client.get("/menu/categories/")
         # Should redirect or work normally
         assert response.status_code in [200, 307, 401, 403, 500]
+
+
+class TestCategoryCreateModel:
+    """Pydantic-level tests for CategoryCreate — issue #458."""
+
+    def test_accepts_name_only(self):
+        from app.models.category import CategoryCreate
+        cat = CategoryCreate(name="Bebidas")
+        assert cat.name == "Bebidas"
+        assert cat.description is None
+
+    def test_accepts_name_and_description(self):
+        from app.models.category import CategoryCreate
+        cat = CategoryCreate(name="Postres", description="Dulces y postres")
+        assert cat.name == "Postres"
+        assert cat.description == "Dulces y postres"
+
+    def test_rejects_empty_name(self):
+        from app.models.category import CategoryCreate
+        with pytest.raises(ValidationError):
+            CategoryCreate(name="")
+
+    def test_rejects_name_over_100_chars(self):
+        from app.models.category import CategoryCreate
+        with pytest.raises(ValidationError):
+            CategoryCreate(name="x" * 101)
+
+    def test_accepts_name_at_max_length(self):
+        from app.models.category import CategoryCreate
+        cat = CategoryCreate(name="x" * 100)
+        assert len(cat.name) == 100
+
+    def test_rejects_description_over_500_chars(self):
+        from app.models.category import CategoryCreate
+        with pytest.raises(ValidationError):
+            CategoryCreate(name="ok", description="x" * 501)
+
+    def test_does_not_accept_tenant_id_in_payload(self):
+        """tenant_id must be derived from session, never trusted from the body."""
+        from app.models.category import CategoryCreate
+        # Pydantic ignores extra fields by default — passing tenant_id should
+        # not surface in the model
+        cat = CategoryCreate(name="ok", tenant_id=str(uuid4()))  # type: ignore[call-arg]
+        assert not hasattr(cat, "tenant_id")
