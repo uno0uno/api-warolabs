@@ -165,3 +165,61 @@ class TestProductByIdEndpoint:
                     product = response.json()
                     assert "data" in product
                     assert product["data"]["id"] == product_id
+
+
+class TestProductCreateModel:
+    """Tests for the ProductCreate Pydantic model — issue #456 (allow products without ingredients)"""
+
+    def test_create_with_empty_recipe_succeeds(self):
+        """Issue #456: ProductCreate must accept empty ingredients AND empty recipe_base_ids."""
+        from app.models.product import ProductCreate
+        product = ProductCreate(
+            name="Cargo de domicilio",
+            price=5000,
+            category_id=uuid4(),
+            ingredients=[],
+            recipe_base_ids=[],
+            tenant_id=uuid4(),
+        )
+        assert product.ingredients == []
+        assert product.recipe_base_ids == []
+
+    def test_create_with_only_ingredients_succeeds(self):
+        """ProductCreate accepts only ingredients (no recipe bases) — pre-existing behavior preserved."""
+        from app.models.product import ProductCreate, RecipeIngredientBase
+        product = ProductCreate(
+            name="Hamburguesa",
+            price=15000,
+            category_id=uuid4(),
+            ingredients=[RecipeIngredientBase(ingredient_id=uuid4(), quantity=100, unit="g")],
+            recipe_base_ids=[],
+            tenant_id=uuid4(),
+        )
+        assert len(product.ingredients) == 1
+
+    def test_create_with_only_recipe_bases_succeeds(self):
+        """ProductCreate accepts only recipe bases (no direct ingredients) — pre-existing behavior preserved."""
+        from app.models.product import ProductCreate
+        product = ProductCreate(
+            name="Combo",
+            price=20000,
+            category_id=uuid4(),
+            ingredients=[],
+            recipe_base_ids=[uuid4()],
+            tenant_id=uuid4(),
+        )
+        assert len(product.recipe_base_ids) == 1
+
+    def test_create_validates_price_still_required(self):
+        """Removing the recipe validator must NOT loosen other validators (price > 0)."""
+        from app.models.product import ProductCreate
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            ProductCreate(
+                name="Bad",
+                price=0,  # invalid: gt=0
+                category_id=uuid4(),
+                ingredients=[],
+                recipe_base_ids=[],
+                tenant_id=uuid4(),
+            )

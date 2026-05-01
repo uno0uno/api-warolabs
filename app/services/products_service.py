@@ -33,15 +33,11 @@ async def create_product_with_recipe(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
-        # VALIDATION: Products must have at least one ingredient OR at least one recipe base
+        # Products may be created without recipe — those skip inventory tracking.
+        # See app/models/product.py ProductCreate docstring.
         has_ingredients = product_data.ingredients and len(product_data.ingredients) > 0
         has_recipe_bases = product_data.recipe_base_ids and len(product_data.recipe_base_ids) > 0
-
-        if not has_ingredients and not has_recipe_bases:
-            raise HTTPException(
-                status_code=400,
-                detail="El producto debe tener al menos un ingrediente o una receta base."
-            )
+        tracks_inventory = has_ingredients or has_recipe_bases
 
         async with get_db_connection() as conn:
             # Start transaction
@@ -123,29 +119,38 @@ async def create_product_with_recipe(
                             tenant_id
                         )
 
-                # 4. Calculate and update product cost (last purchase price)
-                cost_query = """
-                    UPDATE product
-                    SET costo_calculado = (
-                        SELECT COALESCE(SUM(
-                            pr.quantity * COALESCE(
-                                (SELECT pi.unit_cost
-                                 FROM tenant_purchase_items pi
-                                 JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                                 WHERE pi.ingredient_id = pr.ingredient_id
-                                   AND tp.tenant_id = $2
-                                   AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
-                                 ORDER BY tp.purchase_date DESC LIMIT 1),
-                                i.costo_unitario, 0
-                            )
-                        ), 0)
-                        FROM product_recipes pr
-                        JOIN ingredients i ON pr.ingredient_id = i.id
-                        WHERE pr.product_id = $1
+                # 4. Calculate and update product cost (last purchase price).
+                # Products without recipe persist costo_calculado=NULL — semantically
+                # "not applicable" rather than "$0", which avoids polluting margin
+                # reports and lets the frontend render "—".
+                if tracks_inventory:
+                    cost_query = """
+                        UPDATE product
+                        SET costo_calculado = (
+                            SELECT COALESCE(SUM(
+                                pr.quantity * COALESCE(
+                                    (SELECT pi.unit_cost
+                                     FROM tenant_purchase_items pi
+                                     JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                     WHERE pi.ingredient_id = pr.ingredient_id
+                                       AND tp.tenant_id = $2
+                                       AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                                     ORDER BY tp.purchase_date DESC LIMIT 1),
+                                    i.costo_unitario, 0
+                                )
+                            ), 0)
+                            FROM product_recipes pr
+                            JOIN ingredients i ON pr.ingredient_id = i.id
+                            WHERE pr.product_id = $1
+                        )
+                        WHERE id = $1
+                    """
+                    await conn.execute(cost_query, product_id, tenant_id)
+                else:
+                    await conn.execute(
+                        "UPDATE product SET costo_calculado = NULL WHERE id = $1",
+                        product_id,
                     )
-                    WHERE id = $1
-                """
-                await conn.execute(cost_query, product_id, tenant_id)
 
                 # 5. Registrar en historial
                 user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
@@ -793,28 +798,9 @@ async def update_product_with_recipe(
                                 tenant_id
                             )
 
-                # 3. Update recipe if ingredients provided
+                # 3. Update recipe if ingredients provided.
+                # Empty list is now valid — product becomes "no inventory tracking".
                 if product_data.ingredients is not None:
-                    # VALIDATION: Cannot remove all ingredients unless there are recipe bases
-                    if len(product_data.ingredients) == 0:
-                        # Check if product will have recipe bases
-                        has_recipe_bases = False
-                        if product_data.recipe_base_ids is not None:
-                            has_recipe_bases = len(product_data.recipe_base_ids) > 0
-                        else:
-                            # Check existing recipe bases in database
-                            existing_bases = await conn.fetchval(
-                                "SELECT COUNT(*) FROM product_base_recipes WHERE product_id = $1",
-                                product_id
-                            )
-                            has_recipe_bases = existing_bases > 0
-
-                        if not has_recipe_bases:
-                            raise HTTPException(
-                                status_code=400,
-                                detail="El producto debe tener al menos un ingrediente o una receta base."
-                            )
-
                     # Delete existing recipe
                     delete_recipe_query = "DELETE FROM product_recipes WHERE product_id = $1"
                     await conn.execute(delete_recipe_query, product_id)
@@ -844,29 +830,47 @@ async def update_product_with_recipe(
                                 tenant_id
                             )
 
-                    # 4. Recalculate product cost (last purchase price)
-                    cost_query = """
-                        UPDATE product
-                        SET costo_calculado = (
-                            SELECT COALESCE(SUM(
-                                pr.quantity * COALESCE(
-                                    (SELECT pi.unit_cost
-                                     FROM tenant_purchase_items pi
-                                     JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                                     WHERE pi.ingredient_id = pr.ingredient_id
-                                       AND tp.tenant_id = $2
-                                       AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
-                                     ORDER BY tp.purchase_date DESC LIMIT 1),
-                                    i.costo_unitario, 0
-                                )
-                            ), 0)
-                            FROM product_recipes pr
-                            JOIN ingredients i ON pr.ingredient_id = i.id
-                            WHERE pr.product_id = $1
+                    # 4. Recalculate product cost (last purchase price).
+                    # Without recipe → NULL (semantically "no aplica") so the
+                    # margin/cost UI renders "—" instead of $0.
+                    has_any_recipe = await conn.fetchval(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1 FROM product_recipes WHERE product_id = $1
+                            UNION ALL
+                            SELECT 1 FROM product_base_recipes WHERE product_id = $1
                         )
-                        WHERE id = $1
-                    """
-                    await conn.execute(cost_query, product_id, tenant_id)
+                        """,
+                        product_id,
+                    )
+                    if has_any_recipe:
+                        cost_query = """
+                            UPDATE product
+                            SET costo_calculado = (
+                                SELECT COALESCE(SUM(
+                                    pr.quantity * COALESCE(
+                                        (SELECT pi.unit_cost
+                                         FROM tenant_purchase_items pi
+                                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                                         WHERE pi.ingredient_id = pr.ingredient_id
+                                           AND tp.tenant_id = $2
+                                           AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
+                                         ORDER BY tp.purchase_date DESC LIMIT 1),
+                                        i.costo_unitario, 0
+                                    )
+                                ), 0)
+                                FROM product_recipes pr
+                                JOIN ingredients i ON pr.ingredient_id = i.id
+                                WHERE pr.product_id = $1
+                            )
+                            WHERE id = $1
+                        """
+                        await conn.execute(cost_query, product_id, tenant_id)
+                    else:
+                        await conn.execute(
+                            "UPDATE product SET costo_calculado = NULL WHERE id = $1",
+                            product_id,
+                        )
 
                 # 5. Registrar cambios en historial
                 if old_snapshot:

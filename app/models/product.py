@@ -1,5 +1,5 @@
 # Product models for menu management
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 from typing import Optional, List, Literal, Dict, Any
 from uuid import UUID
 from datetime import datetime
@@ -68,22 +68,20 @@ class ProductBase(BaseModel):
     kitchen_name: Optional[str] = Field(None, max_length=100)
 
 class ProductCreate(ProductBase):
-    """Create product with recipe"""
-    # Products must have at least one ingredient OR at least one recipe base
-    # Both can be present, but at least one is required for inventory control
+    """Create product with recipe.
+
+    Products MAY have zero ingredients and zero recipe bases — those products
+    do not control inventory (no rows are written to product_recipes /
+    product_base_recipes, and stock deduction is a no-op at order completion).
+    Used for service-like items (delivery surcharge, tip), pre-packed goods
+    that don't warrant inventory tracking, and resale products without recipe.
+    """
     ingredients: List[RecipeIngredientBase] = Field(
         default=[],
-        description="Recipe ingredients (optional if recipe_base_ids provided)"
+        description="Recipe ingredients (empty list = no inventory tracking)"
     )
-    recipe_base_ids: List[UUID] = Field(default=[], description="List of recipe base IDs")
+    recipe_base_ids: List[UUID] = Field(default=[], description="List of recipe base IDs (empty list = no inventory tracking)")
     tenant_id: UUID = Field(..., description="Tenant ID")
-
-    @model_validator(mode='after')
-    def validate_has_ingredients_or_recipe_bases(self):
-        """Ensure product has at least one ingredient or one recipe base"""
-        if not self.ingredients and not self.recipe_base_ids:
-            raise ValueError("El producto debe tener al menos un ingrediente o una receta base")
-        return self
 
 class ProductUpdate(BaseModel):
     """Update product fields"""
