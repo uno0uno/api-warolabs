@@ -493,6 +493,16 @@ async def send_pos_receipt_email(
     Returns:
         True if sent successfully, False otherwise.
     """
+    # Defense in depth (issue #134): the API schema (SendReceiptRequest /
+    # CompleteOrderRequest) already validates with Pydantic EmailStr, but
+    # any future internal caller (cron, ad-hoc script) could bypass that.
+    # A truthy string with no '@' would crash AWS SES with InvalidParameterValue.
+    if not customer_email or '@' not in customer_email:
+        logger.warning(
+            f"Receipt email skipped: invalid customer_email={customer_email!r} for order #{order_number}"
+        )
+        return False
+
     try:
         text_body = get_pos_receipt_text(
             order_number=order_number,
