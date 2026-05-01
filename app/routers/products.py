@@ -1,13 +1,16 @@
-from fastapi import APIRouter, Request, Response, Query, Body
+from fastapi import APIRouter, HTTPException, Request, Response, Query, Body
+from fastapi.responses import JSONResponse
 from typing import Optional
 from uuid import UUID
+from app.core.exceptions import AuthenticationError
 from app.services.products_service import (
     create_product_with_recipe,
     get_product_by_id,
     get_products_list,
     get_product_stats,
     update_product_with_recipe,
-    delete_product
+    delete_product,
+    upload_product_image,
 )
 from app.models.product import (
     ProductCreate,
@@ -16,6 +19,10 @@ from app.models.product import (
     ProductsListResponse,
     ProductStats
 )
+
+# Mirrors tenant_config.py constants for cross-router consistency.
+ALLOWED_IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/webp'}
+MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB
 
 router = APIRouter()
 
@@ -137,3 +144,53 @@ async def delete_product_endpoint(
     Requires valid session with tenant context.
     """
     return await delete_product(request, product_id)
+
+
+@router.post("/upload-image")
+async def upload_product_image_endpoint(request: Request):
+    """Upload a product hero image to Cloudflare R2 (issue #465).
+
+    Accepts multipart/form-data with:
+      - file: image (JPEG, PNG or WebP, max 5MB)
+
+    Returns: { "url": "https://pub-….r2.dev/product-images/{tenant_id}/{uuid}.{ext}" }
+
+    The URL is permanent. The frontend stores it in `form.image_url` and the
+    submit of the product persists it as `product.image_url`.
+
+    Requires valid session with tenant context.
+    """
+    try:
+        form = await request.form()
+        file = form.get("file")
+
+        if not file or not hasattr(file, 'read'):
+            raise HTTPException(status_code=400, detail="No file provided")
+
+        content_type = getattr(file, 'content_type', None) or 'application/octet-stream'
+        if content_type not in ALLOWED_IMAGE_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File type not allowed. Use JPEG, PNG, or WebP. Got: {content_type}",
+            )
+
+        file_bytes = await file.read()
+
+        if len(file_bytes) > MAX_IMAGE_SIZE:
+            raise HTTPException(status_code=400, detail="File too large. Maximum size is 5MB.")
+
+        public_url = await upload_product_image(
+            request=request,
+            file_bytes=file_bytes,
+            filename=getattr(file, 'filename', 'image.jpg') or 'image.jpg',
+            content_type=content_type,
+        )
+
+        return JSONResponse({"url": public_url})
+
+    except HTTPException:
+        raise
+    except AuthenticationError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")

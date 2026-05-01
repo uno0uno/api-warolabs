@@ -214,7 +214,7 @@ class AWSS3Service:
         file_bytes: bytes,
         filename: str,
         tenant_id: str,
-        image_type: Literal['logo', 'banner'],
+        image_type: Literal['logo', 'banner', 'product'],
         content_type: str = 'image/jpeg'
     ) -> Optional[str]:
         """
@@ -250,7 +250,12 @@ class AWSS3Service:
             )
 
             ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else 'jpg'
-            s3_key = f"tenant-profiles/{tenant_id}/{image_type}/{uuid.uuid4()}.{ext}"
+            if image_type == 'product':
+                # Issue #465 — product images live under their own prefix so a
+                # future cleanup job can scope to a single tenant + image type.
+                s3_key = f"product-images/{tenant_id}/{uuid.uuid4()}.{ext}"
+            else:
+                s3_key = f"tenant-profiles/{tenant_id}/{image_type}/{uuid.uuid4()}.{ext}"
 
             public_client.upload_fileobj(
                 BytesIO(file_bytes),
