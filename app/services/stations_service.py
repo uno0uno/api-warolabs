@@ -6,6 +6,7 @@ Issue: https://github.com/uno0uno/warocol.com/issues/411
 """
 from typing import Optional, List
 from uuid import UUID
+import asyncpg
 from fastapi import Request, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -54,32 +55,44 @@ async def list_active_stations(request: Request) -> dict:
 
 
 async def create_station(request: Request, body) -> dict:
-    """Create a new kitchen station for the tenant."""
+    """Create a new kitchen station for the tenant.
+
+    Maps a UniqueViolationError on (tenant_id, name) to HTTP 409 with a
+    human-readable message so the inline-create slide-over (issue #463)
+    can surface it as an inline form error instead of a generic 500.
+    """
     session = require_valid_session(request)
     tenant_id = session.tenant_id
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
 
-    async with get_db_connection() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO kitchen_stations (
-                tenant_id, name, kitchen_name, color,
-                alert_threshold_1_min, alert_threshold_2_min, display_order
+    try:
+        async with get_db_connection() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO kitchen_stations (
+                    tenant_id, name, kitchen_name, color,
+                    alert_threshold_1_min, alert_threshold_2_min, display_order
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                RETURNING *
+                """,
+                tenant_id,
+                body.name,
+                body.kitchen_name,
+                body.color,
+                body.alert_threshold_1_min,
+                body.alert_threshold_2_min,
+                body.display_order,
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING *
-            """,
-            tenant_id,
-            body.name,
-            body.kitchen_name,
-            body.color,
-            body.alert_threshold_1_min,
-            body.alert_threshold_2_min,
-            body.display_order,
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+            status_code=409,
+            detail="Ya existe una estación con ese nombre",
         )
-        logger.info(f"Created station '{body.name}' for tenant {tenant_id}")
-        return {"success": True, "data": dict(row)}
+
+    logger.info(f"Created station '{body.name}' for tenant {tenant_id}")
+    return {"success": True, "data": dict(row)}
 
 
 async def update_station(request: Request, station_id: UUID, body) -> dict:
