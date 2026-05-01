@@ -49,6 +49,34 @@ ALLOWED_TRANSITIONS: Dict[str, List[str]] = {
 }
 
 
+async def finalize_open_comandas(conn, order_id: UUID, tenant_id: UUID) -> int:
+    """
+    Mark all non-terminal comandas of an order as 'delivered'. Called from
+    every place where an order transitions to 'completed' so the kitchen
+    despacho view doesn't keep showing stale comandas indefinitely.
+
+    Idempotent: if comandas are already terminal, no rows are updated.
+    Returns the number of rows updated.
+    """
+    result = await conn.execute(
+        """
+        UPDATE comandas
+        SET status = 'delivered',
+            delivered_at = COALESCE(delivered_at, ready_at, fired_at, NOW()),
+            updated_at = NOW()
+        WHERE order_id = $1
+          AND tenant_id = $2
+          AND status IN ('pending', 'preparing', 'ready')
+        """,
+        order_id, tenant_id,
+    )
+    # asyncpg returns "UPDATE N" — extract N
+    try:
+        return int(result.split()[-1])
+    except (IndexError, ValueError):
+        return 0
+
+
 async def _check_comandas_enabled(conn, tenant_id: UUID) -> None:
     """Raises APIError(403) if tenant does not have comandas_enabled = true."""
     enabled = await conn.fetchval(
@@ -369,6 +397,10 @@ async def get_comandas_for_kds(
 
             where_clause = " AND ".join(where_conditions)
 
+            # Defense in depth: hide comandas whose order is already finalized
+            # (completed / cancelled). This protects the despacho view even if a
+            # cascade is missed somewhere in the order-completion paths.
+            # See finalize_open_comandas() for the write-side cascade.
             rows = await conn.fetch(f"""
                 SELECT
                     c.id, c.comanda_number, c.comanda_index, c.status, c.source_type, c.table_display_name,
@@ -379,7 +411,9 @@ async def get_comandas_for_kds(
                     ks.alert_threshold_1_min, ks.alert_threshold_2_min
                 FROM comandas c
                 JOIN kitchen_stations ks ON ks.id = c.station_id
+                LEFT JOIN orders o ON o.id = c.order_id
                 WHERE {where_clause}
+                  AND (o.status IS NULL OR o.status NOT IN ('completed', 'cancelled'))
                 ORDER BY c.fired_at ASC
             """, *params)
 

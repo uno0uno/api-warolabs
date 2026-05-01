@@ -17,7 +17,7 @@ from app.services.waros_service import evaluate_and_award
 from app.services.email_helpers import send_pos_receipt_email
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
-from app.services.comandas_service import fire_comandas
+from app.services.comandas_service import fire_comandas, finalize_open_comandas
 import logging
 
 logger = logging.getLogger(__name__)
@@ -704,6 +704,12 @@ async def add_order_payment(
                         order_id, payment_method,
                         payment_method_id,
                     )
+                    # Cascade: finalize any non-terminal comandas of this order
+                    # so the kitchen despacho doesn't keep showing them.
+                    try:
+                        await finalize_open_comandas(conn, order_id, tenant_id)
+                    except Exception as _ce:
+                        logger.warning(f"Could not finalize comandas for order {order_id}: {_ce}")
                 else:
                     await conn.execute(
                         "UPDATE orders SET payment_status = 'partial' WHERE id = $1",
@@ -1188,6 +1194,12 @@ async def complete_pos_order(
                             "UPDATE orders SET payment_status = 'paid' WHERE id = $1",
                             order_id
                         )
+                    # Cascade: finalize any non-terminal comandas of this order so the
+                    # kitchen despacho doesn't keep showing them after checkout.
+                    try:
+                        await finalize_open_comandas(conn, order_id, tenant_id)
+                    except Exception as _ce:
+                        logger.warning(f"Could not finalize comandas for order {order_id}: {_ce}")
 
                 logger.info(f"Order #{order_number} created (split_mode={split_mode})")
 
