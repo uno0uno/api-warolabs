@@ -14,6 +14,16 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+POS_LIKE_FILTER = (
+    "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL "
+    "OR extra_attributes->>'source' = 'manual')"
+)
+POS_LIKE_FILTER_ALIAS_O = (
+    "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL "
+    "OR o.extra_attributes->>'source' = 'manual')"
+)
+
+
 def parse_date(date_str: Optional[str]) -> Optional[date]:
     """Convert date string (YYYY-MM-DD) to date object"""
     if not date_str:
@@ -1198,7 +1208,7 @@ async def get_customers_list(
             # --- all_customers CTE: base pool (no date filter) ---
             base_conditions = [
                 "o.tenant_id = $1",
-                "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
+                "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
                 "o.customer_id IS NOT NULL",
             ]
 
@@ -1214,7 +1224,7 @@ async def get_customers_list(
             # --- period_agg CTE: date-scoped aggregation (completed orders only) ---
             period_conditions = [
                 "o.tenant_id = $1",
-                "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
+                "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
                 "o.customer_id IS NOT NULL",
                 "o.status = 'completed'",
             ]
@@ -1355,7 +1365,7 @@ async def get_customer_detail(
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
                 WHERE o.tenant_id = $1
-                  AND (o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
+                  AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
                   AND o.customer_id = $2
                 GROUP BY o.customer_id, p.name, p.phone_number, p.email
                 """,
@@ -1369,7 +1379,7 @@ async def get_customer_detail(
             # --- Paginated order history (date-filtered) ---
             where_conditions = [
                 "o.tenant_id = $1",
-                "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
+                "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
                 "o.customer_id = $2",
             ]
             params: list = [UUID(tenant_id), customer_id]
@@ -1776,7 +1786,7 @@ async def get_customers_metrics(
 
         async with get_db_connection(use_transaction=False) as conn:
             # Build base WHERE clause (period-scoped, completed POS orders only)
-            pos_filter = "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
+            pos_filter = "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
             where_conditions = ["tenant_id = $1", pos_filter, "status = 'completed'"]
             params: list = [UUID(tenant_id)]
             param_count = 1
@@ -1960,7 +1970,7 @@ async def get_customers_metrics(
                 )
                 if prev_df and prev_dt:
                     # Build previous-period summary using same CTE pattern
-                    prev_pos_filter = "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
+                    prev_pos_filter = "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
                     prev_where_conds = ["tenant_id = $1", prev_pos_filter, "status = 'completed'"]
                     prev_params = [UUID(tenant_id)]
                     ppc = 1
@@ -2047,7 +2057,7 @@ async def get_customers_metrics(
 
 async def _customer_metrics_by_date(conn, where_clause, params, param_count, timezone):
     """Internal: customer metrics grouped by calendar date"""
-    pos_filter = "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
+    pos_filter = "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
     param_count += 1
     tz_param = param_count
     series_params = list(params) + [timezone]
@@ -2090,7 +2100,7 @@ async def _customer_metrics_by_date(conn, where_clause, params, param_count, tim
 
 async def _customer_metrics_by_weekday(conn, where_clause, params, param_count, timezone):
     """Internal: customer metrics grouped by day of week (0=Sunday … 6=Saturday)"""
-    pos_filter = "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
+    pos_filter = "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
     param_count += 1
     tz_param = param_count
     series_params = list(params) + [timezone]
@@ -2136,7 +2146,7 @@ async def _customer_metrics_by_weekday(conn, where_clause, params, param_count, 
 
 async def _customer_metrics_by_month(conn, where_clause, params, param_count, timezone):
     """Internal: customer metrics grouped by month (YYYY-MM)"""
-    pos_filter = "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
+    pos_filter = "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"
     param_count += 1
     tz_param = param_count
     series_params = list(params) + [timezone]

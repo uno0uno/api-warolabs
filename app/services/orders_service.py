@@ -32,6 +32,16 @@ def parse_date(date_str: Optional[str]) -> Optional[date]:
 logger = logging.getLogger(__name__)
 
 
+POS_LIKE_FILTER = (
+    "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL "
+    "OR extra_attributes->>'source' = 'manual')"
+)
+POS_LIKE_FILTER_ALIAS_O = (
+    "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL "
+    "OR o.extra_attributes->>'source' = 'manual')"
+)
+
+
 def _compute_tax_breakdown(
     items_rows: List[Any],
     tax_config: Dict[str, Any],
@@ -752,7 +762,7 @@ async def get_customers_list(
         async with get_db_connection() as conn:
             where_conditions = [
                 "o.tenant_id = $1",
-                "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
+                "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
                 "o.customer_id IS NOT NULL",
             ]
             params = [tenant_id]
@@ -892,7 +902,7 @@ async def get_customer_detail(
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
                 WHERE o.tenant_id = $1
-                  AND (o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
+                  AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
                   AND o.customer_id = $2
                 GROUP BY o.customer_id, p.name, p.phone_number, p.email
                 """,
@@ -906,7 +916,7 @@ async def get_customer_detail(
             # --- Paginated order history ---
             where_conditions = [
                 "o.tenant_id = $1",
-                "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
+                "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
                 "o.customer_id = $2",
             ]
             params = [tenant_id, customer_id]
@@ -1084,7 +1094,7 @@ async def get_orders_metrics(
 
         async with get_db_connection() as conn:
             # Build WHERE clause
-            where_conditions = ["tenant_id = $1", "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"]
+            where_conditions = ["tenant_id = $1", "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"]
             params = [tenant_id]
             param_count = 1
 
@@ -1142,7 +1152,7 @@ async def get_orders_metrics(
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
                 # Rebuild WHERE without payment_method_id for tax query (order_items has no that filter)
                 tax_where = ["o.tenant_id = $1", "o.status = 'completed'",
-                             "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"]
+                             "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"]
                 tax_params: List[Any] = [tenant_id]
                 tax_pc = 1
                 if parsed_date_from:
@@ -1277,7 +1287,7 @@ async def get_orders_dashboard(
                     ), 0) as year_sales
 
                 FROM orders
-                WHERE tenant_id = $1 AND (pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')
+                WHERE tenant_id = $1 AND (pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')
             """
 
             row = await conn.fetchrow(dashboard_query, *params)
@@ -1307,7 +1317,7 @@ async def get_orders_dashboard(
                 LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
                 WHERE o.tenant_id = $1
                   AND o.status = 'completed'
-                  AND (o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
+                  AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
                 GROUP BY COALESCE(pmg.slug, op.payment_method), COALESCE(pmg.name, op.payment_method)
 
                 UNION ALL
@@ -1323,7 +1333,7 @@ async def get_orders_dashboard(
                 LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
                 WHERE o.tenant_id = $1
                   AND o.status = 'completed'
-                  AND (o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
+                  AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
                   AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = o.id)
                 GROUP BY COALESCE(pmg.slug, o.payment_method), COALESCE(pmg.name, o.payment_method)
                 """,
@@ -1356,7 +1366,7 @@ async def get_orders_dashboard(
             _year_std = 0.0
             _year_liq = 0.0
             _tax_label = "Impuesto"
-            _base_filter = "o.tenant_id = $1 AND o.status = 'completed' AND (o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"
+            _base_filter = "o.tenant_id = $1 AND o.status = 'completed' AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"
             _tax_select = """
                 SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
                        COALESCE(SUM(oi.subtotal), 0) AS subtotal
@@ -1455,7 +1465,7 @@ async def export_orders_to_email(
 
         async with get_db_connection() as conn:
             # Build WHERE clause (same as get_orders_list but without pagination)
-            where_conditions = ["o.tenant_id = $1", "(o.pos_cart_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"]
+            where_conditions = ["o.tenant_id = $1", "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"]
             params = [tenant_id]
             param_count = 1
 
@@ -2193,7 +2203,7 @@ async def get_sales_flow(
 
         async with get_db_connection() as conn:
             # Build WHERE conditions
-            where_conditions = ["tenant_id = $1", "(pos_cart_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"]
+            where_conditions = ["tenant_id = $1", "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"]
             params = [tenant_id]
             param_count = 1
 
