@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any
 from uuid import UUID
 from fastapi import Request, Response
 from app.database import get_db_connection
-from app.core.security import get_session_token, clear_session_cookie, set_session_cookie, get_client_ip, SESSION_ACTIVITY_THROTTLE
+from app.core.security import get_session_token, clear_session_cookie, set_session_cookie, get_client_ip
 from app.core.exceptions import AuthenticationError
 from app.core.middleware import require_valid_session
 from app.models.auth import User, Session, Tenant, SessionResponse, SwitchTenantResponse, UpdateProfileResponse
@@ -38,18 +38,7 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                 logger.warning("Invalid or expired session")
                 await clear_session_cookie(response, session_token)
                 raise AuthenticationError("Session expired")
-            
-            
-            # Update last activity for analytics tracking — throttled to once
-            # per SESSION_ACTIVITY_THROTTLE window so bursty POS traffic doesn't
-            # pile up UPDATEs on the same row (issue #146).
-            await conn.execute(
-                f"UPDATE sessions SET last_activity_at = NOW() "
-                f"WHERE id = $1 "
-                f"  AND last_activity_at < NOW() - INTERVAL '{SESSION_ACTIVITY_THROTTLE}'",
-                session_token
-            )
-            
+
             # Get tenant info if tenant_id exists (exact logic from warolabs.com)
             current_tenant = None
             user_role = None
@@ -81,7 +70,6 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
             session = Session(
                 expiresAt=session_result['expires_at'],
                 createdAt=session_result['created_at'],
-                lastActivity=session_result['last_activity_at'],
                 ipAddress=str(session_result['ip_address']) if session_result['ip_address'] else None,
                 loginMethod=session_result['login_method'],
                 tenantId=session_result['tenant_id']
@@ -202,10 +190,10 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
             
             session_query = """
                 INSERT INTO sessions (
-                  id, user_id, tenant_id, expires_at, ip_address, 
-                  user_agent, login_method, is_active, created_at, last_activity_at
+                  id, user_id, tenant_id, expires_at, ip_address,
+                  user_agent, login_method, is_active, created_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW(), NOW())
+                VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW())
             """
             await conn.execute(session_query, 
                 new_session_id, user_id, tenant_id, expires_at,

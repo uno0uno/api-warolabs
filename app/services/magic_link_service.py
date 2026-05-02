@@ -202,10 +202,10 @@ async def verify_code(request: Request, response: Response, email: str, code: st
             session_query = """
                 INSERT INTO sessions (
                   id, user_id, tenant_id, expires_at,
-                  created_at, last_activity_at,
+                  created_at,
                   ip_address, user_agent, login_method, is_active
                 )
-                VALUES ($1, $2, $3, $4, NOW(), NOW(), $5, $6, 'verification_code', true)
+                VALUES ($1, $2, $3, $4, NOW(), $5, $6, 'verification_code', true)
                 RETURNING id
             """
             await conn.execute(session_query,
@@ -335,10 +335,10 @@ async def verify_token(request: Request, response: Response, email: str, token: 
             session_query = """
                 INSERT INTO sessions (
                   id, user_id, tenant_id, expires_at,
-                  created_at, last_activity_at,
+                  created_at,
                   ip_address, user_agent, login_method, is_active
                 )
-                VALUES ($1, $2, $3, $4, NOW(), NOW(), $5, $6, 'magic_link', true)
+                VALUES ($1, $2, $3, $4, NOW(), $5, $6, 'magic_link', true)
                 RETURNING id
             """
             await conn.execute(session_query,

@@ -16,7 +16,6 @@ class User(BaseModel):
 class Session(BaseModel):
     expires_at: datetime = Field(alias='expiresAt')
     created_at: datetime = Field(alias='createdAt')
-    last_activity_at: Optional[datetime] = Field(alias='lastActivity', default=None)
     ip_address: Optional[str] = Field(alias='ipAddress', default=None)
     login_method: Optional[str] = Field(alias='loginMethod', default=None)
     tenant_id: Optional[UUID] = Field(alias='tenantId', default=None)
