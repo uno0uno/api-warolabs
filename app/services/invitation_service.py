@@ -292,10 +292,10 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
             session_query = """
                 INSERT INTO sessions (
                     id, user_id, tenant_id, expires_at,
-                    created_at, last_activity_at,
+                    created_at,
                     ip_address, user_agent, login_method, is_active
                 )
-                VALUES ($1, $2, $3, $4, NOW(), NOW(), $5, $6, 'invitation', true)
+                VALUES ($1, $2, $3, $4, NOW(), $5, $6, 'invitation', true)
             """
             await conn.execute(
                 session_query,
