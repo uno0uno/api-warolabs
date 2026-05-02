@@ -7,6 +7,16 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+
+# Issue #146: throttle the per-request `sessions.last_activity_at` write so
+# bursty POS traffic (mesa mode, many concurrent cashiers) doesn't pile up
+# UPDATEs on a single hot row. The conditional UPDATE only writes when the
+# stored timestamp is older than this interval — see app/core/security.py
+# get_session_from_request and app/services/auth_service.py get_session_data.
+# Postgres-INTERVAL string; consumed inside an SQL literal.
+SESSION_ACTIVITY_THROTTLE = "30 seconds"
+
+
 async def get_session_token(request: Request) -> str:
     """Extract valid session-token from cookies - validates and cleans up invalid tokens"""
     from app.database import get_db_connection
@@ -314,11 +324,16 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
             if not session_result:
                 return None
 
-            # Update last activity timestamp
-            await conn.execute("""
+            # Update last activity timestamp — throttled to once per
+            # SESSION_ACTIVITY_THROTTLE window. The WHERE filter makes a no-op
+            # round-trip (PK lookup + skip) when the session was already
+            # touched recently, so we don't generate heap/index churn on
+            # every authenticated request.
+            await conn.execute(f"""
                 UPDATE sessions
                 SET last_activity_at = NOW()
                 WHERE id = $1
+                  AND last_activity_at < NOW() - INTERVAL '{SESSION_ACTIVITY_THROTTLE}'
             """, session_token)
 
             return {

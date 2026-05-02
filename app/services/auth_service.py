@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any
 from uuid import UUID
 from fastapi import Request, Response
 from app.database import get_db_connection
-from app.core.security import get_session_token, clear_session_cookie, set_session_cookie, get_client_ip
+from app.core.security import get_session_token, clear_session_cookie, set_session_cookie, get_client_ip, SESSION_ACTIVITY_THROTTLE
 from app.core.exceptions import AuthenticationError
 from app.core.middleware import require_valid_session
 from app.models.auth import User, Session, Tenant, SessionResponse, SwitchTenantResponse, UpdateProfileResponse
@@ -40,9 +40,13 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                 raise AuthenticationError("Session expired")
             
             
-            # Update last activity for analytics tracking (exact logic from warolabs.com)
+            # Update last activity for analytics tracking — throttled to once
+            # per SESSION_ACTIVITY_THROTTLE window so bursty POS traffic doesn't
+            # pile up UPDATEs on the same row (issue #146).
             await conn.execute(
-                'UPDATE sessions SET last_activity_at = NOW() WHERE id = $1',
+                f"UPDATE sessions SET last_activity_at = NOW() "
+                f"WHERE id = $1 "
+                f"  AND last_activity_at < NOW() - INTERVAL '{SESSION_ACTIVITY_THROTTLE}'",
                 session_token
             )
             
