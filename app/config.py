@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     # Cron secret — grace period reminders (issue #62)
     cron_secret: Optional[str] = Field(default=None, alias='CRON_SECRET')
 
+    # Outgoing webhook fired on subscription payment approval (issue #156).
+    # Empty / None → no-op. Set to any URL (Discord, n8n, Slack, custom) to
+    # receive a JSON payload describing each successful renewal.
+    billing_webhook_url: Optional[str] = Field(default=None, alias='BILLING_WEBHOOK_URL')
+
     # api-facturacion microservice — DIAN electronic invoicing (issue #128)
     facturacion_api_url: str = Field(default='http://api-facturacion:8001', alias='FACTURACION_API_URL')
 

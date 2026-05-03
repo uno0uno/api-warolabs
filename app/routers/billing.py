@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from app.config import settings
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
-from app.services import billing_service, billing_email_service, wompi_service
+from app.services import billing_service, billing_email_service, billing_webhook_service, wompi_service
 
 logger = logging.getLogger(__name__)
 
@@ -397,6 +397,21 @@ async def wompi_webhook(
                 tenant_name=tenant_info["tenant_name"],
                 tenant_email=tenant_info["tenant_email"],
                 next_period_end=tenant_info["next_period_end"],
+            )
+            # Outgoing webhook (issue #156). No-op when BILLING_WEBHOOK_URL
+            # is empty. Failures are logged but never block activation.
+            background_tasks.add_task(
+                billing_webhook_service.send_payment_approved_webhook,
+                tenant_id=tenant_info["tenant_id"],
+                subscription_id=tenant_info["subscription_id"],
+                tenant_name=tenant_info["tenant_name"],
+                tenant_email=tenant_info["tenant_email"],
+                plan_name=tenant_info["plan_name"],
+                amount=amount_cents / 100,
+                currency="COP",
+                next_period_end=tenant_info["next_period_end"],
+                gateway_reference=payment_link_id,
+                transaction_id=transaction_id,
             )
 
     elif wompi_status in ("DECLINED", "VOIDED", "ERROR"):
