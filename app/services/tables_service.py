@@ -1657,6 +1657,24 @@ async def discard_table_session(request: Request, table_id: UUID) -> dict:
                     """,
                     session_id,
                 )
+                # Cancel comanda_items pointing at the order_items we are about
+                # to delete. comanda_items.order_item_id has FK NO ACTION, so a
+                # raw DELETE on order_items would raise ForeignKeyViolationError
+                # whenever KDS comandas exist. Same pattern as #158 in clear_tab.
+                await conn.execute(
+                    """
+                    UPDATE comanda_items
+                    SET status = 'cancelled',
+                        cancelled_at = NOW(),
+                        order_item_id = NULL
+                    WHERE order_item_id IN (
+                        SELECT oi.id FROM order_items oi
+                        JOIN orders o ON o.id = oi.order_id
+                        WHERE o.table_session_id = $1 AND o.status = 'pending'
+                    )
+                    """,
+                    session_id,
+                )
                 await conn.execute(
                     """
                     DELETE FROM order_items
