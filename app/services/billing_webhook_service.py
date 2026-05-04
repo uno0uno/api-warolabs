@@ -41,22 +41,42 @@ async def send_payment_approved_webhook(
     if not url:
         return
 
-    payload = {
-        "event": "subscription.payment_approved",
-        "tenant_id": tenant_id,
-        "subscription_id": subscription_id,
-        "tenant_name": tenant_name,
-        "tenant_email": tenant_email,
-        "plan_name": plan_name,
-        "amount": amount,
-        "currency": currency,
-        "next_period_end": next_period_end,
-        "gateway_reference": gateway_reference,
-        "transaction_id": transaction_id,
-    }
-
     # Log only the hostname — the URL may contain a token (Discord, etc.).
     host = urlparse(url).hostname or "<unknown>"
+
+    # Discord webhooks reject arbitrary JSON — they need `content` or `embeds`.
+    # Detect Discord URLs and format accordingly; everything else gets the raw
+    # generic payload.
+    if host and host.endswith("discord.com"):
+        payload = {
+            "embeds": [{
+                "title": "💳 Subscription payment approved",
+                "color": 3066993,
+                "fields": [
+                    {"name": "Tenant", "value": f"{tenant_name} (`{tenant_id}`)", "inline": False},
+                    {"name": "Email", "value": tenant_email or "—", "inline": True},
+                    {"name": "Plan", "value": plan_name, "inline": True},
+                    {"name": "Amount", "value": f"{amount:,.0f} {currency}", "inline": True},
+                    {"name": "Next period end", "value": next_period_end, "inline": True},
+                    {"name": "Gateway ref", "value": f"`{gateway_reference}`", "inline": False},
+                    {"name": "Transaction", "value": f"`{transaction_id}`", "inline": False},
+                ],
+            }],
+        }
+    else:
+        payload = {
+            "event": "subscription.payment_approved",
+            "tenant_id": tenant_id,
+            "subscription_id": subscription_id,
+            "tenant_name": tenant_name,
+            "tenant_email": tenant_email,
+            "plan_name": plan_name,
+            "amount": amount,
+            "currency": currency,
+            "next_period_end": next_period_end,
+            "gateway_reference": gateway_reference,
+            "transaction_id": transaction_id,
+        }
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
