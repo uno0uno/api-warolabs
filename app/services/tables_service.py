@@ -1948,6 +1948,30 @@ async def clear_tab(request: Request, table_id: UUID) -> dict:
                 if not session_row:
                     raise NotFoundError("No open session found for this table")
 
+                # Cancel comanda_items that point at the order_items we're
+                # about to delete. Two reasons:
+                #   1. comanda_items.order_item_id has FK to order_items(id)
+                #      with NO ACTION → DELETE on order_items raises
+                #      ForeignKeyViolationError when KDS comandas exist.
+                #   2. Kitchen needs to see status='cancelled' so they know
+                #      these items were dropped (not lost).
+                # We also NULL-out order_item_id so the FK no longer blocks.
+                await conn.execute(
+                    """
+                    UPDATE comanda_items
+                    SET status = 'cancelled',
+                        cancelled_at = NOW(),
+                        order_item_id = NULL
+                    WHERE order_item_id IN (
+                        SELECT oi.id
+                        FROM order_items oi
+                        JOIN orders o ON o.id = oi.order_id
+                        WHERE o.table_session_id = $1 AND o.status = 'pending'
+                    )
+                    """,
+                    session_row["id"],
+                )
+
                 # Delete order_items first (FK: order_items.order_id → orders.id, no cascade)
                 await conn.execute(
                     """
