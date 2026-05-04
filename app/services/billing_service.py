@@ -770,9 +770,11 @@ async def activate_tenant_subscription(
     """
     row = await conn.fetchrow("""
         SELECT ts.id, ts.tenant_id, ts.billing_cycle,
-               t.name AS tenant_name, t.email AS tenant_email
+               t.name AS tenant_name, t.email AS tenant_email,
+               sp.name AS plan_name
         FROM tenant_subscriptions ts
         JOIN tenants t ON t.id = ts.tenant_id
+        JOIN subscription_plans sp ON sp.id = ts.plan_id
         WHERE ts.gateway_reference = $1
           AND ts.status = 'pending'
     """, gateway_reference)
@@ -812,8 +814,11 @@ async def activate_tenant_subscription(
     )
 
     return {
+        "tenant_id": str(row["tenant_id"]),
+        "subscription_id": str(row["id"]),
         "tenant_name": row["tenant_name"],
         "tenant_email": row["tenant_email"],
+        "plan_name": row["plan_name"],
         "next_period_end": next_period_end,
     }
 
