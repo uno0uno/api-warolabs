@@ -121,7 +121,8 @@ async def get_orders(
     sort_field: str = Query("order_date"),
     sort_direction: str = Query("desc"),
     date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None)
+    date_to: Optional[str] = Query(None),
+    delivery_only: Optional[bool] = Query(None, description="When true, narrow results to orders with delivery_address_id IS NOT NULL"),
 ):
     return await orders_service.get_orders_list(
         request,
@@ -135,7 +136,8 @@ async def get_orders(
         sort_field=sort_field,
         sort_direction=sort_direction,
         date_from=date_from,
-        date_to=date_to
+        date_to=date_to,
+        delivery_only=delivery_only,
     )
 
 

@@ -96,7 +96,8 @@ async def get_orders_list(
     sort_field: str = "order_date",
     sort_direction: str = "desc",
     date_from: Optional[str] = None,
-    date_to: Optional[str] = None
+    date_to: Optional[str] = None,
+    delivery_only: Optional[bool] = None,
 ) -> dict:
     """
     Get list of POS orders with filters and pagination
@@ -162,6 +163,10 @@ async def get_orders_list(
                 where_conditions.append(f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')")
                 params.append(parsed_date_to)
 
+            # Delivery-only filter: composes with POS_LIKE_FILTER, uses partial index idx_orders_delivery_address_id
+            if delivery_only:
+                where_conditions.append("o.delivery_address_id IS NOT NULL")
+
             where_clause = " AND ".join(where_conditions)
 
             # Validate sort field
@@ -204,6 +209,9 @@ async def get_orders_list(
                     o.discount_amount,
                     o.pos_cart_id,
                     o.table_session_id,
+                    o.delivery_address_id,
+                    o.scheduled_time,
+                    o.delivery_instructions,
                     t_meta.is_bar as is_bar,
                     p.id as customer_id,
                     p.name as customer_name,
@@ -251,6 +259,10 @@ async def get_orders_list(
                         "mesa" if row['table_session_id'] else
                         "pos"
                     ),
+                    "delivery_address_id": str(row['delivery_address_id']) if row['delivery_address_id'] else None,
+                    "scheduled_time": row['scheduled_time'].isoformat() if row['scheduled_time'] else None,
+                    "delivery_instructions": row['delivery_instructions'],
+                    "is_delivery": row['delivery_address_id'] is not None,
                     "customer": {
                         "id": str(row['customer_id']) if row['customer_id'] else None,
                         "name": row['customer_name'],
@@ -312,10 +324,24 @@ async def get_order_by_id(
                     o.discount_value,
                     o.pos_cart_id,
                     o.table_session_id,
+                    o.delivery_address_id,
+                    o.scheduled_time,
+                    o.delivery_instructions,
                     t_meta2.is_bar as is_bar,
                     p.id as customer_id,
                     p.name as customer_name,
                     p.phone_number as customer_phone,
+                    -- Hydrated delivery address (NULL if not a delivery, or address was soft-deleted)
+                    ap.address_line1   AS addr_line1,
+                    ap.address_line2   AS addr_line2,
+                    ap.city            AS addr_city,
+                    ap.state           AS addr_state,
+                    ap.postal_code     AS addr_postal_code,
+                    ap.country         AS addr_country,
+                    ap.latitude        AS addr_latitude,
+                    ap.longitude       AS addr_longitude,
+                    ap.label           AS addr_type,
+                    ap.delivery_notes  AS addr_delivery_notes,
                     (
                         SELECT COUNT(*)
                         FROM order_items oi
@@ -325,6 +351,7 @@ async def get_order_by_id(
                 LEFT JOIN profile p ON o.customer_id = p.id
                 LEFT JOIN table_sessions ts_meta2 ON ts_meta2.id = o.table_session_id
                 LEFT JOIN tables t_meta2 ON t_meta2.id = ts_meta2.table_id
+                LEFT JOIN addresses_profile ap ON ap.id = o.delivery_address_id AND ap.deleted_at IS NULL
                 WHERE o.id = $1 AND o.tenant_id = $2
                   AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
 
@@ -374,6 +401,23 @@ async def get_order_by_id(
             except Exception as _e:
                 logger.warning(f"Tax breakdown failed for order {order_id}: {_e}")
 
+            # Hydrate delivery address inline (None if not a delivery, or address was soft-deleted)
+            delivery_address = None
+            if order_row['delivery_address_id'] and order_row['addr_line1'] is not None:
+                delivery_address = {
+                    "id": str(order_row['delivery_address_id']),
+                    "address_line1": order_row['addr_line1'],
+                    "address_line2": order_row['addr_line2'],
+                    "city": order_row['addr_city'],
+                    "state": order_row['addr_state'],
+                    "postal_code": order_row['addr_postal_code'],
+                    "country": order_row['addr_country'],
+                    "latitude": float(order_row['addr_latitude']) if order_row['addr_latitude'] is not None else None,
+                    "longitude": float(order_row['addr_longitude']) if order_row['addr_longitude'] is not None else None,
+                    "address_type": order_row['addr_type'],
+                    "delivery_notes": order_row['addr_delivery_notes'],
+                }
+
             return {
                 "success": True,
                 "data": {
@@ -396,6 +440,11 @@ async def get_order_by_id(
                         "mesa" if order_row['table_session_id'] else
                         "pos"
                     ),
+                    "delivery_address_id": str(order_row['delivery_address_id']) if order_row['delivery_address_id'] else None,
+                    "delivery_address": delivery_address,
+                    "scheduled_time": order_row['scheduled_time'].isoformat() if order_row['scheduled_time'] else None,
+                    "delivery_instructions": order_row['delivery_instructions'],
+                    "is_delivery": order_row['delivery_address_id'] is not None,
                     "customer": {
                         "id": str(order_row['customer_id']) if order_row['customer_id'] else None,
                         "name": order_row['customer_name'],
