@@ -54,8 +54,8 @@ class TenantPublicProfileBase(BaseModel):
     seo_title: Optional[str] = Field(None, max_length=255, description="Meta title for SEO")
     seo_description: Optional[str] = Field(None, description="Meta description for SEO")
 
-    # Future configuration
-    accepts_online_orders: bool = Field(False, description="Whether online orders are enabled (future)")
+    # Online ordering gate — controls storefront catalog ordering AND POS delivery toggle
+    accepts_online_orders: bool = Field(False, description="Whether the tenant accepts online orders. Gates storefront catalog ordering AND the POS delivery toggle.")
     min_order_amount: Decimal = Field(Decimal('0'), description="Minimum order amount (future)")
     estimated_preparation_time: int = Field(30, description="Estimated preparation time in minutes")
 
