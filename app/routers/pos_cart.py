@@ -152,6 +152,9 @@ class CompleteOrderRequest(BaseModel):
     split_mode: bool = Field(False, description="True when using split payment — creates order with payment_status='partial'")
     split_first_amount: float = Field(0.0, description="Amount for the first split payment (used only when split_mode=True)")
     table_session_id: Optional[UUID] = Field(None, description="Bar/table session ID — links the order to a session for source tracking")
+    delivery_address_id: Optional[UUID] = Field(None, description="UUID of an addresses_profile row owned by customer_id. When set, this order is treated as a delivery and the comanda fires with source_type='delivery'.")
+    scheduled_time: Optional[datetime] = Field(None, description="ISO datetime for scheduled delivery. NULL = ASAP. Forward-compatible: v1 UI sends NULL only.")
+    delivery_instructions: Optional[str] = Field(None, description="Free-text notes for the courier (e.g. 'Tocar el timbre 2 veces').")
 
 
 @router.post("/{cart_id}/complete")
@@ -181,6 +184,9 @@ async def complete_order(
         order_data.split_mode,
         order_data.split_first_amount,
         order_data.table_session_id,
+        order_data.delivery_address_id,
+        order_data.scheduled_time,
+        order_data.delivery_instructions,
     )
 
 
