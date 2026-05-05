@@ -6,7 +6,7 @@ import asyncio
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from uuid import UUID
-from datetime import date
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from fastapi import Request
 _BOG = ZoneInfo("America/Bogota")
@@ -753,6 +753,9 @@ async def complete_pos_order(
     split_mode: bool = False,
     split_first_amount: float = 0.0,
     table_session_id: Optional[UUID] = None,
+    delivery_address_id: Optional[UUID] = None,
+    scheduled_time: Optional[datetime] = None,
+    delivery_instructions: Optional[str] = None,
 ) -> dict:
     """
     Complete a POS order:
@@ -782,6 +785,28 @@ async def complete_pos_order(
                     if customer_check and customer_check['phone_number'] == '0000000000':
                         raise APIError(
                             "El pago a crédito requiere un cliente identificado (no anónimo)",
+                            status_code=400
+                        )
+
+                # 0b. Delivery validation: address ownership + soft-delete + non-anonymous customer
+                if delivery_address_id is not None:
+                    delivery_customer_check = await conn.fetchrow(
+                        "SELECT phone_number FROM profile WHERE id = $1",
+                        customer_id
+                    )
+                    if delivery_customer_check and delivery_customer_check['phone_number'] == '0000000000':
+                        raise APIError(
+                            "El domicilio requiere un cliente identificado (no anónimo)",
+                            status_code=400
+                        )
+                    address_ok = await conn.fetchval(
+                        "SELECT 1 FROM addresses_profile WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
+                        delivery_address_id,
+                        customer_id,
+                    )
+                    if not address_ok:
+                        raise APIError(
+                            "Dirección de entrega no válida o no pertenece al cliente",
                             status_code=400
                         )
 
@@ -844,9 +869,10 @@ async def complete_pos_order(
                         user_id, tenant_id, customer_id, payment_method, pos_cart_id,
                         order_date, total_amount, status, payment_status, credit_due_date,
                         payment_method_id, discount_type, discount_value, discount_amount,
-                        table_session_id
+                        table_session_id,
+                        delivery_address_id, scheduled_time, delivery_instructions
                     )
-                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12, $13)
+                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                     RETURNING id, order_number, created_at
                 """
                 order_row = await conn.fetchrow(
@@ -864,6 +890,9 @@ async def complete_pos_order(
                     discount_value,
                     _discount_amount,
                     table_session_id,
+                    delivery_address_id,
+                    scheduled_time,
+                    delivery_instructions,
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']
@@ -1154,11 +1183,12 @@ async def complete_pos_order(
                         tenant_id
                     )
                     if _prof and _prof["comandas_enabled"]:
+                        _is_delivery = delivery_address_id is not None
                         await fire_comandas(
                             order_id=order_id,
                             tenant_id=tenant_id,
-                            source_type='pos',
-                            table_display_name='Mostrador',
+                            source_type='delivery' if _is_delivery else 'pos',
+                            table_display_name=f'Domicilio #{order_number}' if _is_delivery else 'Mostrador',
                             conn=conn
                         )
                 except Exception as _fe:
@@ -1571,19 +1601,24 @@ async def fire_pos_cart(request: Request, cart_id: UUID) -> dict:
 
             # 2. Find the most recent order linked to this cart
             order_row = await conn.fetchrow(
-                "SELECT id FROM orders WHERE pos_cart_id = $1 AND tenant_id = $2 ORDER BY created_at DESC LIMIT 1",
+                "SELECT id, order_number, delivery_address_id "
+                "FROM orders WHERE pos_cart_id = $1 AND tenant_id = $2 "
+                "ORDER BY created_at DESC LIMIT 1",
                 cart_id, tenant_id
             )
             if not order_row:
                 raise APIError("No se encontró una orden asociada a este carrito. Complete la orden primero.", status_code=400)
 
             # 3. Fire
+            _is_delivery = order_row["delivery_address_id"] is not None
             async with conn.transaction():
                 comandas = await fire_comandas(
                     order_id=order_row["id"],
                     tenant_id=tenant_id,
-                    source_type='pos',
-                    table_display_name='Mostrador',
+                    source_type='delivery' if _is_delivery else 'pos',
+                    table_display_name=(
+                        f'Domicilio #{order_row["order_number"]}' if _is_delivery else 'Mostrador'
+                    ),
                     conn=conn
                 )
 
