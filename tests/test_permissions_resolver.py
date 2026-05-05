@@ -79,12 +79,12 @@ class TestDefaultsAndOverrides:
     @pytest.mark.asyncio
     async def test_grant_adds_module_not_in_defaults(self):
         tenant = uuid4()
-        # cashier defaults exclude INVENTORY — grant it
-        rows = [{"module": Module.INVENTORY.value, "granted": True}]
+        # cashier defaults exclude ABASTECIMIENTO — grant it
+        rows = [{"module": Module.ABASTECIMIENTO.value, "granted": True}]
         patcher, _conn = _patch_pool(rows=rows)
         with patcher:
             result = await get_role_modules(tenant, Role.CASHIER)
-        assert Module.INVENTORY in result
+        assert Module.ABASTECIMIENTO in result
         assert DEFAULT_ROLE_MODULES[Role.CASHIER].issubset(result)
 
     @pytest.mark.asyncio
@@ -96,19 +96,19 @@ class TestDefaultsAndOverrides:
         with patcher:
             result = await get_role_modules(tenant, Role.CASHIER)
         assert Module.POS not in result
-        assert Module.TABLES in result  # other defaults preserved
+        assert Module.VENTAS in result  # other defaults preserved
 
     @pytest.mark.asyncio
     async def test_unknown_module_in_db_is_ignored(self):
         tenant = uuid4()
         rows = [
             {"module": "nonexistent_module", "granted": True},
-            {"module": Module.ANALYTICS.value, "granted": True},
+            {"module": Module.ANALITICA.value, "granted": True},
         ]
         patcher, _conn = _patch_pool(rows=rows)
         with patcher:
             result = await get_role_modules(tenant, Role.CASHIER)
-        assert Module.ANALYTICS in result
+        assert Module.ANALITICA in result
         # No crash; other modules unaffected
         assert Module.POS in result
 

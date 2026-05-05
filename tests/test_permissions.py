@@ -25,12 +25,21 @@ class TestRoleEnum:
 
 
 class TestModuleEnum:
-    def test_seventeen_modules_exposed(self):
-        assert len(list(Module)) == 17
+    def test_fourteen_modules_exposed(self):
+        # 14 business-area modules per Epic 2 (#164) contract
+        assert len(list(Module)) == 14
 
     def test_no_duplicate_values(self):
         values = [m.value for m in Module]
         assert len(values) == len(set(values))
+
+    def test_epic_2_contract_modules_present(self):
+        expected = {
+            "pos", "ventas", "despacho", "menu", "operaciones",
+            "abastecimiento", "analitica", "finanzas", "facturacion",
+            "equipo", "integraciones", "mi_plan", "mi_negocio", "eventos",
+        }
+        assert {m.value for m in Module} == expected
 
 
 class TestDefaultRoleModules:
@@ -44,10 +53,18 @@ class TestDefaultRoleModules:
     def test_customer_gets_no_modules(self):
         assert DEFAULT_ROLE_MODULES[Role.CUSTOMER] == frozenset()
 
-    def test_kitchen_only_has_kds_and_orders(self):
-        assert DEFAULT_ROLE_MODULES[Role.KITCHEN] == frozenset({
-            Module.KDS, Module.ORDERS,
+    def test_kitchen_only_has_despacho(self):
+        assert DEFAULT_ROLE_MODULES[Role.KITCHEN] == frozenset({Module.DESPACHO})
+
+    def test_cashier_only_has_pos_and_ventas(self):
+        assert DEFAULT_ROLE_MODULES[Role.CASHIER] == frozenset({
+            Module.POS, Module.VENTAS,
         })
+
+    def test_admin_does_not_get_equipo(self):
+        # EQUIPO (membership/role changes) is owner-only by default
+        assert Module.EQUIPO not in DEFAULT_ROLE_MODULES[Role.ADMIN]
+        assert Module.EQUIPO in DEFAULT_ROLE_MODULES[Role.OWNER]
 
     def test_cashier_subset_of_supervisor(self):
         assert DEFAULT_ROLE_MODULES[Role.CASHIER].issubset(

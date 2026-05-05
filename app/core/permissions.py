@@ -49,30 +49,25 @@ class Role(str, Enum):
 class Module(str, Enum):
     """Functional modules the RBAC layer can gate.
 
-    Grouped by concern: tenant administration, catalog, operations, finance.
-    Total: 17 modules.
+    Grouped by business area as defined in Epic 2 (#164). 14 modules in
+    Spanish to match the language operators use to talk about their own
+    business. Each module corresponds to a router group that Epic 2 will
+    decorate with `require_module()`.
     """
-    # Tenant administration
-    SETTINGS = "settings"
-    BILLING = "billing"
-    MEMBERS = "members"
-    INVITATIONS = "invitations"
-    API_TOKENS = "api_tokens"
-    # Catalog
-    MENU = "menu"
-    CATEGORIES = "categories"
-    INVENTORY = "inventory"
-    PURCHASES = "purchases"
-    SUPPLIERS = "suppliers"
-    # Operations
-    POS = "pos"
-    TABLES = "tables"
-    KDS = "kds"
-    ORDERS = "orders"
-    # Finance & analytics
-    ACCOUNTING = "accounting"
-    SALARIES = "salaries"
-    ANALYTICS = "analytics"
+    POS = "pos"                          # pos_cart, tables, comandas, online_orders
+    VENTAS = "ventas"                    # orders, online_cart
+    DESPACHO = "despacho"                # admin_orders
+    MENU = "menu"                        # menu, products, modifiers, combos, categories, recipe_bases, ingredients
+    OPERACIONES = "operaciones"          # tenant_config, stations
+    ABASTECIMIENTO = "abastecimiento"    # purchases, suppliers, inventory, admin_ingredients, ingredient_purchase_units
+    ANALITICA = "analitica"              # analytics, articles
+    FINANZAS = "finanzas"                # accounting, expenses, salaries, cierre, cartera, credit, payment_methods, financial
+    FACTURACION = "facturacion"          # facturacion, invoices, support_documents
+    EQUIPO = "equipo"                    # tenants, invitations
+    INTEGRACIONES = "integraciones"      # api_tokens, webhooks, public_api
+    MI_PLAN = "mi_plan"                  # billing
+    MI_NEGOCIO = "mi_negocio"            # tenant_config (shared)
+    EVENTOS = "eventos"                  # TBD if/when routers exist
 
 
 _ALL_MODULES: FrozenSet[Module] = frozenset(Module)
@@ -84,43 +79,37 @@ _ALL_MODULES: FrozenSet[Module] = frozenset(Module)
 DEFAULT_ROLE_MODULES: Dict[Role, FrozenSet[Module]] = {
     Role.OWNER: _ALL_MODULES,
     Role.ADMIN: frozenset({
-        Module.SETTINGS,
-        Module.BILLING,
-        Module.INVITATIONS,
-        Module.API_TOKENS,
-        Module.MENU,
-        Module.CATEGORIES,
-        Module.INVENTORY,
-        Module.PURCHASES,
-        Module.SUPPLIERS,
         Module.POS,
-        Module.TABLES,
-        Module.KDS,
-        Module.ORDERS,
-        Module.ACCOUNTING,
-        Module.SALARIES,
-        Module.ANALYTICS,
+        Module.VENTAS,
+        Module.DESPACHO,
+        Module.MENU,
+        Module.OPERACIONES,
+        Module.ABASTECIMIENTO,
+        Module.ANALITICA,
+        Module.FINANZAS,
+        Module.FACTURACION,
+        Module.INTEGRACIONES,
+        Module.MI_PLAN,
+        Module.MI_NEGOCIO,
+        Module.EVENTOS,
+        # No EQUIPO — admin manages operations, not membership/role changes
     }),
     Role.SUPERVISOR: frozenset({
-        Module.MENU,
-        Module.CATEGORIES,
-        Module.INVENTORY,
-        Module.PURCHASES,
-        Module.SUPPLIERS,
         Module.POS,
-        Module.TABLES,
-        Module.KDS,
-        Module.ORDERS,
-        Module.ANALYTICS,
+        Module.VENTAS,
+        Module.DESPACHO,
+        Module.MENU,
+        Module.OPERACIONES,
+        Module.ABASTECIMIENTO,
+        Module.ANALITICA,
+        Module.MI_NEGOCIO,
     }),
     Role.CASHIER: frozenset({
         Module.POS,
-        Module.TABLES,
-        Module.ORDERS,
+        Module.VENTAS,
     }),
     Role.KITCHEN: frozenset({
-        Module.KDS,
-        Module.ORDERS,
+        Module.DESPACHO,
     }),
     Role.CUSTOMER: frozenset(),
 }
