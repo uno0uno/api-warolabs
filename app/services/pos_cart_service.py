@@ -600,12 +600,27 @@ async def add_order_payment(
     amount: float,
     payment_method: str,
     payment_method_id: Optional[str] = None,
+    cash_received: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Add a partial payment to a POS cart's underlying order.
     Supports split payments (Mode 1: by amount, Mode 2: equal split).
     When paid_total >= total_amount, completes the order automatically.
+
+    Issue #524: cash_received captures the bill amount handed by the customer
+    (only valid for payment_method='cash'). Change due is derived as
+    cash_received - amount and is not stored.
     """
+    # Issue #524 — defense in depth: validate cash tender at service layer
+    # so we throw a clean error before the DB CHECK constraint catches it.
+    if cash_received is not None:
+        if payment_method != 'cash':
+            raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
+        if cash_received < amount:
+            raise APIError(
+                f"Efectivo recibido ({cash_received}) debe ser mayor o igual al monto a cobrar ({amount})",
+                status_code=400,
+            )
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -669,14 +684,15 @@ async def add_order_payment(
                 payment_row = await conn.fetchrow(
                     """
                     INSERT INTO order_payments
-                        (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id)
+                        (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id, cash_received)
                     VALUES
-                        ($1, $2, $3, $4, $5::uuid, $6::uuid)
+                        ($1, $2, $3, $4, $5::uuid, $6::uuid, $7)
                     RETURNING id
                     """,
                     order_id, tenant_id, amount, payment_method,
                     payment_method_id,
                     user_id,
+                    cash_received,
                 )
                 payment_id = str(payment_row["id"])
 
@@ -756,6 +772,9 @@ async def complete_pos_order(
     delivery_address_id: Optional[UUID] = None,
     scheduled_time: Optional[datetime] = None,
     delivery_instructions: Optional[str] = None,
+    *,
+    split_first_cash_received: Optional[float] = None,
+    cash_received: Optional[float] = None,
 ) -> dict:
     """
     Complete a POS order:
@@ -864,15 +883,29 @@ async def complete_pos_order(
                 if _discount_amount:
                     _item_subtotals = _distribute_discount(_item_subtotals, _discount_amount)
 
+                # Issue #524 — single-payment cash flow stores cash_received on the orders row.
+                # Split mode keeps it NULL here and stores per-line on order_payments below (step 7a).
+                _orders_cash_received: Optional[float] = None
+                if not split_mode and cash_received is not None:
+                    if payment_method != 'cash':
+                        raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
+                    if cash_received < float(_discounted_total):
+                        raise APIError(
+                            f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total ({_discounted_total})",
+                            status_code=400,
+                        )
+                    _orders_cash_received = cash_received
+
                 order_query = """
                     INSERT INTO orders (
                         user_id, tenant_id, customer_id, payment_method, pos_cart_id,
                         order_date, total_amount, status, payment_status, credit_due_date,
                         payment_method_id, discount_type, discount_value, discount_amount,
                         table_session_id,
-                        delivery_address_id, scheduled_time, delivery_instructions
+                        delivery_address_id, scheduled_time, delivery_instructions,
+                        cash_received
                     )
-                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                     RETURNING id, order_number, created_at
                 """
                 order_row = await conn.fetchrow(
@@ -893,6 +926,7 @@ async def complete_pos_order(
                     delivery_address_id,
                     scheduled_time,
                     delivery_instructions,
+                    _orders_cash_received,
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']
@@ -1229,20 +1263,30 @@ async def complete_pos_order(
                 except Exception as _fe:
                     logger.error(f"Auto-fire failed for POS order {order_id}: {_fe}")
 
-                # 7a. In split mode: record first payment; cart stays active
+                # 7a. In split mode: record first payment; cart stays active.
+                # Issue #524: split_first_cash_received is captured when the first split is cash.
                 _split_paid_total = 0.0
                 _split_remaining = float(_discounted_total)
                 _split_is_complete = False
                 if split_mode and split_first_amount > 0:
+                    if split_first_cash_received is not None:
+                        if payment_method != 'cash':
+                            raise APIError("split_first_cash_received solo aplica a pagos en efectivo", status_code=400)
+                        if split_first_cash_received < split_first_amount:
+                            raise APIError(
+                                f"Efectivo recibido ({split_first_cash_received}) debe ser mayor o igual al monto ({split_first_amount})",
+                                status_code=400,
+                            )
                     await conn.execute(
                         """
                         INSERT INTO order_payments
-                            (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id)
-                        VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid)
+                            (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id, cash_received)
+                        VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, $7)
                         """,
                         order_id, tenant_id, split_first_amount, payment_method,
                         str(payment_method_id) if payment_method_id else None,
                         str(user_id) if user_id else None,
+                        split_first_cash_received,
                     )
                     _split_paid_total = split_first_amount
                     _split_remaining = max(0.0, float(_discounted_total) - split_first_amount)

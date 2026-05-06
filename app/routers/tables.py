@@ -123,12 +123,15 @@ class CloseSessionRequest(BaseModel):
     discount_value: Optional[float] = Field(None, description="10 for 10%, 5000 for $5,000 COP")
     split_mode: bool = Field(False, description="True when using split payment — keeps session open, marks orders as partial")
     split_first_amount: float = Field(0.0, description="Amount for the first split payment (used only when split_mode=True)")
+    split_first_cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for the first split payment when payment_method='cash'. Must be >= split_first_amount.")
+    cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for a single (non-split) cash close. Must be >= total session amount.")
 
 
 class AddSessionPaymentRequest(BaseModel):
     amount: float = Field(..., description="Amount for this partial payment")
     payment_method: str = Field(..., description="cash | card | digital")
     payment_method_id: Optional[UUID] = Field(None, description="UUID of the selected payment_methods row")
+    cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for this payment when payment_method='cash'. Must be >= amount.")
 
 
 @router.post("/{table_id}/close")
@@ -152,6 +155,8 @@ async def close_session(request: Request, table_id: UUID, body: CloseSessionRequ
         body.credit_due_date, body.payment_method_id,
         body.discount_type, body.discount_value,
         body.split_mode, body.split_first_amount,
+        split_first_cash_received=body.split_first_cash_received,
+        cash_received=body.cash_received,
     )
 
 
@@ -165,6 +170,7 @@ async def add_session_payment(request: Request, table_id: UUID, body: AddSession
     return await tables_service.add_session_payment(
         request, table_id,
         body.amount, body.payment_method, body.payment_method_id,
+        cash_received=body.cash_received,
     )
 
 
