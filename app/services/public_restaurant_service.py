@@ -28,19 +28,28 @@ async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
     """
     try:
         async with get_db_connection() as conn:
+            # JOIN tenant_subscriptions to gate out tenants without an active
+            # paid subscription. INNER JOIN drops tenants with no row at all
+            # (the "free / never paid" case). Visible statuses follow the
+            # canonical predicate used elsewhere in billing_service: 'active'
+            # plus 'past_due' (any age — only flips dark when billing actually
+            # marks the row as 'cancelled').
             query = """
                 SELECT
-                    id, tenant_id, slug, is_active,
-                    display_name, description, logo_url, banner_url,
-                    phone_number, email, address,
-                    city, neighborhood, latitude, longitude,
-                    business_hours, social_media,
-                    seo_title, seo_description,
-                    accepts_online_orders, min_order_amount, estimated_preparation_time,
-                    is_manually_open,
-                    created_at, updated_at
-                FROM tenant_public_profiles
-                WHERE slug = $1 AND is_active = true
+                    tpp.id, tpp.tenant_id, tpp.slug, tpp.is_active,
+                    tpp.display_name, tpp.description, tpp.logo_url, tpp.banner_url,
+                    tpp.phone_number, tpp.email, tpp.address,
+                    tpp.city, tpp.neighborhood, tpp.latitude, tpp.longitude,
+                    tpp.business_hours, tpp.social_media,
+                    tpp.seo_title, tpp.seo_description,
+                    tpp.accepts_online_orders, tpp.min_order_amount, tpp.estimated_preparation_time,
+                    tpp.is_manually_open,
+                    tpp.created_at, tpp.updated_at
+                FROM tenant_public_profiles tpp
+                JOIN tenant_subscriptions ts ON ts.tenant_id = tpp.tenant_id
+                WHERE tpp.slug = $1
+                  AND tpp.is_active = true
+                  AND ts.status IN ('active', 'past_due')
             """
 
             row = await conn.fetchrow(query, slug)
@@ -97,11 +106,16 @@ async def get_menu_by_slug(
     """
     try:
         async with get_db_connection() as conn:
-            # 1. Get tenant_id from profile
+            # 1. Get tenant_id from profile (gated by billing subscription —
+            # mirror the predicate from get_profile_by_slug so a hidden tenant
+            # cannot leak menu data either).
             profile_query = """
-                SELECT tenant_id, display_name
-                FROM tenant_public_profiles
-                WHERE slug = $1 AND is_active = true
+                SELECT tpp.tenant_id, tpp.display_name
+                FROM tenant_public_profiles tpp
+                JOIN tenant_subscriptions ts ON ts.tenant_id = tpp.tenant_id
+                WHERE tpp.slug = $1
+                  AND tpp.is_active = true
+                  AND ts.status IN ('active', 'past_due')
             """
             profile = await conn.fetchrow(profile_query, slug)
 
@@ -591,22 +605,27 @@ async def list_restaurants(city: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     try:
         async with get_db_connection() as conn:
+            # Gate by billing: only tenants with an active or past_due
+            # subscription appear in the public directory. INNER JOIN drops
+            # tenants with no subscription row (free / never paid).
             query = """
                 SELECT
-                    id, tenant_id, slug, is_active,
-                    display_name, description, logo_url, banner_url,
-                    phone_number, email, address,
-                    city, neighborhood,
-                    is_manually_open, business_hours,
-                    created_at, updated_at
-                FROM tenant_public_profiles
-                WHERE is_active = true
+                    tpp.id, tpp.tenant_id, tpp.slug, tpp.is_active,
+                    tpp.display_name, tpp.description, tpp.logo_url, tpp.banner_url,
+                    tpp.phone_number, tpp.email, tpp.address,
+                    tpp.city, tpp.neighborhood,
+                    tpp.is_manually_open, tpp.business_hours,
+                    tpp.created_at, tpp.updated_at
+                FROM tenant_public_profiles tpp
+                JOIN tenant_subscriptions ts ON ts.tenant_id = tpp.tenant_id
+                WHERE tpp.is_active = true
+                  AND ts.status IN ('active', 'past_due')
             """
             params = []
 
             # Add city filter if provided
             if city:
-                query += " AND city = $1"
+                query += " AND tpp.city = $1"
                 params.append(city)
 
             query += " ORDER BY display_name ASC"
