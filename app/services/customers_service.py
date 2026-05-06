@@ -404,12 +404,16 @@ async def search_customers_by_query(
         async with get_db_connection() as conn:
             # Match against name, phone, OR fiscal_id (NIT/cédula) so users
             # can find a customer by typing the document number.
+            # Also return fiscal_id + fiscal_id_type so the UI can display
+            # the document that matched.
             query = """
                 SELECT DISTINCT
                     p.id,
                     p.name,
                     p.phone_number,
-                    p.email
+                    p.email,
+                    p.fiscal_id,
+                    p.fiscal_id_type
                 FROM profile p
                 JOIN tenant_members tm ON tm.user_id = p.id
                 WHERE tm.tenant_id = $1
@@ -430,7 +434,9 @@ async def search_customers_by_query(
                     id=row['id'],
                     name=row['name'],
                     phone_number=row['phone_number'],
-                    email=row['email']
+                    email=row['email'],
+                    fiscal_id=row['fiscal_id'],
+                    fiscal_id_type=row['fiscal_id_type'],
                 )
                 for row in rows
             ]

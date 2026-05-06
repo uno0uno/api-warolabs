@@ -70,11 +70,17 @@ class CustomerSearchResponse(BaseModel):
 
 
 class CustomerSummary(BaseModel):
-    """Minimal customer data for search results"""
+    """Minimal customer data for search results.
+    Includes fiscal_id so the POS search results can show the cédula/NIT
+    that matched, helping the cashier confirm the right customer when
+    several share a similar name (Issue #526 follow-up).
+    """
     id: UUID
     name: Optional[str] = None
     phone_number: Optional[str] = None
     email: Optional[str] = None
+    fiscal_id: Optional[str] = None
+    fiscal_id_type: Optional[str] = None
 
 
 class CustomerUpdate(FiscalDataMixin):
