@@ -15,7 +15,7 @@ class AddressProfileCreate(BaseModel):
     address_line2: Optional[str] = Field(None, max_length=200)
     city: str = Field(..., min_length=2, max_length=100)
     state: str = Field(..., min_length=2, max_length=100)
-    postal_code: str = Field(..., min_length=4, max_length=20)
+    postal_code: Optional[str] = Field(None, max_length=20)
     country: str = Field(default="CO", max_length=2)
     latitude: Optional[float] = Field(None, ge=-90, le=90)
     longitude: Optional[float] = Field(None, ge=-180, le=180)
@@ -30,7 +30,7 @@ class AddressProfileUpdate(BaseModel):
     address_line2: Optional[str] = Field(None, max_length=200)
     city: Optional[str] = Field(None, min_length=2, max_length=100)
     state: Optional[str] = Field(None, min_length=2, max_length=100)
-    postal_code: Optional[str] = Field(None, min_length=4, max_length=20)
+    postal_code: Optional[str] = Field(None, max_length=20)
     country: Optional[str] = Field(None, max_length=2)
     latitude: Optional[float] = Field(None, ge=-90, le=90)
     longitude: Optional[float] = Field(None, ge=-180, le=180)
@@ -47,7 +47,7 @@ class AddressProfileResponse(BaseModel):
     address_line2: Optional[str]
     city: str
     state: str
-    postal_code: str
+    postal_code: Optional[str]
     country: str
     latitude: Optional[float]
     longitude: Optional[float]
