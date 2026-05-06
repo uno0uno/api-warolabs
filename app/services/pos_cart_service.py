@@ -899,6 +899,41 @@ async def complete_pos_order(
 
                 logger.info(f"Created order #{order_number} from cart {cart_id}")
 
+                # 3b. Bar session rotation: when this POS sale was attached to a bar
+                # table session, close it and open a new one so the next entry shows a
+                # clean tab. Mirrors the rotation logic in tables_service.close_session
+                # for the mesa-as-bar path. Stays inside the existing transaction so
+                # the rotation is atomic with the order persistence.
+                new_table_session_id: Optional[UUID] = None
+                if table_session_id is not None:
+                    bar_check = await conn.fetchrow(
+                        """
+                        SELECT t.id AS table_id, t.is_bar
+                          FROM table_sessions ts
+                          JOIN tables t ON t.id = ts.table_id
+                         WHERE ts.id = $1 AND ts.tenant_id = $2
+                        """,
+                        table_session_id, tenant_id,
+                    )
+                    if bar_check and bar_check['is_bar']:
+                        await conn.execute(
+                            "UPDATE table_sessions SET closed_at = now() WHERE id = $1",
+                            table_session_id,
+                        )
+                        new_session_row = await conn.fetchrow(
+                            """
+                            INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id)
+                            VALUES ($1, $2, NULL)
+                            RETURNING id
+                            """,
+                            bar_check['table_id'], tenant_id,
+                        )
+                        new_table_session_id = new_session_row['id']
+                        logger.info(
+                            f"Bar session rotated on POS complete: closed {table_session_id}, "
+                            f"opened {new_table_session_id} for table {bar_check['table_id']}"
+                        )
+
                 # 4. Copy cart items to order_items
                 for i, item in enumerate(items):
                     _da = _item_subtotals[i]['discount_allocated'] if _discount_amount else None
@@ -1326,6 +1361,7 @@ async def complete_pos_order(
                         "standard_tax": _standard_tax,
                         "liquor_tax": _liquor_tax,
                         "standard_tax_label": _standard_tax_label,
+                        "next_table_session_id": str(new_table_session_id) if new_table_session_id else None,
                         # Split mode extras
                         **({"paid_total": _split_paid_total, "remaining": _split_remaining, "is_complete": _split_is_complete, "payment_id": None} if split_mode else {}),
                     }
