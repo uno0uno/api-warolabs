@@ -151,6 +151,8 @@ class CompleteOrderRequest(BaseModel):
     discount_value: Optional[float] = Field(None, description="10 for 10%, 5000 for $5,000 COP")
     split_mode: bool = Field(False, description="True when using split payment — creates order with payment_status='partial'")
     split_first_amount: float = Field(0.0, description="Amount for the first split payment (used only when split_mode=True)")
+    split_first_cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over by the customer for the first split payment. NULL for non-cash methods. Must be >= split_first_amount when set.")
+    cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for a single (non-split) cash payment. NULL for non-cash methods. Must be >= total_amount.")
     table_session_id: Optional[UUID] = Field(None, description="Bar/table session ID — links the order to a session for source tracking")
     delivery_address_id: Optional[UUID] = Field(None, description="UUID of an addresses_profile row owned by customer_id. When set, this order is treated as a delivery and the comanda fires with source_type='delivery'.")
     scheduled_time: Optional[datetime] = Field(None, description="ISO datetime for scheduled delivery. NULL = ASAP. Forward-compatible: v1 UI sends NULL only.")
@@ -187,6 +189,8 @@ async def complete_order(
         order_data.delivery_address_id,
         order_data.scheduled_time,
         order_data.delivery_instructions,
+        split_first_cash_received=order_data.split_first_cash_received,
+        cash_received=order_data.cash_received,
     )
 
 
@@ -223,6 +227,7 @@ class AddPaymentRequest(BaseModel):
     amount: float = Field(..., gt=0, description="Amount for this payment")
     payment_method: str = Field(..., description="cash | card | digital | credit or custom slug")
     payment_method_id: Optional[str] = Field(None, description="UUID of payment_methods row")
+    cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over by the customer. NULL for non-cash. Must be >= amount when set.")
 
 
 class AddPaymentResponse(BaseModel):
@@ -279,4 +284,5 @@ async def add_cart_payment(
         amount=payment_data.amount,
         payment_method=payment_data.payment_method,
         payment_method_id=payment_data.payment_method_id,
+        cash_received=payment_data.cash_received,
     )

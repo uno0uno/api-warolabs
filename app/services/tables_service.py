@@ -539,7 +539,7 @@ async def open_session(request: Request, table_id: UUID) -> dict:
         raise APIError(f"Error opening session: {e}", status_code=500)
 
 
-async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None, split_mode: bool = False, split_first_amount: float = 0.0) -> dict:
+async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None, split_mode: bool = False, split_first_amount: float = 0.0, *, split_first_cash_received: Optional[float] = None, cash_received: Optional[float] = None) -> dict:
     """
     Close the active session for a table.
     If payment_method is provided, marks all pending orders as completed with that payment method.
@@ -681,6 +681,34 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         f"discount_amount={_discount_amount}) for session {session_row['id']}"
                     )
 
+                    # Issue #524 — single-payment (non-split) cash close: attach cash_received
+                    # to the FIRST completed order in the session (others stay NULL). Cierre
+                    # SUM(cash_received) over a period reconstructs total cash received correctly.
+                    if not split_mode and cash_received is not None:
+                        if payment_method != 'cash':
+                            raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
+                        session_total_for_check = await conn.fetchval(
+                            "SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE table_session_id = $1 AND status = 'completed'",
+                            session_row["id"],
+                        )
+                        if cash_received < float(session_total_for_check or 0):
+                            raise APIError(
+                                f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total de la sesión ({session_total_for_check})",
+                                status_code=400,
+                            )
+                        await conn.execute(
+                            """
+                            UPDATE orders SET cash_received = $1
+                             WHERE id = (
+                               SELECT id FROM orders
+                                WHERE table_session_id = $2 AND status = 'completed'
+                                ORDER BY created_at LIMIT 1
+                             )
+                            """,
+                            cash_received,
+                            session_row["id"],
+                        )
+
                     # GL journal entries — one per order, atomic with session close
                     # Failure is swallowed: GL must never block the close
                     try:
@@ -713,8 +741,20 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         logger.error(f"GL entries failed for session {session_row['id']}: {_gl_exc}")
 
                     # In split_mode: record first payment proportionally across session orders
-                    # and keep session open
+                    # and keep session open.
+                    # Issue #524: validate split_first_cash_received once, then attach the full
+                    # cash_received to the FIRST order's row only (others stay NULL). Cierre sums
+                    # cash_received over the period — putting it once is correct and avoids the
+                    # CHECK (cash_received >= amount) constraint violating on proportionally-split rows.
                     if split_mode and split_first_amount > 0:
+                        if split_first_cash_received is not None:
+                            if payment_method != 'cash':
+                                raise APIError("split_first_cash_received solo aplica a pagos en efectivo", status_code=400)
+                            if split_first_cash_received < split_first_amount:
+                                raise APIError(
+                                    f"Efectivo recibido ({split_first_cash_received}) debe ser mayor o igual al monto ({split_first_amount})",
+                                    status_code=400,
+                                )
                         user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
                         order_rows = await conn.fetch(
                             "SELECT id, total_amount FROM orders WHERE table_session_id = $1 AND status = 'completed' ORDER BY created_at",
@@ -729,15 +769,18 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 else:
                                     portion = round(split_first_amount * float(ord_row["total_amount"]) / session_total)
                                     remaining_payment -= portion
+                                # Issue #524: cash_received only on the first row (sum still correct over period)
+                                row_cash_received = split_first_cash_received if i == 0 else None
                                 await conn.execute(
                                     """
                                     INSERT INTO order_payments
-                                        (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id)
-                                    VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid)
+                                        (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id, cash_received)
+                                    VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, $7)
                                     """,
                                     ord_row["id"], tenant_id, portion, payment_method,
                                     str(payment_method_id) if payment_method_id else None,
                                     str(user_id) if user_id else None,
+                                    row_cash_received,
                                 )
 
                 else:
@@ -912,12 +955,26 @@ async def add_session_payment(
     amount: float,
     payment_method: str,
     payment_method_id: Optional[UUID] = None,
+    cash_received: Optional[float] = None,
 ) -> dict:
     """
     Add a partial payment to an open mesa session that is in split payment mode.
     Distributes the payment proportionally across session orders.
     When total paid >= session total, closes the session and marks all orders as paid.
+
+    Issue #524: cash_received captures the bill amount handed by the customer for
+    cash payment lines. Stored on the FIRST proportional row only (NULL on the
+    rest); cierre SUM(cash_received) over a period yields the correct total.
     """
+    # Issue #524 — defense-in-depth validation
+    if cash_received is not None:
+        if payment_method != 'cash':
+            raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
+        if cash_received < amount:
+            raise APIError(
+                f"Efectivo recibido ({cash_received}) debe ser mayor o igual al monto ({amount})",
+                status_code=400,
+            )
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -955,15 +1012,18 @@ async def add_session_payment(
                     else:
                         portion = round(amount * float(ord_row["total_amount"]) / session_total)
                         remaining_payment -= portion
+                    # Issue #524 — cash_received only on the first row (sum still correct over period)
+                    row_cash_received = cash_received if i == 0 else None
                     await conn.execute(
                         """
                         INSERT INTO order_payments
-                            (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id)
-                        VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid)
+                            (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id, cash_received)
+                        VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, $7)
                         """,
                         ord_row["id"], tenant_id, portion, payment_method,
                         str(payment_method_id) if payment_method_id else None,
                         str(user_id) if user_id else None,
+                        row_cash_received,
                     )
 
                 # Recompute paid total
