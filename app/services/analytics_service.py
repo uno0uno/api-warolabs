@@ -93,19 +93,22 @@ async def _get_menu_analysis_for_tenant(
             base_recipe_costs AS (
                  SELECT
                     p.id as product_id,
+                    -- Issue #517: multiply by pbr.quantity (per-product recipe multiplier)
                     SUM(
-                        CASE
-                            -- Direct match
-                            WHEN (brt.unit = lic.purchase_unit)
-                              OR (brt.unit IN ('g', 'gr') AND lic.purchase_unit IN ('g', 'gr'))
-                              OR (brt.unit IN ('u', 'und') AND lic.purchase_unit IN ('u', 'und'))
-                            THEN brt.base_quantity * lic.unit_cost
-                            -- Conversion
-                            WHEN lic.conversion_factor > 0 THEN
-                                brt.base_quantity * (lic.unit_cost / lic.conversion_factor)
-                            -- Fallback
-                            ELSE brt.base_quantity * i.costo_unitario
-                        END
+                        pbr.quantity * (
+                            CASE
+                                -- Direct match
+                                WHEN (brt.unit = lic.purchase_unit)
+                                  OR (brt.unit IN ('g', 'gr') AND lic.purchase_unit IN ('g', 'gr'))
+                                  OR (brt.unit IN ('u', 'und') AND lic.purchase_unit IN ('u', 'und'))
+                                THEN brt.base_quantity * lic.unit_cost
+                                -- Conversion
+                                WHEN lic.conversion_factor > 0 THEN
+                                    brt.base_quantity * (lic.unit_cost / lic.conversion_factor)
+                                -- Fallback
+                                ELSE brt.base_quantity * i.costo_unitario
+                            END
+                        )
                     ) as total_base_cost
                 FROM product p
                 JOIN product_base_recipes pbr ON p.id = pbr.product_id
@@ -361,19 +364,22 @@ async def _get_food_cost_for_tenant(
             base_recipe_costs AS (
                  SELECT
                     p.id as product_id,
+                    -- Issue #517: multiply by pbr.quantity (per-product recipe multiplier)
                     SUM(
-                        CASE
-                            -- Direct match
-                            WHEN (brt.unit = lic.purchase_unit)
-                              OR (brt.unit IN ('g', 'gr') AND lic.purchase_unit IN ('g', 'gr'))
-                              OR (brt.unit IN ('u', 'und') AND lic.purchase_unit IN ('u', 'und'))
-                            THEN brt.base_quantity * lic.unit_cost
-                            -- Conversion
-                            WHEN lic.conversion_factor > 0 THEN
-                                brt.base_quantity * (lic.unit_cost / lic.conversion_factor)
-                            -- Fallback
-                            ELSE brt.base_quantity * i.costo_unitario
-                        END
+                        pbr.quantity * (
+                            CASE
+                                -- Direct match
+                                WHEN (brt.unit = lic.purchase_unit)
+                                  OR (brt.unit IN ('g', 'gr') AND lic.purchase_unit IN ('g', 'gr'))
+                                  OR (brt.unit IN ('u', 'und') AND lic.purchase_unit IN ('u', 'und'))
+                                THEN brt.base_quantity * lic.unit_cost
+                                -- Conversion
+                                WHEN lic.conversion_factor > 0 THEN
+                                    brt.base_quantity * (lic.unit_cost / lic.conversion_factor)
+                                -- Fallback
+                                ELSE brt.base_quantity * i.costo_unitario
+                            END
+                        )
                     ) as total_base_cost
                 FROM product p
                 JOIN product_base_recipes pbr ON p.id = pbr.product_id

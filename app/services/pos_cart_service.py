@@ -1100,10 +1100,10 @@ async def complete_pos_order(
 
                         UNION ALL
 
-                        -- Ingredients from recipe bases
+                        -- Ingredients from recipe bases (Issue #517: multiply by pbr.quantity)
                         SELECT
                             brt.ingredient_id,
-                            brt.base_quantity as quantity,
+                            brt.base_quantity * pbr.quantity AS quantity,
                             brt.unit,
                             i.name as ingredient_name
                         FROM product_base_recipes pbr
@@ -1495,11 +1495,11 @@ async def _capture_order_item_ingredients(
         UNION ALL
 
         SELECT
-            brt.id::text       AS source_id,
-            'PRODUCT_RECIPE'   AS source_type,
+            brt.id::text                              AS source_id,
+            'PRODUCT_RECIPE'                          AS source_type,
             brt.ingredient_id,
-            i.name             AS ingredient_name,
-            brt.base_quantity  AS quantity,
+            i.name                                    AS ingredient_name,
+            brt.base_quantity * pbr.quantity          AS quantity,  -- Issue #517 multiplier
             brt.unit
         FROM product_base_recipes pbr
         JOIN base_recipe_templates brt ON brt.product_base_type_id = pbr.product_base_type_id

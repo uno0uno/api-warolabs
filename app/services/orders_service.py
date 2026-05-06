@@ -1816,10 +1816,10 @@ async def delete_order_item(
 
                     UNION ALL
 
-                    -- Ingredients from recipe bases
+                    -- Ingredients from recipe bases (Issue #517: multiply by pbr.quantity)
                     SELECT
                         brt.ingredient_id,
-                        brt.base_quantity as quantity,
+                        brt.base_quantity * pbr.quantity as quantity,
                         brt.unit,
                         i.name as ingredient_name
                     FROM product_base_recipes pbr
@@ -1919,7 +1919,8 @@ _INGREDIENTS_QUERY = """
     JOIN ingredients i ON pr.ingredient_id = i.id
     WHERE pr.product_id = $1
     UNION ALL
-    SELECT brt.ingredient_id, brt.base_quantity AS quantity, brt.unit, i.name AS ingredient_name
+    -- Issue #517: multiply by pbr.quantity
+    SELECT brt.ingredient_id, brt.base_quantity * pbr.quantity AS quantity, brt.unit, i.name AS ingredient_name
     FROM product_base_recipes pbr
     JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
     JOIN ingredients i ON brt.ingredient_id = i.id
@@ -2601,7 +2602,8 @@ async def create_manual_order(
 
                         UNION ALL
 
-                        SELECT brt.ingredient_id, brt.base_quantity AS quantity, brt.unit, i.name AS ingredient_name
+                        -- Issue #517: multiply by pbr.quantity
+                        SELECT brt.ingredient_id, brt.base_quantity * pbr.quantity AS quantity, brt.unit, i.name AS ingredient_name
                         FROM product_base_recipes pbr
                         JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
                         JOIN ingredients i ON brt.ingredient_id = i.id

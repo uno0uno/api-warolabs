@@ -46,7 +46,8 @@ async def _deduct_stock_for_order(conn, order_id: UUID, tenant_id, changed_by) -
 
         UNION ALL
 
-        SELECT brt.ingredient_id, brt.base_quantity AS quantity, brt.unit, i.name AS ingredient_name
+        -- Issue #517: multiply by pbr.quantity
+        SELECT brt.ingredient_id, brt.base_quantity * pbr.quantity AS quantity, brt.unit, i.name AS ingredient_name
         FROM product_base_recipes pbr
         JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
         JOIN ingredients i ON brt.ingredient_id = i.id
