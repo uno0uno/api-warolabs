@@ -594,6 +594,86 @@ async def update_cart_total(conn, cart_id: UUID):
     await conn.execute(total_query, cart_id)
 
 
+async def get_cart_tax_preview(
+    request: Request,
+    cart_id: UUID,
+    discount_amount: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Issue #526 — preview the tax breakdown for an in-flight POS cart.
+
+    Mirrors the mesa preview at tables_service.get_current_session (which
+    aggregates order_items by tax_category) but sources rows from
+    pos_cart_items because POS counter/bar carts have no orders yet.
+    Reuses the shared `_compute_tax_breakdown` helper so the sidebar
+    always agrees with the cobrar response.
+
+    pos_cart_items.subtotal already includes modifier prices (computed in
+    create_cart_with_batch_items: `subtotal = (unit_price + modifiers_total) * quantity`),
+    so no extra JOIN to pos_cart_item_modifiers is needed.
+
+    Args:
+        cart_id: the active POS cart UUID.
+        discount_amount: optional in-flight discount applied client-side
+            but used here to compute taxes on the post-discount base.
+
+    Returns:
+        {"standard_tax": float, "liquor_tax": float, "standard_tax_label": str}
+    """
+    # Local imports keep cierre / orders helpers cycle-free at module import
+    from app.services.orders_service import _compute_tax_breakdown
+
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                COALESCE(p.tax_category, 'standard') AS tax_category,
+                COALESCE(SUM(pci.subtotal), 0) AS subtotal
+              FROM pos_cart_items pci
+              JOIN product p ON p.id = pci.product_id
+             WHERE pci.cart_id = $1
+             GROUP BY COALESCE(p.tax_category, 'standard')
+            """,
+            cart_id,
+        )
+
+        # Empty cart short-circuit: helper expects rows; return zero shape directly.
+        if not rows:
+            return {
+                "standard_tax": 0.0,
+                "liquor_tax": 0.0,
+                "standard_tax_label": "Impuesto",
+            }
+
+        # Apply discount proportionally before tax breakdown — mirrors
+        # close_session/complete_pos_order behaviour. Guard against discount
+        # >= total (frontend should clamp, but defense in depth).
+        tax_rows: List[dict] = [{"tax_category": r["tax_category"], "subtotal": float(r["subtotal"])} for r in rows]
+        if discount_amount is not None and discount_amount > 0:
+            total_subtotal = sum(r["subtotal"] for r in tax_rows)
+            if total_subtotal > 0:
+                effective_discount = min(float(discount_amount), total_subtotal)
+                factor = 1.0 - (effective_discount / total_subtotal)
+                tax_rows = [
+                    {"tax_category": r["tax_category"], "subtotal": max(0.0, r["subtotal"] * factor)}
+                    for r in tax_rows
+                ]
+
+        tax_config = await _get_tenant_tax_config(conn, tenant_id)
+        std_tax, liq_tax, tax_label = _compute_tax_breakdown(tax_rows, tax_config)
+
+    return {
+        "standard_tax": float(std_tax),
+        "liquor_tax": float(liq_tax),
+        "standard_tax_label": tax_label,
+    }
+
+
 async def add_order_payment(
     request: Request,
     cart_id: str,
