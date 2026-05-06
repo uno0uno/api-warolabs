@@ -2,7 +2,7 @@
 POS Cart Router
 Endpoints for managing POS cart persistence
 """
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Query
 from typing import List, Optional, Any, Dict
 from uuid import UUID
 from datetime import date, datetime
@@ -279,4 +279,26 @@ async def add_cart_payment(
         amount=payment_data.amount,
         payment_method=payment_data.payment_method,
         payment_method_id=payment_data.payment_method_id,
+    )
+
+
+@router.get("/{cart_id}/tax-preview")
+async def get_cart_tax_preview(
+    request: Request,
+    cart_id: UUID,
+    discount_amount: Optional[float] = Query(
+        None,
+        ge=0,
+        description="Issue #526 — in-flight discount applied client-side, used to compute taxes on the post-discount base.",
+    ),
+):
+    """
+    Return the running tax breakdown for an in-flight POS cart.
+
+    Mirrors the shape of the mesa preview returned by GET /api/tables/{id}/current.
+    Used by the cart sidebar in counter / bar mode so it shows live IVA / IPC
+    instead of a hardcoded "Impuestos (0%)".
+    """
+    return await pos_cart_service.get_cart_tax_preview(
+        request, cart_id, discount_amount,
     )
