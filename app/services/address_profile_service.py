@@ -23,7 +23,7 @@ async def create_address(
     address_line1: str,
     city: str,
     state: str,
-    postal_code: str,
+    postal_code: Optional[str] = None,
     address_line2: Optional[str] = None,
     country: str = "CO",
     latitude: Optional[float] = None,
@@ -35,7 +35,10 @@ async def create_address(
     """
     Create new delivery address for customer (PUBLIC)
     If is_default=True, unsets all other addresses as default
+    Postal code is optional — coerce empty strings to None for DB consistency.
     """
+    # Coerce empty postal_code to None so the column stores NULL, not "".
+    postal_code = postal_code.strip() if postal_code and postal_code.strip() else None
     try:
         async with get_db_connection() as conn:
             async with conn.transaction():
@@ -167,8 +170,14 @@ async def update_address(
 ) -> dict:
     """
     Update existing address (PUBLIC)
-    Validates ownership and handles is_default flag
+    Validates ownership and handles is_default flag.
+    If postal_code arrives as empty string, coerce to None so the DB stores NULL.
     """
+    if 'postal_code' in update_data:
+        pc = update_data['postal_code']
+        if isinstance(pc, str):
+            pc = pc.strip()
+            update_data['postal_code'] = pc if pc else None
     try:
         async with get_db_connection() as conn:
             async with conn.transaction():

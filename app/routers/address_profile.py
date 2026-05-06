@@ -25,7 +25,7 @@ async def create_address(address: AddressProfileCreate):
     - **address_line2**: Apartment, suite, etc (optional)
     - **city**: City name (required)
     - **state**: State/Department (required)
-    - **postal_code**: Postal/ZIP code (required)
+    - **postal_code**: Postal/ZIP code (optional)
     - **country**: ISO country code (default: CO)
     - **latitude/longitude**: GPS coordinates (optional)
     - **is_default**: Set as default address (default: false)
