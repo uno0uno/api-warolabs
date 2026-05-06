@@ -1476,7 +1476,8 @@ async def add_tab_items(
                             JOIN ingredients i ON i.id = pr.ingredient_id
                             WHERE pr.product_id = $1
                             UNION ALL
-                            SELECT brt.ingredient_id, brt.base_quantity AS quantity, brt.unit, i.name as ingredient_name
+                            -- Issue #517: multiply by pbr.quantity
+                            SELECT brt.ingredient_id, brt.base_quantity * pbr.quantity AS quantity, brt.unit, i.name as ingredient_name
                             FROM product_base_recipes pbr
                             JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
                             JOIN ingredients i ON i.id = brt.ingredient_id

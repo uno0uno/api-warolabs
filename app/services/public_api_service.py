@@ -935,13 +935,14 @@ async def get_menu_products(
                         for ing in ingredients_rows
                     ]
 
-                # Get recipe bases with their ingredients
+                # Get recipe bases with their ingredients (Issue #517: include per-product quantity)
                 if include_recipe_bases:
                     recipe_bases_query = """
                         SELECT
                             pbt.id,
                             pbt.name,
-                            pbt.description
+                            pbt.description,
+                            pbr.quantity AS recipe_quantity
                         FROM product_base_recipes pbr
                         JOIN product_base_types pbt ON pbr.product_base_type_id = pbt.id
                         WHERE pbr.product_id = $1
@@ -968,6 +969,7 @@ async def get_menu_products(
                             "id": str(rb['id']),
                             "name": rb['name'],
                             "description": rb['description'],
+                            "recipeQuantity": float(rb['recipe_quantity']),
                             "ingredients": [
                                 {
                                     "id": str(rbi['ingredient_id']),

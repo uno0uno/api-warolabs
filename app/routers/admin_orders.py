@@ -130,11 +130,11 @@ async def backfill_order_ingredients(
                 UNION ALL
 
                 SELECT
-                    brt.id::text      AS source_id,
-                    'PRODUCT_RECIPE'  AS source_type,
+                    brt.id::text                              AS source_id,
+                    'PRODUCT_RECIPE'                          AS source_type,
                     brt.ingredient_id,
-                    i.name            AS ingredient_name,
-                    brt.base_quantity AS quantity,
+                    i.name                                    AS ingredient_name,
+                    brt.base_quantity * pbr.quantity          AS quantity,  -- Issue #517 multiplier
                     brt.unit
                 FROM product_base_recipes pbr
                 JOIN base_recipe_templates brt ON brt.product_base_type_id = pbr.product_base_type_id

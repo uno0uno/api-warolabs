@@ -562,12 +562,16 @@ async def get_product_snapshot(conn, product_id: UUID, tenant_id: UUID) -> Optio
         """, product_id)
         snapshot['ingredients'] = [dict(i) for i in ingredients]
 
-        # Recipe bases
+        # Recipe bases (Issue #517: snapshot includes per-product quantity)
         bases = await conn.fetch("""
-            SELECT product_base_type_id
+            SELECT product_base_type_id, quantity
             FROM product_base_recipes WHERE product_id = $1
         """, product_id)
         snapshot['recipe_base_ids'] = [b['product_base_type_id'] for b in bases]
+        snapshot['recipe_bases'] = [
+            {'recipe_base_id': b['product_base_type_id'], 'quantity': b['quantity']}
+            for b in bases
+        ]
 
         return snapshot
     except Exception as e:

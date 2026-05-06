@@ -36,6 +36,15 @@ class RecipeIngredientBase(BaseModel):
     quantity: float = Field(..., gt=0, description="Quantity of ingredient needed")
     unit: str = Field(..., min_length=1, max_length=50, description="Unit of measure (g, ml, kg, l, u)")
 
+class RecipeBaseLink(BaseModel):
+    """Per-product link to a recipe base with multiplier (Issue #517)."""
+    recipe_base_id: UUID = Field(..., description="ID of the recipe base (product_base_type)")
+    quantity: Decimal = Field(
+        default=Decimal("1"),
+        gt=Decimal("0"),
+        description="How many units of the recipe this product consumes (default 1)"
+    )
+
 class RecipeIngredient(RecipeIngredientBase):
     """Recipe ingredient with full details"""
     id: UUID
@@ -81,7 +90,14 @@ class ProductCreate(ProductBase):
         default=[],
         description="Recipe ingredients (empty list = no inventory tracking)"
     )
-    recipe_base_ids: List[UUID] = Field(default=[], description="List of recipe base IDs (empty list = no inventory tracking)")
+    recipe_base_ids: List[UUID] = Field(
+        default=[],
+        description="DEPRECATED: List of recipe base IDs (each treated as quantity=1). Prefer recipe_bases for new clients."
+    )
+    recipe_bases: Optional[List[RecipeBaseLink]] = Field(
+        default=None,
+        description="Recipe bases with per-product quantity multiplier. Preferred over recipe_base_ids."
+    )
     tenant_id: UUID = Field(..., description="Tenant ID")
 
 class ProductUpdate(BaseModel):
@@ -91,7 +107,8 @@ class ProductUpdate(BaseModel):
     price: Optional[Decimal] = Field(None, gt=0)
     category_id: Optional[UUID] = None
     product_base_type_id: Optional[UUID] = Field(None, description="Optional recipe base type ID (deprecated)")
-    recipe_base_ids: Optional[List[UUID]] = Field(None, description="List of recipe base IDs")
+    recipe_base_ids: Optional[List[UUID]] = Field(None, description="DEPRECATED: List of recipe base IDs (each treated as quantity=1). Prefer recipe_bases.")
+    recipe_bases: Optional[List[RecipeBaseLink]] = Field(None, description="Recipe bases with per-product quantity multiplier. Preferred over recipe_base_ids.")
     preparation_time: Optional[int] = Field(None, ge=0)
     # DEPRECATED: controla_stock is ignored - all products always control inventory
     controla_stock: Optional[bool] = Field(None, description="DEPRECATED: Ignored, always True")
@@ -122,7 +139,8 @@ class Product(ProductBase):
     # Related data
     category_name: Optional[str] = None
     ingredients: List[RecipeIngredient] = []
-    recipe_base_ids: List[UUID] = Field(default=[], description="List of associated recipe base IDs")
+    recipe_base_ids: List[UUID] = Field(default=[], description="DEPRECATED: associated recipe base IDs (sourced from recipe_bases for backwards compat).")
+    recipe_bases: List[RecipeBaseLink] = Field(default=[], description="Recipe bases with per-product quantity multiplier (Issue #517).")
     modifier_groups: List[ModifierGroup] = Field(default=[], description="Modifier groups for this product")
 
     # Calculated fields

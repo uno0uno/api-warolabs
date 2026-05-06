@@ -1,12 +1,13 @@
-from typing import Optional
+from typing import Optional, List, Tuple
 from uuid import UUID
+from decimal import Decimal
 from fastapi import Request, Response, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from app.models.product import (
     Product, ProductCreate, ProductUpdate, ProductsListResponse,
-    ProductResponse, ProductStats
+    ProductResponse, ProductStats, RecipeBaseLink
 )
 from app.services import menu_history_service
 from app.services.aws_s3_service import AWSS3Service
@@ -14,6 +15,31 @@ from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_recipe_bases(
+    recipe_bases: Optional[List[RecipeBaseLink]],
+    recipe_base_ids: Optional[List[UUID]],
+) -> List[Tuple[UUID, Decimal]]:
+    """Normalize the legacy `recipe_base_ids` and the new `recipe_bases` shapes
+    into a single deduplicated list of (recipe_base_id, quantity) tuples.
+
+    Prefers `recipe_bases` (with explicit per-link quantity) when non-empty.
+    Falls back to `recipe_base_ids` (each treated as quantity=1).
+    Deduplication keeps the FIRST occurrence per recipe_base_id.
+    """
+    seen: dict = {}
+    if recipe_bases:
+        for link in recipe_bases:
+            if link.recipe_base_id not in seen:
+                seen[link.recipe_base_id] = Decimal(link.quantity)
+        return [(rid, qty) for rid, qty in seen.items()]
+    if recipe_base_ids:
+        for rid in recipe_base_ids:
+            if rid not in seen:
+                seen[rid] = Decimal("1")
+        return [(rid, qty) for rid, qty in seen.items()]
+    return []
 
 async def create_product_with_recipe(
     request: Request,
@@ -37,7 +63,11 @@ async def create_product_with_recipe(
         # Products may be created without recipe — those skip inventory tracking.
         # See app/models/product.py ProductCreate docstring.
         has_ingredients = product_data.ingredients and len(product_data.ingredients) > 0
-        has_recipe_bases = product_data.recipe_base_ids and len(product_data.recipe_base_ids) > 0
+        normalized_bases = _normalize_recipe_bases(
+            product_data.recipe_bases,
+            product_data.recipe_base_ids,
+        )
+        has_recipe_bases = len(normalized_bases) > 0
         tracks_inventory = has_ingredients or has_recipe_bases
 
         async with get_db_connection() as conn:
@@ -77,23 +107,21 @@ async def create_product_with_recipe(
 
                 product_id = product_result['id']
 
-                # 2. Insert recipe base associations
-                if product_data.recipe_base_ids:
-                    # Remove duplicates
-                    unique_recipe_base_ids = list(set(product_data.recipe_base_ids))
-
+                # 2. Insert recipe base associations (with per-product quantity, Issue #517)
+                if normalized_bases:
                     base_recipe_query = """
                         INSERT INTO product_base_recipes (
-                            product_id, product_base_type_id, tenant_id
+                            product_id, product_base_type_id, tenant_id, quantity
                         )
-                        VALUES ($1, $2, $3)
+                        VALUES ($1, $2, $3, $4)
                     """
-                    for recipe_base_id in unique_recipe_base_ids:
+                    for recipe_base_id, base_qty in normalized_bases:
                         await conn.execute(
                             base_recipe_query,
                             product_id,
                             recipe_base_id,
-                            tenant_id
+                            tenant_id,
+                            base_qty,
                         )
 
                 # 3. Insert recipe ingredients
@@ -273,9 +301,9 @@ async def get_product_by_id(
 
             recipe_rows = await connection.fetch(recipe_query, product_id, tenant_id)
 
-            # Get recipe base IDs
+            # Get recipe base IDs and per-product multipliers (Issue #517)
             recipe_base_query = """
-                SELECT product_base_type_id
+                SELECT product_base_type_id, quantity
                 FROM product_base_recipes
                 WHERE product_id = $1
                 ORDER BY created_at
@@ -357,6 +385,10 @@ async def get_product_by_id(
             product_dict.pop('station_color', None)
             product_dict['ingredients'] = [dict(row) for row in recipe_rows]
             product_dict['recipe_base_ids'] = [row['product_base_type_id'] for row in recipe_base_rows]
+            product_dict['recipe_bases'] = [
+                {'recipe_base_id': row['product_base_type_id'], 'quantity': row['quantity']}
+                for row in recipe_base_rows
+            ]
             product_dict['modifier_groups'] = modifier_groups
 
             return ProductResponse(data=Product(**product_dict))
@@ -423,7 +455,7 @@ async def get_products_list(
                 base_costs AS (
                     SELECT
                         pbr.product_id,
-                        SUM(brt.base_quantity * COALESCE(lpc.unit_cost, 0)) as base_cost
+                        SUM(pbr.quantity * brt.base_quantity * COALESCE(lpc.unit_cost, 0)) as base_cost
                     FROM product_base_recipes pbr
                     JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
                     LEFT JOIN latest_purchase_costs lpc ON brt.ingredient_id = lpc.ingredient_id
@@ -762,7 +794,7 @@ async def update_product_with_recipe(
                 # Without this, the loop below silently drops attempts to remove
                 # an image when the user clicks "Eliminar imagen" in the form.
                 NULLABLE_FIELDS = {'image_url'}
-                for field, value in product_data.dict(exclude={'ingredients', 'recipe_base_ids', 'controla_stock'}, exclude_unset=True).items():
+                for field, value in product_data.dict(exclude={'ingredients', 'recipe_base_ids', 'recipe_bases', 'controla_stock'}, exclude_unset=True).items():
                     if value is None and field not in NULLABLE_FIELDS:
                         continue
                     update_fields.append(f"{field} = ${param_count}")
@@ -782,29 +814,38 @@ async def update_product_with_recipe(
                     update_values.extend([product_id, tenant_id])
                     await conn.execute(update_query, *update_values)
 
-                # 2. Update recipe base associations if provided
-                if product_data.recipe_base_ids is not None:
+                # 2. Update recipe base associations if provided (Issue #517 — with quantity).
+                # Either of the two fields (recipe_bases / recipe_base_ids) being set means
+                # the caller intends to replace the full set of links.
+                bases_provided = (
+                    product_data.recipe_bases is not None
+                    or product_data.recipe_base_ids is not None
+                )
+                if bases_provided:
+                    normalized_bases = _normalize_recipe_bases(
+                        product_data.recipe_bases,
+                        product_data.recipe_base_ids,
+                    )
+
                     # Delete existing associations
                     delete_base_recipe_query = "DELETE FROM product_base_recipes WHERE product_id = $1"
                     await conn.execute(delete_base_recipe_query, product_id)
 
-                    # Insert new associations
-                    if product_data.recipe_base_ids:
-                        # Remove duplicates
-                        unique_recipe_base_ids = list(set(product_data.recipe_base_ids))
-
+                    # Insert new associations with per-product quantity
+                    if normalized_bases:
                         base_recipe_query = """
                             INSERT INTO product_base_recipes (
-                                product_id, product_base_type_id, tenant_id
+                                product_id, product_base_type_id, tenant_id, quantity
                             )
-                            VALUES ($1, $2, $3)
+                            VALUES ($1, $2, $3, $4)
                         """
-                        for recipe_base_id in unique_recipe_base_ids:
+                        for recipe_base_id, base_qty in normalized_bases:
                             await conn.execute(
                                 base_recipe_query,
                                 product_id,
                                 recipe_base_id,
-                                tenant_id
+                                tenant_id,
+                                base_qty,
                             )
 
                 # 3. Update recipe if ingredients provided.
