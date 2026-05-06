@@ -17,6 +17,11 @@ from app.services.waros_service import evaluate_and_award
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas
+# Issue #521 — reuse the POS snapshot writer so online orders also write
+# order_item_ingredients (per-line ingredient cost). Without this the COGS
+# GL entry posted right after deduction sums an empty table and skips,
+# leaving online sales out of CMV. Same function, same idempotency guarantees.
+from app.services.pos_cart_service import _capture_order_item_ingredients
 import logging
 
 logger = logging.getLogger(__name__)
@@ -29,7 +34,8 @@ async def _deduct_stock_for_order(conn, order_id: UUID, tenant_id, changed_by) -
     """
     items = await conn.fetch(
         """
-        SELECT oi.product_id, oi.quantity, p.name AS product_name, o.order_number
+        SELECT oi.id AS order_item_id, oi.product_id, oi.quantity,
+               p.name AS product_name, o.order_number
         FROM order_items oi
         JOIN product p ON p.id = oi.product_id
         JOIN orders o ON o.id = oi.order_id
@@ -54,6 +60,18 @@ async def _deduct_stock_for_order(conn, order_id: UUID, tenant_id, changed_by) -
     """
 
     for item in items:
+        # Issue #521: write the per-line ingredient snapshot first so the
+        # subsequent _post_order_cogs_gl_entry (called by the caller after
+        # this function returns) finds rows to sum. Idempotent via
+        # UNIQUE (order_item_id, ingredient_id) — re-running is safe.
+        await _capture_order_item_ingredients(
+            conn,
+            order_item_id=item["order_item_id"],
+            product_id=item["product_id"],
+            item_quantity=float(item["quantity"]),
+            tenant_id=str(tenant_id),
+        )
+
         ingredients = await conn.fetch(ingredients_query, item["product_id"])
         order_number = item["order_number"]
 
