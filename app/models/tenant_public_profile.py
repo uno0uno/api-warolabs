@@ -69,6 +69,12 @@ class TenantPublicProfileBase(BaseModel):
     comandas_enabled: bool = Field(False, description="Whether the comandas/KDS module is enabled. When false, system behaves exactly as today.")
     kds_enabled: bool = Field(False, description="Whether KDS station screens (/cocina/[id]) are enabled. Requires comandas_enabled=true.")
 
+    # POS personalization (issue #529)
+    auto_select_generic_enabled: bool = Field(
+        False,
+        description="POS: when true, /pos/checkout pre-selects the Genérico customer (phone_number='0000000000') in counter/bar mode."
+    )
+
 class TenantPublicProfileCreate(TenantPublicProfileBase):
     """Create tenant public profile"""
     tenant_id: UUID = Field(..., description="Tenant ID")
@@ -105,6 +111,7 @@ class TenantPublicProfileUpdate(BaseModel):
     tables_enabled: Optional[bool] = None
     comandas_enabled: Optional[bool] = None
     kds_enabled: Optional[bool] = None
+    auto_select_generic_enabled: Optional[bool] = None
 
 class TenantPublicProfile(TenantPublicProfileBase):
     """Complete tenant public profile with all fields"""
