@@ -363,6 +363,14 @@ async def delete_account(request: Request, account_id: UUID) -> dict:
 # ---------------------------------------------------------------------------
 
 def _row_to_journal_entry(row) -> JournalEntry:
+    # asyncpg Record allows .get() via dict-cast; fall back when the column
+    # was not selected (some legacy SELECTs may not include pending_review).
+    pending_review = False
+    try:
+        pending_review = bool(row['pending_review'])
+    except (KeyError, IndexError):
+        pending_review = False
+
     return JournalEntry(
         id=row['id'],
         tenant_id=row['tenant_id'],
@@ -380,6 +388,7 @@ def _row_to_journal_entry(row) -> JournalEntry:
         posted_at=row['posted_at'],
         voided_at=row['voided_at'],
         created_at=row['created_at'],
+        pending_review=pending_review,
     )
 
 
@@ -441,18 +450,26 @@ async def create_journal_entry(request: Request, body: JournalEntryCreate) -> Jo
                 raise ValidationError("Una o más cuentas no pertenecen al tenant actual")
 
             async with conn.transaction():
+                # Issue #531 — accept caller-supplied source_module/source_id
+                # (e.g. 'manual_balance_adjustment' for the "Actualizar saldo
+                # real" flow) and the pending_review annotation flag.
+                source_module = body.source_module or 'manual'
+                source_id = body.source_id
+                pending_review = bool(body.pending_review)
+
                 entry_row = await conn.fetchrow(
                     """INSERT INTO tenant_journal_entries
                            (tenant_id, entry_date, period_year, period_month,
                             description, reference, source_module, source_id,
-                            status, created_by)
-                       VALUES ($1, $2, $3, $4, $5, $6, 'manual', NULL, 'draft', $7)
+                            status, created_by, pending_review)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, $10)
                        RETURNING id, tenant_id, entry_date, period_year, period_month,
                                  description, reference, source_module, source_id,
                                  status, total_debit, total_credit, created_by,
-                                 posted_at, voided_at, created_at""",
+                                 posted_at, voided_at, created_at, pending_review""",
                     tenant_id, entry_date_obj, period_year, period_month,
-                    body.description, body.reference, user_id,
+                    body.description, body.reference, source_module, source_id,
+                    user_id, pending_review,
                 )
                 entry_id = entry_row['id']
 
@@ -539,7 +556,8 @@ async def list_journal_entries(
                 SELECT je.id, je.tenant_id, je.entry_date, je.period_year, je.period_month,
                        je.description, je.reference, je.source_module, je.source_id,
                        je.status, jl.debit AS total_debit, jl.credit AS total_credit,
-                       je.created_by, je.posted_at, je.voided_at, je.created_at
+                       je.created_by, je.posted_at, je.voided_at, je.created_at,
+                       je.pending_review
                 FROM tenant_journal_entries je
                 JOIN tenant_journal_lines jl
                   ON jl.journal_entry_id = je.id AND jl.account_id = ${len(params)}
@@ -550,7 +568,7 @@ async def list_journal_entries(
                 SELECT je.id, je.tenant_id, je.entry_date, je.period_year, je.period_month,
                        je.description, je.reference, je.source_module, je.source_id,
                        je.status, je.total_debit, je.total_credit, je.created_by,
-                       je.posted_at, je.voided_at, je.created_at
+                       je.posted_at, je.voided_at, je.created_at, je.pending_review
                 FROM tenant_journal_entries je
                 WHERE {where_clause}
             """
@@ -630,7 +648,7 @@ async def get_journal_entry(request: Request, entry_id: UUID) -> JournalEntryRes
                 """SELECT id, tenant_id, entry_date, period_year, period_month,
                           description, reference, source_module, source_id,
                           status, total_debit, total_credit, created_by,
-                          posted_at, voided_at, created_at
+                          posted_at, voided_at, created_at, pending_review
                    FROM tenant_journal_entries
                    WHERE id = $1 AND tenant_id = $2""",
                 entry_id, tenant_id,
@@ -711,7 +729,7 @@ async def post_journal_entry(request: Request, entry_id: UUID) -> JournalEntryRe
                        RETURNING id, tenant_id, entry_date, period_year, period_month,
                                  description, reference, source_module, source_id,
                                  status, total_debit, total_credit, created_by,
-                                 posted_at, voided_at, created_at""",
+                                 posted_at, voided_at, created_at, pending_review""",
                     entry_id, float(total_debit), float(total_credit), tenant_id,
                 )
 
@@ -789,7 +807,7 @@ async def void_journal_entry(
                        RETURNING id, tenant_id, entry_date, period_year, period_month,
                                  description, reference, source_module, source_id,
                                  status, total_debit, total_credit, created_by,
-                                 posted_at, voided_at, created_at""",
+                                 posted_at, voided_at, created_at, pending_review""",
                     entry_id, tenant_id,
                 )
 
@@ -805,7 +823,7 @@ async def void_journal_entry(
                        RETURNING id, tenant_id, entry_date, period_year, period_month,
                                  description, reference, source_module, source_id,
                                  status, total_debit, total_credit, created_by,
-                                 posted_at, voided_at, created_at""",
+                                 posted_at, voided_at, created_at, pending_review""",
                     tenant_id,
                     entry_row['entry_date'],
                     entry_row['period_year'],

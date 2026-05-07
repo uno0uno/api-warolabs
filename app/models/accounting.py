@@ -93,6 +93,12 @@ class JournalEntryCreate(BaseModel):
     description: str
     reference: Optional[str] = None
     lines: List[JournalLineCreate]
+    # Issue #531 — annotation flag for asientos created via "Actualizar saldo
+    # real" with motivo "no estoy seguro". When true, the asiento is fully
+    # posted and balanced — only marks it for accountant review later.
+    source_module: Optional[str] = Field(None, alias='sourceModule')
+    source_id: Optional[UUID] = Field(None, alias='sourceId')
+    pending_review: Optional[bool] = Field(False, alias='pendingReview')
 
     class Config:
         populate_by_name = True
@@ -115,6 +121,7 @@ class JournalEntry(BaseModel):
     posted_at: Optional[datetime] = Field(None, alias='postedAt')
     voided_at: Optional[datetime] = Field(None, alias='voidedAt')
     created_at: datetime = Field(alias='createdAt')
+    pending_review: bool = Field(False, alias='pendingReview')
 
     class Config:
         populate_by_name = True
