@@ -2,6 +2,8 @@
 Tenant configuration router - admin endpoints for managing public profiles
 Authentication required
 """
+from datetime import date as _date
+from asyncpg.exceptions import UniqueViolationError
 from fastapi import APIRouter, Request, Body, HTTPException
 from fastapi.responses import JSONResponse
 from app.services import tenant_config_service
@@ -309,28 +311,49 @@ async def create_dian_resolution(request: Request, data: dict = Body(...)):
     resolution_number = data.get('resolution_number', '').strip()
     from_number = int(data.get('from_number', 0))
     to_number = int(data.get('to_number', 0))
-    date_from = data.get('date_from')
-    date_to = data.get('date_to')
+    # asyncpg requires real date objects for `date` columns — the SQL ::date
+    # cast happens AFTER parameter binding, so passing a 'YYYY-MM-DD' string
+    # raises AttributeError ('str' has no 'toordinal'). Parse here.
+    raw_from = data.get('date_from')
+    raw_to = data.get('date_to')
+    if not raw_from or not raw_to:
+        raise HTTPException(status_code=422, detail="date_from y date_to son requeridos")
+    try:
+        date_from = _date.fromisoformat(raw_from)
+        date_to = _date.fromisoformat(raw_to)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Formato de fecha inválido. Usa YYYY-MM-DD")
     document_type = data.get('document_type', 'invoice')
     current_number = int(data.get('current_number', from_number - 1))
 
     if not prefix or not resolution_number or from_number <= 0 or to_number <= 0:
-        from fastapi import HTTPException
         raise HTTPException(status_code=422, detail="Prefijo, número de resolución y rango son requeridos")
     if from_number >= to_number:
-        from fastapi import HTTPException
         raise HTTPException(status_code=422, detail="El rango 'desde' debe ser menor que 'hasta'")
 
     async with get_db_connection() as conn:
         row_id = _uuid.uuid4()
-        await conn.execute(
-            """INSERT INTO dian_resolutions
-                   (id, tenant_id, resolution_number, prefix, date_from, date_to,
-                    from_number, to_number, current_number, is_active, document_type)
-               VALUES ($1, $2, $3, $4, $5::date, $6::date, $7, $8, $9, true, $10)""",
-            row_id, tenant_id, resolution_number, prefix,
-            date_from, date_to, from_number, to_number, current_number, document_type,
-        )
+        try:
+            await conn.execute(
+                """INSERT INTO dian_resolutions
+                       (id, tenant_id, resolution_number, prefix, date_from, date_to,
+                        from_number, to_number, current_number, is_active, document_type)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true, $10)""",
+                row_id, tenant_id, resolution_number, prefix,
+                date_from, date_to, from_number, to_number, current_number, document_type,
+            )
+        except UniqueViolationError as e:
+            # Partial unique index idx_dian_resolutions_active_prefix:
+            # only one ACTIVE resolution per (tenant, prefix) is allowed.
+            if 'idx_dian_resolutions_active_prefix' in str(e):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Ya existe una resolución activa con prefijo '{prefix}'. "
+                        "Desactívala primero o usa un prefijo diferente."
+                    ),
+                )
+            raise
 
     return {'success': True, 'data': {'id': str(row_id)}, 'message': 'Resolución creada'}
 
@@ -344,14 +367,26 @@ async def update_dian_resolution(request: Request, resolution_id: str, data: dic
     session = require_valid_session(request)
     tenant_id = session.tenant_id
 
+    # Parse dates (asyncpg requires date objects, not strings — same reason
+     # as the POST endpoint above).
+    raw_from = data.get('date_from')
+    raw_to = data.get('date_to')
+    if not raw_from or not raw_to:
+        raise HTTPException(status_code=422, detail="date_from y date_to son requeridos")
+    try:
+        date_from = _date.fromisoformat(raw_from)
+        date_to = _date.fromisoformat(raw_to)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Formato de fecha inválido. Usa YYYY-MM-DD")
+
     async with get_db_connection() as conn:
         result = await conn.execute(
             """UPDATE dian_resolutions
-               SET resolution_number = $1, prefix = $2, date_from = $3::date, date_to = $4::date,
+               SET resolution_number = $1, prefix = $2, date_from = $3, date_to = $4,
                    from_number = $5, to_number = $6, current_number = $7, document_type = $8
                WHERE id = $9::uuid AND tenant_id = $10""",
             data.get('resolution_number'), data.get('prefix', '').strip().upper(),
-            data.get('date_from'), data.get('date_to'),
+            date_from, date_to,
             int(data.get('from_number', 0)), int(data.get('to_number', 0)),
             int(data.get('current_number', 0)), data.get('document_type', 'invoice'),
             resolution_id, tenant_id,

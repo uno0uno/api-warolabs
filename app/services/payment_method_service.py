@@ -252,16 +252,20 @@ async def create_method(request: Request, body: CreateMethodRequest) -> dict:
             )
 
         try:
+            # Issue #533 — accept gl_account_code on creation so the auto-create
+            # flow in /finanzas/metodos-pago/{groupId} can link the new method
+            # to its sub-account in a single round-trip (instead of POST + PATCH).
             row = await conn.fetchrow(
                 """
-                INSERT INTO payment_methods (tenant_id, group_id, name, sort_order)
-                VALUES ($1, $2, $3, $4)
-                RETURNING id, tenant_id, group_id, name, is_active, sort_order
+                INSERT INTO payment_methods (tenant_id, group_id, name, sort_order, gl_account_code)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id, tenant_id, group_id, name, is_active, sort_order, gl_account_code
                 """,
                 tenant_id,
                 group_id,
                 body.name,
                 body.sortOrder,
+                body.glAccountCode if body.glAccountCode else None,
             )
         except UniqueViolationError:
             raise ValidationError(
@@ -277,6 +281,7 @@ async def create_method(request: Request, body: CreateMethodRequest) -> dict:
             "name": row["name"],
             "isActive": row["is_active"],
             "sortOrder": row["sort_order"],
+            "glAccountCode": row["gl_account_code"],
         },
     }
 

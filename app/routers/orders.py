@@ -220,6 +220,11 @@ class ManualOrderItem(BaseModel):
 class CreateManualOrderRequest(BaseModel):
     order_date: str
     payment_method: str
+    # Issue #533 follow-up — when the operator picks a specific method from the
+    # dropdown (Nequi, Daviplata, etc.), persist the method UUID so the order
+    # is linked to the right gl_account_code-bearing method (and not just the
+    # group slug). Optional for backward compatibility.
+    payment_method_id: Optional[str] = None
     customer_id: Optional[str] = None
     items: List[ManualOrderItem] = Field(min_length=1)
 
@@ -237,6 +242,7 @@ async def create_manual_order(
         request,
         order_date=data.order_date,
         payment_method=data.payment_method,
+        payment_method_id=data.payment_method_id,
         items=[item.model_dump() for item in data.items],
         customer_id=data.customer_id
     )

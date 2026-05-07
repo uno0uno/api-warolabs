@@ -78,6 +78,10 @@ class CreateMethodRequest(BaseModel):
     groupId: str
     name: str
     sortOrder: int = 0
+    # Issue #533 — optional. Set when the auto-create-PUC-sub-account flow
+    # in /finanzas/metodos-pago/{groupId} creates the sub-account first and
+    # passes its code in here so the method is linked in one round-trip.
+    glAccountCode: Optional[str] = None
 
 
 class PatchMethodRequest(BaseModel):

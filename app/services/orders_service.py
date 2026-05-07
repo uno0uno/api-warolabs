@@ -2444,7 +2444,8 @@ async def create_manual_order(
     order_date: str,
     payment_method: str,
     items: List[dict],
-    customer_id: Optional[str] = None
+    customer_id: Optional[str] = None,
+    payment_method_id: Optional[str] = None,
 ) -> dict:
     """
     Create an order manually with a custom date, bypassing the POS cart.
@@ -2484,15 +2485,16 @@ async def create_manual_order(
                 order_row = await conn.fetchrow(
                     """
                     INSERT INTO orders (
-                        tenant_id, customer_id, payment_method,
+                        tenant_id, customer_id, payment_method, payment_method_id,
                         order_date, total_amount, status, extra_attributes
                     )
-                    VALUES ($1, $2, $3, $4, $5, 'completed', $6)
+                    VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7)
                     RETURNING id, order_number, order_date, created_at
                     """,
                     tenant_id,
                     UUID(customer_id) if customer_id else None,
                     payment_method,
+                    UUID(payment_method_id) if payment_method_id else None,
                     order_datetime,
                     total_amount,
                     json.dumps({"source": "manual"})
