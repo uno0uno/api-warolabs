@@ -429,8 +429,36 @@ async def session_validation_middleware(request: Request, call_next):
 
         # Handle exact root path separately
         if path == '/' or any(path.startswith(endpoint) for endpoint in public_endpoints) or any(path.startswith(prefix) for prefix in public_prefixes) or kds_public:
-            request.state.session_context = SessionContext()
             request.state.api_key_context = ApiKeyContext()
+
+            # KDS endpoints with ?token=... → resolve token to tenant_id and
+            # inject a synthetic SessionContext so downstream services that
+            # call require_valid_session() succeed without an operator login.
+            if kds_public and kds_token_param:
+                try:
+                    from app.database import get_db_connection as _kds_get_conn
+                    async with _kds_get_conn() as _kds_conn:
+                        _kds_row = await _kds_conn.fetchrow(
+                            "SELECT tenant_id FROM kds_tokens WHERE token = $1 AND revoked_at IS NULL",
+                            kds_token_param,
+                        )
+                    if _kds_row:
+                        request.state.session_context = SessionContext({
+                            'user_id': None,
+                            'tenant_id': _kds_row['tenant_id'],
+                            'email': None,
+                            'name': 'KDS Token',
+                            'expires_at': None,
+                            'is_active': True,
+                        })
+                    else:
+                        request.state.session_context = SessionContext()
+                except Exception as _kds_err:
+                    logger.warning(f"KDS token validation failed: {_kds_err}")
+                    request.state.session_context = SessionContext()
+            else:
+                request.state.session_context = SessionContext()
+
             return await call_next(request)
 
         # First, check for API key authentication
