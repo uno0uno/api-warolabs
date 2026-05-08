@@ -75,6 +75,14 @@ class TenantPublicProfileBase(BaseModel):
         description="POS: when true, /pos/checkout pre-selects the Genérico customer (phone_number='0000000000') in counter/bar mode."
     )
 
+    # POS expediter mode (issue #537)
+    expediter_enabled: bool = Field(
+        False,
+        description="POS expediter: when true, waiters can advance comanda state "
+                    "(preparing → ready → delivered) from /pos via a slide-over panel, "
+                    "without touching the KDS. Requires comandas_enabled=true."
+    )
+
 class TenantPublicProfileCreate(TenantPublicProfileBase):
     """Create tenant public profile"""
     tenant_id: UUID = Field(..., description="Tenant ID")
@@ -112,6 +120,7 @@ class TenantPublicProfileUpdate(BaseModel):
     comandas_enabled: Optional[bool] = None
     kds_enabled: Optional[bool] = None
     auto_select_generic_enabled: Optional[bool] = None
+    expediter_enabled: Optional[bool] = None
 
 class TenantPublicProfile(TenantPublicProfileBase):
     """Complete tenant public profile with all fields"""
