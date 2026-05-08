@@ -188,10 +188,15 @@ async def generate_kds_token(request: Request, station_id: UUID):
 
 @router.get("/{station_id}/kds-token")
 async def get_kds_token(request: Request, station_id: UUID):
-    """Get the current active KDS token for a station (masked)."""
+    """Get the current active KDS token for a station.
+
+    Returns the full token so the operator UI can rebuild the KDS URL on
+    every page load without forcing a regenerate. The endpoint is
+    session-protected, so only authenticated tenant operators can read it.
+    """
     from app.core.middleware import require_valid_session
 
-    session = require_valid_session(request)
+    require_valid_session(request)
 
     async with get_db_connection() as conn:
         row = await conn.fetchrow(
@@ -202,13 +207,10 @@ async def get_kds_token(request: Request, station_id: UUID):
     if not row:
         return {'success': True, 'data': None}
 
-    token = row['token']
-    masked = token[:6] + '...' + token[-4:] if len(token) > 10 else '****'
-
     return {
         'success': True,
         'data': {
-            'token_masked': masked,
+            'token': row['token'],
             'created_at': row['created_at'].isoformat() if row['created_at'] else None,
         },
     }
