@@ -71,9 +71,10 @@ async def upsert_public_profile(
                         tables_enabled,
                         comandas_enabled, kds_enabled,
                         auto_select_generic_enabled,
+                        expediter_enabled,
                         updated_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, CURRENT_TIMESTAMP)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, CURRENT_TIMESTAMP)
                     ON CONFLICT (tenant_id)
                     DO UPDATE SET
                         slug = EXCLUDED.slug,
@@ -100,6 +101,7 @@ async def upsert_public_profile(
                         comandas_enabled = EXCLUDED.comandas_enabled,
                         kds_enabled = EXCLUDED.kds_enabled,
                         auto_select_generic_enabled = EXCLUDED.auto_select_generic_enabled,
+                        expediter_enabled = EXCLUDED.expediter_enabled,
                         updated_at = CURRENT_TIMESTAMP
                     RETURNING *
                 """
@@ -130,7 +132,8 @@ async def upsert_public_profile(
                     profile_data.tables_enabled,
                     profile_data.comandas_enabled,
                     profile_data.kds_enabled,
-                    profile_data.auto_select_generic_enabled
+                    profile_data.auto_select_generic_enabled,
+                    profile_data.expediter_enabled
                 )
 
                 profile = TenantPublicProfile(**dict(result))
@@ -197,8 +200,9 @@ async def update_public_profile(
                         accepts_online_orders, min_order_amount, estimated_preparation_time,
                         is_manually_open,
                         comandas_enabled, kds_enabled,
-                        auto_select_generic_enabled
-                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+                        auto_select_generic_enabled,
+                        expediter_enabled
+                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
                     RETURNING *
                 """
                 result = await conn.fetchrow(
@@ -223,6 +227,7 @@ async def update_public_profile(
                     data_dict.get('comandas_enabled', False),
                     data_dict.get('kds_enabled', False),
                     data_dict.get('auto_select_generic_enabled', False),
+                    data_dict.get('expediter_enabled', False),
                 )
 
                 profile_data_dict = dict(result)
@@ -257,6 +262,16 @@ async def update_public_profile(
                     raise HTTPException(
                         status_code=400,
                         detail="kds_enabled requiere que comandas_enabled sea true"
+                    )
+
+            # Issue #537 — expediter_enabled also requires comandas_enabled.
+            if data_dict.get('expediter_enabled') is True:
+                current_comandas = exists['comandas_enabled'] if exists else False
+                new_comandas = data_dict.get('comandas_enabled', current_comandas)
+                if not new_comandas:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="expediter_enabled requiere que comandas_enabled sea true"
                     )
 
             # Validate slug if it's being changed
