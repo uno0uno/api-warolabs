@@ -10,7 +10,15 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 class SessionContext:
-    """Session context object"""
+    """Session context object.
+
+    `role` carries the user's role on the active tenant (from
+    `tenant_members.role`). It is None when the user has no active
+    membership row — e.g. KDS-token sessions, or owners of a freshly
+    created tenant before the membership row is written. Required by
+    Epic 2 (#164) so `require_module()` can gate without an extra DB
+    lookup per request.
+    """
     def __init__(self, session_data: Optional[Dict[str, Any]] = None):
         if session_data:
             self.user_id = session_data['user_id']
@@ -19,6 +27,7 @@ class SessionContext:
             self.name = session_data['name']
             self.expires_at = session_data['expires_at']
             self.is_active = session_data['is_active']
+            self.role: Optional[str] = session_data.get('role')
             self.is_valid = True
         else:
             self.user_id = None
@@ -27,8 +36,9 @@ class SessionContext:
             self.name = None
             self.expires_at = None
             self.is_active = False
+            self.role: Optional[str] = None
             self.is_valid = False
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             'user_id': self.user_id,
@@ -37,6 +47,7 @@ class SessionContext:
             'name': self.name,
             'expires_at': self.expires_at,
             'is_active': self.is_active,
+            'role': self.role,
             'is_valid': self.is_valid
         }
 
