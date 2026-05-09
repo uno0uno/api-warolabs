@@ -299,12 +299,20 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
 
                     return None
 
-            # Get valid session data
+            # Get valid session data + the user's role on this tenant.
+            # LEFT JOIN tenant_members so a session whose user has no
+            # active membership row still resolves (role becomes None).
+            # Epic 2 (#164) — required by the require_module() dependency
+            # so it can decide log/allow/deny without an extra DB hit.
             session_query = """
                 SELECT s.user_id, s.tenant_id, s.expires_at, s.is_active,
-                       p.email, p.name
+                       p.email, p.name,
+                       tm.role AS role
                 FROM sessions s
                 JOIN profile p ON s.user_id = p.id
+                LEFT JOIN tenant_members tm
+                  ON tm.user_id = s.user_id
+                 AND tm.tenant_id = s.tenant_id
                 WHERE s.id = $1
                   AND s.expires_at > NOW()
                   AND s.is_active = true
@@ -321,7 +329,8 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
                 'email': session_result['email'],
                 'name': session_result['name'],
                 'expires_at': session_result['expires_at'],
-                'is_active': session_result['is_active']
+                'is_active': session_result['is_active'],
+                'role': session_result['role'],
             }
 
     except Exception as e:

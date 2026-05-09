@@ -27,11 +27,13 @@ share the membership table but should never receive any staff module. Keeping
 it in the enum lets the future safeguard trigger and `normalize_role` round-
 trip every legacy row without raising.
 """
+import logging
 from enum import Enum
-from typing import Dict, FrozenSet, Optional, Union
+from typing import Awaitable, Callable, Dict, FrozenSet, Optional, Union
 from uuid import UUID
 
 from cachetools import TTLCache
+from fastapi import HTTPException, Request, status
 
 from app.database import get_db_connection
 
@@ -231,3 +233,164 @@ def invalidate_role_modules(
 
     normalized = role if isinstance(role, Role) else normalize_role(role)
     _role_modules_cache.pop((tenant_id, normalized), None)
+
+
+# ─── Epic 2 (#164): require_module dependency + enforcement-mode cache ─────
+
+# Tenant enforcement mode cache. Shorter TTL than the role-modules cache
+# because flipping a tenant from `shadow` to `enforce` should propagate
+# fast — operators expect a manual rollout step to take effect within a
+# minute, not five.
+_enforcement_mode_cache: TTLCache = TTLCache(maxsize=1000, ttl=60)
+
+# Dedicated logger so ops can route shadow events to a specific sink
+# (Discord channel, Loki stream, etc.) without polluting the request log.
+_shadow_logger = logging.getLogger("permissions.shadow")
+
+
+VALID_MODES = frozenset({"disabled", "shadow", "enforce"})
+
+
+async def _get_enforcement_mode(tenant_id: UUID) -> str:
+    """Resolve `tenants.permissions_enforcement_mode` for a tenant.
+
+    Cached for 60s. Defaults to `'disabled'` if the row is missing or the
+    value is unknown — fail-open is safe here because `disabled` mirrors
+    today's behavior (no gating).
+    """
+    cached = _enforcement_mode_cache.get(tenant_id)
+    if cached is not None:
+        return cached
+
+    async with get_db_connection() as conn:
+        mode = await conn.fetchval(
+            "SELECT permissions_enforcement_mode FROM tenants WHERE id = $1",
+            tenant_id,
+        )
+
+    if mode not in VALID_MODES:
+        mode = "disabled"
+
+    _enforcement_mode_cache[tenant_id] = mode
+    return mode
+
+
+def invalidate_enforcement_mode(tenant_id: UUID) -> None:
+    """Drop the cached enforcement mode for `tenant_id`.
+
+    Call this after every successful UPDATE on
+    `tenants.permissions_enforcement_mode` so a flip from `shadow` to
+    `enforce` (or back) takes effect on the next request instead of after
+    the 60s TTL.
+    """
+    _enforcement_mode_cache.pop(tenant_id, None)
+
+
+def _shadow_or_deny(
+    mode: str,
+    tenant_id: UUID,
+    user_id: Optional[UUID],
+    role: Optional[str],
+    module: Module,
+    reason: str,
+    path: str,
+) -> None:
+    """Branch on enforcement mode: log+allow under shadow, raise 403 under enforce.
+
+    `disabled` never reaches this function (the dependency returns earlier),
+    so we only handle `shadow` and `enforce` here.
+    """
+    if mode == "shadow":
+        # Wrap fields under a single key to avoid colliding with reserved
+        # LogRecord attributes (`module`, `pathname`, etc.). Handlers can
+        # pull `record.permission_event` to ship the structured payload.
+        _shadow_logger.warning(
+            "would_deny",
+            extra={
+                "permission_event": {
+                    "tenant_id": str(tenant_id) if tenant_id else None,
+                    "user_id": str(user_id) if user_id else None,
+                    "role": role,
+                    "module": module.value,
+                    "reason": reason,
+                    "path": path,
+                }
+            },
+        )
+        return
+    # enforce
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"Sin permiso para el módulo {module.value}",
+    )
+
+
+def require_module(module: Module) -> Callable[[Request], Awaitable[None]]:
+    """Build a FastAPI dependency that gates `module` per tenant mode.
+
+    Reads `tenants.permissions_enforcement_mode`:
+      * `disabled` → bypass entirely (current behavior, no DB hit beyond
+        the cached lookup).
+      * `shadow`   → if the user lacks the module, log a `permissions.shadow`
+        event and allow the request through. Used to surface false positives
+        before flipping to enforce.
+      * `enforce`  → if the user lacks the module, raise 403.
+
+    Owner short-circuit happens inside `get_role_modules`. Sessions without
+    a valid role (no membership row, KDS tokens, API keys without role
+    plumbing) are treated as "no staff modules" — denied or shadow-logged.
+    Sessions that aren't valid at all return early so `require_valid_session`
+    (still called inside handlers) can raise 401 with its own message —
+    keeps responsibilities split.
+
+    Usage:
+        from fastapi import Depends
+        from app.core.permissions import Module, require_module
+
+        @router.get("/billing", dependencies=[Depends(require_module(Module.MI_PLAN))])
+        async def list_billing(...):
+            ...
+    """
+    async def dependency(request: Request) -> None:
+        from app.core.middleware import get_session_context  # local import to avoid cycle
+
+        session = get_session_context(request)
+        if not session.is_valid:
+            return  # require_valid_session in the handler will surface 401
+
+        tenant_id = session.tenant_id
+        if not tenant_id:
+            return  # no tenant resolved → cannot gate; let handler decide
+
+        mode = await _get_enforcement_mode(tenant_id)
+        if mode == "disabled":
+            return
+
+        path = request.url.path
+        raw_role = session.role
+        if not raw_role:
+            _shadow_or_deny(
+                mode, tenant_id, session.user_id, None, module,
+                reason="no-membership", path=path,
+            )
+            return
+
+        try:
+            normalized = normalize_role(raw_role)
+        except ValueError:
+            _shadow_or_deny(
+                mode, tenant_id, session.user_id, raw_role, module,
+                reason="unknown-role", path=path,
+            )
+            return
+
+        allowed = await get_role_modules(tenant_id, normalized)
+        if module in allowed:
+            return
+
+        _shadow_or_deny(
+            mode, tenant_id, session.user_id, normalized.value, module,
+            reason="not-in-matrix", path=path,
+        )
+
+    return dependency
