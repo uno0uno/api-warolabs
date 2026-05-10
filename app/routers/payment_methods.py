@@ -4,8 +4,9 @@ CRUD for payment method groups and methods, plus POS read-only endpoint.
 
 Issue: https://github.com/uno0uno/warocol.com/issues/331
 """
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from uuid import UUID
+from app.core.permissions import Module, require_module
 from app.services import payment_method_service
 from app.models.payment_method import (
     CreateGroupRequest,
@@ -61,10 +62,13 @@ async def delete_method(request: Request, method_id: UUID):
 
 
 # ── POS read-only endpoint ─────────────────────────────────────────────────────
+# NOTE: finanzas_router endpoints above stay UNGATED in this PR — they get
+# Depends(require_module(Module.FINANZAS)) in E2.10 (#198). This file gets
+# touched twice across the rollout, intentionally per the audit doc §3.
 pos_router = APIRouter(prefix="/pos/payment-methods", tags=["pos"])
 
 
-@pos_router.get("")
+@pos_router.get("", dependencies=[Depends(require_module(Module.POS))])
 async def list_pos_methods(request: Request):
     """POS: returns active groups with their active methods nested inside."""
     return await payment_method_service.list_pos_methods(request)

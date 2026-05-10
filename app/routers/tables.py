@@ -4,11 +4,12 @@ CRUD and session lifecycle endpoints for restaurant table management.
 
 Issue: https://github.com/uno0uno/warocol.com/issues/298
 """
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Depends, Request, Query
 from typing import Optional, List
 from uuid import UUID
 from datetime import date
 from pydantic import BaseModel, Field
+from app.core.permissions import Module, require_module
 from app.services import tables_service
 
 router = APIRouter(tags=["Tables"])
@@ -46,7 +47,7 @@ class UpdateTabItemRequest(BaseModel):
     quantity: int = Field(..., ge=1)
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_module(Module.POS))])
 async def list_tables(request: Request, include_inactive: bool = Query(False)):
     """
     List tables for the tenant.
@@ -56,7 +57,7 @@ async def list_tables(request: Request, include_inactive: bool = Query(False)):
     return await tables_service.list_tables(request, include_inactive=include_inactive)
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(require_module(Module.POS))])
 async def create_table(request: Request, body: CreateTableRequest):
     """
     Create a new table for the tenant.
@@ -64,7 +65,7 @@ async def create_table(request: Request, body: CreateTableRequest):
     return await tables_service.create_table(request, body.name, body.capacity)
 
 
-@router.put("/{table_id}")
+@router.put("/{table_id}", dependencies=[Depends(require_module(Module.POS))])
 async def update_table(request: Request, table_id: UUID, body: UpdateTableRequest):
     """
     Update a table's name and/or capacity.
@@ -73,7 +74,7 @@ async def update_table(request: Request, table_id: UUID, body: UpdateTableReques
     return await tables_service.update_table(request, table_id, body.name, body.capacity)
 
 
-@router.patch("/{table_id}/activate")
+@router.patch("/{table_id}/activate", dependencies=[Depends(require_module(Module.POS))])
 async def activate_table(request: Request, table_id: UUID):
     """
     Re-activate a deactivated table (is_active = true).
@@ -83,7 +84,7 @@ async def activate_table(request: Request, table_id: UUID):
     return await tables_service.activate_table(request, table_id)
 
 
-@router.patch("/{table_id}/deactivate")
+@router.patch("/{table_id}/deactivate", dependencies=[Depends(require_module(Module.POS))])
 async def deactivate_table(request: Request, table_id: UUID):
     """
     Temporarily deactivate a table (is_active = false).
@@ -93,7 +94,7 @@ async def deactivate_table(request: Request, table_id: UUID):
     return await tables_service.deactivate_table(request, table_id)
 
 
-@router.delete("/{table_id}")
+@router.delete("/{table_id}", dependencies=[Depends(require_module(Module.POS))])
 async def delete_table_permanent(request: Request, table_id: UUID):
     """
     Permanently remove a table.
@@ -105,7 +106,7 @@ async def delete_table_permanent(request: Request, table_id: UUID):
     return await tables_service.delete_table_permanent(request, table_id)
 
 
-@router.post("/{table_id}/open")
+@router.post("/{table_id}/open", dependencies=[Depends(require_module(Module.POS))])
 async def open_session(request: Request, table_id: UUID):
     """
     Open a new session for a table (status: free → open).
@@ -134,7 +135,7 @@ class AddSessionPaymentRequest(BaseModel):
     cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for this payment when payment_method='cash'. Must be >= amount.")
 
 
-@router.post("/{table_id}/close")
+@router.post("/{table_id}/close", dependencies=[Depends(require_module(Module.POS))])
 async def close_session(request: Request, table_id: UUID, body: CloseSessionRequest = CloseSessionRequest()):
     """
     Close the active session (status: open/bill_requested → free).
@@ -160,7 +161,7 @@ async def close_session(request: Request, table_id: UUID, body: CloseSessionRequ
     )
 
 
-@router.post("/{table_id}/payments")
+@router.post("/{table_id}/payments", dependencies=[Depends(require_module(Module.POS))])
 async def add_session_payment(request: Request, table_id: UUID, body: AddSessionPaymentRequest):
     """
     Add a partial payment to an open mesa session's split payment.
@@ -174,7 +175,7 @@ async def add_session_payment(request: Request, table_id: UUID, body: AddSession
     )
 
 
-@router.get("/{table_id}/current")
+@router.get("/{table_id}/current", dependencies=[Depends(require_module(Module.POS))])
 async def get_current_session(request: Request, table_id: UUID):
     """
     Get the open session for a table with all linked orders and running total.
@@ -183,7 +184,7 @@ async def get_current_session(request: Request, table_id: UUID):
     return await tables_service.get_current_session(request, table_id)
 
 
-@router.post("/{table_id}/tab/add")
+@router.post("/{table_id}/tab/add", dependencies=[Depends(require_module(Module.POS))])
 async def add_tab_items(request: Request, table_id: UUID, body: TabAddRequest):
     """
     Add items to the running tab for a table session.
@@ -206,19 +207,19 @@ async def add_tab_items(request: Request, table_id: UUID, body: TabAddRequest):
     return await tables_service.add_tab_items(request, table_id, items)
 
 
-@router.delete("/{table_id}/tab/items/{order_item_id}")
+@router.delete("/{table_id}/tab/items/{order_item_id}", dependencies=[Depends(require_module(Module.POS))])
 async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID):
     """Remove an order item from the running tab."""
     return await tables_service.remove_tab_item(request, table_id, order_item_id)
 
 
-@router.patch("/{table_id}/tab/items/{order_item_id}")
+@router.patch("/{table_id}/tab/items/{order_item_id}", dependencies=[Depends(require_module(Module.POS))])
 async def update_tab_item_quantity(request: Request, table_id: UUID, order_item_id: UUID, body: UpdateTabItemRequest):
     """Update the quantity of an order item in the running tab."""
     return await tables_service.update_tab_item_quantity(request, table_id, order_item_id, body.quantity)
 
 
-@router.delete("/{table_id}/tab")
+@router.delete("/{table_id}/tab", dependencies=[Depends(require_module(Module.POS))])
 async def clear_tab(request: Request, table_id: UUID):
     """
     Delete all pending orders for the active session without closing it.
@@ -227,7 +228,7 @@ async def clear_tab(request: Request, table_id: UUID):
     return await tables_service.clear_tab(request, table_id)
 
 
-@router.post("/{table_id}/bill")
+@router.post("/{table_id}/bill", dependencies=[Depends(require_module(Module.POS))])
 async def request_bill(request: Request, table_id: UUID):
     """
     Mark a table as bill_requested (status: open → bill_requested).
@@ -236,7 +237,7 @@ async def request_bill(request: Request, table_id: UUID):
     return await tables_service.request_bill(request, table_id)
 
 
-@router.post("/{table_id}/fire")
+@router.post("/{table_id}/fire", dependencies=[Depends(require_module(Module.POS))])
 async def fire_table_items(request: Request, table_id: UUID):
     """
     Explicitly fire all 'new' items in the table session to the kitchen.
@@ -245,7 +246,7 @@ async def fire_table_items(request: Request, table_id: UUID):
     return await tables_service.fire_table_items(request, table_id)
 
 
-@router.delete("/{table_id}/session")
+@router.delete("/{table_id}/session", dependencies=[Depends(require_module(Module.POS))])
 async def discard_session(request: Request, table_id: UUID):
     """
     Discard the active session: hard-delete all pending orders/items,
@@ -257,7 +258,7 @@ async def discard_session(request: Request, table_id: UUID):
     return await tables_service.discard_table_session(request, table_id)
 
 
-@router.post("/{table_id}/session/reopen")
+@router.post("/{table_id}/session/reopen", dependencies=[Depends(require_module(Module.POS))])
 async def reopen_session(request: Request, table_id: UUID):
     """
     Reopen the most recent non-discarded closed session for a table.
@@ -273,7 +274,7 @@ class MoveTableRequest(BaseModel):
     target_table_id: UUID
 
 
-@router.post("/{source_table_id}/move")
+@router.post("/{source_table_id}/move", dependencies=[Depends(require_module(Module.POS))])
 async def move_table_session(request: Request, source_table_id: UUID, body: MoveTableRequest):
     """
     Transfer all pending orders from source table's open session to target table.
