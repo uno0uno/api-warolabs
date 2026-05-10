@@ -6,9 +6,10 @@ All endpoints require a valid tenant session.
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from app.core.permissions import Module, require_module
 from app.services import waros_service
 
 router = APIRouter(prefix="/admin/waros", tags=["Waros"])
@@ -39,7 +40,7 @@ class AssignBody(BaseModel):
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
-@router.get("/rules")
+@router.get("/rules", dependencies=[Depends(require_module(Module.POS))])
 async def get_rules(request: Request):
     """
     Get all earning rules for the tenant.
@@ -49,7 +50,7 @@ async def get_rules(request: Request):
     return await waros_service.get_rules(request)
 
 
-@router.put("/rules/{rule_type}")
+@router.put("/rules/{rule_type}", dependencies=[Depends(require_module(Module.POS))])
 async def upsert_rule(rule_type: str, body: RuleBody, request: Request):
     """
     Create or update an earning rule for the tenant.
@@ -68,7 +69,7 @@ async def upsert_rule(rule_type: str, body: RuleBody, request: Request):
     )
 
 
-@router.patch("/rules/{rule_type}/toggle")
+@router.patch("/rules/{rule_type}/toggle", dependencies=[Depends(require_module(Module.POS))])
 async def toggle_rule(rule_type: str, request: Request):
     """
     Toggle is_active for a rule without changing its config.
@@ -82,7 +83,7 @@ async def toggle_rule(rule_type: str, request: Request):
     return await waros_service.toggle_rule(request, rule_type=rule_type)
 
 
-@router.patch("/config")
+@router.patch("/config", dependencies=[Depends(require_module(Module.POS))])
 async def update_global_config(body: GlobalConfigBody, request: Request):
     """
     Enable or disable the entire Waros system for the tenant.
@@ -91,7 +92,7 @@ async def update_global_config(body: GlobalConfigBody, request: Request):
     return await waros_service.update_global_config(request, is_enabled=body.is_enabled)
 
 
-@router.get("/estimate")
+@router.get("/estimate", dependencies=[Depends(require_module(Module.POS))])
 async def estimate_waros(
     request: Request,
     total_amount: float = Query(..., description="Cart total in COP", gt=0),
@@ -113,7 +114,7 @@ async def estimate_waros(
     return await waros_service.estimate_waros(request, total_amount, parsed_customer_id)
 
 
-@router.get("/customers/balances")
+@router.get("/customers/balances", dependencies=[Depends(require_module(Module.POS))])
 async def get_customers_balances(
     request: Request,
     profile_ids: str = Query(..., description="Comma-separated profile UUIDs (max 500)"),
@@ -139,7 +140,7 @@ async def get_customers_balances(
     return await waros_service.get_customers_balances(request, ids)
 
 
-@router.get("/customers/{profile_id}/summary")
+@router.get("/customers/{profile_id}/summary", dependencies=[Depends(require_module(Module.POS))])
 async def get_customer_summary(profile_id: UUID, request: Request):
     """
     Waros summary for a single customer: balance + last 5 transactions.
@@ -148,7 +149,7 @@ async def get_customer_summary(profile_id: UUID, request: Request):
     return await waros_service.get_customer_summary(request, profile_id)
 
 
-@router.post("/assign")
+@router.post("/assign", dependencies=[Depends(require_module(Module.POS))])
 async def assign_waros(body: AssignBody, request: Request):
     """
     Manually award or deduct Waros from a customer.

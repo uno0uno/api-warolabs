@@ -5,9 +5,10 @@ Authenticated endpoints for kitchen operators to manage order lifecycle.
 Issue: https://github.com/uno0uno/warocol.com/issues/413
 Issue: https://github.com/uno0uno/warocol.com/issues/416
 """
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Depends, Request, Query
 from typing import Optional
 from uuid import UUID
+from app.core.permissions import Module, require_module
 from app.services import comandas_service
 from app.models.comanda import ComandaStatusUpdateRequest, ComandaItemStatusUpdateRequest, BulkComandaStatusUpdateRequest
 
@@ -21,7 +22,10 @@ router = APIRouter(tags=["KDS / Comandas"])
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@router.get("/active")
+@router.get(
+    "/active",
+    dependencies=[Depends(require_module(Module.POS))],
+)
 async def list_active_comandas(
     request: Request,
     station_id: Optional[UUID] = Query(None, description="Filter by kitchen station"),
@@ -38,7 +42,10 @@ async def list_active_comandas(
     )
 
 
-@router.get("/history")
+@router.get(
+    "/history",
+    dependencies=[Depends(require_module(Module.POS))],
+)
 async def list_comanda_history(
     request: Request,
     date_from: Optional[str] = Query(None, description="ISO format date from"),
@@ -57,7 +64,10 @@ async def list_comanda_history(
     )
 
 
-@router.get("/summary")
+@router.get(
+    "/summary",
+    dependencies=[Depends(require_module(Module.POS))],
+)
 async def get_comanda_summary(
     request: Request,
     date_from: Optional[str] = Query(None),
@@ -69,7 +79,10 @@ async def get_comanda_summary(
     return await comandas_service.get_comanda_summary(request, date_from, date_to)
 
 
-@router.get("/stats")
+@router.get(
+    "/stats",
+    dependencies=[Depends(require_module(Module.POS))],
+)
 async def get_stats_endpoint(
     request: Request,
     date: Optional[str] = Query(None, description="ISO date YYYY-MM-DD, defaults to today"),
@@ -82,6 +95,11 @@ async def get_stats_endpoint(
     return await comandas_service.get_daily_stats(request, date, station_id)
 
 
+# NOTE: KDS-direct endpoint — synthetic session via ?token= middleware
+# bypass has role=None and would always 403 under require_module.
+# Frontend KDS calls this from pages/cocina/[id].vue:53 with ?station_id=&token=.
+# DO NOT add Depends(require_module(...)) here. Operator path keeps
+# require_valid_session() inside the service for defense in depth.
 @router.get("")
 async def list_comandas(
     request: Request,
@@ -102,7 +120,10 @@ async def list_comandas(
     )
 
 
-@router.patch("/bulk-status")
+@router.patch(
+    "/bulk-status",
+    dependencies=[Depends(require_module(Module.POS))],
+)
 async def bulk_update_comanda_status(
     request: Request,
     body: BulkComandaStatusUpdateRequest,
@@ -115,7 +136,10 @@ async def bulk_update_comanda_status(
     return await comandas_service.bulk_update_comanda_status(request, body.comanda_ids, body.status)
 
 
-@router.get("/{comanda_id}")
+@router.get(
+    "/{comanda_id}",
+    dependencies=[Depends(require_module(Module.POS))],
+)
 async def get_comanda_detail(
     request: Request,
     comanda_id: UUID,
@@ -127,6 +151,10 @@ async def get_comanda_detail(
     return await comandas_service.get_comanda_detail(request, comanda_id)
 
 
+# NOTE: KDS-direct endpoint — frontend calls this from
+# components/cocina/ComandaCard.vue:72 with ?token= when the cook marks a
+# comanda as ready. Synthetic session has role=None, so require_module
+# would always 403. DO NOT gate. Service-level transition rules still apply.
 @router.patch("/{comanda_id}/status")
 async def update_comanda_status(
     request: Request,
@@ -144,7 +172,10 @@ async def update_comanda_status(
     return await comandas_service.update_comanda_status(request, comanda_id, body.status)
 
 
-@router.post("/{comanda_id}/deliver")
+@router.post(
+    "/{comanda_id}/deliver",
+    dependencies=[Depends(require_module(Module.POS))],
+)
 async def deliver_comanda(
     request: Request,
     comanda_id: UUID
@@ -156,7 +187,10 @@ async def deliver_comanda(
     return await comandas_service.update_comanda_status(request, comanda_id, 'delivered')
 
 
-@router.post("/{comanda_id}/recall")
+@router.post(
+    "/{comanda_id}/recall",
+    dependencies=[Depends(require_module(Module.POS))],
+)
 async def recall_comanda(
     request: Request,
     comanda_id: UUID
@@ -168,6 +202,10 @@ async def recall_comanda(
     return await comandas_service.recall_comanda(request, comanda_id)
 
 
+# NOTE: KDS-direct endpoint — frontend calls this from
+# components/cocina/ItemRow.vue:24 with ?token= when the cook marks an
+# individual item ready. Synthetic session has role=None, so
+# require_module would always 403. DO NOT gate.
 @router.patch("/{comanda_id}/items/{item_id}/status")
 async def update_comanda_item_status(
     request: Request,

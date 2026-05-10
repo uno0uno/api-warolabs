@@ -83,7 +83,7 @@ Total: **51 routers**, **~394 endpoints** (was 52/395 before #187 deleted `admin
 
 | Module | Routers | Sub-task | Status |
 |---|---|---|---|
-| **POS** | comandas, notifications, pos_cart, tables, waros + payment_methods/pos | 5+1 | E2.3 (#188) — pending |
+| **POS** | comandas, notifications, pos_cart, tables, waros + payment_methods/pos | 5+1 | ✅ E2.3 (#188) — DONE (51 endpoints gated, 3 KDS-direct excluded) |
 | **VENTAS** | customers, online_orders, orders | 3 | E2.4 (#189) — pending |
 | **DESPACHO** | (no routers — placeholder, like EVENTOS) | 0 | ✅ E2.5 (#187) — DONE (deleted dead `admin_orders.py`) |
 | **MENU** | categories, combos, menu, modifiers, products, recipe_bases | 6 | E2.6 (#190) — pending |
@@ -120,9 +120,19 @@ KDS-consumed endpoints must NOT receive the dependency, because the synthetic
 session has no role and would always be denied. Per-endpoint exclusion is
 mandatory — DO NOT use router-level `dependencies=[]`.
 
-The exact endpoint list to exclude lives in the KDS dashboard code on the
-front_nuxt side; the wiring PRs (E2.3, E2.7) will enumerate them after
-re-reading the KDS components and the `comandas.py` / `stations.py` files.
+**Confirmed exclusions in `comandas.py`** (post-E2.3, see #188):
+
+| Endpoint | Frontend caller |
+|---|---|
+| `GET /api/comandas` | `pages/cocina/[id].vue:53` (with `?station_id=&token=`) |
+| `PATCH /api/comandas/{id}/status` | `components/cocina/ComandaCard.vue:72` (with `?token=`) |
+| `PATCH /api/comandas/{id}/items/{item_id}/status` | `components/cocina/ItemRow.vue:24` (with `?token=`) |
+
+Each carries an explicit `# NOTE:` block above its decorator referencing
+the consumer file/line and the reason for the exclusion.
+
+`stations.py` follows the same pattern — exclusions to be enumerated when
+E2.7 (#191) lands.
 
 ## §2. `/invitations/accept` is token-public
 

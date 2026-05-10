@@ -2,7 +2,7 @@
 POS Cart Router
 Endpoints for managing POS cart persistence
 """
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Depends, Request, Query
 from typing import List, Optional, Any, Dict
 from uuid import UUID
 from datetime import date, datetime
@@ -10,6 +10,7 @@ from pydantic import BaseModel, EmailStr, Field
 from app.services import pos_cart_service
 from app.services.email_helpers import send_pos_receipt_email
 from app.core.middleware import require_valid_session
+from app.core.permissions import Module, require_module
 
 router = APIRouter(prefix="/pos/cart", tags=["POS Cart"])
 
@@ -33,7 +34,7 @@ class BatchAddItemsRequest(BaseModel):
     customer_id: Optional[UUID] = None  # Opcional - si no se pasa, se crea carrito anónimo
 
 
-@router.post("/batch")
+@router.post("/batch", dependencies=[Depends(require_module(Module.POS))])
 async def create_cart_with_items_batch(
     request: Request,
     batch: BatchAddItemsRequest
@@ -50,7 +51,7 @@ async def create_cart_with_items_batch(
     )
 
 
-@router.get("/{customer_id}")
+@router.get("/{customer_id}", dependencies=[Depends(require_module(Module.POS))])
 async def get_cart(
     request: Request,
     customer_id: UUID,
@@ -66,7 +67,7 @@ async def get_cart(
     )
 
 
-@router.post("/{cart_id}/items")
+@router.post("/{cart_id}/items", dependencies=[Depends(require_module(Module.POS))])
 async def add_item(
     request: Request,
     cart_id: UUID,
@@ -93,7 +94,7 @@ class UpdateItemRequest(BaseModel):
     notes: Optional[str] = None
 
 
-@router.put("/{cart_id}/items/{item_id}")
+@router.put("/{cart_id}/items/{item_id}", dependencies=[Depends(require_module(Module.POS))])
 async def update_item(
     request: Request,
     cart_id: UUID,
@@ -114,7 +115,7 @@ async def update_item(
     )
 
 
-@router.delete("/{cart_id}/items/{item_id}")
+@router.delete("/{cart_id}/items/{item_id}", dependencies=[Depends(require_module(Module.POS))])
 async def remove_item(
     request: Request,
     cart_id: UUID,
@@ -130,7 +131,7 @@ async def remove_item(
     )
 
 
-@router.delete("/{cart_id}")
+@router.delete("/{cart_id}", dependencies=[Depends(require_module(Module.POS))])
 async def clear_cart(
     request: Request,
     cart_id: UUID
@@ -159,7 +160,7 @@ class CompleteOrderRequest(BaseModel):
     delivery_instructions: Optional[str] = Field(None, description="Free-text notes for the courier (e.g. 'Tocar el timbre 2 veces').")
 
 
-@router.post("/{cart_id}/complete")
+@router.post("/{cart_id}/complete", dependencies=[Depends(require_module(Module.POS))])
 async def complete_order(
     request: Request,
     cart_id: UUID,
@@ -194,7 +195,7 @@ async def complete_order(
     )
 
 
-@router.post("/{cart_id}/fire")
+@router.post("/{cart_id}/fire", dependencies=[Depends(require_module(Module.POS))])
 async def fire_pos_cart(request: Request, cart_id: UUID):
     """
     Explicitly fire all 'new' items in a POS cart/order to the kitchen.
@@ -237,7 +238,7 @@ class AddPaymentResponse(BaseModel):
     payment_id: str
 
 
-@router.post("/receipt-email")
+@router.post("/receipt-email", dependencies=[Depends(require_module(Module.POS))])
 async def send_receipt_email(request: Request, receipt_data: SendReceiptRequest):
     """
     Send a POS receipt email on demand.
@@ -268,7 +269,7 @@ async def send_receipt_email(request: Request, receipt_data: SendReceiptRequest)
     return {"success": success}
 
 
-@router.post("/{cart_id}/payments", response_model=None)
+@router.post("/{cart_id}/payments", response_model=None, dependencies=[Depends(require_module(Module.POS))])
 async def add_cart_payment(
     cart_id: str,
     payment_data: AddPaymentRequest,
@@ -288,7 +289,7 @@ async def add_cart_payment(
     )
 
 
-@router.get("/{cart_id}/tax-preview")
+@router.get("/{cart_id}/tax-preview", dependencies=[Depends(require_module(Module.POS))])
 async def get_cart_tax_preview(
     request: Request,
     cart_id: UUID,
