@@ -1,8 +1,9 @@
 """
 Customers Router - HTTP endpoints for customer management
 """
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Depends, Request, Query
 from uuid import UUID
+from app.core.permissions import Module, require_module
 from app.services.customers_service import (
     search_or_create_customer,
     search_customer_by_phone,
@@ -24,7 +25,7 @@ from app.models.customer import (
 router = APIRouter()
 
 
-@router.post("/search-or-create", response_model=CustomerResponse, status_code=200)
+@router.post("/search-or-create", response_model=CustomerResponse, status_code=200, dependencies=[Depends(require_module(Module.VENTAS))])
 async def search_or_create_customer_endpoint(
     request: Request,
     customer_data: CustomerSearchOrCreate
@@ -53,7 +54,7 @@ async def search_or_create_customer_endpoint(
     return await search_or_create_customer(request, customer_data)
 
 
-@router.get("/search", response_model=CustomerSearchResponse, status_code=200)
+@router.get("/search", response_model=CustomerSearchResponse, status_code=200, dependencies=[Depends(require_module(Module.VENTAS))])
 async def search_customer_endpoint(
     request: Request,
     phone_number: str = Query(..., min_length=7, max_length=20, description="Phone number to search")
@@ -76,7 +77,7 @@ async def search_customer_endpoint(
     return await search_customer_by_phone(request, phone_number)
 
 
-@router.get("/search-by-query", response_model=CustomerQuerySearchResponse, status_code=200)
+@router.get("/search-by-query", response_model=CustomerQuerySearchResponse, status_code=200, dependencies=[Depends(require_module(Module.VENTAS))])
 async def search_customers_by_query_endpoint(
     request: Request,
     q: str = Query(..., min_length=1, max_length=100, description="Partial name or phone to search"),
@@ -98,7 +99,7 @@ async def search_customers_by_query_endpoint(
     return await search_customers_by_query(request, q, limit)
 
 
-@router.patch("/{customer_id}", response_model=CustomerUpdateResponse, status_code=200)
+@router.patch("/{customer_id}", response_model=CustomerUpdateResponse, status_code=200, dependencies=[Depends(require_module(Module.VENTAS))])
 async def update_customer_endpoint(
     request: Request,
     customer_id: UUID,
@@ -111,7 +112,7 @@ async def update_customer_endpoint(
     return await update_customer(request, customer_id, update_data)
 
 
-@router.get("/{customer_id}", response_model=CustomerUpdateResponse, status_code=200)
+@router.get("/{customer_id}", response_model=CustomerUpdateResponse, status_code=200, dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_customer_by_id_endpoint(
     request: Request,
     customer_id: UUID,
@@ -123,7 +124,7 @@ async def get_customer_by_id_endpoint(
     return await get_customer_by_id(request, customer_id)
 
 
-@router.get("/{customer_id}/insights", response_model=CustomerInsightsResponse, status_code=200)
+@router.get("/{customer_id}/insights", response_model=CustomerInsightsResponse, status_code=200, dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_customer_insights_endpoint(
     request: Request,
     customer_id: UUID

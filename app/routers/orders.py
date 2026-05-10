@@ -6,14 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from typing import Optional, List
 from uuid import UUID
 from pydantic import BaseModel, Field
-from app.services import orders_service, facturacion_service
 from app.core.dependencies import require_invoicing_ready
 from app.core.middleware import require_valid_session
+from app.core.permissions import Module, require_module
+from app.services import orders_service, facturacion_service
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
-@router.get("/dashboard")
+@router.get("/dashboard", dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_orders_dashboard(
     request: Request,
     payment_method: Optional[str] = Query(None),
@@ -35,7 +36,7 @@ async def get_orders_dashboard(
     )
 
 
-@router.get("/metrics")
+@router.get("/metrics", dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_orders_metrics(
     request: Request,
     date_from: Optional[str] = Query(None),
@@ -51,7 +52,7 @@ async def get_orders_metrics(
     )
 
 
-@router.get("/sales-flow")
+@router.get("/sales-flow", dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_sales_flow(
     request: Request,
     date_from: Optional[str] = Query(None),
@@ -81,7 +82,7 @@ async def get_sales_flow(
     )
 
 
-@router.post("/export")
+@router.post("/export", dependencies=[Depends(require_module(Module.VENTAS))])
 async def export_orders(
     request: Request,
     search: Optional[str] = Query(None),
@@ -108,7 +109,7 @@ async def export_orders(
     )
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_orders(
     request: Request,
     limit: int = Query(50, ge=1, le=250),
@@ -141,7 +142,7 @@ async def get_orders(
     )
 
 
-@router.get("/customers")
+@router.get("/customers", dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_customers(
     request: Request,
     date_from: Optional[str] = Query(None),
@@ -176,7 +177,7 @@ async def get_customers(
     )
 
 
-@router.get("/customers/{customer_id}")
+@router.get("/customers/{customer_id}", dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_customer_detail(
     request: Request,
     customer_id: UUID,
@@ -229,7 +230,7 @@ class CreateManualOrderRequest(BaseModel):
     items: List[ManualOrderItem] = Field(min_length=1)
 
 
-@router.post("/manual")
+@router.post("/manual", dependencies=[Depends(require_module(Module.VENTAS))])
 async def create_manual_order(
     request: Request,
     data: CreateManualOrderRequest
@@ -248,7 +249,7 @@ async def create_manual_order(
     )
 
 
-@router.get("/products-sold")
+@router.get("/products-sold", dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_products_sold(
     request: Request,
     date_from: Optional[str] = Query(None),
@@ -274,7 +275,7 @@ async def get_products_sold(
     )
 
 
-@router.get("/{order_id}")
+@router.get("/{order_id}", dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_order(
     request: Request,
     order_id: UUID
@@ -297,7 +298,7 @@ class BulkUpdateStatusRequest(BaseModel):
     customer_id: Optional[str] = Field(None, description="UUID of customer to associate")
 
 
-@router.patch("/bulk-status")
+@router.patch("/bulk-status", dependencies=[Depends(require_module(Module.VENTAS))])
 async def bulk_update_order_status(
     request: Request,
     body: BulkUpdateStatusRequest
@@ -306,7 +307,7 @@ async def bulk_update_order_status(
     return await orders_service.bulk_update_order_status(request, body.order_ids, body.status, body.payment_method, body.customer_id)
 
 
-@router.patch("/{order_id}/status")
+@router.patch("/{order_id}/status", dependencies=[Depends(require_module(Module.VENTAS))])
 async def update_order_status(
     request: Request,
     order_id: UUID,
@@ -318,7 +319,7 @@ async def update_order_status(
     return await orders_service.update_order_status(request, order_id, body.status, body.payment_method)
 
 
-@router.get("/{order_id}/items")
+@router.get("/{order_id}/items", dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_order_items(
     request: Request,
     order_id: UUID
@@ -329,7 +330,7 @@ async def get_order_items(
     return await orders_service.get_order_items(request, order_id)
 
 
-@router.delete("/{order_id}/items/{item_id}")
+@router.delete("/{order_id}/items/{item_id}", dependencies=[Depends(require_module(Module.VENTAS))])
 async def delete_order_item(
     request: Request,
     order_id: UUID,
@@ -342,7 +343,7 @@ async def delete_order_item(
     return await orders_service.delete_order_item(request, order_id, item_id)
 
 
-@router.delete("/{order_id}/items/{item_id}/modifiers/{modifier_id}")
+@router.delete("/{order_id}/items/{item_id}/modifiers/{modifier_id}", dependencies=[Depends(require_module(Module.VENTAS))])
 async def delete_order_item_modifier(
     request: Request,
     order_id: UUID,
@@ -358,7 +359,7 @@ async def delete_order_item_modifier(
 
 # ── Electronic invoicing (issue #128) ─────────────────────────────────────────
 
-@router.post("/{order_id}/invoice", tags=["Invoices"])
+@router.post("/{order_id}/invoice", tags=["Invoices"], dependencies=[Depends(require_module(Module.VENTAS))])
 async def emit_order_invoice(
     request: Request,
     order_id: UUID,
@@ -383,7 +384,7 @@ async def emit_order_invoice(
     )
 
 
-@router.get("/{order_id}/invoice", tags=["Invoices"])
+@router.get("/{order_id}/invoice", tags=["Invoices"], dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_order_invoice(
     request: Request,
     order_id: UUID,
@@ -404,7 +405,7 @@ async def get_order_invoice(
     return result
 
 
-@router.get("/{order_id}/invoice/dian-status", tags=["Invoices"])
+@router.get("/{order_id}/invoice/dian-status", tags=["Invoices"], dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_order_invoice_dian_status(
     request: Request,
     order_id: UUID,
