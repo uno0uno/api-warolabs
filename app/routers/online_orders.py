@@ -2,10 +2,11 @@
 Online Orders Router
 Authenticated endpoints for restaurant operators to manage online orders.
 """
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Depends, Request, Query
 from typing import Optional, Literal
 from uuid import UUID
 from pydantic import BaseModel
+from app.core.permissions import Module, require_module
 from app.services import online_orders_service
 
 router = APIRouter(prefix="/online/orders", tags=["Online Orders (Authenticated)"])
@@ -17,7 +18,7 @@ class UpdateOrderStatusRequest(BaseModel):
     auto_complete: bool = False
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_module(Module.VENTAS))])
 async def list_online_orders(
     request: Request,
     status: Optional[str] = Query(None, description="Filter by status: pending, confirmed, preparing, delivered, cancelled"),
@@ -39,7 +40,7 @@ async def list_online_orders(
     )
 
 
-@router.get("/{order_id}/status-history")
+@router.get("/{order_id}/status-history", dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_online_order_status_history(
     request: Request,
     order_id: UUID,
@@ -48,7 +49,7 @@ async def get_online_order_status_history(
     return await online_orders_service.get_order_status_history(request, order_id)
 
 
-@router.get("/{order_id}")
+@router.get("/{order_id}", dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_online_order_detail(
     request: Request,
     order_id: UUID,
@@ -64,7 +65,7 @@ async def get_online_order_detail(
     return await online_orders_service.get_online_order_by_id(request, order_id)
 
 
-@router.patch("/{order_id}/status")
+@router.patch("/{order_id}/status", dependencies=[Depends(require_module(Module.VENTAS))])
 async def update_online_order_status(
     request: Request,
     order_id: UUID,

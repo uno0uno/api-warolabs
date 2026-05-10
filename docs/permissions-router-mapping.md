@@ -84,7 +84,7 @@ Total: **51 routers**, **~394 endpoints** (was 52/395 before #187 deleted `admin
 | Module | Routers | Sub-task | Status |
 |---|---|---|---|
 | **POS** | comandas, notifications, pos_cart, tables, waros + payment_methods/pos | 5+1 | ✅ E2.3 (#188) — DONE (51 endpoints gated, 3 KDS-direct excluded) |
-| **VENTAS** | customers, online_orders, orders | 3 | E2.4 (#189) — pending |
+| **VENTAS** | customers, online_orders, orders | 3 | ✅ E2.4 (#189) — DONE (28 endpoints gated, no exclusions) |
 | **DESPACHO** | (no routers — placeholder, like EVENTOS) | 0 | ✅ E2.5 (#187) — DONE (deleted dead `admin_orders.py`) |
 | **MENU** | categories, combos, menu, modifiers, products, recipe_bases | 6 | E2.6 (#190) — pending |
 | **OPERACIONES** | stations + tenant_config (operaciones part) | 1+1 | E2.7 (#191) — pending |
