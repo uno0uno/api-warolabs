@@ -19,14 +19,13 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ---
 
-## Authoritative Table — 52 routers
+## Authoritative Table — 51 routers
 
 | router_file | mount_prefix | endpoints | module | auth_today | notes |
 |---|---|---|---|---|---|
 | `accounting.py` | `/accounting` | 13 | **FINANZAS** | session | Chart of accounts CRUD, balance, P&L |
 | `address_profile.py` | `/online/addresses` | 6 | **public** | none | Direcciones de delivery (clientes online) |
 | `admin_ingredients.py` | `/admin/ingredients` | 6 | **ABASTECIMIENTO** | session | Catálogo global de ingredientes |
-| `admin_orders.py` | `/admin/orders` | 1 | **DESPACHO** | session | Backfill / mantenimiento (#105) |
 | `analytics.py` | `/analytics` | 6 | **ANALITICA** | session | Dashboard analítico, alertas |
 | `api_tokens.py` | `/api-tokens` | 6 | **INTEGRACIONES** | session | API token CRUD + scopes |
 | `articles.py` | `/blog` | 3 | **public** | none | Blog público (lista + detalle) |
@@ -52,7 +51,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `leads.py` | `/leads` | 2 | **public** | none | Captura de leads (homepage) |
 | `menu.py` | `/menu` | 1 | **MENU** | session | Name-check genérico |
 | `modifiers.py` | `/menu/modifier-groups` | 6 | **MENU** | session | Grupos de modificadores |
-| `notifications.py` | `/notifications` | 4 | **POS** | session | Notificaciones operador (SSE) — ver ambigüedad en §6 |
+| `notifications.py` | `/notifications` | 4 | **POS** | session | Notificaciones operador (SSE) — ver ambigüedad en §7 |
 | `online_cart.py` | `/online/cart` | 10 | **public** | none | Carrito online (anónimo, session_id) |
 | `online_orders.py` | `/online/orders` | 4 | **VENTAS** | session | Operador gestiona pedidos online |
 | `online_verification.py` | `/online/otp` | 3 | **public** | none | OTP por email del cliente |
@@ -80,13 +79,13 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ## Coverage Summary
 
-Total: **52 routers**, **~395 endpoints**.
+Total: **51 routers**, **~394 endpoints** (was 52/395 before #187 deleted `admin_orders.py`).
 
 | Module | Routers | Sub-task | Status |
 |---|---|---|---|
 | **POS** | comandas, notifications, pos_cart, tables, waros + payment_methods/pos | 5+1 | E2.3 (#188) — pending |
 | **VENTAS** | customers, online_orders, orders | 3 | E2.4 (#189) — pending |
-| **DESPACHO** | admin_orders | 1 | E2.5 (#187) — pending |
+| **DESPACHO** | (no routers — placeholder, like EVENTOS) | 0 | ✅ E2.5 (#187) — DONE (deleted dead `admin_orders.py`) |
 | **MENU** | categories, combos, menu, modifiers, products, recipe_bases | 6 | E2.6 (#190) — pending |
 | **OPERACIONES** | stations + tenant_config (operaciones part) | 1+1 | E2.7 (#191) — pending |
 | **ABASTECIMIENTO** | admin_ingredients, ingredient_purchase_units, ingredients, inventory, purchases, suppliers | 6 | E2.8 (#195) — pending |
@@ -169,7 +168,33 @@ Recommendation: do E2.7 and E2.15 in a **single PR** that touches the file
 twice but keeps the diff cohesive. Otherwise the file ends up half-gated
 between two PRs and reviewers lose context.
 
-## §5. `auth.py` and `webhooks.py` — explicit skips
+## §5. Pattern: delete admin endpoints with no UI consumer instead of gating
+
+When auditing a router for E2.X, if the router exposes admin/maintenance
+endpoints that have **zero consumers** across:
+
+- `front_nuxt/` (pages, components, composables, layouts)
+- `api-warolabs/` (other routers, services, scripts)
+- `postman/` collections
+- `tests/`
+
+→ **Delete the router** instead of wiring `require_module()` on it.
+
+Precedents:
+- **#185 (E2.14)** — deleted the entire `/admin/billing/*` surface (10 endpoints + 4 Pydantic models + 9 service methods + the matching `useAdminBilling` composable). Added speculatively in #61, never wired into a workflow.
+- **#187 (E2.5)** — deleted `admin_orders.py` (1 endpoint, `POST /admin/orders/backfill-order-ingredients`). Added in #105 as a one-shot backfill tool, never exposed in any UI.
+
+Rationale: gating dead code adds wire complexity without security value. If the functionality is needed later, the right move is to rebuild the endpoint with proper gating from day 1, paired with the UI that actually consumes it. The deleted SQL/logic remains in git history (referenced commits in the deletion PR) so it can be reused as a transient psql one-off if ever needed.
+
+How to verify a candidate is dead before deleting:
+
+```bash
+# from each repo:
+grep -rn '<endpoint-path>' . --include='*.vue' --include='*.ts' --include='*.js' --include='*.py' --include='*.json'
+# expect: only the router file itself + main.py mount
+```
+
+## §6. `auth.py` and `webhooks.py` — explicit skips
 
 - `auth.py` (`/auth/*` — login, magic link, session, sign-in flow) must run
   BEFORE any session exists. Adding `require_module()` would create a
@@ -182,7 +207,7 @@ between two PRs and reviewers lose context.
 These two files **never** receive `require_module()`. Document explicitly in
 each future PR description that these are intentional skips.
 
-## §6. Ambiguity: `notifications.py` could be POS or OPERACIONES
+## §7. Ambiguity: `notifications.py` could be POS or OPERACIONES
 
 The router serves `/notifications/*` for the operator UI (SSE stream of
 restaurant events: new order, comanda ready, etc.). Today it's classified as

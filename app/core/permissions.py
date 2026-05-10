@@ -58,7 +58,7 @@ class Module(str, Enum):
     """
     POS = "pos"                          # pos_cart, tables, comandas, online_orders
     VENTAS = "ventas"                    # orders, online_cart
-    DESPACHO = "despacho"                # admin_orders
+    DESPACHO = "despacho"                # placeholder — no routers yet (admin_orders deleted in #187)
     MENU = "menu"                        # menu, products, modifiers, combos, categories, recipe_bases, ingredients
     OPERACIONES = "operaciones"          # tenant_config, stations
     ABASTECIMIENTO = "abastecimiento"    # purchases, suppliers, inventory, admin_ingredients, ingredient_purchase_units
