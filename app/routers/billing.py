@@ -1,194 +1,38 @@
 """
-Billing Routers — admin CRUD (issue #61) + tenant subscription flows (issue #60)
+Billing Router — tenant-facing subscription flows (issue #60)
 
-router:        /admin/billing — plan CRUD, subscription management (admin)
-tenant_router: /billing       — subscribe, status, cancel, webhook (tenant-facing)
+tenant_router: /billing — subscribe, status, cancel, webhook, access-status,
+               grace-reminders cron.
+
+Operator endpoints are gated by `require_module(Module.MI_PLAN)` (issue #185 /
+Epic 2 #164). Two endpoints are intentionally NOT gated and carry an explicit
+`# NOTE:` comment above their decorator: the Wompi webhook (signature-verified)
+and the grace-reminders cron (X-Cron-Secret header).
+
+The previous `/admin/billing/*` router was deleted in #185 — those endpoints
+were dead code (no frontend consumer, no scripts) and a security risk under
+RBAC enforcement.
 """
 import logging
-from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Header, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request
 from pydantic import BaseModel
 
 from app.config import settings
 from app.core.middleware import require_valid_session
+from app.core.permissions import Module, require_module
 from app.database import get_db_connection
 from app.services import billing_service, billing_email_service, billing_webhook_service, wompi_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/admin/billing", tags=["Billing Admin"])
 tenant_router = APIRouter(prefix="/billing", tags=["Billing"])
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 # Python 3.9 safe: Optional[X] from typing, no X | None syntax
-
-class PlanCreate(BaseModel):
-    """Body for POST /admin/billing/plans"""
-    name: str
-    slug: str
-    description: Optional[str] = None
-    price_monthly: Decimal
-    price_annual: Decimal
-    scan_limit: int = 1000
-    features: Dict[str, Any] = {}
-
-
-class PlanUpdate(BaseModel):
-    """Body for PATCH /admin/billing/plans/{plan_id} — all fields optional"""
-    name: Optional[str] = None
-    description: Optional[str] = None
-    price_monthly: Optional[Decimal] = None
-    price_annual: Optional[Decimal] = None
-    scan_limit: Optional[int] = None
-    features: Optional[Dict[str, Any]] = None
-
-
-class SubscriptionUpdate(BaseModel):
-    """Body for PATCH /admin/billing/subscriptions/{sub_id}"""
-    status: Optional[str] = None
-    plan_id: Optional[UUID] = None
-
-
-class GiftBody(BaseModel):
-    """Body for POST /admin/billing/subscriptions/{tenant_id}/gift"""
-    days: Optional[int] = None
-    months: Optional[int] = None
-    note: Optional[str] = None
-
-
-# ── Plan endpoints ────────────────────────────────────────────────────────────
-
-@router.get("/plans")
-async def list_plans(request: Request):
-    """List all subscription plans ordered by monthly price."""
-    require_valid_session(request)
-    async with get_db_connection(use_transaction=False) as conn:
-        return await billing_service.list_plans(conn)
-
-
-@router.post("/plans", status_code=201)
-async def create_plan(body: PlanCreate, request: Request):
-    """Create a new subscription plan. Returns 409 if slug already exists."""
-    require_valid_session(request)
-    async with get_db_connection() as conn:
-        return await billing_service.create_plan(conn, body.model_dump())
-
-
-@router.patch("/plans/{plan_id}")
-async def update_plan(plan_id: UUID, body: PlanUpdate, request: Request):
-    """Partially update a subscription plan. Returns 404 if not found."""
-    require_valid_session(request)
-    async with get_db_connection() as conn:
-        return await billing_service.update_plan(
-            conn, plan_id, body.model_dump(exclude_none=True)
-        )
-
-
-@router.delete("/plans/{plan_id}")
-async def deactivate_plan(plan_id: UUID, request: Request):
-    """
-    Soft-delete a plan by setting is_active=false.
-    The plan record is kept (referenced by existing subscriptions).
-    Returns 404 if not found.
-    """
-    require_valid_session(request)
-    async with get_db_connection() as conn:
-        return await billing_service.deactivate_plan(conn, plan_id)
-
-
-# ── Subscription endpoints ────────────────────────────────────────────────────
-
-@router.get("/subscriptions")
-async def list_subscriptions(request: Request):
-    """List all tenant subscriptions with tenant name and plan details."""
-    require_valid_session(request)
-    async with get_db_connection(use_transaction=False) as conn:
-        return await billing_service.list_subscriptions(conn)
-
-
-@router.get("/subscriptions/{tenant_id}")
-async def get_subscription(tenant_id: UUID, request: Request):
-    """Get subscription details for a specific tenant. Returns 404 if not found."""
-    require_valid_session(request)
-    async with get_db_connection(use_transaction=False) as conn:
-        return await billing_service.get_subscription_by_tenant(conn, tenant_id)
-
-
-@router.patch("/subscriptions/{sub_id}/status")
-async def update_subscription_status(
-    sub_id: UUID, body: SubscriptionUpdate, request: Request
-):
-    """
-    Manually update a subscription's status and/or plan.
-    Status must be one of: pending, active, past_due, cancelled, expired.
-    Returns 404 if not found, 422 if status is invalid.
-    """
-    require_valid_session(request)
-    async with get_db_connection() as conn:
-        return await billing_service.update_subscription(
-            conn, sub_id, body.model_dump(exclude_none=True)
-        )
-
-
-@router.post("/subscriptions/{tenant_id}/gift", status_code=200)
-async def gift_subscription(tenant_id: UUID, body: GiftBody, request: Request):
-    """
-    Extend (or create) a subscription for a tenant as a commercial gift.
-
-    - days XOR months must be provided (not both, not neither).
-    - If the tenant has no subscription, creates one (Plan Pro, annual cycle).
-    - If the tenant already has an active subscription, extends current_period_end.
-    - Always records a gift_granted billing event.
-    """
-    require_valid_session(request)
-    if not body.days and not body.months:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=422, detail="Debe proveer 'days' o 'months'")
-    if body.days and body.months:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=422, detail="Provee solo 'days' o 'months', no ambos")
-    async with get_db_connection() as conn:
-        return await billing_service.gift_tenant_subscription(
-            conn,
-            tenant_id=tenant_id,
-            days=body.days,
-            months=body.months,
-            note=body.note,
-        )
-
-
-# ── Usage & events ────────────────────────────────────────────────────────────
-
-@router.get("/usage")
-async def list_usage_summary(request: Request):
-    """
-    Scan usage summary for the current period across all tenants.
-    Tenants with no scans appear with scans_used=0.
-    """
-    require_valid_session(request)
-    async with get_db_connection(use_transaction=False) as conn:
-        return await billing_service.list_usage_summary(conn)
-
-
-@router.get("/events")
-async def list_billing_events(
-    request: Request,
-    limit: int = Query(50, ge=1, le=200, description="Max results per page"),
-    offset: int = Query(0, ge=0, description="Results to skip"),
-):
-    """Paginated billing events log, newest first."""
-    require_valid_session(request)
-    async with get_db_connection(use_transaction=False) as conn:
-        return await billing_service.list_billing_events(conn, limit, offset)
-
-
-# ── Tenant-facing billing endpoints (issue #60) ───────────────────────────────
-# tenant_router prefix: /billing
-
 
 class SubscribeBody(BaseModel):
     """Body for POST /billing/subscribe"""
@@ -197,7 +41,13 @@ class SubscribeBody(BaseModel):
     payer_email: Optional[str] = None
 
 
-@tenant_router.get("/plans")
+# ── Tenant-facing billing endpoints (issue #60) ───────────────────────────────
+
+
+@tenant_router.get(
+    "/plans",
+    dependencies=[Depends(require_module(Module.MI_PLAN))],
+)
 async def tenant_list_plans(request: Request):
     """List active subscription plans (tenant-facing, read-only)."""
     require_valid_session(request)
@@ -206,7 +56,11 @@ async def tenant_list_plans(request: Request):
         return [p for p in plans if p["is_active"]]
 
 
-@tenant_router.post("/subscribe", status_code=201)
+@tenant_router.post(
+    "/subscribe",
+    status_code=201,
+    dependencies=[Depends(require_module(Module.MI_PLAN))],
+)
 async def subscribe(body: SubscribeBody, request: Request):
     """
     Subscribe the authenticated tenant to a plan via Wompi Payment Link.
@@ -262,7 +116,10 @@ async def subscribe(body: SubscribeBody, request: Request):
         )
 
 
-@tenant_router.get("/subscription")
+@tenant_router.get(
+    "/subscription",
+    dependencies=[Depends(require_module(Module.MI_PLAN))],
+)
 async def get_my_subscription(request: Request):
     """Get the current subscription status for the authenticated tenant."""
     session = require_valid_session(request)
@@ -270,7 +127,10 @@ async def get_my_subscription(request: Request):
         return await billing_service.get_tenant_subscription(conn, session.tenant_id)
 
 
-@tenant_router.get("/verify-payment")
+@tenant_router.get(
+    "/verify-payment",
+    dependencies=[Depends(require_module(Module.MI_PLAN))],
+)
 async def verify_payment(request: Request, transaction_id: str = Query(...)):
     """
     Verifica el estado de una transacción de Wompi y activa la suscripción si fue aprobada.
@@ -302,7 +162,10 @@ async def verify_payment(request: Request, transaction_id: str = Query(...)):
     }
 
 
-@tenant_router.get("/usage-history")
+@tenant_router.get(
+    "/usage-history",
+    dependencies=[Depends(require_module(Module.MI_PLAN))],
+)
 async def get_my_usage_history(
     request: Request,
     months: int = Query(12, ge=1, le=24, description="Número de meses a retornar"),
@@ -313,7 +176,10 @@ async def get_my_usage_history(
         return await billing_service.get_scan_monthly_history(session.tenant_id, conn, months)
 
 
-@tenant_router.get("/events")
+@tenant_router.get(
+    "/events",
+    dependencies=[Depends(require_module(Module.MI_PLAN))],
+)
 async def get_my_billing_events(
     request: Request,
     limit: int = Query(20, ge=1, le=100),
@@ -325,7 +191,10 @@ async def get_my_billing_events(
         return await billing_service.list_tenant_billing_events(conn, session.tenant_id, limit, offset)
 
 
-@tenant_router.delete("/subscription")
+@tenant_router.delete(
+    "/subscription",
+    dependencies=[Depends(require_module(Module.MI_PLAN))],
+)
 async def cancel_my_subscription(request: Request):
     """
     Cancela la suscripción activa del tenant en la DB.
@@ -341,6 +210,8 @@ async def cancel_my_subscription(request: Request):
     return {"status": "cancelled", "gateway_reference": gateway_reference or None}
 
 
+# NOTE: Authenticated by Wompi signature verification, not session.
+# Do NOT add require_module() here — it would break payment confirmations.
 @tenant_router.post("/webhook", status_code=200)
 async def wompi_webhook(
     request: Request,
@@ -433,7 +304,10 @@ async def wompi_webhook(
 # ── Grace period & access control — issue #62 ────────────────────────────────
 
 
-@tenant_router.get("/access-status")
+@tenant_router.get(
+    "/access-status",
+    dependencies=[Depends(require_module(Module.MI_PLAN))],
+)
 async def get_access_status(request: Request):
     """
     Return the subscription access level for the authenticated tenant.
@@ -457,6 +331,9 @@ async def get_access_status(request: Request):
         }
 
 
+# NOTE: Cron endpoint authenticated by X-Cron-Secret header, not session.
+# Do NOT add require_module() here — it would break the grace-reminder job
+# that runs from cron-job.org.
 @tenant_router.post("/send-grace-reminders", status_code=200)
 async def send_grace_reminders(
     request: Request,
