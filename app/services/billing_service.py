@@ -425,10 +425,58 @@ async def activate_subscription_by_gateway_ref(
 
 async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
     """
-    Return the tenant's current subscription with plan details.
-    Raises 404 if tenant has no subscription row.
+    Return the tenant's current subscription with plan details and current
+    period scan usage. Raises 404 if tenant has no subscription row.
     """
-    return await get_subscription_by_tenant(conn, tenant_id)
+    row = await conn.fetchrow("""
+        SELECT
+            ts.id,
+            ts.tenant_id,
+            t.name AS tenant_name,
+            ts.plan_id,
+            sp.name AS plan_name,
+            sp.slug AS plan_slug,
+            sp.scan_limit,
+            ts.billing_cycle,
+            ts.status,
+            ts.current_period_start,
+            ts.current_period_end,
+            ts.gateway_reference,
+            ts.cancelled_at,
+            ts.created_at,
+            ts.updated_at,
+            COALESCE(su.scans_used, 0) AS scans_used
+        FROM tenant_subscriptions ts
+        JOIN tenants t ON t.id = ts.tenant_id
+        JOIN subscription_plans sp ON sp.id = ts.plan_id
+        LEFT JOIN scan_usage su
+            ON su.tenant_id = ts.tenant_id
+           AND su.period_start <= now()
+           AND su.period_end   >  now()
+        WHERE ts.tenant_id = $1
+    """, tenant_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+
+    data: Dict[str, Any] = {
+        "id": str(row["id"]),
+        "tenant_id": str(row["tenant_id"]),
+        "tenant_name": row["tenant_name"],
+        "plan_id": str(row["plan_id"]),
+        "plan_name": row["plan_name"],
+        "plan_slug": row["plan_slug"],
+        "scan_limit": row["scan_limit"],
+        "billing_cycle": row["billing_cycle"],
+        "status": row["status"],
+        "current_period_start": row["current_period_start"].isoformat(),
+        "current_period_end": row["current_period_end"].isoformat(),
+        "gateway_reference": row["gateway_reference"],
+        "cancelled_at": row["cancelled_at"].isoformat() if row["cancelled_at"] else None,
+        "created_at": row["created_at"].isoformat(),
+        "updated_at": row["updated_at"].isoformat(),
+        "scans_used": row["scans_used"],
+    }
+    return data
 
 
 async def cancel_tenant_subscription(conn, tenant_id: UUID) -> str:
