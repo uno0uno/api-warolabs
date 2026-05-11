@@ -23,7 +23,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 | router_file | mount_prefix | endpoints | module | auth_today | notes |
 |---|---|---|---|---|---|
-| `accounting.py` | `/accounting` | 13 | **FINANZAS** | session | Chart of accounts CRUD, balance, P&L |
+| `accounting.py` | `/accounting` | 13 | **FINANZAS** | session | DONE en #198. Chart of accounts CRUD, balance, P&L |
 | `address_profile.py` | `/online/addresses` | 6 | **public** | none | Direcciones de delivery (clientes online) |
 | `admin_ingredients.py` | `/admin/ingredients` | 6 | **ABASTECIMIENTO** | session | Catálogo global de ingredientes |
 | `analytics.py` | `/analytics` | 6 | **ANALITICA** | session | Dashboard analítico, alertas |
@@ -31,18 +31,18 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `articles.py` | `/blog` | 3 | **public** | none | Blog público (lista + detalle) |
 | `auth.py` | `/auth` | 7 | **skip** | none | Login/sesión — corre SIN sesión |
 | `billing.py` | `/billing` | 10 | **MI_PLAN** | mixed | DONE en #185. Webhook + cron skip con `# NOTE:` |
-| `cartera.py` | `/cartera` | 4 | **FINANZAS** | session | Cartera (cuentas por cobrar) |
+| `cartera.py` | `/cartera` | 4 | **FINANZAS** | session | DONE en #198. Cartera (cuentas por cobrar) |
 | `categories.py` | `/menu/categories` | 2 | **MENU** | session | Listado con filtro global+tenant |
-| `cierre.py` | `/cierre` | 9 | **FINANZAS** | session | Cierre X/Z diario |
+| `cierre.py` | `/cierre` | 9 | **FINANZAS** | session | DONE en #198. Cierre X/Z diario |
 | `comandas.py` | `/api/comandas` | 11 | **POS** | session | KDS lifecycle. ⚠️ KDS-public paths via `?token=` middleware quedan sin gate (ver §1) |
 | `combos.py` | `/menu/combos` | 6 | **MENU** | session | Combo CRUD |
-| `credit.py` | `/credit` | 3 | **FINANZAS** | session | Pagos a crédito |
+| `credit.py` | `/credit` | 3 | **FINANZAS** | session | DONE en #198. Pagos a crédito |
 | `customer_portal.py` | `/customer` | 7 | **public** | none | Portal del cliente final (JWT customer, no sesión de operador) |
 | `customers.py` | `/customers` | 6 | **VENTAS** | session | Búsqueda + perfil de clientes (operador) |
 | `documents.py` | `/api/documents` | 4 | **FACTURACION** | session | Documentos electrónicos (lista, PDF/XML) |
-| `expenses.py` | `/finance/expenses` | 14 | **FINANZAS** | session | CRUD de gastos + categorías |
+| `expenses.py` | `/finance/expenses` | 14 | **FINANZAS** | session | DONE en #198. CRUD de gastos + categorías |
 | `facturacion.py` | `/api/acquirer + /api/facturacion + /api/payroll` | 3 | **FACTURACION** | session | 3 sub-routers (acquirer, catalog, payroll) — todos FACTURACION |
-| `financial.py` | (sin prefix) | 3 | **FINANZAS** | session | TIR, rentabilidad de productos |
+| `financial.py` | (sin prefix) | 3 | **FINANZAS** | session | DONE en #198. TIR, rentabilidad de productos |
 | `ingredient_purchase_units.py` | `/suppliers/ingredient-purchase-units` | 6 | **ABASTECIMIENTO** | session | Unidades de compra |
 | `ingredients.py` | `/suppliers/ingredients` | 10 | **ABASTECIMIENTO** | session | Custom ingredients + catálogo |
 | `inventory.py` | `/inventory` | 4 | **ABASTECIMIENTO** | session | Stock + ajustes |
@@ -56,14 +56,14 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `online_orders.py` | `/online/orders` | 4 | **VENTAS** | session | Operador gestiona pedidos online |
 | `online_verification.py` | `/online/otp` | 3 | **public** | none | OTP por email del cliente |
 | `orders.py` | `/orders` | 18 | **VENTAS** | session | Dashboard de ventas, métricas |
-| `payment_methods.py` | `/finanzas/metodos-pago + /pos/payment-methods` | 10 | **mixed** | session | Split: finanzas_router (FINANZAS) + pos_router (POS read-only) — ver §3 |
+| `payment_methods.py` | `/finanzas/metodos-pago + /pos/payment-methods` | 10 | **mixed** | session | DONE: finanzas_router → FINANZAS en #198 (7 endpoints); pos_router → POS en #188 (1 endpoint). Ver §3 |
 | `pos_cart.py` | `/pos/cart` | 11 | **POS** | session | Carrito POS, checkout |
 | `products.py` | `/menu/products` | 7 | **MENU** | session | Producto CRUD + receta + imagen |
 | `public_api.py` | `/v1` | 25 | **INTEGRACIONES** | api_key | API pública con API key (clientes externos) |
 | `public_restaurant.py` | `/public/restaurant` | 4 | **public** | none | Lista + detalle por slug |
 | `purchases.py` | `/suppliers/purchases` | 26 | **ABASTECIMIENTO** | session | Compras + estados + factura |
 | `recipe_bases.py` | `/menu/recipe-bases` | 5 | **MENU** | session | Templates de receta |
-| `salaries.py` | `/salaries` | 29 | **FINANZAS** | session | Nómina + prima + cesantías + PILA |
+| `salaries.py` | `/salaries` | 29 | **FINANZAS** | session | DONE en #198 (router más grande del Epic). Nómina + prima + cesantías + PILA |
 | `stations.py` | `/api/stations` | 15 | **OPERACIONES** | session | Estaciones de cocina + routing. ⚠️ KDS-token endpoints sin gate (ver §1) |
 | `supplier_portal.py` | `/supplier-portal` | 8 | **public** | token | Portal del proveedor (token, no sesión) |
 | `suppliers.py` | `/suppliers/providers` | 10 | **ABASTECIMIENTO** | session | Proveedor CRUD |
@@ -90,7 +90,7 @@ Total: **51 routers**, **~394 endpoints** (was 52/395 before #187 deleted `admin
 | **OPERACIONES** | stations + tenant_config (operaciones part) | 1+1 | E2.7 (#191) — pending |
 | **ABASTECIMIENTO** | admin_ingredients, ingredient_purchase_units, ingredients, inventory, purchases, suppliers | 6 | E2.8 (#195) — pending |
 | **ANALITICA** | analytics | 1 | E2.9 (#193) — pending |
-| **FINANZAS** | accounting, cartera, cierre, credit, expenses, financial, salaries + payment_methods/finanzas | 7+1 | E2.10 (#198) — pending |
+| **FINANZAS** | accounting, cartera, cierre, credit, expenses, financial, salaries + payment_methods/finanzas | 7+1 | ✅ E2.10 (#198) — DONE (82 endpoints gated; largest batch in Epic) |
 | **FACTURACION** | documents, facturacion (3 sub-routers), invoices, support_documents | 4 | E2.11 (#194) — pending |
 | **EQUIPO** | invitations (excl. /accept), tenants | 2 | E2.12 (#196) — pending |
 | **INTEGRACIONES** | api_tokens, public_api, v1_ordering | 3 | E2.13 (#197) — pending |
@@ -148,13 +148,13 @@ finanzas_router = APIRouter(prefix="/finanzas/metodos-pago", ...)  # 7 endpoints
 pos_router      = APIRouter(prefix="/pos/payment-methods", ...)    # 1 endpoint
 ```
 
-Both are mounted in `main.py`. Wiring strategy:
+Both are mounted in `main.py`. Wiring done:
 
-- `finanzas_router` → `Depends(require_module(Module.FINANZAS))` → goes in **E2.10** (#198).
-- `pos_router` → `Depends(require_module(Module.POS))` → goes in **E2.3** (#188).
+- ✅ `finanzas_router` → `Depends(require_module(Module.FINANZAS))` → **E2.10** (#198), all 7 endpoints.
+- ✅ `pos_router` → `Depends(require_module(Module.POS))` → **E2.3** (#188), 1 endpoint.
 
 Easier than splitting per-endpoint because the file already separates them
-into distinct router objects.
+into distinct router objects. Regression test in `tests/test_finanzas_permissions.py::test_cashier_role_passes_pos_router_under_enforce_regression` guards against accidental rewrites of the POS gate by future FINANZAS bulk-regex passes.
 
 ## §4. `tenant_config.py` — endpoint-level split required
 
@@ -231,6 +231,25 @@ flows. Alternatives considered:
 
 **Decision applied:** classify as POS. Revisit during shadow-mode rollout if
 logs show kitchen / supervisor roles being denied for legitimate use.
+
+## §8. FINANZAS caveats from #198
+
+Two decisions intentionally NOT made in E2.10 (#198):
+
+1. **SUPERVISOR does not have FINANZAS** in the matrix (`app/core/permissions.py:99-108`).
+   The issue body of #198 says "FINANZAS defaults to admin/supervisor", but the matrix
+   on `main` is the source of truth: only OWNER and ADMIN hold FINANZAS today. After
+   #198 merge, a SUPERVISOR session hitting any FINANZAS endpoint → 403. If product
+   later decides supervisors need read access (e.g. cierre dashboard), open a separate
+   issue and add `Module.FINANZAS` to `Role.SUPERVISOR` defaults — single-line matrix
+   change, no router edits required.
+
+2. **Salaries owner-only is a follow-up**, not part of #198. The issue body suggests
+   that creating / modifying salary configuration (`POST /salaries/employees/{id}/config`,
+   `POST /salaries/payments`, etc.) should be owner-only — not admin. That requires
+   per-endpoint `require_role(Role.OWNER)` style restrictions inside the salaries router,
+   which is a different mechanism than module gating. Track separately after shadow logs
+   surface any admin/supervisor activity on salary endpoints.
 
 ---
 

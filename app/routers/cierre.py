@@ -4,7 +4,8 @@ Daily accounting close: preview (Cierre X) and final close wizard (Cierre Z).
 
 Issue: https://github.com/uno0uno/warocol.com/issues/311
 """
-from fastapi import APIRouter, Request, Response, Query
+from fastapi import Depends, APIRouter, Request, Response, Query
+from app.core.permissions import Module, require_module
 from typing import Optional
 from uuid import UUID
 from datetime import date, datetime
@@ -14,7 +15,7 @@ from app.services import cierre_service
 router = APIRouter(prefix="/cierre", tags=["cierre"])
 
 
-@router.get("/preview")
+@router.get("/preview", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def cierre_preview(
     request: Request,
     period_start: date = Query(..., alias="period_start"),
@@ -39,7 +40,7 @@ async def cierre_preview(
     )
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def create_cierre(request: Request, body: CierreCreate):
     """
     Cierre Z — final daily close.
@@ -52,7 +53,7 @@ async def create_cierre(request: Request, body: CierreCreate):
     return await cierre_service.create_cierre(request, body)
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def list_cierres(
     request: Request,
     period_start: Optional[date] = Query(None, alias="period_start"),
@@ -65,7 +66,7 @@ async def list_cierres(
     return await cierre_service.list_cierres(request, period_start, period_end)
 
 
-@router.get("/mensual")
+@router.get("/mensual", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_cierre_mensual(
     request: Request,
     year:  int = Query(..., alias="year"),
@@ -78,7 +79,7 @@ async def get_cierre_mensual(
     return await cierre_service.get_cierre_mensual(request, year, month)
 
 
-@router.get("/mensual/{year}/{month}/status")
+@router.get("/mensual/{year}/{month}/status", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_monthly_period_status(
     year: int,
     month: int,
@@ -93,7 +94,7 @@ async def get_monthly_period_status(
     return await cierre_service.get_monthly_period(request, response, year, month)
 
 
-@router.post("/mensual/{year}/{month}/close")
+@router.post("/mensual/{year}/{month}/close", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def close_monthly_period_endpoint(
     year: int,
     month: int,
@@ -111,7 +112,7 @@ async def close_monthly_period_endpoint(
     return await cierre_service.close_monthly_period(request, response, year, month, notes)
 
 
-@router.get("/ultimo")
+@router.get("/ultimo", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_ultimo_cierre(request: Request):
     """
     Returns the most recent closed period for the tenant, or null if none exists.
@@ -120,7 +121,7 @@ async def get_ultimo_cierre(request: Request):
     return await cierre_service.get_ultimo_cierre(request)
 
 
-@router.get("/{cierre_id}")
+@router.get("/{cierre_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_cierre(request: Request, cierre_id: UUID):
     """
     Full detail for a single closed period.
@@ -129,7 +130,7 @@ async def get_cierre(request: Request, cierre_id: UUID):
     return await cierre_service.get_cierre(request, cierre_id)
 
 
-@router.delete("/{cierre_id}")
+@router.delete("/{cierre_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def delete_cierre(request: Request, cierre_id: UUID):
     """
     Soft-delete a closed period (sets deleted_at on accounting_period).

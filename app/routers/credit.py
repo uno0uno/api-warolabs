@@ -4,7 +4,8 @@ Endpoints for managing credit sales — payment registration, history, and open-
 
 Issue: https://github.com/uno0uno/warocol.com/issues/294
 """
-from fastapi import APIRouter, Request, Query
+from fastapi import Depends, APIRouter, Request, Query
+from app.core.permissions import Module, require_module
 from typing import Optional
 from uuid import UUID
 from decimal import Decimal
@@ -22,7 +23,7 @@ class RegisterCreditPaymentRequest(BaseModel):
     payment_date: Optional[date] = Field(None, description="Payment date (defaults to now)")
 
 
-@router.post("/orders/{order_id}/payments")
+@router.post("/orders/{order_id}/payments", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def register_payment(
     request: Request,
     order_id: UUID,
@@ -47,7 +48,7 @@ async def register_payment(
     )
 
 
-@router.get("/orders/{order_id}/payments")
+@router.get("/orders/{order_id}/payments", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_payments(
     request: Request,
     order_id: UUID,
@@ -59,7 +60,7 @@ async def get_payments(
     return await credit_service.get_credit_payments(request, order_id)
 
 
-@router.get("/")
+@router.get("/", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def list_open_credits(
     request: Request,
     limit: int = Query(50, ge=1, le=200),
