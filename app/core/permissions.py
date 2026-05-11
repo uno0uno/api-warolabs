@@ -251,7 +251,7 @@ _shadow_logger = logging.getLogger("permissions.shadow")
 VALID_MODES = frozenset({"disabled", "shadow", "enforce"})
 
 
-async def _get_enforcement_mode(tenant_id: UUID) -> str:
+async def get_enforcement_mode(tenant_id: UUID) -> str:
     """Resolve `tenants.permissions_enforcement_mode` for a tenant.
 
     Cached for 60s. Defaults to `'disabled'` if the row is missing or the
@@ -362,7 +362,7 @@ def require_module(module: Module) -> Callable[[Request], Awaitable[None]]:
         if not tenant_id:
             return  # no tenant resolved → cannot gate; let handler decide
 
-        mode = await _get_enforcement_mode(tenant_id)
+        mode = await get_enforcement_mode(tenant_id)
         if mode == "disabled":
             return
 

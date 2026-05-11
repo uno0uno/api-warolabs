@@ -19,7 +19,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ---
 
-## Authoritative Table — 51 routers
+## Authoritative Table — 52 routers
 
 | router_file | mount_prefix | endpoints | module | auth_today | notes |
 |---|---|---|---|---|---|
@@ -49,6 +49,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `invitations.py` | `/invitations` | 4 | **EQUIPO** | session | ⚠️ `/invitations/accept` es token-público (ver §2) |
 | `invoices.py` | `/api/invoices` | 4 | **FACTURACION** | session | Notas crédito/débito, RADIAN |
 | `leads.py` | `/leads` | 2 | **public** | none | Captura de leads (homepage) |
+| `me.py` | `/me` | 1 | **skip** | session | DONE en #200. Endpoint público a usuarios autenticados — surfacing del propio access map (role + modules + enforcement_mode) para Epic 4 |
 | `menu.py` | `/menu` | 1 | **MENU** | session | Name-check genérico |
 | `modifiers.py` | `/menu/modifier-groups` | 6 | **MENU** | session | Grupos de modificadores |
 | `notifications.py` | `/notifications` | 4 | **POS** | session | Notificaciones operador (SSE) — ver ambigüedad en §7 |
@@ -79,7 +80,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ## Coverage Summary
 
-Total: **51 routers**, **~394 endpoints** (was 52/395 before #187 deleted `admin_orders.py`).
+Total: **52 routers**, **~395 endpoints** (was 51/394 before #200 added `me.py`).
 
 | Module | Routers | Sub-task | Status |
 |---|---|---|---|
@@ -98,7 +99,7 @@ Total: **51 routers**, **~394 endpoints** (was 52/395 before #187 deleted `admin
 | **MI_NEGOCIO** | tenant_config (mi_negocio part) | 1 | E2.15 (#199) — pending |
 | **EVENTOS** | (no routers exist) | 0 | E2.16 (#200) — no-op |
 | **public** | address_profile, articles, customer_portal, leads, online_cart, online_verification, public_restaurant, supplier_portal | 8 | n/a — never gated |
-| **skip** | auth, webhooks | 2 | n/a — explicit exclusion |
+| **skip** | auth, me, webhooks | 3 | n/a — explicit exclusion (auth + webhooks pre-session; me surfaces own access map and cannot self-gate) |
 | **mixed (split-by-endpoint)** | payment_methods, tenant_config | 2 | split across two sub-tasks |
 
 ---
