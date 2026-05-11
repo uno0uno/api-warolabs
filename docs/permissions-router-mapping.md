@@ -2,7 +2,7 @@
 
 **Status:** Source of truth for Epic 2 (#164) wiring sub-tasks (E2.3 → E2.16).
 **Origin:** [#186 audit](https://github.com/uno0uno/api-warolabs/issues/186).
-**Last updated:** 2026-05-09 (initial commit, post #185 / E2.14 done).
+**Last updated:** 2026-05-11 (post #197 E2.13 INTEGRACIONES done; v1_ordering.py count fix 7→17; added §10 documenting api-key bypass via require_module early-return).
 
 This document maps each FastAPI router under `app/routers/` to the `Module`
 enum value it should be gated under via `Depends(require_module(Module.X))`,
@@ -27,7 +27,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `address_profile.py` | `/online/addresses` | 6 | **public** | none | Direcciones de delivery (clientes online) |
 | `admin_ingredients.py` | `/admin/ingredients` | 6 | **ABASTECIMIENTO** | session | Catálogo global de ingredientes |
 | `analytics.py` | `/analytics` | 6 | **ANALITICA** | session | Dashboard analítico, alertas |
-| `api_tokens.py` | `/api-tokens` | 6 | **INTEGRACIONES** | session | API token CRUD + scopes |
+| `api_tokens.py` | `/api-tokens` | 6 | **INTEGRACIONES** | session | API token CRUD + scopes. DONE en #197. |
 | `articles.py` | `/blog` | 3 | **public** | none | Blog público (lista + detalle) |
 | `auth.py` | `/auth` | 7 | **skip** | none | Login/sesión — corre SIN sesión |
 | `billing.py` | `/billing` | 10 | **MI_PLAN** | mixed | DONE en #185. Webhook + cron skip con `# NOTE:` |
@@ -59,7 +59,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `payment_methods.py` | `/finanzas/metodos-pago + /pos/payment-methods` | 10 | **mixed** | session | Split: finanzas_router (FINANZAS) + pos_router (POS read-only) — ver §3 |
 | `pos_cart.py` | `/pos/cart` | 11 | **POS** | session | Carrito POS, checkout |
 | `products.py` | `/menu/products` | 7 | **MENU** | session | Producto CRUD + receta + imagen |
-| `public_api.py` | `/v1` | 25 | **INTEGRACIONES** | api_key | API pública con API key (clientes externos) |
+| `public_api.py` | `/v1` | 25 | **INTEGRACIONES** | api_key | API pública con API key (clientes externos). DONE en #197 (api-key callers bypass via early-return, ver §10). |
 | `public_restaurant.py` | `/public/restaurant` | 4 | **public** | none | Lista + detalle por slug |
 | `purchases.py` | `/suppliers/purchases` | 26 | **ABASTECIMIENTO** | session | Compras + estados + factura |
 | `recipe_bases.py` | `/menu/recipe-bases` | 5 | **MENU** | session | Templates de receta |
@@ -71,7 +71,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `tables.py` | `/tables` | 19 | **POS** | session | Mesas + tab + sesión de mesa |
 | `tenant_config.py` | `/api/tenant` | 15 | **mixed** | session | Split obligatorio: OPERACIONES + MI_NEGOCIO — ver §4 |
 | `tenants.py` | `/tenants` | 5 | **EQUIPO** | session | Tenant create + member CRUD |
-| `v1_ordering.py` | `/v1/cart + /v1/addresses + /v1/otp + /v1/customer + /v1/product` | 7 | **INTEGRACIONES** | api_key | V1 ordering API (clientes externos) |
+| `v1_ordering.py` | `/v1/cart + /v1/addresses + /v1/otp + /v1/customer + /v1/product` | 17 | **INTEGRACIONES** | api_key | V1 ordering API (5 sub-routers: cart 7, address 5, otp 3, customer 1, product 1). DONE en #197 (count fix 7→17; api-key bypass §10). |
 | `waros.py` | `/admin/waros` | 8 | **POS** | session | Sistema de loyalty (puntos WaRo) |
 | `webhooks.py` | `/api/webhooks` | 1 | **skip** | signature | Bridge a api-facturacion (signature-verified, no sesión) |
 
@@ -79,7 +79,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ## Coverage Summary
 
-Total: **51 routers**, **~394 endpoints** (was 52/395 before #187 deleted `admin_orders.py`).
+Total: **51 routers**, **~404 endpoints** (corrected v1_ordering.py count 7→17 in #197; was 51/394 before count fix).
 
 | Module | Routers | Sub-task | Status |
 |---|---|---|---|
@@ -93,7 +93,7 @@ Total: **51 routers**, **~394 endpoints** (was 52/395 before #187 deleted `admin
 | **FINANZAS** | accounting, cartera, cierre, credit, expenses, financial, salaries + payment_methods/finanzas | 7+1 | E2.10 (#198) — pending |
 | **FACTURACION** | documents, facturacion (3 sub-routers), invoices, support_documents | 4 | E2.11 (#194) — pending |
 | **EQUIPO** | invitations (excl. /accept), tenants | 2 | E2.12 (#196) — pending |
-| **INTEGRACIONES** | api_tokens, public_api, v1_ordering | 3 | E2.13 (#197) — pending |
+| **INTEGRACIONES** | api_tokens, public_api, v1_ordering | 3 | ✅ E2.13 (#197) — DONE (48 endpoints gated; api-key callers bypass via require_module early-return on invalid session, ver §10) |
 | **MI_PLAN** | billing | 1 | ✅ E2.14 (#185, PR #202) — DONE |
 | **MI_NEGOCIO** | tenant_config (mi_negocio part) | 1 | E2.15 (#199) — pending |
 | **EVENTOS** | (no routers exist) | 0 | E2.16 (#200) — no-op |
@@ -203,6 +203,48 @@ How to verify a candidate is dead before deleting:
 grep -rn '<endpoint-path>' . --include='*.vue' --include='*.ts' --include='*.js' --include='*.py' --include='*.json'
 # expect: only the router file itself + main.py mount
 ```
+
+## §10. API-key callers bypass `require_module` via early-return (#197)
+
+`public_api.py` (25 endpoints) and `v1_ordering.py` (17 endpoints across 5
+sub-routers) are authenticated via API keys (`Authorization: Bearer waro_sk_...`
+or `X-API-Key` header). The middleware at `app/core/middleware.py:163-194`
+validates the key and sets `request.state.tenant_context` — **but never sets
+`request.state.session_context`**.
+
+`get_session_context(request)` (middleware.py:528-532) returns an empty
+`SessionContext()` for API-key requests, which has `is_valid=False`.
+`require_module()` short-circuits on that condition (permissions.py:339-343):
+
+> "Sessions that aren't valid at all return early so `require_valid_session`
+> (still called inside handlers) can raise 401 with its own message."
+
+**Effect**: gating `/api-tokens`, `/v1/*` endpoints under INTEGRACIONES is
+safe — the gate is a complete no-op for API-key calls, which pass through
+to the handler. The handler then runs `validate_api_key_auth(request, scope)`
+which enforces scope-based authorization at the token level (`read`, `write`,
+`orders:read`, `products:write`, etc.).
+
+**Defense in depth**:
+- Outer gate (`require_module`) — gates session-authenticated callers
+- Inner check (`validate_api_key_auth`) — enforces scopes on API-key callers
+- Both coexist without conflict. The gate is a no-op for API-key flow; the
+  scope check is a no-op for session flow.
+
+This pattern is **forward-prep**: if any of these endpoints is ever called
+by an operator session (instead of API key), the gate enforces INTEGRACIONES
+correctly without needing a second-pass PR.
+
+**Test guarding the early-return**:
+\`tests/test_integraciones_permissions.py::test_api_key_request_bypasses_gate_under_enforce\`
+asserts that a request with no SessionContext reaches `/v1/cart/batch` under
+enforce mode. If anyone later tightens the gate to deny invalid sessions
+instead of bypassing them, every API-key caller in production would 403;
+this test catches it before merge.
+
+The audit doc's earlier "Open questions" entry asking whether to plumb a role
+into API keys or skip those routers is **resolved by this finding**: neither
+is necessary.
 
 ## §6. `auth.py` and `webhooks.py` — explicit skips
 
