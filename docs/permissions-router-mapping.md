@@ -79,13 +79,13 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ## Coverage Summary
 
-Total: **51 routers**, **~394 endpoints** (was 52/395 before #187 deleted `admin_orders.py`).
+Total: **51 routers**, **~394 endpoints**, **13 modules** (was 14 modules before #199 dropped `EVENTOS`; was 52/395 routers/endpoints before #187 deleted `admin_orders.py`).
 
 | Module | Routers | Sub-task | Status |
 |---|---|---|---|
 | **POS** | comandas, notifications, pos_cart, tables, waros + payment_methods/pos | 5+1 | ✅ E2.3 (#188) — DONE (51 endpoints gated, 3 KDS-direct excluded) |
 | **VENTAS** | customers, online_orders, orders | 3 | ✅ E2.4 (#189) — DONE (28 endpoints gated, no exclusions) |
-| **DESPACHO** | (no routers — placeholder, like EVENTOS) | 0 | ✅ E2.5 (#187) — DONE (deleted dead `admin_orders.py`) |
+| **DESPACHO** | (no routers — placeholder) | 0 | ✅ E2.5 (#187) — DONE (deleted dead `admin_orders.py`) |
 | **MENU** | categories, combos, menu, modifiers, products, recipe_bases | 6 | E2.6 (#190) — pending |
 | **OPERACIONES** | stations + tenant_config (operaciones part) | 1+1 | E2.7 (#191) — pending |
 | **ABASTECIMIENTO** | admin_ingredients, ingredient_purchase_units, ingredients, inventory, purchases, suppliers | 6 | E2.8 (#195) — pending |
@@ -96,7 +96,6 @@ Total: **51 routers**, **~394 endpoints** (was 52/395 before #187 deleted `admin
 | **INTEGRACIONES** | api_tokens, public_api, v1_ordering | 3 | E2.13 (#197) — pending |
 | **MI_PLAN** | billing | 1 | ✅ E2.14 (#185, PR #202) — DONE |
 | **MI_NEGOCIO** | tenant_config (mi_negocio part) | 1 | E2.15 (#199) — pending |
-| **EVENTOS** | (no routers exist) | 0 | E2.16 (#200) — no-op |
 | **public** | address_profile, articles, customer_portal, leads, online_cart, online_verification, public_restaurant, supplier_portal | 8 | n/a — never gated |
 | **skip** | auth, webhooks | 2 | n/a — explicit exclusion |
 | **mixed (split-by-endpoint)** | payment_methods, tenant_config | 2 | split across two sub-tasks |
@@ -266,6 +265,12 @@ logs show kitchen / supervisor roles being denied for legitimate use.
 - **Reviewer with product context:** the table reflects the auditor's best
   interpretation. A subsequent PR can re-mapping any router based on
   feedback — the doc is versionable.
-- **EVENTOS (Module.EVENTOS):** placeholder in the enum, no router today.
-  Consider removing the enum entry or keeping it as forward-compat. Decide
-  in E2.16 (#200).
+- **EVENTOS:** resolved in #199 — Eventos lives in a separate product
+  (warotickets.com), not in this codebase. `Module.EVENTOS` was removed
+  from the enum and from `Role.ADMIN`'s default set. The only Eventos
+  surface in WARO Colombia is a sidebar `<a>` to `https://warotickets.com/gestion/eventos`,
+  conditioned to owner role. Three dead frontend components
+  (`EventForm.vue`, `EventWizard.vue`, `EventWizardComplete.vue`,
+  ~2060 lines combined) were deleted at the same time — they POSTed to a
+  non-existent `/api/events` endpoint and had zero consumers across pages,
+  layouts, or app.vue.

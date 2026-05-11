@@ -69,7 +69,6 @@ class Module(str, Enum):
     INTEGRACIONES = "integraciones"      # api_tokens, webhooks, public_api
     MI_PLAN = "mi_plan"                  # billing
     MI_NEGOCIO = "mi_negocio"            # tenant_config (shared)
-    EVENTOS = "eventos"                  # TBD if/when routers exist
 
 
 _ALL_MODULES: FrozenSet[Module] = frozenset(Module)
@@ -93,7 +92,6 @@ DEFAULT_ROLE_MODULES: Dict[Role, FrozenSet[Module]] = {
         Module.INTEGRACIONES,
         Module.MI_PLAN,
         Module.MI_NEGOCIO,
-        Module.EVENTOS,
         # No EQUIPO — admin manages operations, not membership/role changes
     }),
     Role.SUPERVISOR: frozenset({
