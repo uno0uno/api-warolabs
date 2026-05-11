@@ -1,9 +1,10 @@
 """
 Recipe Bases Router - HTTP endpoints for recipe base types management
 """
-from fastapi import APIRouter, Request, Response, Query, Body, Path
+from fastapi import APIRouter, Depends, Request, Response, Query, Body, Path
 from typing import Optional
 from uuid import UUID
+from app.core.permissions import Module, require_module
 from app.services.recipe_bases_service import (
     create_recipe_base_type,
     get_recipe_base_types_list,
@@ -21,7 +22,7 @@ from app.models.recipe_base import (
 router = APIRouter()
 
 
-@router.post("", response_model=RecipeBaseTypeResponse, status_code=201)
+@router.post("", response_model=RecipeBaseTypeResponse, status_code=201, dependencies=[Depends(require_module(Module.MENU))])
 async def create_recipe_base_endpoint(
     request: Request,
     recipe_data: RecipeBaseTypeCreate = Body(...)
@@ -62,7 +63,7 @@ async def create_recipe_base_endpoint(
     return await create_recipe_base_type(request, recipe_data)
 
 
-@router.get("", response_model=RecipeBaseTypesListResponse)
+@router.get("", response_model=RecipeBaseTypesListResponse, dependencies=[Depends(require_module(Module.MENU))])
 async def get_recipe_bases_endpoint(
     request: Request,
     response: Response,
@@ -96,7 +97,7 @@ async def get_recipe_bases_endpoint(
     )
 
 
-@router.get("/{recipe_base_id}", response_model=RecipeBaseTypeResponse)
+@router.get("/{recipe_base_id}", response_model=RecipeBaseTypeResponse, dependencies=[Depends(require_module(Module.MENU))])
 async def get_recipe_base_by_id_endpoint(
     request: Request,
     recipe_base_id: UUID = Path(..., description="Recipe base type UUID")
@@ -113,7 +114,7 @@ async def get_recipe_base_by_id_endpoint(
     return await get_recipe_base_type_by_id(request, recipe_base_id)
 
 
-@router.put("/{recipe_base_id}", response_model=RecipeBaseTypeResponse)
+@router.put("/{recipe_base_id}", response_model=RecipeBaseTypeResponse, dependencies=[Depends(require_module(Module.MENU))])
 async def update_recipe_base_endpoint(
     request: Request,
     recipe_base_id: UUID = Path(..., description="Recipe base type UUID"),
@@ -141,7 +142,7 @@ async def update_recipe_base_endpoint(
     return await update_recipe_base_type(request, recipe_base_id, update_data)
 
 
-@router.delete("/{recipe_base_id}", status_code=200)
+@router.delete("/{recipe_base_id}", status_code=200, dependencies=[Depends(require_module(Module.MENU))])
 async def delete_recipe_base_endpoint(
     request: Request,
     recipe_base_id: UUID = Path(..., description="Recipe base type UUID")

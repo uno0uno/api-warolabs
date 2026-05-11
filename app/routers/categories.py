@@ -1,8 +1,9 @@
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 import asyncpg
 
 from app.core.middleware import require_valid_session
+from app.core.permissions import Module, require_module
 from app.database import get_db_connection
 from app.models.category import (
     CategoriesListResponse,
@@ -14,7 +15,7 @@ from app.models.category import (
 router = APIRouter()
 
 
-@router.get("", response_model=CategoriesListResponse)
+@router.get("", response_model=CategoriesListResponse, dependencies=[Depends(require_module(Module.MENU))])
 async def get_categories_endpoint(
     request: Request,
     search: Optional[str] = Query(None, description="Filter by name (case-insensitive partial match)"),
@@ -59,7 +60,7 @@ async def get_categories_endpoint(
     )
 
 
-@router.post("", response_model=CategoryResponse, status_code=201)
+@router.post("", response_model=CategoryResponse, status_code=201, dependencies=[Depends(require_module(Module.MENU))])
 async def create_category_endpoint(request: Request, payload: CategoryCreate):
     """
     Create a category scoped to the current tenant.

@@ -109,6 +109,7 @@ DEFAULT_ROLE_MODULES: Dict[Role, FrozenSet[Module]] = {
     Role.CASHIER: frozenset({
         Module.POS,
         Module.VENTAS,
+        Module.MENU,  # Read access for POS catalog (products + categories)
     }),
     Role.KITCHEN: frozenset({
         Module.DESPACHO,

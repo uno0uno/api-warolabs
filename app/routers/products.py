@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException, Request, Response, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Query, Body
 from fastapi.responses import JSONResponse
 from typing import Optional
 from uuid import UUID
 from app.core.exceptions import AuthenticationError
+from app.core.permissions import Module, require_module
 from app.services.products_service import (
     create_product_with_recipe,
     get_product_by_id,
@@ -26,7 +27,7 @@ MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB
 
 router = APIRouter()
 
-@router.post("", response_model=ProductResponse)
+@router.post("", response_model=ProductResponse, dependencies=[Depends(require_module(Module.MENU))])
 async def create_product_endpoint(
     request: Request,
     product_data: ProductCreate = Body(...)
@@ -45,7 +46,7 @@ async def create_product_endpoint(
     return await create_product_with_recipe(request, product_data)
 
 
-@router.get("", response_model=ProductsListResponse)
+@router.get("", response_model=ProductsListResponse, dependencies=[Depends(require_module(Module.MENU))])
 async def get_products_endpoint(
     request: Request,
     response: Response,
@@ -76,7 +77,7 @@ async def get_products_endpoint(
     )
 
 
-@router.get("/stats", response_model=ProductStats)
+@router.get("/stats", response_model=ProductStats, dependencies=[Depends(require_module(Module.MENU))])
 async def get_products_stats_endpoint(request: Request):
     """
     Get product statistics for dashboard.
@@ -93,7 +94,7 @@ async def get_products_stats_endpoint(request: Request):
     return await get_product_stats(request)
 
 
-@router.get("/{product_id}", response_model=ProductResponse)
+@router.get("/{product_id}", response_model=ProductResponse, dependencies=[Depends(require_module(Module.MENU))])
 async def get_product_endpoint(
     request: Request,
     product_id: UUID
@@ -112,7 +113,7 @@ async def get_product_endpoint(
     return await get_product_by_id(request, product_id)
 
 
-@router.put("/{product_id}", response_model=ProductResponse)
+@router.put("/{product_id}", response_model=ProductResponse, dependencies=[Depends(require_module(Module.MENU))])
 async def update_product_endpoint(
     request: Request,
     product_id: UUID,
@@ -131,7 +132,7 @@ async def update_product_endpoint(
     return await update_product_with_recipe(request, product_id, product_data)
 
 
-@router.delete("/{product_id}")
+@router.delete("/{product_id}", dependencies=[Depends(require_module(Module.MENU))])
 async def delete_product_endpoint(
     request: Request,
     product_id: UUID
@@ -146,7 +147,7 @@ async def delete_product_endpoint(
     return await delete_product(request, product_id)
 
 
-@router.post("/upload-image")
+@router.post("/upload-image", dependencies=[Depends(require_module(Module.MENU))])
 async def upload_product_image_endpoint(request: Request):
     """Upload a product hero image to Cloudflare R2 (issue #465).
 

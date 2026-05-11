@@ -1,11 +1,12 @@
 """
 Menu Router - Generic menu endpoints
 """
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Depends, Request, Query
 from typing import Literal
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
+from app.core.permissions import Module, require_module
 
 router = APIRouter()
 
@@ -16,7 +17,7 @@ ENTITY_TABLE_MAP = {
 }
 
 
-@router.get("/check-name")
+@router.get("/check-name", dependencies=[Depends(require_module(Module.MENU))])
 async def check_name_availability(
     request: Request,
     entity: Literal["recipe-bases", "modifier-groups", "products"] = Query(...),
