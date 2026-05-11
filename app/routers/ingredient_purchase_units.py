@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Request, Response, Query, Path
+from fastapi import APIRouter, Depends, Request, Response, Query, Path
 from typing import Optional
 from uuid import UUID
+from app.core.permissions import Module, require_module
 from app.services.ingredient_purchase_units_service import (
     get_all_purchase_units,
     get_purchase_units_by_ingredient,
@@ -19,7 +20,7 @@ from app.models.ingredient import (
 router = APIRouter()
 
 
-@router.get("", response_model=IngredientPurchaseUnitsListResponse)
+@router.get("", response_model=IngredientPurchaseUnitsListResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def list_purchase_units_endpoint(
     request: Request,
     response: Response,
@@ -38,7 +39,7 @@ async def list_purchase_units_endpoint(
     )
 
 
-@router.get("/ingredient/{ingredient_id}", response_model=IngredientPurchaseUnitsListResponse)
+@router.get("/ingredient/{ingredient_id}", response_model=IngredientPurchaseUnitsListResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_ingredient_purchase_units_endpoint(
     request: Request,
     response: Response,
@@ -54,7 +55,7 @@ async def get_ingredient_purchase_units_endpoint(
     )
 
 
-@router.get("/{purchase_unit_id}", response_model=IngredientPurchaseUnitResponse)
+@router.get("/{purchase_unit_id}", response_model=IngredientPurchaseUnitResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_purchase_unit_endpoint(
     request: Request,
     response: Response,
@@ -67,7 +68,7 @@ async def get_purchase_unit_endpoint(
     return await get_purchase_unit_by_id(request, response, purchase_unit_id)
 
 
-@router.post("", response_model=IngredientPurchaseUnitResponse, status_code=201)
+@router.post("", response_model=IngredientPurchaseUnitResponse, status_code=201, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def create_purchase_unit_endpoint(
     request: Request,
     response: Response,
@@ -93,7 +94,7 @@ async def create_purchase_unit_endpoint(
     return await create_purchase_unit(request, response, purchase_unit_data)
 
 
-@router.put("/{purchase_unit_id}", response_model=IngredientPurchaseUnitResponse)
+@router.put("/{purchase_unit_id}", response_model=IngredientPurchaseUnitResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def update_purchase_unit_endpoint(
     request: Request,
     response: Response,
@@ -109,7 +110,7 @@ async def update_purchase_unit_endpoint(
     return await update_purchase_unit(request, response, purchase_unit_id, purchase_unit_data)
 
 
-@router.delete("/{purchase_unit_id}")
+@router.delete("/{purchase_unit_id}", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def delete_purchase_unit_endpoint(
     request: Request,
     response: Response,
