@@ -28,6 +28,7 @@ ALLOWED_TOGGLES = frozenset({
     "expediter_enabled",
     "tables_enabled",
     "auto_select_generic_enabled",
+    "waiter_attribution_enabled",  # warocol.com#573
 })
 
 
@@ -71,3 +72,22 @@ async def update_toggle(
         await conn.execute(query, tenant_id, enabled)
 
     return {"success": True, "data": {column_name: enabled}}
+
+
+async def assert_waiter_attribution_enabled(tenant_id: UUID) -> None:
+    """Raise 409 if `waiter_attribution_enabled` is False for this tenant.
+
+    Used by mutation endpoints in the waiter-attribution family
+    (warocol.com#573/#574/#575) to reject writes when the owner has the
+    feature disabled — even if the caller bypasses the UI gate.
+    """
+    async with get_db_connection(use_transaction=False) as conn:
+        row = await conn.fetchrow(
+            "SELECT waiter_attribution_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+            tenant_id,
+        )
+    if not row or not row["waiter_attribution_enabled"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Waiter attribution is disabled for this tenant",
+        )
