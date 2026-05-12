@@ -2,7 +2,7 @@
 
 **Status:** Source of truth for Epic 2 (#164) wiring sub-tasks (E2.3 → E2.16).
 **Origin:** [#186 audit](https://github.com/uno0uno/api-warolabs/issues/186).
-**Last updated:** 2026-05-11 (post #191/#192 OPERACIONES/MI_NEGOCIO + #210 operaciones-context toggles + #212 EVENTOS removed + #193 E2.9 ANALITICA done).
+**Last updated:** 2026-05-11 (post #191/#192 OPERACIONES/MI_NEGOCIO + #210 operaciones-context toggles + #212 EVENTOS removed + #193 ANALITICA + #194 FACTURACION done; facturacion.py endpoint count corrected 3→5).
 
 This document maps each FastAPI router under `app/routers/` to the `Module`
 enum value it should be gated under via `Depends(require_module(Module.X))`,
@@ -39,15 +39,15 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `credit.py` | `/credit` | 3 | **FINANZAS** | session | Pagos a crédito |
 | `customer_portal.py` | `/customer` | 7 | **public** | none | Portal del cliente final (JWT customer, no sesión de operador) |
 | `customers.py` | `/customers` | 6 | **VENTAS** | session | Búsqueda + perfil de clientes (operador) |
-| `documents.py` | `/api/documents` | 4 | **FACTURACION** | session | Documentos electrónicos (lista, PDF/XML) |
+| `documents.py` | `/api/documents` | 4 | **FACTURACION** | session | Documentos electrónicos (lista, PDF/XML). DONE en #194. |
 | `expenses.py` | `/finance/expenses` | 14 | **FINANZAS** | session | CRUD de gastos + categorías |
-| `facturacion.py` | `/api/acquirer + /api/facturacion + /api/payroll` | 3 | **FACTURACION** | session | 3 sub-routers (acquirer, catalog, payroll) — todos FACTURACION |
+| `facturacion.py` | `/api/acquirer + /api/facturacion + /api/payroll` | 5 | **FACTURACION** | session | 3 sub-routers (acquirer 1ep, catalog 1ep, payroll 3eps) — todos FACTURACION, todos stubs 503 hasta wired api-facturacion (#129). DONE en #194. |
 | `financial.py` | (sin prefix) | 3 | **FINANZAS** | session | TIR, rentabilidad de productos |
 | `ingredient_purchase_units.py` | `/suppliers/ingredient-purchase-units` | 6 | **ABASTECIMIENTO** | session | Unidades de compra |
 | `ingredients.py` | `/suppliers/ingredients` | 10 | **ABASTECIMIENTO** | session | Custom ingredients + catálogo |
 | `inventory.py` | `/inventory` | 4 | **ABASTECIMIENTO** | session | Stock + ajustes |
 | `invitations.py` | `/invitations` | 4 | **EQUIPO** | session | ⚠️ `/invitations/accept` es token-público (ver §2) |
-| `invoices.py` | `/api/invoices` | 4 | **FACTURACION** | session | Notas crédito/débito, RADIAN |
+| `invoices.py` | `/api/invoices` | 4 | **FACTURACION** | session | Notas crédito/débito, RADIAN (stubs 503). DONE en #194. |
 | `leads.py` | `/leads` | 2 | **public** | none | Captura de leads (homepage) |
 | `menu.py` | `/menu` | 1 | **MENU** | session | Name-check genérico |
 | `modifiers.py` | `/menu/modifier-groups` | 6 | **MENU** | session | Grupos de modificadores |
@@ -67,7 +67,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `stations.py` | `/api/stations` | 15 | **OPERACIONES** | session | Estaciones de cocina + routing. ⚠️ `GET /{station_id}` excluido (KDS público, ver §1). DONE en #191. |
 | `supplier_portal.py` | `/supplier-portal` | 8 | **public** | token | Portal del proveedor (token, no sesión) |
 | `suppliers.py` | `/suppliers/providers` | 10 | **ABASTECIMIENTO** | session | Proveedor CRUD |
-| `support_documents.py` | `/api/support-documents` | 2 | **FACTURACION** | session | DIAN documento soporte |
+| `support_documents.py` | `/api/support-documents` | 2 | **FACTURACION** | session | DIAN documento soporte (stubs 503). DONE en #194. |
 | `tables.py` | `/tables` | 19 | **POS** | session | Mesas + tab + sesión de mesa |
 | `tenant_config.py` | `/api/tenant` | 15 | **MI_NEGOCIO** | session | Owner-only. POS consume `/api/pos/restaurant-context` aggregator (ver §4). DONE en #192. |
 | `pos_context.py` | `/pos/restaurant-context` | 1 | **POS** | session | BFF-style aggregator de tenant context para POS. Introducido en E2.7/E2.15. |
@@ -81,7 +81,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ## Coverage Summary
 
-Total: **53 routers**, **~401 endpoints**, **13 modules** (was 14 modules before #212 dropped `EVENTOS`; was 52/395 routers/endpoints after #191/#192 + added `operaciones_context.py` in #210 — 6 endpoints — for the OPERACIONES aggregator + toggles).
+Total: **53 routers**, **~403 endpoints**, **13 modules** (post #194 corrected facturacion.py count 3→5, +2 endpoints; was 14 modules before #212 dropped `EVENTOS`; was 52/395 routers/endpoints after #191/#192 + added `operaciones_context.py` in #210 for OPERACIONES aggregator + toggles).
 
 | Module | Routers | Sub-task | Status |
 |---|---|---|---|
@@ -93,7 +93,7 @@ Total: **53 routers**, **~401 endpoints**, **13 modules** (was 14 modules before
 | **ABASTECIMIENTO** | admin_ingredients, ingredient_purchase_units, ingredients, inventory, purchases, suppliers | 6 | E2.8 (#195) — pending |
 | **ANALITICA** | analytics | 1 | ✅ E2.9 (#193) — DONE (6 endpoints gated; `articles.py` confirmed public, stays ungated) |
 | **FINANZAS** | accounting, cartera, cierre, credit, expenses, financial, salaries + payment_methods/finanzas | 7+1 | E2.10 (#198) — pending |
-| **FACTURACION** | documents, facturacion (3 sub-routers), invoices, support_documents | 4 | E2.11 (#194) — pending |
+| **FACTURACION** | documents, facturacion (3 sub-routers), invoices, support_documents | 4 | ✅ E2.11 (#194) — DONE (15 endpoints gated: 4 documents + 5 facturacion + 4 invoices + 2 support_documents; 12 of 15 are stubs awaiting api-facturacion #129) |
 | **EQUIPO** | invitations (excl. /accept), tenants | 2 | E2.12 (#196) — pending |
 | **INTEGRACIONES** | api_tokens, public_api, v1_ordering | 3 | E2.13 (#197) — pending |
 | **MI_PLAN** | billing | 1 | ✅ E2.14 (#185, PR #202) — DONE |
