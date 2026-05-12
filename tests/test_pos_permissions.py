@@ -21,6 +21,7 @@ from app.core.middleware import SessionContext
 from app.core.permissions import Module
 from app.routers.tables import router as tables_router
 from app.routers.comandas import router as comandas_router
+from app.routers.pos_context import router as pos_context_router
 
 
 # ─── Fixtures ─────────────────────────────────────────────────────────
@@ -128,3 +129,42 @@ def test_kds_synthetic_session_passes_excluded_comandas_endpoint():
 
     # No 403 — handler reached, role=None passed because endpoint is ungated.
     assert response.status_code == 200
+
+
+def test_cashier_role_passes_pos_restaurant_context_under_enforce():
+    """Cashier reaches GET /pos/restaurant-context under enforce.
+
+    Validates the BFF scoped endpoint introduced in E2.7/E2.15 — POS pages
+    consume tenant context from this aggregator instead of /api/tenant/*,
+    so cashiers do NOT need MI_NEGOCIO (which stays owner-only).
+    """
+    session = _build_session(role="cashier")
+    app = FastAPI()
+    app.include_router(pos_context_router)
+
+    cashier_modules = frozenset({Module.POS, Module.VENTAS})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.pos_context.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=cashier_modules),
+         ), \
+         patch(
+             "app.routers.pos_context.get_restaurant_context",
+             new=AsyncMock(return_value={
+                 "display_name": "Demo",
+                 "kds_enabled": True,
+                 "comandas_enabled": True,
+                 "expediter_enabled": False,
+                 "fiscal_data": {"nit": "900000000"},
+                 "tax_config": {"iva_applicable": False},
+                 "invoicing_ready": False,
+             }),
+         ):
+        client = TestClient(app)
+        response = client.get("/pos/restaurant-context")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["display_name"] == "Demo"

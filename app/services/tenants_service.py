@@ -25,15 +25,18 @@ async def get_user_tenants(request: Request) -> UserTenantsResponse:
         
         
         async with get_db_connection() as conn:
-            # Get tenants for the user
+            # Get tenants where the user has an ACTIVE membership (#201).
+            # Terminated members keep their row with the old role; without the
+            # is_active filter, the sidebar tenant switcher shows tenants the
+            # user can't actually access. See docs/permissions-router-mapping.md §9.
             query = """
-                SELECT DISTINCT 
+                SELECT DISTINCT
                   t.id,
                   t.name,
                   t.slug
                 FROM tenants t
                 INNER JOIN tenant_members tm ON t.id = tm.tenant_id
-                WHERE tm.user_id = $1
+                WHERE tm.user_id = $1 AND tm.is_active = true
                 ORDER BY t.name
             """
             

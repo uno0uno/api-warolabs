@@ -2,10 +2,11 @@
 Public API Router
 Endpoints for external integrations authenticated via API tokens
 """
-from fastapi import APIRouter, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from uuid import UUID
+from app.core.permissions import Module, require_module
 from app.services import public_api_service, public_restaurant_service
 
 router = APIRouter(prefix="/v1", tags=["Public API"])
@@ -111,7 +112,7 @@ class CustomerOrdersRequest(BaseModel):
     includeItems: bool = Field(default=False, description="Include line items per order")
 
 
-@router.get("/restaurant")
+@router.get("/restaurant", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_restaurant_profile(request: Request) -> Dict[str, Any]:
     """
     Retorna el perfil público del restaurante asociado al API key.
@@ -131,7 +132,7 @@ async def get_restaurant_profile(request: Request) -> Dict[str, Any]:
     return {"success": True, "data": profile}
 
 
-@router.get("/menu")
+@router.get("/menu", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_restaurant_menu(
     request: Request,
     category_id: Optional[UUID] = Query(default=None, description="Optional: filter by category ID")
@@ -152,7 +153,7 @@ async def get_restaurant_menu(
     return {"success": True, "data": menu}
 
 
-@router.post("/sales")
+@router.post("/sales", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_sales(request: Request, body: SalesQueryRequest):
     """
     Obtiene la lista de ventas (ordenes) del tenant autenticado.
@@ -177,7 +178,7 @@ async def get_sales(request: Request, body: SalesQueryRequest):
     )
 
 
-@router.post("/sales/metrics")
+@router.post("/sales/metrics", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_sales_metrics(request: Request, body: MetricsQueryRequest):
     """
     Obtiene metricas de ventas del tenant autenticado.
@@ -211,7 +212,7 @@ async def get_sales_metrics(request: Request, body: MetricsQueryRequest):
     )
 
 
-@router.post("/sales/detail")
+@router.post("/sales/detail", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_sale(request: Request, body: SaleDetailRequest):
     """
     Obtiene el detalle de una venta especifica incluyendo items y modificadores.
@@ -225,7 +226,7 @@ async def get_sale(request: Request, body: SaleDetailRequest):
     return await public_api_service.get_sale_by_id(request, UUID(body.orderId))
 
 
-@router.post("/menu/products")
+@router.post("/menu/products", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_menu_products(request: Request, body: MenuProductsRequest):
     """
     Obtiene la lista de productos del menu con ingredientes, recetas base y modificadores.
@@ -248,7 +249,7 @@ async def get_menu_products(request: Request, body: MenuProductsRequest):
     )
 
 
-@router.post("/menu/recipes")
+@router.post("/menu/recipes", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_menu_recipes(request: Request, body: MenuRecipesRequest):
     """
     Obtiene la lista de recetas base con sus ingredientes.
@@ -267,7 +268,7 @@ async def get_menu_recipes(request: Request, body: MenuRecipesRequest):
     )
 
 
-@router.post("/menu/modifiers")
+@router.post("/menu/modifiers", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_menu_modifiers(request: Request, body: MenuModifiersRequest):
     """
     Obtiene la lista de grupos de modificadores con sus opciones e ingredientes.
@@ -285,7 +286,7 @@ async def get_menu_modifiers(request: Request, body: MenuModifiersRequest):
     )
 
 
-@router.post("/customers")
+@router.post("/customers", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_customers(request: Request, body: CustomersListRequest):
     """
     Obtiene la lista de clientes del tenant autenticado, ordenados por total gastado.
@@ -309,7 +310,7 @@ async def get_customers(request: Request, body: CustomersListRequest):
     )
 
 
-@router.post("/customers/detail")
+@router.post("/customers/detail", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_customer_detail(request: Request, body: CustomerDetailRequest):
     """
     Obtiene el perfil, estadisticas y resumen de WaRos de un cliente especifico.
@@ -331,7 +332,7 @@ async def get_customer_detail(request: Request, body: CustomerDetailRequest):
     )
 
 
-@router.post("/customers/orders")
+@router.post("/customers/orders", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_customer_orders(request: Request, body: CustomerOrdersRequest):
     """
     Obtiene el historial de pedidos paginado de un cliente especifico, en todas las fuentes (POS, online, manual).
@@ -360,7 +361,7 @@ async def get_customer_orders(request: Request, body: CustomerOrdersRequest):
     )
 
 
-@router.post("/customers/metrics")
+@router.post("/customers/metrics", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_customers_metrics(request: Request, body: CustomerMetricsRequest):
     """
     Obtiene metricas agregadas de clientes del tenant autenticado.
@@ -491,7 +492,7 @@ class WarosAnalyticsRequest(BaseModel):
 # Analytics endpoints
 # ---------------------------------------------------------------------------
 
-@router.post("/analytics/menu-analysis")
+@router.post("/analytics/menu-analysis", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_analytics_menu_analysis(request: Request, body: AnalyticsMenuAnalysisRequest):
     """
     Obtiene el analisis BCG del menu (estrellas, vacas, interrogantes, perros).
@@ -510,7 +511,7 @@ async def get_analytics_menu_analysis(request: Request, body: AnalyticsMenuAnaly
     )
 
 
-@router.post("/analytics/food-cost")
+@router.post("/analytics/food-cost", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_analytics_food_cost(request: Request, body: AnalyticsFoodCostRequest):
     """
     Obtiene el analisis de food cost por producto.
@@ -531,7 +532,7 @@ async def get_analytics_food_cost(request: Request, body: AnalyticsFoodCostReque
     )
 
 
-@router.post("/analytics/alerts")
+@router.post("/analytics/alerts", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_analytics_alerts(request: Request, body: AnalyticsAlertsRequest):
     """
     Obtiene alertas operacionales e inventario del tenant.
@@ -548,7 +549,7 @@ async def get_analytics_alerts(request: Request, body: AnalyticsAlertsRequest):
     )
 
 
-@router.post("/analytics/data-quality")
+@router.post("/analytics/data-quality", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_analytics_data_quality(request: Request):
     """
     Obtiene el reporte de calidad de datos del tenant.
@@ -562,7 +563,7 @@ async def get_analytics_data_quality(request: Request):
     return await public_api_service.get_analytics_data_quality(request)
 
 
-@router.post("/analytics/cohort")
+@router.post("/analytics/cohort", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_analytics_cohort(request: Request, body: AnalyticsCohortRequest):
     """
     Retorna la matriz de retención por cohorte de adquisición.
@@ -596,7 +597,7 @@ async def get_analytics_cohort(request: Request, body: AnalyticsCohortRequest):
     )
 
 
-@router.post("/analytics/rfm")
+@router.post("/analytics/rfm", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_analytics_rfm(request: Request, body: AnalyticsRFMRequest):
     """
     Retorna la segmentación RFM (Recency, Frequency, Monetary) de los clientes del tenant.
@@ -626,7 +627,7 @@ async def get_analytics_rfm(request: Request, body: AnalyticsRFMRequest):
 # Financial endpoints
 # ---------------------------------------------------------------------------
 
-@router.post("/financial/products")
+@router.post("/financial/products", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_financial_products(request: Request, body: FinancialProductsRequest):
     """
     Obtiene el analisis financiero de productos (margen, costo, rentabilidad).
@@ -650,7 +651,7 @@ async def get_financial_products(request: Request, body: FinancialProductsReques
 # WaRos endpoints
 # ---------------------------------------------------------------------------
 
-@router.post("/waros/customer-summary")
+@router.post("/waros/customer-summary", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_waros_customer_summary(request: Request, body: WarosCustomerSummaryRequest):
     """
     Obtiene el resumen de WaRos (wallet) de un cliente especifico.
@@ -667,7 +668,7 @@ async def get_waros_customer_summary(request: Request, body: WarosCustomerSummar
     )
 
 
-@router.post("/waros/balances")
+@router.post("/waros/balances", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_waros_customers_balances(request: Request, body: WarosCustomersBalancesRequest):
     """
     Obtiene los balances de WaRos para multiples clientes en batch.
@@ -685,7 +686,7 @@ async def get_waros_customers_balances(request: Request, body: WarosCustomersBal
     )
 
 
-@router.post("/waros/estimate")
+@router.post("/waros/estimate", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_waros_estimate(request: Request, body: WarosEstimateRequest):
     """
     Estima cuantos WaRos se ganarian por una compra de determinado monto.
@@ -704,7 +705,7 @@ async def get_waros_estimate(request: Request, body: WarosEstimateRequest):
     )
 
 
-@router.post("/analytics/churn-risk")
+@router.post("/analytics/churn-risk", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_analytics_churn_risk(request: Request, body: AnalyticsChurnRiskRequest):
     """
     Clientes en riesgo de churn basado en su patron de visitas historico.
@@ -727,7 +728,7 @@ async def get_analytics_churn_risk(request: Request, body: AnalyticsChurnRiskReq
     )
 
 
-@router.post("/waros/customer-history")
+@router.post("/waros/customer-history", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_waros_customer_history(request: Request, body: WarosCustomerHistoryRequest):
     """
     Historial paginado de transacciones de WaRos para un cliente especifico.
@@ -748,7 +749,7 @@ async def get_waros_customer_history(request: Request, body: WarosCustomerHistor
     )
 
 
-@router.post("/analytics/waros")
+@router.post("/analytics/waros", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_analytics_waros(request: Request, body: WarosAnalyticsRequest):
     """
     Analytics agregado de WaRos: puntos emitidos, canjeados, tasa de redencion y miembros activos.

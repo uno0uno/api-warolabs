@@ -4,7 +4,8 @@ Endpoints for the accounts-receivable / portfolio view.
 
 Issue: https://github.com/uno0uno/warocol.com/issues/308
 """
-from fastapi import APIRouter, Request, Query
+from fastapi import Depends, APIRouter, Request, Query
+from app.core.permissions import Module, require_module
 from typing import Optional
 from uuid import UUID
 from app.services import cartera_service
@@ -12,7 +13,7 @@ from app.services import cartera_service
 router = APIRouter(prefix="/cartera", tags=["cartera"])
 
 
-@router.get("/summary")
+@router.get("/summary", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def cartera_summary(request: Request):
     """
     Global portfolio summary for the current tenant.
@@ -28,7 +29,7 @@ async def cartera_summary(request: Request):
     return await cartera_service.get_cartera_summary(request)
 
 
-@router.get("/customers")
+@router.get("/customers", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def list_cartera_customers(
     request: Request,
     status: Optional[str] = Query("all", description="Filter: all | overdue | current"),
@@ -66,7 +67,7 @@ async def list_cartera_customers(
     )
 
 
-@router.get("/customers/{customer_id}")
+@router.get("/customers/{customer_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_customer_cartera(
     request: Request,
     customer_id: UUID,
@@ -85,7 +86,7 @@ async def get_customer_cartera(
     return await cartera_service.get_customer_cartera(request, customer_id)
 
 
-@router.get("/aging")
+@router.get("/aging", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def cartera_aging(request: Request):
     """
     Aging bucket report — computed at query time (no caching).
