@@ -92,9 +92,9 @@ DEFAULT_ROLE_MODULES: Dict[Role, FrozenSet[Module]] = {
         Module.FACTURACION,
         Module.INTEGRACIONES,
         Module.MI_PLAN,
-        Module.MI_NEGOCIO,
         Module.EVENTOS,
         # No EQUIPO — admin manages operations, not membership/role changes
+        # No MI_NEGOCIO — business identity / fiscal / DIAN is owner-only (E2.7/E2.15)
     }),
     Role.SUPERVISOR: frozenset({
         Module.POS,
@@ -104,7 +104,7 @@ DEFAULT_ROLE_MODULES: Dict[Role, FrozenSet[Module]] = {
         Module.OPERACIONES,
         Module.ABASTECIMIENTO,
         Module.ANALITICA,
-        Module.MI_NEGOCIO,
+        # No MI_NEGOCIO — owner-only
     }),
     Role.CASHIER: frozenset({
         Module.POS,
