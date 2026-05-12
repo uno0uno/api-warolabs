@@ -35,7 +35,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `categories.py` | `/menu/categories` | 2 | **MENU** | session | Listado con filtro global+tenant |
 | `cierre.py` | `/cierre` | 9 | **FINANZAS** | session | DONE en #198. Cierre X/Z diario |
 | `comandas.py` | `/api/comandas` | 11 | **POS** | session | KDS lifecycle. ⚠️ KDS-public paths via `?token=` middleware quedan sin gate (ver §1) |
-| `combos.py` | `/menu/combos` | 6 | **MENU** | session | Combo CRUD |
+| ~~`combos.py`~~ | ~~`/menu/combos`~~ | ~~6~~ | ~~**MENU**~~ | — | **DELETED en E2.6 (#190)** — frontend migró a `is_combo` flag + `product_base_recipes` |
 | `credit.py` | `/credit` | 3 | **FINANZAS** | session | DONE en #198. Pagos a crédito |
 | `customer_portal.py` | `/customer` | 7 | **public** | none | Portal del cliente final (JWT customer, no sesión de operador) |
 | `customers.py` | `/customers` | 6 | **VENTAS** | session | Búsqueda + perfil de clientes (operador) |
@@ -82,14 +82,14 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ## Coverage Summary
 
-Total: **54 routers**, **~414 endpoints**, **13 modules** (post #200 added `me.py` — 1 endpoint; post #197 corrected v1_ordering.py count 7→17, +10 endpoints; post #194 corrected facturacion.py count 3→5, +2 endpoints; was 14 modules before #212 dropped `EVENTOS`; was 52/395 routers/endpoints after #191/#192 + added `operaciones_context.py` in #210 for OPERACIONES aggregator + toggles).
+Total: **53 routers**, **~408 endpoints**, **13 modules** (post #190 deleted `combos.py` — 6 endpoints removed; post #200 added `me.py` — 1 endpoint; post #197 corrected v1_ordering.py count 7→17, +10 endpoints; post #194 corrected facturacion.py count 3→5, +2 endpoints; was 14 modules before #212 dropped `EVENTOS`; was 52/395 routers/endpoints after #191/#192 + added `operaciones_context.py` in #210 for OPERACIONES aggregator + toggles).
 
 | Module | Routers | Sub-task | Status |
 |---|---|---|---|
 | **POS** | comandas, notifications, pos_cart, tables, waros + payment_methods/pos | 5+1 | ✅ E2.3 (#188) — DONE (51 endpoints gated, 3 KDS-direct excluded) |
 | **VENTAS** | customers, online_orders, orders | 3 | ✅ E2.4 (#189) — DONE (28 endpoints gated, no exclusions) |
 | **DESPACHO** | (no routers — placeholder) | 0 | ✅ E2.5 (#187) — DONE (deleted dead `admin_orders.py`) |
-| **MENU** | categories, combos, menu, modifiers, products, recipe_bases | 6 | E2.6 (#190) — pending |
+| **MENU** | categories, menu, modifiers, products, recipe_bases | 5 | ✅ E2.6 (#190) — DONE (21 endpoints gated, `combos.py` deleted as dead code) |
 | **OPERACIONES** | stations, operaciones_context | 2 | ✅ E2.7 (#191) + #210 — DONE (14 stations endpoints + 6 operaciones-context endpoints, 1 KDS-public excluded) |
 | **ABASTECIMIENTO** | admin_ingredients, ingredient_purchase_units, ingredients, inventory, purchases, suppliers | 6 | ✅ E2.8 (#195) — DONE (62 endpoints gated; largest batch in Epic; no exclusions) |
 | **ANALITICA** | analytics | 1 | ✅ E2.9 (#193) — DONE (6 endpoints gated; `articles.py` confirmed public, stays ungated) |
@@ -209,6 +209,7 @@ endpoints that have **zero consumers** across:
 Precedents:
 - **#185 (E2.14)** — deleted the entire `/admin/billing/*` surface (10 endpoints + 4 Pydantic models + 9 service methods + the matching `useAdminBilling` composable). Added speculatively in #61, never wired into a workflow.
 - **#187 (E2.5)** — deleted `admin_orders.py` (1 endpoint, `POST /admin/orders/backfill-order-ingredients`). Added in #105 as a one-shot backfill tool, never exposed in any UI.
+- **#190 (E2.6)** — deleted `combos.py` (6 endpoints), `combos_service.py` (465 lines), `models/combo.py`. Original CRUD model replaced by `is_combo` flag on `product` + composed recipes via `product_base_recipes`. Frontend mock data in `composables/useMenuMockData.ts` cleaned in the same PR.
 
 Rationale: gating dead code adds wire complexity without security value. If the functionality is needed later, the right move is to rebuild the endpoint with proper gating from day 1, paired with the UI that actually consumes it. The deleted SQL/logic remains in git history (referenced commits in the deletion PR) so it can be reused as a transient psql one-off if ever needed.
 
