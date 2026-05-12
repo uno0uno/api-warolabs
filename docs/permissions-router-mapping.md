@@ -2,7 +2,7 @@
 
 **Status:** Source of truth for Epic 2 (#164) wiring sub-tasks (E2.3 → E2.16).
 **Origin:** [#186 audit](https://github.com/uno0uno/api-warolabs/issues/186).
-**Last updated:** 2026-05-11 (post #191/#192 OPERACIONES/MI_NEGOCIO + #210 operaciones-context toggles + #212 EVENTOS removed + #193 ANALITICA + #194 FACTURACION + #195 ABASTECIMIENTO done — 62 endpoints, largest batch; facturacion.py endpoint count corrected 3→5).
+**Last updated:** 2026-05-11 (post #191/#192 OPERACIONES/MI_NEGOCIO + #210 operaciones-context toggles + #212 EVENTOS removed + #193 ANALITICA + #194 FACTURACION + #195 ABASTECIMIENTO + #196 EQUIPO done; added §9 for self-service exclusions in tenants.py).
 
 This document maps each FastAPI router under `app/routers/` to the `Module`
 enum value it should be gated under via `Depends(require_module(Module.X))`,
@@ -46,7 +46,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `ingredient_purchase_units.py` | `/suppliers/ingredient-purchase-units` | 6 | **ABASTECIMIENTO** | session | Unidades de compra. DONE en #195. |
 | `ingredients.py` | `/suppliers/ingredients` | 10 | **ABASTECIMIENTO** | session | Custom ingredients + catálogo. DONE en #195. |
 | `inventory.py` | `/inventory` | 4 | **ABASTECIMIENTO** | session | Stock + ajustes. DONE en #195. |
-| `invitations.py` | `/invitations` | 4 | **EQUIPO** | session | ⚠️ `/invitations/accept` es token-público (ver §2) |
+| `invitations.py` | `/invitations` | 4 | **EQUIPO** | session | ⚠️ `/invitations/accept` es token-público (ver §2). DONE en #196 (3 of 4 gated). |
 | `invoices.py` | `/api/invoices` | 4 | **FACTURACION** | session | Notas crédito/débito, RADIAN (stubs 503). DONE en #194. |
 | `leads.py` | `/leads` | 2 | **public** | none | Captura de leads (homepage) |
 | `menu.py` | `/menu` | 1 | **MENU** | session | Name-check genérico |
@@ -72,7 +72,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `tenant_config.py` | `/api/tenant` | 15 | **MI_NEGOCIO** | session | Owner-only. POS consume `/api/pos/restaurant-context` aggregator (ver §4). DONE en #192. |
 | `pos_context.py` | `/pos/restaurant-context` | 1 | **POS** | session | BFF-style aggregator de tenant context para POS. Introducido en E2.7/E2.15. |
 | `operaciones_context.py` | `/operaciones/restaurant-context + /operaciones/toggles/*` | 6 | **OPERACIONES** | session | Aggregator + 5 PATCH toggle endpoints (kds, comandas, expediter, tables, auto-select-generic). Introducido en #210 (enforce prep). |
-| `tenants.py` | `/tenants` | 5 | **EQUIPO** | session | Tenant create + member CRUD |
+| `tenants.py` | `/tenants` | 5 | **EQUIPO** | session | Tenant create + member CRUD. ⚠️ `POST ""` y `GET /user-tenants` excluidos (self-service, ver §9). DONE en #196 (3 of 5 gated). |
 | `v1_ordering.py` | `/v1/cart + /v1/addresses + /v1/otp + /v1/customer + /v1/product` | 7 | **INTEGRACIONES** | api_key | V1 ordering API (clientes externos) |
 | `waros.py` | `/admin/waros` | 8 | **POS** | session | Sistema de loyalty (puntos WaRo) |
 | `webhooks.py` | `/api/webhooks` | 1 | **skip** | signature | Bridge a api-facturacion (signature-verified, no sesión) |
@@ -94,7 +94,7 @@ Total: **53 routers**, **~403 endpoints**, **13 modules** (post #194 corrected f
 | **ANALITICA** | analytics | 1 | ✅ E2.9 (#193) — DONE (6 endpoints gated; `articles.py` confirmed public, stays ungated) |
 | **FINANZAS** | accounting, cartera, cierre, credit, expenses, financial, salaries + payment_methods/finanzas | 7+1 | E2.10 (#198) — pending |
 | **FACTURACION** | documents, facturacion (3 sub-routers), invoices, support_documents | 4 | ✅ E2.11 (#194) — DONE (15 endpoints gated: 4 documents + 5 facturacion + 4 invoices + 2 support_documents; 12 of 15 are stubs awaiting api-facturacion #129) |
-| **EQUIPO** | invitations (excl. /accept), tenants | 2 | E2.12 (#196) — pending |
+| **EQUIPO** | invitations (excl. /accept), tenants (excl. POST "" + /user-tenants) | 2 | ✅ E2.12 (#196) — DONE (6 endpoints gated; 3 self-service / public excluded) |
 | **INTEGRACIONES** | api_tokens, public_api, v1_ordering | 3 | E2.13 (#197) — pending |
 | **MI_PLAN** | billing | 1 | ✅ E2.14 (#185, PR #202) — DONE |
 | **MI_NEGOCIO** | tenant_config | 1 | ✅ E2.15 (#192) — DONE (15 endpoints gated, owner-only — ADMIN/SUPERVISOR stripped of MI_NEGOCIO) |
@@ -139,9 +139,9 @@ E2.7 (#191) lands.
 ## §2. `/invitations/accept` is token-public
 
 `POST /invitations/accept` accepts an invitation by token — the invitee has
-no operator session yet. The endpoint is already in the middleware allowlist.
-When wiring `EQUIPO` in E2.12 (#196), exclude `/accept` and gate the other
-3 endpoints (`send`, `list`, `cancel`) only.
+no operator session yet. The endpoint is already in the middleware allowlist
+(`app/main.py:59`). Excluded from the EQUIPO gate in #196 with an explicit
+`# NOTE:` block. Frontend consumer: `pages/auth/accept-invitation.vue:174`.
 
 ## §3. `payment_methods.py` exports two routers
 
@@ -218,6 +218,29 @@ How to verify a candidate is dead before deleting:
 grep -rn '<endpoint-path>' . --include='*.vue' --include='*.ts' --include='*.js' --include='*.py' --include='*.json'
 # expect: only the router file itself + main.py mount
 ```
+
+## §9. `tenants.py` — self-service endpoints excluded from EQUIPO
+
+EQUIPO is owner-only by matrix, but 2 of the 5 endpoints in `tenants.py`
+serve cross-role audiences and were excluded from the gate in #196 with
+explicit `# NOTE:` blocks:
+
+- **`POST /tenants`** — onboarding / add-new-tenant flow. The caller may
+  have no current tenant (role=null) or a non-owner role wanting to start
+  their own tenant. The service makes the caller superuser of the newly
+  created tenant. Gating under EQUIPO would block legitimate signup.
+- **`GET /tenants/user-tenants`** — sidebar tenant switcher. Called by
+  every authenticated user from `stores/tenants.ts:59` regardless of role,
+  populating `DashboardTenantSelector.vue`. Gating under owner-only EQUIPO
+  would break the switcher for cashier / kitchen / admin / supervisor with
+  multiple tenant memberships.
+
+The remaining 3 endpoints in `tenants.py` (`/members` GET + DELETE + role
+PUT) are correctly gated under EQUIPO since they are admin-only team
+management operations consumed by `pages/equipo/miembros.vue`.
+
+A regression test in `tests/test_equipo_permissions.py::test_cashier_passes_user_tenants_exclusion_under_enforce`
+guards against accidental future gating of `/user-tenants`.
 
 ## §6. `auth.py` and `webhooks.py` — explicit skips
 
