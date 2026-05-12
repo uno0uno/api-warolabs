@@ -14,6 +14,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 from app.core.dependencies import require_invoicing_ready
 from app.core.middleware import require_valid_session
+from app.core.permissions import Module, require_module
 
 router = APIRouter(prefix="/api/invoices", tags=["Invoices"])
 
@@ -33,7 +34,7 @@ class RAdianEventRequest(BaseModel):
     event_code: str = Field(..., description="RADIAN event code: 030 | 031 | 032 | 033")
 
 
-@router.post("/{invoice_id}/credit-note")
+@router.post("/{invoice_id}/credit-note", dependencies=[Depends(require_module(Module.FACTURACION))])
 async def emit_credit_note(
     request: Request,
     invoice_id: UUID,
@@ -51,7 +52,7 @@ async def emit_credit_note(
     raise HTTPException(status_code=503, detail=_STUB_DETAIL)
 
 
-@router.post("/{invoice_id}/debit-note")
+@router.post("/{invoice_id}/debit-note", dependencies=[Depends(require_module(Module.FACTURACION))])
 async def emit_debit_note(
     request: Request,
     invoice_id: UUID,
@@ -69,7 +70,7 @@ async def emit_debit_note(
     raise HTTPException(status_code=503, detail=_STUB_DETAIL)
 
 
-@router.post("/{invoice_id}/events")
+@router.post("/{invoice_id}/events", dependencies=[Depends(require_module(Module.FACTURACION))])
 async def emit_radian_event(
     request: Request,
     invoice_id: UUID,
@@ -85,7 +86,7 @@ async def emit_radian_event(
     raise HTTPException(status_code=503, detail=_STUB_DETAIL)
 
 
-@router.get("/{invoice_id}/events")
+@router.get("/{invoice_id}/events", dependencies=[Depends(require_module(Module.FACTURACION))])
 async def get_radian_events(
     request: Request,
     invoice_id: UUID,

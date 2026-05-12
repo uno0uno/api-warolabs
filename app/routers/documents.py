@@ -9,10 +9,11 @@ they read electronic_invoices directly from DB and generate R2 presigned URLs.
 POST /{track_id}/resend-email is a stub until api-facturacion implements
 the resend endpoint.
 """
-from fastapi import APIRouter, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from typing import Any, Dict, Optional
 from uuid import UUID
 from app.core.middleware import require_valid_session
+from app.core.permissions import Module, require_module
 from app.services import facturacion_service
 
 router = APIRouter(prefix="/api/documents", tags=["Document Management"])
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/api/documents", tags=["Document Management"])
 _STUB_DETAIL = "Not yet available — api-facturacion endpoint pending"
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_module(Module.FACTURACION))])
 async def list_documents(
     request: Request,
     prefix: Optional[str] = Query(None, description="Filter by invoice prefix (e.g. SETP)"),
@@ -50,7 +51,7 @@ async def list_documents(
     )
 
 
-@router.post("/{track_id}/resend-email")
+@router.post("/{track_id}/resend-email", dependencies=[Depends(require_module(Module.FACTURACION))])
 async def resend_document_email(
     request: Request,
     track_id: UUID,
@@ -64,7 +65,7 @@ async def resend_document_email(
     raise HTTPException(status_code=503, detail=_STUB_DETAIL)
 
 
-@router.get("/{track_id}/pdf")
+@router.get("/{track_id}/pdf", dependencies=[Depends(require_module(Module.FACTURACION))])
 async def get_document_pdf(
     request: Request,
     track_id: UUID,
@@ -85,7 +86,7 @@ async def get_document_pdf(
     return {"pdf_url": pdf_url, "expires_in": 3600}
 
 
-@router.get("/{track_id}/xml")
+@router.get("/{track_id}/xml", dependencies=[Depends(require_module(Module.FACTURACION))])
 async def get_document_xml(
     request: Request,
     track_id: UUID,

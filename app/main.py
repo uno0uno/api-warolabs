@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, admin_ingredients, menu, tables, credit, cartera, cierre, payment_methods, accounting, stations, comandas, invoices as invoices_router, support_documents, documents as documents_router, facturacion as facturacion_router, webhooks as webhooks_router
+from app.routers import auth, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, combos, ingredient_purchase_units, customers, pos_cart, pos_context, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, tenant_config, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, admin_ingredients, menu, tables, credit, cartera, cierre, payment_methods, accounting, stations, comandas, operaciones_context, invoices as invoices_router, support_documents, documents as documents_router, facturacion as facturacion_router, webhooks as webhooks_router
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -169,6 +169,8 @@ app.include_router(modifiers.router, prefix="/menu/modifier-groups", tags=["modi
 app.include_router(combos.router, prefix="/menu/combos", tags=["combos"])
 app.include_router(customers.router, prefix="/customers", tags=["customers"])
 app.include_router(pos_cart.router)
+app.include_router(pos_context.router)  # POS-scoped aggregator (BFF for /pos/restaurant-context)
+app.include_router(operaciones_context.router)  # OPERACIONES-scoped aggregator + 5 toggle PATCH endpoints
 app.include_router(online_cart.router)  # Public online ordering cart
 app.include_router(online_orders.router)  # Authenticated online orders management
 app.include_router(notifications.router)  # Authenticated notifications management
