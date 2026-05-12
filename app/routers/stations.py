@@ -4,10 +4,11 @@ CRUD and toggle endpoints for kitchen station (preparation point) management.
 
 Issue: https://github.com/uno0uno/warocol.com/issues/411
 """
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Depends, Request, HTTPException
 from typing import Optional, List
 from uuid import UUID
 from pydantic import BaseModel, Field
+from app.core.permissions import Module, require_module
 from app.services import stations_service
 from app.database import get_db_connection
 
@@ -54,48 +55,51 @@ class SetCategoryStationRequest(BaseModel):
 # literal strings as UUIDs.
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def list_stations_endpoint(request: Request):
     """List all stations for the tenant ordered by display_order."""
     return await stations_service.list_stations(request)
 
 
-@router.get("/active")
+@router.get("/active", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def list_active_stations_endpoint(request: Request):
     """List only active stations (used by POS header and KDS routing)."""
     return await stations_service.list_active_stations(request)
 
 
-@router.patch("/reorder")
+@router.patch("/reorder", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def reorder_stations_endpoint(request: Request, body: ReorderRequest):
     """Bulk-update display_order for multiple stations in a single query."""
     return await stations_service.reorder_stations(request, body.items)
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def create_station_endpoint(request: Request, body: CreateStationRequest):
     """Create a new kitchen station for the tenant."""
     return await stations_service.create_station(request, body)
 
 
-@router.get("/categories")
+@router.get("/categories", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def list_category_stations_endpoint(request: Request):
     """List all category→station assignments for the tenant."""
     return await stations_service.get_category_stations(request)
 
 
-@router.post("/categories/{category_id}")
+@router.post("/categories/{category_id}", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def set_category_station_endpoint(request: Request, category_id: UUID, body: SetCategoryStationRequest):
     """Assign (or clear) a kitchen station for a category (UPSERT). Pass station_id=null to clear."""
     return await stations_service.set_category_station(request, category_id, body.station_id)
 
 
-@router.delete("/categories/{category_id}")
+@router.delete("/categories/{category_id}", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def delete_category_station_endpoint(request: Request, category_id: UUID):
     """Remove the station assignment for a category."""
     return await stations_service.delete_category_station(request, category_id)
 
 
+# NOTE: KDS-public endpoint — pages/cocina/[id].vue:25 calls without session
+# (the station UUID itself is the access token). Adding require_module here
+# would 403 the tablet. Per audit doc §1 (KDS public paths).
 @router.get("/{station_id}")
 async def get_station_public_endpoint(station_id: UUID):
     """
@@ -131,13 +135,13 @@ async def get_station_public_endpoint(station_id: UUID):
     return {"success": True, "data": data}
 
 
-@router.patch("/{station_id}")
+@router.patch("/{station_id}", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def update_station_endpoint(request: Request, station_id: UUID, body: UpdateStationRequest):
     """Partial-update a station's name, color, thresholds, or display_order."""
     return await stations_service.update_station(request, station_id, body)
 
 
-@router.delete("/{station_id}")
+@router.delete("/{station_id}", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def soft_delete_station_endpoint(request: Request, station_id: UUID):
     """
     Soft-delete a station (is_active = false).
@@ -146,13 +150,13 @@ async def soft_delete_station_endpoint(request: Request, station_id: UUID):
     return await stations_service.soft_delete_station(request, station_id)
 
 
-@router.get("/{station_id}/deactivate-info")
+@router.get("/{station_id}/deactivate-info", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def get_deactivate_info(request: Request, station_id: UUID):
     """Return active-comanda count and affected categories before deactivating a station."""
     return await stations_service.get_deactivate_info(request, station_id)
 
 
-@router.patch("/{station_id}/toggle")
+@router.patch("/{station_id}/toggle", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def toggle_station_endpoint(request: Request, station_id: UUID, body: ToggleStationRequest):
     """Toggle is_active on/off for a station."""
     return await stations_service.toggle_station(request, station_id, body.is_active)
@@ -160,7 +164,7 @@ async def toggle_station_endpoint(request: Request, station_id: UUID, body: Togg
 
 # ── KDS Token Management ────────────────────────────────────────────────────
 
-@router.post("/{station_id}/kds-token")
+@router.post("/{station_id}/kds-token", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def generate_kds_token(request: Request, station_id: UUID):
     """Generate a new KDS access token for a station. Revokes any previous active token."""
     import secrets
@@ -186,7 +190,7 @@ async def generate_kds_token(request: Request, station_id: UUID):
     return {'success': True, 'data': {'token': token, 'station_id': str(station_id)}}
 
 
-@router.get("/{station_id}/kds-token")
+@router.get("/{station_id}/kds-token", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def get_kds_token(request: Request, station_id: UUID):
     """Get the current active KDS token for a station.
 
@@ -216,7 +220,7 @@ async def get_kds_token(request: Request, station_id: UUID):
     }
 
 
-@router.delete("/{station_id}/kds-token")
+@router.delete("/{station_id}/kds-token", dependencies=[Depends(require_module(Module.OPERACIONES))])
 async def revoke_kds_token(request: Request, station_id: UUID):
     """Revoke all active KDS tokens for a station."""
     from app.core.middleware import require_valid_session
