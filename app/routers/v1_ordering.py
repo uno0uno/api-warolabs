@@ -3,10 +3,11 @@ V1 Ordering Router
 Cart, address, OTP, and customer-validate endpoints authenticated via API key.
 tenant_id is injected from the API key context — never exposed to callers.
 """
-from fastapi import APIRouter, Depends, Request, Query, Response
+from fastapi import APIRouter, Depends, Request, Response
 from typing import List, Optional
 from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field
+from app.core.permissions import Module, require_module
 from app.services import online_cart_service, address_profile_service, otp_service
 from app.services.public_api_service import validate_api_key_auth
 from app.services import public_restaurant_service
@@ -26,7 +27,7 @@ class V1BatchCreateCartRequest(BaseModel):
     order_type: str = Field(default='delivery', pattern='^(delivery|pickup|dine-in)$')
 
 
-@router.post("/batch")
+@router.post("/batch", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def create_cart_batch(request: Request, body: V1BatchCreateCartRequest):
     """
     Create cart and add all items in batch.
@@ -44,7 +45,7 @@ async def create_cart_batch(request: Request, body: V1BatchCreateCartRequest):
     )
 
 
-@router.get("/session/{session_id}")
+@router.get("/session/{session_id}", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_cart_by_session(session_id: str, request: Request):
     """
     Get active cart by session ID.
@@ -61,7 +62,7 @@ async def get_cart_by_session(session_id: str, request: Request):
     )
 
 
-@router.put("/{cart_id}/delivery")
+@router.put("/{cart_id}/delivery", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def update_delivery_info(cart_id: UUID, request: Request, delivery_info: DeliveryInfoUpdate):
     """
     Update delivery information for a cart.
@@ -79,7 +80,7 @@ async def update_delivery_info(cart_id: UUID, request: Request, delivery_info: D
     )
 
 
-@router.delete("/{cart_id}/items/{item_id}")
+@router.delete("/{cart_id}/items/{item_id}", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def delete_cart_item(cart_id: UUID, item_id: UUID, request: Request):
     """
     Delete a specific item from a cart.
@@ -91,7 +92,7 @@ async def delete_cart_item(cart_id: UUID, item_id: UUID, request: Request):
     return await online_cart_service.delete_cart_item(cart_id=cart_id, item_id=item_id)
 
 
-@router.delete("/{cart_id}")
+@router.delete("/{cart_id}", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def clear_cart(cart_id: UUID, request: Request):
     """
     Clear all items from a cart.
@@ -103,7 +104,7 @@ async def clear_cart(cart_id: UUID, request: Request):
     return await online_cart_service.clear_cart(cart_id=cart_id)
 
 
-@router.post("/{cart_id}/verify")
+@router.post("/{cart_id}/verify", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def verify_cart(
     cart_id: UUID,
     request: Request,
@@ -131,7 +132,7 @@ async def verify_cart(
     )
 
 
-@router.post("/{cart_id}/checkout")
+@router.post("/{cart_id}/checkout", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def checkout_cart_v1(cart_id: UUID, request: Request):
     """
     Finalize a verified cart as a confirmed order.
@@ -155,7 +156,7 @@ async def checkout_cart_v1(cart_id: UUID, request: Request):
 # ---------------------------------------------------------------------------
 
 
-@address_router.post("")
+@address_router.post("", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def create_address(request: Request, address: AddressProfileCreate):
     """
     Create a new delivery address for a customer.
@@ -183,7 +184,7 @@ async def create_address(request: Request, address: AddressProfileCreate):
     )
 
 
-@address_router.get("/customer/{customer_id}")
+@address_router.get("/customer/{customer_id}", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_customer_addresses(customer_id: UUID, request: Request):
     """
     Get all addresses for a customer, ordered by default-first then newest.
@@ -195,7 +196,7 @@ async def get_customer_addresses(customer_id: UUID, request: Request):
     return await address_profile_service.get_customer_addresses(customer_id)
 
 
-@address_router.put("/{address_id}")
+@address_router.put("/{address_id}", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def update_address(
     address_id: UUID,
     customer_id: UUID,
@@ -220,7 +221,7 @@ async def update_address(
     )
 
 
-@address_router.delete("/{address_id}")
+@address_router.delete("/{address_id}", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def delete_address(address_id: UUID, customer_id: UUID, request: Request):
     """
     Delete an address. If the deleted address was the default and others exist,
@@ -235,7 +236,7 @@ async def delete_address(address_id: UUID, customer_id: UUID, request: Request):
     return await address_profile_service.delete_address(address_id, customer_id)
 
 
-@address_router.patch("/{address_id}/set-default")
+@address_router.patch("/{address_id}/set-default", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def set_default_address(address_id: UUID, customer_id: UUID, request: Request):
     """
     Set an address as the customer's default. Unsets all other addresses as default.
@@ -272,7 +273,7 @@ class V1ResendOTPRequest(BaseModel):
     cart_id: Optional[UUID] = None
 
 
-@otp_router.post("/send")
+@otp_router.post("/send", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def v1_send_otp(request: Request, body: V1SendOTPRequest):
     """
     Send OTP code via email.
@@ -284,7 +285,7 @@ async def v1_send_otp(request: Request, body: V1SendOTPRequest):
     return await otp_service.send_otp_email(email=body.email, cart_id=body.cart_id)
 
 
-@otp_router.post("/verify")
+@otp_router.post("/verify", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def v1_verify_otp(request: Request, body: V1VerifyOTPRequest, response: Response):
     """
     Verify OTP code.
@@ -313,7 +314,7 @@ async def v1_verify_otp(request: Request, body: V1VerifyOTPRequest, response: Re
     return result
 
 
-@otp_router.post("/resend")
+@otp_router.post("/resend", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def v1_resend_otp(request: Request, body: V1ResendOTPRequest):
     """
     Resend OTP code. Cooldown: 60 seconds between resends.
@@ -343,7 +344,7 @@ class V1ValidateCustomerRequest(BaseModel):
     cart_total: float = 0.0
 
 
-@customer_router_v1.post("/validate")
+@customer_router_v1.post("/validate", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def v1_validate_customer(request: Request, body: V1ValidateCustomerRequest):
     """
     Validate customer eligibility to place an order.
@@ -360,7 +361,7 @@ async def v1_validate_customer(request: Request, body: V1ValidateCustomerRequest
     )
 
 
-@product_router_v1.get("/{product_id}")
+@product_router_v1.get("/{product_id}", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def v1_get_product_detail(product_id: UUID, request: Request):
     """
     Get full product details including modifier groups.

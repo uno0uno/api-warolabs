@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
+from app.core.permissions import Module, require_module
 from app.services.api_tokens_service import (
     create_api_token,
     list_api_tokens,
@@ -19,7 +20,7 @@ from app.models.api_token import (
 router = APIRouter()
 
 
-@router.post("", response_model=ApiTokenCreatedResponse)
+@router.post("", response_model=ApiTokenCreatedResponse, dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def create_api_token_endpoint(request: Request, body: ApiTokenCreate):
     """
     Crea un nuevo API token para el tenant actual.
@@ -32,7 +33,7 @@ async def create_api_token_endpoint(request: Request, body: ApiTokenCreate):
     return await create_api_token(request, body)
 
 
-@router.get("", response_model=ApiTokenListResponse)
+@router.get("", response_model=ApiTokenListResponse, dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def list_api_tokens_endpoint(request: Request):
     """
     Lista todos los API tokens del tenant actual.
@@ -42,7 +43,7 @@ async def list_api_tokens_endpoint(request: Request):
     return await list_api_tokens(request)
 
 
-@router.get("/scopes")
+@router.get("/scopes", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def get_available_scopes():
     """
     Retorna la lista de scopes disponibles para API tokens.
@@ -65,7 +66,7 @@ async def get_available_scopes():
     }
 
 
-@router.patch("/{token_id}", response_model=ApiTokenUpdateResponse)
+@router.patch("/{token_id}", response_model=ApiTokenUpdateResponse, dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def update_api_token_endpoint(request: Request, token_id: str, body: ApiTokenUpdateRequest):
     """
     Actualiza un API token (nombre, scopes, estado activo).
@@ -81,7 +82,7 @@ async def update_api_token_endpoint(request: Request, token_id: str, body: ApiTo
     )
 
 
-@router.post("/{token_id}/revoke", response_model=ApiTokenDeleteResponse)
+@router.post("/{token_id}/revoke", response_model=ApiTokenDeleteResponse, dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def revoke_api_token_endpoint(request: Request, token_id: str):
     """
     Revoca (desactiva) un API token.
@@ -94,7 +95,7 @@ async def revoke_api_token_endpoint(request: Request, token_id: str):
     return await revoke_api_token(request, token_id)
 
 
-@router.delete("/{token_id}", response_model=ApiTokenDeleteResponse)
+@router.delete("/{token_id}", response_model=ApiTokenDeleteResponse, dependencies=[Depends(require_module(Module.INTEGRACIONES))])
 async def delete_api_token_endpoint(request: Request, token_id: str):
     """
     Elimina permanentemente un API token.
