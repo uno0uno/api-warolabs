@@ -19,7 +19,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ---
 
-## Authoritative Table — 53 routers
+## Authoritative Table — 54 routers
 
 | router_file | mount_prefix | endpoints | module | auth_today | notes |
 |---|---|---|---|---|---|
@@ -49,6 +49,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `invitations.py` | `/invitations` | 4 | **EQUIPO** | session | ⚠️ `/invitations/accept` es token-público (ver §2). DONE en #196 (3 of 4 gated). |
 | `invoices.py` | `/api/invoices` | 4 | **FACTURACION** | session | Notas crédito/débito, RADIAN (stubs 503). DONE en #194. |
 | `leads.py` | `/leads` | 2 | **public** | none | Captura de leads (homepage) |
+| `me.py` | `/me` | 1 | **skip** | session | DONE en #200. Endpoint público a usuarios autenticados — surfacing del propio access map (role + modules + enforcement_mode) para Epic 4 |
 | `menu.py` | `/menu` | 1 | **MENU** | session | Name-check genérico |
 | `modifiers.py` | `/menu/modifier-groups` | 6 | **MENU** | session | Grupos de modificadores |
 | `notifications.py` | `/notifications` | 4 | **POS** | session | Notificaciones operador (SSE) — ver ambigüedad en §7 |
@@ -81,7 +82,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ## Coverage Summary
 
-Total: **53 routers**, **~413 endpoints**, **13 modules** (post #197 corrected v1_ordering.py count 7→17, +10 endpoints; post #194 corrected facturacion.py count 3→5, +2 endpoints; was 14 modules before #212 dropped `EVENTOS`; was 52/395 routers/endpoints after #191/#192 + added `operaciones_context.py` in #210 for OPERACIONES aggregator + toggles).
+Total: **54 routers**, **~414 endpoints**, **13 modules** (post #200 added `me.py` — 1 endpoint; post #197 corrected v1_ordering.py count 7→17, +10 endpoints; post #194 corrected facturacion.py count 3→5, +2 endpoints; was 14 modules before #212 dropped `EVENTOS`; was 52/395 routers/endpoints after #191/#192 + added `operaciones_context.py` in #210 for OPERACIONES aggregator + toggles).
 
 | Module | Routers | Sub-task | Status |
 |---|---|---|---|
@@ -100,7 +101,7 @@ Total: **53 routers**, **~413 endpoints**, **13 modules** (post #197 corrected v
 | **MI_NEGOCIO** | tenant_config | 1 | ✅ E2.15 (#192) — DONE (15 endpoints gated, owner-only — ADMIN/SUPERVISOR stripped of MI_NEGOCIO) |
 | ~~**EVENTOS**~~ | — | — | ✅ E2.16 (#199 / PR #212) — DONE (`Module.EVENTOS` removed from enum; Eventos lives in warotickets.com, external product) |
 | **public** | address_profile, articles, customer_portal, leads, online_cart, online_verification, public_restaurant, supplier_portal | 8 | n/a — never gated |
-| **skip** | auth, webhooks | 2 | n/a — explicit exclusion |
+| **skip** | auth, me, webhooks | 3 | n/a — explicit exclusion (auth + webhooks pre-session; me surfaces own access map and cannot self-gate) |
 | **mixed (split-by-endpoint)** | payment_methods, tenant_config | 2 | split across two sub-tasks |
 
 ---

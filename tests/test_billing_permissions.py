@@ -91,7 +91,7 @@ def test_owner_role_passes_billing_under_enforce():
     @asynccontextmanager
     async def _enforce_db():
         conn = MagicMock()
-        # _get_enforcement_mode reads the first conn it gets — return 'enforce'.
+        # get_enforcement_mode reads the first conn it gets — return 'enforce'.
         conn.fetchval = AsyncMock(return_value="enforce")
         conn.fetchrow = AsyncMock(return_value=None)
         conn.fetch = AsyncMock(return_value=[])
