@@ -4,8 +4,9 @@ Authentication required
 """
 from datetime import date as _date
 from asyncpg.exceptions import UniqueViolationError
-from fastapi import APIRouter, Request, Body, HTTPException
+from fastapi import APIRouter, Depends, Request, Body, HTTPException
 from fastapi.responses import JSONResponse
+from app.core.permissions import Module, require_module
 from app.services import tenant_config_service
 from app.models.tenant_public_profile import (
     TenantPublicProfileCreate,
@@ -21,7 +22,7 @@ from typing import Optional
 router = APIRouter()
 
 
-@router.get("/public-profile", response_model=Optional[TenantPublicProfileResponse])
+@router.get("/public-profile", response_model=Optional[TenantPublicProfileResponse], dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def get_own_public_profile_endpoint(
     request: Request
 ):
@@ -36,7 +37,7 @@ async def get_own_public_profile_endpoint(
     return await tenant_config_service.get_own_public_profile(request)
 
 
-@router.put("/public-profile", response_model=TenantPublicProfileResponse)
+@router.put("/public-profile", response_model=TenantPublicProfileResponse, dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def upsert_public_profile_endpoint(
     request: Request,
     profile_data: TenantPublicProfileCreate = Body(...)
@@ -68,7 +69,7 @@ async def upsert_public_profile_endpoint(
     return await tenant_config_service.upsert_public_profile(request, profile_data)
 
 
-@router.patch("/public-profile", response_model=TenantPublicProfileResponse)
+@router.patch("/public-profile", response_model=TenantPublicProfileResponse, dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def update_public_profile_endpoint(
     request: Request,
     profile_data: TenantPublicProfileUpdate = Body(...)
@@ -86,7 +87,7 @@ async def update_public_profile_endpoint(
     return await tenant_config_service.update_public_profile(request, profile_data)
 
 
-@router.post("/public-profile/toggle", response_model=ToggleProfileResponse)
+@router.post("/public-profile/toggle", response_model=ToggleProfileResponse, dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def toggle_public_profile_endpoint(
     request: Request,
     toggle_data: ToggleProfileRequest = Body(...)
@@ -109,7 +110,7 @@ async def toggle_public_profile_endpoint(
     )
 
 
-@router.get("/invoicing-readiness")
+@router.get("/invoicing-readiness", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def get_invoicing_readiness_endpoint(request: Request):
     """
     Return whether the active tenant can emit electronic invoices right now.
@@ -130,7 +131,7 @@ async def get_invoicing_readiness_endpoint(request: Request):
     return payload
 
 
-@router.get("/tax-config")
+@router.get("/tax-config", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def get_tax_config_endpoint(request: Request):
     """
     Get the fiscal tax configuration for the active tenant.
@@ -141,7 +142,7 @@ async def get_tax_config_endpoint(request: Request):
     return await tenant_config_service.get_tax_config(request)
 
 
-@router.put("/tax-config")
+@router.put("/tax-config", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def update_tax_config_endpoint(
     request: Request,
     data: TaxConfigUpdate = Body(...),
@@ -163,7 +164,7 @@ async def update_tax_config_endpoint(
     return await tenant_config_service.update_tax_config(request, data)
 
 
-@router.get("/fiscal-data")
+@router.get("/fiscal-data", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def get_fiscal_data(request: Request):
     """
     Get fiscal data for the active tenant.
@@ -205,7 +206,7 @@ async def get_fiscal_data(request: Request):
     }
 
 
-@router.put("/fiscal-data")
+@router.put("/fiscal-data", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def update_fiscal_data(request: Request, data: dict = Body(...)):
     """
     Upsert fiscal data for the active tenant.
@@ -250,7 +251,7 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
     return {'success': True, 'message': 'Datos fiscales actualizados'}
 
 
-@router.get("/dian-resolutions")
+@router.get("/dian-resolutions", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def get_dian_resolutions(request: Request):
     """
     Get all DIAN resolutions for the active tenant.
@@ -297,7 +298,7 @@ async def get_dian_resolutions(request: Request):
     return {'success': True, 'data': resolutions}
 
 
-@router.post("/dian-resolutions")
+@router.post("/dian-resolutions", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def create_dian_resolution(request: Request, data: dict = Body(...)):
     """Create a new DIAN resolution for the active tenant."""
     from app.core.middleware import require_valid_session
@@ -358,7 +359,7 @@ async def create_dian_resolution(request: Request, data: dict = Body(...)):
     return {'success': True, 'data': {'id': str(row_id)}, 'message': 'Resolución creada'}
 
 
-@router.put("/dian-resolutions/{resolution_id}")
+@router.put("/dian-resolutions/{resolution_id}", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def update_dian_resolution(request: Request, resolution_id: str, data: dict = Body(...)):
     """Update an existing DIAN resolution."""
     from app.core.middleware import require_valid_session
@@ -380,7 +381,7 @@ async def update_dian_resolution(request: Request, resolution_id: str, data: dic
         raise HTTPException(status_code=422, detail="Formato de fecha inválido. Usa YYYY-MM-DD")
 
     async with get_db_connection() as conn:
-        result = await conn.execute(
+        await conn.execute(
             """UPDATE dian_resolutions
                SET resolution_number = $1, prefix = $2, date_from = $3, date_to = $4,
                    from_number = $5, to_number = $6, current_number = $7, document_type = $8
@@ -395,7 +396,7 @@ async def update_dian_resolution(request: Request, resolution_id: str, data: dic
     return {'success': True, 'message': 'Resolución actualizada'}
 
 
-@router.patch("/dian-resolutions/{resolution_id}/toggle")
+@router.patch("/dian-resolutions/{resolution_id}/toggle", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def toggle_dian_resolution(request: Request, resolution_id: str):
     """Toggle is_active for a DIAN resolution."""
     from app.core.middleware import require_valid_session
@@ -422,7 +423,7 @@ async def toggle_dian_resolution(request: Request, resolution_id: str):
     return {'success': True, 'data': {'is_active': new_state}}
 
 
-@router.get("/facturacion-status")
+@router.get("/facturacion-status", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def get_facturacion_status(request: Request):
     """
     Get Matias API connection status and last emitted document.
@@ -466,7 +467,7 @@ ALLOWED_IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/webp'}
 MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB
 
 
-@router.post("/upload-image")
+@router.post("/upload-image", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def upload_tenant_image_endpoint(request: Request):
     """
     Upload a logo or banner image for the tenant public profile.
