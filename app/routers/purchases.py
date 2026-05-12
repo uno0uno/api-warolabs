@@ -1,6 +1,7 @@
-from fastapi import APIRouter, BackgroundTasks, Request, Response, Query, Form, File, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response, Query, Form, File, UploadFile
 from uuid import UUID
 from typing import Optional, List
+from app.core.permissions import Module, require_module
 from app.services.purchases_service import (
     get_purchases_list,
     get_purchase_by_id,
@@ -28,29 +29,22 @@ from app.services.direct_purchase_service import (
     get_direct_purchases_list,
     get_direct_purchase_by_id,
     get_supplier_catalog_prices,
-    get_supplier_catalog_prices,
     update_direct_purchase,
     upload_direct_purchase_attachments
 )
 from app.services.analytics_service import run_anomaly_checks_for_purchase
 from app.core.middleware import require_valid_session
 from app.models.purchase import (
-    Purchase,
     PurchaseCreate,
     PurchaseUpdate,
     PurchaseResponse,
     PurchasesListResponse,
     # State transition models
     ConfirmPurchaseData,
-    ShipPurchaseData,
-    ReceivePurchaseData,
-    InvoicePurchaseData,
-    PayPurchaseData,
     CancelPurchaseData,
     # History and attachment models
     StatusHistoryResponse,
     AttachmentsResponse,
-    PurchaseAttachmentCreate,
     PurchaseAttachmentCreate,
     DirectPurchaseCreate,
     DirectPurchaseUpdate
@@ -59,7 +53,7 @@ from app.models.purchase import (
 router = APIRouter()
 
 
-@router.post("/extract-invoice")
+@router.post("/extract-invoice", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def extract_invoice(
     request: Request,
     file: UploadFile = File(...)
@@ -72,7 +66,7 @@ async def extract_invoice(
     return await extract_invoice_data(request, file)
 
 
-@router.get("/scan-usage")
+@router.get("/scan-usage", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_scan_usage_endpoint(request: Request):
     """
     Returns current period scan quota usage for the authenticated tenant.
@@ -100,7 +94,7 @@ async def get_scan_usage_endpoint(request: Request):
         return await get_scan_usage(tenant_id, conn)
 
 
-@router.get("/next-number")
+@router.get("/next-number", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_next_purchase_number(
     request: Request,
     response: Response
@@ -145,7 +139,7 @@ async def get_next_purchase_number(
 # DIRECT PURCHASES ENDPOINTS (Compras Directas - WR-CD-XXXX)
 # =============================================================================
 
-@router.get("/direct")
+@router.get("/direct", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_direct_purchases_endpoint(
     request: Request,
     response: Response,
@@ -172,7 +166,7 @@ async def get_direct_purchases_endpoint(
     )
 
 
-@router.post("/direct")
+@router.post("/direct", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def create_direct_purchase_endpoint(
     purchase_data: DirectPurchaseCreate,
     request: Request,
@@ -221,7 +215,7 @@ async def create_direct_purchase_endpoint(
     return result
 
 
-@router.get("/direct/next-number")
+@router.get("/direct/next-number", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_next_direct_purchase_number(
     request: Request,
     response: Response
@@ -267,7 +261,7 @@ async def get_next_direct_purchase_number(
         }
 
 
-@router.get("/direct/{purchase_id}")
+@router.get("/direct/{purchase_id}", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_direct_purchase_endpoint(
     purchase_id: UUID,
     request: Request,
@@ -283,7 +277,7 @@ async def get_direct_purchase_endpoint(
     )
 
 
-@router.put("/direct/{purchase_id}")
+@router.put("/direct/{purchase_id}", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def update_direct_purchase_endpoint(
     purchase_id: UUID,
     purchase_data: DirectPurchaseUpdate,
@@ -295,7 +289,6 @@ async def update_direct_purchase_endpoint(
     Updates purchase items and metadata. Use separate endpoints for file uploads.
     """
     # Import locally to avoid circular imports if any, keeping with existing pattern
-    from app.services.direct_purchase_service import update_direct_purchase
     
     # Map Pydantic model to function arguments
     return await update_direct_purchase(
@@ -313,7 +306,7 @@ async def update_direct_purchase_endpoint(
     )
 
 
-@router.post("/direct/{purchase_id}/attachments")
+@router.post("/direct/{purchase_id}/attachments", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def upload_direct_purchase_attachments_endpoint(
     purchase_id: UUID,
     request: Request,
@@ -341,7 +334,7 @@ async def upload_direct_purchase_attachments_endpoint(
     )
 
 
-@router.get("/suppliers/{supplier_id}/catalog")
+@router.get("/suppliers/{supplier_id}/catalog", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_supplier_catalog_endpoint(
     supplier_id: UUID,
     request: Request,
@@ -363,7 +356,7 @@ async def get_supplier_catalog_endpoint(
 # REGULAR PURCHASES ENDPOINTS (Órdenes de Compra - WR-XXXX)
 # =============================================================================
 
-@router.get("", response_model=PurchasesListResponse)
+@router.get("", response_model=PurchasesListResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_purchases_endpoint(
     request: Request,
     response: Response,
@@ -384,7 +377,7 @@ async def get_purchases_endpoint(
         request, response, page, limit, search, search_field, status, supplier_id, payment_status, date_filter
     )
 
-@router.get("/{purchase_id}", response_model=PurchaseResponse)
+@router.get("/{purchase_id}", response_model=PurchaseResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_purchase_endpoint(
     purchase_id: UUID,
     request: Request,
@@ -395,7 +388,7 @@ async def get_purchase_endpoint(
     """
     return await get_purchase_by_id(request, response, purchase_id)
 
-@router.post("", response_model=PurchaseResponse)
+@router.post("", response_model=PurchaseResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def create_purchase_endpoint(
     purchase_data: PurchaseCreate,
     request: Request,
@@ -406,7 +399,7 @@ async def create_purchase_endpoint(
     """
     return await create_purchase(request, response, purchase_data)
 
-@router.put("/{purchase_id}", response_model=PurchaseResponse)
+@router.put("/{purchase_id}", response_model=PurchaseResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def update_purchase_endpoint(
     purchase_id: UUID,
     purchase_data: PurchaseUpdate,
@@ -423,7 +416,7 @@ async def update_purchase_endpoint(
 # STATE TRANSITION ENDPOINTS
 # =============================================================================
 
-@router.post("/{purchase_id}/confirm")
+@router.post("/{purchase_id}/confirm", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def confirm_purchase_endpoint(
     purchase_id: UUID,
     data: ConfirmPurchaseData,
@@ -436,7 +429,7 @@ async def confirm_purchase_endpoint(
     """
     return await transition_to_confirmed(request, response, purchase_id, data)
 
-@router.post("/{purchase_id}/ship")
+@router.post("/{purchase_id}/ship", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def ship_purchase_endpoint(
     purchase_id: UUID,
     request: Request,
@@ -465,7 +458,7 @@ async def ship_purchase_endpoint(
         files=files
     )
 
-@router.post("/{purchase_id}/receive")
+@router.post("/{purchase_id}/receive", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def receive_purchase_endpoint(
     purchase_id: UUID,
     request: Request,
@@ -493,7 +486,7 @@ async def receive_purchase_endpoint(
     )
 
 
-@router.post("/{purchase_id}/invoice")
+@router.post("/{purchase_id}/invoice", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def invoice_purchase_endpoint(
     purchase_id: UUID,
     request: Request,
@@ -528,7 +521,7 @@ async def invoice_purchase_endpoint(
         files=files
     )
 
-@router.post("/{purchase_id}/pay")
+@router.post("/{purchase_id}/pay", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def pay_purchase_endpoint(
     purchase_id: UUID,
     request: Request,
@@ -557,7 +550,7 @@ async def pay_purchase_endpoint(
         files=files
     )
 
-@router.post("/{purchase_id}/cancel")
+@router.post("/{purchase_id}/cancel", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def cancel_purchase_endpoint(
     purchase_id: UUID,
     data: CancelPurchaseData,
@@ -574,7 +567,7 @@ async def cancel_purchase_endpoint(
 # STATUS HISTORY AND ATTACHMENTS
 # =============================================================================
 
-@router.get("/{purchase_id}/history", response_model=StatusHistoryResponse)
+@router.get("/{purchase_id}/history", response_model=StatusHistoryResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_purchase_history_endpoint(
     purchase_id: UUID,
     request: Request,
@@ -586,7 +579,7 @@ async def get_purchase_history_endpoint(
     """
     return await get_purchase_status_history(request, response, purchase_id)
 
-@router.get("/{purchase_id}/transitions/{transition_id}")
+@router.get("/{purchase_id}/transitions/{transition_id}", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_transition_detail_endpoint(
     purchase_id: UUID,
     transition_id: UUID,
@@ -599,7 +592,7 @@ async def get_transition_detail_endpoint(
     """
     return await get_transition_detail(request, response, purchase_id, transition_id)
 
-@router.get("/{purchase_id}/attachments", response_model=AttachmentsResponse)
+@router.get("/{purchase_id}/attachments", response_model=AttachmentsResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_purchase_attachments_endpoint(
     purchase_id: UUID,
     request: Request,
@@ -611,7 +604,7 @@ async def get_purchase_attachments_endpoint(
     """
     return await get_purchase_attachments(request, response, purchase_id)
 
-@router.post("/{purchase_id}/transitions/{transition_id}/attachments")
+@router.post("/{purchase_id}/transitions/{transition_id}/attachments", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def create_transition_attachment_endpoint(
     purchase_id: UUID,
     transition_id: UUID,
@@ -625,7 +618,7 @@ async def create_transition_attachment_endpoint(
     from app.services.purchase_tracking_service import upload_transition_attachments
     return await upload_transition_attachments(request, response, purchase_id, transition_id, files)
 
-@router.post("/{purchase_id}/attachments")
+@router.post("/{purchase_id}/attachments", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def create_purchase_attachment_endpoint(
     purchase_id: UUID,
     attachment_data: PurchaseAttachmentCreate,
@@ -640,7 +633,7 @@ async def create_purchase_attachment_endpoint(
     attachment_data.purchase_id = purchase_id
     return await create_purchase_attachment(request, response, attachment_data)
 
-@router.post("/{purchase_id}/complete-quotation")
+@router.post("/{purchase_id}/complete-quotation", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def complete_quotation_endpoint(
     purchase_id: UUID,
     data: dict,

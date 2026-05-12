@@ -1,15 +1,16 @@
-from fastapi import APIRouter, Request, Response, Query, Body, HTTPException
+from fastapi import APIRouter, Depends, Request, Response, Query, Body, HTTPException
 from typing import Any, Dict, Optional
 from uuid import UUID
+from app.core.middleware import require_valid_session
+from app.core.permissions import Module, require_module
 from app.services.ingredients_service import get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name, create_tenant_ingredient, update_tenant_ingredient, archive_tenant_ingredient, restore_tenant_ingredient, hard_delete_tenant_ingredient
 from app.models.ingredient import IngredientsListResponse, TenantIngredientCreate, TenantIngredientUpdate
 from app.database import get_db_connection
-from app.core.middleware import require_valid_session
 
 router = APIRouter()
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def create_custom_ingredient(
     body: TenantIngredientCreate,
     request: Request,
@@ -32,7 +33,7 @@ async def create_custom_ingredient(
     return {"success": True, "data": data}
 
 
-@router.get("/match")
+@router.get("/match", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def match_ingredient(
     name: str = Query(..., min_length=1),
     threshold: float = Query(default=0.35, ge=0.1, le=1.0)
@@ -48,7 +49,7 @@ async def match_ingredient(
     return {"success": True, "data": match}
 
 
-@router.get("", response_model=IngredientsListResponse)
+@router.get("", response_model=IngredientsListResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_ingredients_endpoint(
     request: Request,
     response: Response,
@@ -72,7 +73,7 @@ async def get_ingredients_endpoint(
     )
 
 
-@router.get("/{ingredient_id}")
+@router.get("/{ingredient_id}", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_ingredient_by_id(ingredient_id: UUID):
     """
     Fetch a single ingredient by its UUID.
@@ -98,7 +99,7 @@ async def get_ingredient_by_id(ingredient_id: UUID):
     }
 
 
-@router.patch("/{ingredient_id}/archive", status_code=200)
+@router.patch("/{ingredient_id}/archive", status_code=200, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def archive_ingredient_endpoint(
     ingredient_id: UUID,
     request: Request,
@@ -114,7 +115,7 @@ async def archive_ingredient_endpoint(
     return await archive_tenant_ingredient(str(ingredient_id), str(session_context.tenant_id))
 
 
-@router.patch("/{ingredient_id}/restore", status_code=200)
+@router.patch("/{ingredient_id}/restore", status_code=200, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def restore_ingredient_endpoint(
     ingredient_id: UUID,
     request: Request,
@@ -129,7 +130,7 @@ async def restore_ingredient_endpoint(
     return await restore_tenant_ingredient(str(ingredient_id), str(session_context.tenant_id))
 
 
-@router.delete("/{ingredient_id}", status_code=200)
+@router.delete("/{ingredient_id}", status_code=200, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def delete_ingredient_endpoint(
     ingredient_id: UUID,
     request: Request,
@@ -144,7 +145,7 @@ async def delete_ingredient_endpoint(
     return await hard_delete_tenant_ingredient(str(ingredient_id), str(session_context.tenant_id))
 
 
-@router.patch("/{ingredient_id}", status_code=200)
+@router.patch("/{ingredient_id}", status_code=200, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def update_custom_ingredient(
     ingredient_id: UUID,
     body: TenantIngredientUpdate,
@@ -166,7 +167,7 @@ async def update_custom_ingredient(
     return {"success": True, "data": data}
 
 
-@router.patch("/{ingredient_id}/unit-weight")
+@router.patch("/{ingredient_id}/unit-weight", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def patch_ingredient_unit_weight(
     ingredient_id: UUID,
     request: Request,
@@ -181,7 +182,7 @@ async def patch_ingredient_unit_weight(
     return await update_ingredient_unit_weight(request, response, ingredient_id, unit_weight_gr)
 
 
-@router.get("/{ingredient_id}/variants")
+@router.get("/{ingredient_id}/variants", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def list_ingredient_variants(
     ingredient_id: UUID,
     request: Request,
