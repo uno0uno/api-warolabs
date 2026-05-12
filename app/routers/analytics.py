@@ -2,16 +2,17 @@
 Analytics Router
 Endpoints for analytics dashboard data
 """
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Depends, Request, Query
 from typing import Optional
 from uuid import UUID
+from app.core.permissions import Module, require_module
 from app.services import analytics_service
 from app.models.data_quality import DataQualityAlertResolve
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 
-@router.get("/menu-analysis")
+@router.get("/menu-analysis", dependencies=[Depends(require_module(Module.ANALITICA))])
 async def get_menu_analysis(
     request: Request,
     date_from: Optional[str] = Query(None),
@@ -40,7 +41,7 @@ async def get_menu_analysis(
     )
 
 
-@router.get("/food-cost")
+@router.get("/food-cost", dependencies=[Depends(require_module(Module.ANALITICA))])
 async def get_food_cost(
     request: Request,
     date_from: Optional[str] = Query(None),
@@ -60,7 +61,7 @@ async def get_food_cost(
     )
 
 
-@router.get("/alerts")
+@router.get("/alerts", dependencies=[Depends(require_module(Module.ANALITICA))])
 async def get_alerts(
     request: Request,
     limit: int = Query(10, ge=1, le=50)
@@ -83,7 +84,7 @@ async def get_alerts(
     )
 
 
-@router.get("/data-quality")
+@router.get("/data-quality", dependencies=[Depends(require_module(Module.ANALITICA))])
 async def get_data_quality(request: Request):
     """
     Scan 30-day purchase history for price anomalies and return quality score.
@@ -101,7 +102,7 @@ async def get_data_quality(request: Request):
     return await analytics_service.get_data_quality(request)
 
 
-@router.patch("/data-quality/{alert_id}/resolve")
+@router.patch("/data-quality/{alert_id}/resolve", dependencies=[Depends(require_module(Module.ANALITICA))])
 async def resolve_data_quality_alert(
     alert_id: UUID,
     resolve_data: DataQualityAlertResolve,
@@ -131,7 +132,7 @@ async def resolve_data_quality_alert(
     )
 
 
-@router.get("/kitchen")
+@router.get("/kitchen", dependencies=[Depends(require_module(Module.ANALITICA))])
 async def get_kitchen_metrics(
     request: Request,
     date_from: Optional[str] = Query(None),

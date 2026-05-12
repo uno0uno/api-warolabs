@@ -2,7 +2,7 @@
 
 **Status:** Source of truth for Epic 2 (#164) wiring sub-tasks (E2.3 → E2.16).
 **Origin:** [#186 audit](https://github.com/uno0uno/api-warolabs/issues/186).
-**Last updated:** 2026-05-11 (post #194 E2.11 FACTURACION done; facturacion.py endpoint count corrected 3→5).
+**Last updated:** 2026-05-11 (post #191/#192 OPERACIONES/MI_NEGOCIO + #210 operaciones-context toggles + #212 EVENTOS removed + #193 ANALITICA + #194 FACTURACION done; facturacion.py endpoint count corrected 3→5).
 
 This document maps each FastAPI router under `app/routers/` to the `Module`
 enum value it should be gated under via `Depends(require_module(Module.X))`,
@@ -19,14 +19,14 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ---
 
-## Authoritative Table — 51 routers
+## Authoritative Table — 53 routers
 
 | router_file | mount_prefix | endpoints | module | auth_today | notes |
 |---|---|---|---|---|---|
 | `accounting.py` | `/accounting` | 13 | **FINANZAS** | session | Chart of accounts CRUD, balance, P&L |
 | `address_profile.py` | `/online/addresses` | 6 | **public** | none | Direcciones de delivery (clientes online) |
 | `admin_ingredients.py` | `/admin/ingredients` | 6 | **ABASTECIMIENTO** | session | Catálogo global de ingredientes |
-| `analytics.py` | `/analytics` | 6 | **ANALITICA** | session | Dashboard analítico, alertas |
+| `analytics.py` | `/analytics` | 6 | **ANALITICA** | session | Dashboard analítico, alertas. DONE en #193. |
 | `api_tokens.py` | `/api-tokens` | 6 | **INTEGRACIONES** | session | API token CRUD + scopes |
 | `articles.py` | `/blog` | 3 | **public** | none | Blog público (lista + detalle) |
 | `auth.py` | `/auth` | 7 | **skip** | none | Login/sesión — corre SIN sesión |
@@ -64,12 +64,14 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `purchases.py` | `/suppliers/purchases` | 26 | **ABASTECIMIENTO** | session | Compras + estados + factura |
 | `recipe_bases.py` | `/menu/recipe-bases` | 5 | **MENU** | session | Templates de receta |
 | `salaries.py` | `/salaries` | 29 | **FINANZAS** | session | Nómina + prima + cesantías + PILA |
-| `stations.py` | `/api/stations` | 15 | **OPERACIONES** | session | Estaciones de cocina + routing. ⚠️ KDS-token endpoints sin gate (ver §1) |
+| `stations.py` | `/api/stations` | 15 | **OPERACIONES** | session | Estaciones de cocina + routing. ⚠️ `GET /{station_id}` excluido (KDS público, ver §1). DONE en #191. |
 | `supplier_portal.py` | `/supplier-portal` | 8 | **public** | token | Portal del proveedor (token, no sesión) |
 | `suppliers.py` | `/suppliers/providers` | 10 | **ABASTECIMIENTO** | session | Proveedor CRUD |
 | `support_documents.py` | `/api/support-documents` | 2 | **FACTURACION** | session | DIAN documento soporte (stubs 503). DONE en #194. |
 | `tables.py` | `/tables` | 19 | **POS** | session | Mesas + tab + sesión de mesa |
-| `tenant_config.py` | `/api/tenant` | 15 | **mixed** | session | Split obligatorio: OPERACIONES + MI_NEGOCIO — ver §4 |
+| `tenant_config.py` | `/api/tenant` | 15 | **MI_NEGOCIO** | session | Owner-only. POS consume `/api/pos/restaurant-context` aggregator (ver §4). DONE en #192. |
+| `pos_context.py` | `/pos/restaurant-context` | 1 | **POS** | session | BFF-style aggregator de tenant context para POS. Introducido en E2.7/E2.15. |
+| `operaciones_context.py` | `/operaciones/restaurant-context + /operaciones/toggles/*` | 6 | **OPERACIONES** | session | Aggregator + 5 PATCH toggle endpoints (kds, comandas, expediter, tables, auto-select-generic). Introducido en #210 (enforce prep). |
 | `tenants.py` | `/tenants` | 5 | **EQUIPO** | session | Tenant create + member CRUD |
 | `v1_ordering.py` | `/v1/cart + /v1/addresses + /v1/otp + /v1/customer + /v1/product` | 7 | **INTEGRACIONES** | api_key | V1 ordering API (clientes externos) |
 | `waros.py` | `/admin/waros` | 8 | **POS** | session | Sistema de loyalty (puntos WaRo) |
@@ -79,24 +81,24 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ## Coverage Summary
 
-Total: **51 routers**, **~396 endpoints** (corrected facturacion.py count from 3 to 5 in #194; was 52/395 before #187 deleted `admin_orders.py`).
+Total: **53 routers**, **~403 endpoints**, **13 modules** (post #194 corrected facturacion.py count 3→5, +2 endpoints; was 14 modules before #212 dropped `EVENTOS`; was 52/395 routers/endpoints after #191/#192 + added `operaciones_context.py` in #210 for OPERACIONES aggregator + toggles).
 
 | Module | Routers | Sub-task | Status |
 |---|---|---|---|
 | **POS** | comandas, notifications, pos_cart, tables, waros + payment_methods/pos | 5+1 | ✅ E2.3 (#188) — DONE (51 endpoints gated, 3 KDS-direct excluded) |
 | **VENTAS** | customers, online_orders, orders | 3 | ✅ E2.4 (#189) — DONE (28 endpoints gated, no exclusions) |
-| **DESPACHO** | (no routers — placeholder, like EVENTOS) | 0 | ✅ E2.5 (#187) — DONE (deleted dead `admin_orders.py`) |
+| **DESPACHO** | (no routers — placeholder) | 0 | ✅ E2.5 (#187) — DONE (deleted dead `admin_orders.py`) |
 | **MENU** | categories, combos, menu, modifiers, products, recipe_bases | 6 | E2.6 (#190) — pending |
-| **OPERACIONES** | stations + tenant_config (operaciones part) | 1+1 | E2.7 (#191) — pending |
+| **OPERACIONES** | stations, operaciones_context | 2 | ✅ E2.7 (#191) + #210 — DONE (14 stations endpoints + 6 operaciones-context endpoints, 1 KDS-public excluded) |
 | **ABASTECIMIENTO** | admin_ingredients, ingredient_purchase_units, ingredients, inventory, purchases, suppliers | 6 | E2.8 (#195) — pending |
-| **ANALITICA** | analytics | 1 | E2.9 (#193) — pending |
+| **ANALITICA** | analytics | 1 | ✅ E2.9 (#193) — DONE (6 endpoints gated; `articles.py` confirmed public, stays ungated) |
 | **FINANZAS** | accounting, cartera, cierre, credit, expenses, financial, salaries + payment_methods/finanzas | 7+1 | E2.10 (#198) — pending |
 | **FACTURACION** | documents, facturacion (3 sub-routers), invoices, support_documents | 4 | ✅ E2.11 (#194) — DONE (15 endpoints gated: 4 documents + 5 facturacion + 4 invoices + 2 support_documents; 12 of 15 are stubs awaiting api-facturacion #129) |
 | **EQUIPO** | invitations (excl. /accept), tenants | 2 | E2.12 (#196) — pending |
 | **INTEGRACIONES** | api_tokens, public_api, v1_ordering | 3 | E2.13 (#197) — pending |
 | **MI_PLAN** | billing | 1 | ✅ E2.14 (#185, PR #202) — DONE |
-| **MI_NEGOCIO** | tenant_config (mi_negocio part) | 1 | E2.15 (#199) — pending |
-| **EVENTOS** | (no routers exist) | 0 | E2.16 (#200) — no-op |
+| **MI_NEGOCIO** | tenant_config | 1 | ✅ E2.15 (#192) — DONE (15 endpoints gated, owner-only — ADMIN/SUPERVISOR stripped of MI_NEGOCIO) |
+| ~~**EVENTOS**~~ | — | — | ✅ E2.16 (#199 / PR #212) — DONE (`Module.EVENTOS` removed from enum; Eventos lives in warotickets.com, external product) |
 | **public** | address_profile, articles, customer_portal, leads, online_cart, online_verification, public_restaurant, supplier_portal | 8 | n/a — never gated |
 | **skip** | auth, webhooks | 2 | n/a — explicit exclusion |
 | **mixed (split-by-endpoint)** | payment_methods, tenant_config | 2 | split across two sub-tasks |
@@ -158,25 +160,38 @@ into distinct router objects.
 
 ## §4. `tenant_config.py` — endpoint-level split required
 
-The 15 endpoints in this router fall into two categories. The wiring PRs
-(E2.7 for OPERACIONES, E2.15 for MI_NEGOCIO) will enumerate them, but the
-buckets are:
+**Resolved in #191/#192 — the per-endpoint split is not possible.**
 
-- **OPERACIONES** (toggles operativos):
-  - KDS toggles (kds_enabled, expediter_enabled)
-  - Comandas toggle (comandas_enabled)
-  - Auto-select Genérico toggle, etc.
-  - Anything that affects how POS / kitchen / tables operate day-to-day.
+When the audit was first written we expected `tenant_config.py` to have
+dedicated endpoints for the operational toggles (KDS, comandas, expediter)
+that would naturally bucket under OPERACIONES, separate from the brand /
+fiscal / DIAN endpoints under MI_NEGOCIO. Reading the file refuted that:
+the operational toggles are **columns** on `tenant_public_profiles`,
+written through the same `PUT/PATCH /api/tenant/public-profile` payload as
+brand fields. A single request can update `slug` and `kds_enabled` at once
+— there is no endpoint to gate separately.
 
-- **MI_NEGOCIO** (perfil del negocio):
-  - Slug, brand name, descripción
-  - Horarios de atención
-  - Información fiscal (NIT, regime, etc.)
-  - Datos de contacto
+**Decision applied in E2.7 + E2.15 (single PR):**
 
-Recommendation: do E2.7 and E2.15 in a **single PR** that touches the file
-twice but keeps the diff cohesive. Otherwise the file ends up half-gated
-between two PRs and reviewers lose context.
+1. `tenant_config.py` gated **entirely** under `Module.MI_NEGOCIO`.
+2. `Module.MI_NEGOCIO` is **owner-only** by business rule — ADMIN and
+   SUPERVISOR were stripped of MI_NEGOCIO in `DEFAULT_ROLE_MODULES`.
+3. POS used to read 4 `/api/tenant/*` endpoints (`public-profile`,
+   `fiscal-data`, `tax-config`, `invoicing-readiness`); enforcing owner-only
+   MI_NEGOCIO would have 403ed every cashier. Solution: a new
+   **BFF-style scoped endpoint** `GET /api/pos/restaurant-context`
+   (`app/routers/pos_context.py`) gated under `Module.POS`. It returns the
+   aggregated subset POS needs in a single payload.
+4. POS frontend (`pages/pos/index.vue`, `pages/pos/checkout.vue`,
+   `composables/useInvoicingReadiness.ts`) cuts over to the new endpoint.
+
+This pattern (audience-scoped aggregator gated under the consumer's module,
+private endpoints kept strict) follows Stripe (`/v1/accounts/me` vs full
+admin endpoints) and GitHub (`/user` vs `/users/{name}/admin/*`).
+
+If future operational toggles need a dedicated endpoint surface, the right
+move is to add them as new, individually-gated endpoints (e.g.
+`PATCH /api/tenant/toggles/kds`) rather than re-bucketing existing ones.
 
 ## §5. Pattern: delete admin endpoints with no UI consumer instead of gating
 
@@ -266,6 +281,12 @@ logs show kitchen / supervisor roles being denied for legitimate use.
 - **Reviewer with product context:** the table reflects the auditor's best
   interpretation. A subsequent PR can re-mapping any router based on
   feedback — the doc is versionable.
-- **EVENTOS (Module.EVENTOS):** placeholder in the enum, no router today.
-  Consider removing the enum entry or keeping it as forward-compat. Decide
-  in E2.16 (#200).
+- **EVENTOS:** resolved in #199 — Eventos lives in a separate product
+  (warotickets.com), not in this codebase. `Module.EVENTOS` was removed
+  from the enum and from `Role.ADMIN`'s default set. The only Eventos
+  surface in WARO Colombia is a sidebar `<a>` to `https://warotickets.com/gestion/eventos`,
+  conditioned to owner role. Three dead frontend components
+  (`EventForm.vue`, `EventWizard.vue`, `EventWizardComplete.vue`,
+  ~2060 lines combined) were deleted at the same time — they POSTed to a
+  non-existent `/api/events` endpoint and had zero consumers across pages,
+  layouts, or app.vue.
