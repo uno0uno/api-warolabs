@@ -1,6 +1,7 @@
 from typing import Optional
 from uuid import UUID
-from fastapi import APIRouter, Request, Query
+from fastapi import Depends, APIRouter, Request, Query
+from app.core.permissions import Module, require_module
 from app.services.accounting_service import (
     get_accounts,
     create_account,
@@ -34,7 +35,7 @@ from app.models.accounting import (
 router = APIRouter()
 
 
-@router.get("/accounts", response_model=TenantAccountsListResponse)
+@router.get("/accounts", response_model=TenantAccountsListResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def list_accounts_endpoint(
     request: Request,
     account_class: Optional[str] = Query(None, alias="class"),
@@ -49,7 +50,7 @@ async def list_accounts_endpoint(
     return await get_accounts(request, account_class=account_class, account_type=account_type, active=active)
 
 
-@router.post("/accounts", response_model=TenantAccountResponse)
+@router.post("/accounts", response_model=TenantAccountResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def create_account_endpoint(request: Request, body: TenantAccountCreate):
     """
     Create a custom account for the current tenant.
@@ -59,7 +60,7 @@ async def create_account_endpoint(request: Request, body: TenantAccountCreate):
     return await create_account(request, body)
 
 
-@router.put("/accounts/{account_id}", response_model=TenantAccountResponse)
+@router.put("/accounts/{account_id}", response_model=TenantAccountResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def update_account_endpoint(request: Request, account_id: UUID, body: TenantAccountUpdate):
     """
     Update account name, active status, or is_detail flag.
@@ -69,7 +70,7 @@ async def update_account_endpoint(request: Request, account_id: UUID, body: Tena
     return await update_account(request, account_id, body)
 
 
-@router.delete("/accounts/{account_id}")
+@router.delete("/accounts/{account_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def delete_account_endpoint(request: Request, account_id: UUID):
     """
     Soft-delete (deactivate) a custom account.
@@ -83,7 +84,7 @@ async def delete_account_endpoint(request: Request, account_id: UUID):
 # Journal Entries (#376)
 # ---------------------------------------------------------------------------
 
-@router.post("/journal-entries", response_model=JournalEntryResponse)
+@router.post("/journal-entries", response_model=JournalEntryResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def create_journal_entry_endpoint(request: Request, body: JournalEntryCreate):
     """
     Create a draft journal entry with lines.
@@ -93,7 +94,7 @@ async def create_journal_entry_endpoint(request: Request, body: JournalEntryCrea
     return await create_journal_entry(request, body)
 
 
-@router.get("/journal-entries", response_model=JournalEntriesListResponse)
+@router.get("/journal-entries", response_model=JournalEntriesListResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def list_journal_entries_endpoint(
     request: Request,
     status: Optional[str] = Query(None),
@@ -120,7 +121,7 @@ async def list_journal_entries_endpoint(
     )
 
 
-@router.get("/journal-entries/{entry_id}", response_model=JournalEntryResponse)
+@router.get("/journal-entries/{entry_id}", response_model=JournalEntryResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_journal_entry_endpoint(request: Request, entry_id: UUID):
     """
     Get a single journal entry with all its lines.
@@ -128,7 +129,7 @@ async def get_journal_entry_endpoint(request: Request, entry_id: UUID):
     return await get_journal_entry(request, entry_id)
 
 
-@router.post("/journal-entries/{entry_id}/post", response_model=JournalEntryResponse)
+@router.post("/journal-entries/{entry_id}/post", response_model=JournalEntryResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def post_journal_entry_endpoint(request: Request, entry_id: UUID):
     """
     Post a draft entry to the GL.
@@ -138,7 +139,7 @@ async def post_journal_entry_endpoint(request: Request, entry_id: UUID):
     return await post_journal_entry(request, entry_id)
 
 
-@router.post("/journal-entries/{entry_id}/void", response_model=JournalEntryResponse)
+@router.post("/journal-entries/{entry_id}/void", response_model=JournalEntryResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def void_journal_entry_endpoint(
     request: Request, entry_id: UUID, body: JournalEntryVoidRequest
 ):
@@ -154,7 +155,7 @@ async def void_journal_entry_endpoint(
 # Trial Balance (#379)
 # ---------------------------------------------------------------------------
 
-@router.get("/trial-balance", response_model=TrialBalanceResponse)
+@router.get("/trial-balance", response_model=TrialBalanceResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_trial_balance_endpoint(
     request: Request,
     period_start: str = Query(..., alias="periodStart", description="YYYY-MM-DD"),
@@ -181,7 +182,7 @@ async def get_trial_balance_endpoint(
 # P&L Statement (#383)
 # ---------------------------------------------------------------------------
 
-@router.get("/pl-statement", response_model=PLStatementResponse)
+@router.get("/pl-statement", response_model=PLStatementResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_pl_statement_endpoint(
     request: Request,
     year: int = Query(..., ge=2020, le=2100),
@@ -212,7 +213,7 @@ async def get_pl_statement_endpoint(
 # Provisions (#384)
 # ---------------------------------------------------------------------------
 
-@router.get("/provisions/preview", response_model=ProvisionsPreviewResponse)
+@router.get("/provisions/preview", response_model=ProvisionsPreviewResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def preview_provisions_endpoint(
     request: Request,
     year: int = Query(..., ge=2020, le=2100),
@@ -226,7 +227,7 @@ async def preview_provisions_endpoint(
     return await preview_provisions(request, year=year, month=month)
 
 
-@router.post("/provisions/post", response_model=ProvisionsPostResponse)
+@router.post("/provisions/post", response_model=ProvisionsPostResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def post_provisions_endpoint(
     request: Request,
     year: int = Query(..., ge=2020, le=2100),

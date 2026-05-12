@@ -69,7 +69,6 @@ class Module(str, Enum):
     INTEGRACIONES = "integraciones"      # api_tokens, webhooks, public_api
     MI_PLAN = "mi_plan"                  # billing
     MI_NEGOCIO = "mi_negocio"            # tenant_config (shared)
-    EVENTOS = "eventos"                  # TBD if/when routers exist
 
 
 _ALL_MODULES: FrozenSet[Module] = frozenset(Module)
@@ -92,9 +91,9 @@ DEFAULT_ROLE_MODULES: Dict[Role, FrozenSet[Module]] = {
         Module.FACTURACION,
         Module.INTEGRACIONES,
         Module.MI_PLAN,
-        Module.MI_NEGOCIO,
-        Module.EVENTOS,
         # No EQUIPO — admin manages operations, not membership/role changes
+        # No MI_NEGOCIO — business identity / fiscal / DIAN is owner-only (E2.7/E2.15)
+        # No EVENTOS — Eventos lives in warotickets.com (external product), removed in #212
     }),
     Role.SUPERVISOR: frozenset({
         Module.POS,
@@ -104,7 +103,7 @@ DEFAULT_ROLE_MODULES: Dict[Role, FrozenSet[Module]] = {
         Module.OPERACIONES,
         Module.ABASTECIMIENTO,
         Module.ANALITICA,
-        Module.MI_NEGOCIO,
+        # No MI_NEGOCIO — owner-only
     }),
     Role.CASHIER: frozenset({
         Module.POS,
@@ -252,7 +251,7 @@ _shadow_logger = logging.getLogger("permissions.shadow")
 VALID_MODES = frozenset({"disabled", "shadow", "enforce"})
 
 
-async def _get_enforcement_mode(tenant_id: UUID) -> str:
+async def get_enforcement_mode(tenant_id: UUID) -> str:
     """Resolve `tenants.permissions_enforcement_mode` for a tenant.
 
     Cached for 60s. Defaults to `'disabled'` if the row is missing or the
@@ -363,7 +362,7 @@ def require_module(module: Module) -> Callable[[Request], Awaitable[None]]:
         if not tenant_id:
             return  # no tenant resolved → cannot gate; let handler decide
 
-        mode = await _get_enforcement_mode(tenant_id)
+        mode = await get_enforcement_mode(tenant_id)
         if mode == "disabled":
             return
 

@@ -22,10 +22,11 @@ import logging
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.core.middleware import require_valid_session
+from app.core.permissions import Module, require_module
 from app.database import get_db_connection
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ class SimilarIngredient(BaseModel):
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def list_global_ingredients(
     request: Request,
     search: Optional[str] = Query(default=None, description="Filter by name (case-insensitive)"),
@@ -144,7 +145,7 @@ async def list_global_ingredients(
     }
 
 
-@router.get("/{ingredient_id}/variants")
+@router.get("/{ingredient_id}/variants", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def list_ingredient_variants(
     ingredient_id: UUID,
     request: Request,
@@ -183,7 +184,7 @@ async def list_ingredient_variants(
     }
 
 
-@router.post("/validate-base", status_code=200)
+@router.post("/validate-base", status_code=200, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def validate_base_name(
     body: ValidateBaseRequest,
     request: Request,
@@ -239,7 +240,7 @@ async def validate_base_name(
     return {"verdict": "create", "similar": candidates, "suggested": None}
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def create_global_ingredient(
     body: CreateIngredientRequest,
     request: Request,
@@ -351,7 +352,7 @@ async def create_global_ingredient(
     }
 
 
-@router.post("/{ingredient_id}/set-base", status_code=200)
+@router.post("/{ingredient_id}/set-base", status_code=200, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def assign_base(
     ingredient_id: UUID,
     body: SetBaseRequest,
@@ -434,7 +435,7 @@ async def assign_base(
     }
 
 
-@router.delete("/{ingredient_id}/set-base", status_code=200)
+@router.delete("/{ingredient_id}/set-base", status_code=200, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def remove_base(
     ingredient_id: UUID,
     request: Request,

@@ -65,7 +65,7 @@ def _patch_get_session(session):
 
 
 def _patch_enforcement_mode(mode):
-    """Stub the DB call inside `_get_enforcement_mode` to return `mode`."""
+    """Stub the DB call inside `get_enforcement_mode` to return `mode`."""
     @asynccontextmanager
     async def _ctx():
         conn = MagicMock()

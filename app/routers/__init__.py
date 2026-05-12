@@ -14,6 +14,8 @@ from app.routers import (
     ingredient_purchase_units,
     customers,
     pos_cart,
+    pos_context,
+    operaciones_context,
     orders,
     inventory,
     articles,
