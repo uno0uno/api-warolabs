@@ -2,15 +2,16 @@
 Inventory Router
 Endpoints for inventory management and stock tracking
 """
-from fastapi import APIRouter, Request, Response, Query
+from fastapi import APIRouter, Depends, Request, Response, Query
 from typing import Optional
 from uuid import UUID
+from app.core.permissions import Module, require_module
 from app.services import inventory_service
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
 
 
-@router.get("/stock")
+@router.get("/stock", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_inventory_stock(
     request: Request,
     response: Response,
@@ -42,7 +43,7 @@ async def get_inventory_stock(
     )
 
 
-@router.get("/movements")
+@router.get("/movements", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_inventory_movements(
     request: Request,
     response: Response,
@@ -74,7 +75,7 @@ async def get_inventory_movements(
     )
 
 
-@router.get("/stock/{ingredient_id}")
+@router.get("/stock/{ingredient_id}", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_ingredient_stock(
     request: Request,
     response: Response,
@@ -96,7 +97,7 @@ async def get_ingredient_stock(
     )
 
 
-@router.post("/adjustments")
+@router.post("/adjustments", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def create_inventory_adjustment(
     request: Request,
     response: Response

@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Request, Response, HTTPException, Query
+from fastapi import APIRouter, Depends, Request, Response, Query
 from uuid import UUID
 from typing import Optional
+from app.core.permissions import Module, require_module
 from app.services.suppliers_service import (
     get_suppliers_list,
     get_supplier_by_id,
@@ -16,14 +17,12 @@ from app.services.payment_agreements_service import (
     delete_payment_agreement
 )
 from app.models.supplier import (
-    Supplier,
     SupplierCreate,
     SupplierUpdate,
     SupplierResponse,
     SuppliersListResponse
 )
 from app.models.payment_agreement import (
-    PaymentAgreement,
     PaymentAgreementCreate,
     PaymentAgreementUpdate,
     PaymentAgreementResponse,
@@ -32,7 +31,7 @@ from app.models.payment_agreement import (
 
 router = APIRouter()
 
-@router.get("", response_model=SuppliersListResponse)
+@router.get("", response_model=SuppliersListResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_suppliers_endpoint(
     request: Request,
     response: Response,
@@ -51,7 +50,7 @@ async def get_suppliers_endpoint(
         request, response, page, limit, search, search_field, is_active, payment_terms
     )
 
-@router.get("/{supplier_id}", response_model=SupplierResponse)
+@router.get("/{supplier_id}", response_model=SupplierResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_supplier_endpoint(
     supplier_id: UUID,
     request: Request,
@@ -62,7 +61,7 @@ async def get_supplier_endpoint(
     """
     return await get_supplier_by_id(request, response, supplier_id)
 
-@router.post("", response_model=SupplierResponse)
+@router.post("", response_model=SupplierResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def create_supplier_endpoint(
     supplier_data: SupplierCreate,
     request: Request,
@@ -73,7 +72,7 @@ async def create_supplier_endpoint(
     """
     return await create_supplier(request, response, supplier_data)
 
-@router.put("/{supplier_id}", response_model=SupplierResponse)
+@router.put("/{supplier_id}", response_model=SupplierResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def update_supplier_endpoint(
     supplier_id: UUID,
     supplier_data: SupplierUpdate,
@@ -85,7 +84,7 @@ async def update_supplier_endpoint(
     """
     return await update_supplier(request, response, supplier_id, supplier_data)
 
-@router.delete("/{supplier_id}")
+@router.delete("/{supplier_id}", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def delete_supplier_endpoint(
     supplier_id: UUID,
     request: Request,
@@ -98,7 +97,7 @@ async def delete_supplier_endpoint(
 
 # Payment Agreements Endpoints
 
-@router.get("/{supplier_id}/payment-agreements", response_model=PaymentAgreementsListResponse)
+@router.get("/{supplier_id}/payment-agreements", response_model=PaymentAgreementsListResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_payment_agreements_endpoint(
     supplier_id: UUID,
     request: Request,
@@ -109,7 +108,7 @@ async def get_payment_agreements_endpoint(
     """
     return await get_payment_agreements_list(request, response, supplier_id)
 
-@router.get("/{supplier_id}/payment-agreements/{agreement_id}", response_model=PaymentAgreementResponse)
+@router.get("/{supplier_id}/payment-agreements/{agreement_id}", response_model=PaymentAgreementResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def get_payment_agreement_endpoint(
     supplier_id: UUID,
     agreement_id: UUID,
@@ -121,7 +120,7 @@ async def get_payment_agreement_endpoint(
     """
     return await get_payment_agreement_by_id(request, response, supplier_id, agreement_id)
 
-@router.post("/{supplier_id}/payment-agreements", response_model=PaymentAgreementResponse)
+@router.post("/{supplier_id}/payment-agreements", response_model=PaymentAgreementResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def create_payment_agreement_endpoint(
     supplier_id: UUID,
     agreement_data: PaymentAgreementCreate,
@@ -133,7 +132,7 @@ async def create_payment_agreement_endpoint(
     """
     return await create_payment_agreement(request, response, supplier_id, agreement_data)
 
-@router.put("/{supplier_id}/payment-agreements/{agreement_id}", response_model=PaymentAgreementResponse)
+@router.put("/{supplier_id}/payment-agreements/{agreement_id}", response_model=PaymentAgreementResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def update_payment_agreement_endpoint(
     supplier_id: UUID,
     agreement_id: UUID,
@@ -146,7 +145,7 @@ async def update_payment_agreement_endpoint(
     """
     return await update_payment_agreement(request, response, supplier_id, agreement_id, agreement_data)
 
-@router.delete("/{supplier_id}/payment-agreements/{agreement_id}")
+@router.delete("/{supplier_id}/payment-agreements/{agreement_id}", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def delete_payment_agreement_endpoint(
     supplier_id: UUID,
     agreement_id: UUID,
