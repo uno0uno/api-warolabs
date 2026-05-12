@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Request, Response, Query
+from fastapi import Depends, APIRouter, Request, Response, Query
+from app.core.permissions import Module, require_module
 from datetime import datetime
 from typing import Optional
 from app.services.financial_service import get_tir_metrics, get_products_analysis, get_obstacles_analysis
@@ -6,7 +7,7 @@ from app.models.financial import TirMetricsResponse
 
 router = APIRouter()
 
-@router.get("/tir-metrics", response_model=TirMetricsResponse)
+@router.get("/tir-metrics", response_model=TirMetricsResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_tir_metrics_endpoint(
     request: Request, 
     response: Response,
@@ -23,7 +24,7 @@ async def get_tir_metrics_endpoint(
         timestamp=datetime.now()
     )
 
-@router.get("/products-analysis")
+@router.get("/products-analysis", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def products_analysis_endpoint(
     request: Request, 
     response: Response,
@@ -43,7 +44,7 @@ async def products_analysis_endpoint(
         "timestamp": datetime.now().isoformat()
     }
 
-@router.get("/obstacles-analysis")
+@router.get("/obstacles-analysis", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def obstacles_analysis_endpoint(
     request: Request, 
     response: Response,

@@ -6,11 +6,12 @@ Acquirer lookup, catalog queries, and payroll documents.
 All endpoints are stubs until api-facturacion implements the
 corresponding upstream endpoints.
 """
-from fastapi import APIRouter, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from typing import Any, Dict, Optional
 from uuid import UUID
 from pydantic import BaseModel, Field
 from app.core.middleware import require_valid_session
+from app.core.permissions import Module, require_module
 
 _STUB_DETAIL = "Not yet available — api-facturacion endpoint pending"
 
@@ -18,7 +19,7 @@ _STUB_DETAIL = "Not yet available — api-facturacion endpoint pending"
 acquirer_router = APIRouter(prefix="/api/acquirer", tags=["Facturacion"])
 
 
-@acquirer_router.get("")
+@acquirer_router.get("", dependencies=[Depends(require_module(Module.FACTURACION))])
 async def lookup_acquirer(
     request: Request,
     type: Optional[str] = Query(None, description="Document type (e.g. 31 = NIT)"),
@@ -37,7 +38,7 @@ async def lookup_acquirer(
 catalog_router = APIRouter(prefix="/api/facturacion", tags=["Facturacion"])
 
 
-@catalog_router.get("/catalog/{name}")
+@catalog_router.get("/catalog/{name}", dependencies=[Depends(require_module(Module.FACTURACION))])
 async def get_catalog(
     request: Request,
     name: str,
@@ -68,7 +69,7 @@ class PayrollVoidRequest(BaseModel):
     reason: Optional[str] = Field(None, description="Reason for voiding payroll")
 
 
-@payroll_router.post("/emit")
+@payroll_router.post("/emit", dependencies=[Depends(require_module(Module.FACTURACION))])
 async def emit_payroll(
     request: Request,
     body: PayrollEmitRequest,
@@ -82,7 +83,7 @@ async def emit_payroll(
     raise HTTPException(status_code=503, detail=_STUB_DETAIL)
 
 
-@payroll_router.post("/{payroll_id}/replace")
+@payroll_router.post("/{payroll_id}/replace", dependencies=[Depends(require_module(Module.FACTURACION))])
 async def replace_payroll(
     request: Request,
     payroll_id: UUID,
@@ -97,7 +98,7 @@ async def replace_payroll(
     raise HTTPException(status_code=503, detail=_STUB_DETAIL)
 
 
-@payroll_router.post("/{payroll_id}/void")
+@payroll_router.post("/{payroll_id}/void", dependencies=[Depends(require_module(Module.FACTURACION))])
 async def void_payroll(
     request: Request,
     payroll_id: UUID,

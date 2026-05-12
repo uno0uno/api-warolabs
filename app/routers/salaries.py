@@ -4,6 +4,7 @@ Handles employee salary configuration and payment registration
 """
 import logging
 from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException, Depends
+from app.core.permissions import Module, require_module
 from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
@@ -12,7 +13,6 @@ from app.services.salary_service import (
     get_employees_with_salary,
     get_employee_salary_detail,
     configure_employee_salary,
-    record_salary_payment,
     record_salary_payment_json,
     get_salary_payments,
     get_payment_detail,
@@ -84,7 +84,7 @@ router = APIRouter()
 # EMPLOYEES ENDPOINTS
 # =============================================================================
 
-@router.get("/employees", response_model=EmployeesWithSalaryResponse)
+@router.get("/employees", response_model=EmployeesWithSalaryResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_employees_endpoint(request: Request):
     """
     Get all employees with their salary configuration
@@ -93,7 +93,7 @@ async def get_employees_endpoint(request: Request):
     return await get_employees_with_salary(request)
 
 
-@router.get("/employees/{employee_id}", response_model=EmployeeDetailResponse)
+@router.get("/employees/{employee_id}", response_model=EmployeeDetailResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_employee_detail_endpoint(request: Request, employee_id: UUID):
     """
     Get employee detail with salary config and payment history
@@ -101,7 +101,7 @@ async def get_employee_detail_endpoint(request: Request, employee_id: UUID):
     return await get_employee_salary_detail(request, employee_id)
 
 
-@router.post("/employees/{employee_id}/config", response_model=SalaryConfigResponse)
+@router.post("/employees/{employee_id}/config", response_model=SalaryConfigResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def configure_salary_endpoint(
     request: Request,
     employee_id: UUID,
@@ -117,7 +117,7 @@ async def configure_salary_endpoint(
 # PAYMENTS ENDPOINTS
 # =============================================================================
 
-@router.post("/payments", response_model=SalaryPaymentResponse)
+@router.post("/payments", response_model=SalaryPaymentResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def record_payment_endpoint(
     request: Request,
     payment_data: SalaryPaymentCreate
@@ -129,7 +129,7 @@ async def record_payment_endpoint(
     return await record_salary_payment_json(request, payment_data)
 
 
-@router.get("/payments", response_model=SalaryPaymentsListResponse)
+@router.get("/payments", response_model=SalaryPaymentsListResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_payments_endpoint(
     request: Request,
     employee_id: Optional[UUID] = None,
@@ -149,7 +149,7 @@ async def get_payments_endpoint(
     )
 
 
-@router.get("/payments/{payment_id}")
+@router.get("/payments/{payment_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_payment_detail_endpoint(request: Request, payment_id: UUID):
     """
     Get payment detail with attachments and employee info
@@ -157,7 +157,7 @@ async def get_payment_detail_endpoint(request: Request, payment_id: UUID):
     return await get_payment_detail(request, payment_id)
 
 
-@router.delete("/payments/{payment_id}")
+@router.delete("/payments/{payment_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def delete_payment_endpoint(request: Request, payment_id: UUID):
     """
     Delete a salary payment
@@ -165,7 +165,7 @@ async def delete_payment_endpoint(request: Request, payment_id: UUID):
     return await delete_salary_payment(request, payment_id)
 
 
-@router.put("/payments/{payment_id}", response_model=SalaryPaymentResponse)
+@router.put("/payments/{payment_id}", response_model=SalaryPaymentResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def update_payment_endpoint(
     request: Request,
     payment_id: UUID,
@@ -199,7 +199,7 @@ async def update_payment_endpoint(
     )
 
 
-@router.get("/payments/{payment_id}/history")
+@router.get("/payments/{payment_id}/history", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_payment_history_endpoint(
     request: Request,
     payment_id: UUID
@@ -210,7 +210,7 @@ async def get_payment_history_endpoint(
     return await get_salary_payment_history(request, payment_id)
 
 
-@router.post("/payments/{payment_id}/attachments")
+@router.post("/payments/{payment_id}/attachments", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def upload_payment_attachments_endpoint(
     payment_id: UUID,
     request: Request,
@@ -224,7 +224,7 @@ async def upload_payment_attachments_endpoint(
     return await upload_salary_payment_attachments(request, payment_id, files, label=label)
 
 
-@router.delete("/payments/attachments/{attachment_id}")
+@router.delete("/payments/attachments/{attachment_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def delete_payment_attachment_endpoint(
     request: Request,
     attachment_id: UUID
@@ -239,7 +239,7 @@ async def delete_payment_attachment_endpoint(
 # PRIMA DE SERVICIOS ENDPOINTS
 # =============================================================================
 
-@router.post("/employees/{member_id}/prima", response_model=PrimaPaymentResponse)
+@router.post("/employees/{member_id}/prima", response_model=PrimaPaymentResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def post_prima_payment_endpoint(
     request: Request,
     member_id: UUID,
@@ -255,7 +255,7 @@ async def post_prima_payment_endpoint(
     return await record_prima_payment(request, member_id, data)
 
 
-@router.get("/employees/{member_id}/prima", response_model=PrimaPaymentListResponse)
+@router.get("/employees/{member_id}/prima", response_model=PrimaPaymentListResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_prima_payments_endpoint(
     request: Request,
     member_id: UUID,
@@ -270,7 +270,7 @@ async def get_prima_payments_endpoint(
 # CESANTÍAS ENDPOINTS
 # =============================================================================
 
-@router.post("/employees/{member_id}/cesantias", response_model=CesantiasPaymentResponse)
+@router.post("/employees/{member_id}/cesantias", response_model=CesantiasPaymentResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def post_cesantias_payment_endpoint(
     request: Request,
     member_id: UUID,
@@ -286,7 +286,7 @@ async def post_cesantias_payment_endpoint(
     return await record_cesantias_payment(request, member_id, data)
 
 
-@router.get("/employees/{member_id}/cesantias", response_model=CesantiasPaymentListResponse)
+@router.get("/employees/{member_id}/cesantias", response_model=CesantiasPaymentListResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_cesantias_payments_endpoint(
     request: Request,
     member_id: UUID,
@@ -301,7 +301,7 @@ async def get_cesantias_payments_endpoint(
 # INTERESES SOBRE CESANTÍAS ENDPOINTS
 # =============================================================================
 
-@router.post("/employees/{member_id}/int-cesantias", response_model=IntCesantiasPaymentResponse)
+@router.post("/employees/{member_id}/int-cesantias", response_model=IntCesantiasPaymentResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def post_int_cesantias_payment_endpoint(
     request: Request,
     member_id: UUID,
@@ -317,7 +317,7 @@ async def post_int_cesantias_payment_endpoint(
     return await record_int_cesantias_payment(request, member_id, data)
 
 
-@router.get("/employees/{member_id}/int-cesantias", response_model=IntCesantiasPaymentListResponse)
+@router.get("/employees/{member_id}/int-cesantias", response_model=IntCesantiasPaymentListResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_int_cesantias_payments_endpoint(
     request: Request,
     member_id: UUID,
@@ -332,7 +332,7 @@ async def get_int_cesantias_payments_endpoint(
 # VACACIONES ENDPOINTS
 # =============================================================================
 
-@router.post("/employees/{member_id}/vacaciones", response_model=VacacionesPaymentResponse)
+@router.post("/employees/{member_id}/vacaciones", response_model=VacacionesPaymentResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def post_vacaciones_payment_endpoint(
     request: Request,
     member_id: UUID,
@@ -345,7 +345,7 @@ async def post_vacaciones_payment_endpoint(
     return await record_vacaciones_payment(request, member_id, data)
 
 
-@router.get("/employees/{member_id}/vacaciones", response_model=VacacionesPaymentListResponse)
+@router.get("/employees/{member_id}/vacaciones", response_model=VacacionesPaymentListResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_vacaciones_payments_endpoint(
     request: Request,
     member_id: UUID,
@@ -356,7 +356,7 @@ async def get_vacaciones_payments_endpoint(
     return await get_vacaciones_payments(request, member_id)
 
 
-@router.post("/employees/{member_id}/dotacion", response_model=DotacionPaymentResponse)
+@router.post("/employees/{member_id}/dotacion", response_model=DotacionPaymentResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def post_dotacion_payment_endpoint(
     request: Request,
     member_id: UUID,
@@ -372,7 +372,7 @@ async def post_dotacion_payment_endpoint(
     return await record_dotacion_payment(request, member_id, data)
 
 
-@router.get("/employees/{member_id}/dotacion", response_model=DotacionPaymentListResponse)
+@router.get("/employees/{member_id}/dotacion", response_model=DotacionPaymentListResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_dotacion_payments_endpoint(
     request: Request,
     member_id: UUID,
@@ -387,7 +387,7 @@ async def get_dotacion_payments_endpoint(
 # PILA ENDPOINTS
 # =============================================================================
 
-@router.get("/pila/pending", response_model=PilaPendingResponse)
+@router.get("/pila/pending", response_model=PilaPendingResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_pila_pending_endpoint(request: Request):
     """
     Return periods with net positive SS liability in accounts 237005 and 237010.
@@ -396,7 +396,7 @@ async def get_pila_pending_endpoint(request: Request):
     return await get_pila_pending(request)
 
 
-@router.post("/pila", response_model=PilaPaymentResponse)
+@router.post("/pila", response_model=PilaPaymentResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def post_pila_payment_endpoint(
     request: Request,
     data: PilaPaymentCreate,
@@ -409,7 +409,7 @@ async def post_pila_payment_endpoint(
     return await record_pila_payment(request, data)
 
 
-@router.get("/pila", response_model=PilaPaymentListResponse)
+@router.get("/pila", response_model=PilaPaymentListResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_pila_payments_endpoint(request: Request):
     """
     List all PILA payments for the tenant, ordered by payment_date DESC.
@@ -421,7 +421,7 @@ async def get_pila_payments_endpoint(request: Request):
 # OVERTIME (HORAS EXTRAS) ENDPOINTS
 # =============================================================================
 
-@router.post("/employees/{member_id}/horas-extras", response_model=OvertimePaymentResponse)
+@router.post("/employees/{member_id}/horas-extras", response_model=OvertimePaymentResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def post_overtime_payment_endpoint(
     request: Request,
     member_id: UUID,
@@ -436,7 +436,7 @@ async def post_overtime_payment_endpoint(
     return await record_overtime_payment(request, member_id, data)
 
 
-@router.get("/employees/{member_id}/horas-extras", response_model=OvertimePaymentListResponse)
+@router.get("/employees/{member_id}/horas-extras", response_model=OvertimePaymentListResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_overtime_payments_endpoint(
     request: Request,
     member_id: UUID,
@@ -451,7 +451,7 @@ async def get_overtime_payments_endpoint(
 # LIQUIDACIÓN DE CONTRATO ENDPOINTS
 # =============================================================================
 
-@router.post("/employees/{member_id}/liquidacion/calculate", response_model=LiquidacionCalculateResponse)
+@router.post("/employees/{member_id}/liquidacion/calculate", response_model=LiquidacionCalculateResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def calculate_liquidacion_endpoint(
     request: Request,
     member_id: UUID,
@@ -464,7 +464,7 @@ async def calculate_liquidacion_endpoint(
     return await calculate_liquidacion(request, member_id, data)
 
 
-@router.post("/employees/{member_id}/liquidacion", response_model=LiquidacionResponse)
+@router.post("/employees/{member_id}/liquidacion", response_model=LiquidacionResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def record_liquidacion_endpoint(
     request: Request,
     member_id: UUID,
@@ -478,7 +478,7 @@ async def record_liquidacion_endpoint(
     return await record_liquidacion(request, member_id, data)
 
 
-@router.get("/employees/{member_id}/liquidacion", response_model=LiquidacionResponse)
+@router.get("/employees/{member_id}/liquidacion", response_model=LiquidacionResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_liquidacion_endpoint(
     request: Request,
     member_id: UUID,
