@@ -2,7 +2,7 @@
 
 **Status:** Source of truth for Epic 2 (#164) wiring sub-tasks (E2.3 → E2.16).
 **Origin:** [#186 audit](https://github.com/uno0uno/api-warolabs/issues/186).
-**Last updated:** 2026-05-11 (post #190 MENU + #191/#192 OPERACIONES/MI_NEGOCIO done).
+**Last updated:** 2026-05-11 (post #190 MENU + #191/#192 OPERACIONES/MI_NEGOCIO + #210 operaciones-context toggles done).
 
 This document maps each FastAPI router under `app/routers/` to the `Module`
 enum value it should be gated under via `Depends(require_module(Module.X))`,
@@ -19,7 +19,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ---
 
-## Authoritative Table — 52 routers
+## Authoritative Table — 53 routers
 
 | router_file | mount_prefix | endpoints | module | auth_today | notes |
 |---|---|---|---|---|---|
@@ -71,6 +71,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `tables.py` | `/tables` | 19 | **POS** | session | Mesas + tab + sesión de mesa |
 | `tenant_config.py` | `/api/tenant` | 15 | **MI_NEGOCIO** | session | Owner-only. POS consume `/api/pos/restaurant-context` aggregator (ver §4). DONE en #192. |
 | `pos_context.py` | `/pos/restaurant-context` | 1 | **POS** | session | BFF-style aggregator de tenant context para POS. Introducido en E2.7/E2.15. |
+| `operaciones_context.py` | `/operaciones/restaurant-context + /operaciones/toggles/*` | 6 | **OPERACIONES** | session | Aggregator + 5 PATCH toggle endpoints (kds, comandas, expediter, tables, auto-select-generic). Introducido en #210 (enforce prep). |
 | `tenants.py` | `/tenants` | 5 | **EQUIPO** | session | Tenant create + member CRUD |
 | `v1_ordering.py` | `/v1/cart + /v1/addresses + /v1/otp + /v1/customer + /v1/product` | 7 | **INTEGRACIONES** | api_key | V1 ordering API (clientes externos) |
 | `waros.py` | `/admin/waros` | 8 | **POS** | session | Sistema de loyalty (puntos WaRo) |
@@ -80,7 +81,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 
 ## Coverage Summary
 
-Total: **52 routers**, **~395 endpoints** (added `pos_context.py` in #191/#192 for the BFF aggregator; was 51/394 after #187 deleted `admin_orders.py`).
+Total: **53 routers**, **~401 endpoints** (added `operaciones_context.py` in #210 — 6 endpoints — for the OPERACIONES aggregator + toggles; was 52/395 after #191/#192).
 
 | Module | Routers | Sub-task | Status |
 |---|---|---|---|
@@ -88,7 +89,7 @@ Total: **52 routers**, **~395 endpoints** (added `pos_context.py` in #191/#192 f
 | **VENTAS** | customers, online_orders, orders | 3 | ✅ E2.4 (#189) — DONE (28 endpoints gated, no exclusions) |
 | **DESPACHO** | (no routers — placeholder, like EVENTOS) | 0 | ✅ E2.5 (#187) — DONE (deleted dead `admin_orders.py`) |
 | **MENU** | categories, combos, menu, modifiers, products, recipe_bases | 6 | E2.6 (#190) — pending |
-| **OPERACIONES** | stations | 1 | ✅ E2.7 (#191) — DONE (14 endpoints gated, 1 KDS-public excluded) |
+| **OPERACIONES** | stations, operaciones_context | 2 | ✅ E2.7 (#191) + #210 — DONE (14 stations endpoints + 6 operaciones-context endpoints, 1 KDS-public excluded) |
 | **ABASTECIMIENTO** | admin_ingredients, ingredient_purchase_units, ingredients, inventory, purchases, suppliers | 6 | E2.8 (#195) — pending |
 | **ANALITICA** | analytics | 1 | E2.9 (#193) — pending |
 | **FINANZAS** | accounting, cartera, cierre, credit, expenses, financial, salaries + payment_methods/finanzas | 7+1 | E2.10 (#198) — pending |
