@@ -2,7 +2,7 @@
 
 **Status:** Source of truth for Epic 2 (#164) wiring sub-tasks (E2.3 → E2.16).
 **Origin:** [#186 audit](https://github.com/uno0uno/api-warolabs/issues/186).
-**Last updated:** 2026-05-11 (post #190 MENU + #191/#192 OPERACIONES/MI_NEGOCIO + #210 operaciones-context toggles done).
+**Last updated:** 2026-05-11 (post #191/#192 OPERACIONES/MI_NEGOCIO + #210 operaciones-context toggles + #212 EVENTOS removed + #193 E2.9 ANALITICA done).
 
 This document maps each FastAPI router under `app/routers/` to the `Module`
 enum value it should be gated under via `Depends(require_module(Module.X))`,
@@ -26,7 +26,7 @@ wired against this catalog was `billing.py` in #185 (E2.14, MI_PLAN).
 | `accounting.py` | `/accounting` | 13 | **FINANZAS** | session | Chart of accounts CRUD, balance, P&L |
 | `address_profile.py` | `/online/addresses` | 6 | **public** | none | Direcciones de delivery (clientes online) |
 | `admin_ingredients.py` | `/admin/ingredients` | 6 | **ABASTECIMIENTO** | session | Catálogo global de ingredientes |
-| `analytics.py` | `/analytics` | 6 | **ANALITICA** | session | Dashboard analítico, alertas |
+| `analytics.py` | `/analytics` | 6 | **ANALITICA** | session | Dashboard analítico, alertas. DONE en #193. |
 | `api_tokens.py` | `/api-tokens` | 6 | **INTEGRACIONES** | session | API token CRUD + scopes |
 | `articles.py` | `/blog` | 3 | **public** | none | Blog público (lista + detalle) |
 | `auth.py` | `/auth` | 7 | **skip** | none | Login/sesión — corre SIN sesión |
@@ -91,7 +91,7 @@ Total: **53 routers**, **~401 endpoints**, **13 modules** (was 14 modules before
 | **MENU** | categories, combos, menu, modifiers, products, recipe_bases | 6 | E2.6 (#190) — pending |
 | **OPERACIONES** | stations, operaciones_context | 2 | ✅ E2.7 (#191) + #210 — DONE (14 stations endpoints + 6 operaciones-context endpoints, 1 KDS-public excluded) |
 | **ABASTECIMIENTO** | admin_ingredients, ingredient_purchase_units, ingredients, inventory, purchases, suppliers | 6 | E2.8 (#195) — pending |
-| **ANALITICA** | analytics | 1 | E2.9 (#193) — pending |
+| **ANALITICA** | analytics | 1 | ✅ E2.9 (#193) — DONE (6 endpoints gated; `articles.py` confirmed public, stays ungated) |
 | **FINANZAS** | accounting, cartera, cierre, credit, expenses, financial, salaries + payment_methods/finanzas | 7+1 | E2.10 (#198) — pending |
 | **FACTURACION** | documents, facturacion (3 sub-routers), invoices, support_documents | 4 | E2.11 (#194) — pending |
 | **EQUIPO** | invitations (excl. /accept), tenants | 2 | E2.12 (#196) — pending |
