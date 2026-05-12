@@ -1,15 +1,13 @@
 import logging
 import secrets
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
-from uuid import UUID
+from typing import Optional
 from fastapi import Request, Response
 from app.database import get_db_connection
 from app.core.security import get_session_token, clear_session_cookie, set_session_cookie, get_client_ip
 from app.core.exceptions import AuthenticationError
 from app.core.middleware import require_valid_session
 from app.models.auth import User, Session, Tenant, SessionResponse, SwitchTenantResponse, UpdateProfileResponse
-from app.core.logging import log_request_context
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +49,12 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                         name=tenant_result['name'],
                         slug=tenant_result['slug']
                     )
+                # Only read role from ACTIVE memberships (#201).
+                # Terminated members keep their row with the old role value
+                # until purged; filtering ensures their stale role never
+                # reaches SessionContext. See docs/permissions-router-mapping.md §9.
                 role_result = await conn.fetchrow(
-                    "SELECT role FROM tenant_members WHERE tenant_id = $1 AND user_id = $2 LIMIT 1",
+                    "SELECT role FROM tenant_members WHERE tenant_id = $1 AND user_id = $2 AND is_active = true LIMIT 1",
                     session_result['tenant_id'], session_result['user_id']
                 )
                 if role_result:
@@ -154,13 +156,16 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
                 )
             
             
-            # Validate user has access to requested tenant and get site info
+            # Validate user has an ACTIVE membership in the requested tenant.
+            # The `tm.is_active = true` filter is load-bearing: without it,
+            # soft-deleted (terminated) members can switch back to a tenant
+            # they were removed from. See docs/permissions-router-mapping.md §9.
             tenant_access_query = """
                 SELECT t.id, t.name, t.slug, ts.site
                 FROM tenants t
                 INNER JOIN tenant_members tm ON t.id = tm.tenant_id
                 LEFT JOIN tenant_sites ts ON t.id = ts.tenant_id AND ts.is_active = true
-                WHERE t.slug = $1 AND tm.user_id = $2
+                WHERE t.slug = $1 AND tm.user_id = $2 AND tm.is_active = true
                 LIMIT 1
             """
             tenant_access_result = await conn.fetchrow(tenant_access_query, tenant_slug, user_id)
@@ -267,7 +272,7 @@ async def update_profile(request: Request, name: Optional[str] = None, user_name
                 raise AuthenticationError("No fields to update")
 
             # Add updated_at
-            updates.append(f"updated_at = NOW()")
+            updates.append("updated_at = NOW()")
 
             # Add user_id as the last parameter
             values.append(user_id)

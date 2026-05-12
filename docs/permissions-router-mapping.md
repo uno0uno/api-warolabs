@@ -331,6 +331,29 @@ Two decisions intentionally NOT made in E2.10 (#198):
    which is a different mechanism than module gating. Track separately after shadow logs
    surface any admin/supervisor activity on salary endpoints.
 
+## §9. `tenant_members.is_active = true` is load-bearing
+
+Three sibling queries read `tenant_members` for authorization decisions and
+MUST filter by `is_active = true`. Hardened in #201 (E2.18):
+
+- `app/services/auth_service.py` — `switch_tenant` validation query (line ~163)
+- `app/services/auth_service.py` — `get_session_data` role read (line ~59)
+- `app/services/tenants_service.py` — `get_user_tenants` listing (line ~38)
+
+Soft-deleted members (`is_active=false`, set when an employee is terminated —
+see `salary_service.py:3906`) keep their row with the old `role` value until
+purged. Without the filter:
+
+1. Terminated members could switch back to a tenant they were removed from →
+   `require_module()` would resolve modules against the stale role → unauthorized access.
+2. Sidebar tenant switcher would list tenants the user can no longer access.
+3. Session reads would surface a stale role in `SessionContext.role`.
+
+**Convention for new code:** any future query reading `tenant_members` for
+authorization (role, membership existence, tenant access) MUST include
+`AND tm.is_active = true` (or `AND is_active = true` if no alias).
+Reference: #201.
+
 ---
 
 ## How to use this doc (for E2.3 → E2.16 implementers)
