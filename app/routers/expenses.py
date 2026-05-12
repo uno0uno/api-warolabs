@@ -1,18 +1,15 @@
-from fastapi import APIRouter, Request, Response, HTTPException, Query, File, UploadFile, Form
+from fastapi import Depends, APIRouter, Request, Response, Query, File, UploadFile
+from app.core.permissions import Module, require_module
 from uuid import UUID
 from typing import Optional, List
 from app.services.expenses_service import (
     get_expense_categories,
     get_expenses_list,
     get_expense_by_id,
-    create_expense,
-    update_expense,
     delete_expense,
     get_expense_history,
     get_recurring_instances,
     get_recurring_instance_by_id,
-    create_recurring_instance,
-    update_recurring_instance,
     upload_instance_attachments,
     delete_instance_attachment
 )
@@ -28,7 +25,7 @@ from app.models.expense import (
 
 router = APIRouter()
 
-@router.get("/categories", response_model=ExpenseCategoriesResponse)
+@router.get("/categories", response_model=ExpenseCategoriesResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_categories_endpoint(
     request: Request,
     response: Response
@@ -38,7 +35,7 @@ async def get_categories_endpoint(
     """
     return await get_expense_categories(request, response)
 
-@router.get("", response_model=ExpensesListResponse)
+@router.get("", response_model=ExpensesListResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_expenses_endpoint(
     request: Request,
     response: Response,
@@ -56,7 +53,7 @@ async def get_expenses_endpoint(
         request, response, page, limit, month_year, category_id, search, expense_type
     )
 
-@router.get("/{expense_id}", response_model=ExpenseResponse)
+@router.get("/{expense_id}", response_model=ExpenseResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_expense_by_id_endpoint(
     expense_id: UUID,
     request: Request,
@@ -67,7 +64,7 @@ async def get_expense_by_id_endpoint(
     """
     return await get_expense_by_id(request, response, expense_id)
 
-@router.post("/{expense_id}/attachments")
+@router.post("/{expense_id}/attachments", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def upload_expense_attachments_endpoint(
     expense_id: UUID,
     request: Request,
@@ -80,7 +77,7 @@ async def upload_expense_attachments_endpoint(
     from app.services.expenses_service import upload_expense_attachments
     return await upload_expense_attachments(request, response, expense_id, files)
 
-@router.post("", response_model=ExpenseResponse)
+@router.post("", response_model=ExpenseResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def create_expense_endpoint(
     expense_data: ExpenseCreate,
     request: Request,
@@ -93,7 +90,7 @@ async def create_expense_endpoint(
     from app.services.expenses_service import create_expense_json
     return await create_expense_json(request, response, expense_data)
 
-@router.put("/{expense_id}", response_model=ExpenseResponse)
+@router.put("/{expense_id}", response_model=ExpenseResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def update_expense_endpoint(
     expense_id: UUID,
     expense_data: ExpenseUpdate,
@@ -107,7 +104,7 @@ async def update_expense_endpoint(
     from app.services.expenses_service import update_expense_json
     return await update_expense_json(request, response, expense_id, expense_data)
 
-@router.delete("/{expense_id}")
+@router.delete("/{expense_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def delete_expense_endpoint(
     expense_id: UUID,
     request: Request,
@@ -118,7 +115,7 @@ async def delete_expense_endpoint(
     """
     return await delete_expense(request, response, expense_id)
 
-@router.get("/{expense_id}/history")
+@router.get("/{expense_id}/history", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_expense_history_endpoint(
     expense_id: UUID,
     request: Request,
@@ -129,7 +126,7 @@ async def get_expense_history_endpoint(
     """
     return await get_expense_history(request, response, expense_id)
 
-@router.get("/{expense_id}/instances")
+@router.get("/{expense_id}/instances", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_expense_instances_endpoint(
     expense_id: UUID,
     request: Request,
@@ -140,7 +137,7 @@ async def get_expense_instances_endpoint(
     """
     return await get_recurring_instances(request, response, expense_id)
 
-@router.get("/instances/{instance_id}")
+@router.get("/instances/{instance_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_instance_by_id_endpoint(
     instance_id: UUID,
     request: Request,
@@ -151,7 +148,7 @@ async def get_instance_by_id_endpoint(
     """
     return await get_recurring_instance_by_id(request, response, instance_id)
 
-@router.post("/{expense_id}/instances")
+@router.post("/{expense_id}/instances", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def create_expense_instance_endpoint(
     expense_id: UUID,
     instance_data: RecurringExpenseInstanceCreate,
@@ -167,7 +164,7 @@ async def create_expense_instance_endpoint(
         request, response, expense_id, instance_data
     )
 
-@router.put("/instances/{instance_id}")
+@router.put("/instances/{instance_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def update_expense_instance_endpoint(
     instance_id: UUID,
     instance_data: RecurringExpenseInstanceUpdate,
@@ -182,7 +179,7 @@ async def update_expense_instance_endpoint(
         request, response, instance_id, instance_data
     )
 
-@router.post("/instances/{instance_id}/attachments")
+@router.post("/instances/{instance_id}/attachments", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def upload_instance_attachments_endpoint(
     instance_id: UUID,
     request: Request,
@@ -196,7 +193,7 @@ async def upload_instance_attachments_endpoint(
         request, response, instance_id, files
     )
 
-@router.delete("/instances/attachments/{attachment_id}")
+@router.delete("/instances/attachments/{attachment_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def delete_instance_attachment_endpoint(
     attachment_id: UUID,
     request: Request,
