@@ -434,6 +434,24 @@ async def update_dian_resolution(request: Request, resolution_id: str, data: dic
             )
 
     async with get_db_connection() as conn:
+        # warocol.com#592 — Forward-only invariant: current_number can never
+        # decrease. The DB trigger `dian_resolutions_no_rewind_trigger` will
+        # block it at the storage layer, but we surface a friendlier 422 here
+        # before the UPDATE rather than a generic 500 from the trigger.
+        existing = await conn.fetchrow(
+            "SELECT current_number FROM dian_resolutions WHERE id = $1::uuid AND tenant_id = $2",
+            resolution_id, tenant_id,
+        )
+        if existing is not None and current_number < existing['current_number']:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"current_number ({current_number}) no puede ser menor que el actual "
+                    f"({existing['current_number']}). DIAN prohíbe reutilizar números — "
+                    "el contador solo avanza."
+                ),
+            )
+
         await conn.execute(
             """UPDATE dian_resolutions
                SET resolution_number = $1, prefix = $2, date_from = $3, date_to = $4,
@@ -474,6 +492,118 @@ async def toggle_dian_resolution(request: Request, resolution_id: str):
         )
 
     return {'success': True, 'data': {'is_active': new_state}}
+
+
+@router.get("/dian-resolutions/gaps", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+async def list_dian_sequence_gaps(
+    request: Request,
+    resolution_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List sequence gaps for the active tenant (warocol.com#592).
+
+    Returns the audit trail of DIAN numbers that were allocated but never
+    accepted by Matias. Each row is permanently retired — DIAN forbids
+    number reuse. Filterable by resolution.
+    """
+    from app.core.middleware import require_valid_session
+    from app.database import get_db_connection
+
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    if limit > 200:
+        limit = 200
+
+    params = [tenant_id, limit, offset]
+    resolution_clause = ""
+    if resolution_id:
+        resolution_clause = " AND g.resolution_id = $4::uuid"
+        params.append(resolution_id)
+
+    query = f"""
+        SELECT
+            g.id, g.resolution_id, g.prefix, g.skipped_number, g.reason,
+            g.matias_response, g.original_attempt_order_id, g.created_at,
+            r.resolution_number, r.from_number, r.to_number,
+            o.order_number AS original_order_number
+        FROM dian_sequence_gaps g
+        JOIN dian_resolutions r ON r.id = g.resolution_id
+        LEFT JOIN orders o ON o.id = g.original_attempt_order_id
+        WHERE g.tenant_id = $1{resolution_clause}
+        ORDER BY g.created_at DESC
+        LIMIT $2 OFFSET $3
+    """
+
+    async with get_db_connection(use_transaction=False) as conn:
+        rows = await conn.fetch(query, *params)
+        total = await conn.fetchval(
+            "SELECT COUNT(*) FROM dian_sequence_gaps WHERE tenant_id = $1",
+            tenant_id,
+        )
+
+    return {
+        'success': True,
+        'total': total,
+        'limit': limit,
+        'offset': offset,
+        'data': [
+            {
+                'id': str(r['id']),
+                'resolution_id': str(r['resolution_id']),
+                'resolution_number': r['resolution_number'],
+                'prefix': r['prefix'],
+                'skipped_number': r['skipped_number'],
+                'reason': r['reason'],
+                'matias_response': r['matias_response'],
+                'original_attempt_order_id': (
+                    str(r['original_attempt_order_id']) if r['original_attempt_order_id'] else None
+                ),
+                'original_order_number': r['original_order_number'],
+                'from_number': r['from_number'],
+                'to_number': r['to_number'],
+                'created_at': r['created_at'].isoformat() if r['created_at'] else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/dian-resolutions/gaps-summary", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+async def dian_gaps_summary(request: Request):
+    """Aggregate gap counts for the active tenant (warocol.com#592).
+
+    Returns counts for the last 24h / 7d / 30d windows. The frontend
+    uses this to surface a range-burn alert on the resolutions card.
+    """
+    from app.core.middleware import require_valid_session
+    from app.database import get_db_connection
+
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection(use_transaction=False) as conn:
+        row = await conn.fetchrow(
+            """SELECT
+                   COUNT(*) FILTER (WHERE created_at > now() - interval '24 hours') AS last_24h,
+                   COUNT(*) FILTER (WHERE created_at > now() - interval '7 days')   AS last_7d,
+                   COUNT(*) FILTER (WHERE created_at > now() - interval '30 days')  AS last_30d,
+                   COUNT(*)                                                          AS total
+               FROM dian_sequence_gaps
+               WHERE tenant_id = $1""",
+            tenant_id,
+        )
+
+    return {
+        'success': True,
+        'data': {
+            'last_24h': row['last_24h'] or 0,
+            'last_7d': row['last_7d'] or 0,
+            'last_30d': row['last_30d'] or 0,
+            'total': row['total'] or 0,
+        },
+    }
 
 
 @router.get("/facturacion-status", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
