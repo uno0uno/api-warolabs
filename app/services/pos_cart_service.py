@@ -855,6 +855,7 @@ async def complete_pos_order(
     *,
     split_first_cash_received: Optional[float] = None,
     cash_received: Optional[float] = None,
+    served_by_member_id: Optional[UUID] = None,
 ) -> dict:
     """
     Complete a POS order:
@@ -872,6 +873,31 @@ async def complete_pos_order(
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
+
+        # warocol.com#575 — Resolve served_by_member_id before the main transaction.
+        # If the feature flag is off for this tenant, silently ignore the field
+        # (idempotency). If on, validate that the member exists + belongs to the
+        # tenant + is active. Done outside the transaction to fail fast.
+        resolved_served_by: Optional[UUID] = None
+        if served_by_member_id is not None:
+            async with get_db_connection(use_transaction=False) as _conn:
+                toggle = await _conn.fetchval(
+                    "SELECT waiter_attribution_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                    tenant_id,
+                )
+                if toggle:
+                    member_check = await _conn.fetchval(
+                        """
+                        SELECT id FROM tenant_members
+                        WHERE id = $1 AND tenant_id = $2 AND is_active = true AND terminated_at IS NULL
+                        """,
+                        served_by_member_id,
+                        tenant_id,
+                    )
+                    if member_check is None:
+                        raise NotFoundError("Member not found")
+                    resolved_served_by = served_by_member_id
+                # toggle OFF → leave resolved_served_by as None (silent ignore)
 
         async with get_db_connection() as conn:
             async with conn.transaction():
@@ -983,9 +1009,10 @@ async def complete_pos_order(
                         payment_method_id, discount_type, discount_value, discount_amount,
                         table_session_id,
                         delivery_address_id, scheduled_time, delivery_instructions,
-                        cash_received
+                        cash_received,
+                        served_by_member_id
                     )
-                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
                     RETURNING id, order_number, created_at
                 """
                 order_row = await conn.fetchrow(
@@ -1007,6 +1034,7 @@ async def complete_pos_order(
                     scheduled_time,
                     delivery_instructions,
                     _orders_cash_received,
+                    resolved_served_by,
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']

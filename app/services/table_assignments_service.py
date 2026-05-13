@@ -305,3 +305,90 @@ async def set_session_waiter(
             "attended_by_member_role": member_role,
         },
     }
+
+
+async def set_order_served_by(
+    tenant_id: UUID,
+    order_id: UUID,
+    member_id: Optional[UUID],
+    caller_user_id: Optional[UUID],
+    caller_role: Optional[str],
+) -> Dict[str, Any]:
+    """Set or clear the per-order waiter (warocol.com#575).
+
+    Auto-handoff guard (reuses `can_reassign_waiter` from #574):
+      - No current `served_by` on the order → anyone with POS can set.
+      - Caller IS the current `served_by` → can hand off / clear.
+      - Caller is supervisor+ → can override.
+      - Else → 403 Forbidden.
+
+    Validations:
+      - `waiter_attribution_enabled = true` for the tenant (else 409)
+      - Order exists + belongs to tenant (else 404)
+      - `member_id`, if set, belongs to tenant + active (else 404)
+    """
+    await assert_waiter_attribution_enabled(tenant_id)
+
+    async with get_db_connection() as conn:
+        async with conn.transaction():
+            order_row = await conn.fetchrow(
+                """
+                SELECT id, served_by_member_id
+                FROM orders
+                WHERE id = $1 AND tenant_id = $2
+                FOR UPDATE
+                """,
+                order_id,
+                tenant_id,
+            )
+            if order_row is None:
+                raise HTTPException(status_code=404, detail="Order not found")
+
+            allowed = await can_reassign_waiter(
+                caller_user_id=caller_user_id,
+                caller_role=caller_role,
+                tenant_id=tenant_id,
+                current_waiter_member_id=order_row["served_by_member_id"],
+            )
+            if not allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only the current server or a supervisor can reassign this order",
+                )
+
+            member_name: Optional[str] = None
+            member_role: Optional[str] = None
+            if member_id is not None:
+                member_row = await conn.fetchrow(
+                    """
+                    SELECT tm.id, tm.role, p.name
+                    FROM tenant_members tm
+                    JOIN profile p ON p.id = tm.user_id
+                    WHERE tm.id = $1
+                      AND tm.tenant_id = $2
+                      AND tm.is_active = true
+                      AND tm.terminated_at IS NULL
+                    """,
+                    member_id,
+                    tenant_id,
+                )
+                if member_row is None:
+                    raise HTTPException(status_code=404, detail="Member not found")
+                member_name = member_row["name"] or "Sin nombre"
+                member_role = member_row["role"]
+
+            await conn.execute(
+                "UPDATE orders SET served_by_member_id = $1, updated_at = now() WHERE id = $2",
+                member_id,
+                order_id,
+            )
+
+    return {
+        "success": True,
+        "data": {
+            "order_id": str(order_id),
+            "served_by_member_id": str(member_id) if member_id else None,
+            "served_by_member_name": member_name,
+            "served_by_member_role": member_role,
+        },
+    }

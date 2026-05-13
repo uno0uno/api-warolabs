@@ -67,3 +67,18 @@ class OpenTableRequest(BaseModel):
                     "If absent, the session inherits the table's assigned_member_id via the resolver. "
                     "Ignored silently when waiter_attribution_enabled is off.",
     )
+
+
+class SetOrderServedByRequest(BaseModel):
+    """PATCH /api/pos/orders/{id}/served-by (warocol.com#575).
+
+    Per-order waiter attribution. Auto-handoff guard enforced server-side:
+    only the current `served_by_member_id` or supervisor+ can change it.
+    Use the body of POST /pos-cart/{id}/complete to set this at creation
+    time (no auto-handoff check there — order didn't exist yet).
+    """
+    member_id: Optional[UUID] = Field(
+        None,
+        description="Member to attribute as the server of this order. "
+                    "NULL clears (resolver falls back to session/table).",
+    )

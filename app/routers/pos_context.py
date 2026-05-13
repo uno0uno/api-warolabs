@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
-from app.models.table_member_assignment import SetSessionWaiterRequest
+from app.models.table_member_assignment import SetOrderServedByRequest, SetSessionWaiterRequest
 from app.services import table_assignments_service
 from app.services.pos_context_service import get_restaurant_context
 
@@ -61,6 +61,36 @@ async def set_session_waiter_endpoint(
     return await table_assignments_service.set_session_waiter(
         tenant_id=session.tenant_id,
         table_id=table_id,
+        member_id=body.member_id,
+        caller_user_id=session.user_id,
+        caller_role=session.role,
+    )
+
+
+@router.patch(
+    "/orders/{order_id}/served-by",
+    dependencies=[Depends(require_module(Module.POS))],
+)
+async def set_order_served_by_endpoint(
+    request: Request,
+    order_id: UUID,
+    body: SetOrderServedByRequest,
+):
+    """Set or clear the per-order waiter (warocol.com#575).
+
+    Used for bar/counter orders post-creation. Auto-handoff guard:
+      - 403 if caller is not the current served_by AND not supervisor+.
+      - 404 if the order doesn't exist or doesn't belong to this tenant.
+      - 404 if `member_id` doesn't belong to this tenant.
+      - 409 if `waiter_attribution_enabled` is off for the tenant.
+
+    To set the value at creation time, include `served_by_member_id` in
+    the body of POST /pos-cart/{id}/complete instead.
+    """
+    session = require_valid_session(request)
+    return await table_assignments_service.set_order_served_by(
+        tenant_id=session.tenant_id,
+        order_id=order_id,
         member_id=body.member_id,
         caller_user_id=session.user_id,
         caller_role=session.role,

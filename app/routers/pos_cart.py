@@ -158,6 +158,7 @@ class CompleteOrderRequest(BaseModel):
     delivery_address_id: Optional[UUID] = Field(None, description="UUID of an addresses_profile row owned by customer_id. When set, this order is treated as a delivery and the comanda fires with source_type='delivery'.")
     scheduled_time: Optional[datetime] = Field(None, description="ISO datetime for scheduled delivery. NULL = ASAP. Forward-compatible: v1 UI sends NULL only.")
     delivery_instructions: Optional[str] = Field(None, description="Free-text notes for the courier (e.g. 'Tocar el timbre 2 veces').")
+    served_by_member_id: Optional[UUID] = Field(None, description="Issue warocol.com#575 — per-order waiter attribution. Pre-validated when set: must belong to tenant + be active. Silently ignored when waiter_attribution_enabled is OFF for the tenant.")
 
 
 @router.post("/{cart_id}/complete", dependencies=[Depends(require_module(Module.POS))])
@@ -192,6 +193,7 @@ async def complete_order(
         order_data.delivery_instructions,
         split_first_cash_received=order_data.split_first_cash_received,
         cash_received=order_data.cash_received,
+        served_by_member_id=order_data.served_by_member_id,
     )
 
 
