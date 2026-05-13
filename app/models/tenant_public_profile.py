@@ -83,6 +83,15 @@ class TenantPublicProfileBase(BaseModel):
                     "without touching the KDS. Requires comandas_enabled=true."
     )
 
+    # Waiter attribution family feature flag (warocol.com#573)
+    waiter_attribution_enabled: bool = Field(
+        False,
+        description="When true, surfaces the waiter assignment family of features: "
+                    "admin panel in /operaciones/comandas (#573), POS mesa override "
+                    "(#574), and bar/counter order attribution (#575). Independent "
+                    "of tables_enabled — bar/counter modes work without tables."
+    )
+
 class TenantPublicProfileCreate(TenantPublicProfileBase):
     """Create tenant public profile"""
     tenant_id: UUID = Field(..., description="Tenant ID")
@@ -121,6 +130,7 @@ class TenantPublicProfileUpdate(BaseModel):
     kds_enabled: Optional[bool] = None
     auto_select_generic_enabled: Optional[bool] = None
     expediter_enabled: Optional[bool] = None
+    waiter_attribution_enabled: Optional[bool] = None
 
 class TenantPublicProfile(TenantPublicProfileBase):
     """Complete tenant public profile with all fields"""

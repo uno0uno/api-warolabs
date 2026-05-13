@@ -24,6 +24,7 @@ SELECT
     tpp.tables_enabled,
     tpp.accepts_online_orders,
     tpp.auto_select_generic_enabled,
+    tpp.waiter_attribution_enabled,
     fd.nit,
     fd.business_name,
     fd.type_organization_id,
@@ -47,18 +48,34 @@ WHERE t.id = $1
 """
 
 
+_MEMBERS_QUERY = """
+SELECT tm.id, p.name, tm.role
+FROM tenant_members tm
+JOIN profile p ON p.id = tm.user_id
+WHERE tm.tenant_id = $1
+  AND tm.is_active = true
+  AND tm.terminated_at IS NULL
+ORDER BY p.name
+"""
+
+
 async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
     """Aggregate the POS-relevant tenant data.
 
     Returns None if the tenant does not exist. Missing rows in the joined
     tables surface as None values inside the payload — POS pages handle
     that gracefully (defaults / blank fields).
+
+    Includes a `members` list (active tenant members) for the waiter-
+    attribution family (warocol.com#573/#574/#575). Embedded here so
+    cashiers/supervisors can populate waiter dropdowns without needing
+    Module.EQUIPO access (which gates /api/tenants/members).
     """
     async with get_db_connection(use_transaction=False) as conn:
         row = await conn.fetchrow(_CONTEXT_QUERY, tenant_id)
-
-    if row is None:
-        return None
+        if row is None:
+            return None
+        members_rows = await conn.fetch(_MEMBERS_QUERY, tenant_id)
 
     readiness = await get_readiness(tenant_id)
     invoicing_ready = bool(readiness and readiness.get('ready'))
@@ -71,6 +88,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         'tables_enabled': bool(row['tables_enabled']) if row['tables_enabled'] is not None else False,
         'accepts_online_orders': bool(row['accepts_online_orders']) if row['accepts_online_orders'] is not None else False,
         'auto_select_generic_enabled': bool(row['auto_select_generic_enabled']) if row['auto_select_generic_enabled'] is not None else False,
+        'waiter_attribution_enabled': bool(row['waiter_attribution_enabled']) if row['waiter_attribution_enabled'] is not None else False,
         'fiscal_data': {
             'nit': row['nit'],
             'business_name': row['business_name'],
@@ -91,4 +109,12 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             'liquor_tax_applicable': bool(row['liquor_tax_applicable']) if row['liquor_tax_applicable'] is not None else False,
         },
         'invoicing_ready': invoicing_ready,
+        'members': [
+            {
+                'id': str(r['id']),
+                'name': r['name'] or 'Sin nombre',
+                'role': r['role'],
+            }
+            for r in members_rows
+        ],
     }

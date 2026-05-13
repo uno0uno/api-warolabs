@@ -119,6 +119,9 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                     t.is_active,
                     t.is_bar,
                     t.created_at,
+                    t.assigned_member_id,
+                    p_assigned.name AS assigned_member_name,
+                    tm_assigned.role AS assigned_member_role,
                     ts.id            AS session_id,
                     ts.opened_at,
                     ts.opened_by_user_id,
@@ -158,6 +161,10 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                     ON ts.table_id = t.id
                     AND ts.tenant_id = $1
                     AND ts.closed_at IS NULL
+                LEFT JOIN tenant_members tm_assigned
+                    ON tm_assigned.id = t.assigned_member_id
+                LEFT JOIN profile p_assigned
+                    ON p_assigned.id = tm_assigned.user_id
                 WHERE t.tenant_id = $1
                   AND t.deleted_at IS NULL
                   AND (t.is_active = true OR $2)
@@ -1994,6 +2001,11 @@ def _format_table_row(row: dict) -> dict:
         "session": None,
         "last_closed_at": row["last_closed_at"].isoformat() if row.get("last_closed_at") else None,
         "last_closed_session_id": str(row["last_closed_session_id"]) if row.get("last_closed_session_id") else None,
+        # Default waiter assignment (warocol.com#573) — denormalized for the
+        # admin panel + future POS surfaces without an extra round-trip.
+        "assigned_member_id": str(row["assigned_member_id"]) if row.get("assigned_member_id") else None,
+        "assigned_member_name": row.get("assigned_member_name"),
+        "assigned_member_role": row.get("assigned_member_role"),
     }
     if row["session_id"]:
         result["session"] = {
