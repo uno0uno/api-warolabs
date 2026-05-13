@@ -394,3 +394,59 @@ def require_module(module: Module) -> Callable[[Request], Awaitable[None]]:
         )
 
     return dependency
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Auto-handoff predicate for the waiter attribution family
+# (warocol.com#574 — POS session override; warocol.com#575 — order
+# attribution).
+# ─────────────────────────────────────────────────────────────────────
+async def can_reassign_waiter(
+    caller_user_id: Optional[UUID],
+    caller_role: Optional[str],
+    tenant_id: UUID,
+    current_waiter_member_id: Optional[UUID],
+) -> bool:
+    """Auto-handoff predicate.
+
+    Returns True if the caller is allowed to set/change a waiter
+    assignment given the current state. Caller is allowed when:
+
+      1. No one currently has the lock (`current_waiter_member_id` is
+         None — covers fresh sessions AND legacy rows with no opener).
+      2. Caller is supervisor or higher (OWNER/ADMIN/SUPERVISOR by
+         normalized role).
+      3. Caller IS the current waiter (handoff to another or release).
+
+    Returns False otherwise — typically a cashier trying to take a
+    table that already belongs to a different cashier.
+
+    Used by:
+      - `table_assignments_service.set_session_waiter` (#574)
+      - `table_assignments_service.set_order_served_by` (#575, future)
+    """
+    if current_waiter_member_id is None:
+        return True
+
+    if caller_role:
+        try:
+            normalized = normalize_role(caller_role)
+            if normalized in (Role.OWNER, Role.ADMIN, Role.SUPERVISOR):
+                return True
+        except ValueError:
+            pass
+
+    if caller_user_id is None:
+        return False
+
+    # Look up caller's tenant_member id and compare with the current waiter.
+    async with get_db_connection(use_transaction=False) as conn:
+        caller_member_id = await conn.fetchval(
+            """
+            SELECT id FROM tenant_members
+            WHERE user_id = $1 AND tenant_id = $2 AND is_active = true
+            """,
+            caller_user_id,
+            tenant_id,
+        )
+    return caller_member_id == current_waiter_member_id

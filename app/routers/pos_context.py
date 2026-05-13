@@ -7,11 +7,19 @@ needing MI_NEGOCIO (which stays owner-only by business rule).
 
 This is the BFF-style alternative to having POS pages fan out to multiple
 `/api/tenant/*` endpoints — see audit doc §4 for the rationale.
+
+Also exposes the per-session waiter mutation endpoint (warocol.com#574)
+under Module.POS so cashiers can hand off / take a table from the POS
+banner without needing OPERACIONES.
 """
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
+from app.models.table_member_assignment import SetSessionWaiterRequest
+from app.services import table_assignments_service
 from app.services.pos_context_service import get_restaurant_context
 
 router = APIRouter(prefix="/pos", tags=["POS Context"])
@@ -28,3 +36,32 @@ async def get_pos_restaurant_context(request: Request):
     if payload is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return {"success": True, "data": payload}
+
+
+# ── Waiter attribution (warocol.com#574) ─────────────────────────────
+
+@router.patch(
+    "/tables/{table_id}/session-waiter",
+    dependencies=[Depends(require_module(Module.POS))],
+)
+async def set_session_waiter_endpoint(
+    request: Request,
+    table_id: UUID,
+    body: SetSessionWaiterRequest,
+):
+    """Set or clear the waiter attributed to a table's open session.
+
+    Auto-handoff guard applies (warocol.com#574):
+      - 403 if caller is not the current waiter AND not supervisor+.
+      - 404 if no open session for the table.
+      - 404 if `member_id` doesn't belong to this tenant.
+      - 409 if `waiter_attribution_enabled` is off for the tenant.
+    """
+    session = require_valid_session(request)
+    return await table_assignments_service.set_session_waiter(
+        tenant_id=session.tenant_id,
+        table_id=table_id,
+        member_id=body.member_id,
+        caller_user_id=session.user_id,
+        caller_role=session.role,
+    )

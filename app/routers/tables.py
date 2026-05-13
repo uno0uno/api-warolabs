@@ -10,6 +10,7 @@ from uuid import UUID
 from datetime import date
 from pydantic import BaseModel, Field
 from app.core.permissions import Module, require_module
+from app.models.table_member_assignment import OpenTableRequest
 from app.services import tables_service
 
 router = APIRouter(tags=["Tables"])
@@ -107,12 +108,24 @@ async def delete_table_permanent(request: Request, table_id: UUID):
 
 
 @router.post("/{table_id}/open", dependencies=[Depends(require_module(Module.POS))])
-async def open_session(request: Request, table_id: UUID):
+async def open_session(
+    request: Request,
+    table_id: UUID,
+    body: Optional[OpenTableRequest] = None,
+):
     """
     Open a new session for a table (status: free → open).
     Returns 409 if a session is already open.
+
+    Optional body (warocol.com#574) lets the cashier pre-set the
+    session-level waiter override (`attended_by_member_id`). When absent
+    OR when the tenant's `waiter_attribution_enabled` flag is off, the
+    session is created with NULL and the resolver inherits from
+    `tables.assigned_member_id`. Backward-compatible — clients that send
+    no body work as before.
     """
-    return await tables_service.open_session(request, table_id)
+    attended_by = body.attended_by_member_id if body else None
+    return await tables_service.open_session(request, table_id, attended_by)
 
 
 class CloseSessionRequest(BaseModel):
