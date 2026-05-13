@@ -60,9 +60,21 @@ async def update_toggle(
         )
 
     # Safe: column_name is validated against a hardcoded whitelist above.
+    #
+    # Hotfix (post-#573 family): the original UPSERT only inserted
+    # `tenant_id` + the toggle column, which fails for fresh tenants
+    # that don't have a `tenant_public_profiles` row yet because
+    # `slug` and `display_name` are NOT NULL with no defaults.
+    # We seed those required fields from the `tenants` table (which
+    # ALWAYS has both populated). For existing rows the ON CONFLICT
+    # branch ignores the seed values — only the toggle column is
+    # updated, so this is non-destructive for tenants with a real
+    # profile already configured.
     query = f"""
-        INSERT INTO tenant_public_profiles (tenant_id, {column_name})
-        VALUES ($1, $2)
+        INSERT INTO tenant_public_profiles (tenant_id, slug, display_name, {column_name})
+        SELECT t.id, t.slug, t.name, $2
+        FROM tenants t
+        WHERE t.id = $1
         ON CONFLICT (tenant_id) DO UPDATE
             SET {column_name} = EXCLUDED.{column_name},
                 updated_at = now()
