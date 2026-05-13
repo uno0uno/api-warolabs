@@ -36,12 +36,15 @@ async def emit_invoice(
     Emit a DIAN electronic invoice for a completed POS order.
 
     Validates the order is completed, then delegates to api-facturacion.
-    Idempotent: calling twice returns the same accepted invoice.
+    Idempotent at the gateway: short-circuits when an accepted invoice
+    already exists for this order, and rejects re-tries when the previous
+    attempt failed with an un-recoverable Matias error (warocol.com#589).
 
     Raises:
         HTTPException 422 — order not found, not completed, or missing resolution
         HTTPException 503 — api-facturacion unreachable or timed out
-        HTTPException 409 — emission already in progress
+        HTTPException 409 — emission already in progress OR unrecoverable
+                            previous rejection (Matias "ya validado")
     """
     # Verify order exists, belongs to tenant, and is completed
     async with get_db_connection(use_transaction=False) as conn:
@@ -57,6 +60,46 @@ async def emit_invoice(
         raise HTTPException(
             status_code=422,
             detail=f"Invoice can only be emitted for completed orders (current status: {order['status']})",
+        )
+
+    # Pre-check existing electronic_invoices for this order (warocol.com#589).
+    # - If the latest is `accepted` → return it, no Matias call.
+    # - If the latest is `rejected` with the Matias "ya validado" signature
+    #   → 409 short-circuit so the cashier doesn't burn another resolution
+    #   number on a retry that will fail again. Recovery (fetch from Matias
+    #   + persist) is out of this layer's scope — handled in api-facturacion
+    #   in a follow-up.
+    # - Any other rejection signature is allowed to retry (e.g., missing NIT
+    #   that the cashier just fixed).
+    async with get_db_connection(use_transaction=False) as conn:
+        latest = await conn.fetchrow(
+            """SELECT status, invoice_number, prefix, error_message
+               FROM electronic_invoices
+               WHERE order_id = $1 AND tenant_id = $2
+               ORDER BY created_at DESC
+               LIMIT 1""",
+            UUID(order_id), UUID(tenant_id),
+        )
+
+    if latest and latest['status'] == 'accepted':
+        existing = await get_order_invoice(order_id, tenant_id)
+        if existing is not None:
+            logger.info(f"Invoice already accepted for order {order_id}, short-circuiting emit")
+            return existing
+
+    if (
+        latest
+        and latest['status'] == 'rejected'
+        and latest['error_message']
+        and 'ya se encuentra validado' in latest['error_message'].lower()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"La factura {latest['prefix']}{latest['invoice_number']} ya está "
+                "validada en DIAN pero no se pudo descargar localmente. "
+                "Contacta soporte para reconciliar el documento."
+            ),
         )
 
     # Delegate to api-facturacion
