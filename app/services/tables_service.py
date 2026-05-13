@@ -125,6 +125,13 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                     ts.id            AS session_id,
                     ts.opened_at,
                     ts.opened_by_user_id,
+                    ts.attended_by_member_id AS session_attended_by_member_id,
+                    p_attended.name AS session_attended_by_member_name,
+                    tm_attended.role AS session_attended_by_member_role,
+                    -- Resolver: session override > table default > NULL
+                    COALESCE(ts.attended_by_member_id, t.assigned_member_id) AS effective_waiter_member_id,
+                    COALESCE(p_attended.name, p_assigned.name)               AS effective_waiter_member_name,
+                    COALESCE(tm_attended.role, tm_assigned.role)             AS effective_waiter_member_role,
                     EXTRACT(EPOCH FROM (now() - ts.opened_at)) / 60 AS session_duration_minutes,
                     COALESCE(
                         (SELECT SUM(o.total_amount)
@@ -165,6 +172,10 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                     ON tm_assigned.id = t.assigned_member_id
                 LEFT JOIN profile p_assigned
                     ON p_assigned.id = tm_assigned.user_id
+                LEFT JOIN tenant_members tm_attended
+                    ON tm_attended.id = ts.attended_by_member_id
+                LEFT JOIN profile p_attended
+                    ON p_attended.id = tm_attended.user_id
                 WHERE t.tenant_id = $1
                   AND t.deleted_at IS NULL
                   AND (t.is_active = true OR $2)
@@ -478,10 +489,23 @@ async def delete_table_permanent(request: Request, table_id: UUID) -> dict:
         raise APIError(f"Error deleting table: {e}", status_code=500)
 
 
-async def open_session(request: Request, table_id: UUID) -> dict:
+async def open_session(
+    request: Request,
+    table_id: UUID,
+    attended_by_member_id: Optional[UUID] = None,
+) -> dict:
     """
     Open a new session for a table.
-    Returns 409 if a session is already open.
+
+    Optional `attended_by_member_id` (warocol.com#574) lets the cashier
+    pre-set the per-session waiter override at open time. If the tenant's
+    `waiter_attribution_enabled` flag is off OR the value is None, the
+    field is left NULL on the new row and the resolver falls back to
+    `tables.assigned_member_id`.
+
+    Returns 409 if a session is already open. Returns 404 if the table
+    doesn't exist or if `attended_by_member_id` doesn't belong to the
+    tenant.
     """
     try:
         session_context = require_valid_session(request)
@@ -489,6 +513,30 @@ async def open_session(request: Request, table_id: UUID) -> dict:
         user_id = session_context.user_id
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
+
+        # If a waiter override was requested, check the toggle is ON and
+        # the member belongs to the tenant. Done OUTSIDE the table lock
+        # to fail fast.
+        resolved_attended_by: Optional[UUID] = None
+        if attended_by_member_id is not None:
+            async with get_db_connection(use_transaction=False) as conn:
+                toggle = await conn.fetchval(
+                    "SELECT waiter_attribution_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                    tenant_id,
+                )
+                if toggle:
+                    member_check = await conn.fetchval(
+                        """
+                        SELECT id FROM tenant_members
+                        WHERE id = $1 AND tenant_id = $2 AND is_active = true AND terminated_at IS NULL
+                        """,
+                        attended_by_member_id,
+                        tenant_id,
+                    )
+                    if member_check is None:
+                        raise NotFoundError("Member not found")
+                    resolved_attended_by = attended_by_member_id
+                # If toggle OFF: silently ignore the field (idempotent).
 
         async with get_db_connection() as conn:
             async with conn.transaction():
@@ -513,13 +561,14 @@ async def open_session(request: Request, table_id: UUID) -> dict:
                 # Create session
                 session_row = await conn.fetchrow(
                     """
-                    INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id)
-                    VALUES ($1, $2, $3)
+                    INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id, attended_by_member_id)
+                    VALUES ($1, $2, $3, $4)
                     RETURNING id, opened_at
                     """,
                     table_id,
                     tenant_id,
                     user_id,
+                    resolved_attended_by,
                 )
 
                 # Update table status
@@ -536,6 +585,7 @@ async def open_session(request: Request, table_id: UUID) -> dict:
                 "session_id": str(session_row["id"]),
                 "table_id": str(table_id),
                 "opened_at": session_row["opened_at"].isoformat(),
+                "attended_by_member_id": str(resolved_attended_by) if resolved_attended_by else None,
             },
         }
 
@@ -1106,6 +1156,13 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     ts.id,
                     ts.opened_at,
                     ts.opened_by_user_id,
+                    ts.attended_by_member_id,
+                    p_attended.name AS attended_by_member_name,
+                    tm_attended.role AS attended_by_member_role,
+                    -- Resolver: session override > table default > NULL
+                    COALESCE(ts.attended_by_member_id, t.assigned_member_id) AS effective_waiter_member_id,
+                    COALESCE(p_attended.name, p_assigned.name)               AS effective_waiter_member_name,
+                    COALESCE(tm_attended.role, tm_assigned.role)             AS effective_waiter_member_role,
                     EXTRACT(EPOCH FROM (now() - ts.opened_at)) / 60 AS duration_minutes,
                     COALESCE(
                         (SELECT SUM(o.total_amount)
@@ -1120,6 +1177,15 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                         0
                     ) AS order_count
                 FROM table_sessions ts
+                JOIN tables t ON t.id = ts.table_id
+                LEFT JOIN tenant_members tm_attended
+                    ON tm_attended.id = ts.attended_by_member_id
+                LEFT JOIN profile p_attended
+                    ON p_attended.id = tm_attended.user_id
+                LEFT JOIN tenant_members tm_assigned
+                    ON tm_assigned.id = t.assigned_member_id
+                LEFT JOIN profile p_assigned
+                    ON p_assigned.id = tm_assigned.user_id
                 WHERE ts.table_id = $1
                   AND ts.tenant_id = $2
                   AND ts.closed_at IS NULL
@@ -1205,6 +1271,13 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     "standard_tax": float(_std_tax),
                     "liquor_tax": float(_liq_tax),
                     "standard_tax_label": _tax_label,
+                    # Waiter attribution (warocol.com#574)
+                    "attended_by_member_id": str(session_row["attended_by_member_id"]) if session_row.get("attended_by_member_id") else None,
+                    "attended_by_member_name": session_row.get("attended_by_member_name"),
+                    "attended_by_member_role": session_row.get("attended_by_member_role"),
+                    "effective_waiter_member_id": str(session_row["effective_waiter_member_id"]) if session_row.get("effective_waiter_member_id") else None,
+                    "effective_waiter_member_name": session_row.get("effective_waiter_member_name"),
+                    "effective_waiter_member_role": session_row.get("effective_waiter_member_role"),
                 },
                 "orders": [
                     {
@@ -2006,6 +2079,11 @@ def _format_table_row(row: dict) -> dict:
         "assigned_member_id": str(row["assigned_member_id"]) if row.get("assigned_member_id") else None,
         "assigned_member_name": row.get("assigned_member_name"),
         "assigned_member_role": row.get("assigned_member_role"),
+        # Effective waiter (warocol.com#574) — resolved server-side via COALESCE
+        # of session.attended_by > table.assigned_member > NULL.
+        "effective_waiter_member_id": str(row["effective_waiter_member_id"]) if row.get("effective_waiter_member_id") else None,
+        "effective_waiter_member_name": row.get("effective_waiter_member_name"),
+        "effective_waiter_member_role": row.get("effective_waiter_member_role"),
     }
     if row["session_id"]:
         result["session"] = {
@@ -2014,6 +2092,10 @@ def _format_table_row(row: dict) -> dict:
             "duration_minutes": round(float(row["session_duration_minutes"]), 1),
             "running_total": float(row["running_total"]),
             "unfired_count": int(row["unfired_count"]) if row.get("unfired_count") is not None else 0,
+            # Session-level waiter override (warocol.com#574)
+            "attended_by_member_id": str(row["session_attended_by_member_id"]) if row.get("session_attended_by_member_id") else None,
+            "attended_by_member_name": row.get("session_attended_by_member_name"),
+            "attended_by_member_role": row.get("session_attended_by_member_role"),
         }
     return result
 

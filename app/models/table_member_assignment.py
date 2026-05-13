@@ -44,3 +44,26 @@ class AssignmentHistoryEntry(BaseModel):
     unassigned_at: Optional[datetime] = None
     assigned_by: Optional[UUID] = None
     assigned_by_name: Optional[str] = None
+
+
+class SetSessionWaiterRequest(BaseModel):
+    """PATCH /api/pos/tables/{id}/session-waiter (warocol.com#574)."""
+    member_id: Optional[UUID] = Field(
+        None,
+        description="Member to attribute as serving this session. "
+                    "NULL clears (session falls back to the table default via the resolver).",
+    )
+
+
+class OpenTableRequest(BaseModel):
+    """POST /tables/{id}/open body (warocol.com#574 extension — optional).
+
+    The endpoint accepted NO body before this. Body is fully optional;
+    when omitted, behaviour is identical to today.
+    """
+    attended_by_member_id: Optional[UUID] = Field(
+        None,
+        description="Optional initial waiter override for the session being opened. "
+                    "If absent, the session inherits the table's assigned_member_id via the resolver. "
+                    "Ignored silently when waiter_attribution_enabled is off.",
+    )

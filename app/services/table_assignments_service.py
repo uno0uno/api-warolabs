@@ -1,13 +1,17 @@
-"""Waiter assignment service (warocol.com#573).
+"""Waiter assignment service (warocol.com#573, #574).
 
-Manages the default waiter assigned to each table:
-- `assign_member_to_table`: atomic transaction that closes the previous
-  period in `table_member_assignments`, opens a new one with snapshots,
-  and updates the `tables.assigned_member_id` pointer.
-- `get_assignment_history`: paginated history for a single table.
+Manages the default waiter assigned to each table AND the per-session
+override:
+- `assign_member_to_table` (#573): atomic transaction that closes the
+  previous period in `table_member_assignments`, opens a new one with
+  snapshots, and updates the `tables.assigned_member_id` pointer.
+- `get_assignment_history` (#573): paginated history for a single table.
+- `set_session_waiter` (#574): set/clear the per-session override on the
+  currently-open session for a table. Enforces auto-handoff: only the
+  current waiter or supervisor+ can reassign.
 
-Both are gated by `assert_waiter_attribution_enabled` to reject writes/
-reads when the feature flag is off for the tenant.
+All gated by `assert_waiter_attribution_enabled` to reject writes/reads
+when the feature flag is off for the tenant.
 
 All public functions are async; use `Optional[X]` and `List[X]` for
 Python 3.9 target compatibility.
@@ -17,6 +21,7 @@ from uuid import UUID
 
 from fastapi import HTTPException
 
+from app.core.permissions import can_reassign_waiter
 from app.database import get_db_connection
 from app.services.operaciones_context_service import assert_waiter_attribution_enabled
 
@@ -205,4 +210,98 @@ async def get_assignment_history(
         "data": entries,
         "limit": limit,
         "offset": offset,
+    }
+
+
+async def set_session_waiter(
+    tenant_id: UUID,
+    table_id: UUID,
+    member_id: Optional[UUID],
+    caller_user_id: Optional[UUID],
+    caller_role: Optional[str],
+) -> Dict[str, Any]:
+    """Set or clear the per-session waiter override (warocol.com#574).
+
+    The override lives on `table_sessions.attended_by_member_id`. When
+    NULL, the resolver falls back to `tables.assigned_member_id` (#573).
+
+    Auto-handoff guard (via `can_reassign_waiter`):
+      - No current waiter on the session → anyone with POS access can set.
+      - Caller IS the current waiter → can hand off to another or clear.
+      - Caller is supervisor+ → can override regardless.
+      - Else → 403 Forbidden.
+
+    Validations:
+      - `waiter_attribution_enabled = true` (else 409)
+      - Open session exists for the table (else 404)
+      - `member_id`, if set, belongs to the tenant and is active (else 404)
+    """
+    await assert_waiter_attribution_enabled(tenant_id)
+
+    async with get_db_connection() as conn:
+        async with conn.transaction():
+            # Lock the open session row to prevent racing PATCHes.
+            session_row = await conn.fetchrow(
+                """
+                SELECT id, attended_by_member_id
+                FROM table_sessions
+                WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL
+                FOR UPDATE
+                """,
+                table_id,
+                tenant_id,
+            )
+            if session_row is None:
+                raise HTTPException(status_code=404, detail="No open session for this table")
+
+            # Auto-handoff check
+            allowed = await can_reassign_waiter(
+                caller_user_id=caller_user_id,
+                caller_role=caller_role,
+                tenant_id=tenant_id,
+                current_waiter_member_id=session_row["attended_by_member_id"],
+            )
+            if not allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only the current waiter or a supervisor can reassign this session",
+                )
+
+            # Validate incoming member if not clearing
+            member_name: Optional[str] = None
+            member_role: Optional[str] = None
+            if member_id is not None:
+                member_row = await conn.fetchrow(
+                    """
+                    SELECT tm.id, tm.role, p.name
+                    FROM tenant_members tm
+                    JOIN profile p ON p.id = tm.user_id
+                    WHERE tm.id = $1
+                      AND tm.tenant_id = $2
+                      AND tm.is_active = true
+                      AND tm.terminated_at IS NULL
+                    """,
+                    member_id,
+                    tenant_id,
+                )
+                if member_row is None:
+                    raise HTTPException(status_code=404, detail="Member not found")
+                member_name = member_row["name"] or "Sin nombre"
+                member_role = member_row["role"]
+
+            # Apply the change
+            await conn.execute(
+                "UPDATE table_sessions SET attended_by_member_id = $1 WHERE id = $2",
+                member_id,
+                session_row["id"],
+            )
+
+    return {
+        "success": True,
+        "data": {
+            "session_id": str(session_row["id"]),
+            "attended_by_member_id": str(member_id) if member_id else None,
+            "attended_by_member_name": member_name,
+            "attended_by_member_role": member_role,
+        },
     }
