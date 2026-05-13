@@ -325,12 +325,36 @@ async def create_dian_resolution(request: Request, data: dict = Body(...)):
     except (TypeError, ValueError):
         raise HTTPException(status_code=422, detail="Formato de fecha inválido. Usa YYYY-MM-DD")
     document_type = data.get('document_type', 'invoice')
-    current_number = int(data.get('current_number', from_number - 1))
 
     if not prefix or not resolution_number or from_number <= 0 or to_number <= 0:
         raise HTTPException(status_code=422, detail="Prefijo, número de resolución y rango son requeridos")
     if from_number >= to_number:
         raise HTTPException(status_code=422, detail="El rango 'desde' debe ser menor que 'hasta'")
+
+    # Validate / seed current_number (warocol.com#589). The allocator in
+    # api-facturacion uses `next = current_number + 1`, so the correct initial
+    # state is `from_number - 1`. Default to that when the client omits the
+    # field. Reject any explicit value outside [from_number - 1, to_number] —
+    # values below would re-use already-validated DIAN numbers from previous
+    # resolutions and collide with Matias' history.
+    raw_current = data.get('current_number')
+    if raw_current is None:
+        current_number = from_number - 1
+    else:
+        current_number = int(raw_current)
+        if current_number < from_number - 1:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"current_number ({current_number}) debe ser >= from_number - 1 "
+                    f"({from_number - 1}). Valores menores reusarían números ya emitidos."
+                ),
+            )
+        if current_number > to_number:
+            raise HTTPException(
+                status_code=422,
+                detail=f"current_number ({current_number}) excede to_number ({to_number}).",
+            )
 
     async with get_db_connection() as conn:
         row_id = _uuid.uuid4()
@@ -380,6 +404,35 @@ async def update_dian_resolution(request: Request, resolution_id: str, data: dic
     except (TypeError, ValueError):
         raise HTTPException(status_code=422, detail="Formato de fecha inválido. Usa YYYY-MM-DD")
 
+    from_number = int(data.get('from_number', 0))
+    to_number = int(data.get('to_number', 0))
+    if from_number <= 0 or to_number <= 0:
+        raise HTTPException(status_code=422, detail="from_number y to_number son requeridos")
+    if from_number >= to_number:
+        raise HTTPException(status_code=422, detail="El rango 'desde' debe ser menor que 'hasta'")
+
+    # Same current_number validation as POST (warocol.com#589). Updates that
+    # set current_number below `from_number - 1` would reactivate the bug
+    # this issue fixed.
+    raw_current = data.get('current_number')
+    if raw_current is None:
+        current_number = from_number - 1
+    else:
+        current_number = int(raw_current)
+        if current_number < from_number - 1:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"current_number ({current_number}) debe ser >= from_number - 1 "
+                    f"({from_number - 1}). Valores menores reusarían números ya emitidos."
+                ),
+            )
+        if current_number > to_number:
+            raise HTTPException(
+                status_code=422,
+                detail=f"current_number ({current_number}) excede to_number ({to_number}).",
+            )
+
     async with get_db_connection() as conn:
         await conn.execute(
             """UPDATE dian_resolutions
@@ -388,8 +441,8 @@ async def update_dian_resolution(request: Request, resolution_id: str, data: dic
                WHERE id = $9::uuid AND tenant_id = $10""",
             data.get('resolution_number'), data.get('prefix', '').strip().upper(),
             date_from, date_to,
-            int(data.get('from_number', 0)), int(data.get('to_number', 0)),
-            int(data.get('current_number', 0)), data.get('document_type', 'invoice'),
+            from_number, to_number,
+            current_number, data.get('document_type', 'invoice'),
             resolution_id, tenant_id,
         )
 
