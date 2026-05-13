@@ -7,11 +7,14 @@ POST /api/webhooks/matias  → proxies raw body + signature header to
 No session auth — Matias calls this from the internet.
 Raw body is forwarded unmodified so api-facturacion can verify HMAC-SHA256.
 """
+import json
 import httpx
 import logging
+from uuid import UUID
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from app.config import settings
+from app.database import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +28,40 @@ async def matias_webhook_bridge(request: Request):
 
     Forwards raw body + X-Matias-Signature header unchanged.
     Always returns 200 to prevent Matias retry storms.
+
+    Defensive gap check (warocol.com#592): if the webhook references a
+    `(tenant, prefix, number)` that we already logged as a permanent skip
+    in `dian_sequence_gaps`, we log a WARNING so the audit trail surfaces
+    the suspicious reconciliation attempt. Authoritative dedup must happen
+    in api-facturacion (which owns the electronic_invoices write path) —
+    this layer is just an early alarm.
     """
     body = await request.body()
     signature = request.headers.get("X-Matias-Signature", "")
+
+    # warocol.com#592 — best-effort gap correlation. Wrapped in broad
+    # try/except: this MUST NOT interfere with the proxy to api-facturacion.
+    try:
+        payload = json.loads(body) if body else {}
+        invoice_number = payload.get("invoice_number")
+        prefix = payload.get("prefix")
+        tenant_id_hint = payload.get("tenant_id")
+        if invoice_number and prefix and tenant_id_hint:
+            async with get_db_connection(use_transaction=False) as conn:
+                gap = await conn.fetchrow(
+                    """SELECT 1 FROM dian_sequence_gaps
+                       WHERE tenant_id = $1 AND prefix = $2 AND skipped_number = $3
+                       LIMIT 1""",
+                    UUID(str(tenant_id_hint)), str(prefix), int(invoice_number),
+                )
+            if gap:
+                logger.warning(
+                    "Matias webhook for %s%s references a logged sequence gap "
+                    "for tenant %s — api-facturacion must dedup, not persist.",
+                    prefix, invoice_number, tenant_id_hint,
+                )
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.debug("Webhook gap-check best-effort failed: %s", exc)
 
     url = f"{settings.facturacion_api_url.rstrip('/')}/webhooks/matias"
 
