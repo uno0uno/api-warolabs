@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     # api-facturacion microservice — DIAN electronic invoicing (issue #128)
     facturacion_api_url: str = Field(default='http://api-facturacion:8001', alias='FACTURACION_API_URL')
 
+    # warocol.com#596 — grace window for the "ya validado" short-circuit in
+    # emit_invoice. A repeated emit on a rejected-as-validado order is 409'd
+    # only if the previous rejection is younger than this many minutes.
+    # Older rejections fall through to api-facturacion so the retry loop
+    # (api-facturacion#21) can recover the order.
+    dian_short_circuit_grace_minutes: int = Field(default=5, alias='DIAN_SHORT_CIRCUIT_GRACE_MINUTES')
+
     class Config:
         env_file = ".env"
         extra = "ignore"  # Ignore extra environment variables
