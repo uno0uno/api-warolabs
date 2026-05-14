@@ -7,7 +7,7 @@ from typing import Optional, Literal
 from uuid import UUID
 from pydantic import BaseModel
 from app.core.permissions import Module, require_module
-from app.services import online_orders_service
+from app.services import online_orders_service, payment_method_service
 
 router = APIRouter(prefix="/online/orders", tags=["Online Orders (Authenticated)"])
 
@@ -16,6 +16,24 @@ class UpdateOrderStatusRequest(BaseModel):
     new_status: Literal["confirmed", "preparing", "delivered", "completed", "cancelled"]
     reason: Optional[str] = None
     auto_complete: bool = False
+    # Optional payment capture — required by the service when transitioning to
+    # 'delivered' if the order does not already have a payment_method persisted.
+    payment_method: Optional[str] = None
+    payment_method_id: Optional[UUID] = None
+
+
+@router.get("/payment-methods", dependencies=[Depends(require_module(Module.VENTAS))])
+async def list_online_payment_methods(request: Request):
+    """
+    Active payment groups + nested methods for the despacho UI.
+
+    Mirrors `/pos/payment-methods` but gated under VENTAS so despachadores
+    can capture cash-on-delivery without a POS permission.
+
+    **Important**: this route must be declared BEFORE `/{order_id}` so the
+    string `payment-methods` is not parsed as a UUID by FastAPI.
+    """
+    return await payment_method_service.list_pos_methods(request)
 
 
 @router.get("", dependencies=[Depends(require_module(Module.VENTAS))])
@@ -87,5 +105,11 @@ async def update_online_order_status(
     **Requires valid session cookie.**
     """
     return await online_orders_service.update_order_status(
-        request, order_id, body.new_status, body.reason, body.auto_complete
+        request,
+        order_id,
+        body.new_status,
+        body.reason,
+        body.auto_complete,
+        payment_method=body.payment_method,
+        payment_method_id=body.payment_method_id,
     )

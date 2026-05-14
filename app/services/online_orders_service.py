@@ -377,12 +377,19 @@ async def update_order_status(
     new_status: str,
     reason: Optional[str] = None,
     auto_complete: bool = False,
+    payment_method: Optional[str] = None,
+    payment_method_id: Optional[UUID] = None,
 ) -> dict:
     """
     Validate the status transition, then atomically:
-      1. UPDATE orders SET status, updated_at
+      1. UPDATE orders SET status, updated_at (and optionally payment_method / payment_method_id)
       2. INSERT into order_status_history
     Returns the transition payload including change_date from history.
+
+    When transitioning to 'delivered' the caller MUST provide payment_method
+    if the order does not already have one persisted — otherwise the
+    accounting GL hook downstream falls back to 'digital' and we lose the
+    real payment information (see warocol.com#606).
     """
     try:
         session = require_valid_session(request)
@@ -398,7 +405,7 @@ async def update_order_status(
             # 1. Fetch current order (tenant-scoped, online orders only)
             row = await conn.fetchrow(
                 """
-                SELECT id, status, customer_id
+                SELECT id, status, customer_id, payment_method, payment_method_id
                 FROM orders
                 WHERE id = $1
                   AND tenant_id = $2
@@ -411,6 +418,7 @@ async def update_order_status(
 
             old_status = row["status"]
             order_customer_id = row["customer_id"]  # may be None for guest checkout
+            existing_payment_method = row["payment_method"]
 
             # 2. Validate state machine transition
             allowed = ALLOWED_TRANSITIONS.get(old_status, [])
@@ -420,14 +428,71 @@ async def update_order_status(
                     f"Allowed: {allowed if allowed else 'none (terminal state)'}"
                 )
 
-            # 3. UPDATE orders.status + updated_at
+            # 2b. Validate payment-method capture on 'delivered' (warocol.com#606)
+            if new_status == "delivered" and not existing_payment_method and not payment_method:
+                from fastapi import HTTPException
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "payment_method_required",
+                        "message": "Selecciona un método de pago para marcar como entregado.",
+                    },
+                )
+
+            # 2c. Validate slug + UUID belong to this tenant before writing
+            if payment_method:
+                group_row = await conn.fetchrow(
+                    """
+                    SELECT id FROM payment_method_groups
+                    WHERE slug = $1
+                      AND is_active = true
+                      AND (tenant_id IS NULL OR tenant_id = $2)
+                    """,
+                    payment_method, tenant_id,
+                )
+                if not group_row:
+                    from fastapi import HTTPException
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "code": "payment_method_invalid",
+                            "message": f"Método de pago '{payment_method}' no es válido para este restaurante.",
+                        },
+                    )
+                if payment_method_id:
+                    method_row = await conn.fetchrow(
+                        """
+                        SELECT id FROM payment_methods
+                        WHERE id = $1
+                          AND tenant_id = $2
+                          AND group_id = $3
+                          AND is_active = true
+                        """,
+                        payment_method_id, tenant_id, group_row["id"],
+                    )
+                    if not method_row:
+                        from fastapi import HTTPException
+                        raise HTTPException(
+                            status_code=400,
+                            detail={
+                                "code": "payment_method_id_invalid",
+                                "message": "El método seleccionado no pertenece al grupo elegido.",
+                            },
+                        )
+
+            # 3. UPDATE orders.status + updated_at (+ optional payment fields via COALESCE).
+            #    COALESCE preserves prior values when the caller omits them, so the
+            #    follow-up delivered → completed transition doesn't need to re-send.
             await conn.execute(
                 """
                 UPDATE orders
-                SET status = $1, updated_at = NOW()
+                SET status = $1,
+                    updated_at = NOW(),
+                    payment_method = COALESCE($4, payment_method),
+                    payment_method_id = COALESCE($5, payment_method_id)
                 WHERE id = $2 AND tenant_id = $3
                 """,
-                new_status, order_id, tenant_id,
+                new_status, order_id, tenant_id, payment_method, payment_method_id,
             )
 
             # 4. INSERT order_status_history, RETURNING change_date
