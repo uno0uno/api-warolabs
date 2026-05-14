@@ -146,6 +146,37 @@ class TestSupplierCRUD:
         response = await client.delete(f"/suppliers/providers/{fake_id}")
         assert response.status_code in [404, 401, 403, 500]
 
+    @pytest.mark.asyncio
+    async def test_delete_supplier_409_response_shape(self, client: AsyncClient):
+        """Validate the 409 response body when a supplier has FK dependents."""
+        list_response = await client.get("/suppliers/providers?limit=50")
+        if list_response.status_code != 200:
+            pytest.skip("list endpoint unauthenticated in this run")
+
+        data = list_response.json()
+        for supplier in data.get("data", []):
+            response = await client.delete(
+                f"/suppliers/providers/{supplier['id']}"
+            )
+            if response.status_code == 409:
+                body = response.json()
+                assert "detail" in body
+                detail = body["detail"]
+                assert isinstance(detail, dict)
+                assert detail.get("code") in (
+                    "supplier_has_dependents",
+                    "supplier_has_dependents_unknown",
+                )
+                assert "message" in detail
+                if detail["code"] == "supplier_has_dependents":
+                    assert "counts" in detail
+                    counts = detail["counts"]
+                    assert isinstance(counts.get("purchases"), int)
+                    assert isinstance(counts.get("supplier_prices"), int)
+                    assert counts["purchases"] + counts["supplier_prices"] > 0
+                return
+        pytest.skip("no supplier with FK dependents present in this DB")
+
 
 class TestPaymentAgreementsEndpoint:
     """Test supplier payment agreements endpoint"""
