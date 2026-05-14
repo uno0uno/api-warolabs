@@ -12,6 +12,8 @@ from app.core.exceptions import AuthenticationError, APIError
 from app.services.aws_ses_service import ses_service
 from app.services.waros_service import evaluate_and_award
 from app.services.cierre_service import assert_order_not_in_closed_monthly_period, _get_tenant_tax_config
+from app.services.email_helpers import send_pos_receipt_email
+from fastapi import HTTPException
 from datetime import datetime, date
 import csv
 
@@ -2788,3 +2790,149 @@ async def get_products_sold(
     except Exception as e:
         logger.error(f"Error getting products sold: {str(e)}")
         raise APIError(f"Error getting products sold: {str(e)}", status_code=500)
+
+
+async def send_invoice_email(
+    request: Request,
+    order_id: UUID,
+    recipient_email: str,
+) -> Dict[str, Any]:
+    """
+    Send the WARO-branded receipt email for an order's accepted invoice (warocol.com#603).
+
+    Loads the order header + items + invoice + tenant business profile from DB
+    (single connection, sequential reads), validates the invoice is accepted and
+    has a PDF available in R2, then dispatches the existing `send_pos_receipt_email`
+    helper which handles SES + template + PDF/XML attachment.
+
+    Raises:
+        HTTPException 404 — order not found for the session tenant
+        HTTPException 422 — no invoice / invoice not accepted / PDF not available
+        HTTPException 502 — SES rejected the send
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    async with get_db_connection() as conn:
+        # 1. Order header (also enforces tenant ownership).
+        order_row = await conn.fetchrow(
+            """SELECT id, order_number, order_date, total_amount, payment_method,
+                      discount_amount
+               FROM orders
+               WHERE id = $1 AND tenant_id = $2""",
+            order_id, tenant_id,
+        )
+        if not order_row:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        # 2. Invoice header — must exist, be accepted, and have a PDF available.
+        invoice_row = await conn.fetchrow(
+            """SELECT prefix, invoice_number, cufe, status, r2_pdf_key
+               FROM electronic_invoices
+               WHERE order_id = $1 AND tenant_id = $2
+               ORDER BY created_at DESC
+               LIMIT 1""",
+            order_id, tenant_id,
+        )
+        if not invoice_row:
+            raise HTTPException(
+                status_code=422,
+                detail="Esta orden no tiene factura electrónica. Emitila antes de enviarla.",
+            )
+        if invoice_row['status'] != 'accepted':
+            raise HTTPException(
+                status_code=422,
+                detail="La factura debe estar aceptada por DIAN para poder enviarla por correo.",
+            )
+        if not invoice_row['r2_pdf_key']:
+            raise HTTPException(
+                status_code=422,
+                detail="El PDF de la factura aún no está disponible. Reintentá en unos segundos.",
+            )
+
+        # 3. Tax breakdown — same helpers get_order_by_id uses.
+        tax_config = await _get_tenant_tax_config(conn, tenant_id)
+        items_for_tax = await conn.fetch(
+            """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
+                      COALESCE(oi.subtotal, 0) AS subtotal
+               FROM order_items oi
+               JOIN product p ON p.id = oi.product_id
+               WHERE oi.order_id = $1""",
+            order_id,
+        )
+        std_tax, liq_tax, tax_label = _compute_tax_breakdown(items_for_tax, tax_config)
+
+        # 4. Items in the shape `pos_receipt_template` expects.
+        item_rows = await conn.fetch(
+            """SELECT oi.id, oi.quantity, oi.subtotal,
+                      p.name as product_name
+               FROM order_items oi
+               LEFT JOIN product p ON p.id = oi.product_id
+               WHERE oi.order_id = $1
+               ORDER BY oi.created_at""",
+            order_id,
+        )
+        items = []
+        for it in item_rows:
+            modifiers_rows = await conn.fetch(
+                """SELECT modifier_name, price_at_purchase
+                   FROM order_item_modifiers WHERE order_item_id = $1""",
+                it['id'],
+            )
+            items.append({
+                'quantity': it['quantity'],
+                'subtotal': float(it['subtotal']),
+                'product': {'name': it['product_name'] or 'Producto'},
+                'modifiers': [
+                    {'name': m['modifier_name'], 'price': float(m['price_at_purchase'])}
+                    for m in modifiers_rows
+                ],
+            })
+
+        # 5. Business profile for the email header.
+        profile_row = await conn.fetchrow(
+            """SELECT COALESCE(p.display_name, t.name) AS display_name,
+                      p.address, p.city, p.phone_number
+               FROM tenants t
+               LEFT JOIN tenant_public_profiles p ON p.tenant_id = t.id
+               WHERE t.id = $1""",
+            tenant_id,
+        )
+
+    discount_amount = float(order_row['discount_amount']) if order_row['discount_amount'] is not None else 0.0
+    # Subtotal: only carried into the template when there's a discount (the
+    # template falls back to total_amount when no discount). Matches the POS
+    # cart caller convention at pos_cart_service.py:1577.
+    subtotal_for_email = sum(float(it['subtotal']) for it in item_rows) if discount_amount > 0 else 0.0
+
+    success = await send_pos_receipt_email(
+        customer_email=recipient_email,
+        order_number=int(order_row['order_number']),
+        total_amount=float(order_row['total_amount']),
+        payment_method=order_row['payment_method'] or '',
+        items=items,
+        order_date=order_row['order_date'],
+        tenant_id=str(tenant_id),
+        business_name=profile_row['display_name'] if profile_row else None,
+        business_address=profile_row['address'] if profile_row else None,
+        business_city=profile_row['city'] if profile_row else None,
+        business_phone=profile_row['phone_number'] if profile_row else None,
+        discount_amount=discount_amount,
+        subtotal=subtotal_for_email,
+        standard_tax=std_tax,
+        liquor_tax=liq_tax,
+        standard_tax_label=tax_label,
+        invoice_prefix=invoice_row['prefix'],
+        invoice_number=int(invoice_row['invoice_number']),
+        invoice_cufe=invoice_row['cufe'],
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=502,
+            detail="No se pudo enviar el correo. Intentá nuevamente en unos segundos.",
+        )
+
+    return {'success': True, 'sent_to': recipient_email}
