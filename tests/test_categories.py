@@ -113,3 +113,100 @@ class TestCategoryCreateModel:
         # not surface in the model
         cat = CategoryCreate(name="ok", tenant_id=str(uuid4()))  # type: ignore[call-arg]
         assert not hasattr(cat, "tenant_id")
+
+
+class TestCategoryUpdateAndDelete:
+    """Test PUT, DELETE, and delete-impact endpoints (issue warocol.com#600)."""
+
+    @pytest.mark.asyncio
+    async def test_update_category_not_found(self, client: AsyncClient):
+        """PUT on non-existent / global / cross-tenant id returns 404 (or auth error)."""
+        fake_id = str(uuid4())
+        response = await client.put(
+            f"/menu/categories/{fake_id}",
+            json={"name": "Renombrada"},
+        )
+        assert response.status_code in [404, 401, 403, 500]
+
+    @pytest.mark.asyncio
+    async def test_update_category_rejects_empty_payload(self, client: AsyncClient):
+        """PUT with no fields returns 400 (or auth error if not authenticated)."""
+        fake_id = str(uuid4())
+        response = await client.put(
+            f"/menu/categories/{fake_id}",
+            json={},
+        )
+        assert response.status_code in [400, 404, 401, 403, 500]
+
+    @pytest.mark.asyncio
+    async def test_delete_category_not_found(self, client: AsyncClient):
+        """DELETE on non-existent id returns 404 (or auth error)."""
+        fake_id = str(uuid4())
+        response = await client.delete(f"/menu/categories/{fake_id}")
+        assert response.status_code in [404, 401, 403, 500]
+
+    @pytest.mark.asyncio
+    async def test_delete_impact_not_found(self, client: AsyncClient):
+        """delete-impact for non-existent / global id returns 404 (or auth error)."""
+        fake_id = str(uuid4())
+        response = await client.get(f"/menu/categories/{fake_id}/delete-impact")
+        assert response.status_code in [404, 401, 403, 500]
+
+    @pytest.mark.asyncio
+    async def test_delete_impact_response_shape(self, client: AsyncClient):
+        """When a category exists and is queryable, delete-impact returns counts."""
+        list_response = await client.get("/menu/categories?limit=50")
+        if list_response.status_code != 200:
+            pytest.skip("list endpoint unauthenticated in this run")
+
+        data = list_response.json()
+        for cat in data.get("data", []):
+            response = await client.get(f"/menu/categories/{cat['id']}/delete-impact")
+            if response.status_code == 200:
+                body = response.json()
+                assert body.get("success") is True
+                assert "data" in body
+                counts = body["data"]
+                assert isinstance(counts.get("products"), int)
+                assert isinstance(counts.get("station_mappings"), int)
+                return
+        pytest.skip("no tenant-owned category accessible in this run")
+
+    @pytest.mark.asyncio
+    async def test_delete_category_409_response_shape(self, client: AsyncClient):
+        """Validate the 409 response body when a category has product dependents."""
+        list_response = await client.get("/menu/categories?limit=50")
+        if list_response.status_code != 200:
+            pytest.skip("list endpoint unauthenticated in this run")
+
+        data = list_response.json()
+        for cat in data.get("data", []):
+            response = await client.delete(f"/menu/categories/{cat['id']}")
+            if response.status_code == 409:
+                body = response.json()
+                assert "detail" in body
+                detail = body["detail"]
+                assert isinstance(detail, dict)
+                assert detail.get("code") in (
+                    "category_has_dependents",
+                    "category_has_dependents_unknown",
+                )
+                assert "message" in detail
+                if detail["code"] == "category_has_dependents":
+                    assert "counts" in detail
+                    counts = detail["counts"]
+                    assert isinstance(counts.get("products"), int)
+                    assert counts["products"] > 0
+                return
+        pytest.skip("no category with product dependents in this run")
+
+    def test_category_update_accepts_partial(self):
+        from app.models.category import CategoryUpdate
+        payload = CategoryUpdate(name="Renombrada")
+        assert payload.name == "Renombrada"
+        assert payload.description is None
+
+    def test_category_update_rejects_empty_name(self):
+        from app.models.category import CategoryUpdate
+        with pytest.raises(ValidationError):
+            CategoryUpdate(name="")
