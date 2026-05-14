@@ -2,6 +2,7 @@ import logging
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 from datetime import time
+import asyncpg
 from fastapi import Request, Response, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -511,24 +512,64 @@ async def delete_supplier(
         async with get_db_connection() as conn:
             # Verify supplier exists and belongs to tenant
             existing_supplier = await conn.fetchrow("""
-                SELECT id FROM tenant_suppliers 
+                SELECT id FROM tenant_suppliers
                 WHERE id = $1 AND tenant_id = $2
             """, supplier_id, tenant_id)
-            
+
             if not existing_supplier:
                 raise HTTPException(status_code=404, detail="Supplier not found")
-            
-            # Delete supplier
-            await conn.execute("""
-                DELETE FROM tenant_suppliers 
-                WHERE id = $1 AND tenant_id = $2
-            """, supplier_id, tenant_id)
-            
+
+            # Pre-count RESTRICT dependents so the client gets an actionable
+            # 409 instead of a generic 500 from a deferred FK violation.
+            # supplier_payment_agreements is ON DELETE CASCADE — not counted.
+            deps = await conn.fetchrow(
+                """
+                SELECT
+                    COALESCE((SELECT COUNT(*) FROM tenant_purchases       WHERE supplier_id = $1), 0) AS purchases,
+                    COALESCE((SELECT COUNT(*) FROM tenant_supplier_prices WHERE supplier_id = $1), 0) AS supplier_prices
+                """,
+                supplier_id,
+            )
+            if deps["purchases"] > 0 or deps["supplier_prices"] > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "supplier_has_dependents",
+                        "counts": {
+                            "purchases": deps["purchases"],
+                            "supplier_prices": deps["supplier_prices"],
+                        },
+                        "message": "El proveedor tiene registros asociados que impiden su eliminación.",
+                    },
+                )
+
+            try:
+                await conn.execute("""
+                    DELETE FROM tenant_suppliers
+                    WHERE id = $1 AND tenant_id = $2
+                """, supplier_id, tenant_id)
+            except asyncpg.exceptions.ForeignKeyViolationError as fk_err:
+                # Defense-in-depth: a future FK without ON DELETE CASCADE would
+                # land here instead of leaking a generic 500. Pre-count above
+                # covers the known cases; this protects against schema drift.
+                logger.warning(
+                    "FK violation deleting supplier %s after pre-count passed: %s",
+                    supplier_id,
+                    fk_err,
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "supplier_has_dependents_unknown",
+                        "message": "El proveedor tiene registros asociados que impiden su eliminación.",
+                    },
+                )
+
             return {
                 "success": True,
                 "message": "Supplier deleted successfully"
             }
-            
+
     except AuthenticationError:
         raise
     except HTTPException:
