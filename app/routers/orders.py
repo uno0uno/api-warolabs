@@ -5,7 +5,7 @@ Endpoints for listing and managing orders
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from typing import Optional, List
 from uuid import UUID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from app.core.dependencies import require_invoicing_ready
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
@@ -424,3 +424,21 @@ async def get_order_invoice_dian_status(
     if result is None:
         raise HTTPException(status_code=404, detail="No invoice found for this order")
     return result
+
+
+class SendInvoiceEmailBody(BaseModel):
+    email: EmailStr = Field(..., description="Recipient email address")
+
+
+@router.post(
+    "/{order_id}/invoice/send-email",
+    tags=["Invoices"],
+    dependencies=[Depends(require_module(Module.VENTAS))],
+)
+async def send_order_invoice_email(
+    request: Request,
+    order_id: UUID,
+    body: SendInvoiceEmailBody,
+):
+    """Send the WARO-branded receipt email for this order's accepted invoice (warocol.com#603)."""
+    return await orders_service.send_invoice_email(request, order_id, body.email)
