@@ -331,6 +331,7 @@ async def get_order_by_id(
                     p.id as customer_id,
                     p.name as customer_name,
                     p.phone_number as customer_phone,
+                    p.email as customer_email,
                     -- Hydrated delivery address (NULL if not a delivery, or address was soft-deleted)
                     ap.address_line1   AS addr_line1,
                     ap.address_line2   AS addr_line2,
@@ -448,7 +449,8 @@ async def get_order_by_id(
                     "customer": {
                         "id": str(order_row['customer_id']) if order_row['customer_id'] else None,
                         "name": order_row['customer_name'],
-                        "phone": order_row['customer_phone']
+                        "phone": order_row['customer_phone'],
+                        "email": order_row['customer_email'],
                     },
                     "items_count": order_row['items_count'],
                     "split_payments": split_payments,
