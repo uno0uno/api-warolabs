@@ -405,6 +405,7 @@ async def get_order_invoice(
             logger.warning(f"Could not generate presigned URL for invoice {row['id']}: {exc}")
 
     return {
+        'id': str(row['id']),
         'order_id': order_id,
         'invoice_number': row['invoice_number'],
         'prefix': row['prefix'],
