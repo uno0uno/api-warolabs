@@ -1,4 +1,5 @@
 from typing import Optional
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 import asyncpg
 
@@ -10,6 +11,7 @@ from app.models.category import (
     Category,
     CategoryCreate,
     CategoryResponse,
+    CategoryUpdate,
 )
 
 router = APIRouter()
@@ -96,3 +98,178 @@ async def create_category_endpoint(request: Request, payload: CategoryCreate):
         )
 
     return CategoryResponse(success=True, data=Category(**dict(row)))
+
+
+async def _load_owned_category(conn, category_id: UUID, tenant_id: UUID):
+    """Fetch a category and reject globals / cross-tenant access.
+
+    Returns the row when it belongs to the caller's tenant; raises 404
+    otherwise (we don't leak existence of globals or other tenants' rows).
+    """
+    row = await conn.fetchrow(
+        "SELECT id, tenant_id FROM categories WHERE id = $1",
+        category_id,
+    )
+    if row is None or row["tenant_id"] is None or row["tenant_id"] != tenant_id:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return row
+
+
+@router.put(
+    "/{category_id}",
+    response_model=CategoryResponse,
+    dependencies=[Depends(require_module(Module.MENU))],
+)
+async def update_category_endpoint(
+    request: Request,
+    category_id: UUID,
+    payload: CategoryUpdate,
+):
+    """
+    Update a tenant-owned category. Globals (tenant_id IS NULL) are
+    rejected with 404. Returns 409 on duplicate name, mirroring POST.
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="Tenant context is required")
+
+    updates = {}
+    if payload.name is not None:
+        updates["name"] = payload.name.strip()
+    if payload.description is not None:
+        updates["description"] = payload.description.strip() or None
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    set_clauses = []
+    params = []
+    for idx, (field, value) in enumerate(updates.items(), start=1):
+        set_clauses.append(f"{field} = ${idx}")
+        params.append(value)
+    set_clauses.append("updated_at = NOW()")
+    params.append(category_id)
+
+    update_query = f"""
+        UPDATE categories
+        SET {", ".join(set_clauses)}
+        WHERE id = ${len(params)}
+        RETURNING id, name, description, tenant_id, created_at, updated_at
+    """
+
+    try:
+        async with get_db_connection() as conn:
+            await _load_owned_category(conn, category_id, tenant_id)
+            row = await conn.fetchrow(update_query, *params)
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+            status_code=409,
+            detail="Ya existe una categoría con ese nombre",
+        )
+
+    return CategoryResponse(success=True, data=Category(**dict(row)))
+
+
+@router.get(
+    "/{category_id}/delete-impact",
+    dependencies=[Depends(require_module(Module.MENU))],
+)
+async def category_delete_impact_endpoint(request: Request, category_id: UUID):
+    """
+    Return dependent counts a delete would affect, without side effects.
+
+    `products` is RESTRICT — non-zero count blocks deletion.
+    `station_mappings` is ON DELETE CASCADE — will be silently removed.
+    The frontend uses both to warn the user before they confirm.
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="Tenant context is required")
+
+    async with get_db_connection() as conn:
+        await _load_owned_category(conn, category_id, tenant_id)
+        deps = await conn.fetchrow(
+            """
+            SELECT
+                COALESCE((SELECT COUNT(*) FROM product WHERE category_id = $1), 0) AS products,
+                COALESCE((SELECT COUNT(*) FROM tenant_category_stations WHERE category_id = $1), 0) AS station_mappings
+            """,
+            category_id,
+        )
+
+    return {
+        "success": True,
+        "data": {
+            "products": int(deps["products"]),
+            "station_mappings": int(deps["station_mappings"]),
+        },
+    }
+
+
+@router.delete(
+    "/{category_id}",
+    dependencies=[Depends(require_module(Module.MENU))],
+)
+async def delete_category_endpoint(request: Request, category_id: UUID):
+    """
+    Delete a tenant-owned category.
+
+    Blocks deletion (409) when `product.category_id` references exist
+    (RESTRICT FK). Station-mapping rows cascade-delete automatically and
+    are NOT a blocker — the count is returned so the caller can refresh
+    the routing UI on success.
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="Tenant context is required")
+
+    async with get_db_connection() as conn:
+        await _load_owned_category(conn, category_id, tenant_id)
+
+        deps = await conn.fetchrow(
+            """
+            SELECT
+                COALESCE((SELECT COUNT(*) FROM product WHERE category_id = $1), 0) AS products,
+                COALESCE((SELECT COUNT(*) FROM tenant_category_stations WHERE category_id = $1), 0) AS station_mappings
+            """,
+            category_id,
+        )
+
+        if deps["products"] > 0:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "category_has_dependents",
+                    "counts": {"products": int(deps["products"])},
+                    "message": "La categoría tiene productos asociados que impiden su eliminación.",
+                },
+            )
+
+        try:
+            await conn.execute(
+                "DELETE FROM categories WHERE id = $1 AND tenant_id = $2",
+                category_id,
+                tenant_id,
+            )
+        except asyncpg.exceptions.ForeignKeyViolationError:
+            # Defense-in-depth: a future RESTRICT FK we didn't pre-count would
+            # land here instead of leaking a generic 500.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "category_has_dependents_unknown",
+                    "message": "La categoría tiene registros asociados que impiden su eliminación.",
+                },
+            )
+
+    return {
+        "success": True,
+        "message": "Category deleted successfully",
+        "cascaded": {"station_mappings": int(deps["station_mappings"])},
+    }

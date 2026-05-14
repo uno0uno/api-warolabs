@@ -31,6 +31,14 @@ class CategoryCreate(BaseModel):
     description: Optional[str] = Field(None, max_length=500, description="Optional descriptive text")
 
 
+class CategoryUpdate(BaseModel):
+    """Payload for PUT /menu/categories/{id}. Fields are optional —
+    only the provided ones are updated. tenant_id is immutable and
+    taken from the session."""
+    name: Optional[str] = Field(None, min_length=1, max_length=100, description="New display name")
+    description: Optional[str] = Field(None, max_length=500, description="New description")
+
+
 class CategoriesListResponse(BaseModel):
     """List of categories response"""
     success: bool = True
