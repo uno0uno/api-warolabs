@@ -16,6 +16,7 @@ directly and generate R2 presigned URLs locally (api-warolabs has R2 credentials
 """
 import httpx
 import logging
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 from fastapi import HTTPException
@@ -65,15 +66,15 @@ async def emit_invoice(
     # Pre-check existing electronic_invoices for this order (warocol.com#589).
     # - If the latest is `accepted` → return it, no Matias call.
     # - If the latest is `rejected` with the Matias "ya validado" signature
-    #   → 409 short-circuit so the cashier doesn't burn another resolution
-    #   number on a retry that will fail again. Recovery (fetch from Matias
-    #   + persist) is out of this layer's scope — handled in api-facturacion
-    #   in a follow-up.
+    #   AND younger than `dian_short_circuit_grace_minutes` → 409 to protect
+    #   against double-click. Older rejections fall through so the
+    #   api-facturacion retry loop (api-facturacion#21, warocol.com#596) can
+    #   take over.
     # - Any other rejection signature is allowed to retry (e.g., missing NIT
     #   that the cashier just fixed).
     async with get_db_connection(use_transaction=False) as conn:
         latest = await conn.fetchrow(
-            """SELECT status, invoice_number, prefix, error_message
+            """SELECT status, invoice_number, prefix, error_message, created_at
                FROM electronic_invoices
                WHERE order_id = $1 AND tenant_id = $2
                ORDER BY created_at DESC
@@ -92,13 +93,14 @@ async def emit_invoice(
         and latest['status'] == 'rejected'
         and latest['error_message']
         and 'ya se encuentra validado' in latest['error_message'].lower()
+        and (datetime.now(timezone.utc) - latest['created_at'])
+            < timedelta(minutes=settings.dian_short_circuit_grace_minutes)
     ):
         raise HTTPException(
             status_code=409,
             detail=(
-                f"La factura {latest['prefix']}{latest['invoice_number']} ya está "
-                "validada en DIAN pero no se pudo descargar localmente. "
-                "Contacta soporte para reconciliar el documento."
+                f"La factura {latest['prefix']}{latest['invoice_number']} acaba de "
+                "rechazarse en DIAN. Esperá unos segundos antes de reintentar."
             ),
         )
 
