@@ -584,12 +584,21 @@ async def verify_cart_with_session(cart_id: UUID, customer_id: UUID, email: str)
         raise APIError(f"Error al verificar el carrito: {str(e)}", status_code=500)
 
 
-async def checkout_cart(cart_id: UUID) -> dict:
+async def checkout_cart(
+    cart_id: UUID,
+    payment_method: Optional[str] = None,
+    payment_method_id: Optional[UUID] = None,
+) -> dict:
     """
     Convert a verified online cart into a confirmed order (PUBLIC).
 
     Validates cart state, atomically marks it as checked_out, then inserts
     the order, order_items, and order_item_modifiers in a single transaction.
+
+    When `payment_method` is provided it must be the slug of an active
+    `payment_method_group` for the cart's tenant with `triggers_cartera = false`
+    (anonymous customers cannot accrue cartera, warocol.com#610). When
+    `payment_method_id` is provided it must belong to that same group.
 
     Returns order summary with order_number and optional pickup_pin.
     Returns 409 if the cart was already checked out (double-submit prevention).
@@ -665,6 +674,60 @@ async def checkout_cart(cart_id: UUID) -> dict:
                         detail=f"El monto mínimo del pedido es ${min_order_amount:,.0f} COP. Tu carrito tiene ${cart_total:,.0f} COP."
                     )
 
+                # 5b. Validate payment selection (warocol.com#610).
+                #     Mirrors the despacho-side validation in online_orders_service so
+                #     that the slug + UUID belong to the cart's tenant and the chosen
+                #     group is not a cartera one (anonymous customers cannot accrue
+                #     cartera). The selector is optional in the schema but required
+                #     in practice — the frontend always sends a method.
+                resolved_group_id = None
+                if payment_method:
+                    group_row = await conn.fetchrow(
+                        """
+                        SELECT id, triggers_cartera FROM payment_method_groups
+                        WHERE slug = $1
+                          AND is_active = true
+                          AND (tenant_id IS NULL OR tenant_id = $2)
+                        """,
+                        payment_method, cart['tenant_id'],
+                    )
+                    if not group_row:
+                        raise HTTPException(
+                            status_code=400,
+                            detail={
+                                "code": "payment_method_invalid",
+                                "message": f"Método de pago '{payment_method}' no es válido para este restaurante.",
+                            },
+                        )
+                    if group_row["triggers_cartera"]:
+                        raise HTTPException(
+                            status_code=400,
+                            detail={
+                                "code": "payment_method_not_allowed_online",
+                                "message": "Este método de pago no está disponible para pedidos en línea.",
+                            },
+                        )
+                    resolved_group_id = group_row["id"]
+                    if payment_method_id:
+                        method_row = await conn.fetchrow(
+                            """
+                            SELECT id FROM payment_methods
+                            WHERE id = $1
+                              AND tenant_id = $2
+                              AND group_id = $3
+                              AND is_active = true
+                            """,
+                            payment_method_id, cart['tenant_id'], resolved_group_id,
+                        )
+                        if not method_row:
+                            raise HTTPException(
+                                status_code=400,
+                                detail={
+                                    "code": "payment_method_id_invalid",
+                                    "message": "El método seleccionado no pertenece al grupo elegido.",
+                                },
+                            )
+
                 # 5. Validate all cart products are still available online
                 product_ids = [UUID(item['product_id']) for item in items]
                 offline_rows = await conn.fetch(
@@ -694,9 +757,10 @@ async def checkout_cart(cart_id: UUID) -> dict:
                 order_query = """
                     INSERT INTO orders (
                         tenant_id, customer_id, online_cart_id,
-                        order_date, total_amount, status, scheduled_time
+                        order_date, total_amount, status, scheduled_time,
+                        payment_method, payment_method_id
                     )
-                    VALUES ($1, $2, $3, NOW(), $4, 'pending', $5)
+                    VALUES ($1, $2, $3, NOW(), $4, 'pending', $5, $6, $7)
                     RETURNING id, order_number
                 """
                 order_row = await conn.fetchrow(
@@ -705,7 +769,9 @@ async def checkout_cart(cart_id: UUID) -> dict:
                     cart['customer_id'],
                     cart_id,
                     cart_total,
-                    cart['scheduled_time']
+                    cart['scheduled_time'],
+                    payment_method,
+                    payment_method_id,
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']
