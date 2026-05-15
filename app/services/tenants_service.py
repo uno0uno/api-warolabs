@@ -362,10 +362,22 @@ async def create_tenant(request: Request, body: TenantCreate) -> TenantCreateRes
         base_slug = _generate_slug(body.name)
 
         async with get_db_connection() as conn:
-            # Ensure slug uniqueness — append counter if taken
+            # Ensure slug uniqueness — append counter if taken. The same
+            # counter logic also runs against the public_cities catalog so
+            # a business named e.g. "Bogotá" never grabs the `bogota`
+            # directory slug (warocol.com#615).
             slug = base_slug
             counter = 1
-            while await conn.fetchval("SELECT 1 FROM tenants WHERE slug = $1", slug):
+            while True:
+                tenant_taken = await conn.fetchval(
+                    "SELECT 1 FROM tenants WHERE slug = $1", slug
+                )
+                city_reserved = await conn.fetchval(
+                    "SELECT 1 FROM public_cities WHERE city_slug = $1 AND is_active = true",
+                    slug,
+                )
+                if not tenant_taken and not city_reserved:
+                    break
                 slug = f"{base_slug}-{counter}"
                 counter += 1
 
