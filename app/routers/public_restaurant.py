@@ -5,7 +5,8 @@ No authentication required
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, Dict, Any
 from uuid import UUID
-from app.services import public_restaurant_service
+from app.core.exceptions import NotFoundError
+from app.services import payment_method_service, public_restaurant_service
 
 import logging
 
@@ -50,6 +51,27 @@ async def list_public_restaurants(
         "success": True,
         "data": restaurants
     }
+
+
+@router.get("/{tenant_slug}/payment-methods")
+async def list_public_payment_methods(tenant_slug: str) -> Dict[str, Any]:
+    """
+    Active payment groups + nested methods that the customer can pick at
+    online checkout. Public — no auth header required (warocol.com#610).
+
+    Mirrors the shape of `/pos/payment-methods` and `/online/orders/payment-methods`
+    but resolves the tenant by `tenant_slug` and excludes `triggersCartera=true`
+    groups (anonymous customers cannot accrue cartera).
+    """
+    try:
+        return await payment_method_service.list_public_methods_by_tenant_slug(
+            tenant_slug
+        )
+    except NotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Restaurant not found or not active",
+        )
 
 
 @router.get("/{tenant_slug}")

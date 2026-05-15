@@ -192,8 +192,21 @@ async def verify_cart_with_session(
     )
 
 
+class CheckoutCartRequest(BaseModel):
+    """
+    Optional payment selection sent by the customer at checkout (warocol.com#610).
+
+    Both fields are nullable in the schema but enforced in the service:
+    `payment_method` (group slug) is required; `payment_method_id` is required
+    only when the chosen group exposes nested methods. `triggersCartera`
+    groups are rejected — anonymous customers cannot accrue cartera.
+    """
+    payment_method: Optional[str] = None
+    payment_method_id: Optional[UUID] = None
+
+
 @router.post("/{cart_id}/checkout")
-async def checkout_cart(cart_id: UUID):
+async def checkout_cart(cart_id: UUID, body: Optional[CheckoutCartRequest] = None):
     """
     Finalize cart as a confirmed order (PUBLIC - no auth).
 
@@ -201,6 +214,8 @@ async def checkout_cart(cart_id: UUID):
     - Cart is OTP-verified
     - Cart has items and meets minimum order amount
     - Delivery address is set when order_type is 'delivery'
+    - payment_method (slug) is active for the tenant and not a cartera group
+    - payment_method_id (when provided) belongs to the chosen group
 
     Returns order_number, total_amount, order_type, and pickup_pin (pickup orders only).
 
@@ -208,4 +223,8 @@ async def checkout_cart(cart_id: UUID):
 
     **Public endpoint - no authentication required**
     """
-    return await online_cart_service.checkout_cart(cart_id=cart_id)
+    return await online_cart_service.checkout_cart(
+        cart_id=cart_id,
+        payment_method=body.payment_method if body else None,
+        payment_method_id=body.payment_method_id if body else None,
+    )

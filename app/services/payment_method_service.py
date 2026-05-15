@@ -392,16 +392,21 @@ async def delete_method(request: Request, method_id: UUID) -> dict:
 
 # ── POS read-only ──────────────────────────────────────────────────────────────
 
-async def list_pos_methods(request: Request) -> dict:
+async def _list_payment_methods_by_tenant_id(
+    tenant_id,
+    exclude_cartera: bool = False,
+) -> dict:
     """
-    POS consumption endpoint — returns active groups (global + tenant's custom)
-    with their active methods nested inside. Ordered by sort_order.
-    """
-    session = require_valid_session(request)
-    tenant_id = session.tenant_id
+    Internal helper — returns active groups + nested methods for a given tenant.
 
+    Used by both `list_pos_methods` (POS / despacho — authenticated, all groups)
+    and the public-restaurant endpoint (anonymous customer checkout, where
+    `exclude_cartera=True` filters out credit groups since walk-in customers
+    can't accrue cartera).
+
+    See warocol.com#610.
+    """
     async with get_db_connection(use_transaction=False) as conn:
-        # Fetch active groups visible to tenant
         groups = await conn.fetch(
             """
             SELECT id, name, slug, triggers_cartera
@@ -412,7 +417,6 @@ async def list_pos_methods(request: Request) -> dict:
             tenant_id,
         )
 
-        # Fetch active methods for tenant
         methods = await conn.fetch(
             """
             SELECT id, group_id, name
@@ -423,7 +427,6 @@ async def list_pos_methods(request: Request) -> dict:
             tenant_id,
         )
 
-    # Group methods by group_id
     methods_by_group: dict = {}
     for m in methods:
         gid = str(m["group_id"])
@@ -440,5 +443,45 @@ async def list_pos_methods(request: Request) -> dict:
             "methods": methods_by_group.get(str(g["id"]), []),
         }
         for g in groups
+        if not (exclude_cartera and g["triggers_cartera"])
     ]
     return {"success": True, "data": data}
+
+
+async def list_pos_methods(request: Request) -> dict:
+    """
+    POS / despacho consumption endpoint — returns active groups (global +
+    tenant's custom) with their active methods nested inside. Ordered by
+    sort_order.
+    """
+    session = require_valid_session(request)
+    return await _list_payment_methods_by_tenant_id(
+        session.tenant_id, exclude_cartera=False
+    )
+
+
+async def list_public_methods_by_tenant_slug(tenant_slug: str) -> dict:
+    """
+    Public endpoint helper — resolves `tenant_slug` to a tenant_id via
+    `tenant_public_profiles`, then returns the same shape as `list_pos_methods`
+    but with `exclude_cartera=True` enforced server-side (anonymous customers
+    can't use credit).
+
+    Raises NotFoundError if the slug doesn't match an active profile.
+    warocol.com#610.
+    """
+    async with get_db_connection(use_transaction=False) as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT tenant_id
+            FROM tenant_public_profiles
+            WHERE slug = $1 AND is_active = true
+            """,
+            tenant_slug,
+        )
+    if not row:
+        raise NotFoundError("Restaurant not found or not active")
+
+    return await _list_payment_methods_by_tenant_id(
+        row["tenant_id"], exclude_cartera=True
+    )
