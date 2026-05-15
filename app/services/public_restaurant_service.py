@@ -593,15 +593,22 @@ async def validate_slug_available(slug: str, exclude_tenant_id: Optional[UUID] =
         return False
 
 
-async def list_restaurants(city: Optional[str] = None) -> List[Dict[str, Any]]:
+async def list_restaurants(
+    city: Optional[str] = None,
+    city_slug: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
-    List all active public restaurant profiles
+    List all active public restaurant profiles.
 
     Args:
-        city: Optional city filter (e.g., 'Bogotá')
+        city: Deprecated — exact-match display-name filter (e.g. 'Bogotá').
+              Kept for one release while callers migrate to `city_slug`.
+        city_slug: Preferred filter (warocol.com#615). Matches the
+              normalized slug stored on tenant_public_profiles.city_slug,
+              which mirrors public_cities.city_slug.
 
     Returns:
-        List of restaurant profiles with basic information
+        List of restaurant profiles with basic information.
     """
     try:
         async with get_db_connection() as conn:
@@ -613,7 +620,7 @@ async def list_restaurants(city: Optional[str] = None) -> List[Dict[str, Any]]:
                     tpp.id, tpp.tenant_id, tpp.slug, tpp.is_active,
                     tpp.display_name, tpp.description, tpp.logo_url, tpp.banner_url,
                     tpp.phone_number, tpp.email, tpp.address,
-                    tpp.city, tpp.neighborhood,
+                    tpp.city, tpp.city_slug, tpp.country, tpp.neighborhood,
                     tpp.is_manually_open, tpp.business_hours,
                     tpp.created_at, tpp.updated_at
                 FROM tenant_public_profiles tpp
@@ -621,12 +628,20 @@ async def list_restaurants(city: Optional[str] = None) -> List[Dict[str, Any]]:
                 WHERE tpp.is_active = true
                   AND ts.status IN ('active', 'past_due')
             """
-            params = []
+            params: List[Any] = []
 
-            # Add city filter if provided
-            if city:
-                query += " AND tpp.city = $1"
+            # Prefer city_slug. Fall back to legacy city (display name) for
+            # any caller still on the deprecated alias.
+            if city_slug:
+                params.append(city_slug)
+                query += f" AND tpp.city_slug = ${len(params)}"
+            elif city:
                 params.append(city)
+                query += f" AND tpp.city = ${len(params)}"
+                logger.warning(
+                    "list_restaurants: deprecated 'city' param used "
+                    "(value=%r). Migrate caller to 'city_slug'.", city,
+                )
 
             query += " ORDER BY display_name ASC"
 
@@ -654,7 +669,9 @@ async def list_restaurants(city: Optional[str] = None) -> List[Dict[str, Any]]:
                     "phone_number": row["phone_number"],
                     "email": row["email"],
                     "address": row["address"],
+                    "country": row["country"],
                     "city": row["city"],
+                    "city_slug": row["city_slug"],
                     "neighborhood": row["neighborhood"],
                     "is_currently_open": is_currently_open(business_hours, row["is_manually_open"]),
                     "created_at": row["created_at"].isoformat() if row["created_at"] else None,
@@ -664,8 +681,90 @@ async def list_restaurants(city: Optional[str] = None) -> List[Dict[str, Any]]:
             return restaurants
 
     except Exception as e:
-        logger.error(f"Error listing restaurants (city={city}): {e}")
+        logger.error(
+            "Error listing restaurants (city=%r, city_slug=%r): %s",
+            city, city_slug, e,
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Error listing restaurants: {str(e)}"
         )
+
+
+async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
+    """
+    Return the curated city catalog (warocol.com#615).
+
+    Used by the `/negocio` city selector (include_empty=True so operators
+    see every city even before someone in that city signs up) and by the
+    root `/` discovery section (include_empty=False so only populated
+    cities surface to customers).
+
+    Args:
+        include_empty: When False (default), filter out cities with zero
+            active tenants. When True, return every active catalog entry.
+
+    Returns:
+        List of dicts with country, city, city_slug, tenant_count.
+        Sorted by sort_order then city name.
+    """
+    try:
+        async with get_db_connection() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    pc.country,
+                    pc.city,
+                    pc.city_slug,
+                    pc.sort_order,
+                    COUNT(tpp.id) FILTER (
+                        WHERE tpp.is_active = true
+                          AND ts.status IN ('active', 'past_due')
+                    ) AS tenant_count
+                FROM public_cities pc
+                LEFT JOIN tenant_public_profiles tpp
+                       ON tpp.city_slug = pc.city_slug
+                LEFT JOIN tenant_subscriptions ts
+                       ON ts.tenant_id = tpp.tenant_id
+                WHERE pc.is_active = true
+                GROUP BY pc.country, pc.city, pc.city_slug, pc.sort_order
+                ORDER BY pc.sort_order ASC, pc.city ASC
+                """,
+            )
+            cities = [
+                {
+                    "country": r["country"],
+                    "city": r["city"],
+                    "city_slug": r["city_slug"],
+                    "tenant_count": int(r["tenant_count"] or 0),
+                }
+                for r in rows
+                if include_empty or (r["tenant_count"] or 0) > 0
+            ]
+            return cities
+    except Exception as e:
+        logger.error("Error listing public cities: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error listing cities: {str(e)}"
+        )
+
+
+async def is_city_slug_known(city_slug: str) -> bool:
+    """
+    Check whether `city_slug` is a recognised active entry in the
+    public_cities catalog (warocol.com#615).
+
+    Used by the profile update endpoint to validate operator input and by
+    the tenant slug generator to avoid collisions.
+    """
+    try:
+        async with get_db_connection() as conn:
+            hit = await conn.fetchval(
+                "SELECT 1 FROM public_cities WHERE city_slug = $1 AND is_active = true",
+                city_slug,
+            )
+            return hit is not None
+    except Exception as e:
+        logger.error("Error checking city slug %r: %s", city_slug, e)
+        return False

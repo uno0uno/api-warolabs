@@ -191,18 +191,32 @@ async def update_public_profile(
                 data_dict = profile_data.model_dump(exclude_unset=True)
                 display_name = data_dict.get('display_name') or tenant_row['name']
 
+                # Validate city_slug against the curated catalog before INSERT
+                # (warocol.com#615). Same gate as the UPDATE path below.
+                if data_dict.get('city_slug'):
+                    known = await public_restaurant_service.is_city_slug_known(
+                        data_dict['city_slug']
+                    )
+                    if not known:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"city_slug '{data_dict['city_slug']}' is not in the catalog. "
+                                   "Pick a city from /public/cities.",
+                        )
+
                 insert_query = """
                     INSERT INTO tenant_public_profiles (
                         tenant_id, slug, display_name, is_active,
                         description, logo_url, banner_url,
-                        phone_number, email, address, city, neighborhood,
+                        phone_number, email, address,
+                        country, city, city_slug, neighborhood,
                         business_hours, social_media,
                         accepts_online_orders, min_order_amount, estimated_preparation_time,
                         is_manually_open,
                         comandas_enabled, kds_enabled,
                         auto_select_generic_enabled,
                         expediter_enabled
-                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
                     RETURNING *
                 """
                 result = await conn.fetchrow(
@@ -216,7 +230,9 @@ async def update_public_profile(
                     data_dict.get('phone_number'),
                     data_dict.get('email'),
                     data_dict.get('address'),
+                    data_dict.get('country', 'Colombia'),
                     data_dict.get('city'),
+                    data_dict.get('city_slug'),
                     data_dict.get('neighborhood'),
                     json.dumps(data_dict['business_hours']) if data_dict.get('business_hours') is not None else None,
                     json.dumps(data_dict['social_media']) if data_dict.get('social_media') is not None else None,
@@ -284,6 +300,20 @@ async def update_public_profile(
                     raise HTTPException(
                         status_code=400,
                         detail=f"Slug '{data_dict['slug']}' is already taken"
+                    )
+
+            # Validate city_slug against the curated catalog (warocol.com#615).
+            # Operators can only pick from public_cities — free text is rejected
+            # at the API boundary so the directory routing stays consistent.
+            if data_dict.get('city_slug'):
+                known = await public_restaurant_service.is_city_slug_known(
+                    data_dict['city_slug']
+                )
+                if not known:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"city_slug '{data_dict['city_slug']}' is not in the catalog. "
+                               "Pick a city from /public/cities.",
                     )
 
             _jsonb_fields = {'business_hours', 'social_media'}

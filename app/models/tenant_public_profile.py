@@ -33,7 +33,16 @@ class TenantPublicProfileBase(BaseModel):
     address: Optional[str] = Field(None, max_length=500, description="Physical address")
 
     # Location
+    country: Optional[str] = Field(
+        'Colombia', max_length=80,
+        description="Country (warocol.com#615). v1 locks the UI to Colombia.",
+    )
     city: Optional[str] = Field(None, max_length=255)
+    city_slug: Optional[str] = Field(
+        None, max_length=120,
+        description="Normalized slug for the city directory (warocol.com#615). "
+                    "Must match an active public_cities entry.",
+    )
     neighborhood: Optional[str] = Field(None, max_length=255)
     latitude: Optional[Decimal] = Field(None, description="Latitude coordinate")
     longitude: Optional[Decimal] = Field(None, description="Longitude coordinate")
@@ -109,7 +118,9 @@ class TenantPublicProfileUpdate(BaseModel):
     email: Optional[str] = Field(None, max_length=255)
     address: Optional[str] = Field(None, max_length=500)
 
+    country: Optional[str] = Field(None, max_length=80)
     city: Optional[str] = Field(None, max_length=255)
+    city_slug: Optional[str] = Field(None, max_length=120)
     neighborhood: Optional[str] = Field(None, max_length=255)
     latitude: Optional[Decimal] = None
     longitude: Optional[Decimal] = None

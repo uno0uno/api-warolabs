@@ -19,31 +19,35 @@ router = APIRouter()
 async def list_public_restaurants(
     city: Optional[str] = Query(
         default=None,
-        description="Optional: filter by city (e.g., 'Bogotá')"
-    )
+        description="Deprecated: filter by display-name city. Use city_slug instead."
+    ),
+    city_slug: Optional[str] = Query(
+        default=None,
+        description="Preferred: filter by normalized slug (e.g. 'bogota', 'mosquera')."
+    ),
 ) -> Dict[str, Any]:
     """
-    List all active public restaurant profiles
+    List all active public restaurant profiles.
 
     Optional filters:
-    - city: Filter by city name
+    - city_slug: preferred (matches `tenant_public_profiles.city_slug`)
+    - city: deprecated alias kept for one release; logs a warning when used.
 
-    Returns list of restaurants with basic info:
-    - id, tenant_id, slug
-    - display_name, description
-    - logo_url, banner_url
-    - city, address
-    - phone_number, email
-    - is_active
+    Returns list of restaurants with basic info plus `country` and `city_slug`.
 
-    **Public endpoint - no authentication required**
+    **Public endpoint — no authentication required**
 
     Example: GET /api/public/restaurant/list
-    Example with filter: GET /api/public/restaurant/list?city=Bogotá
+    Example: GET /api/public/restaurant/list?city_slug=bogota
     """
-    logger.info(f"🔍 [list_public_restaurants] Request with city filter: {city}")
+    logger.info(
+        "🔍 [list_public_restaurants] Request city=%r city_slug=%r",
+        city, city_slug,
+    )
 
-    restaurants = await public_restaurant_service.list_restaurants(city=city)
+    restaurants = await public_restaurant_service.list_restaurants(
+        city=city, city_slug=city_slug,
+    )
 
     logger.info(f"🔍 [list_public_restaurants] Found {len(restaurants)} restaurants")
 
@@ -51,6 +55,28 @@ async def list_public_restaurants(
         "success": True,
         "data": restaurants
     }
+
+
+@router.get("/cities")
+async def list_public_cities(
+    include_empty: bool = Query(
+        default=False,
+        description="Include catalog entries with zero active tenants. "
+                    "True for the operator selector on /negocio; "
+                    "False (default) for the discovery section on /."
+    ),
+) -> Dict[str, Any]:
+    """
+    Return the curated city catalog (warocol.com#615).
+
+    Public — no auth required. Used by the operator-facing city selector
+    on /negocio and the customer-facing discovery section on the root
+    landing page.
+    """
+    cities = await public_restaurant_service.list_cities(
+        include_empty=include_empty,
+    )
+    return {"success": True, "data": cities}
 
 
 @router.get("/{tenant_slug}/payment-methods")
