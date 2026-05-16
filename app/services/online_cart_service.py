@@ -588,6 +588,8 @@ async def checkout_cart(
     cart_id: UUID,
     payment_method: Optional[str] = None,
     payment_method_id: Optional[UUID] = None,
+    tip_amount: float = 0,
+    tip_source: str = 'none',
 ) -> dict:
     """
     Convert a verified online cart into a confirmed order (PUBLIC).
@@ -639,16 +641,19 @@ async def checkout_cart(
                     raise HTTPException(status_code=400, detail="El carrito está vacío")
 
                 # 4. Validate online ordering gate, open status and minimum order amount from tenant profile
+                # warocol.com#637 — also read tip_enabled here to gate the optional tip fields
                 tenant_profile_query = """
                     SELECT min_order_amount, estimated_preparation_time, is_manually_open, business_hours,
-                           accepts_online_orders
+                           accepts_online_orders, tip_enabled
                     FROM tenant_public_profiles
                     WHERE tenant_id = $1
                 """
                 profile = await conn.fetchrow(tenant_profile_query, cart['tenant_id'])
                 min_order_amount = Decimal('0')
                 estimated_preparation_time = None
+                tip_enabled = False
                 if profile:
+                    tip_enabled = bool(profile['tip_enabled'])
                     from app.services.public_restaurant_service import is_currently_open
                     import json as _json
                     if not profile['accepts_online_orders']:
@@ -673,6 +678,22 @@ async def checkout_cart(
                         status_code=400,
                         detail=f"El monto mínimo del pedido es ${min_order_amount:,.0f} COP. Tu carrito tiene ${cart_total:,.0f} COP."
                     )
+
+                # warocol.com#637 — tip validation. Same rules as the POS path; no
+                # split mode, no cash flow on the public storefront. Coerce
+                # (0, anything) → (0, 'none') for idempotency, reject inconsistent
+                # combinations to match the DB CHECK from migration 079.
+                if tip_amount < 0:
+                    raise HTTPException(status_code=400, detail="tip_amount must be non-negative")
+                if tip_source not in ('preset', 'custom', 'none'):
+                    raise HTTPException(status_code=400, detail=f"invalid tip_source: {tip_source!r}")
+                if tip_amount == 0:
+                    tip_source = 'none'
+                else:
+                    if tip_source == 'none':
+                        raise HTTPException(status_code=400, detail="tip_source cannot be 'none' when tip_amount > 0")
+                    if not tip_enabled:
+                        raise HTTPException(status_code=400, detail="Tipping is not enabled for this tenant")
 
                 # 5b. Validate payment selection (warocol.com#610).
                 #     Mirrors the despacho-side validation in online_orders_service so
@@ -758,9 +779,10 @@ async def checkout_cart(
                     INSERT INTO orders (
                         tenant_id, customer_id, online_cart_id,
                         order_date, total_amount, status, scheduled_time,
-                        payment_method, payment_method_id
+                        payment_method, payment_method_id,
+                        tip_amount, tip_source
                     )
-                    VALUES ($1, $2, $3, NOW(), $4, 'pending', $5, $6, $7)
+                    VALUES ($1, $2, $3, NOW(), $4, 'pending', $5, $6, $7, $8, $9)
                     RETURNING id, order_number
                 """
                 order_row = await conn.fetchrow(
@@ -772,6 +794,8 @@ async def checkout_cart(
                     cart['scheduled_time'],
                     payment_method,
                     payment_method_id,
+                    Decimal(str(tip_amount)),
+                    tip_source,
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']
@@ -861,6 +885,9 @@ async def checkout_cart(
                         "order_id": str(order_id),
                         "order_number": int(order_number),
                         "total_amount": float(cart_total),
+                        "tip_amount": float(tip_amount),
+                        "tip_source": tip_source,
+                        "charged_amount": float(cart_total) + float(tip_amount),
                         "order_type": cart['order_type'],
                         "pickup_pin": cart['pickup_pin'],
                         "estimated_preparation_time": estimated_preparation_time
