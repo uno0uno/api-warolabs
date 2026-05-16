@@ -236,7 +236,12 @@ async def update_public_profile(
                     data_dict.get('neighborhood'),
                     json.dumps(data_dict['business_hours']) if data_dict.get('business_hours') is not None else None,
                     json.dumps(data_dict['social_media']) if data_dict.get('social_media') is not None else None,
-                    data_dict.get('accepts_online_orders', False),
+                    # Default True so new tenants are immediately able to
+                    # receive online orders — the platform's core value
+                    # prop (warocol.com#626). Operators can still toggle
+                    # off from /negocio at any time. Existing rows are
+                    # untouched by this change.
+                    data_dict.get('accepts_online_orders', True),
                     data_dict.get('min_order_amount', 0),
                     data_dict.get('estimated_preparation_time', 30),
                     data_dict.get('is_manually_open', True),
