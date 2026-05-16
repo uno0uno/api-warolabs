@@ -93,7 +93,11 @@ async def export_orders(
     sort_field: str = Query("order_date"),
     sort_direction: str = Query("desc"),
     date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None)
+    date_to: Optional[str] = Query(None),
+    # warocol.com#640 — tips-only export mode
+    tips_only: bool = Query(False, description="When true, restrict to orders with tip_amount > 0 and emit tip-specific CSV columns."),
+    member_id: Optional[str] = Query(None, description="Filter by served_by_member_id (tips-only flow)."),
+    channel: Optional[str] = Query(None, description="Filter by channel: 'pos' | 'mesa' | 'online' (tips-only flow)."),
 ):
     return await orders_service.export_orders_to_email(
         request,
@@ -105,7 +109,10 @@ async def export_orders(
         sort_field=sort_field,
         sort_direction=sort_direction,
         date_from=date_from,
-        date_to=date_to
+        date_to=date_to,
+        tips_only=tips_only,
+        member_id=member_id,
+        channel=channel,
     )
 
 
