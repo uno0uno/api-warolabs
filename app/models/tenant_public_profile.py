@@ -1,5 +1,5 @@
 # Tenant Public Profile models for restaurant public pages
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, Dict, Any
 from uuid import UUID
 from datetime import datetime
@@ -138,6 +138,41 @@ class TenantPublicProfileBase(BaseModel):
                     "checkout. NULL = nothing pre-selected (Ley 1935 voluntariness).",
     )
 
+    @field_validator('tip_default_percentages')
+    @classmethod
+    def _validate_tip_presets(cls, v):
+        # Mirror DB CHECK constraints from migration 078 + the per-issue rule:
+        # max 5 entries, each 0 <= p <= 100. Empty list is rejected — if the
+        # tenant wants no presets, they should set tip_enabled = false instead.
+        if v is None:
+            return v
+        if len(v) == 0:
+            raise ValueError("tip_default_percentages must contain at least one preset")
+        if len(v) > 5:
+            raise ValueError("tip_default_percentages cannot contain more than 5 presets")
+        for p in v:
+            if p < 0 or p > 100:
+                raise ValueError(f"tip preset {p} must be between 0 and 100")
+        return v
+
+    @model_validator(mode='after')
+    def _validate_tip_preselect_index(self):
+        # Only runs when both fields are present on the model instance. For
+        # partial-update payloads (Update model) the validator on the Update
+        # class enforces the same rule scoped to fields sent in the request.
+        if self.tip_preselect_index is None:
+            return self
+        if self.tip_preselect_index < 0:
+            raise ValueError("tip_preselect_index must be non-negative")
+        if self.tip_default_percentages is None:
+            raise ValueError("tip_preselect_index requires tip_default_percentages to be set")
+        if self.tip_preselect_index >= len(self.tip_default_percentages):
+            raise ValueError(
+                f"tip_preselect_index {self.tip_preselect_index} is out of bounds for "
+                f"tip_default_percentages of length {len(self.tip_default_percentages)}"
+            )
+        return self
+
 class TenantPublicProfileCreate(TenantPublicProfileBase):
     """Create tenant public profile"""
     tenant_id: UUID = Field(..., description="Tenant ID")
@@ -188,6 +223,40 @@ class TenantPublicProfileUpdate(BaseModel):
     tip_enabled: Optional[bool] = None
     tip_default_percentages: Optional[list[Decimal]] = None
     tip_preselect_index: Optional[int] = None
+
+    @field_validator('tip_default_percentages')
+    @classmethod
+    def _validate_tip_presets_update(cls, v):
+        # Same rules as the Base validator; runs only when the field is sent.
+        if v is None:
+            return v
+        if len(v) == 0:
+            raise ValueError("tip_default_percentages must contain at least one preset")
+        if len(v) > 5:
+            raise ValueError("tip_default_percentages cannot contain more than 5 presets")
+        for p in v:
+            if p < 0 or p > 100:
+                raise ValueError(f"tip preset {p} must be between 0 and 100")
+        return v
+
+    @model_validator(mode='after')
+    def _validate_tip_preselect_index_update(self):
+        # Only enforces the bounds rule when both fields are present in the
+        # SAME payload. If the operator PATCHes only tip_preselect_index, we
+        # cannot validate against the existing array without a DB read — let
+        # the service guard against that case if needed. Negative is always
+        # rejected since it's nonsense.
+        if self.tip_preselect_index is None:
+            return self
+        if self.tip_preselect_index < 0:
+            raise ValueError("tip_preselect_index must be non-negative")
+        if self.tip_default_percentages is not None:
+            if self.tip_preselect_index >= len(self.tip_default_percentages):
+                raise ValueError(
+                    f"tip_preselect_index {self.tip_preselect_index} is out of bounds for "
+                    f"tip_default_percentages of length {len(self.tip_default_percentages)}"
+                )
+        return self
 
 class TenantPublicProfile(TenantPublicProfileBase):
     """Complete tenant public profile with all fields"""
