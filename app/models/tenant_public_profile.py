@@ -117,6 +117,27 @@ class TenantPublicProfileBase(BaseModel):
         description="Custom plural noun for 'Mesas' (e.g. 'Habitaciones'). NULL = use default.",
     )
 
+    # Tipping configuration (warocol.com#635) — phase 1 direct attribution.
+    # tip_enabled gates the checkout selector and the /ventas/propinas view.
+    # Defaults preserve current behaviour (tipping hidden).
+    tip_enabled: bool = Field(
+        False,
+        description="Master tipping toggle (warocol.com#635). When true, "
+                    "surfaces the tip selector at POS/online checkout and the "
+                    "/ventas/propinas history view.",
+    )
+    tip_default_percentages: list[Decimal] = Field(
+        default_factory=lambda: [Decimal('10')],
+        description="Suggested tip presets shown as chips at checkout "
+                    "(warocol.com#635). Resolved on subtotal (pre-tax). Max 5 "
+                    "entries, each between 0 and 100.",
+    )
+    tip_preselect_index: Optional[int] = Field(
+        None,
+        description="Index into tip_default_percentages to pre-select at "
+                    "checkout. NULL = nothing pre-selected (Ley 1935 voluntariness).",
+    )
+
 class TenantPublicProfileCreate(TenantPublicProfileBase):
     """Create tenant public profile"""
     tenant_id: UUID = Field(..., description="Tenant ID")
@@ -162,6 +183,11 @@ class TenantPublicProfileUpdate(BaseModel):
     # Custom mesa label (warocol.com#614)
     tables_label_singular: Optional[str] = Field(None, min_length=1, max_length=40)
     tables_label_plural: Optional[str] = Field(None, min_length=1, max_length=40)
+
+    # Tipping configuration (warocol.com#635)
+    tip_enabled: Optional[bool] = None
+    tip_default_percentages: Optional[list[Decimal]] = None
+    tip_preselect_index: Optional[int] = None
 
 class TenantPublicProfile(TenantPublicProfileBase):
     """Complete tenant public profile with all fields"""
