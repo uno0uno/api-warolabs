@@ -29,6 +29,7 @@ ALLOWED_TOGGLES = frozenset({
     "tables_enabled",
     "auto_select_generic_enabled",
     "waiter_attribution_enabled",  # warocol.com#573
+    "tip_enabled",                  # warocol.com#638
 })
 
 
@@ -133,6 +134,52 @@ async def update_tables_label(
         "data": {
             "tables_label_singular": row["tables_label_singular"],
             "tables_label_plural": row["tables_label_plural"],
+        },
+    }
+
+
+async def update_tip_config(
+    tenant_id: UUID,
+    percentages: list,
+    preselect_index: Optional[int],
+) -> Dict[str, Any]:
+    """Persist tip presets + preselected index (warocol.com#638).
+
+    Sibling to update_tables_label — handles the non-boolean part of the
+    tipping configuration. The boolean toggle (tip_enabled) flows through
+    the generic update_toggle() helper.
+
+    Mirrors the UPSERT pattern so fresh tenants without a
+    tenant_public_profiles row still work; slug and display_name are
+    seeded from the tenants table (both NOT NULL with no DB defaults).
+
+    Pydantic validators on TipConfigRequest enforce array bounds; DB
+    CHECKs from migration 078 / 079 are the defensive net.
+    """
+    query = """
+        INSERT INTO tenant_public_profiles
+            (tenant_id, slug, display_name, tip_default_percentages, tip_preselect_index)
+        SELECT t.id, t.slug, t.name, $2::numeric(5,2)[], $3
+        FROM tenants t
+        WHERE t.id = $1
+        ON CONFLICT (tenant_id) DO UPDATE
+            SET tip_default_percentages = EXCLUDED.tip_default_percentages,
+                tip_preselect_index     = EXCLUDED.tip_preselect_index,
+                updated_at              = now()
+        RETURNING tip_default_percentages, tip_preselect_index
+    """
+
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(query, tenant_id, percentages, preselect_index)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    return {
+        "success": True,
+        "data": {
+            "tip_default_percentages": [float(p) for p in row["tip_default_percentages"] or []],
+            "tip_preselect_index": row["tip_preselect_index"],
         },
     }
 
