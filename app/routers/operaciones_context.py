@@ -11,8 +11,10 @@ column whitelist guards against SQL injection.
 """
 from uuid import UUID
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
@@ -20,6 +22,7 @@ from app.models.table_member_assignment import AssignMemberRequest
 from app.services import table_assignments_service
 from app.services.operaciones_context_service import (
     get_operaciones_context,
+    update_tables_label,
     update_toggle,
 )
 
@@ -28,6 +31,17 @@ router = APIRouter(prefix="/operaciones", tags=["Operaciones Context"])
 
 class ToggleRequest(BaseModel):
     enabled: bool
+
+
+class TablesLabelRequest(BaseModel):
+    """Payload for PATCH /operaciones/labels/tables (warocol.com#614).
+
+    Both fields optional and accept empty strings — the service normalizes
+    empty/whitespace input to NULL so users can reset to defaults by
+    clearing both inputs.
+    """
+    singular: Optional[str] = Field(None, max_length=40)
+    plural: Optional[str] = Field(None, max_length=40)
 
 
 @router.get(
@@ -115,6 +129,24 @@ async def toggle_waiter_attribution_enabled(request: Request, body: ToggleReques
     session = require_valid_session(request)
     return await update_toggle(
         session.tenant_id, "waiter_attribution_enabled", body.enabled
+    )
+
+
+# ── Custom mesa label (warocol.com#614) ─────────────────────────────────
+
+@router.patch(
+    "/labels/tables",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def patch_tables_label(request: Request, body: TablesLabelRequest):
+    """Persist tenant-global custom labels for the 'Mesa' noun.
+
+    Empty / whitespace input on either field is normalized server-side to
+    NULL — the frontend interprets that as "use default" (Mesa / Mesas).
+    """
+    session = require_valid_session(request)
+    return await update_tables_label(
+        session.tenant_id, body.singular, body.plural,
     )
 
 

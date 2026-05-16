@@ -190,3 +190,101 @@ async def test_update_toggle_rejects_unknown_column():
 
     assert excinfo.value.status_code == 422
     assert "Unknown toggle" in excinfo.value.detail
+
+
+# ─── Custom mesa label (warocol.com#614) ────────────────────────────────
+
+
+def test_supervisor_passes_tables_label_under_enforce():
+    """Supervisor PATCHes /operaciones/labels/tables with new noun pair."""
+    session = _build_session(role="supervisor")
+    app = FastAPI()
+    app.include_router(operaciones_context_router)
+
+    supervisor_modules = frozenset({
+        Module.POS, Module.VENTAS, Module.OPERACIONES,
+    })
+    label_stub = AsyncMock(return_value={
+        "success": True,
+        "data": {
+            "tables_label_singular": "Habitación",
+            "tables_label_plural": "Habitaciones",
+        },
+    })
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.operaciones_context.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=supervisor_modules),
+         ), \
+         patch(
+             "app.routers.operaciones_context.update_tables_label",
+             new=label_stub,
+         ):
+        client = TestClient(app)
+        response = client.patch(
+            "/operaciones/labels/tables",
+            json={"singular": "Habitación", "plural": "Habitaciones"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["tables_label_singular"] == "Habitación"
+    assert data["tables_label_plural"] == "Habitaciones"
+    # Service receives (tenant_id, singular, plural)
+    args, _ = label_stub.call_args
+    assert args[1] == "Habitación"
+    assert args[2] == "Habitaciones"
+
+
+def test_cashier_denied_tables_label_under_enforce():
+    """Cashier without OPERACIONES cannot PATCH the labels."""
+    session = _build_session(role="cashier")
+    app = FastAPI()
+    app.include_router(operaciones_context_router)
+
+    cashier_modules = frozenset({Module.POS, Module.VENTAS, Module.MENU})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.operaciones_context.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=cashier_modules),
+         ):
+        client = TestClient(app)
+        response = client.patch(
+            "/operaciones/labels/tables",
+            json={"singular": "Habitación", "plural": "Habitaciones"},
+        )
+
+    assert response.status_code == 403
+    assert "operaciones" in response.json()["detail"].lower()
+
+
+def test_tables_label_rejects_oversized_strings():
+    """Pydantic max_length=40 enforced before any service code runs."""
+    session = _build_session(role="supervisor")
+    app = FastAPI()
+    app.include_router(operaciones_context_router)
+
+    supervisor_modules = frozenset({
+        Module.POS, Module.VENTAS, Module.OPERACIONES,
+    })
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.operaciones_context.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=supervisor_modules),
+         ):
+        client = TestClient(app)
+        response = client.patch(
+            "/operaciones/labels/tables",
+            json={"singular": "x" * 41, "plural": "y" * 41},
+        )
+
+    assert response.status_code == 422
