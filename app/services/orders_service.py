@@ -294,6 +294,193 @@ async def get_orders_list(
         raise APIError(f"Error getting orders list: {str(e)}", status_code=500)
 
 
+async def get_tips_list(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    search: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    member_id: Optional[UUID] = None,
+    payment_method: Optional[str] = None,
+    channel: Optional[str] = None,
+    sort_field: str = "order_date",
+    sort_direction: str = "desc",
+) -> dict:
+    """
+    Get list of orders that captured a tip, with filters, pagination, and
+    aggregates. Powers /ventas/propinas (warocol.com#640).
+
+    Base WHERE: tenant scope + tip_amount > 0. The aggregates query runs against
+    the same WHERE so the totals always match the visible page.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            where_conditions = [
+                "o.tenant_id = $1",
+                "o.tip_amount > 0",
+            ]
+            params: List[Any] = [tenant_id]
+            param_count = 1
+
+            # Free-text search on order_number
+            if search:
+                param_count += 1
+                where_conditions.append(f"CAST(o.order_number AS TEXT) ILIKE ${param_count}")
+                params.append(f"%{search}%")
+
+            if payment_method:
+                param_count += 1
+                where_conditions.append(f"o.payment_method = ${param_count}")
+                params.append(payment_method)
+
+            if member_id:
+                param_count += 1
+                where_conditions.append(f"o.served_by_member_id = ${param_count}::uuid")
+                params.append(str(member_id))
+
+            # channel ∈ {'online', 'mesa', 'pos'} mirrors the derivation in get_orders_list
+            if channel == 'online':
+                where_conditions.append("o.online_cart_id IS NOT NULL")
+            elif channel == 'mesa':
+                where_conditions.append("o.table_session_id IS NOT NULL")
+            elif channel == 'pos':
+                where_conditions.append("o.pos_cart_id IS NOT NULL AND o.table_session_id IS NULL")
+
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
+
+            if parsed_date_from:
+                param_count += 1
+                where_conditions.append(f"o.order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')")
+                params.append(parsed_date_from)
+
+            if parsed_date_to:
+                param_count += 1
+                where_conditions.append(f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')")
+                params.append(parsed_date_to)
+
+            where_clause = " AND ".join(where_conditions)
+
+            allowed_sort_fields = ["order_number", "order_date", "total_amount", "tip_amount", "payment_method"]
+            if sort_field not in allowed_sort_fields:
+                sort_field = "order_date"
+            sort_direction_sql = "ASC" if sort_direction.lower() == "asc" else "DESC"
+            sort_column_map = {
+                "order_number": "o.order_number",
+                "order_date": "o.order_date",
+                "total_amount": "o.total_amount",
+                "tip_amount": "o.tip_amount",
+                "payment_method": "o.payment_method",
+            }
+            sort_column = sort_column_map.get(sort_field, "o.order_date")
+
+            param_count += 1
+            limit_param = param_count
+            param_count += 1
+            offset_param = param_count
+
+            tips_query = f"""
+                SELECT
+                    o.id,
+                    o.order_number,
+                    o.order_date,
+                    o.total_amount,
+                    o.tip_amount,
+                    o.tip_source,
+                    o.payment_method,
+                    o.payment_method_id,
+                    o.pos_cart_id,
+                    o.online_cart_id,
+                    o.table_session_id,
+                    o.served_by_member_id,
+                    tm.name AS member_name,
+                    t_meta.is_bar AS is_bar,
+                    COUNT(*) OVER() AS total_count
+                FROM orders o
+                LEFT JOIN tenant_members tm ON tm.id = o.served_by_member_id
+                LEFT JOIN table_sessions ts_meta ON ts_meta.id = o.table_session_id
+                LEFT JOIN tables t_meta ON t_meta.id = ts_meta.table_id
+                WHERE {where_clause}
+                ORDER BY {sort_column} {sort_direction_sql}
+                LIMIT ${limit_param} OFFSET ${offset_param}
+            """
+
+            row_params = list(params) + [limit, offset]
+            rows = await conn.fetch(tips_query, *row_params)
+            total_count = rows[0]['total_count'] if rows else 0
+
+            # Aggregates run against the same WHERE (no LIMIT/OFFSET, no pagination params)
+            aggregates_query = f"""
+                SELECT
+                    COALESCE(SUM(o.tip_amount), 0) AS sum_tip,
+                    COUNT(*) AS count_with_tip,
+                    COALESCE(AVG(
+                        CASE WHEN o.total_amount > 0
+                             THEN o.tip_amount / o.total_amount * 100
+                             ELSE 0
+                        END
+                    ), 0) AS avg_pct
+                FROM orders o
+                WHERE {where_clause}
+            """
+            agg_row = await conn.fetchrow(aggregates_query, *params)
+
+            tips = [
+                {
+                    "id": str(row['id']),
+                    "order_number": int(row['order_number']),
+                    "order_date": row['order_date'].isoformat(),
+                    "total_amount": float(row['total_amount']),
+                    "tip_amount": float(row['tip_amount']),
+                    "tip_source": row['tip_source'],
+                    "tip_percent": (
+                        round(float(row['tip_amount']) / float(row['total_amount']) * 100, 2)
+                        if float(row['total_amount']) > 0 else 0.0
+                    ),
+                    "payment_method": row['payment_method'],
+                    "payment_method_id": str(row['payment_method_id']) if row['payment_method_id'] else None,
+                    "channel": (
+                        "online" if row['online_cart_id'] else
+                        "barra" if row['table_session_id'] and row['is_bar'] else
+                        "mesa" if row['table_session_id'] else
+                        "pos"
+                    ),
+                    "served_by_member_id": str(row['served_by_member_id']) if row['served_by_member_id'] else None,
+                    "member_name": row['member_name'],
+                }
+                for row in rows
+            ]
+
+            return {
+                "success": True,
+                "data": tips,
+                "pagination": {
+                    "total": total_count,
+                    "limit": limit,
+                    "offset": offset,
+                    "has_more": (offset + limit) < total_count,
+                },
+                "aggregates": {
+                    "sum_tip": float(agg_row['sum_tip']) if agg_row else 0.0,
+                    "count_with_tip": int(agg_row['count_with_tip']) if agg_row else 0,
+                    "avg_pct": round(float(agg_row['avg_pct']), 2) if agg_row else 0.0,
+                },
+            }
+
+    except AuthenticationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting tips list: {str(e)}")
+        raise APIError(f"Error getting tips list: {str(e)}", status_code=500)
+
+
 async def get_order_by_id(
     request: Request,
     order_id: UUID
