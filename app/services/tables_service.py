@@ -15,7 +15,8 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
-from app.services.pos_cart_service import _capture_order_item_ingredients
+from app.services.accounting_service import void_order_journal_entry_in_txn
+from app.services.pos_cart_service import _capture_order_item_ingredients, _PAYMENT_VOID_ROLES
 from app.services.orders_service import _compute_tax_breakdown
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas
@@ -920,7 +921,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 session_total = sum(float(r["total_amount"]) for r in order_rows)
                 order_ids = [r["id"] for r in order_rows]
                 paid_row = await conn2.fetchrow(
-                    "SELECT COALESCE(SUM(amount), 0) AS paid FROM order_payments WHERE order_id = ANY($1)",
+                    "SELECT COALESCE(SUM(amount), 0) AS paid FROM order_payments WHERE order_id = ANY($1) AND voided_at IS NULL",
                     order_ids,
                 )
                 paid_total = float(paid_row["paid"])
@@ -1085,7 +1086,7 @@ async def add_session_payment(
 
                 # Recompute paid total
                 paid_row = await conn.fetchrow(
-                    "SELECT COALESCE(SUM(amount), 0) AS paid FROM order_payments WHERE order_id = ANY($1)",
+                    "SELECT COALESCE(SUM(amount), 0) AS paid FROM order_payments WHERE order_id = ANY($1) AND voided_at IS NULL",
                     order_ids,
                 )
                 paid_total = float(paid_row["paid"])
@@ -2260,3 +2261,156 @@ def _format_table_simple(row: dict) -> dict:
         "is_active": row["is_active"],
         "created_at": row["created_at"].isoformat(),
     }
+
+
+async def void_table_payment(
+    request: Request,
+    table_id: UUID,
+    payment_id: UUID,
+    reason: str,
+) -> dict:
+    """
+    Issue warocol.com#649 — soft-delete a mesa partial payment.
+
+    Mesa proportional splits store one logical payment as N rows (one per order
+    in the session) at the same paid_at timestamp. The void targets a single
+    payment_id but voids the entire sibling group identified by
+    (table_session_id, payment_method, paid_at) so the books stay consistent.
+
+    Recomputes the session's paid_total over remaining rows. When voiding flips
+    the session out of fully-paid, reopens it (closed_at=NULL, table.status='open')
+    and auto-reverses the per-order GL entries inside the same transaction.
+    """
+    if not reason or not reason.strip():
+        raise APIError("Se requiere un motivo para anular el pago", status_code=400)
+
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+        role = session_context.role if hasattr(session_context, 'role') else None
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # 1. Lock target payment + identify its sibling group.
+                target = await conn.fetchrow(
+                    """
+                    SELECT op.id, op.order_id, op.payment_method, op.paid_at,
+                           op.cash_received, op.created_by_user_id, op.voided_at,
+                           o.table_session_id
+                    FROM order_payments op
+                    JOIN orders o ON o.id = op.order_id
+                    WHERE op.id = $1::uuid AND op.tenant_id = $2
+                    FOR UPDATE OF op
+                    """,
+                    payment_id, tenant_id,
+                )
+                if not target:
+                    raise APIError("Pago no encontrado", status_code=404)
+                if target["voided_at"] is not None:
+                    raise APIError("Este pago ya fue anulado", status_code=409)
+                if target["table_session_id"] is None:
+                    raise APIError("El pago no pertenece a una sesión de mesa", status_code=400)
+
+                # 2. Validate the session belongs to the URL's table.
+                session_row = await conn.fetchrow(
+                    "SELECT id, table_id, closed_at FROM table_sessions WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+                    target["table_session_id"], tenant_id,
+                )
+                if not session_row or str(session_row["table_id"]) != str(table_id):
+                    raise APIError("La sesión no corresponde a esta mesa", status_code=400)
+
+                # 3. Authorization: creator OR manager-level role.
+                creator_id = target["created_by_user_id"]
+                if creator_id is not None and str(creator_id) != str(user_id) and role not in _PAYMENT_VOID_ROLES:
+                    raise APIError(
+                        "Solo el cajero que registró el pago o un administrador puede anularlo",
+                        status_code=403,
+                    )
+
+                # 4. Find sibling rows (proportional split): same session,
+                # same method, same paid_at, not voided. Lock them all.
+                sibling_rows = await conn.fetch(
+                    """
+                    SELECT op.id, op.order_id, op.amount
+                    FROM order_payments op
+                    JOIN orders o ON o.id = op.order_id
+                    WHERE o.table_session_id = $1
+                      AND op.payment_method = $2
+                      AND op.paid_at = $3
+                      AND op.voided_at IS NULL
+                      AND op.tenant_id = $4
+                    FOR UPDATE OF op
+                    """,
+                    session_row["id"], target["payment_method"], target["paid_at"], tenant_id,
+                )
+                if not sibling_rows:
+                    raise APIError("Pago no encontrado en la sesión", status_code=404)
+
+                voided_ids = [str(r["id"]) for r in sibling_rows]
+                affected_order_ids = list({r["order_id"] for r in sibling_rows})
+
+                # 5. Soft-delete all siblings atomically.
+                await conn.execute(
+                    "UPDATE order_payments SET voided_at = NOW() WHERE id = ANY($1::uuid[])",
+                    [r["id"] for r in sibling_rows],
+                )
+
+                # 6. Recompute session-wide paid_total / remaining.
+                session_orders = await conn.fetch(
+                    "SELECT id, total_amount FROM orders WHERE table_session_id = $1",
+                    session_row["id"],
+                )
+                session_total = sum(float(r["total_amount"]) for r in session_orders)
+                order_ids = [r["id"] for r in session_orders]
+                paid_row = await conn.fetchrow(
+                    "SELECT COALESCE(SUM(amount), 0) AS paid FROM order_payments WHERE order_id = ANY($1) AND voided_at IS NULL",
+                    order_ids,
+                )
+                paid_total = float(paid_row["paid"])
+                remaining = max(0.0, session_total - paid_total)
+                is_complete = remaining <= 0.01
+
+                # 7. Reopen if voiding flipped the session out of fully-paid.
+                was_closed = session_row["closed_at"] is not None
+                reopened = was_closed and not is_complete
+                if reopened:
+                    await conn.execute(
+                        "UPDATE orders SET payment_status = 'partial' WHERE table_session_id = $1 AND status = 'completed' AND payment_status = 'paid'",
+                        session_row["id"],
+                    )
+                    await conn.execute(
+                        "UPDATE table_sessions SET closed_at = NULL WHERE id = $1",
+                        session_row["id"],
+                    )
+                    await conn.execute(
+                        "UPDATE tables SET status = 'open' WHERE id = $1 AND tenant_id = $2",
+                        table_id, tenant_id,
+                    )
+                    # Reverse posted GL entry per affected order.
+                    for affected_order_id in affected_order_ids:
+                        await void_order_journal_entry_in_txn(
+                            conn, tenant_id, affected_order_id, user_id, reason.strip(),
+                        )
+
+        logger.info(
+            f"Mesa payments voided: session={session_row['id']} group_size={len(voided_ids)} paid_total={paid_total} reopened={reopened}"
+        )
+        return {
+            "success": True,
+            "data": {
+                "voided_ids": voided_ids,
+                "paid_total": paid_total,
+                "remaining": remaining,
+                "is_complete": is_complete,
+                "reopened": reopened,
+            },
+        }
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error voiding mesa payment {payment_id}: {e}")
+        raise APIError(f"Error al anular el pago: {e}", status_code=500)

@@ -188,6 +188,27 @@ async def add_session_payment(request: Request, table_id: UUID, body: AddSession
     )
 
 
+class VoidSessionPaymentRequest(BaseModel):
+    reason: str = Field(..., min_length=1, description="Issue warocol.com#649 — motivo de la anulación (auditoría).")
+
+
+@router.delete("/{table_id}/payments/{payment_id}", dependencies=[Depends(require_module(Module.POS))])
+async def void_session_payment(
+    request: Request,
+    table_id: UUID,
+    payment_id: UUID,
+    body: VoidSessionPaymentRequest,
+):
+    """
+    Issue warocol.com#649 — soft-delete a mesa partial payment (with its
+    proportional siblings). Reopens the session if the void cleared the
+    closing payment and auto-reverses the GL entries atomically.
+    """
+    return await tables_service.void_table_payment(
+        request, table_id, payment_id, body.reason,
+    )
+
+
 @router.get("/{table_id}/current", dependencies=[Depends(require_module(Module.POS))])
 async def get_current_session(request: Request, table_id: UUID):
     """

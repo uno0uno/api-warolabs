@@ -16,6 +16,7 @@ from app.core.exceptions import AuthenticationError, APIError
 from app.services.waros_service import evaluate_and_award
 from app.services.email_helpers import send_pos_receipt_email
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
+from app.services.accounting_service import void_order_journal_entry_in_txn
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas, finalize_open_comandas
 import logging
@@ -776,9 +777,9 @@ async def add_order_payment(
                 )
                 payment_id = str(payment_row["id"])
 
-                # 4. Compute paid total
+                # 4. Compute paid total (warocol.com#649: ignore voided rows)
                 paid_total_row = await conn.fetchrow(
-                    "SELECT COALESCE(SUM(amount), 0) AS paid_total FROM order_payments WHERE order_id = $1",
+                    "SELECT COALESCE(SUM(amount), 0) AS paid_total FROM order_payments WHERE order_id = $1 AND voided_at IS NULL",
                     order_id
                 )
                 paid_total = float(paid_total_row["paid_total"])
@@ -834,6 +835,128 @@ async def add_order_payment(
     except Exception as e:
         logger.error(f"Error adding order payment: {str(e)}")
         raise APIError(f"Error adding payment: {str(e)}", status_code=500)
+
+
+# Roles allowed to void another cashier's payment. The original creator can
+# always void their own. Issue warocol.com#649.
+_PAYMENT_VOID_ROLES = {'admin', 'superuser'}
+
+
+async def void_order_payment(
+    request: Request,
+    cart_id: str,
+    payment_id: str,
+    reason: str,
+) -> Dict[str, Any]:
+    """
+    Issue warocol.com#649 — soft-delete a partial payment on a POS cart's order.
+
+    - Marks order_payments.voided_at = NOW().
+    - Recomputes paid_total ignoring voided rows.
+    - Reopens the order (payment_status='partial') and the cart
+      (status='active') when the voided row was the one that closed them.
+    - Auto-reverses the posted sale journal entry in the same transaction.
+    """
+    if not reason or not reason.strip():
+        raise APIError("Se requiere un motivo para anular el pago", status_code=400)
+
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+        role = session_context.role if hasattr(session_context, 'role') else None
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                # 1. Lock the payment row and join to its parent cart/order.
+                payment_row = await conn.fetchrow(
+                    """
+                    SELECT op.id, op.order_id, op.amount, op.payment_method,
+                           op.cash_received, op.created_by_user_id, op.voided_at,
+                           o.pos_cart_id, o.total_amount, o.payment_status, o.status AS order_status
+                    FROM order_payments op
+                    JOIN orders o ON o.id = op.order_id
+                    WHERE op.id = $1::uuid AND op.tenant_id = $2
+                    FOR UPDATE OF op
+                    """,
+                    payment_id, tenant_id,
+                )
+                if not payment_row:
+                    raise APIError("Pago no encontrado", status_code=404)
+                if payment_row["voided_at"] is not None:
+                    raise APIError("Este pago ya fue anulado", status_code=409)
+                if str(payment_row["pos_cart_id"]) != str(cart_id):
+                    raise APIError("El pago no pertenece a este carrito", status_code=400)
+
+                order_id = payment_row["order_id"]
+
+                # 2. Authorization: creator or manager-level role.
+                creator_id = payment_row["created_by_user_id"]
+                if creator_id is not None and str(creator_id) != str(user_id) and role not in _PAYMENT_VOID_ROLES:
+                    raise APIError(
+                        "Solo el cajero que registró el pago o un administrador puede anularlo",
+                        status_code=403,
+                    )
+
+                # 3. Lock the parent order to coordinate concurrent voids.
+                await conn.execute("SELECT 1 FROM orders WHERE id = $1 FOR UPDATE", order_id)
+
+                was_paid = payment_row["payment_status"] == "paid"
+
+                # 4. Mark payment as voided (soft delete).
+                await conn.execute(
+                    "UPDATE order_payments SET voided_at = NOW() WHERE id = $1",
+                    payment_row["id"],
+                )
+
+                # 5. Recompute paid total ignoring voided rows.
+                paid_row = await conn.fetchrow(
+                    "SELECT COALESCE(SUM(amount), 0) AS paid FROM order_payments WHERE order_id = $1 AND voided_at IS NULL",
+                    order_id,
+                )
+                paid_total = float(paid_row["paid"])
+                total_amount = float(payment_row["total_amount"])
+                remaining = max(0.0, total_amount - paid_total)
+                is_complete = remaining <= 0.01
+
+                # 6. If voiding flipped the order out of fully-paid, reopen.
+                reopened = was_paid and not is_complete
+                if reopened:
+                    await conn.execute(
+                        "UPDATE orders SET payment_status = 'partial' WHERE id = $1",
+                        order_id,
+                    )
+                    await conn.execute(
+                        "UPDATE pos_carts SET status = 'active', updated_at = NOW() WHERE id = $1",
+                        payment_row["pos_cart_id"],
+                    )
+                    # Reverse the posted GL entry — same transaction, atomic.
+                    await void_order_journal_entry_in_txn(
+                        conn, tenant_id, order_id, user_id, reason.strip(),
+                    )
+
+        logger.info(
+            f"Payment {payment_id} voided (order={order_id}, paid_total={paid_total}, reopened={reopened})"
+        )
+        return {
+            "success": True,
+            "data": {
+                "voided_ids": [str(payment_id)],
+                "paid_total": paid_total,
+                "remaining": remaining,
+                "is_complete": is_complete,
+                "reopened": reopened,
+            },
+        }
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error voiding payment {payment_id}: {e}")
+        raise APIError(f"Error al anular el pago: {e}", status_code=500)
 
 
 async def complete_pos_order(
