@@ -101,6 +101,22 @@ class TenantPublicProfileBase(BaseModel):
                     "of tables_enabled — bar/counter modes work without tables."
     )
 
+    # Custom mesa label (warocol.com#614) — tenant-global override for the noun
+    # used across the UI. NULL means the frontend falls back to defaults
+    # ("Mesa" / "Mesas"). Empty/whitespace input on the API normalizes to NULL.
+    tables_label_singular: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=40,
+        description="Custom singular noun for 'Mesa' (e.g. 'Habitación' for hotels). NULL = use default.",
+    )
+    tables_label_plural: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=40,
+        description="Custom plural noun for 'Mesas' (e.g. 'Habitaciones'). NULL = use default.",
+    )
+
 class TenantPublicProfileCreate(TenantPublicProfileBase):
     """Create tenant public profile"""
     tenant_id: UUID = Field(..., description="Tenant ID")
@@ -142,6 +158,10 @@ class TenantPublicProfileUpdate(BaseModel):
     auto_select_generic_enabled: Optional[bool] = None
     expediter_enabled: Optional[bool] = None
     waiter_attribution_enabled: Optional[bool] = None
+
+    # Custom mesa label (warocol.com#614)
+    tables_label_singular: Optional[str] = Field(None, min_length=1, max_length=40)
+    tables_label_plural: Optional[str] = Field(None, min_length=1, max_length=40)
 
 class TenantPublicProfile(TenantPublicProfileBase):
     """Complete tenant public profile with all fields"""

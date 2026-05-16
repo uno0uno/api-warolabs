@@ -25,6 +25,8 @@ SELECT
     tpp.accepts_online_orders,
     tpp.auto_select_generic_enabled,
     tpp.waiter_attribution_enabled,
+    tpp.tables_label_singular,
+    tpp.tables_label_plural,
     fd.nit,
     fd.business_name,
     fd.type_organization_id,
@@ -90,6 +92,8 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         'accepts_online_orders': bool(row['accepts_online_orders']) if row['accepts_online_orders'] is not None else False,
         'auto_select_generic_enabled': bool(row['auto_select_generic_enabled']) if row['auto_select_generic_enabled'] is not None else False,
         'waiter_attribution_enabled': bool(row['waiter_attribution_enabled']) if row['waiter_attribution_enabled'] is not None else False,
+        'tables_label_singular': row['tables_label_singular'],
+        'tables_label_plural': row['tables_label_plural'],
         'fiscal_data': {
             'nit': row['nit'],
             'business_name': row['business_name'],

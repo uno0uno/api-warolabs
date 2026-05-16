@@ -86,6 +86,57 @@ async def update_toggle(
     return {"success": True, "data": {column_name: enabled}}
 
 
+async def update_tables_label(
+    tenant_id: UUID,
+    singular: Optional[str],
+    plural: Optional[str],
+) -> Dict[str, Any]:
+    """Persist tenant-global custom labels for the mesa noun (warocol.com#614).
+
+    Empty / whitespace inputs are normalized to NULL — the frontend
+    interprets that as "use defaults" (Mesa / Mesas).
+
+    Mirrors the UPSERT pattern from `update_toggle()` so fresh tenants
+    without a tenant_public_profiles row still work; `slug` and
+    `display_name` are seeded from the `tenants` table (both NOT NULL
+    with no DB defaults).
+
+    String-valued sibling to `update_toggle()`; deliberately NOT entered
+    into the `ALLOWED_TOGGLES` whitelist since that frozenset is for
+    boolean toggles only.
+    """
+    # Normalize: empty / whitespace-only -> NULL (resets to default)
+    sin = singular.strip() if singular and singular.strip() else None
+    plu = plural.strip() if plural and plural.strip() else None
+
+    query = """
+        INSERT INTO tenant_public_profiles
+            (tenant_id, slug, display_name, tables_label_singular, tables_label_plural)
+        SELECT t.id, t.slug, t.name, $2, $3
+        FROM tenants t
+        WHERE t.id = $1
+        ON CONFLICT (tenant_id) DO UPDATE
+            SET tables_label_singular = EXCLUDED.tables_label_singular,
+                tables_label_plural   = EXCLUDED.tables_label_plural,
+                updated_at = now()
+        RETURNING tables_label_singular, tables_label_plural
+    """
+
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(query, tenant_id, sin, plu)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    return {
+        "success": True,
+        "data": {
+            "tables_label_singular": row["tables_label_singular"],
+            "tables_label_plural": row["tables_label_plural"],
+        },
+    }
+
+
 async def assert_waiter_attribution_enabled(tenant_id: UUID) -> None:
     """Raise 409 if `waiter_attribution_enabled` is False for this tenant.
 
