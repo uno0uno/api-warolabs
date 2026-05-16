@@ -44,6 +44,7 @@ async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
                     tpp.seo_title, tpp.seo_description,
                     tpp.accepts_online_orders, tpp.min_order_amount, tpp.estimated_preparation_time,
                     tpp.is_manually_open,
+                    tpp.tip_enabled, tpp.tip_default_percentages, tpp.tip_preselect_index,
                     tpp.created_at, tpp.updated_at
                 FROM tenant_public_profiles tpp
                 JOIN tenant_subscriptions ts ON ts.tenant_id = tpp.tenant_id
@@ -72,6 +73,17 @@ async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
                     profile['social_media'] = json.loads(profile['social_media'])
                 except (json.JSONDecodeError, TypeError):
                     profile['social_media'] = {}
+
+            # warocol.com#639 — tip presets surface to the public storefront so the
+            # online checkout can render the tip selector. asyncpg returns
+            # numeric(5,2)[] as list[Decimal]; cast to list[float] for JSON.
+            # Default to [10.0] when missing so the checkout has something to show
+            # if a tenant enables tipping without explicitly setting presets.
+            tip_presets = profile.get('tip_default_percentages')
+            profile['tip_default_percentages'] = (
+                [float(p) for p in tip_presets] if tip_presets else [10.0]
+            )
+            profile['tip_enabled'] = bool(profile.get('tip_enabled'))
 
             # Calculate if currently open — manual toggle takes priority
             profile['is_currently_open'] = is_currently_open(

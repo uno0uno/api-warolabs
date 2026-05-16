@@ -291,6 +291,30 @@ async def add_cart_payment(
     )
 
 
+class VoidPaymentRequest(BaseModel):
+    reason: str = Field(..., min_length=1, description="Issue warocol.com#649 — motivo de la anulación (auditoría).")
+
+
+@router.delete("/{cart_id}/payments/{payment_id}", dependencies=[Depends(require_module(Module.POS))])
+async def void_cart_payment(
+    cart_id: str,
+    payment_id: str,
+    body: VoidPaymentRequest,
+    request: Request,
+):
+    """
+    Issue warocol.com#649 — soft-delete a partial payment on a cart's order.
+    Recomputes paid_total, reopens the cart if the void cleared the closing
+    payment, and auto-reverses the posted sale journal entry atomically.
+    """
+    return await pos_cart_service.void_order_payment(
+        request=request,
+        cart_id=cart_id,
+        payment_id=payment_id,
+        reason=body.reason,
+    )
+
+
 @router.get("/{cart_id}/tax-preview", dependencies=[Depends(require_module(Module.POS))])
 async def get_cart_tax_preview(
     request: Request,

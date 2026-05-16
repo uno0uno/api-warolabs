@@ -418,6 +418,94 @@ async def _assert_period_open(conn, tenant_id: UUID, year: int, month: int) -> N
         )
 
 
+async def void_order_journal_entry_in_txn(
+    conn,
+    tenant_id: UUID,
+    order_id: UUID,
+    user_id: Optional[UUID],
+    reason: str,
+) -> Optional[UUID]:
+    """
+    Issue warocol.com#649 — void the posted sale entry for an order and post
+    a balancing reversing entry, all inside the caller's transaction.
+
+    Mirrors `void_journal_entry` semantics but works against an already-open
+    connection so a single transaction covers payment-void + GL-void atomically.
+
+    Returns the id of the reversing entry, or None when no posted entry exists
+    for this order (early-stage partials never created one — nothing to undo).
+    """
+    entry_row = await conn.fetchrow(
+        """SELECT id, entry_date, period_year, period_month, description,
+                  reference, total_debit, total_credit, status
+           FROM tenant_journal_entries
+           WHERE tenant_id = $1 AND source_module = 'orden' AND source_id = $2
+             AND status = 'posted'
+           ORDER BY created_at DESC
+           LIMIT 1
+           FOR UPDATE""",
+        tenant_id, order_id,
+    )
+    if not entry_row:
+        return None
+
+    await _assert_period_open(conn, tenant_id, entry_row['period_year'], entry_row['period_month'])
+
+    original_lines = await conn.fetch(
+        """SELECT account_id, debit, credit, description, line_order
+           FROM tenant_journal_lines WHERE journal_entry_id = $1
+           ORDER BY line_order""",
+        entry_row['id'],
+    )
+
+    await conn.execute(
+        """UPDATE tenant_journal_entries
+           SET status = 'voided', voided_at = NOW()
+           WHERE id = $1""",
+        entry_row['id'],
+    )
+
+    rev_description = f"Reversión: {entry_row['description']} — {reason.strip()}"
+    rev_row = await conn.fetchrow(
+        """INSERT INTO tenant_journal_entries
+               (tenant_id, entry_date, period_year, period_month,
+                description, reference, source_module, source_id,
+                status, total_debit, total_credit, created_by, posted_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'system', $7,
+                   'posted', $8, $9, $10, NOW())
+           RETURNING id""",
+        tenant_id,
+        entry_row['entry_date'],
+        entry_row['period_year'],
+        entry_row['period_month'],
+        rev_description,
+        entry_row['reference'],
+        entry_row['id'],
+        float(entry_row['total_credit']),
+        float(entry_row['total_debit']),
+        user_id,
+    )
+
+    for line in original_lines:
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit,
+                    description, line_order)
+               VALUES ($1, $2, $3, $4, $5, $6)""",
+            rev_row['id'],
+            line['account_id'],
+            float(line['credit']),
+            float(line['debit']),
+            line['description'],
+            line['line_order'],
+        )
+
+    logger.info(
+        f"🔄 Order GL entry voided in payment-void txn: order={order_id} entry={entry_row['id']} → reversing {rev_row['id']}"
+    )
+    return rev_row['id']
+
+
 async def create_journal_entry(request: Request, body: JournalEntryCreate) -> JournalEntryResponse:
     """
     Create a draft journal entry with its lines.
