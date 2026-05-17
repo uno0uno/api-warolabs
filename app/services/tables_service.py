@@ -650,12 +650,33 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     raise NotFoundError("Table not found")
 
                 session_row = await conn.fetchrow(
-                    "SELECT id FROM table_sessions WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL",
+                    """
+                    SELECT
+                        ts.id,
+                        COALESCE(ts.attended_by_member_id, t.assigned_member_id) AS effective_waiter_member_id
+                    FROM table_sessions ts
+                    JOIN tables t ON t.id = ts.table_id
+                    WHERE ts.table_id = $1 AND ts.tenant_id = $2 AND ts.closed_at IS NULL
+                    """,
                     table_id,
                     tenant_id,
                 )
                 if not session_row:
                     raise NotFoundError("No open session found for this table")
+
+                # warocol.com#665 — when checkout omits served_by (session already has a waiter),
+                # copy the effective waiter onto completed orders for propinas / member reports.
+                if resolved_served_by is None and session_row.get("effective_waiter_member_id"):
+                    member_ok = await conn.fetchval(
+                        """
+                        SELECT id FROM tenant_members
+                        WHERE id = $1 AND tenant_id = $2 AND is_active = true AND terminated_at IS NULL
+                        """,
+                        session_row["effective_waiter_member_id"],
+                        tenant_id,
+                    )
+                    if member_ok:
+                        resolved_served_by = session_row["effective_waiter_member_id"]
 
                 is_bar_table = bool(table_row["is_bar"])
 
