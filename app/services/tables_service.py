@@ -597,11 +597,22 @@ async def open_session(
         raise APIError(f"Error opening session: {e}", status_code=500)
 
 
-async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None, split_mode: bool = False, split_first_amount: float = 0.0, *, split_first_cash_received: Optional[float] = None, cash_received: Optional[float] = None) -> dict:
+async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None, split_mode: bool = False, split_first_amount: float = 0.0, *, split_first_cash_received: Optional[float] = None, cash_received: Optional[float] = None, tip_amount: float = 0, tip_source: str = 'none') -> dict:
     """
     Close the active session for a table.
     If payment_method is provided, marks all pending orders as completed with that payment method.
     """
+    # warocol.com#639 — tip validation (same rules as pos_cart.complete_pos_order)
+    if tip_amount < 0:
+        raise APIError("tip_amount must be non-negative", status_code=400)
+    if tip_source not in ('preset', 'custom', 'none'):
+        raise APIError(f"invalid tip_source: {tip_source!r}", status_code=400)
+    if tip_amount == 0:
+        tip_source = 'none'
+    elif tip_source == 'none':
+        raise APIError("tip_source cannot be 'none' when tip_amount > 0", status_code=400)
+    if tip_amount > 0 and split_mode:
+        raise APIError("Tip is not supported in split-payment mode in this phase", status_code=400)
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -764,6 +775,41 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                              )
                             """,
                             cash_received,
+                            session_row["id"],
+                        )
+
+                    # warocol.com#639 — apply session-level tip to the first completed order
+                    # (same single-row pattern as cash_received). The tip lives on one
+                    # `orders` row so the /ventas/propinas aggregator sees a single entry
+                    # per mesa close instead of N inflated percentages.
+                    if not split_mode and tip_amount > 0:
+                        tenant_tip_enabled = await conn.fetchval(
+                            "SELECT tip_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                            tenant_id,
+                        )
+                        if not bool(tenant_tip_enabled):
+                            raise APIError("Tipping is not enabled for this tenant", status_code=400)
+                        if payment_method == 'cash' and cash_received is not None:
+                            session_total_with_tip = await conn.fetchval(
+                                "SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE table_session_id = $1 AND status = 'completed'",
+                                session_row["id"],
+                            )
+                            if cash_received < (float(session_total_with_tip or 0) + float(tip_amount)):
+                                raise APIError(
+                                    f"Efectivo recibido ({cash_received}) debe cubrir total + propina ({float(session_total_with_tip or 0) + float(tip_amount)})",
+                                    status_code=400,
+                                )
+                        await conn.execute(
+                            """
+                            UPDATE orders SET tip_amount = $1, tip_source = $2
+                             WHERE id = (
+                               SELECT id FROM orders
+                                WHERE table_session_id = $3 AND status = 'completed'
+                                ORDER BY created_at LIMIT 1
+                             )
+                            """,
+                            float(tip_amount),
+                            tip_source,
                             session_row["id"],
                         )
 
@@ -952,7 +998,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
         async with get_db_connection() as conn_ids:
             order_rows = await conn_ids.fetch(
                 """
-                SELECT id, order_number
+                SELECT id, order_number, total_amount
                 FROM orders
                 WHERE table_session_id = $1 AND status = 'completed'
                 ORDER BY created_at
@@ -1005,6 +1051,9 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 "standard_tax": float(_std_tax),
                 "liquor_tax": float(_liq_tax),
                 "standard_tax_label": _tax_label,
+                "tip_amount": float(tip_amount) if tip_amount > 0 else 0,
+                "tip_source": tip_source,
+                "charged_amount": float(sum(float(r.get("total_amount", 0)) for r in order_rows) + float(tip_amount)) if tip_amount > 0 else None,
             },
         }
 

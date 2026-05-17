@@ -5,7 +5,7 @@ CRUD and session lifecycle endpoints for restaurant table management.
 Issue: https://github.com/uno0uno/warocol.com/issues/298
 """
 from fastapi import APIRouter, Depends, Request, Query
-from typing import Optional, List
+from typing import Optional, List, Literal
 from uuid import UUID
 from datetime import date
 from pydantic import BaseModel, Field
@@ -139,6 +139,8 @@ class CloseSessionRequest(BaseModel):
     split_first_amount: float = Field(0.0, description="Amount for the first split payment (used only when split_mode=True)")
     split_first_cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for the first split payment when payment_method='cash'. Must be >= split_first_amount.")
     cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for a single (non-split) cash close. Must be >= total session amount.")
+    tip_amount: float = Field(0, ge=0, description="warocol.com#639 — total tip for the mesa session. Applied to the first completed order in the session (like cash_received). Rejected when tip_enabled=false or split_mode=true.")
+    tip_source: Literal['preset', 'custom', 'none'] = Field('none', description="warocol.com#639 — how the tip was chosen. Must agree with tip_amount.")
 
 
 class AddSessionPaymentRequest(BaseModel):
@@ -171,6 +173,8 @@ async def close_session(request: Request, table_id: UUID, body: CloseSessionRequ
         body.split_mode, body.split_first_amount,
         split_first_cash_received=body.split_first_cash_received,
         cash_received=body.cash_received,
+        tip_amount=body.tip_amount,
+        tip_source=body.tip_source,
     )
 
 
