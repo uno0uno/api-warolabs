@@ -115,6 +115,30 @@ async def get_or_create_active_cart(
             # Get cart items with modifiers
             items = await get_cart_items(conn, cart_id)
 
+            # Issue warocol.com#656 — active (non-voided) partial payments of the
+            # cart's order, surfaced so checkout can rehydrate "Pagos registrados"
+            # on re-entry (otherwise the cashier may double-charge).
+            # POS payments are not split proportionally — one row per logical
+            # payment. Bar mode filter via order state (only orders still in flight).
+            partial_payments_rows = await conn.fetch(
+                """
+                SELECT op.id, op.amount, op.payment_method, op.payment_method_id,
+                       op.paid_at, pm.name AS payment_method_name
+                FROM order_payments op
+                LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
+                WHERE op.order_id = (
+                    SELECT id FROM orders
+                    WHERE pos_cart_id = $1
+                      AND (status != 'completed' OR payment_status != 'paid')
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                )
+                  AND op.voided_at IS NULL
+                ORDER BY op.paid_at
+                """,
+                cart_id,
+            )
+
             return {
                 "success": True,
                 "data": {
@@ -122,7 +146,19 @@ async def get_or_create_active_cart(
                     "total_amount": float(cart_row['total_amount']),
                     "items": items,
                     "created_at": cart_row['created_at'].isoformat(),
-                    "updated_at": cart_row['updated_at'].isoformat()
+                    "updated_at": cart_row['updated_at'].isoformat(),
+                    # Issue warocol.com#656 — rehydration source for checkout's Pagos registrados
+                    "partial_payments": [
+                        {
+                            "id": str(r["id"]),
+                            "amount": float(r["amount"]),
+                            "payment_method": r["payment_method"],
+                            "payment_method_id": str(r["payment_method_id"]) if r["payment_method_id"] else None,
+                            "payment_method_name": r["payment_method_name"],
+                            "paid_at": r["paid_at"].isoformat(),
+                        }
+                        for r in partial_payments_rows
+                    ],
                 }
             }
 
