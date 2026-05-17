@@ -1059,7 +1059,8 @@ async def complete_pos_order(
                 if flags:
                     waiter_attribution_enabled = bool(flags['waiter_attribution_enabled'])
                     tip_enabled = bool(flags['tip_enabled'])
-                if served_by_member_id is not None and waiter_attribution_enabled:
+                # warocol.com#663 — persist checkout attribution even when per-table toggle is off
+                if served_by_member_id is not None:
                     member_check = await _conn.fetchval(
                         """
                         SELECT id FROM tenant_members
@@ -1071,7 +1072,6 @@ async def complete_pos_order(
                     if member_check is None:
                         raise NotFoundError("Member not found")
                     resolved_served_by = served_by_member_id
-                # waiter toggle OFF → leave resolved_served_by as None (silent ignore)
 
         # warocol.com#637 — tip validation (fail fast, before the transaction).
         # Coerce (0, anything) → (0, 'none') for idempotency. Reject inconsistent

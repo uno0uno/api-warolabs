@@ -597,7 +597,7 @@ async def open_session(
         raise APIError(f"Error opening session: {e}", status_code=500)
 
 
-async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None, split_mode: bool = False, split_first_amount: float = 0.0, *, split_first_cash_received: Optional[float] = None, cash_received: Optional[float] = None, tip_amount: float = 0, tip_source: str = 'none') -> dict:
+async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None, split_mode: bool = False, split_first_amount: float = 0.0, *, split_first_cash_received: Optional[float] = None, cash_received: Optional[float] = None, tip_amount: float = 0, tip_source: str = 'none', served_by_member_id: Optional[UUID] = None) -> dict:
     """
     Close the active session for a table.
     If payment_method is provided, marks all pending orders as completed with that payment method.
@@ -613,6 +613,26 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
         raise APIError("tip_source cannot be 'none' when tip_amount > 0", status_code=400)
     if tip_amount > 0 and split_mode:
         raise APIError("Tip is not supported in split-payment mode in this phase", status_code=400)
+
+    resolved_served_by: Optional[UUID] = None
+    if served_by_member_id is not None:
+        session_context_pre = require_valid_session(request)
+        tenant_id_pre = session_context_pre.tenant_id
+        if not tenant_id_pre:
+            raise AuthenticationError("Tenant ID is required")
+        async with get_db_connection(use_transaction=False) as _conn:
+            member_check = await _conn.fetchval(
+                """
+                SELECT id FROM tenant_members
+                WHERE id = $1 AND tenant_id = $2 AND is_active = true AND terminated_at IS NULL
+                """,
+                served_by_member_id,
+                tenant_id_pre,
+            )
+            if member_check is None:
+                raise NotFoundError("Member not found")
+            resolved_served_by = served_by_member_id
+
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -749,6 +769,18 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         f"(payment_method={payment_method}, payment_status={payment_status}, "
                         f"discount_amount={_discount_amount}) for session {session_row['id']}"
                     )
+
+                    # warocol.com#663 — checkout waiter attribution on all completed session orders
+                    if resolved_served_by is not None:
+                        await conn.execute(
+                            """
+                            UPDATE orders
+                            SET served_by_member_id = $1, updated_at = now()
+                            WHERE table_session_id = $2 AND status = 'completed'
+                            """,
+                            resolved_served_by,
+                            session_row["id"],
+                        )
 
                     # Issue #524 — single-payment (non-split) cash close: attach cash_received
                     # to the FIRST completed order in the session (others stay NULL). Cierre

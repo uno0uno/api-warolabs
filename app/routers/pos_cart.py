@@ -158,7 +158,7 @@ class CompleteOrderRequest(BaseModel):
     delivery_address_id: Optional[UUID] = Field(None, description="UUID of an addresses_profile row owned by customer_id. When set, this order is treated as a delivery and the comanda fires with source_type='delivery'.")
     scheduled_time: Optional[datetime] = Field(None, description="ISO datetime for scheduled delivery. NULL = ASAP. Forward-compatible: v1 UI sends NULL only.")
     delivery_instructions: Optional[str] = Field(None, description="Free-text notes for the courier (e.g. 'Tocar el timbre 2 veces').")
-    served_by_member_id: Optional[UUID] = Field(None, description="Issue warocol.com#575 — per-order waiter attribution. Pre-validated when set: must belong to tenant + be active. Silently ignored when waiter_attribution_enabled is OFF for the tenant.")
+    served_by_member_id: Optional[UUID] = Field(None, description="Issue warocol.com#575/#663 — waiter at checkout. Validated against active tenant members; persisted even when waiter_attribution_enabled is OFF.")
     tip_amount: float = Field(0, ge=0, description="Issue warocol.com#637 — tip amount in COP. Strictly separate from total_amount. Rejected when tip_enabled=false for the tenant. Rejected when split_mode=true. For cash payments, cash_received must cover total + tip.")
     tip_source: Literal['preset', 'custom', 'none'] = Field('none', description="Issue warocol.com#637 — how the customer chose the tip. Must agree with tip_amount: (0,'none') or (>0,'preset'|'custom').")
 

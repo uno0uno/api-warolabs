@@ -518,6 +518,8 @@ async def get_order_by_id(
                     o.scheduled_time,
                     o.delivery_instructions,
                     t_meta2.is_bar as is_bar,
+                    o.served_by_member_id,
+                    p_served.name as served_by_member_name,
                     p.id as customer_id,
                     p.name as customer_name,
                     p.phone_number as customer_phone,
@@ -539,6 +541,8 @@ async def get_order_by_id(
                         WHERE oi.order_id = o.id
                     ) as items_count
                 FROM orders o
+                LEFT JOIN tenant_members tm_served ON tm_served.id = o.served_by_member_id
+                LEFT JOIN profile p_served ON p_served.id = tm_served.user_id
                 LEFT JOIN profile p ON o.customer_id = p.id
                 LEFT JOIN table_sessions ts_meta2 ON ts_meta2.id = o.table_session_id
                 LEFT JOIN tables t_meta2 ON t_meta2.id = ts_meta2.table_id
@@ -642,6 +646,8 @@ async def get_order_by_id(
                         "phone": order_row['customer_phone'],
                         "email": order_row['customer_email'],
                     },
+                    "served_by_member_id": str(order_row['served_by_member_id']) if order_row['served_by_member_id'] else None,
+                    "served_by_member_name": order_row['served_by_member_name'],
                     "items_count": order_row['items_count'],
                     "split_payments": split_payments,
                     "standard_tax": _std_tax,
