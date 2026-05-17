@@ -9,12 +9,13 @@ Five dedicated PATCH endpoints (one per toggle) — REST-friendly and easier
 to gate / observe than a single combined endpoint. The service layer's
 column whitelist guards against SQL injection.
 """
+from decimal import Decimal
 from uuid import UUID
 
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
@@ -23,6 +24,7 @@ from app.services import table_assignments_service
 from app.services.operaciones_context_service import (
     get_operaciones_context,
     update_tables_label,
+    update_tip_config,
     update_toggle,
 )
 
@@ -42,6 +44,43 @@ class TablesLabelRequest(BaseModel):
     """
     singular: Optional[str] = Field(None, max_length=40)
     plural: Optional[str] = Field(None, max_length=40)
+
+
+class TipConfigRequest(BaseModel):
+    """Payload for PATCH /operaciones/tip/config (warocol.com#638).
+
+    Non-boolean part of the tipping configuration. The boolean toggle
+    (tip_enabled) flows through PATCH /operaciones/toggles/tip via the
+    generic update_toggle() helper.
+
+    Mirrors the validation rules baked into the DB CHECK constraints from
+    migration 078 + the @field_validator on TenantPublicProfileBase:
+        - 1 to 5 percentage entries, each in [0, 100]
+        - preselect_index is NULL or a valid index into percentages
+    """
+    percentages: List[Decimal] = Field(..., min_length=1, max_length=5)
+    preselect_index: Optional[int] = None
+
+    @field_validator('percentages')
+    @classmethod
+    def _validate_percentages(cls, v):
+        for p in v:
+            if p < 0 or p > 100:
+                raise ValueError(f"tip preset {p} must be between 0 and 100")
+        return v
+
+    @model_validator(mode='after')
+    def _validate_preselect(self):
+        if self.preselect_index is None:
+            return self
+        if self.preselect_index < 0:
+            raise ValueError("preselect_index must be non-negative")
+        if self.preselect_index >= len(self.percentages):
+            raise ValueError(
+                f"preselect_index {self.preselect_index} is out of bounds for "
+                f"percentages of length {len(self.percentages)}"
+            )
+        return self
 
 
 @router.get(
@@ -110,6 +149,43 @@ async def toggle_auto_select_generic(request: Request, body: ToggleRequest):
     session = require_valid_session(request)
     return await update_toggle(
         session.tenant_id, "auto_select_generic_enabled", body.enabled
+    )
+
+
+# ── Tipping family (warocol.com#638) ────────────────────────────────────
+
+@router.patch(
+    "/toggles/tip",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def toggle_tip_enabled(request: Request, body: ToggleRequest):
+    """Toggle `tip_enabled` on the tenant profile.
+
+    Master switch for the tipping feature (warocol.com#638). When false,
+    the checkout selector (POS + online) is hidden and the API rejects
+    tip_amount > 0. Reads/writes of the existing tip presets remain
+    accessible — operators can keep their preset list ready without
+    surfacing tipping to customers.
+    """
+    session = require_valid_session(request)
+    return await update_toggle(session.tenant_id, "tip_enabled", body.enabled)
+
+
+@router.patch(
+    "/tip/config",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def patch_tip_config(request: Request, body: TipConfigRequest):
+    """Persist tip presets + preselected index (warocol.com#638).
+
+    Non-boolean sibling of /operaciones/toggles/tip. Validates that the
+    presets array is non-empty + <= 5 entries each in [0, 100], and that
+    preselect_index (when set) is in bounds. App-level validation mirrors
+    the DB CHECK constraints from migration 078.
+    """
+    session = require_valid_session(request)
+    return await update_tip_config(
+        session.tenant_id, body.percentages, body.preselect_index,
     )
 
 

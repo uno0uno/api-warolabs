@@ -27,6 +27,9 @@ SELECT
     tpp.waiter_attribution_enabled,
     tpp.tables_label_singular,
     tpp.tables_label_plural,
+    tpp.tip_enabled,
+    tpp.tip_default_percentages,
+    tpp.tip_preselect_index,
     fd.nit,
     fd.business_name,
     fd.type_organization_id,
@@ -94,6 +97,12 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         'waiter_attribution_enabled': bool(row['waiter_attribution_enabled']) if row['waiter_attribution_enabled'] is not None else False,
         'tables_label_singular': row['tables_label_singular'],
         'tables_label_plural': row['tables_label_plural'],
+        'tip_enabled': bool(row['tip_enabled']) if row['tip_enabled'] is not None else False,
+        'tip_default_percentages': (
+            [float(p) for p in row['tip_default_percentages']]
+            if row['tip_default_percentages'] else [10.0]
+        ),
+        'tip_preselect_index': row['tip_preselect_index'],
         'fiscal_data': {
             'nit': row['nit'],
             'business_name': row['business_name'],
