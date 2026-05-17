@@ -1686,10 +1686,18 @@ async def export_orders_to_email(
     sort_field: str = "order_date",
     sort_direction: str = "desc",
     date_from: Optional[str] = None,
-    date_to: Optional[str] = None
+    date_to: Optional[str] = None,
+    tips_only: bool = False,
+    member_id: Optional[str] = None,
+    channel: Optional[str] = None,
 ) -> dict:
     """
-    Export all orders (without pagination) based on filters and send via email
+    Export all orders (without pagination) based on filters and send via email.
+
+    When `tips_only=True` (warocol.com#640), the result is restricted to
+    orders with tip_amount > 0 and the CSV emits tip-specific columns
+    (channel, mesero, propina, %). Additional filters `member_id` and
+    `channel` apply only to this mode.
     """
     try:
         session_context = require_valid_session(request)
@@ -1704,8 +1712,17 @@ async def export_orders_to_email(
             raise APIError("No se encontró el correo del usuario", status_code=400)
 
         async with get_db_connection() as conn:
-            # Build WHERE clause (same as get_orders_list but without pagination)
-            where_conditions = ["o.tenant_id = $1", "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"]
+            # Build WHERE clause (same as get_orders_list but without pagination).
+            # warocol.com#640 — tips-only mode swaps the orders-list base predicate
+            # for tip_amount > 0 (all tips, regardless of channel).
+            where_conditions: List[str] = ["o.tenant_id = $1"]
+            if tips_only:
+                where_conditions.append("o.tip_amount > 0")
+            else:
+                where_conditions.append(
+                    "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL "
+                    "OR o.extra_attributes->>'source' = 'manual')"
+                )
             params = [tenant_id]
             param_count = 1
 
@@ -1754,10 +1771,25 @@ async def export_orders_to_email(
                 where_conditions.append(f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')")
                 params.append(parsed_date_to)
 
+            # warocol.com#640 — tips-only filters (ignored when tips_only is False)
+            if tips_only and member_id:
+                param_count += 1
+                where_conditions.append(f"o.served_by_member_id = ${param_count}::uuid")
+                params.append(member_id)
+            if tips_only and channel:
+                if channel == 'online':
+                    where_conditions.append("o.online_cart_id IS NOT NULL")
+                elif channel == 'mesa':
+                    where_conditions.append("o.table_session_id IS NOT NULL")
+                elif channel == 'pos':
+                    where_conditions.append("o.pos_cart_id IS NOT NULL AND o.table_session_id IS NULL")
+
             where_clause = " AND ".join(where_conditions)
 
-            # Validate sort field
+            # Validate sort field (tips-only mode also accepts tip_amount)
             allowed_sort_fields = ["order_number", "order_date", "total_amount", "customer_name", "payment_method"]
+            if tips_only:
+                allowed_sort_fields.append("tip_amount")
             if sort_field not in allowed_sort_fields:
                 sort_field = "order_date"
 
@@ -1768,40 +1800,68 @@ async def export_orders_to_email(
                 "order_number": "o.order_number",
                 "order_date": "o.order_date",
                 "total_amount": "o.total_amount",
+                "tip_amount": "o.tip_amount",
                 "customer_name": "p.name",
                 "payment_method": "o.payment_method"
             }
             sort_column = sort_column_map.get(sort_field, "o.order_date")
 
-            # Get ALL orders without pagination
-            orders_query = f"""
-                SELECT
-                    o.id,
-                    o.order_number,
-                    o.order_date,
-                    o.total_amount,
-                    o.status,
-                    o.payment_method,
-                    COALESCE(pmg.name, o.payment_method) AS payment_method_display,
-                    p.name as customer_name,
-                    p.phone_number as customer_phone,
-                    (
-                        SELECT COUNT(*)
-                        FROM order_items oi
-                        WHERE oi.order_id = o.id
-                    ) as items_count
-                FROM orders o
-                LEFT JOIN profile p ON o.customer_id = p.id
-                LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id AND pm.tenant_id = $1
-                LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id AND pmg.tenant_id = $1
-                WHERE {where_clause}
-                ORDER BY {sort_column} {sort_direction}
-            """
+            # Get ALL rows without pagination. warocol.com#640 — tips-only mode
+            # adds tip_amount/tip_source + mesero name + cart linkage so the CSV
+            # can render channel and the tip-specific columns.
+            if tips_only:
+                orders_query = f"""
+                    SELECT
+                        o.id,
+                        o.order_number,
+                        o.order_date,
+                        o.total_amount,
+                        o.tip_amount,
+                        o.tip_source,
+                        o.status,
+                        o.payment_method,
+                        COALESCE(pmg.name, o.payment_method) AS payment_method_display,
+                        tm.name AS member_name,
+                        o.online_cart_id,
+                        o.table_session_id,
+                        o.pos_cart_id
+                    FROM orders o
+                    LEFT JOIN tenant_members tm ON tm.id = o.served_by_member_id
+                    LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id AND pm.tenant_id = $1
+                    LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id AND pmg.tenant_id = $1
+                    WHERE {where_clause}
+                    ORDER BY {sort_column} {sort_direction}
+                """
+            else:
+                orders_query = f"""
+                    SELECT
+                        o.id,
+                        o.order_number,
+                        o.order_date,
+                        o.total_amount,
+                        o.status,
+                        o.payment_method,
+                        COALESCE(pmg.name, o.payment_method) AS payment_method_display,
+                        p.name as customer_name,
+                        p.phone_number as customer_phone,
+                        (
+                            SELECT COUNT(*)
+                            FROM order_items oi
+                            WHERE oi.order_id = o.id
+                        ) as items_count
+                    FROM orders o
+                    LEFT JOIN profile p ON o.customer_id = p.id
+                    LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id AND pm.tenant_id = $1
+                    LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id AND pmg.tenant_id = $1
+                    WHERE {where_clause}
+                    ORDER BY {sort_column} {sort_direction}
+                """
 
             orders_rows = await conn.fetch(orders_query, *params)
 
             if not orders_rows:
-                raise APIError("No hay ventas para exportar con los filtros seleccionados", status_code=404)
+                noun = "propinas" if tips_only else "ventas"
+                raise APIError(f"No hay {noun} para exportar con los filtros seleccionados", status_code=404)
 
             # Status labels
             status_labels = {
@@ -1815,46 +1875,83 @@ async def export_orders_to_email(
             output = io.StringIO()
             writer = csv.writer(output, delimiter=';')  # Use semicolon for better Excel compatibility
 
-            # Write header
-            writer.writerow([
-                'Numero Orden',
-                'Fecha',
-                'Hora',
-                'Cliente',
-                'Telefono',
-                'Items',
-                'Metodo Pago',
-                'Total',
-                'Estado'
-            ])
-
-            total_sum = 0
+            total_sum = 0  # sum of total_amount (orders) or tip_amount (tips_only)
             completed_count = 0
             cancelled_count = 0
 
-            for row in orders_rows:
-                # Split date and time for easier Excel filtering
-                order_date = row['order_date'].strftime('%Y-%m-%d') if row['order_date'] else ''
-                order_time = row['order_date'].strftime('%H:%M:%S') if row['order_date'] else ''
-                total_amount = float(row['total_amount'])
-
-                if row['status'] == 'completed':
-                    total_sum += total_amount
-                    completed_count += 1
-                elif row['status'] == 'cancelled':
-                    cancelled_count += 1
-
+            if tips_only:
+                # warocol.com#640 — tip-specific CSV shape
                 writer.writerow([
-                    row['order_number'],
-                    order_date,
-                    order_time,
-                    row['customer_name'] or 'Sin nombre',
-                    row['customer_phone'] or '',
-                    row['items_count'],
-                    row['payment_method_display'] or row['payment_method'] or '',
-                    total_amount,
-                    status_labels.get(row['status'], row['status'])
+                    'Numero Orden',
+                    'Fecha',
+                    'Hora',
+                    'Canal',
+                    'Mesero',
+                    'Total Orden',
+                    'Propina',
+                    'Porcentaje',
+                    'Metodo Pago',
                 ])
+                for row in orders_rows:
+                    order_date_str = row['order_date'].strftime('%Y-%m-%d') if row['order_date'] else ''
+                    order_time_str = row['order_date'].strftime('%H:%M:%S') if row['order_date'] else ''
+                    total_amount = float(row['total_amount'])
+                    tip_amount = float(row['tip_amount'])
+                    pct = round(tip_amount / total_amount * 100, 2) if total_amount > 0 else 0
+                    if row['online_cart_id']:
+                        ch = 'online'
+                    elif row['table_session_id']:
+                        ch = 'mesa'
+                    else:
+                        ch = 'pos'
+                    total_sum += tip_amount
+                    completed_count += 1
+                    writer.writerow([
+                        row['order_number'],
+                        order_date_str,
+                        order_time_str,
+                        ch,
+                        row['member_name'] or 'Sin asignar',
+                        total_amount,
+                        tip_amount,
+                        f"{pct}%",
+                        row['payment_method_display'] or row['payment_method'] or '',
+                    ])
+            else:
+                # Standard orders export (unchanged shape)
+                writer.writerow([
+                    'Numero Orden',
+                    'Fecha',
+                    'Hora',
+                    'Cliente',
+                    'Telefono',
+                    'Items',
+                    'Metodo Pago',
+                    'Total',
+                    'Estado'
+                ])
+                for row in orders_rows:
+                    order_date_str = row['order_date'].strftime('%Y-%m-%d') if row['order_date'] else ''
+                    order_time_str = row['order_date'].strftime('%H:%M:%S') if row['order_date'] else ''
+                    total_amount = float(row['total_amount'])
+
+                    if row['status'] == 'completed':
+                        total_sum += total_amount
+                        completed_count += 1
+                    elif row['status'] == 'cancelled':
+                        cancelled_count += 1
+
+                    writer.writerow([
+                        row['order_number'],
+                        order_date_str,
+                        order_time_str,
+                        row['customer_name'] or 'Sin nombre',
+                        row['customer_phone'] or '',
+                        row['items_count'],
+                        row['payment_method_display'] or row['payment_method'] or '',
+                        total_amount,
+                        status_labels.get(row['status'], row['status'])
+                    ])
 
             csv_content = output.getvalue()
             output.close()
@@ -1878,7 +1975,33 @@ async def export_orders_to_email(
 
             date_str = now.strftime('%Y-%m-%d_%H%M')
 
-            email_body = f"""¡Hola {user_name}!
+            if tips_only:
+                # warocol.com#640 — tip-specific email copy + filename + subject
+                email_body = f"""¡Hola {user_name}!
+
+Aquí está tu reporte de propinas solicitado.
+
+RESUMEN
+-------
+Total de propinas exportadas: {len(orders_rows)}
+Suma total de propinas: ${total_sum:,.0f}
+Fecha de generación: {now.strftime('%d/%m/%Y %H:%M')}
+
+FILTROS APLICADOS
+-----------------
+{filter_text}
+
+Adjunto encontrarás el archivo CSV con el detalle de las propinas.
+Puedes abrirlo con Excel o Google Sheets.
+
+---
+Saifer 101 de Waro Colombia
+Tecnología colombiana para el mundo.
+"""
+                filename = f"propinas_{date_str}.csv"
+                subject = f"Reporte de Propinas - {date_str}"
+            else:
+                email_body = f"""¡Hola {user_name}!
 
 Aquí está tu reporte de ventas solicitado.
 
@@ -1901,14 +2024,15 @@ Puedes abrirlo con Excel o Google Sheets.
 Saifer 101 de Waro Colombia
 Tecnología colombiana para el mundo.
 """
+                filename = f"ventas_{date_str}.csv"
+                subject = f"Reporte de Ventas - {date_str}"
 
             # Send email with CSV attachment
-            filename = f"ventas_{date_str}.csv"
             success = await ses_service.send_email_with_attachment(
                 from_email="hola@warocol.com",
                 from_name="Waro Colombia - Reportes",
                 to_emails=[user_email],
-                subject=f"Reporte de Ventas - {date_str}",
+                subject=subject,
                 text_body=email_body,
                 attachment_data=csv_content.encode('utf-8'),
                 attachment_filename=filename,
