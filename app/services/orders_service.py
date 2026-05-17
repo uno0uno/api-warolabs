@@ -400,11 +400,12 @@ async def get_tips_list(
                     o.online_cart_id,
                     o.table_session_id,
                     o.served_by_member_id,
-                    tm.name AS member_name,
+                    p.name AS member_name,
                     t_meta.is_bar AS is_bar,
                     COUNT(*) OVER() AS total_count
                 FROM orders o
                 LEFT JOIN tenant_members tm ON tm.id = o.served_by_member_id
+                LEFT JOIN profile p ON p.id = tm.user_id
                 LEFT JOIN table_sessions ts_meta ON ts_meta.id = o.table_session_id
                 LEFT JOIN tables t_meta ON t_meta.id = ts_meta.table_id
                 WHERE {where_clause}
@@ -1821,12 +1822,13 @@ async def export_orders_to_email(
                         o.status,
                         o.payment_method,
                         COALESCE(pmg.name, o.payment_method) AS payment_method_display,
-                        tm.name AS member_name,
+                        p.name AS member_name,
                         o.online_cart_id,
                         o.table_session_id,
                         o.pos_cart_id
                     FROM orders o
                     LEFT JOIN tenant_members tm ON tm.id = o.served_by_member_id
+                    LEFT JOIN profile p ON p.id = tm.user_id
                     LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id AND pm.tenant_id = $1
                     LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id AND pmg.tenant_id = $1
                     WHERE {where_clause}
