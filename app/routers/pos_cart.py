@@ -3,7 +3,7 @@ POS Cart Router
 Endpoints for managing POS cart persistence
 """
 from fastapi import APIRouter, Depends, Request, Query
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Literal
 from uuid import UUID
 from datetime import date, datetime
 from pydantic import BaseModel, EmailStr, Field
@@ -159,6 +159,8 @@ class CompleteOrderRequest(BaseModel):
     scheduled_time: Optional[datetime] = Field(None, description="ISO datetime for scheduled delivery. NULL = ASAP. Forward-compatible: v1 UI sends NULL only.")
     delivery_instructions: Optional[str] = Field(None, description="Free-text notes for the courier (e.g. 'Tocar el timbre 2 veces').")
     served_by_member_id: Optional[UUID] = Field(None, description="Issue warocol.com#575 — per-order waiter attribution. Pre-validated when set: must belong to tenant + be active. Silently ignored when waiter_attribution_enabled is OFF for the tenant.")
+    tip_amount: float = Field(0, ge=0, description="Issue warocol.com#637 — tip amount in COP. Strictly separate from total_amount. Rejected when tip_enabled=false for the tenant. Rejected when split_mode=true. For cash payments, cash_received must cover total + tip.")
+    tip_source: Literal['preset', 'custom', 'none'] = Field('none', description="Issue warocol.com#637 — how the customer chose the tip. Must agree with tip_amount: (0,'none') or (>0,'preset'|'custom').")
 
 
 @router.post("/{cart_id}/complete", dependencies=[Depends(require_module(Module.POS))])
@@ -194,6 +196,8 @@ async def complete_order(
         split_first_cash_received=order_data.split_first_cash_received,
         cash_received=order_data.cash_received,
         served_by_member_id=order_data.served_by_member_id,
+        tip_amount=order_data.tip_amount,
+        tip_source=order_data.tip_source,
     )
 
 
@@ -224,6 +228,7 @@ class SendReceiptRequest(BaseModel):
     invoice_prefix: Optional[str] = None
     invoice_number: Optional[int] = None
     invoice_cufe: Optional[str] = None
+    tip_amount: float = Field(0.0, ge=0, description="Tip amount captured at checkout — shown as a separate line on the receipt (warocol.com#637).")
 
 
 class AddPaymentRequest(BaseModel):
@@ -267,6 +272,7 @@ async def send_receipt_email(request: Request, receipt_data: SendReceiptRequest)
         invoice_prefix=receipt_data.invoice_prefix,
         invoice_number=receipt_data.invoice_number,
         invoice_cufe=receipt_data.invoice_cufe,
+        tip_amount=receipt_data.tip_amount,
     )
     return {"success": success}
 

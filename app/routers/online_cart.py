@@ -3,7 +3,7 @@ Online Cart Router
 PUBLIC endpoints for online ordering cart management (NO authentication required)
 """
 from fastapi import APIRouter, Body, Depends, Query
-from typing import List, Optional
+from typing import List, Optional, Literal
 from uuid import UUID
 from pydantic import BaseModel, Field
 from app.services import online_cart_service
@@ -200,9 +200,14 @@ class CheckoutCartRequest(BaseModel):
     `payment_method` (group slug) is required; `payment_method_id` is required
     only when the chosen group exposes nested methods. `triggersCartera`
     groups are rejected — anonymous customers cannot accrue cartera.
+
+    Optional tip fields (warocol.com#637): when present, the service validates
+    against tenant tip_enabled and the (amount, source) consistency rule.
     """
     payment_method: Optional[str] = None
     payment_method_id: Optional[UUID] = None
+    tip_amount: float = Field(0, ge=0, description="Tip amount in COP. Rejected when tip_enabled=false for the tenant.")
+    tip_source: Literal['preset', 'custom', 'none'] = Field('none', description="How the customer chose the tip. Must agree with tip_amount.")
 
 
 @router.post("/{cart_id}/checkout")
@@ -227,4 +232,6 @@ async def checkout_cart(cart_id: UUID, body: Optional[CheckoutCartRequest] = Non
         cart_id=cart_id,
         payment_method=body.payment_method if body else None,
         payment_method_id=body.payment_method_id if body else None,
+        tip_amount=body.tip_amount if body else 0,
+        tip_source=body.tip_source if body else 'none',
     )

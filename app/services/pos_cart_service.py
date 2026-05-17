@@ -1023,6 +1023,8 @@ async def complete_pos_order(
     split_first_cash_received: Optional[float] = None,
     cash_received: Optional[float] = None,
     served_by_member_id: Optional[UUID] = None,
+    tip_amount: float = 0,
+    tip_source: str = 'none',
 ) -> dict:
     """
     Complete a POS order:
@@ -1041,18 +1043,23 @@ async def complete_pos_order(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
-        # warocol.com#575 — Resolve served_by_member_id before the main transaction.
-        # If the feature flag is off for this tenant, silently ignore the field
-        # (idempotency). If on, validate that the member exists + belongs to the
-        # tenant + is active. Done outside the transaction to fail fast.
+        # warocol.com#575 + warocol.com#637 — Resolve served_by_member_id and the
+        # tipping gate before the main transaction. Combined into a single SELECT
+        # to keep the round-trip count identical to the pre-tipping code path.
+        # Member existence is only checked when waiter attribution is requested.
         resolved_served_by: Optional[UUID] = None
-        if served_by_member_id is not None:
+        waiter_attribution_enabled = False
+        tip_enabled = False
+        if served_by_member_id is not None or tip_amount > 0 or tip_source != 'none':
             async with get_db_connection(use_transaction=False) as _conn:
-                toggle = await _conn.fetchval(
-                    "SELECT waiter_attribution_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                flags = await _conn.fetchrow(
+                    "SELECT waiter_attribution_enabled, tip_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
                     tenant_id,
                 )
-                if toggle:
+                if flags:
+                    waiter_attribution_enabled = bool(flags['waiter_attribution_enabled'])
+                    tip_enabled = bool(flags['tip_enabled'])
+                if served_by_member_id is not None and waiter_attribution_enabled:
                     member_check = await _conn.fetchval(
                         """
                         SELECT id FROM tenant_members
@@ -1064,7 +1071,24 @@ async def complete_pos_order(
                     if member_check is None:
                         raise NotFoundError("Member not found")
                     resolved_served_by = served_by_member_id
-                # toggle OFF → leave resolved_served_by as None (silent ignore)
+                # waiter toggle OFF → leave resolved_served_by as None (silent ignore)
+
+        # warocol.com#637 — tip validation (fail fast, before the transaction).
+        # Coerce (0, anything) → (0, 'none') for idempotency. Reject inconsistent
+        # combinations to match the DB CHECK from migration 079.
+        if tip_amount < 0:
+            raise APIError("tip_amount must be non-negative", status_code=400)
+        if tip_source not in ('preset', 'custom', 'none'):
+            raise APIError(f"invalid tip_source: {tip_source!r}", status_code=400)
+        if tip_amount == 0:
+            tip_source = 'none'  # coerce stray sources to none
+        else:
+            if tip_source == 'none':
+                raise APIError("tip_source cannot be 'none' when tip_amount > 0", status_code=400)
+            if not tip_enabled:
+                raise APIError("Tipping is not enabled for this tenant", status_code=400)
+            if split_mode:
+                raise APIError("Tip is not supported in split-payment mode in this phase", status_code=400)
 
         async with get_db_connection() as conn:
             async with conn.transaction():
@@ -1158,11 +1182,19 @@ async def complete_pos_order(
 
                 # Issue #524 — single-payment cash flow stores cash_received on the orders row.
                 # Split mode keeps it NULL here and stores per-line on order_payments below (step 7a).
+                # warocol.com#637 — when tipping is in effect, cash_received must cover
+                # total + tip (the customer must hand over enough physical cash for both).
                 _orders_cash_received: Optional[float] = None
                 if not split_mode and cash_received is not None:
                     if payment_method != 'cash':
                         raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
-                    if cash_received < float(_discounted_total):
+                    _required_cash = float(_discounted_total) + float(tip_amount)
+                    if cash_received < _required_cash:
+                        if tip_amount > 0:
+                            raise APIError(
+                                f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total + propina ({_required_cash})",
+                                status_code=400,
+                            )
                         raise APIError(
                             f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total ({_discounted_total})",
                             status_code=400,
@@ -1177,9 +1209,10 @@ async def complete_pos_order(
                         table_session_id,
                         delivery_address_id, scheduled_time, delivery_instructions,
                         cash_received,
-                        served_by_member_id
+                        served_by_member_id,
+                        tip_amount, tip_source
                     )
-                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
                     RETURNING id, order_number, created_at
                 """
                 order_row = await conn.fetchrow(
@@ -1202,6 +1235,8 @@ async def complete_pos_order(
                     delivery_instructions,
                     _orders_cash_received,
                     resolved_served_by,
+                    float(tip_amount),
+                    tip_source,
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']
@@ -1677,6 +1712,9 @@ async def complete_pos_order(
                         "order_id": str(order_id),
                         "order_number": int(order_number),
                         "total_amount": float(_discounted_total),
+                        "tip_amount": float(tip_amount),
+                        "tip_source": tip_source,
+                        "charged_amount": float(_discounted_total) + float(tip_amount),
                         "payment_method": payment_method,
                         "payment_status": payment_status,
                         "credit_due_date": str(credit_due_date) if credit_due_date is not None else None,
@@ -1746,6 +1784,7 @@ async def complete_pos_order(
                         business_phone=_business_phone,
                         discount_amount=float(_discount_amount) if _discount_amount else 0.0,
                         subtotal=float(cart_subtotal) if _discount_amount else 0.0,
+                        tip_amount=float(tip_amount),
                     )
                 )
             except Exception as _email_err:

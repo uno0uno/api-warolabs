@@ -484,6 +484,7 @@ async def send_pos_receipt_email(
     invoice_prefix: Optional[str] = None,
     invoice_number: Optional[int] = None,
     invoice_cufe: Optional[str] = None,
+    tip_amount: float = 0.0,
 ) -> bool:
     """
     Send a POS receipt email to the customer after a point-of-sale order completes.
@@ -522,6 +523,7 @@ async def send_pos_receipt_email(
             invoice_prefix=invoice_prefix,
             invoice_number=invoice_number,
             invoice_cufe=invoice_cufe,
+            tip_amount=tip_amount,
         )
         subject = get_pos_receipt_subject(order_number, business_name=business_name)
 

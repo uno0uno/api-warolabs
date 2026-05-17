@@ -275,6 +275,42 @@ async def get_products_sold(
     )
 
 
+@router.get("/tips", dependencies=[Depends(require_module(Module.VENTAS))])
+async def get_tips(
+    request: Request,
+    limit: int = Query(50, ge=1, le=250),
+    offset: int = Query(0, ge=0),
+    search: Optional[str] = Query(None, description="Free-text search on order_number"),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    member_id: Optional[UUID] = Query(None, description="Filter by served_by_member_id (single waiter)"),
+    payment_method: Optional[str] = Query(None),
+    channel: Optional[str] = Query(None, description="'pos' | 'mesa' | 'online'"),
+    sort_field: str = Query("order_date"),
+    sort_direction: str = Query("desc"),
+):
+    """
+    History of orders with captured tips (warocol.com#637). Powers /ventas/propinas.
+
+    Always scoped to the current tenant and to rows where tip_amount > 0.
+    Response includes pagination + aggregates (sum_tip, count_with_tip, avg_pct)
+    computed against the same WHERE so totals match the visible page.
+    """
+    return await orders_service.get_tips_list(
+        request,
+        limit=limit,
+        offset=offset,
+        search=search,
+        date_from=date_from,
+        date_to=date_to,
+        member_id=member_id,
+        payment_method=payment_method,
+        channel=channel,
+        sort_field=sort_field,
+        sort_direction=sort_direction,
+    )
+
+
 @router.get("/{order_id}", dependencies=[Depends(require_module(Module.VENTAS))])
 async def get_order(
     request: Request,

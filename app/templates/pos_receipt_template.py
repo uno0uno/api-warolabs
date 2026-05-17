@@ -57,6 +57,7 @@ def get_pos_receipt_text(
     invoice_prefix: Optional[str] = None,
     invoice_number: Optional[int] = None,
     invoice_cufe: Optional[str] = None,
+    tip_amount: float = 0.0,
 ) -> str:
     date_str = _format_bogota_date(order_date)
     payment_label = _PAYMENT_LABELS.get(payment_method, payment_method)
@@ -99,6 +100,18 @@ def get_pos_receipt_text(
         totals_lines.append(f"IVA licores 5%: {_format_cop(liquor_tax)}")
     totals_block = ("\n".join(totals_lines) + "\n") if totals_lines else ""
 
+    # warocol.com#637 — tip line shown separately from the order total so the
+    # customer can see exactly how much went to the waiter. Charged total is
+    # only printed when there is a tip to avoid noise on the typical receipt.
+    tip_block = ""
+    if tip_amount > 0:
+        charged_total = total_amount + tip_amount
+        tip_block = (
+            f"Propina: {_format_cop(tip_amount)}\n"
+            f"--------------------------------\n"
+            f"TOTAL COBRADO: {_format_cop(charged_total)}\n"
+        )
+
     # DIAN invoice section (optional)
     invoice_block = ""
     if invoice_prefix and invoice_number and invoice_cufe:
@@ -121,7 +134,7 @@ PRODUCTOS
 {items_block}
 --------------------------------
 {totals_block}TOTAL: {_format_cop(total_amount)}
-Método de pago: {payment_label}
+{tip_block}Método de pago: {payment_label}
 ================================
 
 Gracias por tu compra.
