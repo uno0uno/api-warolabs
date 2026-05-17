@@ -292,7 +292,7 @@ async def add_cart_payment(
 
 
 class VoidPaymentRequest(BaseModel):
-    reason: str = Field(..., min_length=1, description="Issue warocol.com#649 — motivo de la anulación (auditoría).")
+    reason: Optional[str] = Field(None, description="Issue warocol.com#649 — motivo opcional de la anulación (auditoría).")
 
 
 @router.delete("/{cart_id}/payments/{payment_id}", dependencies=[Depends(require_module(Module.POS))])

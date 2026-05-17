@@ -804,6 +804,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     # cash_received to the FIRST order's row only (others stay NULL). Cierre sums
                     # cash_received over the period — putting it once is correct and avoids the
                     # CHECK (cash_received >= amount) constraint violating on proportionally-split rows.
+                    _split_first_payment_id_mesa: Optional[str] = None
                     if split_mode and split_first_amount > 0:
                         if split_first_cash_received is not None:
                             if payment_method != 'cash':
@@ -829,17 +830,22 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                     remaining_payment -= portion
                                 # Issue #524: cash_received only on the first row (sum still correct over period)
                                 row_cash_received = split_first_cash_received if i == 0 else None
-                                await conn.execute(
+                                # Issue warocol.com#649 — RETURNING id so the frontend has a
+                                # real UUID for void operations (siblings resolved via heuristic).
+                                inserted_row = await conn.fetchrow(
                                     """
                                     INSERT INTO order_payments
                                         (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id, cash_received)
                                     VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, $7)
+                                    RETURNING id
                                     """,
                                     ord_row["id"], tenant_id, portion, payment_method,
                                     str(payment_method_id) if payment_method_id else None,
                                     str(user_id) if user_id else None,
                                     row_cash_received,
                                 )
+                                if i == 0:
+                                    _split_first_payment_id_mesa = str(inserted_row["id"])
 
                 else:
                     completed_count = 0
@@ -936,6 +942,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     "paid_total": paid_total,
                     "remaining": remaining,
                     "is_complete": is_complete,
+                    # Issue warocol.com#649 — real UUID of the first inserted row.
+                    "payment_id": _split_first_payment_id_mesa,
                 },
             }
 
@@ -1064,6 +1072,7 @@ async def add_session_payment(
 
                 # Distribute this payment proportionally
                 remaining_payment = amount
+                first_payment_id: Optional[str] = None
                 for i, ord_row in enumerate(order_rows):
                     if i == len(order_rows) - 1:
                         portion = remaining_payment
@@ -1072,17 +1081,22 @@ async def add_session_payment(
                         remaining_payment -= portion
                     # Issue #524 — cash_received only on the first row (sum still correct over period)
                     row_cash_received = cash_received if i == 0 else None
-                    await conn.execute(
+                    # Issue warocol.com#649 — RETURNING id so the frontend has a
+                    # real UUID for void operations (was: "split" placeholder → 422).
+                    inserted_row = await conn.fetchrow(
                         """
                         INSERT INTO order_payments
                             (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id, cash_received)
                         VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, $7)
+                        RETURNING id
                         """,
                         ord_row["id"], tenant_id, portion, payment_method,
                         str(payment_method_id) if payment_method_id else None,
                         str(user_id) if user_id else None,
                         row_cash_received,
                     )
+                    if i == 0:
+                        first_payment_id = str(inserted_row["id"])
 
                 # Recompute paid total
                 paid_row = await conn.fetchrow(
@@ -1111,8 +1125,6 @@ async def add_session_payment(
                     )
                     logger.info(f"Session {session_row['id']} closed via split payment (fully paid)")
 
-                payment_id = None  # payments are distributed; return None as placeholder
-
         return {
             "success": True,
             "data": {
@@ -1120,7 +1132,8 @@ async def add_session_payment(
                 "paid_total": paid_total,
                 "remaining": remaining,
                 "is_complete": is_complete,
-                "payment_id": str(payment_id) if payment_id else "split",
+                # Issue warocol.com#649 — real UUID; siblings void via heuristic.
+                "payment_id": first_payment_id,
             },
         }
 
@@ -2314,7 +2327,7 @@ async def void_table_payment(
     request: Request,
     table_id: UUID,
     payment_id: UUID,
-    reason: str,
+    reason: Optional[str] = None,
 ) -> dict:
     """
     Issue warocol.com#649 — soft-delete a mesa partial payment.
@@ -2327,9 +2340,10 @@ async def void_table_payment(
     Recomputes the session's paid_total over remaining rows. When voiding flips
     the session out of fully-paid, reopens it (closed_at=NULL, table.status='open')
     and auto-reverses the per-order GL entries inside the same transaction.
+
+    `reason` is optional (audit-only). Empty defaults to "Sin motivo".
     """
-    if not reason or not reason.strip():
-        raise APIError("Se requiere un motivo para anular el pago", status_code=400)
+    normalized_reason = (reason or '').strip() or 'Sin motivo'
 
     try:
         session_context = require_valid_session(request)
@@ -2439,7 +2453,7 @@ async def void_table_payment(
                     # Reverse posted GL entry per affected order.
                     for affected_order_id in affected_order_ids:
                         await void_order_journal_entry_in_txn(
-                            conn, tenant_id, affected_order_id, user_id, reason.strip(),
+                            conn, tenant_id, affected_order_id, user_id, normalized_reason,
                         )
 
         logger.info(

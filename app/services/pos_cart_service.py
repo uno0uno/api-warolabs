@@ -882,7 +882,7 @@ async def void_order_payment(
     request: Request,
     cart_id: str,
     payment_id: str,
-    reason: str,
+    reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Issue warocol.com#649 — soft-delete a partial payment on a POS cart's order.
@@ -892,9 +892,10 @@ async def void_order_payment(
     - Reopens the order (payment_status='partial') and the cart
       (status='active') when the voided row was the one that closed them.
     - Auto-reverses the posted sale journal entry in the same transaction.
+
+    `reason` is optional (audit-only). Empty defaults to "Sin motivo".
     """
-    if not reason or not reason.strip():
-        raise APIError("Se requiere un motivo para anular el pago", status_code=400)
+    normalized_reason = (reason or '').strip() or 'Sin motivo'
 
     try:
         session_context = require_valid_session(request)
@@ -924,6 +925,13 @@ async def void_order_payment(
                     raise APIError("Pago no encontrado", status_code=404)
                 if payment_row["voided_at"] is not None:
                     raise APIError("Este pago ya fue anulado", status_code=409)
+                # pos_cart_id is NULL on mesa orders — flag the wrong endpoint
+                # instead of returning the generic mismatch error.
+                if payment_row["pos_cart_id"] is None:
+                    raise APIError(
+                        "Este pago pertenece a una sesión de mesa — usa el endpoint /api/tables/{table_id}/payments/{payment_id}",
+                        status_code=400,
+                    )
                 if str(payment_row["pos_cart_id"]) != str(cart_id):
                     raise APIError("El pago no pertenece a este carrito", status_code=400)
 
@@ -971,7 +979,7 @@ async def void_order_payment(
                     )
                     # Reverse the posted GL entry — same transaction, atomic.
                     await void_order_journal_entry_in_txn(
-                        conn, tenant_id, order_id, user_id, reason.strip(),
+                        conn, tenant_id, order_id, user_id, normalized_reason,
                     )
 
         logger.info(
@@ -1535,6 +1543,7 @@ async def complete_pos_order(
                 _split_paid_total = 0.0
                 _split_remaining = float(_discounted_total)
                 _split_is_complete = False
+                _split_first_payment_id: Optional[str] = None
                 if split_mode and split_first_amount > 0:
                     if split_first_cash_received is not None:
                         if payment_method != 'cash':
@@ -1544,17 +1553,21 @@ async def complete_pos_order(
                                 f"Efectivo recibido ({split_first_cash_received}) debe ser mayor o igual al monto ({split_first_amount})",
                                 status_code=400,
                             )
-                    await conn.execute(
+                    # Issue warocol.com#649 — RETURNING id so the frontend has a
+                    # real UUID for void operations (was: None → placeholder → 422).
+                    _split_first_payment_row = await conn.fetchrow(
                         """
                         INSERT INTO order_payments
                             (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id, cash_received)
                         VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, $7)
+                        RETURNING id
                         """,
                         order_id, tenant_id, split_first_amount, payment_method,
                         str(payment_method_id) if payment_method_id else None,
                         str(user_id) if user_id else None,
                         split_first_cash_received,
                     )
+                    _split_first_payment_id = str(_split_first_payment_row["id"])
                     _split_paid_total = split_first_amount
                     _split_remaining = max(0.0, float(_discounted_total) - split_first_amount)
                     _split_is_complete = _split_remaining <= 0.01
@@ -1674,7 +1687,7 @@ async def complete_pos_order(
                         "standard_tax_label": _standard_tax_label,
                         "next_table_session_id": str(new_table_session_id) if new_table_session_id else None,
                         # Split mode extras
-                        **({"paid_total": _split_paid_total, "remaining": _split_remaining, "is_complete": _split_is_complete, "payment_id": None} if split_mode else {}),
+                        **({"paid_total": _split_paid_total, "remaining": _split_remaining, "is_complete": _split_is_complete, "payment_id": _split_first_payment_id} if split_mode else {}),
                     }
                 }
 

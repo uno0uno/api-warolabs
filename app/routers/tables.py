@@ -189,7 +189,7 @@ async def add_session_payment(request: Request, table_id: UUID, body: AddSession
 
 
 class VoidSessionPaymentRequest(BaseModel):
-    reason: str = Field(..., min_length=1, description="Issue warocol.com#649 — motivo de la anulación (auditoría).")
+    reason: Optional[str] = Field(None, description="Issue warocol.com#649 — motivo opcional de la anulación (auditoría).")
 
 
 @router.delete("/{table_id}/payments/{payment_id}", dependencies=[Depends(require_module(Module.POS))])
