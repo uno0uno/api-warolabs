@@ -1255,6 +1255,41 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                 session_row["id"],
             )
 
+            # Issue warocol.com#656 — active (non-voided) partial payments of the
+            # session, surfaced so checkout can rehydrate "Pagos registrados" on
+            # re-entry (otherwise the cashier may double-charge).
+            #
+            # DISTINCT ON + group_amount collapses mesa proportional splits (one
+            # logical payment stored as N rows across orders, same paid_at) into
+            # one row per logical payment. The canonical id is the first sibling;
+            # the void endpoint already resolves the rest via the
+            # (table_session_id, payment_method, paid_at) heuristic.
+            #
+            # Bar mode filter: only orders still in flight — closed-and-paid
+            # orders from previous rounds should not surface.
+            partial_payments_rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (op.payment_method, op.paid_at)
+                    op.id, op.amount, op.payment_method, op.payment_method_id,
+                    op.paid_at, pm.name AS payment_method_name,
+                    (SELECT COALESCE(SUM(op2.amount), 0)
+                       FROM order_payments op2
+                       JOIN orders o2 ON o2.id = op2.order_id
+                       WHERE o2.table_session_id = $1
+                         AND op2.payment_method = op.payment_method
+                         AND op2.paid_at = op.paid_at
+                         AND op2.voided_at IS NULL) AS group_amount
+                FROM order_payments op
+                JOIN orders o ON o.id = op.order_id
+                LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
+                WHERE o.table_session_id = $1
+                  AND op.voided_at IS NULL
+                  AND (o.status != 'completed' OR o.payment_status != 'paid')
+                ORDER BY op.payment_method, op.paid_at, op.id
+                """,
+                session_row["id"],
+            )
+
         return {
             "success": True,
             "data": {
@@ -1279,6 +1314,18 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     "effective_waiter_member_id": str(session_row["effective_waiter_member_id"]) if session_row.get("effective_waiter_member_id") else None,
                     "effective_waiter_member_name": session_row.get("effective_waiter_member_name"),
                     "effective_waiter_member_role": session_row.get("effective_waiter_member_role"),
+                    # Issue warocol.com#656 — rehydration source for checkout's Pagos registrados
+                    "partial_payments": [
+                        {
+                            "id": str(r["id"]),
+                            "amount": float(r["group_amount"]),
+                            "payment_method": r["payment_method"],
+                            "payment_method_id": str(r["payment_method_id"]) if r["payment_method_id"] else None,
+                            "payment_method_name": r["payment_method_name"],
+                            "paid_at": r["paid_at"].isoformat(),
+                        }
+                        for r in partial_payments_rows
+                    ],
                 },
                 "orders": [
                     {
