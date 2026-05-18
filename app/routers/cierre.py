@@ -121,6 +121,31 @@ async def get_ultimo_cierre(request: Request):
     return await cierre_service.get_ultimo_cierre(request)
 
 
+@router.get("/suggested-window", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def get_suggested_cierre_window(
+    request: Request,
+    anchor_date: date = Query(..., alias="date", description="Fallback anchor date if no prior close exists"),
+):
+    """Suggest a custom cash-count window from last arqueo end through now (Bogotá)."""
+    from app.services import shift_window_service
+
+    return await shift_window_service.get_suggested_window(request, anchor_date)
+
+
+@router.get("/shift-window", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def get_cierre_shift_window(
+    request: Request,
+    shift_template_id: UUID = Query(..., alias="shift_template_id"),
+    anchor_date: date = Query(..., alias="date", description="Anchor calendar date (YYYY-MM-DD, Bogotá)"),
+):
+    """Finanzas-facing alias for template window resolution (same payload as operaciones)."""
+    from app.services import shift_window_service
+
+    return await shift_window_service.get_template_window(
+        request, shift_template_id, anchor_date
+    )
+
+
 @router.get("/{cierre_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_cierre(request: Request, cierre_id: UUID):
     """
