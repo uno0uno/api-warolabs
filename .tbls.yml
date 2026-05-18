@@ -14,11 +14,14 @@ docPath: dbdoc
 er:
   format: mermaid
 
-# Note on noise: the database contains two empty migration-tracking tables
-# (`public._prisma_migrations`, `drizzle.__drizzle_migrations`) from earlier
-# Prisma/Drizzle setups that never tracked anything here. tbls v1.94.5 does
-# not honor `exclude:` for tables that exist — remove them after generation:
+# Post-generation cleanup. Two manual steps tbls itself does not handle:
 #
-#   rm -f dbdoc/public._prisma_migrations.{md,svg} \
-#         dbdoc/drizzle.__drizzle_migrations.{md,svg}
-#   sed -i '' -E '/\[(drizzle.__drizzle_migrations|public._prisma_migrations)\]/d' dbdoc/README.md
+# (a) Drop per-table SVG diagrams (tbls auto-generates them when Graphviz
+#     `dot` is on PATH; they duplicate info already in the .md files).
+#       find dbdoc -name "*.svg" -delete
+#
+# (b) Remove two empty migration-tracking tables left over from earlier
+#     Prisma/Drizzle setups — neither tracks anything in this database.
+#     tbls v1.94.5 does not honor `exclude:` for tables that exist, so:
+#       rm -f dbdoc/public._prisma_migrations.md dbdoc/drizzle.__drizzle_migrations.md
+#       sed -i '' -E '/\[(drizzle.__drizzle_migrations|public._prisma_migrations)\]/d' dbdoc/README.md

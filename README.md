@@ -116,9 +116,9 @@ export TBLS_DSN="postgres://${NUXT_PRIVATE_DB_USER}:${NUXT_PRIVATE_DB_PASSWORD}@
 # 3. Run tbls (binary or Docker — see .tbls.yml)
 tbls doc -f
 
-# 4. Strip empty Prisma/Drizzle migration-tracking tables (see .tbls.yml note)
-rm -f dbdoc/public._prisma_migrations.{md,svg} \
-      dbdoc/drizzle.__drizzle_migrations.{md,svg}
+# 4. Post-generation cleanup (see .tbls.yml header for the why)
+find dbdoc -name "*.svg" -delete
+rm -f dbdoc/public._prisma_migrations.md dbdoc/drizzle.__drizzle_migrations.md
 sed -i '' -E '/\[(drizzle.__drizzle_migrations|public._prisma_migrations)\]/d' dbdoc/README.md
 ```
 
