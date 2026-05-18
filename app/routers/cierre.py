@@ -23,6 +23,7 @@ async def cierre_preview(
     completed_only: bool = Query(False, alias="completed_only"),
     period_start_time: Optional[datetime] = Query(None, alias="period_start_time"),
     period_end_time: Optional[datetime] = Query(None, alias="period_end_time"),
+    shift_template_id: Optional[UUID] = Query(None, alias="shift_template_id"),
 ):
     """
     Cierre X — non-destructive daily summary.
@@ -37,6 +38,7 @@ async def cierre_preview(
         request, period_start, period_end, completed_only,
         period_start_time=period_start_time,
         period_end_time=period_end_time,
+        shift_template_id=shift_template_id,
     )
 
 
@@ -130,6 +132,12 @@ async def get_suggested_cierre_window(
     from app.services import shift_window_service
 
     return await shift_window_service.get_suggested_window(request, anchor_date)
+
+
+@router.get("/shift-templates", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def list_cierre_shift_templates(request: Request):
+    """Active shift templates for arqueo template mode (Finanzas-only)."""
+    return await cierre_service.list_active_shift_templates(request)
 
 
 @router.get("/shift-window", dependencies=[Depends(require_module(Module.FINANZAS))])
