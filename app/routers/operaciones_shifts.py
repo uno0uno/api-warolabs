@@ -1,11 +1,12 @@
-"""Shift template CRUD for Operaciones (warocol.com#682)."""
+"""Shift template CRUD for Operaciones (warocol.com#682, #684)."""
+from datetime import date
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
 
 from app.core.permissions import Module, require_module
 from app.models.shift_template import ShiftTemplateCreate, ShiftTemplatePatch
-from app.services import shift_templates_service
+from app.services import shift_templates_service, shift_window_service
 
 router = APIRouter(prefix="/operaciones", tags=["Operaciones Shifts"])
 
@@ -38,6 +39,21 @@ async def create_shift_template_endpoint(
 ):
     """Create a reusable shift template."""
     return await shift_templates_service.create_shift_template(request, body)
+
+
+@router.get(
+    "/shifts/{template_id}/window",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def get_shift_template_window_endpoint(
+    request: Request,
+    template_id: UUID,
+    anchor_date: date = Query(..., alias="date", description="Anchor calendar date (YYYY-MM-DD, Bogotá)"),
+):
+    """Resolve template clock times to periodStart/End + periodStartTime/EndTime."""
+    return await shift_window_service.get_template_window(
+        request, template_id, anchor_date
+    )
 
 
 @router.patch(
