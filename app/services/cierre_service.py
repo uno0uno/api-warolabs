@@ -673,6 +673,52 @@ def _build_order_date_filter(
     return sql, [period_start, period_end]
 
 
+def _build_expense_filter(
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime],
+    period_end_time: Optional[datetime],
+    param_offset: int = 2,
+):
+    """
+    Cash expenses: date-only arqueos use transaction_date (business day).
+    Shift windows use created_at (transaction_date has no time component).
+    """
+    p2 = f"${param_offset}"
+    p3 = f"${param_offset + 1}"
+    if period_start_time and period_end_time:
+        sql = f"AND created_at >= {p2} AND created_at <= {p3}"
+        return sql, [period_start_time, period_end_time]
+    sql = f"AND transaction_date >= {p2} AND transaction_date <= {p3}"
+    return sql, [period_start, period_end]
+
+
+def _build_open_tables_filter(
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime],
+    period_end_time: Optional[datetime],
+    param_offset: int = 2,
+):
+    """
+    Open tables (closed_at IS NULL applied by caller).
+
+    Date-only: opened on a calendar day in [period_start, period_end].
+    Shift window: session started on or before shift end (still-open tables
+    that began before the shift still block the close).
+    """
+    if period_start_time and period_end_time:
+        p_end = f"${param_offset}"
+        return f"AND ts.opened_at <= {p_end}", [period_end_time]
+    p2 = f"${param_offset}"
+    p3 = f"${param_offset + 1}"
+    sql = (
+        f"AND ts.opened_at::date >= {p2} "
+        f"AND ts.opened_at::date <= {p3}"
+    )
+    return sql, [period_start, period_end]
+
+
 async def _compute_preview(
     conn,
     tenant_id: UUID,
@@ -690,11 +736,17 @@ async def _compute_preview(
     completed_only=False → 'completed' + 'pending' (used for Cierre X preview so
                            open-table orders are visible)
 
-    When period_start_time / period_end_time are supplied the order filter uses
-    exact TIMESTAMPTZ comparison, enabling cross-midnight shift closing.
+    When period_start_time / period_end_time are supplied the order, expense,
+    and open-table filters use exact TIMESTAMPTZ comparison (shift windows).
     """
     status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
     date_filter, date_params = _build_order_date_filter(
+        period_start, period_end, period_start_time, period_end_time
+    )
+    expense_filter, expense_params = _build_expense_filter(
+        period_start, period_end, period_start_time, period_end_time
+    )
+    open_tables_filter, open_tables_params = _build_open_tables_filter(
         period_start, period_end, period_start_time, period_end_time
     )
     sales_row = await conn.fetchrow(
@@ -749,30 +801,28 @@ async def _compute_preview(
             method_totals[m] = method_totals.get(m, 0.0) + float(row["total"])
 
     gastos_row = await conn.fetchrow(
-        """
+        f"""
         SELECT COALESCE(SUM(amount), 0) AS gastos_efectivo
         FROM tenant_expenses
         WHERE tenant_id = $1
           AND payment_method = 'cash'
-          AND transaction_date >= $2
-          AND transaction_date <= $3
+          {expense_filter}
         """,
-        tenant_id, period_start, period_end,
+        tenant_id, *expense_params,
     )
 
     open_tables_row = await conn.fetchrow(
-        """
+        f"""
         SELECT COUNT(*) AS open_tables_count
         FROM table_sessions ts
         JOIN tables t ON t.id = ts.table_id
         WHERE ts.tenant_id = $1
           AND ts.closed_at IS NULL
           AND ts.is_discarded = FALSE
-          AND ts.opened_at::date >= $2
-          AND ts.opened_at::date <= $3
+          {open_tables_filter}
           AND t.is_bar IS FALSE
         """,
-        tenant_id, period_start, period_end,
+        tenant_id, *open_tables_params,
     )
 
     total_cash = method_totals.get("cash", 0.0)
