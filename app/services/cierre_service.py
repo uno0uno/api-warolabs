@@ -6,6 +6,7 @@ Issue: https://github.com/uno0uno/warocol.com/issues/311
 """
 import logging
 from decimal import Decimal
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 from datetime import date, datetime
@@ -673,6 +674,52 @@ def _build_order_date_filter(
     return sql, [period_start, period_end]
 
 
+def _build_expense_filter(
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime],
+    period_end_time: Optional[datetime],
+    param_offset: int = 2,
+):
+    """
+    Cash expenses: date-only arqueos use transaction_date (business day).
+    Shift windows use created_at (transaction_date has no time component).
+    """
+    p2 = f"${param_offset}"
+    p3 = f"${param_offset + 1}"
+    if period_start_time and period_end_time:
+        sql = f"AND created_at >= {p2} AND created_at <= {p3}"
+        return sql, [period_start_time, period_end_time]
+    sql = f"AND transaction_date >= {p2} AND transaction_date <= {p3}"
+    return sql, [period_start, period_end]
+
+
+def _build_open_tables_filter(
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime],
+    period_end_time: Optional[datetime],
+    param_offset: int = 2,
+):
+    """
+    Open tables (closed_at IS NULL applied by caller).
+
+    Date-only: opened on a calendar day in [period_start, period_end].
+    Shift window: session started on or before shift end (still-open tables
+    that began before the shift still block the close).
+    """
+    if period_start_time and period_end_time:
+        p_end = f"${param_offset}"
+        return f"AND ts.opened_at <= {p_end}", [period_end_time]
+    p2 = f"${param_offset}"
+    p3 = f"${param_offset + 1}"
+    sql = (
+        f"AND ts.opened_at::date >= {p2} "
+        f"AND ts.opened_at::date <= {p3}"
+    )
+    return sql, [period_start, period_end]
+
+
 async def _compute_preview(
     conn,
     tenant_id: UUID,
@@ -690,11 +737,17 @@ async def _compute_preview(
     completed_only=False → 'completed' + 'pending' (used for Cierre X preview so
                            open-table orders are visible)
 
-    When period_start_time / period_end_time are supplied the order filter uses
-    exact TIMESTAMPTZ comparison, enabling cross-midnight shift closing.
+    When period_start_time / period_end_time are supplied the order, expense,
+    and open-table filters use exact TIMESTAMPTZ comparison (shift windows).
     """
     status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
     date_filter, date_params = _build_order_date_filter(
+        period_start, period_end, period_start_time, period_end_time
+    )
+    expense_filter, expense_params = _build_expense_filter(
+        period_start, period_end, period_start_time, period_end_time
+    )
+    open_tables_filter, open_tables_params = _build_open_tables_filter(
         period_start, period_end, period_start_time, period_end_time
     )
     sales_row = await conn.fetchrow(
@@ -749,30 +802,28 @@ async def _compute_preview(
             method_totals[m] = method_totals.get(m, 0.0) + float(row["total"])
 
     gastos_row = await conn.fetchrow(
-        """
+        f"""
         SELECT COALESCE(SUM(amount), 0) AS gastos_efectivo
         FROM tenant_expenses
         WHERE tenant_id = $1
           AND payment_method = 'cash'
-          AND transaction_date >= $2
-          AND transaction_date <= $3
+          {expense_filter}
         """,
-        tenant_id, period_start, period_end,
+        tenant_id, *expense_params,
     )
 
     open_tables_row = await conn.fetchrow(
-        """
+        f"""
         SELECT COUNT(*) AS open_tables_count
         FROM table_sessions ts
         JOIN tables t ON t.id = ts.table_id
         WHERE ts.tenant_id = $1
           AND ts.closed_at IS NULL
           AND ts.is_discarded = FALSE
-          AND ts.opened_at::date >= $2
-          AND ts.opened_at::date <= $3
+          {open_tables_filter}
           AND t.is_bar IS FALSE
         """,
-        tenant_id, period_start, period_end,
+        tenant_id, *open_tables_params,
     )
 
     total_cash = method_totals.get("cash", 0.0)
@@ -886,6 +937,111 @@ async def _compute_breakdown_rows(
 
 
 # ---------------------------------------------------------------------------
+# Shift template resolution (#686)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ResolvedCierrePeriod:
+    period_start: date
+    period_end: date
+    period_start_time: Optional[datetime]
+    period_end_time: Optional[datetime]
+    shift_template_id: Optional[UUID]
+
+
+async def resolve_cierre_period_fields(
+    conn,
+    tenant_id: UUID,
+    *,
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime],
+    period_end_time: Optional[datetime],
+    shift_template_id: Optional[UUID],
+) -> ResolvedCierrePeriod:
+    """Resolve template vs custom vs full-day period fields before preview/create."""
+    if shift_template_id:
+        if period_start_time or period_end_time:
+            raise APIError(
+                "No envíes horas manuales cuando usas una plantilla de turno.",
+                status_code=422,
+            )
+        if period_start != period_end:
+            raise APIError(
+                "La plantilla de turno solo aplica a un solo día.",
+                status_code=422,
+            )
+
+        row = await conn.fetchrow(
+            """
+            SELECT id, name, start_time, end_time, crosses_midnight
+            FROM tenant_shift_templates
+            WHERE id = $1 AND tenant_id = $2 AND is_active = true
+            """,
+            shift_template_id,
+            tenant_id,
+        )
+        if not row:
+            raise APIError("Plantilla de turno no encontrada o inactiva.", status_code=404)
+
+        from app.services.shift_window_service import resolve_shift_template_window
+
+        payload = resolve_shift_template_window(
+            anchor_date=period_start,
+            start_time=row["start_time"],
+            end_time=row["end_time"],
+            crosses_midnight=row["crosses_midnight"],
+            template_id=row["id"],
+            template_name=row["name"],
+        )
+        return ResolvedCierrePeriod(
+            period_start=date.fromisoformat(payload["periodStart"]),
+            period_end=date.fromisoformat(payload["periodEnd"]),
+            period_start_time=datetime.fromisoformat(payload["periodStartTime"]),
+            period_end_time=datetime.fromisoformat(payload["periodEndTime"]),
+            shift_template_id=shift_template_id,
+        )
+
+    return ResolvedCierrePeriod(
+        period_start=period_start,
+        period_end=period_end,
+        period_start_time=period_start_time,
+        period_end_time=period_end_time,
+        shift_template_id=None,
+    )
+
+
+async def list_active_shift_templates(request: Request) -> dict:
+    """Active shift templates for Finanzas arqueo UI (warocol.com#686)."""
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    async with get_db_connection(use_transaction=False) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, name, start_time, end_time, crosses_midnight, sort_order
+            FROM tenant_shift_templates
+            WHERE tenant_id = $1 AND is_active = true
+            ORDER BY sort_order, name
+            """,
+            tenant_id,
+        )
+
+    data = []
+    for row in rows:
+        data.append({
+            "id": str(row["id"]),
+            "name": row["name"],
+            "startTime": row["start_time"].strftime("%H:%M"),
+            "endTime": row["end_time"].strftime("%H:%M"),
+            "crossesMidnight": row["crosses_midnight"],
+        })
+    return {"success": True, "data": data}
+
+
+# ---------------------------------------------------------------------------
 # GET /cierre/preview
 # ---------------------------------------------------------------------------
 
@@ -896,6 +1052,7 @@ async def get_cierre_preview(
     completed_only: bool = False,
     period_start_time: Optional[datetime] = None,
     period_end_time: Optional[datetime] = None,
+    shift_template_id: Optional[UUID] = None,
 ) -> dict:
     try:
         session_context = require_valid_session(request)
@@ -904,17 +1061,28 @@ async def get_cierre_preview(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection(use_transaction=False) as conn:
-            preview = await _compute_preview(
-                conn, tenant_id, period_start, period_end,
-                completed_only=completed_only,
+            resolved = await resolve_cierre_period_fields(
+                conn,
+                tenant_id,
+                period_start=period_start,
+                period_end=period_end,
                 period_start_time=period_start_time,
                 period_end_time=period_end_time,
+                shift_template_id=shift_template_id,
+            )
+            preview = await _compute_preview(
+                conn, tenant_id,
+                resolved.period_start, resolved.period_end,
+                completed_only=completed_only,
+                period_start_time=resolved.period_start_time,
+                period_end_time=resolved.period_end_time,
             )
             breakdown = await _compute_breakdown_rows(
-                conn, tenant_id, period_start, period_end,
+                conn, tenant_id,
+                resolved.period_start, resolved.period_end,
                 completed_only=completed_only,
-                period_start_time=period_start_time,
-                period_end_time=period_end_time,
+                period_start_time=resolved.period_start_time,
+                period_end_time=resolved.period_end_time,
             )
             preview["breakdown"] = breakdown
 
@@ -939,8 +1107,23 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection(use_transaction=True) as conn:
+            resolved = await resolve_cierre_period_fields(
+                conn,
+                tenant_id,
+                period_start=body.period_start,
+                period_end=body.period_end,
+                period_start_time=body.period_start_time,
+                period_end_time=body.period_end_time,
+                shift_template_id=body.shift_template_id,
+            )
+            period_start = resolved.period_start
+            period_end = resolved.period_end
+            period_start_time = resolved.period_start_time
+            period_end_time = resolved.period_end_time
+            shift_template_id = resolved.shift_template_id
+
             # 0. Validation: multi-day periods require exact timestamps
-            if body.period_start != body.period_end and not (body.period_start_time and body.period_end_time):
+            if period_start != period_end and not (period_start_time and period_end_time):
                 raise APIError(
                     "Para períodos de varios días debes especificar hora de inicio y fin exactas.",
                     status_code=422,
@@ -952,16 +1135,16 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             #    This allows multiple non-overlapping shifts on the same day.
             from zoneinfo import ZoneInfo
             bog = ZoneInfo("America/Bogota")
-            if body.period_start_time and body.period_end_time:
-                eff_start = body.period_start_time
-                eff_end   = body.period_end_time
+            if period_start_time and period_end_time:
+                eff_start = period_start_time
+                eff_end   = period_end_time
             else:
                 eff_start = datetime(
-                    body.period_start.year, body.period_start.month, body.period_start.day,
+                    period_start.year, period_start.month, period_start.day,
                     0, 0, 0, tzinfo=bog,
                 )
                 eff_end = datetime(
-                    body.period_end.year, body.period_end.month, body.period_end.day,
+                    period_end.year, period_end.month, period_end.day,
                     23, 59, 59, tzinfo=bog,
                 )
 
@@ -992,17 +1175,17 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
 
             # 2. Preview aggregation (completed only — cash already received)
             preview = await _compute_preview(
-                conn, tenant_id, body.period_start, body.period_end,
+                conn, tenant_id, period_start, period_end,
                 completed_only=True,
-                period_start_time=body.period_start_time,
-                period_end_time=body.period_end_time,
+                period_start_time=period_start_time,
+                period_end_time=period_end_time,
             )
 
             # 3. Open tables check — skip for past periods (mesas actuales no pertenecen al período)
             # Use Bogota date so the check is correct even when the server runs in UTC.
             from zoneinfo import ZoneInfo
             today_bogota = datetime.now(ZoneInfo("America/Bogota")).date()
-            is_past_period = body.period_end < today_bogota
+            is_past_period = period_end < today_bogota
             if not is_past_period and preview["openTablesCount"] > 0:
                 raise APIError(
                     f"Hay {preview['openTablesCount']} mesa(s) con cuenta abierta. "
@@ -1014,12 +1197,12 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             period_row = await conn.fetchrow(
                 """
                 INSERT INTO accounting_period
-                    (tenant_id, period_start, period_end, period_start_time, period_end_time)
-                VALUES ($1, $2, $3, $4, $5)
+                    (tenant_id, period_start, period_end, period_start_time, period_end_time, shift_template_id)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 RETURNING id, closed_at
                 """,
-                tenant_id, body.period_start, body.period_end,
-                body.period_start_time, body.period_end_time,
+                tenant_id, period_start, period_end,
+                period_start_time, period_end_time, shift_template_id,
             )
             period_id = period_row["id"]
             closed_at = period_row["closed_at"]
@@ -1054,10 +1237,10 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
 
             # 6. Compute and persist payment breakdown
             breakdown_rows = await _compute_breakdown_rows(
-                conn, tenant_id, body.period_start, body.period_end,
+                conn, tenant_id, period_start, period_end,
                 completed_only=True,
-                period_start_time=body.period_start_time,
-                period_end_time=body.period_end_time,
+                period_start_time=period_start_time,
+                period_end_time=period_end_time,
             )
             if breakdown_rows:
                 await conn.execute(
@@ -1084,10 +1267,11 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 "id":                   str(summary_row["id"]),
                 "accountingPeriodId":   str(period_id),
                 "tenantId":             str(tenant_id),
-                "periodStart":          body.period_start.isoformat(),
-                "periodEnd":            body.period_end.isoformat(),
-                "periodStartTime":      body.period_start_time.isoformat() if body.period_start_time else None,
-                "periodEndTime":        body.period_end_time.isoformat()   if body.period_end_time   else None,
+                "periodStart":          period_start.isoformat(),
+                "periodEnd":            period_end.isoformat(),
+                "periodStartTime":      period_start_time.isoformat() if period_start_time else None,
+                "periodEndTime":        period_end_time.isoformat()   if period_end_time   else None,
+                "shiftTemplateId":      str(shift_template_id) if shift_template_id else None,
                 "totalSales":           preview["totalSales"],
                 "itemsSold":            preview["itemsSold"],
                 "totalCash":            preview["totalCash"],

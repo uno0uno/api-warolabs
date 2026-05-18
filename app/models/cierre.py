@@ -15,6 +15,7 @@ class CierreCreate(BaseModel):
     # instead of the date-truncated comparison (supports cross-midnight shifts).
     period_start_time: Optional[datetime] = Field(None, alias='periodStartTime')
     period_end_time: Optional[datetime] = Field(None, alias='periodEndTime')
+    shift_template_id: Optional[UUID] = Field(None, alias='shiftTemplateId')
     cash_counted: float = Field(alias='cashCounted')
     notes: Optional[str] = None
 
