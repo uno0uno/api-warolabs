@@ -96,6 +96,27 @@ def test_supervisor_passes_list_shifts_under_enforce():
     assert response.json()["success"] is True
 
 
+def test_cashier_denied_list_shifts_under_enforce():
+    session = _build_session(role="cashier")
+    app = FastAPI()
+    app.include_router(operaciones_shifts_router)
+
+    cashier_modules = frozenset({Module.POS, Module.VENTAS, Module.MENU})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.services.shift_templates_service.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=cashier_modules),
+         ):
+        client = TestClient(app)
+        response = client.get("/operaciones/shifts")
+
+    assert response.status_code == 403
+    assert "operaciones" in response.json()["detail"].lower()
+
+
 def test_kitchen_denied_list_shifts_under_enforce():
     session = _build_session(role="kitchen")
     app = FastAPI()
