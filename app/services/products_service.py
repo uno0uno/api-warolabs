@@ -81,10 +81,11 @@ async def create_product_with_recipe(
                 product_query = """
                     INSERT INTO product (
                         name, description, price, category_id, product_base_type_id, preparation_time,
-                        controla_stock, is_available, is_available_online, is_combo, is_resale, allow_modifiers,
+                        controla_stock, is_available, is_available_online, is_available_table_qr,
+                        is_combo, is_resale, allow_modifiers,
                         tax_category, tenant_id, station_id, kitchen_name, image_url
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
                     RETURNING id, created_at, updated_at
                 """
                 product_result = await conn.fetchrow(
@@ -236,6 +237,7 @@ async def get_product_by_id(
                     p.controla_stock,
                     p.is_available,
                     p.is_available_online,
+                    p.is_available_table_qr,
                     p.is_combo,
                     p.is_resale,
                     p.allow_modifiers,
@@ -483,6 +485,7 @@ async def get_products_list(
                     p.controla_stock,
                     p.is_available,
                     p.is_available_online,
+                    p.is_available_table_qr,
                     p.is_combo,
                     p.is_resale,
                     p.allow_modifiers,
