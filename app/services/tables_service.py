@@ -4,6 +4,7 @@ Business logic for table management and session lifecycle.
 
 Issue: https://github.com/uno0uno/warocol.com/issues/298
 """
+import secrets
 from typing import Optional, List
 from uuid import UUID
 from datetime import date
@@ -23,6 +24,64 @@ from app.services.comandas_service import fire_comandas
 import logging
 
 logger = logging.getLogger(__name__)
+
+_QR_TOKEN_URLSAFE_BYTES = 32
+_QR_TOKEN_MAX_ATTEMPTS = 5
+
+
+async def _generate_unique_qr_token(conn) -> str:
+    """Opaque token for public table QR URLs (api-warolabs#266)."""
+    for _ in range(_QR_TOKEN_MAX_ATTEMPTS):
+        token = secrets.token_urlsafe(_QR_TOKEN_URLSAFE_BYTES)
+        exists = await conn.fetchval(
+            "SELECT 1 FROM tables WHERE qr_public_token = $1",
+            token,
+        )
+        if not exists:
+            return token
+    raise APIError("No se pudo generar un token QR único", status_code=500)
+
+
+async def _require_table_qr_module(conn, tenant_id) -> None:
+    enabled = await conn.fetchval(
+        """
+        SELECT table_qr_module_enabled
+        FROM tenant_public_profiles
+        WHERE tenant_id = $1
+        """,
+        tenant_id,
+    )
+    if not enabled:
+        raise APIError(
+            "El módulo de pedido por QR en mesa no está habilitado",
+            status_code=409,
+        )
+
+
+async def _get_table_for_qr_management(conn, tenant_id, table_id) -> dict:
+    row = await conn.fetchrow(
+        """
+        SELECT id, name, is_bar, is_active, deleted_at, qr_enabled, qr_public_token
+        FROM tables
+        WHERE id = $1 AND tenant_id = $2
+        """,
+        table_id,
+        tenant_id,
+    )
+    if not row or row["deleted_at"]:
+        raise NotFoundError("Table not found")
+    if row["is_bar"]:
+        raise APIError("La Barra no admite pedidos por QR", status_code=409)
+    if not row["is_active"]:
+        raise APIError("No se puede configurar QR en una mesa inactiva", status_code=409)
+    return dict(row)
+
+
+def _format_table_qr_fields(row: dict) -> dict:
+    return {
+        "qr_enabled": bool(row.get("qr_enabled")) if row.get("qr_enabled") is not None else False,
+        "qr_public_token": row.get("qr_public_token"),
+    }
 
 
 def _distribute_discount(items: List[dict], discount_amount: float) -> List[dict]:
@@ -119,6 +178,8 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                     t.status,
                     t.is_active,
                     t.is_bar,
+                    t.qr_enabled,
+                    t.qr_public_token,
                     t.created_at,
                     t.assigned_member_id,
                     p_assigned.name AS assigned_member_name,
@@ -213,16 +274,40 @@ async def create_table(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO tables (tenant_id, name, capacity)
-                VALUES ($1, $2, $3)
-                RETURNING id, name, capacity, status, is_active, created_at
-                """,
-                tenant_id,
-                name,
-                capacity,
-            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO tables (tenant_id, name, capacity)
+                    VALUES ($1, $2, $3)
+                    RETURNING id, name, capacity, status, is_active, is_bar,
+                              qr_enabled, qr_public_token, created_at
+                    """,
+                    tenant_id,
+                    name,
+                    capacity,
+                )
+                module_on = await conn.fetchval(
+                    """
+                    SELECT table_qr_module_enabled
+                    FROM tenant_public_profiles
+                    WHERE tenant_id = $1
+                    """,
+                    tenant_id,
+                )
+                if module_on and not row["is_bar"]:
+                    token = await _generate_unique_qr_token(conn)
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE tables
+                        SET qr_public_token = $1
+                        WHERE id = $2 AND tenant_id = $3
+                        RETURNING id, name, capacity, status, is_active, is_bar,
+                                  qr_enabled, qr_public_token, created_at
+                        """,
+                        token,
+                        row["id"],
+                        tenant_id,
+                    )
 
         logger.info(f"Table created: {row['id']} ({name}) for tenant {tenant_id}")
         return {"success": True, "data": _format_table_simple(row)}
@@ -2222,6 +2307,91 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
         raise APIError(f"Error moving table session: {e}", status_code=500)
 
 
+async def set_table_qr_enabled(request: Request, table_id: UUID, enabled: bool) -> dict:
+    """Enable/disable Table QR for a table. Generates token on first enable."""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                await _require_table_qr_module(conn, tenant_id)
+                table = await _get_table_for_qr_management(conn, tenant_id, table_id)
+                token = table["qr_public_token"]
+                if enabled:
+                    if not token:
+                        token = await _generate_unique_qr_token(conn)
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE tables
+                        SET qr_enabled = true, qr_public_token = $1
+                        WHERE id = $2 AND tenant_id = $3
+                        RETURNING id, name, capacity, status, is_active, is_bar,
+                                  qr_enabled, qr_public_token, created_at
+                        """,
+                        token,
+                        table_id,
+                        tenant_id,
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE tables
+                        SET qr_enabled = false
+                        WHERE id = $1 AND tenant_id = $2
+                        RETURNING id, name, capacity, status, is_active, is_bar,
+                                  qr_enabled, qr_public_token, created_at
+                        """,
+                        table_id,
+                        tenant_id,
+                    )
+
+        return {"success": True, "data": _format_table_simple(row)}
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error setting table QR enabled={enabled} for {table_id}: {e}")
+        raise APIError(f"Error updating table QR: {e}", status_code=500)
+
+
+async def regenerate_table_qr_token(request: Request, table_id: UUID) -> dict:
+    """Issue a new public token; previous printed QRs stop resolving."""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                await _require_table_qr_module(conn, tenant_id)
+                await _get_table_for_qr_management(conn, tenant_id, table_id)
+                token = await _generate_unique_qr_token(conn)
+                row = await conn.fetchrow(
+                    """
+                    UPDATE tables
+                    SET qr_public_token = $1, qr_enabled = true
+                    WHERE id = $2 AND tenant_id = $3
+                    RETURNING id, name, capacity, status, is_active, is_bar,
+                              qr_enabled, qr_public_token, created_at
+                    """,
+                    token,
+                    table_id,
+                    tenant_id,
+                )
+
+        return {"success": True, "data": _format_table_simple(row)}
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error regenerating QR token for table {table_id}: {e}")
+        raise APIError(f"Error regenerating table QR token: {e}", status_code=500)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _format_table_row(row: dict) -> dict:
@@ -2233,6 +2403,7 @@ def _format_table_row(row: dict) -> dict:
         "is_active": row["is_active"],
         "is_bar": bool(row["is_bar"]) if row.get("is_bar") is not None else False,
         "created_at": row["created_at"].isoformat(),
+        **_format_table_qr_fields(row),
         "has_history": row.get("last_closed_session_id") is not None,
         "session": None,
         "last_closed_at": row["last_closed_at"].isoformat() if row.get("last_closed_at") else None,
@@ -2422,6 +2593,7 @@ def _format_table_simple(row: dict) -> dict:
         "status": row["status"],
         "is_active": row["is_active"],
         "created_at": row["created_at"].isoformat(),
+        **_format_table_qr_fields(row),
     }
 
 
