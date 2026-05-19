@@ -27,6 +27,8 @@ def _session():
 @pytest.mark.asyncio
 async def test_resolve_table_qr_token_active():
     row = {
+        "tenant_id": uuid4(),
+        "table_id": uuid4(),
         "table_name": "Mesa 1",
         "qr_enabled": True,
         "table_active": True,
@@ -38,7 +40,11 @@ async def test_resolve_table_qr_token_active():
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=row)
 
-    with patch("app.services.public_table_qr_service.get_db_connection") as mock_get_conn:
+    row["business_hours"] = None
+    row["is_manually_open"] = True
+
+    with patch("app.services.public_table_qr_service.get_db_connection") as mock_get_conn, \
+         patch("app.services.public_table_qr_service.is_currently_open", return_value=True):
         mock_get_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
         mock_get_conn.return_value.__aexit__ = AsyncMock(return_value=False)
         result = await public_table_qr_service.resolve_table_qr_token("tok-abc")
@@ -60,7 +66,11 @@ async def test_resolve_table_qr_token_disabled_module_returns_none():
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=row)
 
-    with patch("app.services.public_table_qr_service.get_db_connection") as mock_get_conn:
+    row["business_hours"] = None
+    row["is_manually_open"] = True
+
+    with patch("app.services.public_table_qr_service.get_db_connection") as mock_get_conn, \
+         patch("app.services.public_table_qr_service.is_currently_open", return_value=True):
         mock_get_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
         mock_get_conn.return_value.__aexit__ = AsyncMock(return_value=False)
         assert await public_table_qr_service.resolve_table_qr_token("tok-abc") is None

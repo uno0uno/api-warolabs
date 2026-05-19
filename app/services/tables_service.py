@@ -1704,6 +1704,208 @@ async def update_tab_item_quantity(
         raise APIError(f"Error updating item: {e}", status_code=500)
 
 
+async def _add_tab_items_core(
+    conn,
+    tenant_id: UUID,
+    user_id: UUID,
+    table_id: UUID,
+    items: List[dict],
+) -> dict:
+    """
+    Add tab items using an existing connection (caller owns transaction).
+    Used by add_tab_items and table QR accept (#268).
+    """
+    session_row = await conn.fetchrow(
+        """
+        SELECT ts.id AS session_id
+        FROM table_sessions ts
+        JOIN tables t ON t.id = ts.table_id
+        WHERE ts.table_id = $1
+          AND ts.tenant_id = $2
+          AND ts.closed_at IS NULL
+          AND t.is_active = true
+        """,
+        table_id,
+        tenant_id,
+    )
+    if not session_row:
+        raise NotFoundError("No open session found for this table")
+
+    session_id = session_row["session_id"]
+
+    for item in items:
+        mod_sum = sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
+        logger.info(
+            f"[add_tab_items] item product_id={item['product_id']} "
+            f"qty={item['quantity']} unit_price={item['unit_price']} "
+            f"modifier_sum={mod_sum} "
+            f"line_total={item['quantity'] * (item['unit_price'] + mod_sum)}"
+        )
+    batch_amount = sum(
+        item["quantity"] * (
+            item["unit_price"]
+            + sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
+        )
+        for item in items
+    )
+    logger.info(f"[add_tab_items] batch_amount={batch_amount} items_count={len(items)}")
+
+    existing_order = await conn.fetchrow(
+        """
+        SELECT id FROM orders
+        WHERE table_session_id = $1 AND status = 'pending'
+        ORDER BY order_date ASC
+        LIMIT 1
+        """,
+        session_id,
+    )
+    order_number: int
+    order_total: float
+    if existing_order:
+        order_id = existing_order["id"]
+        updated = await conn.fetchrow(
+            """
+            UPDATE orders
+            SET total_amount = total_amount + $1
+            WHERE id = $2
+            RETURNING order_number, total_amount
+            """,
+            batch_amount,
+            order_id,
+        )
+        order_number = updated["order_number"]
+        order_total = float(updated["total_amount"])
+        logger.info(f"[add_tab_items] reusing existing order {order_id}, adding {batch_amount}")
+    else:
+        order_row = await conn.fetchrow(
+            """
+            INSERT INTO orders (
+                user_id, tenant_id, table_session_id,
+                order_date, total_amount, status
+            )
+            VALUES ($1, $2, $3, NOW(), $4, 'pending')
+            RETURNING id, order_number, total_amount
+            """,
+            user_id,
+            tenant_id,
+            session_id,
+            batch_amount,
+        )
+        order_id = order_row["id"]
+        order_number = order_row["order_number"]
+        order_total = float(order_row["total_amount"])
+        logger.info(f"[add_tab_items] created new order {order_id}")
+
+    for item in items:
+        modifier_unit_total = sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
+        subtotal = item["quantity"] * (item["unit_price"] + modifier_unit_total)
+        order_item_row = await conn.fetchrow(
+            """
+            INSERT INTO order_items (
+                order_id, product_id, quantity,
+                price_at_purchase, subtotal
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
+            """,
+            order_id,
+            item["product_id"],
+            item["quantity"],
+            item["unit_price"],
+            subtotal,
+        )
+        order_item_id = order_item_row["id"]
+
+        for mod in item.get("modifiers") or []:
+            await conn.execute(
+                """
+                INSERT INTO order_item_modifiers (
+                    order_item_id, modifier_id, modifier_name,
+                    price_at_purchase, quantity
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                order_item_id,
+                mod.get("id"),
+                mod.get("name"),
+                mod.get("price", 0),
+                1,
+            )
+
+        try:
+            await _capture_order_item_ingredients(
+                conn, order_item_id, item["product_id"],
+                float(item["quantity"]), str(tenant_id)
+            )
+        except Exception as _snap_exc:
+            logger.error(f"[tab] ingredient snapshot failed for item {order_item_id}: {_snap_exc}")
+
+        try:
+            ingredients = await conn.fetch(
+                """
+                SELECT pr.ingredient_id, pr.quantity, pr.unit, i.name as ingredient_name
+                FROM product_recipes pr
+                JOIN ingredients i ON i.id = pr.ingredient_id
+                WHERE pr.product_id = $1
+                UNION ALL
+                SELECT brt.ingredient_id, brt.base_quantity * pbr.quantity AS quantity, brt.unit, i.name as ingredient_name
+                FROM product_base_recipes pbr
+                JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
+                JOIN ingredients i ON i.id = brt.ingredient_id
+                WHERE pbr.product_id = $1
+                """,
+                item["product_id"],
+            )
+            for ing in ingredients:
+                resolved_qty = await resolve_recipe_quantity_to_base_unit(
+                    conn, ing["ingredient_id"],
+                    float(ing["quantity"]), ing["unit"] or "",
+                )
+                qty_to_deduct = float(item["quantity"]) * resolved_qty
+                stock_row = await conn.fetchrow(
+                    "SELECT current_stock FROM tenant_inventory WHERE ingredient_id = $1 AND tenant_id = $2",
+                    ing["ingredient_id"], tenant_id,
+                )
+                if stock_row:
+                    prev = float(stock_row["current_stock"] or 0)
+                    new_stock = prev - qty_to_deduct
+                    await conn.execute(
+                        "UPDATE tenant_inventory SET current_stock = $1, last_updated = NOW() WHERE ingredient_id = $2 AND tenant_id = $3",
+                        new_stock, ing["ingredient_id"], tenant_id,
+                    )
+                else:
+                    new_stock = -qty_to_deduct
+                    await conn.execute(
+                        "INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock, last_updated) VALUES ($1, $2, $3, 0, NOW())",
+                        tenant_id, ing["ingredient_id"], new_stock,
+                    )
+                await conn.execute(
+                    """
+                    INSERT INTO tenant_ingredient_movements (
+                        tenant_id, ingredient_id, movement_type, quantity_change,
+                        unit, previous_stock, new_stock, reference_table, reference_id,
+                        reason, created_by, created_at
+                    ) VALUES ($1, $2, 'consumption', $3, $4, $5, $6, 'orders', $7, $8, $9, NOW())
+                    """,
+                    tenant_id, ing["ingredient_id"], -qty_to_deduct,
+                    ing["unit"] or "und",
+                    float(stock_row["current_stock"] or 0) if stock_row else 0.0,
+                    new_stock, order_id,
+                    f"Venta de {item['quantity']}x (mesa {table_id}) - Orden #{order_number}",
+                    user_id,
+                )
+        except Exception as _inv_exc:
+            logger.error(f"[tab] inventory deduction failed for item {order_item_id}: {_inv_exc}")
+
+    return {
+        "order_id": order_id,
+        "order_number": order_number,
+        "total_amount": order_total,
+        "session_id": session_id,
+        "items_count": len(items),
+    }
+
+
 async def add_tab_items(
     request: Request,
     table_id: UUID,
@@ -1722,197 +1924,14 @@ async def add_tab_items(
         if not items:
             raise APIError("No items provided", status_code=400)
 
+        tab_result: dict = {}
         async with get_db_connection() as conn:
             async with conn.transaction():
-                # Verify the table has an open session owned by this tenant
-                session_row = await conn.fetchrow(
-                    """
-                    SELECT ts.id AS session_id
-                    FROM table_sessions ts
-                    JOIN tables t ON t.id = ts.table_id
-                    WHERE ts.table_id = $1
-                      AND ts.tenant_id = $2
-                      AND ts.closed_at IS NULL
-                      AND t.is_active = true
-                    """,
-                    table_id,
-                    tenant_id,
-                )
-                if not session_row:
-                    raise NotFoundError("No open session found for this table")
+                tab_result = await _add_tab_items_core(conn, tenant_id, user_id, table_id, items)
 
-                session_id = session_row["session_id"]
-
-                # Compute total including modifier prices (no DB price lookup — POS already verified)
-                for item in items:
-                    mod_sum = sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
-                    logger.info(
-                        f"[add_tab_items] item product_id={item['product_id']} "
-                        f"qty={item['quantity']} unit_price={item['unit_price']} "
-                        f"modifier_sum={mod_sum} "
-                        f"line_total={item['quantity'] * (item['unit_price'] + mod_sum)}"
-                    )
-                batch_amount = sum(
-                    item["quantity"] * (
-                        item["unit_price"]
-                        + sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
-                    )
-                    for item in items
-                )
-                logger.info(f"[add_tab_items] batch_amount={batch_amount} items_count={len(items)}")
-
-                # Reuse the existing pending order for this session, or create one if none exists
-                existing_order = await conn.fetchrow(
-                    """
-                    SELECT id FROM orders
-                    WHERE table_session_id = $1 AND status = 'pending'
-                    ORDER BY order_date ASC
-                    LIMIT 1
-                    """,
-                    session_id,
-                )
-                order_number: int
-                order_total: float
-                if existing_order:
-                    order_id = existing_order["id"]
-                    updated = await conn.fetchrow(
-                        """
-                        UPDATE orders
-                        SET total_amount = total_amount + $1
-                        WHERE id = $2
-                        RETURNING order_number, total_amount
-                        """,
-                        batch_amount,
-                        order_id,
-                    )
-                    order_number = updated["order_number"]
-                    order_total = float(updated["total_amount"])
-                    logger.info(f"[add_tab_items] reusing existing order {order_id}, adding {batch_amount}")
-                else:
-                    order_row = await conn.fetchrow(
-                        """
-                        INSERT INTO orders (
-                            user_id, tenant_id, table_session_id,
-                            order_date, total_amount, status
-                        )
-                        VALUES ($1, $2, $3, NOW(), $4, 'pending')
-                        RETURNING id, order_number, total_amount
-                        """,
-                        user_id,
-                        tenant_id,
-                        session_id,
-                        batch_amount,
-                    )
-                    order_id = order_row["id"]
-                    order_number = order_row["order_number"]
-                    order_total = float(order_row["total_amount"])
-                    logger.info(f"[add_tab_items] created new order {order_id}")
-
-                # Insert order_items
-                for item in items:
-                    modifier_unit_total = sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
-                    subtotal = item["quantity"] * (item["unit_price"] + modifier_unit_total)
-                    order_item_row = await conn.fetchrow(
-                        """
-                        INSERT INTO order_items (
-                            order_id, product_id, quantity,
-                            price_at_purchase, subtotal
-                        )
-                        VALUES ($1, $2, $3, $4, $5)
-                        RETURNING id
-                        """,
-                        order_id,
-                        item["product_id"],
-                        item["quantity"],
-                        item["unit_price"],
-                        subtotal,
-                    )
-                    order_item_id = order_item_row["id"]
-
-                    # Insert modifiers if any
-                    for mod in item.get("modifiers") or []:
-                        await conn.execute(
-                            """
-                            INSERT INTO order_item_modifiers (
-                                order_item_id, modifier_id, modifier_name,
-                                price_at_purchase, quantity
-                            )
-                            VALUES ($1, $2, $3, $4, $5)
-                            """,
-                            order_item_id,
-                            mod.get("id"),
-                            mod.get("name"),
-                            mod.get("price", 0),
-                            1,
-                        )
-
-                    # Capture ingredient cost snapshot (needed for COGS GL at close)
-                    try:
-                        await _capture_order_item_ingredients(
-                            conn, order_item_id, item["product_id"],
-                            float(item["quantity"]), str(tenant_id)
-                        )
-                    except Exception as _snap_exc:
-                        logger.error(f"[tab] ingredient snapshot failed for item {order_item_id}: {_snap_exc}")
-
-                    # Deduct inventory for each ingredient in the product recipe
-                    try:
-                        ingredients = await conn.fetch(
-                            """
-                            SELECT pr.ingredient_id, pr.quantity, pr.unit, i.name as ingredient_name
-                            FROM product_recipes pr
-                            JOIN ingredients i ON i.id = pr.ingredient_id
-                            WHERE pr.product_id = $1
-                            UNION ALL
-                            -- Issue #517: multiply by pbr.quantity
-                            SELECT brt.ingredient_id, brt.base_quantity * pbr.quantity AS quantity, brt.unit, i.name as ingredient_name
-                            FROM product_base_recipes pbr
-                            JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
-                            JOIN ingredients i ON i.id = brt.ingredient_id
-                            WHERE pbr.product_id = $1
-                            """,
-                            item["product_id"],
-                        )
-                        for ing in ingredients:
-                            resolved_qty = await resolve_recipe_quantity_to_base_unit(
-                                conn, ing["ingredient_id"],
-                                float(ing["quantity"]), ing["unit"] or "",
-                            )
-                            qty_to_deduct = float(item["quantity"]) * resolved_qty
-                            stock_row = await conn.fetchrow(
-                                "SELECT current_stock FROM tenant_inventory WHERE ingredient_id = $1 AND tenant_id = $2",
-                                ing["ingredient_id"], tenant_id,
-                            )
-                            if stock_row:
-                                prev = float(stock_row["current_stock"] or 0)
-                                new_stock = prev - qty_to_deduct
-                                await conn.execute(
-                                    "UPDATE tenant_inventory SET current_stock = $1, last_updated = NOW() WHERE ingredient_id = $2 AND tenant_id = $3",
-                                    new_stock, ing["ingredient_id"], tenant_id,
-                                )
-                            else:
-                                new_stock = -qty_to_deduct
-                                await conn.execute(
-                                    "INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock, last_updated) VALUES ($1, $2, $3, 0, NOW())",
-                                    tenant_id, ing["ingredient_id"], new_stock,
-                                )
-                            await conn.execute(
-                                """
-                                INSERT INTO tenant_ingredient_movements (
-                                    tenant_id, ingredient_id, movement_type, quantity_change,
-                                    unit, previous_stock, new_stock, reference_table, reference_id,
-                                    reason, created_by, created_at
-                                ) VALUES ($1, $2, 'consumption', $3, $4, $5, $6, 'orders', $7, $8, $9, NOW())
-                                """,
-                                tenant_id, ing["ingredient_id"], -qty_to_deduct,
-                                ing["unit"] or "und",
-                                float(stock_row["current_stock"] or 0) if stock_row else 0.0,
-                                new_stock, order_id,
-                                f"Venta de {item['quantity']}x (mesa {table_id}) - Orden #{order_number}",
-                                user_id,
-                            )
-                    except Exception as _inv_exc:
-                        logger.error(f"[tab] inventory deduction failed for item {order_item_id}: {_inv_exc}")
+        order_id = tab_result["order_id"]
+        order_number = tab_result["order_number"]
+        order_total = tab_result["total_amount"]
 
         # Auto-fire comandas if enabled
         try:
