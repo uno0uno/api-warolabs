@@ -948,8 +948,9 @@ async def delete_product(
     product_id: UUID
 ) -> dict:
     """
-    Deletes a product and its recipe.
-    Returns success status.
+    Deletes a product when it has no sales history, or archives it when order_items exist.
+
+    Hard delete would CASCADE into order_items and fail on comanda_items FK (warocol.com#705).
     """
     try:
         session_context = require_valid_session(request)
@@ -959,38 +960,87 @@ async def delete_product(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
-            # Verify product exists and belongs to tenant
-            verify_query = "SELECT id, name FROM product WHERE id = $1 AND tenant_id = $2"
-            product_exists = await conn.fetchrow(verify_query, product_id, tenant_id)
+            verify_query = """
+                SELECT id, name, is_available, is_available_online
+                FROM product WHERE id = $1 AND tenant_id = $2
+            """
+            product_row = await conn.fetchrow(verify_query, product_id, tenant_id)
 
-            if not product_exists:
+            if not product_row:
                 raise HTTPException(status_code=404, detail="Product not found")
 
-            # Obtener snapshot ANTES de eliminar (para historial)
             product_snapshot = await menu_history_service.get_product_snapshot(conn, product_id, tenant_id)
-            product_name = product_exists['name']
+            product_name = product_row['name']
             user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
 
-            # Start transaction
             async with conn.transaction():
-                # 1. Registrar eliminación en historial
+                has_sales = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM order_items WHERE product_id = $1)",
+                    product_id,
+                )
+
+                if has_sales:
+                    if not product_row['is_available'] and not product_row['is_available_online']:
+                        return {
+                            "success": True,
+                            "archived": True,
+                            "message": "Product is already archived",
+                        }
+
+                    await conn.execute(
+                        """
+                        UPDATE product
+                           SET is_available = false,
+                               is_available_online = false,
+                               updated_at = NOW()
+                         WHERE id = $1 AND tenant_id = $2
+                        """,
+                        product_id,
+                        tenant_id,
+                    )
+
+                    archive_reason = "Archived: product has sales history (order_items)"
+                    if product_row['is_available']:
+                        await menu_history_service.record_product_update(
+                            conn, tenant_id, product_id, product_name,
+                            'is_available', product_row['is_available'], False,
+                            user_id, archive_reason,
+                        )
+                    if product_row['is_available_online']:
+                        await menu_history_service.record_product_update(
+                            conn, tenant_id, product_id, product_name,
+                            'is_available_online', product_row['is_available_online'], False,
+                            user_id, archive_reason,
+                        )
+
+                    return {
+                        "success": True,
+                        "archived": True,
+                        "message": (
+                            "Product archived. It remains in sales history and is hidden "
+                            "from POS and online ordering."
+                        ),
+                    }
+
                 if product_snapshot:
                     await menu_history_service.record_product_delete(
                         conn, tenant_id, product_id, product_name,
                         product_snapshot, user_id
                     )
 
-                # 2. Delete recipe first (foreign key constraint)
-                delete_recipe_query = "DELETE FROM product_recipes WHERE product_id = $1"
-                await conn.execute(delete_recipe_query, product_id)
-
-                # 3. Delete product
-                delete_product_query = "DELETE FROM product WHERE id = $1 AND tenant_id = $2"
-                await conn.execute(delete_product_query, product_id, tenant_id)
+                await conn.execute(
+                    "DELETE FROM product_recipes WHERE product_id = $1",
+                    product_id,
+                )
+                await conn.execute(
+                    "DELETE FROM product WHERE id = $1 AND tenant_id = $2",
+                    product_id, tenant_id,
+                )
 
                 return {
                     "success": True,
-                    "message": "Product deleted successfully"
+                    "archived": False,
+                    "message": "Product deleted successfully",
                 }
 
     except HTTPException:

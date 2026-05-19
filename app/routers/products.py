@@ -138,9 +138,10 @@ async def delete_product_endpoint(
     product_id: UUID
 ):
     """
-    Delete a product and its recipe.
+    Delete or archive a product.
 
-    This will permanently delete the product and all associated recipe data.
+    Products with sales history (order_items) are archived (is_available=false) to
+    preserve orders and KDS links. Products never sold are permanently deleted.
 
     Requires valid session with tenant context.
     """
