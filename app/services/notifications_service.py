@@ -28,6 +28,21 @@ async def create_order_notification(conn, tenant_id, order_id, payload: dict):
     await conn.execute("SELECT pg_notify($1, $2)", channel, json.dumps(payload))
 
 
+async def create_table_qr_notification(
+    conn, tenant_id: UUID, request_id: UUID, payload: dict
+) -> None:
+    """Notify staff of a pending Table QR request (api-warolabs#267). order_id is NULL."""
+    await conn.execute(
+        """INSERT INTO notifications (tenant_id, order_id, type, payload)
+           VALUES ($1, NULL, 'table_qr_request', $2::jsonb)""",
+        tenant_id,
+        json.dumps(payload),
+    )
+    channel = "tenant_" + str(tenant_id).replace("-", "")
+    notify_payload = {**payload, "request_id": str(request_id)}
+    await conn.execute("SELECT pg_notify($1, $2)", channel, json.dumps(notify_payload))
+
+
 async def get_unread_notifications(request: Request) -> dict:
     """GET /notifications — returns last 50 unread for the tenant."""
     try:
