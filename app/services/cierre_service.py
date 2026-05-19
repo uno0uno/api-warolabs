@@ -1299,6 +1299,24 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
 # GET /cierre
 # ---------------------------------------------------------------------------
 
+_CIERRE_SUMMARY_COLUMNS = """
+    cs.id, cs.accounting_period_id, cs.tenant_id,
+    ap.period_start, ap.period_end, ap.period_start_time, ap.period_end_time, ap.closed_at,
+    ap.shift_template_id,
+    tst.name AS shift_template_name,
+    cs.total_sales, cs.items_sold,
+    cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
+    cs.gastos_efectivo, cs.cash_expected, cs.cash_counted, cs.cash_difference,
+    cs.notes
+"""
+
+_CIERRE_SUMMARY_FROM = """
+    FROM closing_summary cs
+    JOIN accounting_period ap ON ap.id = cs.accounting_period_id
+    LEFT JOIN tenant_shift_templates tst ON tst.id = ap.shift_template_id
+"""
+
+
 async def list_cierres(
     request: Request,
     period_start: Optional[date] = None,
@@ -1323,18 +1341,17 @@ async def list_cierres(
             rows = await conn.fetch(
                 f"""
                 SELECT
-                    cs.id, cs.accounting_period_id, cs.tenant_id,
-                    ap.period_start, ap.period_end, ap.period_start_time, ap.period_end_time, ap.closed_at,
-                    cs.total_sales, cs.items_sold,
-                    cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
-                    cs.gastos_efectivo, cs.cash_expected, cs.cash_counted, cs.cash_difference,
-                    cs.notes
-                FROM closing_summary cs
-                JOIN accounting_period ap ON ap.id = cs.accounting_period_id
+                    {_CIERRE_SUMMARY_COLUMNS}
+                {_CIERRE_SUMMARY_FROM}
                 WHERE cs.tenant_id = $1
                   AND ap.deleted_at IS NULL
                 {date_filter}
-                ORDER BY ap.period_start DESC
+                ORDER BY
+                    COALESCE(
+                        ap.period_start_time,
+                        ap.period_start::timestamp AT TIME ZONE 'America/Bogota'
+                    ) DESC,
+                    ap.closed_at DESC
                 """,
                 *params,
             )
@@ -1362,16 +1379,10 @@ async def get_cierre(request: Request, cierre_id: UUID) -> dict:
 
         async with get_db_connection(use_transaction=False) as conn:
             row = await conn.fetchrow(
-                """
+                f"""
                 SELECT
-                    cs.id, cs.accounting_period_id, cs.tenant_id,
-                    ap.period_start, ap.period_end, ap.period_start_time, ap.period_end_time, ap.closed_at,
-                    cs.total_sales, cs.items_sold,
-                    cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
-                    cs.gastos_efectivo, cs.cash_expected, cs.cash_counted, cs.cash_difference,
-                    cs.notes
-                FROM closing_summary cs
-                JOIN accounting_period ap ON ap.id = cs.accounting_period_id
+                    {_CIERRE_SUMMARY_COLUMNS}
+                {_CIERRE_SUMMARY_FROM}
                 WHERE cs.id = $1 AND cs.tenant_id = $2 AND ap.deleted_at IS NULL
                 """,
                 cierre_id, tenant_id,
@@ -1470,16 +1481,10 @@ async def get_cierre_mensual(request: Request, year: int, month: int) -> dict:
 
         async with get_db_connection(use_transaction=False) as conn:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT
-                    cs.id, cs.accounting_period_id, cs.tenant_id,
-                    ap.period_start, ap.period_end, ap.period_start_time, ap.period_end_time, ap.closed_at,
-                    cs.total_sales, cs.items_sold,
-                    cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
-                    cs.gastos_efectivo, cs.cash_expected, cs.cash_counted, cs.cash_difference,
-                    cs.notes
-                FROM closing_summary cs
-                JOIN accounting_period ap ON ap.id = cs.accounting_period_id
+                    {_CIERRE_SUMMARY_COLUMNS}
+                {_CIERRE_SUMMARY_FROM}
                 WHERE cs.tenant_id = $1
                   AND ap.period_start >= $2
                   AND ap.period_end   <= $3
@@ -1528,16 +1533,10 @@ async def get_ultimo_cierre(request: Request) -> dict:
 
         async with get_db_connection(use_transaction=False) as conn:
             row = await conn.fetchrow(
-                """
+                f"""
                 SELECT
-                    cs.id, cs.accounting_period_id, cs.tenant_id,
-                    ap.period_start, ap.period_end, ap.period_start_time, ap.period_end_time, ap.closed_at,
-                    cs.total_sales, cs.items_sold,
-                    cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
-                    cs.gastos_efectivo, cs.cash_expected, cs.cash_counted, cs.cash_difference,
-                    cs.notes
-                FROM closing_summary cs
-                JOIN accounting_period ap ON ap.id = cs.accounting_period_id
+                    {_CIERRE_SUMMARY_COLUMNS}
+                {_CIERRE_SUMMARY_FROM}
                 WHERE cs.tenant_id = $1
                 ORDER BY ap.period_end DESC, ap.closed_at DESC
                 LIMIT 1
@@ -1570,6 +1569,8 @@ def _row_to_dict(row) -> dict:
         "periodEnd":            row["period_end"].isoformat(),
         "periodStartTime":      row["period_start_time"].isoformat() if row["period_start_time"] else None,
         "periodEndTime":        row["period_end_time"].isoformat()   if row["period_end_time"]   else None,
+        "shiftTemplateId":      str(row["shift_template_id"]) if row["shift_template_id"] else None,
+        "shiftTemplateName":    row["shift_template_name"],
         "totalSales":           float(row["total_sales"]),
         "itemsSold":            int(row["items_sold"]),
         "totalCash":            float(row["total_cash"]),
