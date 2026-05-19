@@ -99,6 +99,33 @@ waro schema sales list   # introspect endpoint schema
 
 ---
 
+## Database schema documentation
+
+The full schema lives auto-generated in [`dbdoc/`](dbdoc/) — one Markdown file per table with columns, foreign keys, indexes, and `COMMENT ON` values pulled directly from the live database. Both humans and LLM assistants should read `dbdoc/` rather than walking `migrations/*.sql` to understand a table.
+
+**Regenerate after applying a new migration in production:**
+
+```bash
+# 1. Tunnel must be up
+ssh -L 5432:localhost:5432 warolabs -N &
+
+# 2. Load DB credentials from .env
+set -a && source .env && set +a
+export TBLS_DSN="postgres://${NUXT_PRIVATE_DB_USER}:${NUXT_PRIVATE_DB_PASSWORD}@localhost:5432/${NUXT_PRIVATE_DB_NAME}?sslmode=disable"
+
+# 3. Run tbls (binary or Docker — see .tbls.yml)
+tbls doc -f
+
+# 4. Post-generation cleanup (see .tbls.yml header for the why)
+find dbdoc -name "*.svg" -delete
+rm -f dbdoc/public._prisma_migrations.md dbdoc/drizzle.__drizzle_migrations.md
+sed -i '' -E '/\[(drizzle.__drizzle_migrations|public._prisma_migrations)\]/d' dbdoc/README.md
+```
+
+Commit the regenerated `dbdoc/` in the same PR as the migration.
+
+---
+
 ## License
 
 Proprietary — [warocol.com](https://warocol.com)
