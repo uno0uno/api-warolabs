@@ -12,9 +12,12 @@ from app.models.product import (
 from app.services import menu_history_service
 from app.services.aws_s3_service import AWSS3Service
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
+import asyncpg
 import logging
 
 logger = logging.getLogger(__name__)
+
+_DUPLICATE_PRODUCT_NAME_DETAIL = "Ya existe un producto con ese nombre en tu menú"
 
 
 def _normalize_recipe_bases(
@@ -194,8 +197,12 @@ async def create_product_with_recipe(
                 # 6. Get complete product with recipe
                 return await get_product_by_id(request, product_id, conn)
 
+    except HTTPException:
+        raise
     except AuthenticationError as e:
         raise e
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(status_code=409, detail=_DUPLICATE_PRODUCT_NAME_DETAIL)
     except Exception as e:
         logger.error(f"Error creating product: {str(e)}")
         raise APIError(f"Error creating product: {str(e)}", status_code=500)
@@ -938,6 +945,8 @@ async def update_product_with_recipe(
         raise
     except AuthenticationError as e:
         raise e
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(status_code=409, detail=_DUPLICATE_PRODUCT_NAME_DETAIL)
     except Exception as e:
         logger.error(f"Error updating product: {str(e)}")
         raise APIError(f"Error updating product: {str(e)}", status_code=500)
