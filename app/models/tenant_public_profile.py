@@ -74,6 +74,13 @@ class TenantPublicProfileBase(BaseModel):
     # Table management module flag
     tables_enabled: bool = Field(False, description="Whether the table management module is enabled for this tenant")
 
+    # Table QR ordering (warocol.com#710)
+    table_qr_module_enabled: bool = Field(
+        False,
+        description="When true, tenant can enable per-table static QR links for "
+                    "diner self-order with staff confirmation in Despacho.",
+    )
+
     # KDS / Comandas module flags
     comandas_enabled: bool = Field(False, description="Whether the comandas/KDS module is enabled. When false, system behaves exactly as today.")
     kds_enabled: bool = Field(False, description="Whether KDS station screens (/cocina/[id]) are enabled. Requires comandas_enabled=true.")
@@ -209,6 +216,7 @@ class TenantPublicProfileUpdate(BaseModel):
     estimated_preparation_time: Optional[int] = None
     is_manually_open: Optional[bool] = None
     tables_enabled: Optional[bool] = None
+    table_qr_module_enabled: Optional[bool] = None
     comandas_enabled: Optional[bool] = None
     kds_enabled: Optional[bool] = None
     auto_select_generic_enabled: Optional[bool] = None

@@ -141,6 +141,16 @@ async def toggle_tables_enabled(request: Request, body: ToggleRequest):
 
 
 @router.patch(
+    "/toggles/table-qr",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def toggle_table_qr_module(request: Request, body: ToggleRequest):
+    """Toggle `table_qr_module_enabled` on the tenant profile (warocol.com#710)."""
+    session = require_valid_session(request)
+    return await update_toggle(session.tenant_id, "table_qr_module_enabled", body.enabled)
+
+
+@router.patch(
     "/toggles/auto-select-generic",
     dependencies=[Depends(require_module(Module.OPERACIONES))],
 )

@@ -120,7 +120,10 @@ async def tenant_detection_middleware(request: Request, call_next):
             return response
 
         # Skip tenant detection for public restaurant endpoints (they use slug-based lookup)
-        if request.url.path.startswith('/public/restaurant'):
+        if (
+            request.url.path.startswith('/public/restaurant')
+            or request.url.path.startswith('/public/table-qr')
+        ):
             request.state.tenant_context = TenantContext()
             response = await call_next(request)
             return response
@@ -427,7 +430,7 @@ async def session_validation_middleware(request: Request, call_next):
         # /api/comandas GET-only: KDS screen polls active comandas by station_id (no session, UUID-secured)
         # Only bypass when there is no session cookie — logged-in dashboard users must go through
         # normal session validation so their tenant_id is available to the service.
-        public_prefixes = ['/blog', '/supplier-portal', '/public/restaurant']
+        public_prefixes = ['/blog', '/supplier-portal', '/public/restaurant', '/public/table-qr']
         has_session_cookie = bool(request.cookies.get("session-token") or "session-token=" in request.headers.get("cookie", ""))
         kds_token_param = request.query_params.get('token', '')
         kds_public = (

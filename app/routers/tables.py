@@ -26,6 +26,10 @@ class UpdateTableRequest(BaseModel):
     capacity: Optional[int] = Field(None, gt=0)
 
 
+class TableQrToggleRequest(BaseModel):
+    enabled: bool
+
+
 class TabModifier(BaseModel):
     id: Optional[str] = None
     name: Optional[str] = None
@@ -64,6 +68,18 @@ async def create_table(request: Request, body: CreateTableRequest):
     Create a new table for the tenant.
     """
     return await tables_service.create_table(request, body.name, body.capacity)
+
+
+@router.patch("/{table_id}/qr", dependencies=[Depends(require_module(Module.OPERACIONES))])
+async def set_table_qr(request: Request, table_id: UUID, body: TableQrToggleRequest):
+    """Enable or disable Table QR for a table (api-warolabs#266)."""
+    return await tables_service.set_table_qr_enabled(request, table_id, body.enabled)
+
+
+@router.post("/{table_id}/qr-token/regenerate", dependencies=[Depends(require_module(Module.OPERACIONES))])
+async def regenerate_table_qr_token(request: Request, table_id: UUID):
+    """Regenerate the public QR token for a table (invalidates old printed QRs)."""
+    return await tables_service.regenerate_table_qr_token(request, table_id)
 
 
 @router.put("/{table_id}", dependencies=[Depends(require_module(Module.POS))])
