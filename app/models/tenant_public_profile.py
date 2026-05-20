@@ -133,6 +133,11 @@ class TenantPublicProfileBase(BaseModel):
                     "surfaces the tip selector at POS/online checkout and the "
                     "/ventas/propinas history view.",
     )
+    tip_taxable_default: bool = Field(
+        False,
+        description="warocol.com#740 — default: apply consumption tax to tips "
+                    "at checkout (gravada). Cashier may override per sale.",
+    )
     tip_default_percentages: list[Decimal] = Field(
         default_factory=lambda: [Decimal('10')],
         description="Suggested tip presets shown as chips at checkout "
@@ -229,6 +234,7 @@ class TenantPublicProfileUpdate(BaseModel):
 
     # Tipping configuration (warocol.com#635)
     tip_enabled: Optional[bool] = None
+    tip_taxable_default: Optional[bool] = None
     tip_default_percentages: Optional[list[Decimal]] = None
     tip_preselect_index: Optional[int] = None
 

@@ -161,6 +161,7 @@ class CompleteOrderRequest(BaseModel):
     served_by_member_id: Optional[UUID] = Field(None, description="Issue warocol.com#575/#663 — waiter at checkout. Validated against active tenant members; persisted even when waiter_attribution_enabled is OFF.")
     tip_amount: float = Field(0, ge=0, description="Issue warocol.com#637 — tip amount in COP. Strictly separate from total_amount. Rejected when tip_enabled=false for the tenant. Allowed with split_mode (settlement is total + tip). For cash payments, cash_received must cover total + tip on single-pay close.")
     tip_source: Literal['preset', 'custom', 'none'] = Field('none', description="Issue warocol.com#637 — how the customer chose the tip. Must agree with tip_amount: (0,'none') or (>0,'preset'|'custom').")
+    tip_taxable: bool = Field(False, description="warocol.com#740 — when true, standard consumption tax is applied to tip_amount (gravada).")
 
 
 @router.post("/{cart_id}/complete", dependencies=[Depends(require_module(Module.POS))])
@@ -198,6 +199,7 @@ async def complete_order(
         served_by_member_id=order_data.served_by_member_id,
         tip_amount=order_data.tip_amount,
         tip_source=order_data.tip_source,
+        tip_taxable=order_data.tip_taxable,
     )
 
 

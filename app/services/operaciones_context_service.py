@@ -31,6 +31,7 @@ ALLOWED_TOGGLES = frozenset({
     "auto_select_generic_enabled",
     "waiter_attribution_enabled",  # warocol.com#573
     "tip_enabled",                  # warocol.com#638
+    "tip_taxable_default",          # warocol.com#740
 })
 
 

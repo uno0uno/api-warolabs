@@ -182,6 +182,20 @@ async def toggle_tip_enabled(request: Request, body: ToggleRequest):
 
 
 @router.patch(
+    "/toggles/tip-taxable-default",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def toggle_tip_taxable_default(request: Request, body: ToggleRequest):
+    """Toggle default taxable tip (gravada) at checkout (warocol.com#740).
+
+    When true, new checkouts pre-select applying IVA/INC to the tip amount.
+    Cashiers can still override per sale at checkout.
+    """
+    session = require_valid_session(request)
+    return await update_toggle(session.tenant_id, "tip_taxable_default", body.enabled)
+
+
+@router.patch(
     "/tip/config",
     dependencies=[Depends(require_module(Module.OPERACIONES))],
 )
