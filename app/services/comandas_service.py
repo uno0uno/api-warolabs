@@ -147,6 +147,7 @@ async def _fire_with_conn(
                 oi.id,
                 oi.quantity,
                 oi.product_id,
+                oi.notes,
                 COALESCE(p.kitchen_name, p.name) AS kitchen_name
             FROM order_items oi
             JOIN product p ON oi.product_id = p.id
@@ -164,6 +165,7 @@ async def _fire_with_conn(
                 oi.id,
                 oi.quantity,
                 oi.product_id,
+                oi.notes,
                 COALESCE(p.kitchen_name, p.name) AS kitchen_name
             FROM order_items oi
             JOIN product p ON oi.product_id = p.id
@@ -253,13 +255,14 @@ async def _fire_with_conn(
                 for m in mod_rows
             ] if mod_rows else None
 
+            item_notes = (item.get('notes') or '').strip() or None
             ci_row = await conn.fetchrow(
                 """
                 INSERT INTO comanda_items (
                     comanda_id, order_item_id, kitchen_name,
-                    quantity, modifiers_snapshot
+                    quantity, modifiers_snapshot, notes
                 )
-                VALUES ($1, $2, $3, $4, $5)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 RETURNING id, order_item_id, kitchen_name, quantity,
                           notes, modifiers_snapshot, status, ready_at, created_at
                 """,
@@ -268,6 +271,7 @@ async def _fire_with_conn(
                 item['kitchen_name'],
                 item['quantity'],
                 json.dumps(modifiers_snapshot) if modifiers_snapshot else None,
+                item_notes,
             )
             inserted_items.append(_parse_item_row(ci_row))
 
