@@ -16,17 +16,17 @@ from app.core.exceptions import AuthenticationError, APIError
 from app.services.waros_service import evaluate_and_award
 from app.services.email_helpers import send_pos_receipt_email
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
+from app.services.tip_tax_service import (
+    compute_tip_tax_amount,
+    split_settlement_amount_due,
+    tip_settlement_total,
+)
 from app.services.accounting_service import void_order_journal_entry_in_txn
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas, finalize_open_comandas
 import logging
 
 logger = logging.getLogger(__name__)
-
-
-def _split_settlement_amount_due(order_total: float, tip_amount: float) -> float:
-    """warocol.com#737 — partial payments settle order total + tip (tip not in total_amount)."""
-    return float(order_total) + float(tip_amount or 0)
 
 
 def _distribute_discount(items: List[dict], discount_amount: float) -> List[dict]:
@@ -775,7 +775,7 @@ async def add_order_payment(
                 # 2. Fetch + lock the order linked to this cart via pos_cart_id
                 order_row = await conn.fetchrow(
                     """
-                    SELECT id, total_amount, tip_amount, status, payment_status
+                    SELECT id, total_amount, tip_amount, tip_tax_amount, status, payment_status
                     FROM orders
                     WHERE pos_cart_id = $1 AND tenant_id = $2
                     ORDER BY created_at DESC
@@ -800,7 +800,11 @@ async def add_order_payment(
                     raise APIError("Order is already fully paid", status_code=409)
 
                 total_amount = float(order_row["total_amount"])
-                amount_due = _split_settlement_amount_due(total_amount, float(order_row["tip_amount"] or 0))
+                amount_due = split_settlement_amount_due(
+                    total_amount,
+                    float(order_row["tip_amount"] or 0),
+                    float(order_row["tip_tax_amount"] or 0),
+                )
 
                 # 3. Insert payment record
                 user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
@@ -919,8 +923,8 @@ async def void_order_payment(
                     """
                     SELECT op.id, op.order_id, op.amount, op.payment_method,
                            op.cash_received, op.created_by_user_id, op.voided_at,
-                           o.pos_cart_id, o.total_amount, o.tip_amount, o.payment_status,
-                           o.status AS order_status
+                           o.pos_cart_id, o.total_amount, o.tip_amount, o.tip_tax_amount,
+                           o.payment_status, o.status AS order_status
                     FROM order_payments op
                     JOIN orders o ON o.id = op.order_id
                     WHERE op.id = $1::uuid AND op.tenant_id = $2
@@ -970,8 +974,10 @@ async def void_order_payment(
                 )
                 paid_total = float(paid_row["paid"])
                 total_amount = float(payment_row["total_amount"])
-                amount_due = _split_settlement_amount_due(
-                    total_amount, float(payment_row["tip_amount"] or 0),
+                amount_due = split_settlement_amount_due(
+                    total_amount,
+                    float(payment_row["tip_amount"] or 0),
+                    float(payment_row["tip_tax_amount"] or 0),
                 )
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
@@ -1035,6 +1041,7 @@ async def complete_pos_order(
     served_by_member_id: Optional[UUID] = None,
     tip_amount: float = 0,
     tip_source: str = 'none',
+    tip_taxable: bool = False,
 ) -> dict:
     """
     Complete a POS order:
@@ -1160,6 +1167,12 @@ async def complete_pos_order(
                 if not items:
                     raise APIError("Cannot complete order with empty cart", status_code=400)
 
+                tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                _tip_taxable = bool(tip_taxable) if tip_amount > 0 else False
+                _tip_tax_amount = compute_tip_tax_amount(
+                    float(tip_amount), _tip_taxable, tax_config,
+                )
+
                 # 3. Create order record (use customer_id from parameter)
                 # Compute payment_status
                 if split_mode:
@@ -1196,11 +1209,14 @@ async def complete_pos_order(
                 if not split_mode and cash_received is not None:
                     if payment_method != 'cash':
                         raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
-                    _required_cash = float(_discounted_total) + float(tip_amount)
+                    _required_cash = float(_discounted_total) + tip_settlement_total(
+                        float(tip_amount), _tip_tax_amount,
+                    )
                     if cash_received < _required_cash:
                         if tip_amount > 0:
                             raise APIError(
-                                f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total + propina ({_required_cash})",
+                                f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total + propina"
+                                f" (+ IVA propina si aplica) ({_required_cash})",
                                 status_code=400,
                             )
                         raise APIError(
@@ -1218,9 +1234,10 @@ async def complete_pos_order(
                         delivery_address_id, scheduled_time, delivery_instructions,
                         cash_received,
                         served_by_member_id,
-                        tip_amount, tip_source
+                        tip_amount, tip_source,
+                        tip_taxable, tip_tax_amount
                     )
-                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
                     RETURNING id, order_number, created_at
                 """
                 order_row = await conn.fetchrow(
@@ -1245,6 +1262,8 @@ async def complete_pos_order(
                     resolved_served_by,
                     float(tip_amount),
                     tip_source,
+                    _tip_taxable,
+                    float(_tip_tax_amount),
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']
@@ -1612,7 +1631,9 @@ async def complete_pos_order(
                     )
                     _split_first_payment_id = str(_split_first_payment_row["id"])
                     _split_paid_total = split_first_amount
-                    _amount_due = _split_settlement_amount_due(float(_discounted_total), float(tip_amount))
+                    _amount_due = split_settlement_amount_due(
+                        float(_discounted_total), float(tip_amount), _tip_tax_amount,
+                    )
                     _split_remaining = max(0.0, _amount_due - split_first_amount)
                     _split_is_complete = _split_remaining <= 0.01
 
@@ -1723,7 +1744,11 @@ async def complete_pos_order(
                         "total_amount": float(_discounted_total),
                         "tip_amount": float(tip_amount),
                         "tip_source": tip_source,
-                        "charged_amount": float(_discounted_total) + float(tip_amount),
+                        "tip_taxable": _tip_taxable,
+                        "tip_tax_amount": float(_tip_tax_amount),
+                        "charged_amount": float(_discounted_total) + tip_settlement_total(
+                            float(tip_amount), _tip_tax_amount,
+                        ),
                         "payment_method": payment_method,
                         "payment_status": payment_status,
                         "credit_due_date": str(credit_due_date) if credit_due_date is not None else None,

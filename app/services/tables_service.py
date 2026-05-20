@@ -20,7 +20,11 @@ from app.services.accounting_service import void_order_journal_entry_in_txn
 from app.services.pos_cart_service import (
     _capture_order_item_ingredients,
     _PAYMENT_VOID_ROLES,
-    _split_settlement_amount_due,
+)
+from app.services.tip_tax_service import (
+    compute_tip_tax_amount,
+    split_settlement_amount_due,
+    tip_settlement_total,
 )
 from app.services.orders_service import _compute_tax_breakdown
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
@@ -686,7 +690,7 @@ async def open_session(
         raise APIError(f"Error opening session: {e}", status_code=500)
 
 
-async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None, split_mode: bool = False, split_first_amount: float = 0.0, *, split_first_cash_received: Optional[float] = None, cash_received: Optional[float] = None, tip_amount: float = 0, tip_source: str = 'none', served_by_member_id: Optional[UUID] = None) -> dict:
+async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None, split_mode: bool = False, split_first_amount: float = 0.0, *, split_first_cash_received: Optional[float] = None, cash_received: Optional[float] = None, tip_amount: float = 0, tip_source: str = 'none', tip_taxable: bool = False, served_by_member_id: Optional[UUID] = None) -> dict:
     """
     Close the active session for a table.
     If payment_method is provided, marks all pending orders as completed with that payment method.
@@ -765,6 +769,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         resolved_served_by = session_row["effective_waiter_member_id"]
 
                 is_bar_table = bool(table_row["is_bar"])
+                _mesa_tip_taxable = bool(tip_taxable) if tip_amount > 0 else False
+                _mesa_tip_tax_amount = 0.0
 
                 # Mark pending orders as completed if payment_method provided
                 if payment_method:
@@ -922,25 +928,35 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     # `orders` row so the /ventas/propinas aggregator sees a single entry
                     # per mesa close instead of N inflated percentages.
                     if tip_amount > 0:
+                        _mesa_tip_taxable = bool(tip_taxable)
                         tenant_tip_enabled = await conn.fetchval(
                             "SELECT tip_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
                             tenant_id,
                         )
                         if not bool(tenant_tip_enabled):
                             raise APIError("Tipping is not enabled for this tenant", status_code=400)
+                        tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        _mesa_tip_tax_amount = compute_tip_tax_amount(
+                            float(tip_amount), _mesa_tip_taxable, tax_config,
+                        )
                         if not split_mode and payment_method == 'cash' and cash_received is not None:
                             session_total_with_tip = await conn.fetchval(
                                 "SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE table_session_id = $1 AND status = 'completed'",
                                 session_row["id"],
                             )
-                            if cash_received < (float(session_total_with_tip or 0) + float(tip_amount)):
+                            _required_cash = float(session_total_with_tip or 0) + tip_settlement_total(
+                                float(tip_amount), _mesa_tip_tax_amount,
+                            )
+                            if cash_received < _required_cash:
                                 raise APIError(
-                                    f"Efectivo recibido ({cash_received}) debe cubrir total + propina ({float(session_total_with_tip or 0) + float(tip_amount)})",
+                                    f"Efectivo recibido ({cash_received}) debe cubrir total + propina"
+                                    f" (+ IVA propina si aplica) ({_required_cash})",
                                     status_code=400,
                                 )
                         await conn.execute(
                             """
-                            UPDATE orders SET tip_amount = $1, tip_source = $2
+                            UPDATE orders SET tip_amount = $1, tip_source = $2,
+                                              tip_taxable = $4, tip_tax_amount = $5
                              WHERE id = (
                                SELECT id FROM orders
                                 WHERE table_session_id = $3 AND status = 'completed'
@@ -950,6 +966,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             float(tip_amount),
                             tip_source,
                             session_row["id"],
+                            _mesa_tip_taxable,
+                            float(_mesa_tip_tax_amount),
                         )
 
                     # GL journal entries — one per order, atomic with session close
@@ -1117,15 +1135,21 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 )
                 paid_total = float(paid_row["paid"])
                 
-                session_tip = await conn2.fetchval(
+                session_tip_row = await conn2.fetchrow(
                     """
-                    SELECT COALESCE(tip_amount, 0) FROM orders
+                    SELECT COALESCE(tip_amount, 0) AS tip_amount,
+                           COALESCE(tip_tax_amount, 0) AS tip_tax_amount
+                    FROM orders
                     WHERE table_session_id = $1 AND status = 'completed'
                     ORDER BY created_at LIMIT 1
                     """,
                     session_row["id"],
                 )
-                amount_due = _split_settlement_amount_due(session_total, float(session_tip or 0))
+                amount_due = split_settlement_amount_due(
+                    session_total,
+                    float(session_tip_row["tip_amount"] or 0) if session_tip_row else 0.0,
+                    float(session_tip_row["tip_tax_amount"] or 0) if session_tip_row else 0.0,
+                )
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
             logger.info(f"Split payment recorded for session {session_row['id']}: paid={paid_total}, remaining={remaining}")
@@ -1202,7 +1226,12 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 "standard_tax_label": _tax_label,
                 "tip_amount": float(tip_amount) if tip_amount > 0 else 0,
                 "tip_source": tip_source,
-                "charged_amount": float(sum(float(r.get("total_amount", 0)) for r in order_rows) + float(tip_amount)) if tip_amount > 0 else None,
+                "tip_taxable": _mesa_tip_taxable if tip_amount > 0 else False,
+                "tip_tax_amount": float(_mesa_tip_tax_amount) if tip_amount > 0 else 0,
+                "charged_amount": (
+                    float(sum(float(r.get("total_amount", 0)) for r in order_rows))
+                    + tip_settlement_total(float(tip_amount), _mesa_tip_tax_amount)
+                ) if tip_amount > 0 else None,
             },
         }
 
@@ -1303,15 +1332,21 @@ async def add_session_payment(
                 )
                 paid_total = float(paid_row["paid"])
                 
-                session_tip = await conn.fetchval(
+                session_tip_row = await conn.fetchrow(
                     """
-                    SELECT COALESCE(tip_amount, 0) FROM orders
+                    SELECT COALESCE(tip_amount, 0) AS tip_amount,
+                           COALESCE(tip_tax_amount, 0) AS tip_tax_amount
+                    FROM orders
                     WHERE table_session_id = $1 AND status = 'completed'
                     ORDER BY created_at LIMIT 1
                     """,
                     session_row["id"],
                 )
-                amount_due = _split_settlement_amount_due(session_total, float(session_tip or 0))
+                amount_due = split_settlement_amount_due(
+                    session_total,
+                    float(session_tip_row["tip_amount"] or 0) if session_tip_row else 0.0,
+                    float(session_tip_row["tip_tax_amount"] or 0) if session_tip_row else 0.0,
+                )
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
 
@@ -2746,15 +2781,21 @@ async def void_table_payment(
                 )
                 paid_total = float(paid_row["paid"])
                 
-                session_tip = await conn.fetchval(
+                session_tip_row = await conn.fetchrow(
                     """
-                    SELECT COALESCE(tip_amount, 0) FROM orders
+                    SELECT COALESCE(tip_amount, 0) AS tip_amount,
+                           COALESCE(tip_tax_amount, 0) AS tip_tax_amount
+                    FROM orders
                     WHERE table_session_id = $1 AND status = 'completed'
                     ORDER BY created_at LIMIT 1
                     """,
                     session_row["id"],
                 )
-                amount_due = _split_settlement_amount_due(session_total, float(session_tip or 0))
+                amount_due = split_settlement_amount_due(
+                    session_total,
+                    float(session_tip_row["tip_amount"] or 0) if session_tip_row else 0.0,
+                    float(session_tip_row["tip_tax_amount"] or 0) if session_tip_row else 0.0,
+                )
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
 

@@ -29,6 +29,7 @@ SELECT
     tpp.tables_label_singular,
     tpp.tables_label_plural,
     tpp.tip_enabled,
+    tpp.tip_taxable_default,
     tpp.tip_default_percentages,
     tpp.tip_preselect_index,
     fd.nit,
@@ -42,8 +43,10 @@ SELECT
     fd.phone           AS fiscal_phone,
     fd.email           AS fiscal_email,
     ttc.inc_applicable,
+    ttc.inc_rate,
     ttc.inc_included_in_price,
     ttc.iva_applicable,
+    ttc.iva_rate,
     ttc.iva_included_in_price,
     ttc.liquor_tax_applicable
 FROM tenants t
@@ -100,6 +103,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         'tables_label_singular': row['tables_label_singular'],
         'tables_label_plural': row['tables_label_plural'],
         'tip_enabled': bool(row['tip_enabled']) if row['tip_enabled'] is not None else False,
+        'tip_taxable_default': bool(row['tip_taxable_default']) if row['tip_taxable_default'] is not None else False,
         'tip_default_percentages': (
             [float(p) for p in row['tip_default_percentages']]
             if row['tip_default_percentages'] else [10.0]
@@ -119,8 +123,10 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         },
         'tax_config': {
             'inc_applicable': bool(row['inc_applicable']) if row['inc_applicable'] is not None else False,
+            'inc_rate': float(row['inc_rate']) if row['inc_rate'] is not None else 0.08,
             'inc_included_in_price': bool(row['inc_included_in_price']) if row['inc_included_in_price'] is not None else False,
             'iva_applicable': bool(row['iva_applicable']) if row['iva_applicable'] is not None else False,
+            'iva_rate': float(row['iva_rate']) if row['iva_rate'] is not None else 0.19,
             'iva_included_in_price': bool(row['iva_included_in_price']) if row['iva_included_in_price'] is not None else False,
             'liquor_tax_applicable': bool(row['liquor_tax_applicable']) if row['liquor_tax_applicable'] is not None else False,
         },

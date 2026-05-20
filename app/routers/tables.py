@@ -141,6 +141,7 @@ class CloseSessionRequest(BaseModel):
     cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for a single (non-split) cash close. Must be >= total session amount.")
     tip_amount: float = Field(0, ge=0, description="warocol.com#639 — total tip for the mesa session. Applied to the first completed order in the session (like cash_received). Rejected when tip_enabled=false. Allowed with split_mode.")
     tip_source: Literal['preset', 'custom', 'none'] = Field('none', description="warocol.com#639 — how the tip was chosen. Must agree with tip_amount.")
+    tip_taxable: bool = Field(False, description="warocol.com#740 — apply consumption tax to tip_amount when true (gravada).")
     served_by_member_id: Optional[UUID] = Field(None, description="warocol.com#663 — waiter assigned at checkout. Applied to all completed orders in the session.")
 
 
@@ -176,6 +177,7 @@ async def close_session(request: Request, table_id: UUID, body: CloseSessionRequ
         cash_received=body.cash_received,
         tip_amount=body.tip_amount,
         tip_source=body.tip_source,
+        tip_taxable=body.tip_taxable,
         served_by_member_id=body.served_by_member_id,
     )
 
