@@ -100,6 +100,11 @@ class ProductCreate(ProductBase):
         description="Recipe bases with per-product quantity multiplier. Preferred over recipe_base_ids."
     )
     tenant_id: UUID = Field(..., description="Tenant ID")
+    costo_percibido: Optional[Decimal] = Field(
+        None,
+        ge=0,
+        description="Operational/perceived unit cost set by the tenant",
+    )
 
 class ProductUpdate(BaseModel):
     """Update product fields"""
@@ -124,12 +129,21 @@ class ProductUpdate(BaseModel):
     station_id: Optional[UUID] = None
     kitchen_name: Optional[str] = Field(None, max_length=100)
     image_url: Optional[str] = Field(None, max_length=500, description="Public URL of the product hero image (null clears it)")
+    costo_percibido: Optional[Decimal] = Field(
+        None,
+        ge=0,
+        description="Operational/perceived unit cost (null clears)",
+    )
 
 class Product(ProductBase):
     """Complete product with calculated fields"""
     id: UUID
     tenant_id: Optional[UUID]
     costo_calculado: Optional[Decimal] = Field(None, description="Calculated cost from recipe")
+    costo_percibido: Optional[Decimal] = Field(
+        None,
+        description="Operational/perceived cost set by tenant",
+    )
     precio_sugerido: Optional[Decimal] = Field(None, description="Suggested price")
     margen_objetivo: Optional[Decimal] = Field(None, description="Target margin")
     created_at: datetime
@@ -145,9 +159,13 @@ class Product(ProductBase):
     recipe_bases: List[RecipeBaseLink] = Field(default=[], description="Recipe bases with per-product quantity multiplier (Issue #517).")
     modifier_groups: List[ModifierGroup] = Field(default=[], description="Modifier groups for this product")
 
-    # Calculated fields
-    margen_porcentaje: Optional[float] = None  # (price - cost) / cost * 100
-    margen_valor: Optional[Decimal] = None  # price - cost
+    # Calculated fields (real = costo_calculado, operativo = costo_percibido)
+    margen_real_pct: Optional[float] = None
+    margen_real_valor: Optional[Decimal] = None
+    margen_operativo_pct: Optional[float] = None
+    margen_operativo_valor: Optional[Decimal] = None
+    margen_porcentaje: Optional[float] = None  # alias margen_real_pct (backward compat)
+    margen_valor: Optional[Decimal] = None  # alias margen_real_valor
 
     class Config:
         from_attributes = True

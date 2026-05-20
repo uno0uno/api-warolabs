@@ -18,6 +18,7 @@
 | is_available | boolean | true | true |  |  |  |
 | is_combo | boolean | false | true |  |  | true si es un combo/bundle de productos |
 | costo_calculado | numeric(10,2) |  | true |  |  | Costo automático calculado desde recetas (se actualiza cuando cambian precios de ingredientes) |
+| costo_percibido | numeric(10,2) |  | true |  |  | Costo operativo/percibido definido por el tenant; independiente de costo_calculado |
 | precio_sugerido | numeric(10,2) |  | true |  |  |  |
 | margen_objetivo | numeric(5,2) |  | true |  |  | Margen de ganancia objetivo en porcentaje (ej: 150 = 150%) |
 | allow_modifiers | boolean | true | true |  |  |  |
