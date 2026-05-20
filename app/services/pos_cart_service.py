@@ -24,6 +24,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _split_settlement_amount_due(order_total: float, tip_amount: float) -> float:
+    """warocol.com#737 — partial payments settle order total + tip (tip not in total_amount)."""
+    return float(order_total) + float(tip_amount or 0)
+
+
 def _distribute_discount(items: List[dict], discount_amount: float) -> List[dict]:
     """
     Distribute a discount proportionally across cart items based on each item's
@@ -770,7 +775,7 @@ async def add_order_payment(
                 # 2. Fetch + lock the order linked to this cart via pos_cart_id
                 order_row = await conn.fetchrow(
                     """
-                    SELECT id, total_amount, status, payment_status
+                    SELECT id, total_amount, tip_amount, status, payment_status
                     FROM orders
                     WHERE pos_cart_id = $1 AND tenant_id = $2
                     ORDER BY created_at DESC
@@ -795,6 +800,7 @@ async def add_order_payment(
                     raise APIError("Order is already fully paid", status_code=409)
 
                 total_amount = float(order_row["total_amount"])
+                amount_due = _split_settlement_amount_due(total_amount, float(order_row["tip_amount"] or 0))
 
                 # 3. Insert payment record
                 user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
@@ -819,7 +825,7 @@ async def add_order_payment(
                     order_id
                 )
                 paid_total = float(paid_total_row["paid_total"])
-                remaining = max(0.0, total_amount - paid_total)
+                remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01  # tolerance for rounding
 
                 # 5. Update order status
@@ -913,7 +919,8 @@ async def void_order_payment(
                     """
                     SELECT op.id, op.order_id, op.amount, op.payment_method,
                            op.cash_received, op.created_by_user_id, op.voided_at,
-                           o.pos_cart_id, o.total_amount, o.payment_status, o.status AS order_status
+                           o.pos_cart_id, o.total_amount, o.tip_amount, o.payment_status,
+                           o.status AS order_status
                     FROM order_payments op
                     JOIN orders o ON o.id = op.order_id
                     WHERE op.id = $1::uuid AND op.tenant_id = $2
@@ -963,7 +970,10 @@ async def void_order_payment(
                 )
                 paid_total = float(paid_row["paid"])
                 total_amount = float(payment_row["total_amount"])
-                remaining = max(0.0, total_amount - paid_total)
+                amount_due = _split_settlement_amount_due(
+                    total_amount, float(payment_row["tip_amount"] or 0),
+                )
+                remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
 
                 # 6. If voiding flipped the order out of fully-paid, reopen.
@@ -1087,8 +1097,6 @@ async def complete_pos_order(
                 raise APIError("tip_source cannot be 'none' when tip_amount > 0", status_code=400)
             if not tip_enabled:
                 raise APIError("Tipping is not enabled for this tenant", status_code=400)
-            if split_mode:
-                raise APIError("Tip is not supported in split-payment mode in this phase", status_code=400)
 
         async with get_db_connection() as conn:
             async with conn.transaction():
@@ -1604,7 +1612,8 @@ async def complete_pos_order(
                     )
                     _split_first_payment_id = str(_split_first_payment_row["id"])
                     _split_paid_total = split_first_amount
-                    _split_remaining = max(0.0, float(_discounted_total) - split_first_amount)
+                    _amount_due = _split_settlement_amount_due(float(_discounted_total), float(tip_amount))
+                    _split_remaining = max(0.0, _amount_due - split_first_amount)
                     _split_is_complete = _split_remaining <= 0.01
 
                 # 7b. Mark cart completed — skip in split mode unless fully paid
