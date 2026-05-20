@@ -179,11 +179,36 @@ def test_list_endpoint_delegates():
         assert res.json()["data"]["total_pending"] == 0
 
 
+def test_format_request_row_payment_display_with_submethod():
+    row = {
+        "id": uuid4(),
+        "table_id": uuid4(),
+        "status": "pending",
+        "items": "[]",
+        "payment_method": "transferencia",
+        "payment_method_id": uuid4(),
+        "customer_notes": None,
+        "created_at": datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc),
+        "table_name": "Mesa 1",
+        "payment_method_group_name": "Transferencia",
+        "payment_method_name": "Bancolombia Ahorros",
+    }
+    data = table_qr_requests_service._format_request_row(row)
+    assert data["payment_display"] == "Transferencia · Bancolombia Ahorros"
+    assert data["payment_method_group_name"] == "Transferencia"
+    assert data["payment_method_name"] == "Bancolombia Ahorros"
+
+
 @pytest.mark.asyncio
 async def test_get_request_returns_enriched_pending():
     session = _session()
     request_id = uuid4()
-    row = _pending_request_row(id=request_id)
+    row = _pending_request_row(
+        id=request_id,
+        payment_method="cash",
+        payment_method_group_name="Efectivo",
+        payment_method_name=None,
+    )
     product_id = json.loads(row["items"])[0]["product_id"]
 
     conn = MagicMock()
@@ -205,6 +230,7 @@ async def test_get_request_returns_enriched_pending():
     assert data["total_amount"] == 20.0
     assert data["items"][0]["product_name"] == "Hamburguesa"
     assert data["customer_notes"] == "Sin cebolla"
+    assert data["payment_display"] == "Efectivo"
 
 
 @pytest.mark.asyncio

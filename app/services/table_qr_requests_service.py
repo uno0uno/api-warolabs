@@ -13,6 +13,29 @@ from app.services.tables_service import _add_tab_items_core, fire_table_items
 
 logger = logging.getLogger(__name__)
 
+_PAYMENT_LABEL_JOINS = """
+    LEFT JOIN LATERAL (
+        SELECT name
+        FROM payment_method_groups pmg
+        WHERE pmg.slug = r.payment_method
+          AND (pmg.tenant_id IS NULL OR pmg.tenant_id = r.tenant_id)
+        ORDER BY pmg.tenant_id DESC NULLS LAST
+        LIMIT 1
+    ) pmg ON true
+    LEFT JOIN payment_methods pm
+        ON pm.id = r.payment_method_id AND pm.tenant_id = r.tenant_id
+"""
+
+
+def _payment_display(row: dict) -> Optional[str]:
+    group = row.get("payment_method_group_name") or row.get("payment_method")
+    if not group:
+        return None
+    method_name = row.get("payment_method_name")
+    if method_name:
+        return f"{group} · {method_name}"
+    return str(group)
+
 
 def _parse_items_json(raw: Any) -> List[dict]:
     if raw is None:
@@ -33,6 +56,9 @@ def _format_request_row(row: dict) -> dict:
         "item_count": len(items),
         "payment_method": row["payment_method"],
         "payment_method_id": str(row["payment_method_id"]) if row.get("payment_method_id") else None,
+        "payment_method_group_name": row.get("payment_method_group_name"),
+        "payment_method_name": row.get("payment_method_name"),
+        "payment_display": _payment_display(row),
         "customer_notes": row.get("customer_notes"),
         "created_at": row["created_at"].isoformat(),
     }
@@ -136,13 +162,16 @@ async def list_pending_grouped(request: Request) -> dict:
 
     async with get_db_connection(use_transaction=False) as conn:
         rows = await conn.fetch(
-            """
+            f"""
             SELECT
                 r.id, r.table_id, r.status, r.items,
                 r.payment_method, r.payment_method_id, r.customer_notes, r.created_at,
-                t.name AS table_name
+                t.name AS table_name,
+                pmg.name AS payment_method_group_name,
+                pm.name AS payment_method_name
             FROM table_qr_requests r
             JOIN tables t ON t.id = r.table_id
+            {_PAYMENT_LABEL_JOINS}
             WHERE r.tenant_id = $1 AND r.status = 'pending'
             ORDER BY t.name, r.created_at ASC
             """,
@@ -178,13 +207,16 @@ async def get_request(request: Request, request_id: UUID) -> dict:
 
     async with get_db_connection(use_transaction=False) as conn:
         row = await conn.fetchrow(
-            """
+            f"""
             SELECT
                 r.id, r.table_id, r.status, r.items,
                 r.payment_method, r.payment_method_id, r.customer_notes, r.created_at,
-                t.name AS table_name
+                t.name AS table_name,
+                pmg.name AS payment_method_group_name,
+                pm.name AS payment_method_name
             FROM table_qr_requests r
             JOIN tables t ON t.id = r.table_id
+            {_PAYMENT_LABEL_JOINS}
             WHERE r.id = $1 AND r.tenant_id = $2 AND r.status = 'pending'
             """,
             request_id,
