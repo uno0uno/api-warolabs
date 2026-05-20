@@ -10,6 +10,7 @@ from app.models.product import (
     ProductResponse, ProductStats, RecipeBaseLink
 )
 from app.services import menu_history_service
+from app.services import cost_resolution_service
 from app.services.aws_s3_service import AWSS3Service
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 import asyncpg
@@ -154,38 +155,13 @@ async def create_product_with_recipe(
                             tenant_id
                         )
 
-                # 4. Calculate and update product cost (last purchase price).
-                # Products without recipe persist costo_calculado=NULL — semantically
-                # "not applicable" rather than "$0", which avoids polluting margin
-                # reports and lets the frontend render "—".
-                if tracks_inventory:
-                    cost_query = """
-                        UPDATE product
-                        SET costo_calculado = (
-                            SELECT COALESCE(SUM(
-                                pr.quantity * COALESCE(
-                                    (SELECT pi.unit_cost
-                                     FROM tenant_purchase_items pi
-                                     JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                                     WHERE pi.ingredient_id = pr.ingredient_id
-                                       AND tp.tenant_id = $2
-                                       AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
-                                     ORDER BY tp.purchase_date DESC LIMIT 1),
-                                    i.costo_unitario, 0
-                                )
-                            ), 0)
-                            FROM product_recipes pr
-                            JOIN ingredients i ON pr.ingredient_id = i.id
-                            WHERE pr.product_id = $1
-                        )
-                        WHERE id = $1
-                    """
-                    await conn.execute(cost_query, product_id, tenant_id)
-                else:
-                    await conn.execute(
-                        "UPDATE product SET costo_calculado = NULL WHERE id = $1",
-                        product_id,
-                    )
+                # 4. Unified real cost (direct recipes + base recipes)
+                await cost_resolution_service.persist_product_costo_calculado(
+                    product_id,
+                    tenant_id,
+                    conn,
+                    tracks_inventory=tracks_inventory,
+                )
 
                 # 5. Registrar en historial
                 user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
@@ -442,36 +418,7 @@ async def get_products_list(
         async with get_db_connection() as conn:
             # CTE: pre-compute latest purchase cost per ingredient once (O(1) index scan)
             # Replaces nested correlated subqueries that ran O(products × base_recipe_rows) times
-            cte_prefix = """
-                WITH latest_purchase_costs AS (
-                    SELECT DISTINCT ON (pi.ingredient_id)
-                        pi.ingredient_id,
-                        pi.unit_cost
-                    FROM tenant_purchase_items pi
-                    JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                    WHERE tp.tenant_id = $1
-                      AND pi.unit_cost IS NOT NULL
-                      AND pi.unit_cost > 0
-                    ORDER BY pi.ingredient_id, tp.purchase_date DESC
-                ),
-                direct_costs AS (
-                    SELECT
-                        pr.product_id,
-                        SUM(pr.quantity * COALESCE(lpc.unit_cost, 0)) as direct_cost
-                    FROM product_recipes pr
-                    LEFT JOIN latest_purchase_costs lpc ON pr.ingredient_id = lpc.ingredient_id
-                    GROUP BY pr.product_id
-                ),
-                base_costs AS (
-                    SELECT
-                        pbr.product_id,
-                        SUM(pbr.quantity * brt.base_quantity * COALESCE(lpc.unit_cost, 0)) as base_cost
-                    FROM product_base_recipes pbr
-                    JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
-                    LEFT JOIN latest_purchase_costs lpc ON brt.ingredient_id = lpc.ingredient_id
-                    GROUP BY pbr.product_id
-                )
-            """
+            cte_prefix = cost_resolution_service.LIST_COST_CTE_PREFIX
 
             # Base query uses CTE JOINs instead of correlated subqueries
             base_query = """
@@ -894,44 +841,15 @@ async def update_product_with_recipe(
                     # 4. Recalculate product cost (last purchase price).
                     # Without recipe → NULL (semantically "no aplica") so the
                     # margin/cost UI renders "—" instead of $0.
-                    has_any_recipe = await conn.fetchval(
-                        """
-                        SELECT EXISTS (
-                            SELECT 1 FROM product_recipes WHERE product_id = $1
-                            UNION ALL
-                            SELECT 1 FROM product_base_recipes WHERE product_id = $1
-                        )
-                        """,
-                        product_id,
+                    has_any_recipe = await cost_resolution_service.product_has_any_recipe(
+                        product_id, conn
                     )
-                    if has_any_recipe:
-                        cost_query = """
-                            UPDATE product
-                            SET costo_calculado = (
-                                SELECT COALESCE(SUM(
-                                    pr.quantity * COALESCE(
-                                        (SELECT pi.unit_cost
-                                         FROM tenant_purchase_items pi
-                                         JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                                         WHERE pi.ingredient_id = pr.ingredient_id
-                                           AND tp.tenant_id = $2
-                                           AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
-                                         ORDER BY tp.purchase_date DESC LIMIT 1),
-                                        i.costo_unitario, 0
-                                    )
-                                ), 0)
-                                FROM product_recipes pr
-                                JOIN ingredients i ON pr.ingredient_id = i.id
-                                WHERE pr.product_id = $1
-                            )
-                            WHERE id = $1
-                        """
-                        await conn.execute(cost_query, product_id, tenant_id)
-                    else:
-                        await conn.execute(
-                            "UPDATE product SET costo_calculado = NULL WHERE id = $1",
-                            product_id,
-                        )
+                    await cost_resolution_service.persist_product_costo_calculado(
+                        product_id,
+                        tenant_id,
+                        conn,
+                        tracks_inventory=has_any_recipe,
+                    )
 
                 # 5. Registrar cambios en historial
                 if old_snapshot:

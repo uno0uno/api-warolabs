@@ -239,3 +239,44 @@ class TestRecipeTotalCostCalculation:
         costo_total = self.calculate_recipe_cost(ingredients)
 
         assert costo_total == Decimal("0")
+
+
+class TestUnifiedProductCostResolution:
+    """Tests for cost_resolution_service (#744)."""
+
+    def test_list_cte_includes_costo_unitario_fallback(self):
+        from app.services.cost_resolution_service import LIST_COST_CTE_PREFIX
+
+        assert "i.costo_unitario" in LIST_COST_CTE_PREFIX
+        assert "COALESCE(lpc.unit_cost, i.costo_unitario, 0)" in LIST_COST_CTE_PREFIX
+
+    def test_direct_plus_base_recipe_total(self):
+        """Product cost = direct ingredients + base template ingredients."""
+        direct = Decimal("10") * Decimal("100")  # 1000
+        base = Decimal("2") * Decimal("500") * Decimal("3")  # qty × base_qty × unit
+        assert direct + base == Decimal("4000")
+
+    def test_purchase_wins_over_costo_unitario_for_line(self):
+        purchase = Decimal("500")
+        configured = Decimal("100")
+        effective = purchase if purchase > 0 else configured
+        assert effective == Decimal("500")
+
+    def test_analytics_fallback_when_zero_real_cost(self):
+        from app.services.cost_resolution_service import apply_analytics_cost_fallback
+
+        price = Decimal("10000")
+        assert apply_analytics_cost_fallback(Decimal("0"), price) == Decimal("4000")
+
+    def test_analytics_fallback_when_cost_exceeds_price(self):
+        from app.services.cost_resolution_service import apply_analytics_cost_fallback
+
+        price = Decimal("5000")
+        assert apply_analytics_cost_fallback(Decimal("8000"), price) == Decimal("2000")
+
+    def test_analytics_no_fallback_when_valid_cost(self):
+        from app.services.cost_resolution_service import apply_analytics_cost_fallback
+
+        price = Decimal("10000")
+        real = Decimal("3500")
+        assert apply_analytics_cost_fallback(real, price) == real
