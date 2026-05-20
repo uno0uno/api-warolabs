@@ -16,6 +16,32 @@ import json
 
 logger = logging.getLogger(__name__)
 
+# Stored product costs (#744 real, #745 perceived). $1 = tenant_id.
+_PRODUCT_COSTS_CTE = """
+    product_costs AS (
+        SELECT
+            p.id,
+            p.price,
+            p.costo_calculado,
+            p.costo_percibido,
+            CASE
+                WHEN COALESCE(p.costo_calculado, 0) <= 0 THEN p.price * 0.40
+                ELSE p.costo_calculado
+            END AS estimated_cost,
+            CASE
+                WHEN p.costo_percibido IS NOT NULL AND p.costo_percibido > 0 THEN p.costo_percibido
+                WHEN COALESCE(p.costo_calculado, 0) > 0 THEN p.costo_calculado
+                ELSE p.price * 0.40
+            END AS effective_cost,
+            CASE
+                WHEN p.costo_percibido IS NOT NULL AND p.costo_percibido > 0 THEN 'operativo'
+                ELSE 'real'
+            END AS cost_used_for_classification
+        FROM product p
+        WHERE p.tenant_id = $1
+    )
+"""
+
 
 def parse_date(date_str: Optional[str]) -> Optional[date]:
     """Convert date string (YYYY-MM-DD) to date object"""
@@ -44,110 +70,26 @@ async def _get_menu_analysis_for_tenant(
         parsed_date_from = today.replace(month=1, day=1)
 
     async with get_db_connection() as conn:
-        # Get product sales with REAL profitability based on purchase history
-        # Calculates actual cost from recipe ingredients and their latest purchase costs
-        # Optimized query: Pre-calculate latest ingredient costs first, then join.
-        # This avoids N*M subqueries and uses a single efficient CTE for cost lookup.
-        query = """
-            WITH latest_ingredient_costs AS (
-                -- Get the most recent purchase cost for each ingredient
-                SELECT DISTINCT ON (pi.ingredient_id)
-                    pi.ingredient_id,
-                    pi.unit as purchase_unit,
-                    pi.unit_cost,
-                    ipu.conversion_factor,
-                    ipu.purchase_unit_label
-                FROM tenant_purchase_items pi
-                JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                LEFT JOIN ingredient_purchase_units ipu ON
-                    pi.ingredient_id = ipu.ingredient_id AND
-                    pi.unit = ipu.purchase_unit
-                WHERE tp.tenant_id = $1
-                  AND pi.unit_cost IS NOT NULL
-                  AND pi.unit_cost > 0
-                ORDER BY pi.ingredient_id, tp.purchase_date DESC
-            ),
-            product_ingredients_costs AS (
-                SELECT
-                    p.id as product_id,
-                    SUM(
-                        CASE
-                            -- Direct match (units are same or aliases)
-                            WHEN (pr.unit = lic.purchase_unit)
-                              OR (pr.unit IN ('g', 'gr') AND lic.purchase_unit IN ('g', 'gr'))
-                              OR (pr.unit IN ('u', 'und') AND lic.purchase_unit IN ('u', 'und'))
-                            THEN pr.quantity * lic.unit_cost
-                            -- Conversion needed
-                            WHEN lic.conversion_factor > 0 THEN
-                                pr.quantity * (lic.unit_cost / lic.conversion_factor)
-                            -- Fallback to current configured cost if no purchase history or funny units
-                            ELSE pr.quantity * i.costo_unitario
-                        END
-                    ) as total_recipe_cost
-                FROM product p
-                JOIN product_recipes pr ON p.id = pr.product_id
-                JOIN ingredients i ON pr.ingredient_id = i.id
-                LEFT JOIN latest_ingredient_costs lic ON pr.ingredient_id = lic.ingredient_id
-                WHERE p.tenant_id = $1
-                GROUP BY p.id
-            ),
-            base_recipe_costs AS (
-                 SELECT
-                    p.id as product_id,
-                    -- Issue #517: multiply by pbr.quantity (per-product recipe multiplier)
-                    SUM(
-                        pbr.quantity * (
-                            CASE
-                                -- Direct match
-                                WHEN (brt.unit = lic.purchase_unit)
-                                  OR (brt.unit IN ('g', 'gr') AND lic.purchase_unit IN ('g', 'gr'))
-                                  OR (brt.unit IN ('u', 'und') AND lic.purchase_unit IN ('u', 'und'))
-                                THEN brt.base_quantity * lic.unit_cost
-                                -- Conversion
-                                WHEN lic.conversion_factor > 0 THEN
-                                    brt.base_quantity * (lic.unit_cost / lic.conversion_factor)
-                                -- Fallback
-                                ELSE brt.base_quantity * i.costo_unitario
-                            END
-                        )
-                    ) as total_base_cost
-                FROM product p
-                JOIN product_base_recipes pbr ON p.id = pbr.product_id
-                JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
-                JOIN ingredients i ON brt.ingredient_id = i.id
-                LEFT JOIN latest_ingredient_costs lic ON brt.ingredient_id = lic.ingredient_id
-                WHERE p.tenant_id = $1
-                GROUP BY p.id
-            ),
-            product_real_costs AS (
-                SELECT
-                    p.id,
-                    p.price,
-                    COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0) as calc_cost,
-                    CASE
-                        WHEN (COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0)) = 0 THEN p.price * 0.40 -- Fallback if no cost info
-                        WHEN (COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0)) > p.price THEN p.price * 0.40 -- Fallback if error
-                        ELSE (COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0))
-                    END as real_cost
-                FROM product p
-                LEFT JOIN product_ingredients_costs pic ON p.id = pic.product_id
-                LEFT JOIN base_recipe_costs brc ON p.id = brc.product_id
-                WHERE p.tenant_id = $1
-            ),
+        # Real/perceived costs from product table (#744/#745); BCG uses operativo when set (#747).
+        query = f"""
+            WITH {_PRODUCT_COSTS_CTE},
             product_sales AS (
                 SELECT
                     p.id,
                     p.name,
-                    p.price,
-                    prc.real_cost as estimated_cost,
+                    pc.price,
+                    pc.estimated_cost,
+                    pc.costo_percibido,
+                    pc.effective_cost,
+                    pc.cost_used_for_classification,
                     c.name as category_name,
                     COUNT(DISTINCT oi.id) as order_count,
                     SUM(oi.quantity) as total_units_sold,
                     SUM(COALESCE(oi.net_total, oi.subtotal)) as total_revenue,
                     AVG(oi.price_at_purchase) as avg_price
                 FROM product p
+                JOIN product_costs pc ON p.id = pc.id
                 LEFT JOIN categories c ON p.category_id = c.id
-                LEFT JOIN product_real_costs prc ON p.id = prc.id
                 LEFT JOIN order_items oi ON p.id = oi.product_id
                 LEFT JOIN orders o ON oi.order_id = o.id
                 WHERE p.tenant_id = $1
@@ -159,31 +101,40 @@ async def _get_menu_analysis_for_tenant(
                             AND DATE(o.order_date AT TIME ZONE 'America/Bogota') <= $3
                         )
                     )
-                GROUP BY p.id, p.name, p.price, prc.real_cost, c.name
+                GROUP BY p.id, p.name, pc.price, pc.estimated_cost, pc.costo_percibido,
+                    pc.effective_cost, pc.cost_used_for_classification, c.name
                 HAVING COUNT(DISTINCT oi.id) > 0
             ),
             sales_stats AS (
                 SELECT
                     AVG(total_units_sold) as avg_units,
                     PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total_units_sold) as median_units,
-                    AVG((price - estimated_cost) / NULLIF(price, 0) * 100) as avg_margin_pct,
-                    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY (price - estimated_cost) / NULLIF(price, 0) * 100) as median_margin_pct
+                    AVG((price - effective_cost) / NULLIF(price, 0) * 100) as avg_margin_pct,
+                    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY (price - effective_cost) / NULLIF(price, 0) * 100) as median_margin_pct
                 FROM product_sales
             )
             SELECT
                 ps.*,
-                (ps.price - ps.estimated_cost) as profit_per_unit,
-                ((ps.price - ps.estimated_cost) / NULLIF(ps.price, 0) * 100) as profit_margin_pct,
-                (ps.price - ps.estimated_cost) * ps.total_units_sold as total_profit,
+                (ps.price - ps.effective_cost) as profit_per_unit,
+                ((ps.price - ps.effective_cost) / NULLIF(ps.price, 0) * 100) as profit_margin_pct,
+                CASE
+                    WHEN ps.estimated_cost > 0
+                    THEN ((ps.price - ps.estimated_cost) / ps.estimated_cost * 100)
+                END as profit_margin_real_pct,
+                CASE
+                    WHEN ps.costo_percibido IS NOT NULL AND ps.costo_percibido > 0
+                    THEN ((ps.price - ps.costo_percibido) / ps.costo_percibido * 100)
+                END as profit_margin_operativo_pct,
+                (ps.price - ps.effective_cost) * ps.total_units_sold as total_profit,
                 CASE
                     WHEN ps.total_units_sold >= ss.median_units
-                        AND ((ps.price - ps.estimated_cost) / NULLIF(ps.price, 0) * 100) >= ss.median_margin_pct
+                        AND ((ps.price - ps.effective_cost) / NULLIF(ps.price, 0) * 100) >= ss.median_margin_pct
                         THEN 'Star'
                     WHEN ps.total_units_sold >= ss.median_units
-                        AND ((ps.price - ps.estimated_cost) / NULLIF(ps.price, 0) * 100) < ss.median_margin_pct
+                        AND ((ps.price - ps.effective_cost) / NULLIF(ps.price, 0) * 100) < ss.median_margin_pct
                         THEN 'Plowhorse'
                     WHEN ps.total_units_sold < ss.median_units
-                        AND ((ps.price - ps.estimated_cost) / NULLIF(ps.price, 0) * 100) >= ss.median_margin_pct
+                        AND ((ps.price - ps.effective_cost) / NULLIF(ps.price, 0) * 100) >= ss.median_margin_pct
                         THEN 'Puzzle'
                     ELSE 'Dog'
                 END as classification
@@ -203,12 +154,14 @@ async def _get_menu_analysis_for_tenant(
 
         menu_items = []
         for row in rows:
-            menu_items.append({
+            perceived = row['costo_percibido']
+            item = {
                 "id": str(row['id']),
                 "name": row['name'],
                 "category": row['category_name'],
                 "price": float(row['price']),
                 "estimated_cost": float(row['estimated_cost']),
+                "costo_percibido": float(perceived) if perceived is not None else None,
                 "profit_per_unit": float(row['profit_per_unit']),
                 "profit_margin_pct": round(float(row['profit_margin_pct']), 1),
                 "order_count": row['order_count'],
@@ -216,8 +169,14 @@ async def _get_menu_analysis_for_tenant(
                 "total_revenue": float(row['total_revenue']),
                 "total_profit": float(row['total_profit']),
                 "avg_price": float(row['avg_price']),
-                "classification": row['classification']
-            })
+                "classification": row['classification'],
+                "cost_used_for_classification": row['cost_used_for_classification'],
+            }
+            if row['profit_margin_real_pct'] is not None:
+                item["profit_margin_real_pct"] = round(float(row['profit_margin_real_pct']), 1)
+            if row['profit_margin_operativo_pct'] is not None:
+                item["profit_margin_operativo_pct"] = round(float(row['profit_margin_operativo_pct']), 1)
+            menu_items.append(item)
 
         # Calculate summary stats
         if menu_items:
@@ -267,6 +226,9 @@ async def get_menu_analysis(
     - Plowhorses: Low profit margin, high sales volume (optimize costs)
     - Puzzles: High profit margin, low sales volume (increase marketing)
     - Dogs: Low profit margin, low sales volume (consider removing)
+
+    Costs: estimated_cost = product.costo_calculado (40% price fallback only when real is 0).
+    BCG margin uses costo_percibido when set (operativo), else real (#747).
     """
     try:
         session_context = require_valid_session(request)
@@ -316,99 +278,13 @@ async def _get_food_cost_for_tenant(
         prev_date_from = prev_date_to - timedelta(days=days_diff - 1)
 
     async with get_db_connection() as conn:
-        # Query for current and previous period with REAL costs from purchase history
-        # Optimized query: Pre-calculate latest ingredient costs first, then join.
-        # This avoids N*M subqueries and uses a single efficient CTE for cost lookup.
-        query = """
-            WITH latest_ingredient_costs AS (
-                -- Get the most recent purchase cost for each ingredient
-                SELECT DISTINCT ON (pi.ingredient_id)
-                    pi.ingredient_id,
-                    pi.unit as purchase_unit,
-                    pi.unit_cost,
-                    ipu.conversion_factor,
-                    ipu.purchase_unit_label
-                FROM tenant_purchase_items pi
-                JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                LEFT JOIN ingredient_purchase_units ipu ON
-                    pi.ingredient_id = ipu.ingredient_id AND
-                    pi.unit = ipu.purchase_unit
-                WHERE tp.tenant_id = $1
-                  AND pi.unit_cost IS NOT NULL
-                  AND pi.unit_cost > 0
-                ORDER BY pi.ingredient_id, tp.purchase_date DESC
-            ),
-            product_ingredients_costs AS (
-                SELECT
-                    p.id as product_id,
-                    SUM(
-                        CASE
-                            -- Direct match (units are same or aliases)
-                            WHEN (pr.unit = lic.purchase_unit)
-                              OR (pr.unit IN ('g', 'gr') AND lic.purchase_unit IN ('g', 'gr'))
-                              OR (pr.unit IN ('u', 'und') AND lic.purchase_unit IN ('u', 'und'))
-                            THEN pr.quantity * lic.unit_cost
-                            -- Conversion needed
-                            WHEN lic.conversion_factor > 0 THEN
-                                pr.quantity * (lic.unit_cost / lic.conversion_factor)
-                            -- Fallback to current configured cost if no purchase history or funny units
-                            ELSE pr.quantity * i.costo_unitario
-                        END
-                    ) as total_recipe_cost
-                FROM product p
-                JOIN product_recipes pr ON p.id = pr.product_id
-                JOIN ingredients i ON pr.ingredient_id = i.id
-                LEFT JOIN latest_ingredient_costs lic ON pr.ingredient_id = lic.ingredient_id
-                WHERE p.tenant_id = $1
-                GROUP BY p.id
-            ),
-            base_recipe_costs AS (
-                 SELECT
-                    p.id as product_id,
-                    -- Issue #517: multiply by pbr.quantity (per-product recipe multiplier)
-                    SUM(
-                        pbr.quantity * (
-                            CASE
-                                -- Direct match
-                                WHEN (brt.unit = lic.purchase_unit)
-                                  OR (brt.unit IN ('g', 'gr') AND lic.purchase_unit IN ('g', 'gr'))
-                                  OR (brt.unit IN ('u', 'und') AND lic.purchase_unit IN ('u', 'und'))
-                                THEN brt.base_quantity * lic.unit_cost
-                                -- Conversion
-                                WHEN lic.conversion_factor > 0 THEN
-                                    brt.base_quantity * (lic.unit_cost / lic.conversion_factor)
-                                -- Fallback
-                                ELSE brt.base_quantity * i.costo_unitario
-                            END
-                        )
-                    ) as total_base_cost
-                FROM product p
-                JOIN product_base_recipes pbr ON p.id = pbr.product_id
-                JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
-                JOIN ingredients i ON brt.ingredient_id = i.id
-                LEFT JOIN latest_ingredient_costs lic ON brt.ingredient_id = lic.ingredient_id
-                WHERE p.tenant_id = $1
-                GROUP BY p.id
-            ),
-            product_real_costs AS (
-                SELECT
-                    p.id,
-                    p.price,
-                    COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0) as calc_cost,
-                    CASE
-                        WHEN (COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0)) = 0 THEN p.price * 0.40 -- Fallback if no cost info
-                        WHEN (COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0)) > p.price THEN p.price * 0.40 -- Fallback if error
-                        ELSE (COALESCE(pic.total_recipe_cost, 0) + COALESCE(brc.total_base_cost, 0))
-                    END as real_cost
-                FROM product p
-                LEFT JOIN product_ingredients_costs pic ON p.id = pic.product_id
-                LEFT JOIN base_recipe_costs brc ON p.id = brc.product_id
-                WHERE p.tenant_id = $1
-            ),
+        query = f"""
+            WITH {_PRODUCT_COSTS_CTE},
             period_costs AS (
                 SELECT
                     SUM(COALESCE(oi.net_total, oi.subtotal)) as revenue,
-                    SUM(oi.quantity * prc.real_cost) as total_cost,
+                    SUM(oi.quantity * pc.estimated_cost) as total_cost,
+                    SUM(oi.quantity * pc.effective_cost) as total_cost_operativo,
                     CASE
                         WHEN DATE(o.order_date AT TIME ZONE 'America/Bogota') >= $2
                             AND DATE(o.order_date AT TIME ZONE 'America/Bogota') <= $3
@@ -417,8 +293,7 @@ async def _get_food_cost_for_tenant(
                     END as period
                 FROM order_items oi
                 JOIN orders o ON oi.order_id = o.id
-                JOIN product p ON oi.product_id = p.id
-                JOIN product_real_costs prc ON p.id = prc.id
+                JOIN product_costs pc ON oi.product_id = pc.id
                 WHERE o.tenant_id = $1
                     AND o.status = 'completed'
                     AND (
@@ -434,7 +309,8 @@ async def _get_food_cost_for_tenant(
                 period,
                 revenue,
                 total_cost,
-                (total_cost / NULLIF(revenue, 0) * 100) as food_cost_pct
+                (total_cost / NULLIF(revenue, 0) * 100) as food_cost_pct,
+                (total_cost_operativo / NULLIF(revenue, 0) * 100) as food_cost_operativo_pct
             FROM period_costs
         """
 
@@ -447,15 +323,17 @@ async def _get_food_cost_for_tenant(
             prev_date_to
         )
 
-        # Parse results
-        current_data = {"revenue": 0, "total_cost": 0, "food_cost_pct": 0}
-        previous_data = {"revenue": 0, "total_cost": 0, "food_cost_pct": 0}
+        # Parse results — food_cost_pct = real (estimated_cost); operativo KPI optional (#747)
+        current_data = {"revenue": 0, "total_cost": 0, "food_cost_pct": 0, "food_cost_operativo_pct": None}
+        previous_data = {"revenue": 0, "total_cost": 0, "food_cost_pct": 0, "food_cost_operativo_pct": None}
 
         for row in rows:
+            operativo_pct = row['food_cost_operativo_pct']
             data = {
                 "revenue": float(row['revenue'] or 0),
                 "total_cost": float(row['total_cost'] or 0),
-                "food_cost_pct": float(row['food_cost_pct'] or 0)
+                "food_cost_pct": float(row['food_cost_pct'] or 0),
+                "food_cost_operativo_pct": round(float(operativo_pct), 2) if operativo_pct is not None else None,
             }
             if row['period'] == 'current':
                 current_data = data
@@ -475,6 +353,7 @@ async def _get_food_cost_for_tenant(
             "data": {
                 "current_period": {
                     "food_cost_pct": round(current_data['food_cost_pct'], 2),
+                    "food_cost_operativo_pct": current_data['food_cost_operativo_pct'],
                     "revenue": round(current_data['revenue'], 2),
                     "total_cost": round(current_data['total_cost'], 2),
                     "from": parsed_date_from.isoformat(),
@@ -482,6 +361,7 @@ async def _get_food_cost_for_tenant(
                 },
                 "previous_period": {
                     "food_cost_pct": round(previous_data['food_cost_pct'], 2),
+                    "food_cost_operativo_pct": previous_data['food_cost_operativo_pct'],
                     "revenue": round(previous_data['revenue'], 2),
                     "total_cost": round(previous_data['total_cost'], 2),
                     "from": prev_date_from.isoformat(),

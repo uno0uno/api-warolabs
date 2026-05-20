@@ -884,6 +884,7 @@ async def get_menu_products(
                     p.allow_modifiers,
                     p.preparation_time,
                     p.costo_calculado,
+                    p.costo_percibido,
                     p.category_id,
                     c.name as category_name
                 FROM product p
@@ -906,6 +907,7 @@ async def get_menu_products(
                     "allowModifiers": row['allow_modifiers'],
                     "preparationTime": row['preparation_time'],
                     "calculatedCost": float(row['costo_calculado']) if row['costo_calculado'] else None,
+                    "perceivedCost": float(row['costo_percibido']) if row['costo_percibido'] else None,
                     "category": {
                         "id": str(row['category_id']) if row['category_id'] else None,
                         "name": row['category_name']
