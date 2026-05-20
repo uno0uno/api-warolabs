@@ -11,6 +11,7 @@ from datetime import date
 from pydantic import BaseModel, Field
 from app.core.permissions import Module, require_module
 from app.models.table_member_assignment import OpenTableRequest
+from app.models.comanda import FireTableItemsRequest
 from app.services import tables_service
 
 router = APIRouter(tags=["Tables"])
@@ -280,12 +281,18 @@ async def request_bill(request: Request, table_id: UUID):
 
 
 @router.post("/{table_id}/fire", dependencies=[Depends(require_module(Module.POS))])
-async def fire_table_items(request: Request, table_id: UUID):
+async def fire_table_items(
+    request: Request,
+    table_id: UUID,
+    body: Optional[FireTableItemsRequest] = None,
+):
     """
-    Explicitly fire all 'new' items in the table session to the kitchen.
+    Explicitly fire 'new' items in the table session to the kitchen.
+    Optional item_ids: fire only selected order_items (#753).
     Returns comanda summaries and fired item count.
     """
-    return await tables_service.fire_table_items(request, table_id)
+    item_ids = body.item_ids if body else None
+    return await tables_service.fire_table_items(request, table_id, item_ids=item_ids)
 
 
 @router.delete("/{table_id}/session", dependencies=[Depends(require_module(Module.POS))])
