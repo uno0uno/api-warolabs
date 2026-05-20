@@ -1310,12 +1310,13 @@ async def complete_pos_order(
                     _da = _item_subtotals[i]['discount_allocated'] if _discount_amount else None
                     _nt = _item_subtotals[i]['net_total'] if _discount_amount else None
                     # Insert order item
+                    _item_notes = (item.get('notes') or '').strip() or None
                     order_item_query = """
                         INSERT INTO order_items (
                             order_id, product_id, quantity, price_at_purchase, subtotal,
-                            discount_allocated, net_total
+                            discount_allocated, net_total, notes
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                         RETURNING id
                     """
                     order_item_row = await conn.fetchrow(
@@ -1327,6 +1328,7 @@ async def complete_pos_order(
                         item['subtotal'],
                         _da,
                         _nt,
+                        _item_notes,
                     )
                     order_item_id = order_item_row['id']
 

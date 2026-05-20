@@ -1855,13 +1855,14 @@ async def _add_tab_items_core(
     for item in items:
         modifier_unit_total = sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
         subtotal = item["quantity"] * (item["unit_price"] + modifier_unit_total)
+        item_notes = (item.get("notes") or "").strip() or None
         order_item_row = await conn.fetchrow(
             """
             INSERT INTO order_items (
                 order_id, product_id, quantity,
-                price_at_purchase, subtotal
+                price_at_purchase, subtotal, notes
             )
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id
             """,
             order_id,
@@ -1869,6 +1870,7 @@ async def _add_tab_items_core(
             item["quantity"],
             item["unit_price"],
             subtotal,
+            item_notes,
         )
         order_item_id = order_item_row["id"]
 
