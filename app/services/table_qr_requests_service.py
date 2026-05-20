@@ -38,6 +38,38 @@ def _format_request_row(row: dict) -> dict:
     }
 
 
+def _request_total_amount(items: List[dict]) -> float:
+    return sum(float(item.get("line_total") or 0) for item in items)
+
+
+async def _enrich_items_with_product_names(
+    conn,
+    tenant_id: UUID,
+    items: List[dict],
+) -> None:
+    product_ids = [
+        UUID(str(item["product_id"]))
+        for item in items
+        if item.get("product_id")
+    ]
+    if not product_ids:
+        return
+
+    product_rows = await conn.fetch(
+        """
+        SELECT id, name FROM product
+        WHERE id = ANY($1::uuid[]) AND tenant_id = $2
+        """,
+        product_ids,
+        tenant_id,
+    )
+    names = {str(row["id"]): row["name"] for row in product_rows}
+    for item in items:
+        product_id = item.get("product_id")
+        if product_id and str(product_id) in names:
+            item["product_name"] = names[str(product_id)]
+
+
 async def _resolve_tenant_member_id(conn, tenant_id: UUID, user_id: UUID) -> Optional[UUID]:
     return await conn.fetchval(
         """
@@ -135,6 +167,40 @@ async def list_pending_grouped(request: Request) -> dict:
             "total_pending": len(rows),
         },
     }
+
+
+async def get_request(request: Request, request_id: UUID) -> dict:
+    """GET /table-qr-requests/{request_id} — single pending request for Despacho detail."""
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    async with get_db_connection(use_transaction=False) as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                r.id, r.table_id, r.status, r.items,
+                r.payment_method, r.payment_method_id, r.customer_notes, r.created_at,
+                t.name AS table_name
+            FROM table_qr_requests r
+            JOIN tables t ON t.id = r.table_id
+            WHERE r.id = $1 AND r.tenant_id = $2 AND r.status = 'pending'
+            """,
+            request_id,
+            tenant_id,
+        )
+        if not row:
+            raise APIError(
+                "Request not found or not pending",
+                status_code=404,
+            )
+
+        data = _format_request_row(dict(row))
+        await _enrich_items_with_product_names(conn, tenant_id, data["items"])
+        data["total_amount"] = _request_total_amount(data["items"])
+
+    return {"success": True, "data": data}
 
 
 async def reject_request(request: Request, request_id: UUID) -> dict:

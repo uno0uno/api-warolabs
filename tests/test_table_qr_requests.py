@@ -1,7 +1,8 @@
-"""Tests for Table QR request accept/reject (api-warolabs#268)."""
+"""Tests for Table QR request accept/reject (api-warolabs#268) and detail GET (#275)."""
 import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -11,6 +12,32 @@ from app.core.exceptions import APIError
 from app.core.middleware import SessionContext
 from app.routers import table_qr_requests as table_qr_requests_router
 from app.services import table_qr_requests_service
+
+
+def _pending_request_row(**overrides):
+    product_id = uuid4()
+    base = {
+        "id": uuid4(),
+        "table_id": uuid4(),
+        "status": "pending",
+        "items": json.dumps([
+            {
+                "product_id": str(product_id),
+                "quantity": 2,
+                "unit_price": 10.0,
+                "modifiers": [],
+                "notes": None,
+                "line_total": 20.0,
+            },
+        ]),
+        "payment_method": "cash",
+        "payment_method_id": None,
+        "customer_notes": "Sin cebolla",
+        "created_at": datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc),
+        "table_name": "Mesa 1",
+    }
+    base.update(overrides)
+    return base
 
 
 def _session():
@@ -150,3 +177,82 @@ def test_list_endpoint_delegates():
         res = client.get("/table-qr-requests?status=pending")
         assert res.status_code == 200
         assert res.json()["data"]["total_pending"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_request_returns_enriched_pending():
+    session = _session()
+    request_id = uuid4()
+    row = _pending_request_row(id=request_id)
+    product_id = json.loads(row["items"])[0]["product_id"]
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=row)
+    conn.fetch = AsyncMock(return_value=[{"id": UUID(product_id), "name": "Hamburguesa"}])
+
+    with patch("app.services.table_qr_requests_service.require_valid_session", return_value=session), \
+         patch("app.services.table_qr_requests_service.get_db_connection") as mock_conn:
+        mock_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
+        mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await table_qr_requests_service.get_request(MagicMock(), request_id)
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["id"] == str(request_id)
+    assert data["table_name"] == "Mesa 1"
+    assert data["status"] == "pending"
+    assert data["total_amount"] == 20.0
+    assert data["items"][0]["product_name"] == "Hamburguesa"
+    assert data["customer_notes"] == "Sin cebolla"
+
+
+@pytest.mark.asyncio
+async def test_get_request_not_found_404():
+    session = _session()
+    request_id = uuid4()
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=None)
+
+    with patch("app.services.table_qr_requests_service.require_valid_session", return_value=session), \
+         patch("app.services.table_qr_requests_service.get_db_connection") as mock_conn:
+        mock_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
+        mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with pytest.raises(APIError) as exc:
+            await table_qr_requests_service.get_request(MagicMock(), request_id)
+        assert exc.value.status_code == 404
+
+
+def test_get_endpoint_delegates():
+    app = FastAPI()
+    app.include_router(table_qr_requests_router.router, prefix="/table-qr-requests")
+
+    request_id = uuid4()
+    payload = {
+        "success": True,
+        "data": {
+            "id": str(request_id),
+            "table_id": str(uuid4()),
+            "table_name": "Mesa 2",
+            "status": "pending",
+            "items": [],
+            "item_count": 0,
+            "total_amount": 0.0,
+            "payment_method": None,
+            "payment_method_id": None,
+            "customer_notes": None,
+            "created_at": "2026-05-20T12:00:00+00:00",
+        },
+    }
+
+    with patch(
+        "app.routers.table_qr_requests.table_qr_requests_service.get_request",
+        new_callable=AsyncMock,
+        return_value=payload,
+    ):
+        client = TestClient(app)
+        res = client.get(f"/table-qr-requests/{request_id}")
+        assert res.status_code == 200
+        assert res.json()["data"]["id"] == str(request_id)
