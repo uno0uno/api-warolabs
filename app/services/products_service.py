@@ -54,6 +54,38 @@ _PRODUCT_MARGIN_OUTER_SQL = """
     END as margen_valor
 """
 
+_PRODUCT_SEARCH_FIELDS = frozenset({"name", "description", "kitchen_name"})
+
+_PRODUCT_SORT_SQL = {
+    "created_at_desc": "created_at DESC",
+    "created_at_asc": "created_at ASC",
+    "name_asc": "name ASC",
+    "name_desc": "name DESC",
+    "price_asc": "price ASC",
+    "price_desc": "price DESC",
+    "margin_asc": "margen_valor ASC NULLS LAST",
+    "margin_desc": "margen_valor DESC NULLS LAST",
+}
+
+_HAS_RECIPE_SQL = """
+    (
+        EXISTS (SELECT 1 FROM product_recipes pr WHERE pr.product_id = p.id)
+        OR EXISTS (SELECT 1 FROM product_base_recipes pbr WHERE pbr.product_id = p.id)
+        OR p.product_base_type_id IS NOT NULL
+    )
+"""
+
+
+def _resolve_products_sort(sort: Optional[str]) -> str:
+    key = (sort or "created_at_desc").strip().lower()
+    order = _PRODUCT_SORT_SQL.get(key)
+    if not order:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid sort '{sort}'. Allowed: {', '.join(sorted(_PRODUCT_SORT_SQL))}",
+        )
+    return order
+
 
 def _normalize_recipe_bases(
     recipe_bases: Optional[List[RecipeBaseLink]],
@@ -459,12 +491,19 @@ async def get_products_list(
     page: int = 1,
     limit: int = 50,
     search: Optional[str] = None,
+    search_field: Optional[str] = None,
     category_id: Optional[UUID] = None,
     is_available: Optional[bool] = None,
     is_combo: Optional[bool] = None,
     is_resale: Optional[bool] = None,
+    station_id: Optional[UUID] = None,
+    is_available_online: Optional[bool] = None,
+    is_available_table_qr: Optional[bool] = None,
+    has_recipe: Optional[bool] = None,
+    margin_negative: Optional[bool] = None,
+    sort: Optional[str] = None,
     include_ingredients: bool = False,
-    include_modifiers: bool = False
+    include_modifiers: bool = False,
 ) -> ProductsListResponse:
     """Get list of products with filters"""
     try:
@@ -530,33 +569,78 @@ async def get_products_list(
                 WHERE 1=1
             """
 
-            count_query = "SELECT COUNT(*) FROM product WHERE tenant_id = $1"
-
             params = [tenant_id]
             param_count = 2
+            inner_filters = ""
 
-            # Add filters (now applied to subquery)
-            if search:
-                base_query += f" AND (LOWER(name) LIKE LOWER(${param_count}) OR LOWER(description) LIKE LOWER(${param_count}))"
-                count_query += f" AND (LOWER(name) LIKE LOWER(${param_count}) OR LOWER(description) LIKE LOWER(${param_count}))"
-                params.append(f"%{search}%")
+            # Inner filters (product / join predicates)
+            if station_id is not None:
+                inner_filters += (
+                    f" AND (p.station_id = ${param_count}"
+                    f" OR tcs.station_id = ${param_count})"
+                )
+                params.append(station_id)
                 param_count += 1
+
+            if is_available_online is not None:
+                inner_filters += f" AND p.is_available_online = ${param_count}"
+                params.append(is_available_online)
+                param_count += 1
+
+            if is_available_table_qr is not None:
+                inner_filters += f" AND p.is_available_table_qr = ${param_count}"
+                params.append(is_available_table_qr)
+                param_count += 1
+
+            if has_recipe is not None:
+                if has_recipe:
+                    inner_filters += f" AND {_HAS_RECIPE_SQL}"
+                else:
+                    inner_filters += f" AND NOT {_HAS_RECIPE_SQL}"
+
+            if inner_filters:
+                base_query = base_query.replace(
+                    "WHERE p.tenant_id = $1",
+                    "WHERE p.tenant_id = $1" + inner_filters,
+                    1,
+                )
+
+            # Outer filters (subquery column aliases)
+            if search:
+                term = f"%{search}%"
+                if search_field:
+                    field = search_field.strip().lower()
+                    if field not in _PRODUCT_SEARCH_FIELDS:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"Invalid search_field '{search_field}'. "
+                                f"Allowed: {', '.join(sorted(_PRODUCT_SEARCH_FIELDS))}"
+                            ),
+                        )
+                    base_query += f" AND LOWER({field}) LIKE LOWER(${param_count})"
+                    params.append(term)
+                    param_count += 1
+                else:
+                    base_query += (
+                        f" AND (LOWER(name) LIKE LOWER(${param_count})"
+                        f" OR LOWER(description) LIKE LOWER(${param_count}))"
+                    )
+                    params.append(term)
+                    param_count += 1
 
             if category_id:
                 base_query += f" AND category_id = ${param_count}"
-                count_query += f" AND category_id = ${param_count}"
                 params.append(category_id)
                 param_count += 1
 
             if is_available is not None:
                 base_query += f" AND is_available = ${param_count}"
-                count_query += f" AND is_available = ${param_count}"
                 params.append(is_available)
                 param_count += 1
 
             if is_combo is not None:
                 base_query += f" AND is_combo = ${param_count}"
-                count_query += f" AND is_combo = ${param_count}"
                 params.append(is_combo)
                 param_count += 1
 
@@ -565,19 +649,30 @@ async def get_products_list(
             # Exception: POS (include_modifiers=true) should show ALL products
             if is_resale is None:
                 if not include_modifiers:
-                    # Default for menu list: exclude resale products
                     base_query += " AND (is_resale = false OR is_resale IS NULL)"
-                    count_query += " AND (is_resale = false OR is_resale IS NULL)"
-                # else: POS context - show all products (no filter)
             else:
                 base_query += f" AND is_resale = ${param_count}"
-                count_query += f" AND is_resale = ${param_count}"
                 params.append(is_resale)
                 param_count += 1
 
-            # Add pagination
+            if margin_negative is not None:
+                if margin_negative:
+                    base_query += (
+                        " AND costo_calculado IS NOT NULL"
+                        " AND costo_calculado > price"
+                    )
+                else:
+                    base_query += (
+                        " AND (costo_calculado IS NULL"
+                        " OR costo_calculado <= price)"
+                    )
+
+            order_clause = _resolve_products_sort(sort)
             offset = (page - 1) * limit
-            base_query += f" ORDER BY created_at DESC LIMIT ${param_count} OFFSET ${param_count + 1}"
+            count_query = f"SELECT COUNT(*) FROM ({base_query}) AS counted"
+            base_query += (
+                f" ORDER BY {order_clause} LIMIT ${param_count} OFFSET ${param_count + 1}"
+            )
 
             # Execute queries
             products_data = await conn.fetch(base_query, *params, limit, offset)

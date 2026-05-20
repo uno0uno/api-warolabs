@@ -108,6 +108,68 @@ class TestProductsListEndpoint:
         response = await client.get("/menu/products?limit=251")
         assert response.status_code in [422, 500]
 
+    @pytest.mark.asyncio
+    async def test_get_products_search_field_kitchen_name(self, client: AsyncClient):
+        """Test targeted search_field=kitchen_name"""
+        response = await client.get("/menu/products?search=test&search_field=kitchen_name")
+        assert response.status_code in [200, 401, 403, 422, 500]
+
+    @pytest.mark.asyncio
+    async def test_get_products_invalid_search_field(self, client: AsyncClient):
+        """Invalid search_field returns 422 when authenticated"""
+        response = await client.get("/menu/products?search=test&search_field=invalid")
+        assert response.status_code in [401, 403, 422, 500]
+
+    @pytest.mark.asyncio
+    async def test_get_products_filter_online(self, client: AsyncClient):
+        """Test is_available_online filter"""
+        response = await client.get("/menu/products?is_available_online=true")
+        assert response.status_code in [200, 401, 403, 500]
+
+        if response.status_code == 200:
+            for product in response.json()["data"]:
+                assert product["is_available_online"] is True
+
+    @pytest.mark.asyncio
+    async def test_get_products_filter_table_qr(self, client: AsyncClient):
+        """Test is_available_table_qr filter"""
+        response = await client.get("/menu/products?is_available_table_qr=true")
+        assert response.status_code in [200, 401, 403, 500]
+
+        if response.status_code == 200:
+            for product in response.json()["data"]:
+                assert product["is_available_table_qr"] is True
+
+    @pytest.mark.asyncio
+    async def test_get_products_sort_name_asc(self, client: AsyncClient):
+        """Test server-side sort=name_asc"""
+        response = await client.get("/menu/products?sort=name_asc&limit=5")
+        assert response.status_code in [200, 401, 403, 422, 500]
+
+    @pytest.mark.asyncio
+    async def test_get_products_invalid_sort(self, client: AsyncClient):
+        """Invalid sort returns 422 when authenticated"""
+        response = await client.get("/menu/products?sort=not_a_sort")
+        assert response.status_code in [401, 403, 422, 500]
+
+    @pytest.mark.asyncio
+    async def test_get_products_margin_negative(self, client: AsyncClient):
+        """Test margin_negative filter (cost > price)"""
+        response = await client.get("/menu/products?margin_negative=true&limit=10")
+        assert response.status_code in [200, 401, 403, 500]
+
+        if response.status_code == 200:
+            for product in response.json()["data"]:
+                cost = product.get("costo_calculado")
+                if cost is not None:
+                    assert float(cost) > float(product["price"])
+
+    @pytest.mark.asyncio
+    async def test_get_products_has_recipe(self, client: AsyncClient):
+        """Test has_recipe=true filter"""
+        response = await client.get("/menu/products?has_recipe=true&limit=10")
+        assert response.status_code in [200, 401, 403, 500]
+
 
 class TestProductsStatsEndpoint:
     """Test products stats endpoint"""
