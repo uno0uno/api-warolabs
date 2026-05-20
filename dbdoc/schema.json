@@ -9825,6 +9825,12 @@
           "comment": "Costo automático calculado desde recetas (se actualiza cuando cambian precios de ingredientes)"
         },
         {
+          "name": "costo_percibido",
+          "type": "numeric(10,2)",
+          "nullable": true,
+          "comment": "Costo operativo/percibido definido por el tenant; independiente de costo_calculado"
+        },
+        {
           "name": "precio_sugerido",
           "type": "numeric(10,2)",
           "nullable": true

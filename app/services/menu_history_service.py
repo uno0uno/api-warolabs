@@ -546,7 +546,7 @@ async def get_product_snapshot(conn, product_id: UUID, tenant_id: UUID) -> Optio
         product = await conn.fetchrow("""
             SELECT id, name, description, price, category_id, is_available,
                    allow_modifiers, preparation_time, product_base_type_id,
-                   costo_calculado, controla_stock, is_combo
+                   costo_calculado, costo_percibido, controla_stock, is_combo
             FROM product WHERE id = $1 AND tenant_id = $2
         """, product_id, tenant_id)
 

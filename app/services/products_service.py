@@ -20,6 +20,40 @@ logger = logging.getLogger(__name__)
 
 _DUPLICATE_PRODUCT_NAME_DETAIL = "Ya existe un producto con ese nombre en tu menú"
 
+# Dual margins: real (costo_calculado) + operativo (costo_percibido). Outer SELECT only.
+_PRODUCT_MARGIN_OUTER_SQL = """
+    CASE
+        WHEN costo_calculado > 0 AND costo_calculado IS NOT NULL
+        THEN ((price - costo_calculado) / costo_calculado * 100)
+        ELSE NULL
+    END as margen_real_pct,
+    CASE
+        WHEN costo_calculado IS NOT NULL
+        THEN (price - costo_calculado)
+        ELSE NULL
+    END as margen_real_valor,
+    CASE
+        WHEN costo_percibido > 0 AND costo_percibido IS NOT NULL
+        THEN ((price - costo_percibido) / costo_percibido * 100)
+        ELSE NULL
+    END as margen_operativo_pct,
+    CASE
+        WHEN costo_percibido IS NOT NULL
+        THEN (price - costo_percibido)
+        ELSE NULL
+    END as margen_operativo_valor,
+    CASE
+        WHEN costo_calculado > 0 AND costo_calculado IS NOT NULL
+        THEN ((price - costo_calculado) / costo_calculado * 100)
+        ELSE NULL
+    END as margen_porcentaje,
+    CASE
+        WHEN costo_calculado IS NOT NULL
+        THEN (price - costo_calculado)
+        ELSE NULL
+    END as margen_valor
+"""
+
 
 def _normalize_recipe_bases(
     recipe_bases: Optional[List[RecipeBaseLink]],
@@ -84,9 +118,9 @@ async def create_product_with_recipe(
                         name, description, price, category_id, product_base_type_id, preparation_time,
                         controla_stock, is_available, is_available_online, is_available_table_qr,
                         is_combo, is_resale, allow_modifiers,
-                        tax_category, tenant_id, station_id, kitchen_name, image_url
+                        tax_category, tenant_id, station_id, kitchen_name, image_url, costo_percibido
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                     RETURNING id, created_at, updated_at
                 """
                 product_result = await conn.fetchrow(
@@ -109,6 +143,7 @@ async def create_product_with_recipe(
                     product_data.station_id,
                     product_data.kitchen_name,
                     product_data.image_url,
+                    product_data.costo_percibido,
                 )
 
                 product_id = product_result['id']
@@ -220,6 +255,7 @@ async def get_product_by_id(
                     p.allow_modifiers,
                     p.tax_category,
                     p.costo_calculado,
+                    p.costo_percibido,
                     p.precio_sugerido,
                     p.margen_objetivo,
                     p.tenant_id,
@@ -231,13 +267,36 @@ async def get_product_by_id(
                     ks.id as ks_id,
                     ks.name as station_name,
                     ks.color as station_color,
-                    -- Calculated fields
+                    CASE
+                        WHEN p.costo_calculado > 0
+                        THEN ((p.price - p.costo_calculado) / p.costo_calculado * 100)
+                        ELSE NULL
+                    END as margen_real_pct,
+                    CASE
+                        WHEN p.costo_calculado IS NOT NULL
+                        THEN (p.price - p.costo_calculado)
+                        ELSE NULL
+                    END as margen_real_valor,
+                    CASE
+                        WHEN p.costo_percibido > 0
+                        THEN ((p.price - p.costo_percibido) / p.costo_percibido * 100)
+                        ELSE NULL
+                    END as margen_operativo_pct,
+                    CASE
+                        WHEN p.costo_percibido IS NOT NULL
+                        THEN (p.price - p.costo_percibido)
+                        ELSE NULL
+                    END as margen_operativo_valor,
                     CASE
                         WHEN p.costo_calculado > 0
                         THEN ((p.price - p.costo_calculado) / p.costo_calculado * 100)
                         ELSE NULL
                     END as margen_porcentaje,
-                    (p.price - COALESCE(p.costo_calculado, 0)) as margen_valor
+                    CASE
+                        WHEN p.costo_calculado IS NOT NULL
+                        THEN (p.price - p.costo_calculado)
+                        ELSE NULL
+                    END as margen_valor
                 FROM product p
                 LEFT JOIN categories c ON p.category_id = c.id
                 LEFT JOIN tenant_category_stations tcs ON tcs.category_id = p.category_id AND tcs.tenant_id = p.tenant_id
@@ -439,6 +498,7 @@ async def get_products_list(
                     p.allow_modifiers,
                     p.tax_category,
                     COALESCE(dc.direct_cost, 0) + COALESCE(bc.base_cost, 0) as costo_calculado,
+                    p.costo_percibido,
                     p.precio_sugerido,
                     p.margen_objetivo,
                     p.tenant_id,
@@ -463,16 +523,7 @@ async def get_products_list(
             base_query = cte_prefix + """
                 SELECT
                     *,
-                    CASE
-                        WHEN costo_calculado > 0 AND costo_calculado IS NOT NULL
-                        THEN ((price - costo_calculado) / costo_calculado * 100)
-                        ELSE NULL
-                    END as margen_porcentaje,
-                    CASE
-                        WHEN costo_calculado IS NOT NULL
-                        THEN (price - costo_calculado)
-                        ELSE NULL
-                    END as margen_valor
+            """ + _PRODUCT_MARGIN_OUTER_SQL + """
                 FROM (
             """ + base_query + """
                 ) subquery
@@ -751,7 +802,7 @@ async def update_product_with_recipe(
                 # Fields where None is a valid "clear this value" intent (#465).
                 # Without this, the loop below silently drops attempts to remove
                 # an image when the user clicks "Eliminar imagen" in the form.
-                NULLABLE_FIELDS = {'image_url'}
+                NULLABLE_FIELDS = {'image_url', 'costo_percibido'}
                 for field, value in product_data.dict(exclude={'ingredients', 'recipe_base_ids', 'recipe_bases', 'controla_stock'}, exclude_unset=True).items():
                     if value is None and field not in NULLABLE_FIELDS:
                         continue
@@ -838,18 +889,16 @@ async def update_product_with_recipe(
                                 tenant_id
                             )
 
-                    # 4. Recalculate product cost (last purchase price).
-                    # Without recipe → NULL (semantically "no aplica") so the
-                    # margin/cost UI renders "—" instead of $0.
-                    has_any_recipe = await cost_resolution_service.product_has_any_recipe(
-                        product_id, conn
-                    )
-                    await cost_resolution_service.persist_product_costo_calculado(
-                        product_id,
-                        tenant_id,
-                        conn,
-                        tracks_inventory=has_any_recipe,
-                    )
+                # 4. Recalculate real cost only (never touches costo_percibido).
+                has_any_recipe = await cost_resolution_service.product_has_any_recipe(
+                    product_id, conn
+                )
+                await cost_resolution_service.persist_product_costo_calculado(
+                    product_id,
+                    tenant_id,
+                    conn,
+                    tracks_inventory=has_any_recipe,
+                )
 
                 # 5. Registrar cambios en historial
                 if old_snapshot:
