@@ -29,6 +29,12 @@ async def list_table_qr_requests(
     return await table_qr_requests_service.list_pending_grouped(request)
 
 
+@router.get("/{request_id}", dependencies=[Depends(require_module(Module.DESPACHO))])
+async def get_table_qr_request(request: Request, request_id: UUID):
+    """Get a single pending Table QR request (Despacho detail page)."""
+    return await table_qr_requests_service.get_request(request, request_id)
+
+
 @router.patch("/{request_id}/reject", dependencies=[Depends(require_module(Module.DESPACHO))])
 async def reject_table_qr_request(request: Request, request_id: UUID):
     return await table_qr_requests_service.reject_request(request, request_id)
