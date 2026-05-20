@@ -52,6 +52,14 @@ class Comanda(BaseModel):
         from_attributes = True
 
 
+class FireTableItemsRequest(BaseModel):
+    """Optional body for POST /tables/{table_id}/fire (#753)."""
+    item_ids: Optional[List[UUID]] = Field(
+        None,
+        description="If set, only fire these order_item UUIDs (must be fulfillment_status=new).",
+    )
+
+
 class FireComandasResult(BaseModel):
     success: bool = True
     comandas: List[Comanda] = []

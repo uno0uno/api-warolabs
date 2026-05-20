@@ -2588,9 +2588,14 @@ async def clear_tab(request: Request, table_id: UUID) -> dict:
         raise APIError(f"Error clearing tab: {e}", status_code=500)
 
 
-async def fire_table_items(request: Request, table_id: UUID) -> dict:
+async def fire_table_items(
+    request: Request,
+    table_id: UUID,
+    item_ids: Optional[List[UUID]] = None,
+) -> dict:
     """
-    Explicitly fire all 'new' items in the current table session to the KDS.
+    Explicitly fire 'new' items in the current table session to the KDS.
+    When item_ids is set, only those order_items are fired (#753).
     """
     try:
         session_context = require_valid_session(request)
@@ -2640,7 +2645,8 @@ async def fire_table_items(request: Request, table_id: UUID) -> dict:
                         tenant_id=tenant_id,
                         source_type='table',
                         table_display_name=table_row["name"],
-                        conn=conn
+                        item_ids=item_ids,
+                        conn=conn,
                     )
                     all_comandas.extend(res)
                     total_fired += sum(len(c.get('items', [])) for c in res)
