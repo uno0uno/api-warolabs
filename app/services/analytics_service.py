@@ -6,6 +6,7 @@ from typing import Optional, List, Dict, Any
 from uuid import UUID
 from fastapi import Request
 from app.database import get_db_connection
+from app.services import cost_resolution_service
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from datetime import datetime, date, timedelta
@@ -1384,32 +1385,12 @@ async def resolve_data_quality_alert(
                     effective_quantity * corrected_value,
                 )
 
-                # 5. Recalculate costo_calculado for all products using this ingredient
-                await conn.execute("""
-                    UPDATE product
-                    SET costo_calculado = (
-                        SELECT COALESCE(SUM(
-                            pr.quantity * COALESCE(
-                                (SELECT pi.unit_cost
-                                 FROM tenant_purchase_items pi
-                                 JOIN tenant_purchases tp ON pi.purchase_id = tp.id
-                                 WHERE pi.ingredient_id = pr.ingredient_id
-                                   AND tp.tenant_id = $2
-                                   AND pi.unit_cost IS NOT NULL AND pi.unit_cost > 0
-                                 ORDER BY tp.purchase_date DESC LIMIT 1),
-                                i.costo_unitario, 0
-                            )
-                        ), 0)
-                        FROM product_recipes pr
-                        JOIN ingredients i ON pr.ingredient_id = i.id
-                        WHERE pr.product_id = product.id
-                    )
-                    WHERE id IN (
-                        SELECT DISTINCT pr.product_id
-                        FROM product_recipes pr
-                        WHERE pr.ingredient_id = $1
-                    )
-                """, ingredient_id, tenant_id)
+                # 5. Recalculate costo_calculado (unified resolver, incl. base recipes)
+                await cost_resolution_service.recalculate_products_for_ingredient(
+                    ingredient_id,
+                    tenant_id,
+                    conn,
+                )
 
                 # 6. Mark alert resolved with full audit trail
                 await conn.execute("""
