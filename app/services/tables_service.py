@@ -1989,9 +1989,17 @@ async def add_tab_items(
         order_number = tab_result["order_number"]
         order_total = tab_result["total_amount"]
 
-        # Auto-fire comandas if enabled
+        # Auto-fire comandas if enabled (#753 — return comandas for POS print)
+        fired_comandas: List[dict] = []
+        fired_items_count = 0
         try:
-            await fire_table_items(request, table_id)
+            fire_result = await fire_table_items(request, table_id)
+            if fire_result and isinstance(fire_result.get("data"), dict):
+                fired_comandas = fire_result["data"].get("comandas") or []
+                fired_items_count = int(fire_result["data"].get("fired_items_count") or 0)
+            else:
+                fired_comandas = fire_result.get("comandas") or []
+                fired_items_count = int(fire_result.get("fired_items_count") or 0)
         except Exception as _fe:
             logger.error(f"[add_tab_items] Auto-fire failed for table {table_id}: {_fe}")
 
@@ -2003,6 +2011,8 @@ async def add_tab_items(
                 "order_number": order_number,
                 "items_count": len(items),
                 "total_amount": order_total,
+                "comandas": fired_comandas,
+                "fired_items_count": fired_items_count,
             },
         }
 
