@@ -99,6 +99,7 @@ async def create_product_with_recipe(
                     True,  # ALWAYS True - controla_stock is mandatory
                     product_data.is_available,
                     product_data.is_available_online,
+                    product_data.is_available_table_qr,
                     product_data.is_combo,
                     product_data.is_resale,
                     product_data.allow_modifiers,
