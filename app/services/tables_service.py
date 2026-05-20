@@ -17,7 +17,11 @@ from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
 from app.services.accounting_service import void_order_journal_entry_in_txn
-from app.services.pos_cart_service import _capture_order_item_ingredients, _PAYMENT_VOID_ROLES
+from app.services.pos_cart_service import (
+    _capture_order_item_ingredients,
+    _PAYMENT_VOID_ROLES,
+    _split_settlement_amount_due,
+)
 from app.services.orders_service import _compute_tax_breakdown
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas
@@ -696,9 +700,6 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
         tip_source = 'none'
     elif tip_source == 'none':
         raise APIError("tip_source cannot be 'none' when tip_amount > 0", status_code=400)
-    if tip_amount > 0 and split_mode:
-        raise APIError("Tip is not supported in split-payment mode in this phase", status_code=400)
-
     resolved_served_by: Optional[UUID] = None
     if served_by_member_id is not None:
         session_context_pre = require_valid_session(request)
@@ -920,14 +921,14 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     # (same single-row pattern as cash_received). The tip lives on one
                     # `orders` row so the /ventas/propinas aggregator sees a single entry
                     # per mesa close instead of N inflated percentages.
-                    if not split_mode and tip_amount > 0:
+                    if tip_amount > 0:
                         tenant_tip_enabled = await conn.fetchval(
                             "SELECT tip_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
                             tenant_id,
                         )
                         if not bool(tenant_tip_enabled):
                             raise APIError("Tipping is not enabled for this tenant", status_code=400)
-                        if payment_method == 'cash' and cash_received is not None:
+                        if not split_mode and payment_method == 'cash' and cash_received is not None:
                             session_total_with_tip = await conn.fetchval(
                                 "SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE table_session_id = $1 AND status = 'completed'",
                                 session_row["id"],
@@ -1115,7 +1116,17 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     order_ids,
                 )
                 paid_total = float(paid_row["paid"])
-                remaining = max(0.0, session_total - paid_total)
+                
+                session_tip = await conn2.fetchval(
+                    """
+                    SELECT COALESCE(tip_amount, 0) FROM orders
+                    WHERE table_session_id = $1 AND status = 'completed'
+                    ORDER BY created_at LIMIT 1
+                    """,
+                    session_row["id"],
+                )
+                amount_due = _split_settlement_amount_due(session_total, float(session_tip or 0))
+                remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
             logger.info(f"Split payment recorded for session {session_row['id']}: paid={paid_total}, remaining={remaining}")
             return {
@@ -1291,7 +1302,17 @@ async def add_session_payment(
                     order_ids,
                 )
                 paid_total = float(paid_row["paid"])
-                remaining = max(0.0, session_total - paid_total)
+                
+                session_tip = await conn.fetchval(
+                    """
+                    SELECT COALESCE(tip_amount, 0) FROM orders
+                    WHERE table_session_id = $1 AND status = 'completed'
+                    ORDER BY created_at LIMIT 1
+                    """,
+                    session_row["id"],
+                )
+                amount_due = _split_settlement_amount_due(session_total, float(session_tip or 0))
+                remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
 
                 if is_complete:
@@ -2724,7 +2745,17 @@ async def void_table_payment(
                     order_ids,
                 )
                 paid_total = float(paid_row["paid"])
-                remaining = max(0.0, session_total - paid_total)
+                
+                session_tip = await conn.fetchval(
+                    """
+                    SELECT COALESCE(tip_amount, 0) FROM orders
+                    WHERE table_session_id = $1 AND status = 'completed'
+                    ORDER BY created_at LIMIT 1
+                    """,
+                    session_row["id"],
+                )
+                amount_due = _split_settlement_amount_due(session_total, float(session_tip or 0))
+                remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
 
                 # 7. Reopen if voiding flipped the session out of fully-paid.

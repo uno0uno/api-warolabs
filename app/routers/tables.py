@@ -26,10 +26,6 @@ class UpdateTableRequest(BaseModel):
     capacity: Optional[int] = Field(None, gt=0)
 
 
-class TableQrToggleRequest(BaseModel):
-    enabled: bool
-
-
 class TabModifier(BaseModel):
     id: Optional[str] = None
     name: Optional[str] = None
@@ -68,18 +64,6 @@ async def create_table(request: Request, body: CreateTableRequest):
     Create a new table for the tenant.
     """
     return await tables_service.create_table(request, body.name, body.capacity)
-
-
-@router.patch("/{table_id}/qr", dependencies=[Depends(require_module(Module.OPERACIONES))])
-async def set_table_qr(request: Request, table_id: UUID, body: TableQrToggleRequest):
-    """Enable or disable Table QR for a table (api-warolabs#266)."""
-    return await tables_service.set_table_qr_enabled(request, table_id, body.enabled)
-
-
-@router.post("/{table_id}/qr-token/regenerate", dependencies=[Depends(require_module(Module.OPERACIONES))])
-async def regenerate_table_qr_token(request: Request, table_id: UUID):
-    """Regenerate the public QR token for a table (invalidates old printed QRs)."""
-    return await tables_service.regenerate_table_qr_token(request, table_id)
 
 
 @router.put("/{table_id}", dependencies=[Depends(require_module(Module.POS))])
@@ -155,7 +139,7 @@ class CloseSessionRequest(BaseModel):
     split_first_amount: float = Field(0.0, description="Amount for the first split payment (used only when split_mode=True)")
     split_first_cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for the first split payment when payment_method='cash'. Must be >= split_first_amount.")
     cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for a single (non-split) cash close. Must be >= total session amount.")
-    tip_amount: float = Field(0, ge=0, description="warocol.com#639 — total tip for the mesa session. Applied to the first completed order in the session (like cash_received). Rejected when tip_enabled=false or split_mode=true.")
+    tip_amount: float = Field(0, ge=0, description="warocol.com#639 — total tip for the mesa session. Applied to the first completed order in the session (like cash_received). Rejected when tip_enabled=false. Allowed with split_mode.")
     tip_source: Literal['preset', 'custom', 'none'] = Field('none', description="warocol.com#639 — how the tip was chosen. Must agree with tip_amount.")
     served_by_member_id: Optional[UUID] = Field(None, description="warocol.com#663 — waiter assigned at checkout. Applied to all completed orders in the session.")
 
