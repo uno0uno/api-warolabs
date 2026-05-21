@@ -8208,6 +8208,12 @@
           "name": "ready_at",
           "type": "timestamp with time zone",
           "nullable": true
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "nullable": true,
+          "comment": "Special preparation notes from POS (Notas Especiales); copied to comanda_items on fire."
         }
       ],
       "indexes": [
@@ -8678,6 +8684,20 @@
           "nullable": false,
           "default": "'none'::character varying",
           "comment": "How the tip was selected (warocol.com#635): preset (chip from tenant config), custom (free input), or none. Used for analytics. Must agree with tip_amount via chk_orders_tip_source_consistency."
+        },
+        {
+          "name": "tip_taxable",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false",
+          "comment": "warocol.com#740 — whether IVA/INC was applied to tip_amount for this sale"
+        },
+        {
+          "name": "tip_tax_amount",
+          "type": "numeric(12,2)",
+          "nullable": false,
+          "default": "0",
+          "comment": "warocol.com#740 — tax on tip_amount when tip_taxable=true; separate from total_amount"
         }
       ],
       "indexes": [
@@ -8862,6 +8882,28 @@
           "columns": [
             "tip_amount",
             "tip_source"
+          ]
+        },
+        {
+          "name": "chk_orders_tip_tax_amount_nonneg",
+          "type": "CHECK",
+          "def": "CHECK ((tip_tax_amount \u003e= (0)::numeric))",
+          "table": "public.orders",
+          "referenced_table": "",
+          "columns": [
+            "tip_tax_amount"
+          ]
+        },
+        {
+          "name": "chk_orders_tip_tax_consistency",
+          "type": "CHECK",
+          "def": "CHECK ((((tip_amount = (0)::numeric) AND (tip_taxable = false) AND (tip_tax_amount = (0)::numeric)) OR (tip_amount \u003e (0)::numeric)))",
+          "table": "public.orders",
+          "referenced_table": "",
+          "columns": [
+            "tip_amount",
+            "tip_taxable",
+            "tip_tax_amount"
           ]
         },
         {
@@ -9825,12 +9867,6 @@
           "comment": "Costo automático calculado desde recetas (se actualiza cuando cambian precios de ingredientes)"
         },
         {
-          "name": "costo_percibido",
-          "type": "numeric(10,2)",
-          "nullable": true,
-          "comment": "Costo operativo/percibido definido por el tenant; independiente de costo_calculado"
-        },
-        {
           "name": "precio_sugerido",
           "type": "numeric(10,2)",
           "nullable": true
@@ -9890,6 +9926,19 @@
           "name": "image_url",
           "type": "varchar(500)",
           "nullable": true
+        },
+        {
+          "name": "is_available_table_qr",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false",
+          "comment": "Whether product appears on the Table QR public menu (warocol.com#710). Independent of is_available_online (domicilios). Default false."
+        },
+        {
+          "name": "costo_percibido",
+          "type": "numeric(10,2)",
+          "nullable": true,
+          "comment": "Costo operativo/percibido definido por el tenant; no se recalcula con compras ni recetas."
         }
       ],
       "indexes": [
@@ -9965,6 +10014,15 @@
           "table": "public.product",
           "columns": [
             "station_id"
+          ]
+        },
+        {
+          "name": "idx_product_available_table_qr",
+          "def": "CREATE INDEX idx_product_available_table_qr ON public.product USING btree (tenant_id, is_available_table_qr) WHERE (is_available_table_qr = true)",
+          "table": "public.product",
+          "columns": [
+            "tenant_id",
+            "is_available_table_qr"
           ]
         }
       ],
@@ -20338,6 +20396,20 @@
           "type": "integer",
           "nullable": true,
           "comment": "Index into tip_default_percentages to pre-select at checkout. NULL means nothing is pre-selected (recommended — Ley 1935/2018 voluntariness)."
+        },
+        {
+          "name": "table_qr_module_enabled",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false",
+          "comment": "Table QR ordering module (warocol.com#710). When true, tenant can enable per-table static QR links for diner self-order with staff confirmation. Default false preserves current behaviour."
+        },
+        {
+          "name": "tip_taxable_default",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false",
+          "comment": "warocol.com#740 — default: include standard consumption tax on tips at checkout"
         }
       ],
       "indexes": [
@@ -23726,6 +23798,19 @@
           "type": "uuid",
           "nullable": true,
           "comment": "Default waiter assigned to this table (warocol.com#573). NULL = no default. Bars (is_bar = true) should never have this set (enforced in application code, not DB constraint). Full history with snapshots lives in table_member_assignments."
+        },
+        {
+          "name": "qr_public_token",
+          "type": "varchar(64)",
+          "nullable": true,
+          "comment": "Opaque public token for Table QR URL (api-warolabs#265). Generated via secrets.token_urlsafe(32) in #266 — not derivable from table_id. NULL until first enable/create. Globally unique when set."
+        },
+        {
+          "name": "qr_enabled",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false",
+          "comment": "Per-table QR toggle (api-warolabs#265). When false, public resolve rejects access even if token is set. Default false."
         }
       ],
       "indexes": [
@@ -23760,6 +23845,14 @@
           "table": "public.tables",
           "columns": [
             "assigned_member_id"
+          ]
+        },
+        {
+          "name": "idx_tables_qr_public_token",
+          "def": "CREATE UNIQUE INDEX idx_tables_qr_public_token ON public.tables USING btree (qr_public_token) WHERE (qr_public_token IS NOT NULL)",
+          "table": "public.tables",
+          "columns": [
+            "qr_public_token"
           ]
         }
       ],
@@ -24148,6 +24241,12 @@
           "type": "timestamp with time zone",
           "nullable": true,
           "comment": "Soft delete timestamp. NULL = active, non-NULL = deleted."
+        },
+        {
+          "name": "shift_template_id",
+          "type": "uuid",
+          "nullable": true,
+          "comment": "Optional FK to tenant_shift_templates (warocol.com#681). NULL = custom time window or legacy full-day arqueo."
         }
       ],
       "indexes": [
@@ -24177,6 +24276,14 @@
             "period_start",
             "period_end"
           ]
+        },
+        {
+          "name": "idx_accounting_period_shift",
+          "def": "CREATE INDEX idx_accounting_period_shift ON public.accounting_period USING btree (shift_template_id) WHERE (shift_template_id IS NOT NULL)",
+          "table": "public.accounting_period",
+          "columns": [
+            "shift_template_id"
+          ]
         }
       ],
       "constraints": [
@@ -24200,6 +24307,19 @@
           "table": "public.accounting_period",
           "referenced_table": "",
           "columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "accounting_period_shift_template_id_fkey",
+          "type": "FOREIGN KEY",
+          "def": "FOREIGN KEY (shift_template_id) REFERENCES tenant_shift_templates(id) ON DELETE SET NULL",
+          "table": "public.accounting_period",
+          "referenced_table": "public.tenant_shift_templates",
+          "columns": [
+            "shift_template_id"
+          ],
+          "referenced_columns": [
             "id"
           ]
         }
@@ -29167,6 +29287,509 @@
           ]
         }
       ]
+    },
+    {
+      "name": "public.tenant_shift_templates",
+      "type": "BASE TABLE",
+      "comment": "Reusable operating-shift schedules per tenant (warocol.com#680). Configured under Operaciones → Turnos; resolved to TIMESTAMPTZ windows per calendar date in #684.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()"
+        },
+        {
+          "name": "tenant_id",
+          "type": "uuid",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "type": "varchar(80)",
+          "nullable": false
+        },
+        {
+          "name": "start_time",
+          "type": "time without time zone",
+          "nullable": false
+        },
+        {
+          "name": "end_time",
+          "type": "time without time zone",
+          "nullable": false
+        },
+        {
+          "name": "crosses_midnight",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false",
+          "comment": "When true, end_time is on the day after start_time (e.g. 22:00–06:00)."
+        },
+        {
+          "name": "sort_order",
+          "type": "smallint",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "is_active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "tenant_shift_templates_pkey",
+          "def": "CREATE UNIQUE INDEX tenant_shift_templates_pkey ON public.tenant_shift_templates USING btree (id)",
+          "table": "public.tenant_shift_templates",
+          "columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "tenant_shift_templates_tenant_id_name_key",
+          "def": "CREATE UNIQUE INDEX tenant_shift_templates_tenant_id_name_key ON public.tenant_shift_templates USING btree (tenant_id, name)",
+          "table": "public.tenant_shift_templates",
+          "columns": [
+            "tenant_id",
+            "name"
+          ]
+        },
+        {
+          "name": "idx_shift_templates_tenant",
+          "def": "CREATE INDEX idx_shift_templates_tenant ON public.tenant_shift_templates USING btree (tenant_id) WHERE (is_active = true)",
+          "table": "public.tenant_shift_templates",
+          "columns": [
+            "tenant_id"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "tenant_shift_templates_tenant_id_fkey",
+          "type": "FOREIGN KEY",
+          "def": "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE",
+          "table": "public.tenant_shift_templates",
+          "referenced_table": "public.tenants",
+          "columns": [
+            "tenant_id"
+          ],
+          "referenced_columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "tenant_shift_templates_pkey",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "public.tenant_shift_templates",
+          "referenced_table": "",
+          "columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "tenant_shift_templates_tenant_id_name_key",
+          "type": "UNIQUE",
+          "def": "UNIQUE (tenant_id, name)",
+          "table": "public.tenant_shift_templates",
+          "referenced_table": "",
+          "columns": [
+            "tenant_id",
+            "name"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "public.table_qr_requests",
+      "type": "BASE TABLE",
+      "comment": "Customer Table QR orders awaiting staff confirmation (warocol.com#710). Submit (#267) creates pending rows; accept (#268) opens session, merges to POS tab, and fires comandas. Multiple pending rows per table allowed.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()"
+        },
+        {
+          "name": "tenant_id",
+          "type": "uuid",
+          "nullable": false
+        },
+        {
+          "name": "table_id",
+          "type": "uuid",
+          "nullable": false
+        },
+        {
+          "name": "status",
+          "type": "varchar(20)",
+          "nullable": false,
+          "default": "'pending'::character varying"
+        },
+        {
+          "name": "items",
+          "type": "jsonb",
+          "nullable": false,
+          "comment": "Line items snapshot at submit: product_id, quantity, unit_price, modifiers, notes — aligned with POS TabItem (app/routers/tables.py)."
+        },
+        {
+          "name": "payment_method",
+          "type": "varchar(50)",
+          "nullable": true
+        },
+        {
+          "name": "payment_method_id",
+          "type": "uuid",
+          "nullable": true,
+          "comment": "Customer payment intent FK. #267 must validate tenant_id match before insert."
+        },
+        {
+          "name": "customer_notes",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "session_id",
+          "type": "uuid",
+          "nullable": true,
+          "comment": "Set on accept (#268) when table session is opened or reused."
+        },
+        {
+          "name": "accepted_by",
+          "type": "uuid",
+          "nullable": true,
+          "comment": "tenant_members.id of staff who accepted the request (#268)."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "accepted_at",
+          "type": "timestamp with time zone",
+          "nullable": true
+        },
+        {
+          "name": "rejected_at",
+          "type": "timestamp with time zone",
+          "nullable": true
+        }
+      ],
+      "indexes": [
+        {
+          "name": "table_qr_requests_pkey",
+          "def": "CREATE UNIQUE INDEX table_qr_requests_pkey ON public.table_qr_requests USING btree (id)",
+          "table": "public.table_qr_requests",
+          "columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "idx_tqr_tenant_status",
+          "def": "CREATE INDEX idx_tqr_tenant_status ON public.table_qr_requests USING btree (tenant_id, status)",
+          "table": "public.table_qr_requests",
+          "columns": [
+            "tenant_id",
+            "status"
+          ]
+        },
+        {
+          "name": "idx_tqr_table_pending",
+          "def": "CREATE INDEX idx_tqr_table_pending ON public.table_qr_requests USING btree (table_id, status) WHERE ((status)::text = 'pending'::text)",
+          "table": "public.table_qr_requests",
+          "columns": [
+            "table_id",
+            "status"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "chk_table_qr_request_status",
+          "type": "CHECK",
+          "def": "CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'accepted'::character varying, 'rejected'::character varying])::text[])))",
+          "table": "public.table_qr_requests",
+          "referenced_table": "",
+          "columns": [
+            "status"
+          ]
+        },
+        {
+          "name": "table_qr_requests_accepted_by_fkey",
+          "type": "FOREIGN KEY",
+          "def": "FOREIGN KEY (accepted_by) REFERENCES tenant_members(id) ON DELETE SET NULL",
+          "table": "public.table_qr_requests",
+          "referenced_table": "public.tenant_members",
+          "columns": [
+            "accepted_by"
+          ],
+          "referenced_columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "table_qr_requests_tenant_id_fkey",
+          "type": "FOREIGN KEY",
+          "def": "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE",
+          "table": "public.table_qr_requests",
+          "referenced_table": "public.tenants",
+          "columns": [
+            "tenant_id"
+          ],
+          "referenced_columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "table_qr_requests_table_id_fkey",
+          "type": "FOREIGN KEY",
+          "def": "FOREIGN KEY (table_id) REFERENCES tables(id) ON DELETE CASCADE",
+          "table": "public.table_qr_requests",
+          "referenced_table": "public.tables",
+          "columns": [
+            "table_id"
+          ],
+          "referenced_columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "table_qr_requests_session_id_fkey",
+          "type": "FOREIGN KEY",
+          "def": "FOREIGN KEY (session_id) REFERENCES table_sessions(id) ON DELETE SET NULL",
+          "table": "public.table_qr_requests",
+          "referenced_table": "public.table_sessions",
+          "columns": [
+            "session_id"
+          ],
+          "referenced_columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "table_qr_requests_payment_method_id_fkey",
+          "type": "FOREIGN KEY",
+          "def": "FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) ON DELETE SET NULL",
+          "table": "public.table_qr_requests",
+          "referenced_table": "public.payment_methods",
+          "columns": [
+            "payment_method_id"
+          ],
+          "referenced_columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "table_qr_requests_pkey",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "public.table_qr_requests",
+          "referenced_table": "",
+          "columns": [
+            "id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "public.tenant_operation_events",
+      "type": "BASE TABLE",
+      "comment": "Append-only operation audit log for Bitácora de operaciones (MVP: POS).",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()"
+        },
+        {
+          "name": "tenant_id",
+          "type": "uuid",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "domain",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "channel",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "action",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "actor_user_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "actor_member_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "table_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "table_session_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "pos_cart_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "order_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "order_item_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "comanda_item_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "payload",
+          "type": "jsonb",
+          "nullable": false,
+          "default": "'{}'::jsonb"
+        },
+        {
+          "name": "reason",
+          "type": "text",
+          "nullable": true
+        }
+      ],
+      "indexes": [
+        {
+          "name": "tenant_operation_events_pkey",
+          "def": "CREATE UNIQUE INDEX tenant_operation_events_pkey ON public.tenant_operation_events USING btree (id)",
+          "table": "public.tenant_operation_events",
+          "columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "idx_tenant_operation_events_tenant_created",
+          "def": "CREATE INDEX idx_tenant_operation_events_tenant_created ON public.tenant_operation_events USING btree (tenant_id, created_at DESC)",
+          "table": "public.tenant_operation_events",
+          "columns": [
+            "tenant_id",
+            "created_at"
+          ]
+        },
+        {
+          "name": "idx_tenant_operation_events_tenant_action",
+          "def": "CREATE INDEX idx_tenant_operation_events_tenant_action ON public.tenant_operation_events USING btree (tenant_id, action)",
+          "table": "public.tenant_operation_events",
+          "columns": [
+            "tenant_id",
+            "action"
+          ]
+        },
+        {
+          "name": "idx_tenant_operation_events_tenant_actor_user",
+          "def": "CREATE INDEX idx_tenant_operation_events_tenant_actor_user ON public.tenant_operation_events USING btree (tenant_id, actor_user_id) WHERE (actor_user_id IS NOT NULL)",
+          "table": "public.tenant_operation_events",
+          "columns": [
+            "tenant_id",
+            "actor_user_id"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "tenant_operation_events_action_check",
+          "type": "CHECK",
+          "def": "CHECK ((action = ANY (ARRAY['tab_item_added'::text, 'tab_item_removed'::text, 'tab_item_qty_changed'::text, 'tab_cleared'::text, 'cart_line_removed'::text, 'cart_cleared'::text, 'payment_voided'::text, 'comanda_line_cancelled'::text])))",
+          "table": "public.tenant_operation_events",
+          "referenced_table": "",
+          "columns": [
+            "action"
+          ]
+        },
+        {
+          "name": "tenant_operation_events_channel_check",
+          "type": "CHECK",
+          "def": "CHECK ((channel = ANY (ARRAY['mesa'::text, 'barra'::text, 'mostrador'::text])))",
+          "table": "public.tenant_operation_events",
+          "referenced_table": "",
+          "columns": [
+            "channel"
+          ]
+        },
+        {
+          "name": "tenant_operation_events_domain_check",
+          "type": "CHECK",
+          "def": "CHECK ((domain = ANY (ARRAY['pos'::text])))",
+          "table": "public.tenant_operation_events",
+          "referenced_table": "",
+          "columns": [
+            "domain"
+          ]
+        },
+        {
+          "name": "tenant_operation_events_tenant_id_fkey",
+          "type": "FOREIGN KEY",
+          "def": "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE",
+          "table": "public.tenant_operation_events",
+          "referenced_table": "public.tenants",
+          "columns": [
+            "tenant_id"
+          ],
+          "referenced_columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "tenant_operation_events_pkey",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "public.tenant_operation_events",
+          "referenced_table": "",
+          "columns": [
+            "id"
+          ]
+        }
+      ]
     }
   ],
   "relations": [
@@ -33188,6 +33811,19 @@
       "def": "FOREIGN KEY (tenant_id) REFERENCES tenants(id)"
     },
     {
+      "table": "public.accounting_period",
+      "columns": [
+        "shift_template_id"
+      ],
+      "cardinality": "zero_or_more",
+      "parent_table": "public.tenant_shift_templates",
+      "parent_columns": [
+        "id"
+      ],
+      "parent_cardinality": "zero_or_one",
+      "def": "FOREIGN KEY (shift_template_id) REFERENCES tenant_shift_templates(id) ON DELETE SET NULL"
+    },
+    {
       "table": "public.closing_summary",
       "columns": [
         "tenant_id"
@@ -33810,6 +34446,97 @@
       ],
       "parent_cardinality": "exactly_one",
       "def": "FOREIGN KEY (resolution_id) REFERENCES dian_resolutions(id)"
+    },
+    {
+      "table": "public.tenant_shift_templates",
+      "columns": [
+        "tenant_id"
+      ],
+      "cardinality": "zero_or_more",
+      "parent_table": "public.tenants",
+      "parent_columns": [
+        "id"
+      ],
+      "parent_cardinality": "exactly_one",
+      "def": "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "public.table_qr_requests",
+      "columns": [
+        "accepted_by"
+      ],
+      "cardinality": "zero_or_more",
+      "parent_table": "public.tenant_members",
+      "parent_columns": [
+        "id"
+      ],
+      "parent_cardinality": "zero_or_one",
+      "def": "FOREIGN KEY (accepted_by) REFERENCES tenant_members(id) ON DELETE SET NULL"
+    },
+    {
+      "table": "public.table_qr_requests",
+      "columns": [
+        "tenant_id"
+      ],
+      "cardinality": "zero_or_more",
+      "parent_table": "public.tenants",
+      "parent_columns": [
+        "id"
+      ],
+      "parent_cardinality": "exactly_one",
+      "def": "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "public.table_qr_requests",
+      "columns": [
+        "table_id"
+      ],
+      "cardinality": "zero_or_more",
+      "parent_table": "public.tables",
+      "parent_columns": [
+        "id"
+      ],
+      "parent_cardinality": "exactly_one",
+      "def": "FOREIGN KEY (table_id) REFERENCES tables(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "public.table_qr_requests",
+      "columns": [
+        "session_id"
+      ],
+      "cardinality": "zero_or_more",
+      "parent_table": "public.table_sessions",
+      "parent_columns": [
+        "id"
+      ],
+      "parent_cardinality": "zero_or_one",
+      "def": "FOREIGN KEY (session_id) REFERENCES table_sessions(id) ON DELETE SET NULL"
+    },
+    {
+      "table": "public.table_qr_requests",
+      "columns": [
+        "payment_method_id"
+      ],
+      "cardinality": "zero_or_more",
+      "parent_table": "public.payment_methods",
+      "parent_columns": [
+        "id"
+      ],
+      "parent_cardinality": "zero_or_one",
+      "def": "FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) ON DELETE SET NULL"
+    },
+    {
+      "table": "public.tenant_operation_events",
+      "columns": [
+        "tenant_id"
+      ],
+      "cardinality": "zero_or_more",
+      "parent_table": "public.tenants",
+      "parent_columns": [
+        "id"
+      ],
+      "parent_cardinality": "exactly_one",
+      "def": "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE"
     }
   ],
   "functions": [

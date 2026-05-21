@@ -81,7 +81,7 @@ CREATE VIEW v_financial_tir_metrics AS (
 
 | Name | Columns | Comment | Type |
 | ---- | ------- | ------- | ---- |
-| [public.orders](public.orders.md) | 41 |  | BASE TABLE |
+| [public.orders](public.orders.md) | 43 |  | BASE TABLE |
 | [public.tenant_members](public.tenant_members.md) | 6 |  | BASE TABLE |
 | [monthly_costs](monthly_costs.md) | 0 |  |  |
 | [tir_calculations](tir_calculations.md) | 0 |  |  |

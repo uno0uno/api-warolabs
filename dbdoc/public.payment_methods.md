@@ -4,7 +4,7 @@
 
 | Name | Type | Default | Nullable | Children | Parents | Comment |
 | ---- | ---- | ------- | -------- | -------- | ------- | ------- |
-| id | uuid | gen_random_uuid() | false | [public.orders](public.orders.md) [public.tenant_expenses](public.tenant_expenses.md) [public.tenant_purchases](public.tenant_purchases.md) [public.order_payments](public.order_payments.md) |  |  |
+| id | uuid | gen_random_uuid() | false | [public.orders](public.orders.md) [public.tenant_expenses](public.tenant_expenses.md) [public.tenant_purchases](public.tenant_purchases.md) [public.order_payments](public.order_payments.md) [public.table_qr_requests](public.table_qr_requests.md) |  |  |
 | tenant_id | uuid |  | false |  | [public.tenants](public.tenants.md) |  |
 | group_id | uuid |  | false |  | [public.payment_method_groups](public.payment_method_groups.md) |  |
 | name | varchar(100) |  | false |  |  |  |

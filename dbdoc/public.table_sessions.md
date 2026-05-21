@@ -4,7 +4,7 @@
 
 | Name | Type | Default | Nullable | Children | Parents | Comment |
 | ---- | ---- | ------- | -------- | -------- | ------- | ------- |
-| id | uuid | gen_random_uuid() | false | [public.orders](public.orders.md) |  |  |
+| id | uuid | gen_random_uuid() | false | [public.orders](public.orders.md) [public.table_qr_requests](public.table_qr_requests.md) |  |  |
 | table_id | uuid |  | false |  | [public.tables](public.tables.md) |  |
 | tenant_id | uuid |  | false |  | [public.tenants](public.tenants.md) |  |
 | opened_at | timestamp with time zone | now() | false |  |  |  |
