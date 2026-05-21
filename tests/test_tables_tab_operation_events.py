@@ -1,9 +1,10 @@
-"""Operation audit events for mesa/barra tab flows (warocol.com#783)."""
+"""Operation audit events for mesa/barra tab flows (warocol.com#783, #786)."""
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
+from app.core.exceptions import APIError
 from app.services import tables_service
 
 
@@ -98,6 +99,7 @@ async def test_remove_tab_item_records_before_delete():
         "table_name": "Barra 1",
         "is_bar": True,
         "effective_waiter_member_id": None,
+        "fulfillment_status": "new",
     }
 
     mock_conn = AsyncMock()
@@ -206,6 +208,7 @@ async def test_add_then_remove_shares_table_session_id():
         "table_name": "Mesa 1",
         "is_bar": False,
         "effective_waiter_member_id": None,
+        "fulfillment_status": "new",
     }
     mock_conn_rm = AsyncMock()
     mock_conn_rm.fetchrow = AsyncMock(side_effect=[row, None])
@@ -242,3 +245,127 @@ async def test_add_then_remove_shares_table_session_id():
     assert recorded[1]["action"] == "tab_item_removed"
     assert recorded[0]["tab_ctx"]["table_session_id"] == session_id
     assert recorded[1]["tab_ctx"]["table_session_id"] == session_id
+
+
+@pytest.mark.asyncio
+async def test_remove_fired_item_without_reason_raises_400():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    table_id = uuid4()
+    order_item_id = uuid4()
+    order_id = uuid4()
+    session_id = uuid4()
+
+    row = {
+        "id": order_item_id,
+        "product_id": uuid4(),
+        "quantity": 1,
+        "price_at_purchase": 10.0,
+        "subtotal": 10.0,
+        "notes": None,
+        "fulfillment_status": "sent",
+        "order_id": order_id,
+        "total_amount": 10.0,
+        "order_number": 3,
+        "table_session_id": session_id,
+        "product_name": "Pasta",
+        "table_name": "Mesa 2",
+        "is_bar": False,
+        "effective_waiter_member_id": None,
+    }
+
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow = AsyncMock(side_effect=[row, None])
+    mock_conn.fetch = AsyncMock(return_value=[])
+    mock_conn.execute = AsyncMock()
+
+    class _Txn:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *args):
+            return None
+
+    mock_conn.transaction = MagicMock(return_value=_Txn())
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("app.services.tables_service.require_valid_session") as mock_sess, \
+         patch("app.services.tables_service.get_db_connection", return_value=mock_cm):
+        mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id)
+        with pytest.raises(APIError) as exc:
+            await tables_service.remove_tab_item(
+                MagicMock(), table_id, order_item_id, reason="",
+            )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_remove_fired_item_with_reason_records_event():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    table_id = uuid4()
+    order_item_id = uuid4()
+    order_id = uuid4()
+    session_id = uuid4()
+    comanda_item_id = uuid4()
+    recorded = []
+
+    async def capture_record(conn, tid, **kwargs):
+        recorded.append(kwargs)
+
+    row = {
+        "id": order_item_id,
+        "product_id": uuid4(),
+        "quantity": 1,
+        "price_at_purchase": 15.0,
+        "subtotal": 15.0,
+        "notes": None,
+        "fulfillment_status": "preparing",
+        "order_id": order_id,
+        "total_amount": 15.0,
+        "order_number": 9,
+        "table_session_id": session_id,
+        "product_name": "Sopa",
+        "table_name": "Mesa 4",
+        "is_bar": False,
+        "effective_waiter_member_id": None,
+    }
+    comanda_row = {"id": comanda_item_id, "comanda_id": uuid4()}
+
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow = AsyncMock(side_effect=[row, comanda_row])
+    mock_conn.fetch = AsyncMock(return_value=[])
+    mock_conn.fetchval = AsyncMock(return_value=1)
+    mock_conn.execute = AsyncMock()
+
+    class _Txn:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *args):
+            return None
+
+    mock_conn.transaction = MagicMock(return_value=_Txn())
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("app.services.tables_service.require_valid_session") as mock_sess, \
+         patch("app.services.tables_service.get_db_connection", return_value=mock_cm), \
+         patch(
+             "app.services.tables_service._record_tab_operation_event",
+             side_effect=capture_record,
+         ):
+        mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id)
+        await tables_service.remove_tab_item(
+            MagicMock(),
+            table_id,
+            order_item_id,
+            reason="  Cliente cambió de opinión  ",
+        )
+
+    assert len(recorded) == 1
+    assert recorded[0]["reason"] == "Cliente cambió de opinión"
+    assert recorded[0]["comanda_item_id"] == comanda_item_id

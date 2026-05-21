@@ -250,10 +250,24 @@ async def add_tab_items(request: Request, table_id: UUID, body: TabAddRequest):
     return await tables_service.add_tab_items(request, table_id, items)
 
 
+class RemoveTabItemRequest(BaseModel):
+    reason: Optional[str] = Field(
+        None,
+        description="warocol.com#786 — required when the line was fired to kitchen",
+    )
+
+
 @router.delete("/{table_id}/tab/items/{order_item_id}", dependencies=[Depends(require_module(Module.POS))])
-async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID):
+async def remove_tab_item(
+    request: Request,
+    table_id: UUID,
+    order_item_id: UUID,
+    body: RemoveTabItemRequest,
+):
     """Remove an order item from the running tab."""
-    return await tables_service.remove_tab_item(request, table_id, order_item_id)
+    return await tables_service.remove_tab_item(
+        request, table_id, order_item_id, body.reason,
+    )
 
 
 @router.patch("/{table_id}/tab/items/{order_item_id}", dependencies=[Depends(require_module(Module.POS))])

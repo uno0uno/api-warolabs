@@ -1733,6 +1733,7 @@ async def _record_tab_operation_event(
     order_item_id: Optional[UUID] = None,
     comanda_item_id: Optional[UUID] = None,
     payload: Optional[Dict[str, Any]] = None,
+    reason: Optional[str] = None,
 ) -> None:
     await record_operation_event(
         conn,
@@ -1748,10 +1749,27 @@ async def _record_tab_operation_event(
         order_item_id=order_item_id,
         comanda_item_id=comanda_item_id,
         payload=payload,
+        reason=reason,
     )
 
 
-async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID) -> dict:
+def _tab_item_requires_remove_reason(
+    fulfillment_status: Optional[str],
+    comanda_item_row: Optional[Any],
+) -> bool:
+    """Fired to kitchen: non-new fulfillment or linked comanda line (warocol.com#786)."""
+    status = fulfillment_status or "new"
+    if status not in ("new", "cancelled"):
+        return True
+    return comanda_item_row is not None
+
+
+async def remove_tab_item(
+    request: Request,
+    table_id: UUID,
+    order_item_id: UUID,
+    reason: Optional[str] = None,
+) -> dict:
     """Remove an order item from the running tab and update the order total."""
     try:
         session_context = require_valid_session(request)
@@ -1765,7 +1783,7 @@ async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID)
                 """
                 SELECT
                     oi.id, oi.product_id, oi.quantity, oi.price_at_purchase,
-                    oi.subtotal, oi.notes,
+                    oi.subtotal, oi.notes, oi.fulfillment_status,
                     o.id AS order_id, o.total_amount, o.order_number, o.table_session_id,
                     p.name AS product_name,
                     t.name AS table_name,
@@ -1801,6 +1819,15 @@ async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID)
                 "SELECT id, comanda_id FROM comanda_items WHERE order_item_id = $1",
                 order_item_id,
             )
+
+            normalized_reason = (reason or "").strip()
+            if _tab_item_requires_remove_reason(row["fulfillment_status"], comanda_item_row):
+                if not normalized_reason:
+                    raise APIError(
+                        "Motivo requerido para eliminar un producto enviado a cocina",
+                        status_code=400,
+                    )
+            event_reason = normalized_reason or None
             if comanda_item_row:
                 await conn.execute(
                     """
@@ -1858,6 +1885,7 @@ async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID)
                 order_id=row["order_id"],
                 order_item_id=order_item_id,
                 comanda_item_id=comanda_item_id,
+                reason=event_reason,
                 payload=_build_tab_item_payload(
                     product_id=row["product_id"],
                     product_name=row["product_name"],
@@ -1880,7 +1908,7 @@ async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID)
             )
 
         return {"success": True, "data": {"removed": str(order_item_id)}}
-    except (AuthenticationError, NotFoundError):
+    except (AuthenticationError, NotFoundError, APIError):
         raise
     except Exception as e:
         logger.error(f"Error removing tab item {order_item_id}: {e}")
