@@ -3017,6 +3017,8 @@ async def get_products_sold(
     date_to: Optional[str] = None,
     category_id: Optional[str] = None,
     sort: str = "qty_desc",
+    search: Optional[str] = None,
+    channel: Optional[str] = None,
 ) -> dict:
     """
     Get products sold aggregated by product, filtered by date range and category.
@@ -3055,6 +3057,19 @@ async def get_products_sold(
                 param_count += 1
                 where_conditions.append(f"p.category_id = ${param_count}::uuid")
                 params.append(category_id)
+
+            if search and search.strip():
+                param_count += 1
+                where_conditions.append(f"p.name ILIKE ${param_count}")
+                params.append(f"%{search.strip()}%")
+
+            # channel ∈ {'online', 'mesa', 'pos'} — same as get_orders_list
+            if channel == 'online':
+                where_conditions.append("o.online_cart_id IS NOT NULL")
+            elif channel == 'mesa':
+                where_conditions.append("o.table_session_id IS NOT NULL")
+            elif channel == 'pos':
+                where_conditions.append("o.pos_cart_id IS NOT NULL AND o.table_session_id IS NULL")
 
             where_clause = " AND ".join(where_conditions)
 
