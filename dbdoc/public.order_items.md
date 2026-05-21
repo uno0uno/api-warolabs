@@ -20,6 +20,7 @@
 | fulfillment_status | varchar(10) | 'new'::character varying | false |  |  |  |
 | sent_at | timestamp with time zone |  | true |  |  |  |
 | ready_at | timestamp with time zone |  | true |  |  |  |
+| notes | text |  | true |  |  | Special preparation notes from POS (Notas Especiales); copied to comanda_items on fire. |
 
 ## Constraints
 

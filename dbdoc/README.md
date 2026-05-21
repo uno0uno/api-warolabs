@@ -63,15 +63,15 @@
 | [public.order_item_costs](public.order_item_costs.md) | 14 | Snapshot inmutable de costos y rentabilidad al momento de cada venta. Los costos NO cambian aunque suban precios de ingredientes después. | BASE TABLE |
 | [public.order_item_ingredients](public.order_item_ingredients.md) | 11 | Detalle inmutable de ingredientes consumidos en cada venta. Permite trazabilidad completa y análisis de consumo. | BASE TABLE |
 | [public.order_item_modifiers](public.order_item_modifiers.md) | 7 | Modificadores seleccionados por el cliente en cada venta (histórico inmutable) | BASE TABLE |
-| [public.order_items](public.order_items.md) | 16 |  | BASE TABLE |
+| [public.order_items](public.order_items.md) | 17 |  | BASE TABLE |
 | [public.order_status_history](public.order_status_history.md) | 8 |  | BASE TABLE |
-| [public.orders](public.orders.md) | 41 |  | BASE TABLE |
+| [public.orders](public.orders.md) | 43 |  | BASE TABLE |
 | [public.payments](public.payments.md) | 23 |  | BASE TABLE |
 | [public.pdf_documents](public.pdf_documents.md) | 13 |  | BASE TABLE |
 | [public.pos_cart_item_modifiers](public.pos_cart_item_modifiers.md) | 6 |  | BASE TABLE |
 | [public.pos_cart_items](public.pos_cart_items.md) | 9 |  | BASE TABLE |
 | [public.pos_carts](public.pos_carts.md) | 10 |  | BASE TABLE |
-| [public.product](public.product.md) | 25 |  | BASE TABLE |
+| [public.product](public.product.md) | 27 |  | BASE TABLE |
 | [public.product_base_recipes](public.product_base_recipes.md) | 6 | Junction table linking products to multiple recipe bases | BASE TABLE |
 | [public.product_base_types](public.product_base_types.md) | 7 | Tipos base de productos para sistema de recetas modulares (ej: BURGER, HOTDOG) | BASE TABLE |
 | [public.product_change_history](public.product_change_history.md) | 12 | Historial de cambios en productos para trazabilidad y análisis de impacto | BASE TABLE |
@@ -139,7 +139,7 @@
 | [public.recurring_expense_instances](public.recurring_expense_instances.md) | 14 | Individual payment instances for recurring expenses | BASE TABLE |
 | [public.salary_payment_change_history](public.salary_payment_change_history.md) | 12 | Audit log for tracking all changes to salary payments | BASE TABLE |
 | [public.salary_config_change_history](public.salary_config_change_history.md) | 12 | Audit log for tracking changes to employee salary configuration | BASE TABLE |
-| [public.tenant_public_profiles](public.tenant_public_profiles.md) | 39 | Perfiles públicos de restaurantes para mostrar menú y información | BASE TABLE |
+| [public.tenant_public_profiles](public.tenant_public_profiles.md) | 41 | Perfiles públicos de restaurantes para mostrar menú y información | BASE TABLE |
 | [public.promoter_codes](public.promoter_codes.md) | 8 |  | BASE TABLE |
 | [public.commission_configs](public.commission_configs.md) | 8 |  | BASE TABLE |
 | [public.order_commissions](public.order_commissions.md) | 20 |  | BASE TABLE |
@@ -163,10 +163,10 @@
 | [public.billing_events](public.billing_events.md) | 8 |  | BASE TABLE |
 | [public.scan_monthly_log](public.scan_monthly_log.md) | 6 |  | BASE TABLE |
 | [public.ingredient_global_hierarchy](public.ingredient_global_hierarchy.md) | 4 |  | BASE TABLE |
-| [public.tables](public.tables.md) | 10 |  | BASE TABLE |
+| [public.tables](public.tables.md) | 12 |  | BASE TABLE |
 | [public.table_sessions](public.table_sessions.md) | 8 |  | BASE TABLE |
 | [public.credit_payments](public.credit_payments.md) | 10 |  | BASE TABLE |
-| [public.accounting_period](public.accounting_period.md) | 8 |  | BASE TABLE |
+| [public.accounting_period](public.accounting_period.md) | 9 |  | BASE TABLE |
 | [public.closing_summary](public.closing_summary.md) | 16 |  | BASE TABLE |
 | [public.payment_method_groups](public.payment_method_groups.md) | 9 |  | BASE TABLE |
 | [public.payment_methods](public.payment_methods.md) | 8 |  | BASE TABLE |
@@ -201,6 +201,9 @@
 | [public.table_member_assignments](public.table_member_assignments.md) | 10 | Append-only history of default waiter assignments per table (warocol.com#573). Period model: each row spans one continuous assignment, with snapshots that survive member deletion. | BASE TABLE |
 | [public.dian_sequence_gaps](public.dian_sequence_gaps.md) | 9 | Audit trail of DIAN invoice numbers that were allocated but never accepted by Matias/DIAN. Each row represents a number permanently retired from the sequence — DIAN forbids reuse so this table is the legal justification for any gap an auditor finds. See warocol.com#592. | BASE TABLE |
 | [public.public_cities](public.public_cities.md) | 7 | Curated catalog of cities WARO operates in (warocol.com#615). Used to populate the city selector on /negocio, the discovery section on /, and the reserved-words check in tenants_service._generate_slug. Adding a city here makes warocol.com/{city_slug} reachable; removing it requires reassigning any tenants that reference it. | BASE TABLE |
+| [public.tenant_shift_templates](public.tenant_shift_templates.md) | 10 | Reusable operating-shift schedules per tenant (warocol.com#680). Configured under Operaciones → Turnos; resolved to TIMESTAMPTZ windows per calendar date in #684. | BASE TABLE |
+| [public.table_qr_requests](public.table_qr_requests.md) | 13 | Customer Table QR orders awaiting staff confirmation (warocol.com#710). Submit (#267) creates pending rows; accept (#268) opens session, merges to POS tab, and fires comandas. Multiple pending rows per table allowed. | BASE TABLE |
+| [public.tenant_operation_events](public.tenant_operation_events.md) | 16 | Append-only operation audit log for Bitácora de operaciones (MVP: POS). | BASE TABLE |
 
 ## Stored procedures and functions
 

@@ -116,10 +116,10 @@ CREATE VIEW v_product_analysis AS (
 
 | Name | Columns | Comment | Type |
 | ---- | ------- | ------- | ---- |
-| [public.order_items](public.order_items.md) | 16 |  | BASE TABLE |
-| [public.orders](public.orders.md) | 41 |  | BASE TABLE |
+| [public.order_items](public.order_items.md) | 17 |  | BASE TABLE |
+| [public.orders](public.orders.md) | 43 |  | BASE TABLE |
 | [public.product_variants](public.product_variants.md) | 9 |  | BASE TABLE |
-| [public.product](public.product.md) | 25 |  | BASE TABLE |
+| [public.product](public.product.md) | 27 |  | BASE TABLE |
 | [public.categories](public.categories.md) | 7 |  | BASE TABLE |
 | [public.tenant_members](public.tenant_members.md) | 6 |  | BASE TABLE |
 | [product_metrics](product_metrics.md) | 0 |  |  |

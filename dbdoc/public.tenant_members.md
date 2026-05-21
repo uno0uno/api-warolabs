@@ -4,7 +4,7 @@
 
 | Name | Type | Default | Nullable | Children | Parents | Comment |
 | ---- | ---- | ------- | -------- | -------- | ------- | ------- |
-| id | uuid |  | false | [public.orders](public.orders.md) [public.tenant_member_roles](public.tenant_member_roles.md) [public.salary_payments](public.salary_payments.md) [public.salary_config_change_history](public.salary_config_change_history.md) [public.promoter_codes](public.promoter_codes.md) [public.order_commissions](public.order_commissions.md) [public.tables](public.tables.md) [public.table_sessions](public.table_sessions.md) [public.salary_overtime_payments](public.salary_overtime_payments.md) [public.salary_liquidaciones](public.salary_liquidaciones.md) [public.table_member_assignments](public.table_member_assignments.md) |  |  |
+| id | uuid |  | false | [public.orders](public.orders.md) [public.tenant_member_roles](public.tenant_member_roles.md) [public.salary_payments](public.salary_payments.md) [public.salary_config_change_history](public.salary_config_change_history.md) [public.promoter_codes](public.promoter_codes.md) [public.order_commissions](public.order_commissions.md) [public.tables](public.tables.md) [public.table_sessions](public.table_sessions.md) [public.salary_overtime_payments](public.salary_overtime_payments.md) [public.salary_liquidaciones](public.salary_liquidaciones.md) [public.table_member_assignments](public.table_member_assignments.md) [public.table_qr_requests](public.table_qr_requests.md) |  |  |
 | tenant_id | uuid |  | false |  | [public.tenants](public.tenants.md) |  |
 | user_id | uuid |  | false |  | [public.profile](public.profile.md) |  |
 | role | text | 'member'::text | false |  |  |  |

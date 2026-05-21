@@ -45,6 +45,8 @@
 | served_by_member_id | uuid |  | true |  | [public.tenant_members](public.tenant_members.md) | Per-order waiter attribution (warocol.com#575). Used by bar/counter modes where mesa-level (#573) and session-level (#574) override do not fit. Resolver: order \> session \> table \> NULL. |
 | tip_amount | numeric(12,2) | 0 | false |  |  | Tip captured at checkout in COP (warocol.com#635). Strictly separate from total_amount — never folded in. Attributed to served_by_member_id. |
 | tip_source | varchar(20) | 'none'::character varying | false |  |  | How the tip was selected (warocol.com#635): preset (chip from tenant config), custom (free input), or none. Used for analytics. Must agree with tip_amount via chk_orders_tip_source_consistency. |
+| tip_taxable | boolean | false | false |  |  | warocol.com#740 — whether IVA/INC was applied to tip_amount for this sale |
+| tip_tax_amount | numeric(12,2) | 0 | false |  |  | warocol.com#740 — tax on tip_amount when tip_taxable=true; separate from total_amount |
 
 ## Constraints
 
@@ -54,6 +56,8 @@
 | chk_orders_tip_amount_nonneg | CHECK | CHECK ((tip_amount >= (0)::numeric)) |
 | chk_orders_tip_source | CHECK | CHECK (((tip_source)::text = ANY ((ARRAY['preset'::character varying, 'custom'::character varying, 'none'::character varying])::text[]))) |
 | chk_orders_tip_source_consistency | CHECK | CHECK ((((tip_amount = (0)::numeric) AND ((tip_source)::text = 'none'::text)) OR ((tip_amount > (0)::numeric) AND ((tip_source)::text = ANY ((ARRAY['preset'::character varying, 'custom'::character varying])::text[]))))) |
+| chk_orders_tip_tax_amount_nonneg | CHECK | CHECK ((tip_tax_amount >= (0)::numeric)) |
+| chk_orders_tip_tax_consistency | CHECK | CHECK ((((tip_amount = (0)::numeric) AND (tip_taxable = false) AND (tip_tax_amount = (0)::numeric)) OR (tip_amount > (0)::numeric))) |
 | orders_billing_address_id_fkey | FOREIGN KEY | FOREIGN KEY (billing_address_id) REFERENCES addresses(id) |
 | orders_shipping_address_id_fkey | FOREIGN KEY | FOREIGN KEY (shipping_address_id) REFERENCES addresses(id) |
 | orders_natural_key_key | UNIQUE | UNIQUE (natural_key) |

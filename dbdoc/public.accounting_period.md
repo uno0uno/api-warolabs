@@ -12,6 +12,7 @@
 | period_start_time | timestamp with time zone |  | true |  |  | Exact start timestamp for the period (optional). When set, order filtering uses this instead of period_start::date. |
 | period_end_time | timestamp with time zone |  | true |  |  | Exact end timestamp for the period (optional). When set, order filtering uses this instead of period_end::date. |
 | deleted_at | timestamp with time zone |  | true |  |  | Soft delete timestamp. NULL = active, non-NULL = deleted. |
+| shift_template_id | uuid |  | true |  | [public.tenant_shift_templates](public.tenant_shift_templates.md) | Optional FK to tenant_shift_templates (warocol.com#681). NULL = custom time window or legacy full-day arqueo. |
 
 ## Constraints
 
@@ -19,6 +20,7 @@
 | ---- | ---- | ---------- |
 | accounting_period_tenant_id_fkey | FOREIGN KEY | FOREIGN KEY (tenant_id) REFERENCES tenants(id) |
 | accounting_period_pkey | PRIMARY KEY | PRIMARY KEY (id) |
+| accounting_period_shift_template_id_fkey | FOREIGN KEY | FOREIGN KEY (shift_template_id) REFERENCES tenant_shift_templates(id) ON DELETE SET NULL |
 
 ## Indexes
 
@@ -27,6 +29,7 @@
 | accounting_period_pkey | CREATE UNIQUE INDEX accounting_period_pkey ON public.accounting_period USING btree (id) |
 | idx_accounting_period_tenant | CREATE INDEX idx_accounting_period_tenant ON public.accounting_period USING btree (tenant_id, period_start DESC) |
 | uq_period_tenant_active | CREATE UNIQUE INDEX uq_period_tenant_active ON public.accounting_period USING btree (tenant_id, period_start, period_end) WHERE (deleted_at IS NULL) |
+| idx_accounting_period_shift | CREATE INDEX idx_accounting_period_shift ON public.accounting_period USING btree (shift_template_id) WHERE (shift_template_id IS NOT NULL) |
 
 ## Relations
 

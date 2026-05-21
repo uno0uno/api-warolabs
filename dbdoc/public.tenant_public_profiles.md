@@ -47,6 +47,8 @@ Perfiles públicos de restaurantes para mostrar menú y información
 | tip_enabled | boolean | false | false |  |  | Master tipping toggle (warocol.com#635). When true, surfaces the tip selector at POS/online checkout and the /ventas/propinas history view. Default false preserves current behaviour. |
 | tip_default_percentages | numeric(5,2)[] | ARRAY[(10)::numeric(5,2)] | false |  |  | Suggested tip presets shown as chips at checkout (warocol.com#635). Resolved on subtotal (pre-tax). App-level validation enforces max 5 entries, each between 0 and 100. |
 | tip_preselect_index | integer |  | true |  |  | Index into tip_default_percentages to pre-select at checkout. NULL means nothing is pre-selected (recommended — Ley 1935/2018 voluntariness). |
+| table_qr_module_enabled | boolean | false | false |  |  | Table QR ordering module (warocol.com#710). When true, tenant can enable per-table static QR links for diner self-order with staff confirmation. Default false preserves current behaviour. |
+| tip_taxable_default | boolean | false | false |  |  | warocol.com#740 — default: include standard consumption tax on tips at checkout |
 
 ## Constraints
 
