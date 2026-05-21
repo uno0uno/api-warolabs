@@ -263,6 +263,8 @@ async def get_products_sold(
     date_to: Optional[str] = Query(None),
     category_id: Optional[str] = Query(None),
     sort: Optional[str] = Query("qty_desc"),
+    search: Optional[str] = Query(None, description="Filter by product name (partial match)"),
+    channel: Optional[str] = Query(None, description="Filter by channel: 'pos' | 'mesa' | 'online'"),
 ):
     """
     Get products sold report aggregated by product.
@@ -272,6 +274,8 @@ async def get_products_sold(
     - date_to: End date (YYYY-MM-DD)
     - category_id: Filter by category UUID
     - sort: qty_desc | revenue_desc | name_asc
+    - search: Product name (ILIKE)
+    - channel: pos | mesa | online
     """
     return await orders_service.get_products_sold(
         request,
@@ -279,6 +283,8 @@ async def get_products_sold(
         date_to=date_to,
         category_id=category_id,
         sort=sort or "qty_desc",
+        search=search,
+        channel=channel,
     )
 
 
