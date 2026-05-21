@@ -119,7 +119,15 @@ async def update_item(
 async def remove_item(
     request: Request,
     cart_id: UUID,
-    item_id: UUID
+    item_id: UUID,
+    channel: Literal["mostrador", "barra"] = Query(
+        "mostrador",
+        description="POS channel for bitácora (warocol.com#784)",
+    ),
+    actor_member_id: Optional[UUID] = Query(
+        None,
+        description="Optional tenant_members.id (served-by attribution, #575)",
+    ),
 ):
     """
     Remove item from cart
@@ -127,19 +135,34 @@ async def remove_item(
     return await pos_cart_service.remove_item_from_cart(
         request,
         cart_id,
-        item_id
+        item_id,
+        channel=channel,
+        actor_member_id=actor_member_id,
     )
 
 
 @router.delete("/{cart_id}", dependencies=[Depends(require_module(Module.POS))])
 async def clear_cart(
     request: Request,
-    cart_id: UUID
+    cart_id: UUID,
+    channel: Literal["mostrador", "barra"] = Query(
+        "mostrador",
+        description="POS channel for bitácora (warocol.com#784)",
+    ),
+    actor_member_id: Optional[UUID] = Query(
+        None,
+        description="Optional tenant_members.id (served-by attribution, #575)",
+    ),
 ):
     """
     Clear all items from cart
     """
-    return await pos_cart_service.clear_cart(request, cart_id)
+    return await pos_cart_service.clear_cart(
+        request,
+        cart_id,
+        channel=channel,
+        actor_member_id=actor_member_id,
+    )
 
 
 class CompleteOrderRequest(BaseModel):
@@ -309,6 +332,10 @@ async def void_cart_payment(
     payment_id: str,
     body: VoidPaymentRequest,
     request: Request,
+    channel: Literal["mostrador", "barra"] = Query(
+        "mostrador",
+        description="POS channel for bitácora (warocol.com#785)",
+    ),
 ):
     """
     Issue warocol.com#649 — soft-delete a partial payment on a cart's order.
@@ -320,6 +347,7 @@ async def void_cart_payment(
         cart_id=cart_id,
         payment_id=payment_id,
         reason=body.reason,
+        channel=channel,
     )
 
 

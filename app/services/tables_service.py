@@ -5,7 +5,7 @@ Business logic for table management and session lifecycle.
 Issue: https://github.com/uno0uno/warocol.com/issues/298
 """
 import secrets
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 from uuid import UUID
 from datetime import date
 from decimal import Decimal
@@ -29,6 +29,7 @@ from app.services.tip_tax_service import (
 from app.services.orders_service import _compute_tax_breakdown
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas
+from app.services.operation_events_service import DOMAIN_POS, record_operation_event
 import logging
 
 logger = logging.getLogger(__name__)
@@ -1616,21 +1617,184 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
         raise APIError(f"Error fetching session: {e}", status_code=500)
 
 
-async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID) -> dict:
+async def _fetch_tab_operation_context(
+    conn, tenant_id: UUID, table_id: UUID
+) -> Optional[Dict[str, Any]]:
+    """Channel, session, table label, and effective waiter for bitácora events (#783)."""
+    row = await conn.fetchrow(
+        """
+        SELECT
+            t.name AS table_name,
+            t.is_bar,
+            ts.id AS table_session_id,
+            COALESCE(ts.attended_by_member_id, t.assigned_member_id) AS effective_waiter_member_id
+        FROM tables t
+        JOIN table_sessions ts ON ts.table_id = t.id
+        WHERE t.id = $1
+          AND t.tenant_id = $2
+          AND ts.closed_at IS NULL
+        """,
+        table_id,
+        tenant_id,
+    )
+    if not row:
+        return None
+    return {
+        "channel": "barra" if row["is_bar"] else "mesa",
+        "table_name": row["table_name"],
+        "table_session_id": row["table_session_id"],
+        "effective_waiter_member_id": row["effective_waiter_member_id"],
+    }
+
+
+async def _prefetch_product_names(
+    conn, tenant_id: UUID, product_ids: List[Any]
+) -> Dict[str, str]:
+    if not product_ids:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT id, name FROM product
+        WHERE tenant_id = $1 AND id = ANY($2::uuid[])
+        """,
+        tenant_id,
+        list(product_ids),
+    )
+    return {str(r["id"]): r["name"] for r in rows}
+
+
+async def _fetch_order_item_modifiers(conn, order_item_id: UUID) -> List[Dict[str, Any]]:
+    rows = await conn.fetch(
+        """
+        SELECT modifier_id, modifier_name, price_at_purchase, quantity
+        FROM order_item_modifiers
+        WHERE order_item_id = $1
+        """,
+        order_item_id,
+    )
+    return [
+        {
+            "id": str(r["modifier_id"]) if r["modifier_id"] else None,
+            "name": r["modifier_name"],
+            "price": float(r["price_at_purchase"]),
+            "quantity": int(r["quantity"]),
+        }
+        for r in rows
+    ]
+
+
+def _build_tab_item_payload(
+    *,
+    product_id: Any,
+    product_name: Optional[str],
+    quantity: Any,
+    unit_price: Any,
+    subtotal: Any,
+    modifiers: List[Dict[str, Any]],
+    notes: Optional[str],
+    table_id: UUID,
+    table_name: str,
+    order_number: Any,
+) -> Dict[str, Any]:
+    return {
+        "product_id": str(product_id) if product_id else None,
+        "product_name": product_name,
+        "quantity": float(quantity) if quantity is not None else None,
+        "unit_price": float(unit_price),
+        "subtotal": float(subtotal),
+        "modifiers": modifiers,
+        "notes": notes,
+        "table_id": str(table_id),
+        "table_name": table_name,
+        "order_number": int(order_number) if order_number is not None else None,
+    }
+
+
+def _modifiers_from_request_item(item: dict) -> List[Dict[str, Any]]:
+    return [
+        {
+            "id": m.get("id"),
+            "name": m.get("name"),
+            "price": float(m.get("price", 0)),
+        }
+        for m in (item.get("modifiers") or [])
+    ]
+
+
+async def _record_tab_operation_event(
+    conn,
+    tenant_id: UUID,
+    *,
+    user_id: UUID,
+    table_id: UUID,
+    tab_ctx: Dict[str, Any],
+    action: str,
+    order_id: Optional[UUID] = None,
+    order_item_id: Optional[UUID] = None,
+    comanda_item_id: Optional[UUID] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    reason: Optional[str] = None,
+) -> None:
+    await record_operation_event(
+        conn,
+        tenant_id,
+        domain=DOMAIN_POS,
+        channel=tab_ctx["channel"],
+        action=action,
+        actor_user_id=user_id,
+        actor_member_id=tab_ctx.get("effective_waiter_member_id"),
+        table_id=table_id,
+        table_session_id=tab_ctx.get("table_session_id"),
+        order_id=order_id,
+        order_item_id=order_item_id,
+        comanda_item_id=comanda_item_id,
+        payload=payload,
+        reason=reason,
+    )
+
+
+def _tab_item_requires_remove_reason(
+    fulfillment_status: Optional[str],
+    comanda_item_row: Optional[Any],
+) -> bool:
+    """Fired to kitchen: non-new fulfillment or linked comanda line (warocol.com#786)."""
+    status = fulfillment_status or "new"
+    if status not in ("new", "cancelled"):
+        return True
+    return comanda_item_row is not None
+
+
+async def remove_tab_item(
+    request: Request,
+    table_id: UUID,
+    order_item_id: UUID,
+    reason: Optional[str] = None,
+) -> dict:
     """Remove an order item from the running tab and update the order total."""
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection(use_transaction=True) as conn:
             row = await conn.fetchrow(
                 """
-                SELECT oi.id, oi.subtotal, o.id AS order_id, o.total_amount
+                SELECT
+                    oi.id, oi.product_id, oi.quantity, oi.price_at_purchase,
+                    oi.subtotal, oi.notes, oi.fulfillment_status,
+                    o.id AS order_id, o.total_amount, o.order_number, o.table_session_id,
+                    p.name AS product_name,
+                    t.name AS table_name,
+                    t.is_bar,
+                    COALESCE(ts.attended_by_member_id, t.assigned_member_id)
+                        AS effective_waiter_member_id
                 FROM order_items oi
                 JOIN orders o ON o.id = oi.order_id
                 JOIN table_sessions ts ON ts.id = o.table_session_id
+                JOIN tables t ON t.id = ts.table_id
+                JOIN product p ON p.id = oi.product_id
                 WHERE oi.id = $1
                   AND ts.table_id = $2
                   AND ts.tenant_id = $3
@@ -1641,12 +1805,29 @@ async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID)
             if not row:
                 raise NotFoundError("Order item not found or session already closed")
 
+            tab_ctx = {
+                "channel": "barra" if row["is_bar"] else "mesa",
+                "table_name": row["table_name"],
+                "table_session_id": row["table_session_id"],
+                "effective_waiter_member_id": row["effective_waiter_member_id"],
+            }
+            modifiers = await _fetch_order_item_modifiers(conn, order_item_id)
+
             # Cancel linked comanda_item BEFORE deleting order_item (FK: no cascade).
             # If comandas are disabled no row will be found — no-op, continues as before.
             comanda_item_row = await conn.fetchrow(
                 "SELECT id, comanda_id FROM comanda_items WHERE order_item_id = $1",
                 order_item_id,
             )
+
+            normalized_reason = (reason or "").strip()
+            if _tab_item_requires_remove_reason(row["fulfillment_status"], comanda_item_row):
+                if not normalized_reason:
+                    raise APIError(
+                        "Motivo requerido para eliminar un producto enviado a cocina",
+                        status_code=400,
+                    )
+            event_reason = normalized_reason or None
             if comanda_item_row:
                 await conn.execute(
                     """
@@ -1691,6 +1872,34 @@ async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID)
                     comanda_item_row["id"],
                 )
 
+            comanda_item_id = (
+                comanda_item_row["id"] if comanda_item_row else None
+            )
+            await _record_tab_operation_event(
+                conn,
+                tenant_id,
+                user_id=user_id,
+                table_id=table_id,
+                tab_ctx=tab_ctx,
+                action="tab_item_removed",
+                order_id=row["order_id"],
+                order_item_id=order_item_id,
+                comanda_item_id=comanda_item_id,
+                reason=event_reason,
+                payload=_build_tab_item_payload(
+                    product_id=row["product_id"],
+                    product_name=row["product_name"],
+                    quantity=row["quantity"],
+                    unit_price=row["price_at_purchase"],
+                    subtotal=row["subtotal"],
+                    modifiers=modifiers,
+                    notes=row["notes"],
+                    table_id=table_id,
+                    table_name=row["table_name"],
+                    order_number=row["order_number"],
+                ),
+            )
+
             await conn.execute("DELETE FROM order_items WHERE id = $1", order_item_id)
             new_total = max(0.0, float(row["total_amount"]) - float(row["subtotal"]))
             await conn.execute(
@@ -1699,7 +1908,7 @@ async def remove_tab_item(request: Request, table_id: UUID, order_item_id: UUID)
             )
 
         return {"success": True, "data": {"removed": str(order_item_id)}}
-    except (AuthenticationError, NotFoundError):
+    except (AuthenticationError, NotFoundError, APIError):
         raise
     except Exception as e:
         logger.error(f"Error removing tab item {order_item_id}: {e}")
@@ -1715,16 +1924,28 @@ async def update_tab_item_quantity(
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection(use_transaction=True) as conn:
             row = await conn.fetchrow(
                 """
-                SELECT oi.id, oi.price_at_purchase, oi.subtotal, o.id AS order_id, o.total_amount
+                SELECT
+                    oi.id, oi.product_id, oi.quantity, oi.price_at_purchase,
+                    oi.subtotal, oi.notes,
+                    o.id AS order_id, o.total_amount, o.order_number,
+                    p.name AS product_name,
+                    t.name AS table_name,
+                    t.is_bar,
+                    ts.id AS table_session_id,
+                    COALESCE(ts.attended_by_member_id, t.assigned_member_id)
+                        AS effective_waiter_member_id
                 FROM order_items oi
                 JOIN orders o ON o.id = oi.order_id
                 JOIN table_sessions ts ON ts.id = o.table_session_id
+                JOIN tables t ON t.id = ts.table_id
+                JOIN product p ON p.id = oi.product_id
                 WHERE oi.id = $1
                   AND ts.table_id = $2
                   AND ts.tenant_id = $3
@@ -1734,6 +1955,15 @@ async def update_tab_item_quantity(
             )
             if not row:
                 raise NotFoundError("Order item not found or session already closed")
+
+            old_quantity = float(row["quantity"])
+            tab_ctx = {
+                "channel": "barra" if row["is_bar"] else "mesa",
+                "table_name": row["table_name"],
+                "table_session_id": row["table_session_id"],
+                "effective_waiter_member_id": row["effective_waiter_member_id"],
+            }
+            modifiers = await _fetch_order_item_modifiers(conn, order_item_id)
 
             modifier_sum = await conn.fetchval(
                 "SELECT COALESCE(SUM(price_at_purchase), 0) FROM order_item_modifiers WHERE order_item_id = $1",
@@ -1750,6 +1980,33 @@ async def update_tab_item_quantity(
             await conn.execute(
                 "UPDATE orders SET total_amount = $1 WHERE id = $2",
                 new_total, row["order_id"],
+            )
+
+            payload = _build_tab_item_payload(
+                product_id=row["product_id"],
+                product_name=row["product_name"],
+                quantity=quantity,
+                unit_price=row["price_at_purchase"],
+                subtotal=new_subtotal,
+                modifiers=modifiers,
+                notes=row["notes"],
+                table_id=table_id,
+                table_name=row["table_name"],
+                order_number=row["order_number"],
+            )
+            payload["old_quantity"] = old_quantity
+            payload["new_quantity"] = float(quantity)
+
+            await _record_tab_operation_event(
+                conn,
+                tenant_id,
+                user_id=user_id,
+                table_id=table_id,
+                tab_ctx=tab_ctx,
+                action="tab_item_qty_changed",
+                order_id=row["order_id"],
+                order_item_id=order_item_id,
+                payload=payload,
             )
 
         return {"success": True, "data": {"order_item_id": str(order_item_id), "quantity": quantity, "subtotal": new_subtotal}}
@@ -1773,7 +2030,12 @@ async def _add_tab_items_core(
     """
     session_row = await conn.fetchrow(
         """
-        SELECT ts.id AS session_id
+        SELECT
+            ts.id AS session_id,
+            t.name AS table_name,
+            t.is_bar,
+            COALESCE(ts.attended_by_member_id, t.assigned_member_id)
+                AS effective_waiter_member_id
         FROM table_sessions ts
         JOIN tables t ON t.id = ts.table_id
         WHERE ts.table_id = $1
@@ -1788,6 +2050,14 @@ async def _add_tab_items_core(
         raise NotFoundError("No open session found for this table")
 
     session_id = session_row["session_id"]
+    tab_ctx = {
+        "channel": "barra" if session_row["is_bar"] else "mesa",
+        "table_name": session_row["table_name"],
+        "table_session_id": session_id,
+        "effective_waiter_member_id": session_row["effective_waiter_member_id"],
+    }
+    product_ids = list({item["product_id"] for item in items})
+    product_names = await _prefetch_product_names(conn, tenant_id, product_ids)
 
     for item in items:
         mod_sum = sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
@@ -1889,6 +2159,29 @@ async def _add_tab_items_core(
                 mod.get("price", 0),
                 1,
             )
+
+        await _record_tab_operation_event(
+            conn,
+            tenant_id,
+            user_id=user_id,
+            table_id=table_id,
+            tab_ctx=tab_ctx,
+            action="tab_item_added",
+            order_id=order_id,
+            order_item_id=order_item_id,
+            payload=_build_tab_item_payload(
+                product_id=item["product_id"],
+                product_name=product_names.get(str(item["product_id"])),
+                quantity=item["quantity"],
+                unit_price=item["unit_price"],
+                subtotal=subtotal,
+                modifiers=_modifiers_from_request_item(item),
+                notes=item_notes,
+                table_id=table_id,
+                table_name=tab_ctx["table_name"],
+                order_number=order_number,
+            ),
+        )
 
         try:
             await _capture_order_item_ingredients(
@@ -2529,6 +2822,7 @@ async def clear_tab(request: Request, table_id: UUID) -> dict:
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
@@ -2541,6 +2835,54 @@ async def clear_tab(request: Request, table_id: UUID) -> dict:
                 )
                 if not session_row:
                     raise NotFoundError("No open session found for this table")
+
+                tab_ctx = await _fetch_tab_operation_context(conn, tenant_id, table_id)
+                if tab_ctx:
+                    pending_lines = await conn.fetch(
+                        """
+                        SELECT
+                            oi.id AS order_item_id,
+                            oi.product_id,
+                            oi.quantity,
+                            oi.price_at_purchase,
+                            oi.subtotal,
+                            oi.notes,
+                            o.id AS order_id,
+                            o.order_number,
+                            p.name AS product_name
+                        FROM order_items oi
+                        JOIN orders o ON o.id = oi.order_id
+                        JOIN product p ON p.id = oi.product_id
+                        WHERE o.table_session_id = $1 AND o.status = 'pending'
+                        """,
+                        session_row["id"],
+                    )
+                    for line in pending_lines:
+                        line_modifiers = await _fetch_order_item_modifiers(
+                            conn, line["order_item_id"]
+                        )
+                        await _record_tab_operation_event(
+                            conn,
+                            tenant_id,
+                            user_id=user_id,
+                            table_id=table_id,
+                            tab_ctx=tab_ctx,
+                            action="tab_cleared",
+                            order_id=line["order_id"],
+                            order_item_id=line["order_item_id"],
+                            payload=_build_tab_item_payload(
+                                product_id=line["product_id"],
+                                product_name=line["product_name"],
+                                quantity=line["quantity"],
+                                unit_price=line["price_at_purchase"],
+                                subtotal=line["subtotal"],
+                                modifiers=line_modifiers,
+                                notes=line["notes"],
+                                table_id=table_id,
+                                table_name=tab_ctx["table_name"],
+                                order_number=line["order_number"],
+                            ),
+                        )
 
                 # Cancel comanda_items that point at the order_items we're
                 # about to delete. Two reasons:
@@ -2758,6 +3100,12 @@ async def void_table_payment(
                         status_code=403,
                     )
 
+                table_meta = await conn.fetchrow(
+                    "SELECT is_bar FROM tables WHERE id = $1 AND tenant_id = $2",
+                    table_id, tenant_id,
+                )
+                mesa_channel = "barra" if table_meta and table_meta["is_bar"] else "mesa"
+
                 # 4. Find sibling rows (proportional split): same session,
                 # same method, same paid_at, not voided. Lock them all.
                 sibling_rows = await conn.fetch(
@@ -2782,8 +3130,9 @@ async def void_table_payment(
 
                 # 5. Soft-delete all siblings atomically.
                 await conn.execute(
-                    "UPDATE order_payments SET voided_at = NOW() WHERE id = ANY($1::uuid[])",
+                    "UPDATE order_payments SET voided_at = NOW(), void_reason = $2 WHERE id = ANY($1::uuid[])",
                     [r["id"] for r in sibling_rows],
+                    normalized_reason,
                 )
 
                 # 6. Recompute session-wide paid_total / remaining.
@@ -2838,6 +3187,32 @@ async def void_table_payment(
                         await void_order_journal_entry_in_txn(
                             conn, tenant_id, affected_order_id, user_id, normalized_reason,
                         )
+
+                void_amount = sum(float(r["amount"]) for r in sibling_rows)
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_POS,
+                    channel=mesa_channel,
+                    action="payment_voided",
+                    actor_user_id=user_id,
+                    table_id=table_id,
+                    table_session_id=session_row["id"],
+                    order_id=target["order_id"],
+                    reason=normalized_reason,
+                    payload={
+                        "voided_ids": voided_ids,
+                        "order_ids": [str(oid) for oid in affected_order_ids],
+                        "payment_method": target["payment_method"],
+                        "amount": void_amount,
+                        "cash_received": (
+                            float(target["cash_received"])
+                            if target["cash_received"] is not None
+                            else None
+                        ),
+                        "reopened": reopened,
+                    },
+                )
 
         logger.info(
             f"Mesa payments voided: session={session_row['id']} group_size={len(voided_ids)} paid_total={paid_total} reopened={reopened}"

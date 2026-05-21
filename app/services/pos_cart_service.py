@@ -24,6 +24,7 @@ from app.services.tip_tax_service import (
 from app.services.accounting_service import void_order_journal_entry_in_txn
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas, finalize_open_comandas
+from app.services.operation_events_service import DOMAIN_POS, record_operation_event
 import logging
 
 logger = logging.getLogger(__name__)
@@ -534,10 +535,93 @@ async def update_cart_item(
         raise APIError(f"Error updating cart item: {str(e)}", status_code=500)
 
 
+def _normalize_cart_channel(channel: Optional[str]) -> str:
+    """POS cart channel for bitácora (#784)."""
+    normalized = (channel or "mostrador").strip().lower()
+    if normalized not in ("mostrador", "barra"):
+        return "mostrador"
+    return normalized
+
+
+async def _fetch_cart_item_modifiers(conn, cart_item_id: UUID) -> List[Dict[str, Any]]:
+    rows = await conn.fetch(
+        """
+        SELECT modifier_id, modifier_name, price
+        FROM pos_cart_item_modifiers
+        WHERE cart_item_id = $1
+        """,
+        cart_item_id,
+    )
+    return [
+        {
+            "id": str(r["modifier_id"]) if r["modifier_id"] else None,
+            "name": r["modifier_name"],
+            "price": float(r["price"]),
+        }
+        for r in rows
+    ]
+
+
+def _build_cart_line_payload(
+    *,
+    product_id: Any,
+    product_name: Optional[str],
+    quantity: Any,
+    unit_price: Any,
+    subtotal: Any,
+    modifiers: List[Dict[str, Any]],
+    notes: Optional[str],
+    table_id: Optional[UUID] = None,
+    table_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "product_id": str(product_id) if product_id else None,
+        "product_name": product_name,
+        "quantity": float(quantity) if quantity is not None else None,
+        "unit_price": float(unit_price),
+        "subtotal": float(subtotal),
+        "modifiers": modifiers,
+        "notes": notes,
+        "table_id": str(table_id) if table_id else None,
+        "table_name": table_name,
+        "order_number": None,
+    }
+
+
+async def _record_cart_operation_event(
+    conn,
+    tenant_id: UUID,
+    *,
+    user_id: UUID,
+    channel: str,
+    action: str,
+    pos_cart_id: UUID,
+    pos_cart_item_id: Optional[UUID] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    actor_member_id: Optional[UUID] = None,
+) -> None:
+    merged_payload = dict(payload) if payload else {}
+    if pos_cart_item_id:
+        merged_payload["pos_cart_item_id"] = str(pos_cart_item_id)
+    await record_operation_event(
+        conn,
+        tenant_id,
+        domain=DOMAIN_POS,
+        channel=_normalize_cart_channel(channel),
+        action=action,
+        actor_user_id=user_id,
+        actor_member_id=actor_member_id,
+        pos_cart_id=pos_cart_id,
+        payload=merged_payload,
+    )
+
+
 async def remove_item_from_cart(
     request: Request,
     cart_id: UUID,
-    item_id: UUID
+    item_id: UUID,
+    channel: str = "mostrador",
+    actor_member_id: Optional[UUID] = None,
 ) -> dict:
     """
     Remove an item from cart
@@ -545,20 +629,61 @@ async def remove_item_from_cart(
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
             async with conn.transaction():
-                # Delete item (modifiers will cascade)
-                delete_query = """
+                row = await conn.fetchrow(
+                    """
+                    SELECT
+                        pci.id, pci.product_id, pci.quantity, pci.unit_price,
+                        pci.subtotal, pci.notes,
+                        p.name AS product_name
+                    FROM pos_cart_items pci
+                    JOIN pos_carts pc ON pc.id = pci.cart_id
+                    JOIN product p ON p.id = pci.product_id
+                    WHERE pci.id = $1 AND pci.cart_id = $2 AND pc.tenant_id = $3
+                    """,
+                    item_id,
+                    cart_id,
+                    tenant_id,
+                )
+                if not row:
+                    raise APIError("Cart item not found", status_code=404)
+
+                modifiers = await _fetch_cart_item_modifiers(conn, item_id)
+                await _record_cart_operation_event(
+                    conn,
+                    tenant_id,
+                    user_id=user_id,
+                    channel=channel,
+                    action="cart_line_removed",
+                    pos_cart_id=cart_id,
+                    pos_cart_item_id=item_id,
+                    actor_member_id=actor_member_id,
+                    payload=_build_cart_line_payload(
+                        product_id=row["product_id"],
+                        product_name=row["product_name"],
+                        quantity=row["quantity"],
+                        unit_price=row["unit_price"],
+                        subtotal=row["subtotal"],
+                        modifiers=modifiers,
+                        notes=row["notes"],
+                    ),
+                )
+
+                await conn.execute(
+                    """
                     DELETE FROM pos_cart_items
                     WHERE id = $1 AND cart_id = $2
-                """
-                await conn.execute(delete_query, item_id, cart_id)
+                    """,
+                    item_id,
+                    cart_id,
+                )
 
-                # Update cart total
                 await update_cart_total(conn, cart_id)
 
                 logger.info(f"Removed item {item_id} from cart {cart_id}")
@@ -577,7 +702,9 @@ async def remove_item_from_cart(
 
 async def clear_cart(
     request: Request,
-    cart_id: UUID
+    cart_id: UUID,
+    channel: str = "mostrador",
+    actor_member_id: Optional[UUID] = None,
 ) -> dict:
     """
     Clear all items from cart
@@ -585,18 +712,71 @@ async def clear_cart(
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
             async with conn.transaction():
-                # Delete all items (modifiers will cascade)
-                delete_query = """
+                cart_row = await conn.fetchrow(
+                    """
+                    SELECT id FROM pos_carts
+                    WHERE id = $1 AND tenant_id = $2
+                    """,
+                    cart_id,
+                    tenant_id,
+                )
+                if not cart_row:
+                    raise APIError("Cart not found", status_code=404)
+
+                lines = await conn.fetch(
+                    """
+                    SELECT
+                        pci.id AS cart_item_id,
+                        pci.product_id,
+                        pci.quantity,
+                        pci.unit_price,
+                        pci.subtotal,
+                        pci.notes,
+                        p.name AS product_name
+                    FROM pos_cart_items pci
+                    JOIN product p ON p.id = pci.product_id
+                    WHERE pci.cart_id = $1
+                    """,
+                    cart_id,
+                )
+                for line in lines:
+                    line_modifiers = await _fetch_cart_item_modifiers(
+                        conn, line["cart_item_id"]
+                    )
+                    await _record_cart_operation_event(
+                        conn,
+                        tenant_id,
+                        user_id=user_id,
+                        channel=channel,
+                        action="cart_cleared",
+                        pos_cart_id=cart_id,
+                        pos_cart_item_id=line["cart_item_id"],
+                        actor_member_id=actor_member_id,
+                        payload=_build_cart_line_payload(
+                            product_id=line["product_id"],
+                            product_name=line["product_name"],
+                            quantity=line["quantity"],
+                            unit_price=line["unit_price"],
+                            subtotal=line["subtotal"],
+                            modifiers=line_modifiers,
+                            notes=line["notes"],
+                        ),
+                    )
+
+                await conn.execute(
+                    """
                     DELETE FROM pos_cart_items
                     WHERE cart_id = $1
-                """
-                await conn.execute(delete_query, cart_id)
+                    """,
+                    cart_id,
+                )
 
                 # Update cart total to 0
                 update_query = """
@@ -893,6 +1073,7 @@ async def void_order_payment(
     cart_id: str,
     payment_id: str,
     reason: Optional[str] = None,
+    channel: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Issue warocol.com#649 — soft-delete a partial payment on a POS cart's order.
@@ -963,8 +1144,9 @@ async def void_order_payment(
 
                 # 4. Mark payment as voided (soft delete).
                 await conn.execute(
-                    "UPDATE order_payments SET voided_at = NOW() WHERE id = $1",
+                    "UPDATE order_payments SET voided_at = NOW(), void_reason = $2 WHERE id = $1",
                     payment_row["id"],
+                    normalized_reason,
                 )
 
                 # 5. Recompute paid total ignoring voided rows.
@@ -997,6 +1179,30 @@ async def void_order_payment(
                     await void_order_journal_entry_in_txn(
                         conn, tenant_id, order_id, user_id, normalized_reason,
                     )
+
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_POS,
+                    channel=_normalize_cart_channel(channel),
+                    action="payment_voided",
+                    actor_user_id=user_id,
+                    pos_cart_id=payment_row["pos_cart_id"],
+                    order_id=order_id,
+                    reason=normalized_reason,
+                    payload={
+                        "voided_ids": [str(payment_id)],
+                        "order_ids": [str(order_id)],
+                        "payment_method": payment_row["payment_method"],
+                        "amount": float(payment_row["amount"]),
+                        "cash_received": (
+                            float(payment_row["cash_received"])
+                            if payment_row["cash_received"] is not None
+                            else None
+                        ),
+                        "reopened": reopened,
+                    },
+                )
 
         logger.info(
             f"Payment {payment_id} voided (order={order_id}, paid_total={paid_total}, reopened={reopened})"

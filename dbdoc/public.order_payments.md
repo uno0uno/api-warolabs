@@ -15,6 +15,7 @@
 | notes | text |  | true |  |  |  |
 | cash_received | numeric(12,2) |  | true |  |  | Cash handed over by the customer for this split payment line. Always NULL for non-cash methods. Change due is derived: cash_received - amount. |
 | voided_at | timestamp with time zone |  | true |  |  | Soft-delete marker (warocol.com#649). NULL means active. When set, the row is excluded from paid_total computations and the parent order is reopened if this row had closed it. |
+| void_reason | text |  | true |  |  | Motivo de anulación (#649/#785). NULL mientras el pago está activo. |
 
 ## Constraints
 
