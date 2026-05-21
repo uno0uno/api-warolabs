@@ -1073,6 +1073,7 @@ async def void_order_payment(
     cart_id: str,
     payment_id: str,
     reason: Optional[str] = None,
+    channel: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Issue warocol.com#649 — soft-delete a partial payment on a POS cart's order.
@@ -1143,8 +1144,9 @@ async def void_order_payment(
 
                 # 4. Mark payment as voided (soft delete).
                 await conn.execute(
-                    "UPDATE order_payments SET voided_at = NOW() WHERE id = $1",
+                    "UPDATE order_payments SET voided_at = NOW(), void_reason = $2 WHERE id = $1",
                     payment_row["id"],
+                    normalized_reason,
                 )
 
                 # 5. Recompute paid total ignoring voided rows.
@@ -1177,6 +1179,30 @@ async def void_order_payment(
                     await void_order_journal_entry_in_txn(
                         conn, tenant_id, order_id, user_id, normalized_reason,
                     )
+
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_POS,
+                    channel=_normalize_cart_channel(channel),
+                    action="payment_voided",
+                    actor_user_id=user_id,
+                    pos_cart_id=payment_row["pos_cart_id"],
+                    order_id=order_id,
+                    reason=normalized_reason,
+                    payload={
+                        "voided_ids": [str(payment_id)],
+                        "order_ids": [str(order_id)],
+                        "payment_method": payment_row["payment_method"],
+                        "amount": float(payment_row["amount"]),
+                        "cash_received": (
+                            float(payment_row["cash_received"])
+                            if payment_row["cash_received"] is not None
+                            else None
+                        ),
+                        "reopened": reopened,
+                    },
+                )
 
         logger.info(
             f"Payment {payment_id} voided (order={order_id}, paid_total={paid_total}, reopened={reopened})"

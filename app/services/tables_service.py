@@ -3072,6 +3072,12 @@ async def void_table_payment(
                         status_code=403,
                     )
 
+                table_meta = await conn.fetchrow(
+                    "SELECT is_bar FROM tables WHERE id = $1 AND tenant_id = $2",
+                    table_id, tenant_id,
+                )
+                mesa_channel = "barra" if table_meta and table_meta["is_bar"] else "mesa"
+
                 # 4. Find sibling rows (proportional split): same session,
                 # same method, same paid_at, not voided. Lock them all.
                 sibling_rows = await conn.fetch(
@@ -3096,8 +3102,9 @@ async def void_table_payment(
 
                 # 5. Soft-delete all siblings atomically.
                 await conn.execute(
-                    "UPDATE order_payments SET voided_at = NOW() WHERE id = ANY($1::uuid[])",
+                    "UPDATE order_payments SET voided_at = NOW(), void_reason = $2 WHERE id = ANY($1::uuid[])",
                     [r["id"] for r in sibling_rows],
+                    normalized_reason,
                 )
 
                 # 6. Recompute session-wide paid_total / remaining.
@@ -3152,6 +3159,32 @@ async def void_table_payment(
                         await void_order_journal_entry_in_txn(
                             conn, tenant_id, affected_order_id, user_id, normalized_reason,
                         )
+
+                void_amount = sum(float(r["amount"]) for r in sibling_rows)
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_POS,
+                    channel=mesa_channel,
+                    action="payment_voided",
+                    actor_user_id=user_id,
+                    table_id=table_id,
+                    table_session_id=session_row["id"],
+                    order_id=target["order_id"],
+                    reason=normalized_reason,
+                    payload={
+                        "voided_ids": voided_ids,
+                        "order_ids": [str(oid) for oid in affected_order_ids],
+                        "payment_method": target["payment_method"],
+                        "amount": void_amount,
+                        "cash_received": (
+                            float(target["cash_received"])
+                            if target["cash_received"] is not None
+                            else None
+                        ),
+                        "reopened": reopened,
+                    },
+                )
 
         logger.info(
             f"Mesa payments voided: session={session_row['id']} group_size={len(voided_ids)} paid_total={paid_total} reopened={reopened}"

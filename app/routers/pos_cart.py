@@ -332,6 +332,10 @@ async def void_cart_payment(
     payment_id: str,
     body: VoidPaymentRequest,
     request: Request,
+    channel: Literal["mostrador", "barra"] = Query(
+        "mostrador",
+        description="POS channel for bitácora (warocol.com#785)",
+    ),
 ):
     """
     Issue warocol.com#649 — soft-delete a partial payment on a cart's order.
@@ -343,6 +347,7 @@ async def void_cart_payment(
         cart_id=cart_id,
         payment_id=payment_id,
         reason=body.reason,
+        channel=channel,
     )
 
 
