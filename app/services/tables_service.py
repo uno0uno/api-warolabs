@@ -1109,15 +1109,17 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 conn=conn
                             )
 
-                        # Auto-deliver: mark all non-terminal comandas as delivered when session closes
-                        session_order_ids = [_o["id"] for _o in session_orders]
-                        await conn.execute("""
-                            UPDATE comandas
-                            SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
-                            WHERE order_id = ANY($1::uuid[])
-                              AND tenant_id = $2
-                              AND status IN ('pending', 'preparing', 'ready')
-                        """, session_order_ids, tenant_id)
+                        # Mesa: auto-deliver open comandas on payment. Barra: kitchen closes
+                        # them manually (warocol.com#799).
+                        if not is_bar_table:
+                            session_order_ids = [_o["id"] for _o in session_orders]
+                            await conn.execute("""
+                                UPDATE comandas
+                                SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
+                                WHERE order_id = ANY($1::uuid[])
+                                  AND tenant_id = $2
+                                  AND status IN ('pending', 'preparing', 'ready')
+                            """, session_order_ids, tenant_id)
                 except Exception as _fe:
                     logger.error(f"Auto-fire failed during close_session for table {table_id}: {_fe}")
 
@@ -2906,6 +2908,22 @@ async def clear_tab(request: Request, table_id: UUID) -> dict:
                     )
                     """,
                     session_row["id"],
+                )
+
+                # Cancel parent comandas so KDS does not show orphaned tickets (#139, #799)
+                await conn.execute(
+                    """
+                    UPDATE comandas
+                    SET status = 'cancelled', updated_at = NOW()
+                    WHERE order_id IN (
+                        SELECT id FROM orders
+                        WHERE table_session_id = $1 AND status = 'pending'
+                    )
+                      AND tenant_id = $2
+                      AND status IN ('pending', 'preparing', 'ready')
+                    """,
+                    session_row["id"],
+                    tenant_id,
                 )
 
                 # Delete order_items first (FK: order_items.order_id → orders.id, no cascade)

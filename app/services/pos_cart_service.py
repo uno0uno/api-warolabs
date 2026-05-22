@@ -1027,12 +1027,23 @@ async def add_order_payment(
                         order_id, payment_method,
                         payment_method_id,
                     )
-                    # Cascade: finalize any non-terminal comandas of this order
-                    # so the kitchen despacho doesn't keep showing them.
-                    try:
-                        await finalize_open_comandas(conn, order_id, tenant_id)
-                    except Exception as _ce:
-                        logger.warning(f"Could not finalize comandas for order {order_id}: {_ce}")
+                    # Mostrador: auto-deliver; barra: keep comandas open (#799).
+                    _bar_order = await conn.fetchval(
+                        """
+                        SELECT t.is_bar
+                          FROM orders o
+                          JOIN table_sessions ts ON ts.id = o.table_session_id
+                          JOIN tables t ON t.id = ts.table_id
+                         WHERE o.id = $1 AND o.tenant_id = $2
+                        """,
+                        order_id,
+                        tenant_id,
+                    )
+                    if not _bar_order:
+                        try:
+                            await finalize_open_comandas(conn, order_id, tenant_id)
+                        except Exception as _ce:
+                            logger.warning(f"Could not finalize comandas for order {order_id}: {_ce}")
                 else:
                     await conn.execute(
                         "UPDATE orders SET payment_status = 'partial' WHERE id = $1",
@@ -1311,6 +1322,9 @@ async def complete_pos_order(
             if not tip_enabled:
                 raise APIError("Tipping is not enabled for this tenant", status_code=400)
 
+        _is_bar_sale = False
+        _bar_display_name: Optional[str] = None
+
         async with get_db_connection() as conn:
             async with conn.transaction():
                 # 0. Backend guard: credit requires an identified (non-anonymous) customer
@@ -1493,6 +1507,12 @@ async def complete_pos_order(
                         table_session_id, tenant_id,
                     )
                     if bar_check and bar_check['is_bar']:
+                        _is_bar_sale = True
+                        _bar_display_name = await conn.fetchval(
+                            "SELECT name FROM tables WHERE id = $1 AND tenant_id = $2",
+                            bar_check['table_id'],
+                            tenant_id,
+                        ) or 'Barra'
                         await conn.execute(
                             "UPDATE table_sessions SET closed_at = now() WHERE id = $1",
                             table_session_id,
@@ -1798,11 +1818,17 @@ async def complete_pos_order(
                     )
                     if _prof and _prof["comandas_enabled"]:
                         _is_delivery = delivery_address_id is not None
+                        if _is_delivery:
+                            _fire_source, _fire_label = 'delivery', f'Domicilio #{order_number}'
+                        elif _is_bar_sale:
+                            _fire_source, _fire_label = 'table', _bar_display_name or 'Barra'
+                        else:
+                            _fire_source, _fire_label = 'pos', 'Mostrador'
                         await fire_comandas(
                             order_id=order_id,
                             tenant_id=tenant_id,
-                            source_type='delivery' if _is_delivery else 'pos',
-                            table_display_name=f'Domicilio #{order_number}' if _is_delivery else 'Mostrador',
+                            source_type=_fire_source,
+                            table_display_name=_fire_label,
                             conn=conn
                         )
                 except Exception as _fe:
@@ -1856,12 +1882,13 @@ async def complete_pos_order(
                             "UPDATE orders SET payment_status = 'paid' WHERE id = $1",
                             order_id
                         )
-                    # Cascade: finalize any non-terminal comandas of this order so the
-                    # kitchen despacho doesn't keep showing them after checkout.
-                    try:
-                        await finalize_open_comandas(conn, order_id, tenant_id)
-                    except Exception as _ce:
-                        logger.warning(f"Could not finalize comandas for order {order_id}: {_ce}")
+                    # Mostrador/delivery: auto-deliver after checkout. Barra: kitchen
+                    # closes comandas manually (warocol.com#799).
+                    if not _is_bar_sale:
+                        try:
+                            await finalize_open_comandas(conn, order_id, tenant_id)
+                        except Exception as _ce:
+                            logger.warning(f"Could not finalize comandas for order {order_id}: {_ce}")
 
                 logger.info(f"Order #{order_number} created (split_mode={split_mode})")
 
