@@ -8,6 +8,9 @@ from app.core.exceptions import APIError, NotFoundError, ValidationError
 
 logger = logging.getLogger(__name__)
 
+OPEN_SALE_DEFAULT_NAME = "Venta libre"
+OPEN_SALE_CATALOG_PRICE = Decimal("1")
+
 _PRICE_TOLERANCE = Decimal("0.01")
 
 
@@ -165,3 +168,80 @@ async def fetch_open_sale_product(
             len(rows),
         )
     return None
+
+
+async def ensure_open_sale_product(conn, tenant_id: UUID) -> Dict[str, str]:
+    """Create or reactivate the tenant shell product for venta libre (#805)."""
+    existing = await conn.fetchrow(
+        """
+        SELECT id, name
+        FROM product
+        WHERE tenant_id = $1 AND open_priced = true
+        LIMIT 1
+        """,
+        tenant_id,
+    )
+    if existing:
+        await conn.execute(
+            """
+            UPDATE product
+            SET is_available = true,
+                allow_modifiers = false,
+                open_priced = true,
+                updated_at = now()
+            WHERE id = $1 AND tenant_id = $2
+            """,
+            existing["id"],
+            tenant_id,
+        )
+        return {"id": str(existing["id"]), "name": existing["name"]}
+
+    category = await conn.fetchrow(
+        """
+        SELECT id FROM categories
+        WHERE tenant_id = $1
+        ORDER BY created_at ASC
+        LIMIT 1
+        """,
+        tenant_id,
+    )
+    if not category:
+        raise APIError(
+            "Crea al menos una categoría en el menú antes de activar venta libre en el POS.",
+            status_code=409,
+        )
+
+    row = await conn.fetchrow(
+        """
+        INSERT INTO product (
+            name, description, price, category_id, product_base_type_id, preparation_time,
+            controla_stock, is_available, is_available_online, is_available_table_qr,
+            is_combo, is_resale, open_priced, allow_modifiers,
+            tax_category, tenant_id, station_id, kitchen_name, image_url, costo_percibido
+        )
+        VALUES (
+            $1, NULL, $2, $3, NULL, NULL,
+            true, true, false, false,
+            false, false, true, false,
+            'standard', $4, NULL, NULL, NULL, NULL
+        )
+        RETURNING id, name
+        """,
+        OPEN_SALE_DEFAULT_NAME,
+        OPEN_SALE_CATALOG_PRICE,
+        category["id"],
+        tenant_id,
+    )
+    return {"id": str(row["id"]), "name": row["name"]}
+
+
+async def deactivate_open_sale_product(conn, tenant_id: UUID) -> None:
+    """Hide the shell product from POS without dropping open_priced (#805)."""
+    await conn.execute(
+        """
+        UPDATE product
+        SET is_available = false, updated_at = now()
+        WHERE tenant_id = $1 AND open_priced = true
+        """,
+        tenant_id,
+    )
