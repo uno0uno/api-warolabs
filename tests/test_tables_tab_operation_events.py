@@ -255,6 +255,63 @@ async def test_add_then_remove_shares_table_session_id():
 
 
 @pytest.mark.asyncio
+async def test_remove_unfired_tab_item_without_reason_succeeds():
+    """warocol.com#814 — venta libre / new lines delete without motivo in body."""
+    tenant_id = uuid4()
+    user_id = uuid4()
+    table_id = uuid4()
+    order_item_id = uuid4()
+    order_id = uuid4()
+    session_id = uuid4()
+
+    row = {
+        "id": order_item_id,
+        "product_id": uuid4(),
+        "quantity": 1,
+        "price_at_purchase": 5000.0,
+        "subtotal": 5000.0,
+        "notes": "VARIOS: Propina",
+        "fulfillment_status": "new",
+        "order_id": order_id,
+        "total_amount": 5000.0,
+        "order_number": 12,
+        "table_session_id": session_id,
+        "product_name": "Venta libre",
+        "table_name": "Mesa 3",
+        "is_bar": False,
+        "effective_waiter_member_id": None,
+    }
+
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow = AsyncMock(side_effect=[row, None])
+    mock_conn.fetch = AsyncMock(return_value=[])
+    mock_conn.execute = AsyncMock()
+    mock_conn.fetchval = AsyncMock(return_value=0)
+
+    class _Txn:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *args):
+            return None
+
+    mock_conn.transaction = MagicMock(return_value=_Txn())
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("app.services.tables_service.require_valid_session") as mock_sess, \
+         patch("app.services.tables_service.get_db_connection", return_value=mock_cm), \
+         patch("app.services.tables_service._record_tab_operation_event", new_callable=AsyncMock):
+        mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id)
+        result = await tables_service.remove_tab_item(
+            MagicMock(), table_id, order_item_id, reason=None,
+        )
+
+    assert result["success"] is True
+
+
+@pytest.mark.asyncio
 async def test_remove_fired_item_without_reason_raises_400():
     tenant_id = uuid4()
     user_id = uuid4()

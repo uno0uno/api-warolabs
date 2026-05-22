@@ -4,7 +4,7 @@ CRUD and session lifecycle endpoints for restaurant table management.
 
 Issue: https://github.com/uno0uno/warocol.com/issues/298
 """
-from fastapi import APIRouter, Depends, Request, Query
+from fastapi import APIRouter, Body, Depends, Request, Query
 from typing import Optional, List, Literal
 from uuid import UUID
 from datetime import date
@@ -262,7 +262,7 @@ async def remove_tab_item(
     request: Request,
     table_id: UUID,
     order_item_id: UUID,
-    body: RemoveTabItemRequest,
+    body: RemoveTabItemRequest = Body(default_factory=RemoveTabItemRequest),
 ):
     """Remove an order item from the running tab."""
     return await tables_service.remove_tab_item(
