@@ -401,10 +401,8 @@ async def get_comandas_for_kds(
 
             where_clause = " AND ".join(where_conditions)
 
-            # Defense in depth: hide comandas whose order is already finalized
-            # (completed / cancelled). This protects the despacho view even if a
-            # cascade is missed somewhere in the order-completion paths.
-            # See finalize_open_comandas() for the write-side cascade.
+            # Hide cancelled orders; allow non-terminal comandas on paid orders (barra
+            # checkout — warocol.com#799). Terminal comandas are excluded by status filter.
             rows = await conn.fetch(f"""
                 SELECT
                     c.id, c.comanda_number, c.comanda_index, c.status, c.source_type, c.table_display_name,
@@ -417,7 +415,7 @@ async def get_comandas_for_kds(
                 JOIN kitchen_stations ks ON ks.id = c.station_id
                 LEFT JOIN orders o ON o.id = c.order_id
                 WHERE {where_clause}
-                  AND (o.status IS NULL OR o.status NOT IN ('completed', 'cancelled'))
+                  AND (o.status IS NULL OR o.status != 'cancelled')
                 ORDER BY c.fired_at ASC
             """, *params)
 
@@ -555,7 +553,14 @@ async def update_comanda_status(
 
             # Fetch current comanda (verify ownership)
             row = await conn.fetchrow(
-                "SELECT id, status, source_type FROM comandas WHERE id = $1 AND tenant_id = $2",
+                """
+                SELECT c.id, c.status, c.source_type, COALESCE(t.is_bar, false) AS is_bar
+                  FROM comandas c
+                  LEFT JOIN orders o ON o.id = c.order_id
+                  LEFT JOIN table_sessions ts ON ts.id = o.table_session_id
+                  LEFT JOIN tables t ON t.id = ts.table_id
+                 WHERE c.id = $1 AND c.tenant_id = $2
+                """,
                 comanda_id, tenant_id
             )
             if not row:
@@ -570,8 +575,8 @@ async def update_comanda_status(
                     f"Transiciones permitidas desde '{current_status}': {allowed_next}"
                 )
 
-            # POS/counter comandas: skip the 'ready' holding state — auto-deliver immediately
-            if new_status == 'ready' and row['source_type'] == 'pos':
+            # Mostrador POS only: skip 'ready' — barra uses table-like lifecycle (#799)
+            if new_status == 'ready' and row['source_type'] == 'pos' and not row['is_bar']:
                 new_status = 'delivered'
 
             sql_updates = ["status = $1", "updated_at = NOW()"]
@@ -634,7 +639,14 @@ async def bulk_update_comanda_status(
             await _check_comandas_enabled(conn, tenant_id)
 
             rows = await conn.fetch(
-                "SELECT id, status, source_type FROM comandas WHERE id = ANY($1::uuid[]) AND tenant_id = $2",
+                """
+                SELECT c.id, c.status, c.source_type, COALESCE(t.is_bar, false) AS is_bar
+                  FROM comandas c
+                  LEFT JOIN orders o ON o.id = c.order_id
+                  LEFT JOIN table_sessions ts ON ts.id = o.table_session_id
+                  LEFT JOIN tables t ON t.id = ts.table_id
+                 WHERE c.id = ANY($1::uuid[]) AND c.tenant_id = $2
+                """,
                 comanda_ids, tenant_id,
             )
 
@@ -648,9 +660,9 @@ async def bulk_update_comanda_status(
                     skipped += 1
                     continue
 
-                # POS/counter: auto-deliver when marked ready
+                # Mostrador POS only — barra keeps ready until expedited (#799)
                 effective_status = new_status
-                if new_status == 'ready' and row['source_type'] == 'pos':
+                if new_status == 'ready' and row['source_type'] == 'pos' and not row['is_bar']:
                     effective_status = 'delivered'
 
                 sql_updates = ["status = $1", "updated_at = NOW()"]
