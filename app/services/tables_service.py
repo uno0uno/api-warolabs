@@ -1506,6 +1506,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     oi.quantity,
                     oi.price_at_purchase,
                     oi.subtotal,
+                    oi.notes,
                     oi.fulfillment_status,
                     oi.sent_at,
                     p.name AS product_name
@@ -1608,6 +1609,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                         "quantity": r["quantity"],
                         "unitPrice": float(r["price_at_purchase"]),
                         "subtotal": float(r["subtotal"]),
+                        "notes": r["notes"],
                         "fulfillmentStatus": r["fulfillment_status"],
                         "sentAt": r["sent_at"].isoformat() if r["sent_at"] else None,
                     }
