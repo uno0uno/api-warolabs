@@ -30,6 +30,10 @@ from app.services.orders_service import _compute_tax_breakdown
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas
 from app.services.operation_events_service import DOMAIN_POS, record_operation_event
+from app.services.open_priced_service import (
+    fetch_product_pricing_map,
+    validate_items_unit_prices,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -1502,6 +1506,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     oi.quantity,
                     oi.price_at_purchase,
                     oi.subtotal,
+                    oi.notes,
                     oi.fulfillment_status,
                     oi.sent_at,
                     p.name AS product_name
@@ -1604,6 +1609,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                         "quantity": r["quantity"],
                         "unitPrice": float(r["price_at_purchase"]),
                         "subtotal": float(r["subtotal"]),
+                        "notes": r["notes"],
                         "fulfillmentStatus": r["fulfillment_status"],
                         "sentAt": r["sent_at"].isoformat() if r["sent_at"] else None,
                     }
@@ -2060,6 +2066,8 @@ async def _add_tab_items_core(
     }
     product_ids = list({item["product_id"] for item in items})
     product_names = await _prefetch_product_names(conn, tenant_id, product_ids)
+    pricing_map = await fetch_product_pricing_map(conn, tenant_id, product_ids)
+    validate_items_unit_prices(pricing_map, items)
 
     for item in items:
         mod_sum = sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))

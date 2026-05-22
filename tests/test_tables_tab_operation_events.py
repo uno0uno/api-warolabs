@@ -1,4 +1,5 @@
 """Operation audit events for mesa/barra tab flows (warocol.com#783, #786)."""
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -46,12 +47,18 @@ async def test_add_tab_items_core_records_tab_item_added_per_line():
         "notes": "Sin cebolla",
     }]
 
+    pricing_map = {
+        str(product_id): {"price": Decimal("15.00"), "open_priced": False},
+    }
     with patch(
         "app.services.tables_service._record_tab_operation_event",
         side_effect=capture_record,
     ), patch(
         "app.services.tables_service._prefetch_product_names",
         new=AsyncMock(return_value={str(product_id): "Hamburguesa"}),
+    ), patch(
+        "app.services.tables_service.fetch_product_pricing_map",
+        new=AsyncMock(return_value=pricing_map),
     ), patch(
         "app.services.tables_service._capture_order_item_ingredients",
         new=AsyncMock(),

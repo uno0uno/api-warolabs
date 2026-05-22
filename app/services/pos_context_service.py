@@ -13,6 +13,7 @@ from uuid import UUID
 
 from app.database import get_db_connection
 from app.services.invoicing_readiness_service import get_readiness
+from app.services.open_priced_service import fetch_open_sale_product
 
 
 _CONTEXT_QUERY = """
@@ -86,6 +87,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         if row is None:
             return None
         members_rows = await conn.fetch(_MEMBERS_QUERY, tenant_id)
+        open_sale_product = await fetch_open_sale_product(conn, tenant_id)
 
     readiness = await get_readiness(tenant_id)
     invoicing_ready = bool(readiness and readiness.get('ready'))
@@ -131,6 +133,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             'liquor_tax_applicable': bool(row['liquor_tax_applicable']) if row['liquor_tax_applicable'] is not None else False,
         },
         'invoicing_ready': invoicing_ready,
+        'open_sale_product': open_sale_product,
         'members': [
             {
                 'id': str(r['id']),

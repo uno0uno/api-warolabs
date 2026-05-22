@@ -13,6 +13,7 @@ from app.services import menu_history_service
 from app.services import cost_resolution_service
 from app.services.aws_s3_service import AWSS3Service
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
+from app.services.open_priced_service import assert_single_open_priced_per_tenant
 import asyncpg
 import logging
 
@@ -143,16 +144,19 @@ async def create_product_with_recipe(
         async with get_db_connection() as conn:
             # Start transaction
             async with conn.transaction():
+                if product_data.open_priced:
+                    await assert_single_open_priced_per_tenant(conn, tenant_id)
+
                 # 1. Insert product
                 # NOTE: controla_stock is ALWAYS True - all products control inventory
                 product_query = """
                     INSERT INTO product (
                         name, description, price, category_id, product_base_type_id, preparation_time,
                         controla_stock, is_available, is_available_online, is_available_table_qr,
-                        is_combo, is_resale, allow_modifiers,
+                        is_combo, is_resale, open_priced, allow_modifiers,
                         tax_category, tenant_id, station_id, kitchen_name, image_url, costo_percibido
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
                     RETURNING id, created_at, updated_at
                 """
                 product_result = await conn.fetchrow(
@@ -169,6 +173,7 @@ async def create_product_with_recipe(
                     product_data.is_available_table_qr,
                     product_data.is_combo,
                     product_data.is_resale,
+                    product_data.open_priced,
                     product_data.allow_modifiers,
                     product_data.tax_category,
                     tenant_id,
@@ -284,6 +289,7 @@ async def get_product_by_id(
                     p.is_available_table_qr,
                     p.is_combo,
                     p.is_resale,
+                    p.open_priced,
                     p.allow_modifiers,
                     p.tax_category,
                     p.costo_calculado,
@@ -534,6 +540,7 @@ async def get_products_list(
                     p.is_available_table_qr,
                     p.is_combo,
                     p.is_resale,
+                    p.open_priced,
                     p.allow_modifiers,
                     p.tax_category,
                     COALESCE(dc.direct_cost, 0) + COALESCE(bc.base_cost, 0) as costo_calculado,
@@ -888,6 +895,13 @@ async def update_product_with_recipe(
 
             # Start transaction
             async with conn.transaction():
+                if product_data.open_priced is True:
+                    await assert_single_open_priced_per_tenant(
+                        conn,
+                        tenant_id,
+                        exclude_product_id=product_id,
+                    )
+
                 # 1. Build update query dynamically based on provided fields
                 # NOTE: controla_stock is ALWAYS excluded from updates - it's always True
                 update_fields = []
