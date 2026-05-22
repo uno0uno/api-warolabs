@@ -19,6 +19,11 @@ from uuid import UUID
 from fastapi import HTTPException
 
 from app.database import get_db_connection
+from app.services.open_priced_service import (
+    deactivate_open_sale_product,
+    ensure_open_sale_product,
+    fetch_open_sale_product,
+)
 from app.services.pos_context_service import get_restaurant_context as _pos_get_context
 
 
@@ -32,6 +37,7 @@ ALLOWED_TOGGLES = frozenset({
     "waiter_attribution_enabled",  # warocol.com#573
     "tip_enabled",                  # warocol.com#638
     "tip_taxable_default",          # warocol.com#740
+    "open_sale_enabled",            # warocol.com#805
 })
 
 
@@ -87,6 +93,38 @@ async def update_toggle(
         await conn.execute(query, tenant_id, enabled)
 
     return {"success": True, "data": {column_name: enabled}}
+
+
+async def set_open_sale_enabled(
+    tenant_id: UUID,
+    enabled: bool,
+) -> Dict[str, Any]:
+    """Toggle venta libre: profile flag + shell product create/reactivate or hide (#805)."""
+    profile_upsert = """
+        INSERT INTO tenant_public_profiles (tenant_id, slug, display_name, open_sale_enabled)
+        SELECT t.id, t.slug, t.name, $2
+        FROM tenants t
+        WHERE t.id = $1
+        ON CONFLICT (tenant_id) DO UPDATE
+            SET open_sale_enabled = EXCLUDED.open_sale_enabled,
+                updated_at = now()
+    """
+    async with get_db_connection() as conn:
+        async with conn.transaction():
+            await conn.execute(profile_upsert, tenant_id, enabled)
+            if enabled:
+                await ensure_open_sale_product(conn, tenant_id)
+            else:
+                await deactivate_open_sale_product(conn, tenant_id)
+            open_sale_product = await fetch_open_sale_product(conn, tenant_id)
+
+    return {
+        "success": True,
+        "data": {
+            "open_sale_enabled": enabled,
+            "open_sale_product": open_sale_product,
+        },
+    }
 
 
 async def update_tables_label(

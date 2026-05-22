@@ -91,6 +91,11 @@ class TenantPublicProfileBase(BaseModel):
         description="POS: when true, /pos/checkout pre-selects the Genérico customer (phone_number='0000000000') in counter/bar mode."
     )
 
+    open_sale_enabled: bool = Field(
+        False,
+        description="When true, POS shows Venta libre and the tenant shell open-priced product is active.",
+    )
+
     # POS expediter mode (issue #537)
     expediter_enabled: bool = Field(
         False,

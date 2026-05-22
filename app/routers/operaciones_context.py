@@ -23,6 +23,7 @@ from app.models.table_member_assignment import AssignMemberRequest
 from app.services import table_assignments_service
 from app.services.operaciones_context_service import (
     get_operaciones_context,
+    set_open_sale_enabled,
     update_tables_label,
     update_tip_config,
     update_toggle,
@@ -160,6 +161,16 @@ async def toggle_auto_select_generic(request: Request, body: ToggleRequest):
     return await update_toggle(
         session.tenant_id, "auto_select_generic_enabled", body.enabled
     )
+
+
+@router.patch(
+    "/toggles/open-sale",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def toggle_open_sale(request: Request, body: ToggleRequest):
+    """Enable/disable POS venta libre and provision the shell product (#805)."""
+    session = require_valid_session(request)
+    return await set_open_sale_enabled(session.tenant_id, body.enabled)
 
 
 # ── Tipping family (warocol.com#638) ────────────────────────────────────

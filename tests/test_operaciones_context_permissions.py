@@ -182,6 +182,45 @@ def test_supervisor_passes_toggle_kds_under_enforce():
     assert args[2] is True
 
 
+def test_supervisor_passes_toggle_open_sale_under_enforce():
+    """Supervisor toggles venta libre; set_open_sale_enabled receives enabled flag (#805)."""
+    session = _build_session(role="supervisor")
+    app = FastAPI()
+    app.include_router(operaciones_context_router)
+
+    supervisor_modules = frozenset({
+        Module.POS, Module.VENTAS, Module.OPERACIONES,
+    })
+    toggle_stub = AsyncMock(
+        return_value={
+            "success": True,
+            "data": {
+                "open_sale_enabled": True,
+                "open_sale_product": {"id": str(uuid4()), "name": "Venta libre"},
+            },
+        }
+    )
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.operaciones_context.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=supervisor_modules),
+         ), \
+         patch(
+             "app.routers.operaciones_context.set_open_sale_enabled",
+             new=toggle_stub,
+         ):
+        client = TestClient(app)
+        response = client.patch("/operaciones/toggles/open-sale", json={"enabled": True})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["open_sale_enabled"] is True
+    args, _ = toggle_stub.call_args
+    assert args[1] is True
+
+
 @pytest.mark.asyncio
 async def test_update_toggle_rejects_unknown_column():
     """Whitelist guard: unknown column name raises 422 before any SQL."""
