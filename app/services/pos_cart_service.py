@@ -25,6 +25,11 @@ from app.services.accounting_service import void_order_journal_entry_in_txn
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas, finalize_open_comandas
 from app.services.operation_events_service import DOMAIN_POS, record_operation_event
+from app.services.open_priced_service import (
+    fetch_product_pricing_map,
+    resolve_line_unit_price,
+    validate_items_unit_prices,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -214,6 +219,10 @@ async def create_cart_with_batch_items(
                 cart_id = cart_row['id']
                 logger.info(f"Created cart {cart_id} (customer: {customer_id or 'anonymous'})")
 
+                product_ids = list({item["product_id"] for item in items})
+                pricing_map = await fetch_product_pricing_map(conn, tenant_id, product_ids)
+                validate_items_unit_prices(pricing_map, items)
+
                 # Add all items in batch
                 item_ids = []
                 for item in items:
@@ -383,6 +392,13 @@ async def add_item_to_cart(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
+                pricing_map = await fetch_product_pricing_map(conn, tenant_id, [product_id])
+                unit_price = float(
+                    resolve_line_unit_price(
+                        pricing_map, product_id, unit_price, modifiers
+                    )
+                )
+
                 # Calculate subtotal
                 modifiers_total = sum(mod['price'] for mod in modifiers)
                 subtotal = (unit_price + modifiers_total) * quantity
@@ -436,6 +452,8 @@ async def add_item_to_cart(
 
     except AuthenticationError as e:
         raise e
+    except APIError as e:
+        raise e
     except Exception as e:
         logger.error(f"Error adding item to cart: {str(e)}")
         raise APIError(f"Error adding item to cart: {str(e)}", status_code=500)
@@ -472,6 +490,32 @@ async def update_cart_item(
 
                 if not item_exists:
                     raise APIError("Cart item not found", status_code=404)
+
+                product_row = await conn.fetchrow(
+                    """
+                    SELECT pci.product_id
+                    FROM pos_cart_items pci
+                    JOIN pos_carts pc ON pc.id = pci.cart_id
+                    WHERE pci.id = $1 AND pci.cart_id = $2 AND pc.tenant_id = $3
+                    """,
+                    item_id,
+                    cart_id,
+                    tenant_id,
+                )
+                if not product_row:
+                    raise APIError("Cart item not found", status_code=404)
+
+                pricing_map = await fetch_product_pricing_map(
+                    conn, tenant_id, [product_row["product_id"]]
+                )
+                unit_price = float(
+                    resolve_line_unit_price(
+                        pricing_map,
+                        product_row["product_id"],
+                        unit_price,
+                        modifiers,
+                    )
+                )
 
                 # Calculate new subtotal
                 modifiers_total = sum(mod['price'] for mod in modifiers)

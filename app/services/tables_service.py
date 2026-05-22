@@ -30,6 +30,10 @@ from app.services.orders_service import _compute_tax_breakdown
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas
 from app.services.operation_events_service import DOMAIN_POS, record_operation_event
+from app.services.open_priced_service import (
+    fetch_product_pricing_map,
+    validate_items_unit_prices,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -2060,6 +2064,8 @@ async def _add_tab_items_core(
     }
     product_ids = list({item["product_id"] for item in items})
     product_names = await _prefetch_product_names(conn, tenant_id, product_ids)
+    pricing_map = await fetch_product_pricing_map(conn, tenant_id, product_ids)
+    validate_items_unit_prices(pricing_map, items)
 
     for item in items:
         mod_sum = sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))

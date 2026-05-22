@@ -72,6 +72,10 @@ class ProductBase(BaseModel):
     is_available_table_qr: bool = Field(False, description="Whether product appears on the table QR menu")
     is_combo: bool = Field(False, description="Whether product is a combo")
     is_resale: bool = Field(False, description="Whether product is a resale product (not prepared)")
+    open_priced: bool = Field(
+        False,
+        description="When true, POS may send a custom unit_price (venta libre); at most one per tenant",
+    )
     allow_modifiers: bool = Field(True, description="Whether product allows modifiers")
     tax_category: Literal['standard', 'liquor', 'exempt'] = Field("standard", description="Tax classification: standard (INC/IVA), liquor (IVA licores 5%), exempt (no tax)")
     station_id: Optional[UUID] = None
@@ -123,6 +127,7 @@ class ProductUpdate(BaseModel):
     is_available_table_qr: Optional[bool] = None
     is_combo: Optional[bool] = None
     is_resale: Optional[bool] = None
+    open_priced: Optional[bool] = None
     allow_modifiers: Optional[bool] = None
     tax_category: Optional[Literal['standard', 'liquor', 'exempt']] = Field(None, description="Tax classification: standard, liquor, exempt")
     ingredients: Optional[List[RecipeIngredientBase]] = Field(None, description="Updated recipe ingredients")
