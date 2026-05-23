@@ -37,7 +37,7 @@ tenant_router = APIRouter(prefix="/billing", tags=["Billing"])
 class SubscribeBody(BaseModel):
     """Body for POST /billing/subscribe"""
     plan_id: UUID
-    billing_cycle: str = "monthly"  # "monthly" | "annual"
+    billing_cycle: str = "annual"  # new subscriptions: annual only (#877)
     payer_email: Optional[str] = None
 
 
@@ -70,13 +70,13 @@ async def subscribe(body: SubscribeBody, request: Request):
     3. Guarda wompi_link_id y status='pending' en DB
     4. Retorna checkout_url para redirigir al checkout de Wompi
 
-    billing_cycle debe ser 'monthly' o 'annual'.
+    billing_cycle debe ser 'annual' para nuevas suscripciones (#877).
     """
-    if body.billing_cycle not in ("monthly", "annual"):
+    if body.billing_cycle != "annual":
         from fastapi import HTTPException
         raise HTTPException(
             status_code=422,
-            detail="billing_cycle debe ser 'monthly' o 'annual'",
+            detail="Las suscripciones nuevas solo están disponibles con ciclo anual (billing_cycle='annual').",
         )
 
     session = require_valid_session(request)
@@ -85,11 +85,7 @@ async def subscribe(body: SubscribeBody, request: Request):
     async with get_db_connection() as conn:
         plan = await billing_service.get_plan_for_subscribe(conn, body.plan_id)
 
-        amount = (
-            plan["price_monthly"]
-            if body.billing_cycle == "monthly"
-            else plan["price_annual"]
-        )
+        amount = plan["price_annual"]
 
         # Strip any base path from frontend_url to get the root host
         # e.g. "http://localhost:8080/waro-colombia" → "http://localhost:8080"
