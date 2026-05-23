@@ -1,4 +1,4 @@
-"""Regression: create_product INSERT must pass 19 bind args (#279, #745)."""
+"""Regression: create_product INSERT must pass 20 bind args (#279, #745)."""
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -74,7 +74,7 @@ async def test_create_product_insert_passes_19_bind_args_in_order():
         result = await create_product_with_recipe(request, product_data)
 
     assert result is mock_response
-    assert len(insert_args) == 19
+    assert len(insert_args) == 20
     # $7 controla_stock=True, $8 is_available, $9 is_available_online,
     # $10 is_available_table_qr, $11 is_combo
     assert insert_args[6] is True  # controla_stock
