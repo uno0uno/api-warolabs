@@ -1,5 +1,5 @@
 # Product models for menu management
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List, Literal, Dict, Any
 from uuid import UUID
 from datetime import datetime
@@ -109,6 +109,49 @@ class ProductCreate(ProductBase):
         ge=0,
         description="Operational/perceived unit cost set by the tenant",
     )
+    auto_resale_ingredient: bool = Field(
+        False,
+        description=(
+            "When true with is_resale and empty recipe: atomically create a linked "
+            "tenant ingredient (und, is_resale) + product_recipes row (qty 1)."
+        ),
+    )
+    resale_unit_weight_gr: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Weight/volume per und for auto-created resale ingredient (required when auto_resale_ingredient)",
+    )
+    resale_unit_weight_unit: Literal["gr", "ml"] = Field(
+        "gr",
+        description="Unit for resale_unit_weight_gr on auto-created ingredient",
+    )
+    resale_ingredient_type: Literal["food", "supply"] = Field(
+        "food",
+        description="Ingredient type for auto-created resale ingredient",
+    )
+    resale_ingredient_category: Optional[str] = Field(
+        None,
+        max_length=255,
+        description="Ingredient category label; defaults to menu category name when omitted",
+    )
+
+    @model_validator(mode="after")
+    def validate_auto_resale_ingredient(self):
+        if not self.auto_resale_ingredient:
+            return self
+        if not self.is_resale:
+            raise ValueError("auto_resale_ingredient requires is_resale=true")
+        if self.ingredients:
+            raise ValueError("auto_resale_ingredient cannot be combined with ingredients")
+        if self.recipe_bases:
+            raise ValueError("auto_resale_ingredient cannot be combined with recipe_bases")
+        if self.recipe_base_ids:
+            raise ValueError("auto_resale_ingredient cannot be combined with recipe_base_ids")
+        if self.product_base_type_id:
+            raise ValueError("auto_resale_ingredient cannot be combined with product_base_type_id")
+        if self.resale_unit_weight_gr is None:
+            raise ValueError("resale_unit_weight_gr is required when auto_resale_ingredient is true")
+        return self
 
 class ProductUpdate(BaseModel):
     """Update product fields"""
@@ -163,6 +206,10 @@ class Product(ProductBase):
     recipe_base_ids: List[UUID] = Field(default=[], description="DEPRECATED: associated recipe base IDs (sourced from recipe_bases for backwards compat).")
     recipe_bases: List[RecipeBaseLink] = Field(default=[], description="Recipe bases with per-product quantity multiplier (Issue #517).")
     modifier_groups: List[ModifierGroup] = Field(default=[], description="Modifier groups for this product")
+    resale_ingredient_id: Optional[UUID] = Field(
+        None,
+        description="Linked resale ingredient id when created via auto_resale_ingredient",
+    )
 
     # Calculated fields (real = costo_calculado, operativo = costo_percibido)
     margen_real_pct: Optional[float] = None

@@ -14,6 +14,8 @@ from app.services import cost_resolution_service
 from app.services.aws_s3_service import AWSS3Service
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 from app.services.open_priced_service import assert_single_open_priced_per_tenant
+from app.services.ingredients_service import create_tenant_ingredient
+from app.models.ingredient import TenantIngredientCreate, PurchaseUnitInput
 import asyncpg
 import logging
 
@@ -112,6 +114,26 @@ def _normalize_recipe_bases(
         return [(rid, qty) for rid, qty in seen.items()]
     return []
 
+
+async def _resolve_resale_ingredient_category(
+    conn,
+    tenant_id: UUID,
+    category_id: UUID,
+    override: Optional[str],
+) -> str:
+    """Category string for auto-created resale ingredients."""
+    if override and override.strip():
+        return override.strip()
+    row = await conn.fetchrow(
+        "SELECT name FROM categories WHERE id = $1 AND tenant_id = $2",
+        category_id,
+        tenant_id,
+    )
+    if row and row.get("name"):
+        return row["name"]
+    return "Reventa"
+
+
 async def create_product_with_recipe(
     request: Request,
     product_data: ProductCreate
@@ -139,13 +161,44 @@ async def create_product_with_recipe(
             product_data.recipe_base_ids,
         )
         has_recipe_bases = len(normalized_bases) > 0
-        tracks_inventory = has_ingredients or has_recipe_bases
+        auto_resale = product_data.auto_resale_ingredient
+        tracks_inventory = has_ingredients or has_recipe_bases or auto_resale
+        auto_resale_ingredient_id: Optional[UUID] = None
 
         async with get_db_connection() as conn:
             # Start transaction
             async with conn.transaction():
                 if product_data.open_priced:
                     await assert_single_open_priced_per_tenant(conn, tenant_id)
+
+                if auto_resale:
+                    ingredient_category = await _resolve_resale_ingredient_category(
+                        conn,
+                        tenant_id,
+                        product_data.category_id,
+                        product_data.resale_ingredient_category,
+                    )
+                    costo_ingredient = None
+                    if product_data.costo_percibido is not None:
+                        costo_ingredient = float(product_data.costo_percibido)
+                    ing_result = await create_tenant_ingredient(
+                        conn,
+                        tenant_id,
+                        TenantIngredientCreate(
+                            name=product_data.name.strip(),
+                            unit="und",
+                            type=product_data.resale_ingredient_type,
+                            category=ingredient_category,
+                            is_resale=True,
+                            unit_weight_gr=product_data.resale_unit_weight_gr,
+                            unit_weight_unit=product_data.resale_unit_weight_unit,
+                            costo_unitario=costo_ingredient,
+                            purchase_units=[
+                                PurchaseUnitInput(purchase_unit="und", is_default=True),
+                            ],
+                        ),
+                    )
+                    auto_resale_ingredient_id = UUID(ing_result["id"])
 
                 # 1. Insert product
                 # NOTE: controla_stock is ALWAYS True - all products control inventory
@@ -203,14 +256,28 @@ async def create_product_with_recipe(
                         )
 
                 # 3. Insert recipe ingredients
-                if product_data.ingredients:
-                    recipe_query = """
-                        INSERT INTO product_recipes (
-                            product_id, ingredient_id, quantity, unit, tenant_id
-                        )
-                        VALUES ($1, $2, $3, $4, $5)
-                    """
-
+                recipe_query = """
+                    INSERT INTO product_recipes (
+                        product_id, ingredient_id, quantity, unit, tenant_id
+                    )
+                    VALUES ($1, $2, $3, $4, $5)
+                """
+                if auto_resale_ingredient_id:
+                    base_qty, base_unit = await resolve_to_base_unit(
+                        conn,
+                        auto_resale_ingredient_id,
+                        1,
+                        "und",
+                    )
+                    await conn.execute(
+                        recipe_query,
+                        product_id,
+                        auto_resale_ingredient_id,
+                        base_qty,
+                        base_unit,
+                        tenant_id,
+                    )
+                elif product_data.ingredients:
                     for ingredient in product_data.ingredients:
                         base_qty, base_unit = await resolve_to_base_unit(
                             conn,
@@ -245,7 +312,10 @@ async def create_product_with_recipe(
                     )
 
                 # 6. Get complete product with recipe
-                return await get_product_by_id(request, product_id, conn)
+                response = await get_product_by_id(request, product_id, conn)
+                if auto_resale_ingredient_id:
+                    response.data.resale_ingredient_id = auto_resale_ingredient_id
+                return response
 
     except HTTPException:
         raise
@@ -338,7 +408,7 @@ async def get_product_by_id(
                 FROM product p
                 LEFT JOIN categories c ON p.category_id = c.id
                 LEFT JOIN tenant_category_stations tcs ON tcs.category_id = p.category_id AND tcs.tenant_id = p.tenant_id
-                LEFT JOIN kitchen_stations ks ON ks.id = tcs.station_id
+                LEFT JOIN kitchen_stations ks ON ks.id = COALESCE(p.station_id, tcs.station_id)
                 WHERE p.id = $1 AND p.tenant_id = $2
             """
 
@@ -561,7 +631,7 @@ async def get_products_list(
                 LEFT JOIN direct_costs dc ON p.id = dc.product_id
                 LEFT JOIN base_costs bc ON p.id = bc.product_id
                 LEFT JOIN tenant_category_stations tcs ON tcs.category_id = p.category_id AND tcs.tenant_id = p.tenant_id
-                LEFT JOIN kitchen_stations ks ON ks.id = tcs.station_id
+                LEFT JOIN kitchen_stations ks ON ks.id = COALESCE(p.station_id, tcs.station_id)
                 WHERE p.tenant_id = $1
             """
 

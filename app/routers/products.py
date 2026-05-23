@@ -41,6 +41,15 @@ async def create_product_endpoint(
     - Automatically calculated cost based on ingredients
     - Calculated margin (percentage and value)
 
+    **Atomic resale** (`auto_resale_ingredient=true`): requires `is_resale=true`, empty
+    recipe arrays, and `resale_unit_weight_gr`. Creates tenant ingredient (und, is_resale)
+    + product + one `product_recipes` row in the same transaction. Response includes
+    `resale_ingredient_id` (also in `ingredients[0].ingredient_id`).
+
+    **Duplicate names**: ingredient and product names are unique per tenant in separate
+    indexes — the same display name on both rows is allowed. Ingredient duplicate → 409
+    with ingredient message; product duplicate → 409 with product message (txn rolls back).
+
     Requires valid session with tenant context.
     """
     return await create_product_with_recipe(request, product_data)
