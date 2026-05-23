@@ -510,6 +510,7 @@ async def get_products_list(
     sort: Optional[str] = None,
     include_ingredients: bool = False,
     include_modifiers: bool = False,
+    include_all_types: bool = False,
 ) -> ProductsListResponse:
     """Get list of products with filters"""
     try:
@@ -653,9 +654,9 @@ async def get_products_list(
 
             # Filter by is_resale - default to excluding resale products
             # Resale products have their own section, so by default we exclude them
-            # Exception: POS (include_modifiers=true) should show ALL products
+            # Exception: POS (include_modifiers=true) or catalog Todos (include_all_types=true)
             if is_resale is None:
-                if not include_modifiers:
+                if not include_modifiers and not include_all_types:
                     base_query += " AND (is_resale = false OR is_resale IS NULL)"
             else:
                 base_query += f" AND is_resale = ${param_count}"
