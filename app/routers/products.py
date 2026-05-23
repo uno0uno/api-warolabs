@@ -93,6 +93,10 @@ async def get_products_endpoint(
     ),
     include_ingredients: bool = Query(default=False, description="Include recipe ingredients in response"),
     include_modifiers: bool = Query(default=False, description="Include modifier groups in response (for POS)"),
+    include_all_types: bool = Query(
+        default=False,
+        description="Include menu and resale products (Productos list Todos filter)",
+    ),
 ):
     """
     Get products list with filters and pagination.
@@ -125,6 +129,7 @@ async def get_products_endpoint(
         sort,
         include_ingredients,
         include_modifiers,
+        include_all_types,
     )
 
 
