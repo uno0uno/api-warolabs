@@ -98,6 +98,7 @@ class ArticleSummary(BaseModel):
     views: Optional[int] = 0
     published: bool
     created_at: datetime
+    updated_at: Optional[datetime] = None
     author_name: Optional[str] = None
     author_avatar: Optional[str] = None
 
