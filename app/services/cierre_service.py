@@ -764,32 +764,61 @@ async def _compute_preview(
     )
 
     # Payment method totals — COALESCE split vs legacy:
-    # Split orders: sum from order_payments rows
-    # Legacy orders (no order_payments rows): use orders.total_amount + orders.payment_method
+    # Split orders: sum from active order_payments rows
+    # Legacy orders (no active order_payments rows): use orders.total_amount + stored method
     method_rows = await conn.fetch(
         f"""
         SELECT
-            op.payment_method AS method,
+            COALESCE(pmg.slug, op.payment_method) AS method,
             COALESCE(SUM(op.amount), 0) AS total
         FROM order_payments op
         JOIN orders o ON o.id = op.order_id
+        LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
+        LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
           {status_filter.replace('status', 'o.status')}
           {date_filter.replace('order_date', 'o.order_date')}
-        GROUP BY op.payment_method
+          AND op.voided_at IS NULL
+        GROUP BY COALESCE(pmg.slug, op.payment_method)
 
         UNION ALL
 
         SELECT
-            payment_method AS method,
+            pmg.slug AS method,
             COALESCE(SUM(total_amount), 0) AS total
-        FROM orders
-        WHERE tenant_id = $1
+        FROM orders o
+        JOIN payment_methods pm ON pm.id = o.payment_method_id
+        JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+        WHERE o.tenant_id = $1
           {status_filter}
           {date_filter}
-          AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = orders.id)
-          AND payment_method IS NOT NULL
-        GROUP BY payment_method
+          AND o.payment_method_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM order_payments op
+              WHERE op.order_id = o.id
+                AND op.voided_at IS NULL
+          )
+        GROUP BY pmg.slug
+
+        UNION ALL
+
+        SELECT
+            o.payment_method AS method,
+            COALESCE(SUM(o.total_amount), 0) AS total
+        FROM orders o
+        WHERE o.tenant_id = $1
+          {status_filter}
+          {date_filter}
+          AND o.payment_method_id IS NULL
+          AND o.payment_method IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM order_payments op
+              WHERE op.order_id = o.id
+                AND op.voided_at IS NULL
+          )
+        GROUP BY o.payment_method
         """,
         tenant_id, *date_params,
     )
@@ -862,6 +891,8 @@ async def _compute_breakdown_rows(
       - Legacy orders (payment_method_id IS NULL): group by payment_method VARCHAR slug
 
     Returns list of {group_slug, method_name, total}, excluding zero-total rows.
+    Orders without an active payment method stay visible as
+    "Sin método registrado" so the breakdown can reconcile with totalSales.
     When period_start_time / period_end_time are supplied, uses exact TIMESTAMPTZ comparison.
     """
     status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
@@ -882,6 +913,7 @@ async def _compute_breakdown_rows(
         WHERE o.tenant_id = $1
           {status_filter.replace('status', 'o.status')}
           {date_filter.replace('order_date', 'o.order_date')}
+          AND op.voided_at IS NULL
         GROUP BY COALESCE(pmg.slug, op.payment_method), COALESCE(pm.name, op.payment_method)
 
         UNION ALL
@@ -898,7 +930,12 @@ async def _compute_breakdown_rows(
           {status_filter}
           {date_filter}
           AND o.payment_method_id IS NOT NULL
-          AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = o.id)
+          AND NOT EXISTS (
+              SELECT 1
+              FROM order_payments op
+              WHERE op.order_id = o.id
+                AND op.voided_at IS NULL
+          )
         GROUP BY pmg.slug, pm.name
 
         UNION ALL
@@ -914,8 +951,34 @@ async def _compute_breakdown_rows(
           {date_filter}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NOT NULL
-          AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = o.id)
+          AND NOT EXISTS (
+              SELECT 1
+              FROM order_payments op
+              WHERE op.order_id = o.id
+                AND op.voided_at IS NULL
+          )
         GROUP BY o.payment_method
+
+        UNION ALL
+
+        -- Orders with no active payment tracking yet: keep them visible so the
+        -- close preview explains why totalSales can exceed registered methods.
+        SELECT
+            'untracked'                AS group_slug,
+            'Sin método registrado'    AS method_name,
+            COALESCE(SUM(o.total_amount), 0) AS total
+        FROM orders o
+        WHERE o.tenant_id = $1
+          {status_filter}
+          {date_filter}
+          AND o.payment_method_id IS NULL
+          AND o.payment_method IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM order_payments op
+              WHERE op.order_id = o.id
+                AND op.voided_at IS NULL
+          )
         """,
         tenant_id, *date_params,
     )
