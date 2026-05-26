@@ -76,6 +76,7 @@ async def get_articles_list(
                     COALESCE(a.views, 0) as views,
                     a.published,
                     a.created_at,
+                    a.updated_at,
                     p.name as author_name,
                     p.logo_avatar as author_avatar
                 FROM articles a
@@ -100,6 +101,7 @@ async def get_articles_list(
                     views=row['views'],
                     published=row['published'],
                     created_at=row['created_at'],
+                    updated_at=row['updated_at'],
                     author_name=row['author_name'],
                     author_avatar=row['author_avatar']
                 )
@@ -279,6 +281,7 @@ async def get_related_articles(
                     COALESCE(a.views, 0) as views,
                     a.published,
                     a.created_at,
+                    a.updated_at,
                     p.name as author_name,
                     p.logo_avatar as author_avatar
                 FROM articles a
@@ -306,6 +309,7 @@ async def get_related_articles(
                     views=row['views'],
                     published=row['published'],
                     created_at=row['created_at'],
+                    updated_at=row['updated_at'],
                     author_name=row['author_name'],
                     author_avatar=row['author_avatar']
                 )
