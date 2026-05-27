@@ -295,15 +295,15 @@ async def _post_order_gl_entry(
     source_id     = order_id
 
     DR  [payment account]    debit_total   (1105 Caja / 1110 Bancos / 1305 Clientes)
-    CR  4175 Ingresos        net_revenue (+ net tip when included at checkout)
+    CR  4175 Ingresos        product net + dedicated tip line when tip > 0
     CR  2495/2408 Impuesto   tax_amount    (product + tip tax when applicable)
 
     Tax modes (per tenant_tax_config):
       inc_included_in_price=True  (default): price already includes tax — extract formula
       inc_included_in_price=False           : tax added on top — additive formula
 
-    Tips: pass tip_amount/tip_tax_amount for single-payment checkout. Split flows defer
-    tip to _post_deferred_order_tip_gl when the last payment completes (#912).
+    Tips: single-payment checkout posts product net on `— ingreso neto` and tip net on
+    `— propina` (#915). Split flows defer tip to _post_deferred_order_tip_gl (#912).
 
     Idempotent: skips if an 'orden' entry already exists for this order_id.
     Caller MUST wrap in try/except — GL failure must never roll back the order.
@@ -457,12 +457,13 @@ async def _post_order_gl_entry(
     tip_tax_acct_id = None
     if tip_tax_credit > 0:
         tip_tax_acct_id = await _resolve_standard_tax_account_id(conn, tenant_id, tax_config)
+    product_net_revenue = net_revenue
     if tip_settlement > 0:
         debit_total += tip_settlement
-        net_revenue += tip_net_revenue
 
     dt = float(debit_total)
     description = f"#{order_number}" if order_number else f"Venta {order_date.isoformat()} — orden {order_id}"
+    tip_description = f"{description} — propina"
 
     # ── Insert entry + lines (savepoint if inside outer transaction) ───────
     async with conn.transaction():
@@ -486,12 +487,12 @@ async def _post_order_gl_entry(
             entry_id, debit_acct["id"], dt, description,
         )
 
-        # Credit line — net revenue to 4135
+        # Credit line — product net revenue to 4175
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, 1)""",
-            entry_id, ingresos_acct["id"], float(net_revenue),
+            entry_id, ingresos_acct["id"], float(product_net_revenue),
             f"{description} — ingreso neto",
         )
 
@@ -517,19 +518,29 @@ async def _post_order_gl_entry(
                 line_order,
             )
             line_order += 1
+        if tip_net_revenue > 0:
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, $4, $5)""",
+                entry_id, ingresos_acct["id"], float(tip_net_revenue),
+                tip_description,
+                line_order,
+            )
+            line_order += 1
         if tip_tax_credit > 0 and tip_tax_acct_id:
             await conn.execute(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, 0, $3, $4, $5)""",
                 entry_id, tip_tax_acct_id, float(tip_tax_credit),
-                f"{description} — propina INC/IVA",
+                f"{tip_description} — INC/IVA",
                 line_order,
             )
 
     logger.info(
         f"[GL] ✅ Posted order entry {entry_id} for order {order_id} "
-        f"(total={dt}, net={float(net_revenue)}, "
+        f"(total={dt}, product_net={float(product_net_revenue)}, "
         f"inc={float(standard_tax)}, liquor={float(liquor_tax)}, "
         f"tip={float(tip_settlement)})"
     )

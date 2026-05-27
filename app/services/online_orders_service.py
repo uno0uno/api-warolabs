@@ -561,7 +561,9 @@ async def update_order_status(
                 # GL journal entry — atomic with the order, failure never blocks
                 try:
                     order_for_gl = await conn.fetchrow(
-                        "SELECT order_number, total_amount, payment_method, payment_method_id, order_date FROM orders WHERE id = $1",
+                        """SELECT order_number, total_amount, payment_method, payment_method_id,
+                                  order_date, tip_amount, tip_tax_amount
+                           FROM orders WHERE id = $1""",
                         order_id,
                     )
                     tax_config = await _get_tenant_tax_config(conn, tenant_id)
@@ -575,6 +577,8 @@ async def update_order_status(
                         payment_method_id=order_for_gl["payment_method_id"],
                         tax_config=tax_config,
                         order_number=int(order_for_gl["order_number"]),
+                        tip_amount=Decimal(str(order_for_gl["tip_amount"] or 0)),
+                        tip_tax_amount=Decimal(str(order_for_gl["tip_tax_amount"] or 0)),
                     )
                 except Exception as e:
                     logger.error(f"GL entry failed for online order {order_id}: {e}")
@@ -678,7 +682,9 @@ async def update_order_status(
                 # GL journal entry — atomic with the order, failure never blocks
                 try:
                     order_for_gl = await conn.fetchrow(
-                        "SELECT order_number, total_amount, payment_method, payment_method_id, order_date FROM orders WHERE id = $1",
+                        """SELECT order_number, total_amount, payment_method, payment_method_id,
+                                  order_date, tip_amount, tip_tax_amount
+                           FROM orders WHERE id = $1""",
                         order_id,
                     )
                     tax_config = await _get_tenant_tax_config(conn, tenant_id)
@@ -692,6 +698,8 @@ async def update_order_status(
                         payment_method_id=order_for_gl["payment_method_id"],
                         tax_config=tax_config,
                         order_number=int(order_for_gl["order_number"]),
+                        tip_amount=Decimal(str(order_for_gl["tip_amount"] or 0)),
+                        tip_tax_amount=Decimal(str(order_for_gl["tip_tax_amount"] or 0)),
                     )
                 except Exception as e:
                     logger.error(f"GL entry failed for online order {order_id}: {e}")
