@@ -23,6 +23,7 @@ from app.services.pos_cart_service import (
 )
 from app.services.tip_tax_service import (
     compute_tip_tax_amount,
+    normalize_tip_payload,
     split_settlement_amount_due,
     tip_settlement_total,
 )
@@ -701,14 +702,12 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
     If payment_method is provided, marks all pending orders as completed with that payment method.
     """
     # warocol.com#639 — tip validation (same rules as pos_cart.complete_pos_order)
-    if tip_amount < 0:
-        raise APIError("tip_amount must be non-negative", status_code=400)
-    if tip_source not in ('preset', 'custom', 'none'):
-        raise APIError(f"invalid tip_source: {tip_source!r}", status_code=400)
-    if tip_amount == 0:
-        tip_source = 'none'
-    elif tip_source == 'none':
-        raise APIError("tip_source cannot be 'none' when tip_amount > 0", status_code=400)
+    try:
+        tip_amount, tip_source, tip_taxable = normalize_tip_payload(
+            tip_amount, tip_source, tip_taxable,
+        )
+    except ValueError as exc:
+        raise APIError(str(exc), status_code=400)
     resolved_served_by: Optional[UUID] = None
     if served_by_member_id is not None:
         session_context_pre = require_valid_session(request)
@@ -1256,6 +1255,9 @@ async def add_session_payment(
     payment_method: str,
     payment_method_id: Optional[UUID] = None,
     cash_received: Optional[float] = None,
+    tip_amount: Optional[float] = None,
+    tip_source: Optional[str] = None,
+    tip_taxable: Optional[bool] = None,
 ) -> dict:
     """
     Add a partial payment to an open mesa session that is in split payment mode.
@@ -1303,6 +1305,65 @@ async def add_session_payment(
 
                 session_total = sum(float(r["total_amount"]) for r in order_rows)
                 order_ids = [r["id"] for r in order_rows]
+                session_tip_row = await conn.fetchrow(
+                    """
+                    SELECT id,
+                           COALESCE(tip_amount, 0) AS tip_amount,
+                           COALESCE(tip_source, 'none') AS tip_source,
+                           COALESCE(tip_taxable, false) AS tip_taxable,
+                           COALESCE(tip_tax_amount, 0) AS tip_tax_amount
+                    FROM orders
+                    WHERE table_session_id = $1 AND status = 'completed'
+                    ORDER BY created_at
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    session_row["id"],
+                )
+                resolved_tip_amount = float(session_tip_row["tip_amount"] or 0) if session_tip_row else 0.0
+                resolved_tip_source = session_tip_row["tip_source"] if session_tip_row else "none"
+                resolved_tip_taxable = bool(session_tip_row["tip_taxable"]) if session_tip_row else False
+                resolved_tip_tax_amount = float(session_tip_row["tip_tax_amount"] or 0) if session_tip_row else 0.0
+
+                if any(value is not None for value in (tip_amount, tip_source, tip_taxable)):
+                    try:
+                        resolved_tip_amount, resolved_tip_source, resolved_tip_taxable = normalize_tip_payload(
+                            resolved_tip_amount if tip_amount is None else tip_amount,
+                            resolved_tip_source if tip_source is None else tip_source,
+                            resolved_tip_taxable if tip_taxable is None else tip_taxable,
+                        )
+                    except ValueError as exc:
+                        raise APIError(str(exc), status_code=400)
+
+                    if resolved_tip_amount > 0:
+                        tip_enabled = await conn.fetchval(
+                            "SELECT tip_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                            tenant_id,
+                        )
+                        if not bool(tip_enabled):
+                            raise APIError("Tipping is not enabled for this tenant", status_code=400)
+                        tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        resolved_tip_tax_amount = compute_tip_tax_amount(
+                            resolved_tip_amount, resolved_tip_taxable, tax_config,
+                        )
+                    else:
+                        resolved_tip_tax_amount = 0.0
+
+                    await conn.execute(
+                        """
+                        UPDATE orders
+                        SET tip_amount = $2,
+                            tip_source = $3,
+                            tip_taxable = $4,
+                            tip_tax_amount = $5
+                        WHERE id = $1
+                        """,
+                        session_tip_row["id"],
+                        resolved_tip_amount,
+                        resolved_tip_source,
+                        resolved_tip_taxable,
+                        resolved_tip_tax_amount,
+                    )
 
                 # Distribute this payment proportionally
                 remaining_payment = amount
@@ -1339,20 +1400,10 @@ async def add_session_payment(
                 )
                 paid_total = float(paid_row["paid"])
                 
-                session_tip_row = await conn.fetchrow(
-                    """
-                    SELECT COALESCE(tip_amount, 0) AS tip_amount,
-                           COALESCE(tip_tax_amount, 0) AS tip_tax_amount
-                    FROM orders
-                    WHERE table_session_id = $1 AND status = 'completed'
-                    ORDER BY created_at LIMIT 1
-                    """,
-                    session_row["id"],
-                )
                 amount_due = split_settlement_amount_due(
                     session_total,
-                    float(session_tip_row["tip_amount"] or 0) if session_tip_row else 0.0,
-                    float(session_tip_row["tip_tax_amount"] or 0) if session_tip_row else 0.0,
+                    resolved_tip_amount,
+                    resolved_tip_tax_amount,
                 )
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
@@ -1382,6 +1433,10 @@ async def add_session_payment(
                 "paid_total": paid_total,
                 "remaining": remaining,
                 "is_complete": is_complete,
+                "tip_amount": resolved_tip_amount,
+                "tip_source": resolved_tip_source,
+                "tip_taxable": resolved_tip_taxable,
+                "tip_tax_amount": resolved_tip_tax_amount,
                 # Issue warocol.com#649 — real UUID; siblings void via heuristic.
                 "payment_id": first_payment_id,
             },

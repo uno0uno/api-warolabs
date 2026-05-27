@@ -261,6 +261,9 @@ class AddPaymentRequest(BaseModel):
     payment_method: str = Field(..., description="cash | card | digital | credit or custom slug")
     payment_method_id: Optional[str] = Field(None, description="UUID of payment_methods row")
     cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over by the customer. NULL for non-cash. Must be >= amount when set.")
+    tip_amount: Optional[float] = Field(None, ge=0, description="Optional canonical tip override for an in-progress split settlement. Persists on the order header, not on order_payments.")
+    tip_source: Optional[Literal['preset', 'custom', 'none']] = Field(None, description="Optional tip source patch paired with tip_amount for split settlement updates.")
+    tip_taxable: Optional[bool] = Field(None, description="Optional gravada flag for split settlement tip updates.")
 
 
 class AddPaymentResponse(BaseModel):
@@ -319,6 +322,9 @@ async def add_cart_payment(
         payment_method=payment_data.payment_method,
         payment_method_id=payment_data.payment_method_id,
         cash_received=payment_data.cash_received,
+        tip_amount=payment_data.tip_amount,
+        tip_source=payment_data.tip_source,
+        tip_taxable=payment_data.tip_taxable,
     )
 
 
