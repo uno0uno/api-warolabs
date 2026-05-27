@@ -26,6 +26,7 @@ from app.services.pos_cart_service import (
     _capture_order_item_ingredients,
     _PAYMENT_VOID_ROLES,
 )
+from app.utils.table_code import infer_table_code, normalize_table_code, resolve_unique_code
 from app.services.tip_tax_service import (
     compute_tip_tax_amount,
     normalize_tip_payload,
@@ -125,6 +126,45 @@ def _distribute_discount(items: List[dict], discount_amount: float) -> List[dict
     return items
 
 
+async def _tenant_table_codes(conn, tenant_id, exclude_table_id=None) -> set[str]:
+    rows = await conn.fetch(
+        """
+        SELECT code FROM tables
+        WHERE tenant_id = $1
+          AND code IS NOT NULL
+          AND deleted_at IS NULL
+          AND ($2::uuid IS NULL OR id != $2)
+        """,
+        tenant_id,
+        exclude_table_id,
+    )
+    return {str(r["code"]).upper() for r in rows}
+
+
+async def _resolve_table_code(
+    conn,
+    tenant_id,
+    name: str,
+    *,
+    is_bar: bool = False,
+    explicit_code: Optional[str] = None,
+    exclude_table_id=None,
+) -> str:
+    if is_bar:
+        return "BAR"
+
+    used = await _tenant_table_codes(conn, tenant_id, exclude_table_id)
+
+    if explicit_code is not None and str(explicit_code).strip():
+        normalized = normalize_table_code(explicit_code)
+        if normalized and normalized.upper() in used:
+            raise APIError(f"Table code '{normalized}' is already in use", status_code=409)
+        return normalized or infer_table_code(name)
+
+    proposed = infer_table_code(name)
+    return resolve_unique_code(proposed, used)
+
+
 async def _ensure_bar_table(conn, tenant_id) -> None:
     """
     Ensure a permanent bar table and its open session exist for the tenant.
@@ -137,8 +177,8 @@ async def _ensure_bar_table(conn, tenant_id) -> None:
     if not bar_row:
         bar_row = await conn.fetchrow(
             """
-            INSERT INTO tables (tenant_id, name, capacity, status, is_bar)
-            VALUES ($1, 'Barra', NULL, 'open', TRUE)
+            INSERT INTO tables (tenant_id, name, capacity, status, is_bar, code)
+            VALUES ($1, 'Barra', NULL, 'open', TRUE, 'BAR')
             RETURNING id, status
             """,
             tenant_id,
@@ -193,6 +233,7 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                 SELECT
                     t.id,
                     t.name,
+                    t.code,
                     t.capacity,
                     t.status,
                     t.is_active,
@@ -282,6 +323,7 @@ async def create_table(
     request: Request,
     name: str,
     capacity: Optional[int],
+    code: Optional[str] = None,
 ) -> dict:
     """
     Create a new table for the tenant.
@@ -294,16 +336,24 @@ async def create_table(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
+                try:
+                    resolved_code = await _resolve_table_code(
+                        conn, tenant_id, name, explicit_code=code,
+                    )
+                except ValueError as exc:
+                    raise APIError(str(exc), status_code=400) from exc
+
                 row = await conn.fetchrow(
                     """
-                    INSERT INTO tables (tenant_id, name, capacity)
-                    VALUES ($1, $2, $3)
-                    RETURNING id, name, capacity, status, is_active, is_bar,
+                    INSERT INTO tables (tenant_id, name, capacity, code)
+                    VALUES ($1, $2, $3, $4)
+                    RETURNING id, name, code, capacity, status, is_active, is_bar,
                               qr_enabled, qr_public_token, created_at
                     """,
                     tenant_id,
                     name,
                     capacity,
+                    resolved_code,
                 )
                 module_on = await conn.fetchval(
                     """
@@ -320,7 +370,7 @@ async def create_table(
                         UPDATE tables
                         SET qr_public_token = $1
                         WHERE id = $2 AND tenant_id = $3
-                        RETURNING id, name, capacity, status, is_active, is_bar,
+                        RETURNING id, name, code, capacity, status, is_active, is_bar,
                                   qr_enabled, qr_public_token, created_at
                         """,
                         token,
@@ -328,10 +378,10 @@ async def create_table(
                         tenant_id,
                     )
 
-        logger.info(f"Table created: {row['id']} ({name}) for tenant {tenant_id}")
+        logger.info(f"Table created: {row['id']} ({name}, code={row['code']}) for tenant {tenant_id}")
         return {"success": True, "data": _format_table_simple(row)}
 
-    except AuthenticationError:
+    except (AuthenticationError, APIError):
         raise
     except Exception as e:
         logger.error(f"Error creating table: {e}")
@@ -341,11 +391,11 @@ async def create_table(
 async def update_table(
     request: Request,
     table_id: UUID,
-    name: Optional[str],
-    capacity: Optional[int],
+    updates: dict,
 ) -> dict:
     """
-    Update a table's name and/or capacity (status is NOT editable here).
+    Update a table's name, code, and/or capacity (status is NOT editable here).
+    Only keys present in ``updates`` are applied (see router model_dump exclude_unset).
     """
     try:
         session_context = require_valid_session(request)
@@ -355,31 +405,93 @@ async def update_table(
 
         async with get_db_connection() as conn:
             existing = await conn.fetchrow(
-                "SELECT id FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true",
+                """
+                SELECT id, name, is_bar, code
+                FROM tables
+                WHERE id = $1 AND tenant_id = $2 AND is_active = true AND deleted_at IS NULL
+                """,
                 table_id,
                 tenant_id,
             )
             if not existing:
                 raise NotFoundError("Table not found")
 
+            if not updates:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, name, code, capacity, status, is_active, is_bar,
+                           qr_enabled, qr_public_token, created_at
+                    FROM tables WHERE id = $1 AND tenant_id = $2
+                    """,
+                    table_id,
+                    tenant_id,
+                )
+                return {"success": True, "data": _format_table_simple(row)}
+
+            set_clauses: List[str] = []
+            params: List[Any] = [table_id, tenant_id]
+            idx = 3
+            effective_name = updates.get("name", existing["name"])
+
+            if "name" in updates:
+                set_clauses.append(f"name = ${idx}")
+                params.append(updates["name"])
+                idx += 1
+
+            if "capacity" in updates:
+                set_clauses.append(f"capacity = ${idx}")
+                params.append(updates["capacity"])
+                idx += 1
+
+            if "code" in updates:
+                if existing["is_bar"]:
+                    raise APIError("Bar table code cannot be changed", status_code=400)
+                raw_code = updates["code"]
+                try:
+                    if raw_code is None or (isinstance(raw_code, str) and not raw_code.strip()):
+                        resolved_code = await _resolve_table_code(
+                            conn,
+                            tenant_id,
+                            effective_name,
+                            explicit_code=None,
+                            exclude_table_id=table_id,
+                        )
+                    else:
+                        normalized = normalize_table_code(raw_code)
+                        used = await _tenant_table_codes(conn, tenant_id, exclude_table_id=table_id)
+                        if normalized and normalized.upper() in used:
+                            raise APIError(
+                                f"Table code '{normalized}' is already in use",
+                                status_code=409,
+                            )
+                        resolved_code = normalized or await _resolve_table_code(
+                            conn,
+                            tenant_id,
+                            effective_name,
+                            explicit_code=None,
+                            exclude_table_id=table_id,
+                        )
+                except ValueError as exc:
+                    raise APIError(str(exc), status_code=400) from exc
+
+                set_clauses.append(f"code = ${idx}")
+                params.append(resolved_code)
+                idx += 1
+
             row = await conn.fetchrow(
-                """
+                f"""
                 UPDATE tables
-                SET
-                    name     = COALESCE($3, name),
-                    capacity = COALESCE($4, capacity)
+                SET {", ".join(set_clauses)}
                 WHERE id = $1 AND tenant_id = $2
-                RETURNING id, name, capacity, status, is_active, created_at
+                RETURNING id, name, code, capacity, status, is_active, is_bar,
+                          qr_enabled, qr_public_token, created_at
                 """,
-                table_id,
-                tenant_id,
-                name,
-                capacity,
+                *params,
             )
 
         return {"success": True, "data": _format_table_simple(row)}
 
-    except (AuthenticationError, NotFoundError):
+    except (AuthenticationError, NotFoundError, APIError):
         raise
     except Exception as e:
         logger.error(f"Error updating table {table_id}: {e}")
@@ -2928,6 +3040,7 @@ def _format_table_row(row: dict) -> dict:
     result = {
         "id": str(row["id"]),
         "name": row["name"],
+        "code": row.get("code"),
         "capacity": row["capacity"],
         "status": row["status"],
         "is_active": row["is_active"],
@@ -3190,6 +3303,7 @@ def _format_table_simple(row: dict) -> dict:
     return {
         "id": str(row["id"]),
         "name": row["name"],
+        "code": row.get("code"),
         "capacity": row["capacity"],
         "status": row["status"],
         "is_active": row["is_active"],
