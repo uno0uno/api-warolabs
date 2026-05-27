@@ -1071,6 +1071,36 @@ async def _compute_preview(
                 AND op.voided_at IS NULL
           )
         GROUP BY o.payment_method
+
+        UNION ALL
+
+        -- Tip settlement on order header (single-pay and split completion)
+        SELECT
+            pmg.slug AS method,
+            COALESCE(SUM(o.tip_amount + o.tip_tax_amount), 0) AS total
+        FROM orders o
+        JOIN payment_methods pm ON pm.id = o.payment_method_id
+        JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+        WHERE o.tenant_id = $1
+          {status_filter}
+          {date_filter}
+          AND o.payment_method_id IS NOT NULL
+          AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
+        GROUP BY pmg.slug
+
+        UNION ALL
+
+        SELECT
+            o.payment_method AS method,
+            COALESCE(SUM(o.tip_amount + o.tip_tax_amount), 0) AS total
+        FROM orders o
+        WHERE o.tenant_id = $1
+          {status_filter}
+          {date_filter}
+          AND o.payment_method_id IS NULL
+          AND o.payment_method IS NOT NULL
+          AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
+        GROUP BY o.payment_method
         """,
         tenant_id, *date_params,
     )
@@ -1153,8 +1183,10 @@ async def _compute_breakdown_rows(
       - Legacy orders (payment_method_id IS NULL): group by payment_method VARCHAR slug
 
     Returns list of {group_slug, method_name, total}, excluding zero-total rows.
-    Orders without an active payment method stay visible as
-    "Sin método registrado" so the breakdown can reconcile with totalSales.
+    Product amounts come from order_payments or orders.total_amount; tips are
+    attributed to each order's closing payment method (order header, not split
+    payment rows). Orders without an active payment method stay visible as
+    "Sin método registrado" so the breakdown can reconcile with totalCharged.
     When period_start_time / period_end_time are supplied, uses exact TIMESTAMPTZ comparison.
     """
     status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
@@ -1241,6 +1273,54 @@ async def _compute_breakdown_rows(
               WHERE op.order_id = o.id
                 AND op.voided_at IS NULL
           )
+
+        UNION ALL
+
+        -- Tip settlement on order closing method (FK; covers split completion)
+        SELECT
+            pmg.slug        AS group_slug,
+            pm.name         AS method_name,
+            COALESCE(SUM(o.tip_amount + o.tip_tax_amount), 0) AS total
+        FROM orders o
+        JOIN payment_methods pm ON pm.id = o.payment_method_id
+        JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+        WHERE o.tenant_id = $1
+          {status_filter}
+          {date_filter}
+          AND o.payment_method_id IS NOT NULL
+          AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
+        GROUP BY pmg.slug, pm.name
+
+        UNION ALL
+
+        -- Tip settlement for legacy VARCHAR method
+        SELECT
+            o.payment_method AS group_slug,
+            o.payment_method AS method_name,
+            COALESCE(SUM(o.tip_amount + o.tip_tax_amount), 0) AS total
+        FROM orders o
+        WHERE o.tenant_id = $1
+          {status_filter}
+          {date_filter}
+          AND o.payment_method_id IS NULL
+          AND o.payment_method IS NOT NULL
+          AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
+        GROUP BY o.payment_method
+
+        UNION ALL
+
+        -- Tip settlement with no payment method tracked
+        SELECT
+            'untracked'                AS group_slug,
+            'Sin método registrado'    AS method_name,
+            COALESCE(SUM(o.tip_amount + o.tip_tax_amount), 0) AS total
+        FROM orders o
+        WHERE o.tenant_id = $1
+          {status_filter}
+          {date_filter}
+          AND o.payment_method_id IS NULL
+          AND o.payment_method IS NULL
+          AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
         """,
         tenant_id, *date_params,
     )
