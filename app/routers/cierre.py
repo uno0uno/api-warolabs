@@ -9,7 +9,7 @@ from app.core.permissions import Module, require_module
 from typing import Optional
 from uuid import UUID
 from datetime import date, datetime
-from app.models.cierre import CierreCreate, MonthlyPeriodClose, OpenShiftCreate
+from app.models.cierre import CierreCashSettingsUpdate, CierreCreate, MonthlyPeriodClose, OpenShiftCreate
 from app.services import cierre_service
 
 router = APIRouter(prefix="/cierre", tags=["cierre"])
@@ -161,6 +161,18 @@ async def open_cierre_shift(request: Request, body: OpenShiftCreate):
     Issue: warocol.com#920
     """
     return await cierre_service.open_shift(request, body)
+
+
+@router.get("/cash-settings", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def get_cierre_cash_settings(request: Request):
+    """Tenant default opening cash float for arqueo (#922)."""
+    return await cierre_service.get_cash_settings(request)
+
+
+@router.patch("/cash-settings", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def patch_cierre_cash_settings(request: Request, body: CierreCashSettingsUpdate):
+    """Update tenant default opening cash float (#922)."""
+    return await cierre_service.update_cash_settings(request, body)
 
 
 @router.get("/shift-status", dependencies=[Depends(require_module(Module.FINANZAS))])

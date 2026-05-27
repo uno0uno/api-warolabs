@@ -30,7 +30,15 @@ class CierreCreate(BaseModel):
     period_end_time: Optional[datetime] = Field(None, alias='periodEndTime')
     shift_template_id: Optional[UUID] = Field(None, alias='shiftTemplateId')
     cash_counted: float = Field(alias='cashCounted')
+    cash_left_in_drawer: Optional[float] = Field(None, alias='cashLeftInDrawer', ge=0)
     notes: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class CierreCashSettingsUpdate(BaseModel):
+    default_opening_cash: Optional[float] = Field(None, alias='defaultOpeningCash', ge=0)
 
     class Config:
         populate_by_name = True
@@ -71,6 +79,7 @@ class ClosingSummaryOut(BaseModel):
     total_credit: float = Field(alias='totalCredit')
     gastos_efectivo: float = Field(alias='gastosEfectivo')
     opening_cash: float = Field(0, alias='openingCash')
+    cash_left_in_drawer: Optional[float] = Field(None, alias='cashLeftInDrawer')
     cash_expected: float = Field(alias='cashExpected')
     cash_counted: float = Field(alias='cashCounted')
     cash_difference: float = Field(alias='cashDifference')
