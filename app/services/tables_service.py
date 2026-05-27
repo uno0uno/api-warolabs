@@ -15,7 +15,12 @@ from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError
-from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
+from app.services.cierre_service import (
+    _get_tenant_tax_config,
+    _post_order_gl_entry,
+    _post_order_cogs_gl_entry,
+    _post_deferred_order_tip_gl,
+)
 from app.services.accounting_service import void_order_journal_entry_in_txn
 from app.services.pos_cart_service import (
     _capture_order_item_ingredients,
@@ -983,7 +988,20 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             session_row["id"],
                         )
                         tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        first_order_id = await conn.fetchval(
+                            """
+                            SELECT id FROM orders
+                             WHERE table_session_id = $1 AND status = 'completed'
+                             ORDER BY created_at LIMIT 1
+                            """,
+                            session_row["id"],
+                        )
                         for ord_row in completed_orders:
+                            ord_tip = Decimal("0")
+                            ord_tip_tax = Decimal("0")
+                            if not split_mode and first_order_id and ord_row["id"] == first_order_id:
+                                ord_tip = Decimal(str(tip_amount or 0))
+                                ord_tip_tax = Decimal(str(_mesa_tip_tax_amount))
                             await _post_order_gl_entry(
                                 conn=conn,
                                 tenant_id=tenant_id,
@@ -994,6 +1012,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 payment_method_id=ord_row["payment_method_id"],
                                 tax_config=tax_config,
                                 order_number=int(ord_row["order_number"]),
+                                tip_amount=ord_tip,
+                                tip_tax_amount=ord_tip_tax,
                             )
                             await _post_order_cogs_gl_entry(
                                 conn=conn,
@@ -1053,6 +1073,49 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 )
                                 if i == 0:
                                     _split_first_payment_id_mesa = str(inserted_row["id"])
+
+                        # Split tip GL when first payment completes the session (#912)
+                        first_tip_order = await conn.fetchrow(
+                            """
+                            SELECT id, order_number,
+                                   COALESCE(tip_amount, 0) AS tip_amount,
+                                   COALESCE(tip_tax_amount, 0) AS tip_tax_amount
+                            FROM orders
+                            WHERE table_session_id = $1 AND status = 'completed'
+                            ORDER BY created_at LIMIT 1
+                            """,
+                            session_row["id"],
+                        )
+                        if first_tip_order and float(first_tip_order["tip_amount"]) > 0:
+                            split_order_ids = [r["id"] for r in order_rows]
+                            split_paid_row = await conn.fetchrow(
+                                "SELECT COALESCE(SUM(amount), 0) AS paid FROM order_payments WHERE order_id = ANY($1) AND voided_at IS NULL",
+                                split_order_ids,
+                            )
+                            split_paid_total = float(split_paid_row["paid"])
+                            split_amount_due = split_settlement_amount_due(
+                                session_total,
+                                float(first_tip_order["tip_amount"]),
+                                float(first_tip_order["tip_tax_amount"]),
+                            )
+                            if split_amount_due - split_paid_total <= 0.01:
+                                try:
+                                    split_tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                                    await _post_deferred_order_tip_gl(
+                                        conn=conn,
+                                        tenant_id=tenant_id,
+                                        order_id=first_tip_order["id"],
+                                        tip_amount=Decimal(str(first_tip_order["tip_amount"])),
+                                        tip_tax_amount=Decimal(str(first_tip_order["tip_tax_amount"])),
+                                        payment_method=payment_method or "digital",
+                                        payment_method_id=payment_method_id,
+                                        tax_config=split_tax_config,
+                                        order_number=int(first_tip_order["order_number"]),
+                                    )
+                                except Exception as _defer_tip_exc:
+                                    logger.error(
+                                        f"Deferred tip GL failed for mesa session {session_row['id']}: {_defer_tip_exc}"
+                                    )
 
                 else:
                     completed_count = 0
@@ -1414,6 +1477,28 @@ async def add_session_payment(
                         "UPDATE orders SET payment_status = 'paid' WHERE table_session_id = $1 AND status = 'completed' AND payment_status = 'partial'",
                         session_row["id"],
                     )
+                    if resolved_tip_amount > 0 and session_tip_row:
+                        try:
+                            tip_order_meta = await conn.fetchrow(
+                                "SELECT order_number FROM orders WHERE id = $1",
+                                session_tip_row["id"],
+                            )
+                            tip_tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                            await _post_deferred_order_tip_gl(
+                                conn=conn,
+                                tenant_id=tenant_id,
+                                order_id=session_tip_row["id"],
+                                tip_amount=Decimal(str(resolved_tip_amount)),
+                                tip_tax_amount=Decimal(str(resolved_tip_tax_amount)),
+                                payment_method=payment_method,
+                                payment_method_id=payment_method_id,
+                                tax_config=tip_tax_config,
+                                order_number=int(tip_order_meta["order_number"]) if tip_order_meta else None,
+                            )
+                        except Exception as _defer_tip_exc:
+                            logger.error(
+                                f"Deferred tip GL failed for mesa table {table_id}: {_defer_tip_exc}"
+                            )
                     # Close the session
                     await conn.execute(
                         "UPDATE table_sessions SET closed_at = now() WHERE id = $1",

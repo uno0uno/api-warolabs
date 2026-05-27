@@ -37,6 +37,56 @@ COGS_CODE       = "6135"   # Costo de ventas
 INVENTARIO_CODE = "1435"   # Inventarios — materia prima y suministros
 
 
+def _tip_gl_amounts(
+    tip_amount: Decimal,
+    tip_tax_amount: Decimal,
+    tax_config: Dict[str, Any],
+) -> tuple:
+    """
+    Return (settlement_debit, net_tip_revenue, tip_tax_credit) for GL posting.
+    Mirrors additive vs extractive tip tax from tenant_tax_config.
+    """
+    tip_amt = Decimal(str(tip_amount or 0))
+    tip_tax = Decimal(str(tip_tax_amount or 0))
+    if tip_amt <= 0 and tip_tax <= 0:
+        return Decimal("0"), Decimal("0"), Decimal("0")
+
+    tip_tax_additive = False
+    if tip_tax > 0:
+        if tax_config.get("inc_applicable"):
+            tip_tax_additive = not tax_config.get("inc_included_in_price", True)
+        elif tax_config.get("iva_applicable"):
+            tip_tax_additive = not tax_config.get("iva_included_in_price", False)
+
+    if tip_tax_additive:
+        settlement = tip_amt + tip_tax
+        net_tip_revenue = tip_amt
+    else:
+        settlement = tip_amt
+        net_tip_revenue = tip_amt - tip_tax
+    return settlement, net_tip_revenue, tip_tax
+
+
+async def _resolve_standard_tax_account_id(
+    conn,
+    tenant_id: UUID,
+    tax_config: Dict[str, Any],
+) -> Optional[UUID]:
+    """Resolve INC/IVA credit account for standard (non-liquor) tax, including tip tax."""
+    tax_code = None
+    if tax_config.get("inc_applicable"):
+        tax_code = str(tax_config["inc_gl_account_code"])
+    elif tax_config.get("iva_applicable"):
+        tax_code = str(tax_config["iva_gl_account_code"])
+    if not tax_code:
+        return None
+    tax_row = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, tax_code,
+    )
+    return tax_row["id"] if tax_row else None
+
+
 async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
     """
     Return tax config for the tenant.  Falls back to all-disabled defaults
@@ -235,6 +285,8 @@ async def _post_order_gl_entry(
     payment_method_id: Optional[UUID],
     tax_config: Dict[str, Any],
     order_number: Optional[int] = None,
+    tip_amount: Decimal = Decimal("0"),
+    tip_tax_amount: Decimal = Decimal("0"),
 ) -> None:
     """
     Post a double-entry GL journal entry for a single completed order (POS or domicilio).
@@ -243,12 +295,15 @@ async def _post_order_gl_entry(
     source_id     = order_id
 
     DR  [payment account]    debit_total   (1105 Caja / 1110 Bancos / 1305 Clientes)
-    CR  4135 Ingresos        net_revenue
-    CR  2495/2408 Impuesto   tax_amount    (only if tax enabled and account resolved)
+    CR  4175 Ingresos        net_revenue (+ net tip when included at checkout)
+    CR  2495/2408 Impuesto   tax_amount    (product + tip tax when applicable)
 
     Tax modes (per tenant_tax_config):
       inc_included_in_price=True  (default): price already includes tax — extract formula
       inc_included_in_price=False           : tax added on top — additive formula
+
+    Tips: pass tip_amount/tip_tax_amount for single-payment checkout. Split flows defer
+    tip to _post_deferred_order_tip_gl when the last payment completes (#912).
 
     Idempotent: skips if an 'orden' entry already exists for this order_id.
     Caller MUST wrap in try/except — GL failure must never roll back the order.
@@ -396,6 +451,16 @@ async def _post_order_gl_entry(
     net_revenue    = debit_total - standard_tax - liquor_tax
     # Invariant: DR debit_total = CR net_revenue + CR standard_tax + CR liquor_tax ✓
 
+    tip_settlement, tip_net_revenue, tip_tax_credit = _tip_gl_amounts(
+        tip_amount, tip_tax_amount, tax_config,
+    )
+    tip_tax_acct_id = None
+    if tip_tax_credit > 0:
+        tip_tax_acct_id = await _resolve_standard_tax_account_id(conn, tenant_id, tax_config)
+    if tip_settlement > 0:
+        debit_total += tip_settlement
+        net_revenue += tip_net_revenue
+
     dt = float(debit_total)
     description = f"#{order_number}" if order_number else f"Venta {order_date.isoformat()} — orden {order_id}"
 
@@ -451,11 +516,158 @@ async def _post_order_gl_entry(
                 f"{description} — IVA licores",
                 line_order,
             )
+            line_order += 1
+        if tip_tax_credit > 0 and tip_tax_acct_id:
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, $4, $5)""",
+                entry_id, tip_tax_acct_id, float(tip_tax_credit),
+                f"{description} — propina INC/IVA",
+                line_order,
+            )
 
     logger.info(
         f"[GL] ✅ Posted order entry {entry_id} for order {order_id} "
         f"(total={dt}, net={float(net_revenue)}, "
-        f"inc={float(standard_tax)}, liquor={float(liquor_tax)})"
+        f"inc={float(standard_tax)}, liquor={float(liquor_tax)}, "
+        f"tip={float(tip_settlement)})"
+    )
+
+
+async def _post_deferred_order_tip_gl(
+    conn,
+    tenant_id: UUID,
+    order_id: UUID,
+    tip_amount: Decimal,
+    tip_tax_amount: Decimal,
+    payment_method: str,
+    payment_method_id: Optional[UUID],
+    tax_config: Dict[str, Any],
+    order_number: Optional[int] = None,
+) -> None:
+    """
+    Append tip lines to an existing orden GL entry when split payment completes (#912).
+
+    Single-payment tips are included in _post_order_gl_entry at checkout. Split POS/mesa
+    defer tip until is_complete so follow-up payments can set or change the tip (#910).
+
+    Idempotent: skips when a propina journal line already exists for this order.
+    """
+    tip_settlement, tip_net_revenue, tip_tax_credit = _tip_gl_amounts(
+        tip_amount, tip_tax_amount, tax_config,
+    )
+    if tip_settlement <= 0:
+        return
+
+    existing_tip = await conn.fetchval(
+        """SELECT 1 FROM tenant_journal_lines jl
+           JOIN tenant_journal_entries je ON je.id = jl.journal_entry_id
+           WHERE je.source_module = 'orden' AND je.source_id = $1 AND je.tenant_id = $2
+             AND je.status = 'posted'
+             AND jl.description ILIKE '%propina%'""",
+        order_id, tenant_id,
+    )
+    if existing_tip:
+        logger.info(f"[GL] Order {order_id}: tip already in journal — skip (idempotent)")
+        return
+
+    entry_row = await conn.fetchrow(
+        """SELECT id, total_debit, total_credit, description
+           FROM tenant_journal_entries
+           WHERE source_module = 'orden' AND source_id = $1 AND tenant_id = $2
+             AND status = 'posted'
+           ORDER BY created_at DESC
+           LIMIT 1""",
+        order_id, tenant_id,
+    )
+    if not entry_row:
+        logger.warning(
+            f"[GL] Order {order_id}: no orden entry for deferred tip — skip"
+        )
+        return
+
+    debit_code = None
+    if payment_method_id:
+        pm_row = await conn.fetchrow(
+            """SELECT COALESCE(pm.gl_account_code, pmg.gl_account_code) AS code
+               FROM payment_methods pm
+               JOIN payment_method_groups pmg ON pm.group_id = pmg.id
+               WHERE pm.id = $1""",
+            payment_method_id,
+        )
+        if pm_row and pm_row["code"]:
+            debit_code = pm_row["code"]
+    if not debit_code:
+        debit_code = _SLUG_DEBIT_CODE.get(payment_method or "", "1105")
+
+    debit_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, debit_code,
+    )
+    ingresos_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id, INGRESOS_CODE,
+    )
+    if not debit_acct or not ingresos_acct:
+        logger.warning(
+            f"[GL] Deferred tip for order {order_id}: missing debit/ingresos account — skip"
+        )
+        return
+
+    tip_tax_acct_id = None
+    if tip_tax_credit > 0:
+        tip_tax_acct_id = await _resolve_standard_tax_account_id(conn, tenant_id, tax_config)
+
+    entry_id = entry_row["id"]
+    base_description = entry_row["description"] or (
+        f"#{order_number}" if order_number else f"orden {order_id}"
+    )
+    tip_description = f"{base_description} — propina"
+
+    max_line = await conn.fetchval(
+        "SELECT COALESCE(MAX(line_order), -1) FROM tenant_journal_lines WHERE journal_entry_id = $1",
+        entry_id,
+    )
+    line_order = int(max_line) + 1
+    settlement_f = float(tip_settlement)
+    new_debit = float(entry_row["total_debit"]) + settlement_f
+    new_credit = float(entry_row["total_credit"]) + settlement_f
+
+    async with conn.transaction():
+        await conn.execute(
+            """UPDATE tenant_journal_entries
+               SET total_debit = $2, total_credit = $3
+               WHERE id = $1""",
+            entry_id, new_debit, new_credit,
+        )
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, $3, 0, $4, $5)""",
+            entry_id, debit_acct["id"], settlement_f, tip_description, line_order,
+        )
+        line_order += 1
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+               VALUES ($1, $2, 0, $3, $4, $5)""",
+            entry_id, ingresos_acct["id"], float(tip_net_revenue),
+            f"{tip_description} — ingreso neto", line_order,
+        )
+        if tip_tax_credit > 0 and tip_tax_acct_id:
+            line_order += 1
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, $4, $5)""",
+                entry_id, tip_tax_acct_id, float(tip_tax_credit),
+                f"{tip_description} — INC/IVA", line_order,
+            )
+
+    logger.info(
+        f"[GL] ✅ Appended deferred tip to entry {entry_id} for order {order_id} "
+        f"(tip_settlement={settlement_f})"
     )
 
 
