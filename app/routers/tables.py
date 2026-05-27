@@ -20,11 +20,21 @@ router = APIRouter(tags=["Tables"])
 class CreateTableRequest(BaseModel):
     name: str = Field(..., max_length=50, description="e.g. 'Mesa 1', 'Barra 2'")
     capacity: Optional[int] = Field(None, gt=0)
+    code: Optional[str] = Field(
+        None,
+        max_length=4,
+        description="Short POS code (1–4 alphanumeric). Inferred from name when omitted.",
+    )
 
 
 class UpdateTableRequest(BaseModel):
     name: Optional[str] = Field(None, max_length=50)
     capacity: Optional[int] = Field(None, gt=0)
+    code: Optional[str] = Field(
+        None,
+        max_length=4,
+        description="Short POS code. Send empty string to re-infer from name.",
+    )
 
 
 class TabModifier(BaseModel):
@@ -64,7 +74,7 @@ async def create_table(request: Request, body: CreateTableRequest):
     """
     Create a new table for the tenant.
     """
-    return await tables_service.create_table(request, body.name, body.capacity)
+    return await tables_service.create_table(request, body.name, body.capacity, body.code)
 
 
 @router.put("/{table_id}", dependencies=[Depends(require_module(Module.POS))])
@@ -73,7 +83,7 @@ async def update_table(request: Request, table_id: UUID, body: UpdateTableReques
     Update a table's name and/or capacity.
     Status is NOT editable here — use session endpoints to change status.
     """
-    return await tables_service.update_table(request, table_id, body.name, body.capacity)
+    return await tables_service.update_table(request, table_id, body.model_dump(exclude_unset=True))
 
 
 @router.patch("/{table_id}/activate", dependencies=[Depends(require_module(Module.POS))])
