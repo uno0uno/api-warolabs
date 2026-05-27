@@ -2,10 +2,23 @@
 Cierre Contable — Pydantic models
 Issue: https://github.com/uno0uno/warocol.com/issues/311
 """
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from pydantic import BaseModel, Field
 from datetime import date, datetime
 from uuid import UUID
+
+
+class OpenShiftCreate(BaseModel):
+    period_start: date = Field(alias='periodStart')
+    period_end: date = Field(alias='periodEnd')
+    period_start_time: Optional[datetime] = Field(None, alias='periodStartTime')
+    period_end_time: Optional[datetime] = Field(None, alias='periodEndTime')
+    shift_template_id: Optional[UUID] = Field(None, alias='shiftTemplateId')
+    opening_cash: float = Field(alias='openingCash', ge=0)
+    opening_breakdown: Optional[Dict[str, Any]] = Field(None, alias='openingBreakdown')
+
+    class Config:
+        populate_by_name = True
 
 
 class CierreCreate(BaseModel):
@@ -31,6 +44,7 @@ class CierrePreviewData(BaseModel):
     total_digital: float = Field(alias='totalDigital')
     total_credit: float = Field(alias='totalCredit')
     gastos_efectivo: float = Field(alias='gastosEfectivo')
+    opening_cash: float = Field(0, alias='openingCash')
     cash_expected: float = Field(alias='cashExpected')
     open_tables_count: int = Field(alias='openTablesCount')
 
@@ -56,6 +70,7 @@ class ClosingSummaryOut(BaseModel):
     total_digital: float = Field(alias='totalDigital')
     total_credit: float = Field(alias='totalCredit')
     gastos_efectivo: float = Field(alias='gastosEfectivo')
+    opening_cash: float = Field(0, alias='openingCash')
     cash_expected: float = Field(alias='cashExpected')
     cash_counted: float = Field(alias='cashCounted')
     cash_difference: float = Field(alias='cashDifference')

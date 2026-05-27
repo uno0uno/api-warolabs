@@ -9,7 +9,7 @@ from app.core.permissions import Module, require_module
 from typing import Optional
 from uuid import UUID
 from datetime import date, datetime
-from app.models.cierre import CierreCreate, MonthlyPeriodClose
+from app.models.cierre import CierreCreate, MonthlyPeriodClose, OpenShiftCreate
 from app.services import cierre_service
 
 router = APIRouter(prefix="/cierre", tags=["cierre"])
@@ -151,6 +151,35 @@ async def get_cierre_shift_window(
 
     return await shift_window_service.get_template_window(
         request, shift_template_id, anchor_date
+    )
+
+
+@router.post("/open-shift", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def open_cierre_shift(request: Request, body: OpenShiftCreate):
+    """
+    Open an operational shift with opening cash float (fondo de caja).
+    Issue: warocol.com#920
+    """
+    return await cierre_service.open_shift(request, body)
+
+
+@router.get("/shift-status", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def get_cierre_shift_status(
+    request: Request,
+    period_start: date = Query(..., alias="period_start"),
+    period_end: date = Query(..., alias="period_end"),
+    period_start_time: Optional[datetime] = Query(None, alias="period_start_time"),
+    period_end_time: Optional[datetime] = Query(None, alias="period_end_time"),
+    shift_template_id: Optional[UUID] = Query(None, alias="shift_template_id"),
+):
+    """Return open shift for the resolved window, or status none. Issue: #920"""
+    return await cierre_service.get_shift_status(
+        request,
+        period_start,
+        period_end,
+        period_start_time=period_start_time,
+        period_end_time=period_end_time,
+        shift_template_id=shift_template_id,
     )
 
 

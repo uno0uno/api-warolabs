@@ -5,6 +5,7 @@ Preview (Cierre X), create close (Cierre Z), list, and detail.
 Issue: https://github.com/uno0uno/warocol.com/issues/311
 """
 import logging
+import json
 from decimal import Decimal
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -14,7 +15,7 @@ from fastapi import Request, Response
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
-from app.models.cierre import CierreCreate
+from app.models.cierre import CierreCreate, OpenShiftCreate
 from app.services.tip_tax_service import tip_settlement_total
 
 logger = logging.getLogger(__name__)
@@ -944,6 +945,131 @@ def _build_open_tables_filter(
     return sql, [period_start, period_end]
 
 
+# ---------------------------------------------------------------------------
+# Shift opening helpers (#920)
+# ---------------------------------------------------------------------------
+
+def _effective_period_bounds(
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime],
+    period_end_time: Optional[datetime],
+) -> tuple:
+    """Calendar day → Bogotá 00:00–23:59:59 unless exact timestamps supplied."""
+    from zoneinfo import ZoneInfo
+    bog = ZoneInfo("America/Bogota")
+    if period_start_time and period_end_time:
+        return period_start_time, period_end_time
+    eff_start = datetime(
+        period_start.year, period_start.month, period_start.day,
+        0, 0, 0, tzinfo=bog,
+    )
+    eff_end = datetime(
+        period_end.year, period_end.month, period_end.day,
+        23, 59, 59, tzinfo=bog,
+    )
+    return eff_start, eff_end
+
+
+def _requires_open_shift(
+    shift_template_id: Optional[UUID],
+    period_start_time: Optional[datetime],
+    period_end_time: Optional[datetime],
+) -> bool:
+    """Template and custom timestamp windows require a declared fondo de caja."""
+    if shift_template_id:
+        return True
+    if period_start_time and period_end_time:
+        return True
+    return False
+
+
+_PERIOD_WINDOW_OVERLAP_SQL = """
+    AND NOT (
+        COALESCE(
+            period_end_time,
+            (period_end::timestamp + INTERVAL '23:59:59') AT TIME ZONE 'America/Bogota'
+        ) <= $2
+        OR
+        COALESCE(
+            period_start_time,
+            period_start::timestamp AT TIME ZONE 'America/Bogota'
+        ) >= $3
+    )
+"""
+
+
+async def _find_overlapping_period_id(
+    conn,
+    tenant_id: UUID,
+    table: str,
+    eff_start: datetime,
+    eff_end: datetime,
+    *,
+    open_only: bool = False,
+) -> Optional[UUID]:
+    if table == "accounting_period":
+        extra = "AND deleted_at IS NULL"
+    elif table == "cash_shift_openings":
+        extra = "AND status = 'open'" if open_only else ""
+    else:
+        raise ValueError(f"Unsupported overlap table: {table}")
+
+    row = await conn.fetchrow(
+        f"""
+        SELECT id FROM {table}
+        WHERE tenant_id = $1
+          {extra}
+          {_PERIOD_WINDOW_OVERLAP_SQL}
+        LIMIT 1
+        """,
+        tenant_id, eff_start, eff_end,
+    )
+    return row["id"] if row else None
+
+
+async def _fetch_open_shift_for_window(
+    conn,
+    tenant_id: UUID,
+    eff_start: datetime,
+    eff_end: datetime,
+):
+    return await conn.fetchrow(
+        f"""
+        SELECT
+            id, opening_cash, opening_breakdown, opened_at, opened_by_user_id,
+            shift_template_id, period_start, period_end,
+            period_start_time, period_end_time
+        FROM cash_shift_openings
+        WHERE tenant_id = $1
+          AND status = 'open'
+          {_PERIOD_WINDOW_OVERLAP_SQL}
+        ORDER BY opened_at DESC
+        LIMIT 1
+        """,
+        tenant_id, eff_start, eff_end,
+    )
+
+
+def _open_shift_row_to_dict(row) -> dict:
+    breakdown = row["opening_breakdown"]
+    if isinstance(breakdown, str):
+        breakdown = json.loads(breakdown)
+    return {
+        "id":                   str(row["id"]),
+        "status":               "open",
+        "openingCash":          float(row["opening_cash"]),
+        "openingBreakdown":     breakdown,
+        "periodStart":          row["period_start"].isoformat(),
+        "periodEnd":            row["period_end"].isoformat(),
+        "periodStartTime":      row["period_start_time"].isoformat() if row["period_start_time"] else None,
+        "periodEndTime":        row["period_end_time"].isoformat() if row["period_end_time"] else None,
+        "shiftTemplateId":      str(row["shift_template_id"]) if row["shift_template_id"] else None,
+        "openedAt":             row["opened_at"].isoformat(),
+        "openedByUserId":       str(row["opened_by_user_id"]) if row["opened_by_user_id"] else None,
+    }
+
+
 async def _compute_preview(
     conn,
     tenant_id: UUID,
@@ -952,6 +1078,7 @@ async def _compute_preview(
     completed_only: bool = False,
     period_start_time: Optional[datetime] = None,
     period_end_time: Optional[datetime] = None,
+    opening_cash: float = 0.0,
 ) -> dict:
     """
     Runs the three aggregation queries (sales, gastos, open tables) and returns
@@ -1145,7 +1272,7 @@ async def _compute_preview(
     total_charged = float(sales_row["total_sales"]) + tip_settlement_total(
         total_tips, total_tip_tax,
     )
-    cash_expected = total_cash + cash_tips - gastos_efectivo
+    cash_expected = float(opening_cash) + total_cash + cash_tips - gastos_efectivo
 
     return {
         "totalSales":       float(sales_row["total_sales"]),
@@ -1154,6 +1281,7 @@ async def _compute_preview(
         "totalTipTax":      total_tip_tax,
         "totalCharged":     total_charged,
         "cashTips":         cash_tips,
+        "openingCash":      float(opening_cash),
         "totalCash":        total_cash,
         "totalCard":        method_totals.get("card", 0.0),
         "totalDigital":     method_totals.get("digital", 0.0),
@@ -1447,6 +1575,131 @@ async def list_active_shift_templates(request: Request) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# POST /cierre/open-shift + GET /cierre/shift-status (#920)
+# ---------------------------------------------------------------------------
+
+async def open_shift(request: Request, body: OpenShiftCreate) -> dict:
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=True) as conn:
+            resolved = await resolve_cierre_period_fields(
+                conn,
+                tenant_id,
+                period_start=body.period_start,
+                period_end=body.period_end,
+                period_start_time=body.period_start_time,
+                period_end_time=body.period_end_time,
+                shift_template_id=body.shift_template_id,
+            )
+            eff_start, eff_end = _effective_period_bounds(
+                resolved.period_start,
+                resolved.period_end,
+                resolved.period_start_time,
+                resolved.period_end_time,
+            )
+
+            if await _find_overlapping_period_id(
+                conn, tenant_id, "accounting_period", eff_start, eff_end,
+            ):
+                raise APIError(
+                    "Ya existe un cierre cerrado para este período o uno que se superpone.",
+                    status_code=409,
+                )
+
+            if await _find_overlapping_period_id(
+                conn, tenant_id, "cash_shift_openings", eff_start, eff_end, open_only=True,
+            ):
+                raise APIError(
+                    "Ya hay un turno abierto para este período o uno que se superpone.",
+                    status_code=409,
+                )
+
+            breakdown_json = (
+                json.dumps(body.opening_breakdown)
+                if body.opening_breakdown is not None
+                else None
+            )
+            row = await conn.fetchrow(
+                """
+                INSERT INTO cash_shift_openings (
+                    tenant_id, shift_template_id,
+                    period_start, period_end, period_start_time, period_end_time,
+                    opening_cash, opening_breakdown, opened_by_user_id
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+                RETURNING
+                    id, opening_cash, opening_breakdown, opened_at, opened_by_user_id,
+                    shift_template_id, period_start, period_end,
+                    period_start_time, period_end_time
+                """,
+                tenant_id,
+                resolved.shift_template_id,
+                resolved.period_start,
+                resolved.period_end,
+                resolved.period_start_time,
+                resolved.period_end_time,
+                body.opening_cash,
+                breakdown_json,
+                session_context.user_id,
+            )
+
+        return {"success": True, "data": _open_shift_row_to_dict(row)}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in open_shift: {exc}")
+        raise APIError(f"Error in open_shift: {exc}", status_code=500)
+
+
+async def get_shift_status(
+    request: Request,
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime] = None,
+    period_end_time: Optional[datetime] = None,
+    shift_template_id: Optional[UUID] = None,
+) -> dict:
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=False) as conn:
+            resolved = await resolve_cierre_period_fields(
+                conn,
+                tenant_id,
+                period_start=period_start,
+                period_end=period_end,
+                period_start_time=period_start_time,
+                period_end_time=period_end_time,
+                shift_template_id=shift_template_id,
+            )
+            eff_start, eff_end = _effective_period_bounds(
+                resolved.period_start,
+                resolved.period_end,
+                resolved.period_start_time,
+                resolved.period_end_time,
+            )
+            row = await _fetch_open_shift_for_window(conn, tenant_id, eff_start, eff_end)
+
+        if not row:
+            return {"success": True, "data": {"status": "none"}}
+
+        return {"success": True, "data": _open_shift_row_to_dict(row)}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in get_shift_status: {exc}")
+        raise APIError(f"Error in get_shift_status: {exc}", status_code=500)
+
+
+# ---------------------------------------------------------------------------
 # GET /cierre/preview
 # ---------------------------------------------------------------------------
 
@@ -1475,12 +1728,23 @@ async def get_cierre_preview(
                 period_end_time=period_end_time,
                 shift_template_id=shift_template_id,
             )
+            eff_start, eff_end = _effective_period_bounds(
+                resolved.period_start,
+                resolved.period_end,
+                resolved.period_start_time,
+                resolved.period_end_time,
+            )
+            open_shift = await _fetch_open_shift_for_window(
+                conn, tenant_id, eff_start, eff_end,
+            )
+            opening_cash = float(open_shift["opening_cash"]) if open_shift else 0.0
             preview = await _compute_preview(
                 conn, tenant_id,
                 resolved.period_start, resolved.period_end,
                 completed_only=completed_only,
                 period_start_time=resolved.period_start_time,
                 period_end_time=resolved.period_end_time,
+                opening_cash=opening_cash,
             )
             breakdown = await _compute_breakdown_rows(
                 conn, tenant_id,
@@ -1534,43 +1798,13 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                     status_code=422,
                 )
 
-            # 1. Unified overlap check using effective time windows.
-            #    Date-only cierres (single day) are treated as 00:00–23:59:59 Bogotá.
-            #    Timestamped cierres use their exact TIMESTAMPTZ values.
-            #    This allows multiple non-overlapping shifts on the same day.
-            from zoneinfo import ZoneInfo
-            bog = ZoneInfo("America/Bogota")
-            if period_start_time and period_end_time:
-                eff_start = period_start_time
-                eff_end   = period_end_time
-            else:
-                eff_start = datetime(
-                    period_start.year, period_start.month, period_start.day,
-                    0, 0, 0, tzinfo=bog,
-                )
-                eff_end = datetime(
-                    period_end.year, period_end.month, period_end.day,
-                    23, 59, 59, tzinfo=bog,
-                )
+            eff_start, eff_end = _effective_period_bounds(
+                period_start, period_end, period_start_time, period_end_time,
+            )
 
-            overlap = await conn.fetchrow(
-                """
-                SELECT id FROM accounting_period
-                WHERE tenant_id = $1
-                  AND deleted_at IS NULL
-                  AND NOT (
-                    COALESCE(
-                        period_end_time,
-                        (period_end::timestamp + INTERVAL '23:59:59') AT TIME ZONE 'America/Bogota'
-                    ) <= $2
-                    OR
-                    COALESCE(
-                        period_start_time,
-                        period_start::timestamp AT TIME ZONE 'America/Bogota'
-                    ) >= $3
-                  )
-                """,
-                tenant_id, eff_start, eff_end,
+            # 1. Unified overlap check using effective time windows.
+            overlap = await _find_overlapping_period_id(
+                conn, tenant_id, "accounting_period", eff_start, eff_end,
             )
             if overlap:
                 raise APIError(
@@ -1578,12 +1812,24 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                     status_code=409,
                 )
 
+            open_shift = await _fetch_open_shift_for_window(
+                conn, tenant_id, eff_start, eff_end,
+            )
+            if _requires_open_shift(shift_template_id, period_start_time, period_end_time):
+                if not open_shift:
+                    raise APIError(
+                        "Debes abrir el turno con el fondo de caja antes de registrar el cierre.",
+                        status_code=422,
+                    )
+            opening_cash = float(open_shift["opening_cash"]) if open_shift else 0.0
+
             # 2. Preview aggregation (completed only — cash already received)
             preview = await _compute_preview(
                 conn, tenant_id, period_start, period_end,
                 completed_only=True,
                 period_start_time=period_start_time,
                 period_end_time=period_end_time,
+                opening_cash=opening_cash,
             )
 
             # 3. Open tables check — skip for past periods (mesas actuales no pertenecen al período)
@@ -1621,15 +1867,15 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                     total_sales, items_sold,
                     total_tips, total_tip_tax, cash_tips,
                     total_cash, total_card, total_digital, total_credit,
-                    gastos_efectivo, cash_expected, cash_counted, cash_difference,
+                    gastos_efectivo, opening_cash, cash_expected, cash_counted, cash_difference,
                     notes
                 ) VALUES (
                     $1, $2,
                     $3, $4,
                     $5, $6, $7,
                     $8, $9, $10, $11,
-                    $12, $13, $14, $15,
-                    $16
+                    $12, $13, $14, $15, $16,
+                    $17
                 )
                 RETURNING id, created_at
                 """,
@@ -1638,10 +1884,22 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 preview["totalTips"], preview["totalTipTax"], preview["cashTips"],
                 preview["totalCash"], preview["totalCard"],
                 preview["totalDigital"], preview["totalCredit"],
-                preview["gastosEfectivo"], preview["cashExpected"],
+                preview["gastosEfectivo"], opening_cash, preview["cashExpected"],
                 body.cash_counted, cash_difference,
                 body.notes,
             )
+
+            if open_shift:
+                await conn.execute(
+                    """
+                    UPDATE cash_shift_openings
+                    SET status = 'closed',
+                        accounting_period_id = $2,
+                        closed_at = NOW()
+                    WHERE id = $1 AND tenant_id = $3 AND status = 'open'
+                    """,
+                    open_shift["id"], period_id, tenant_id,
+                )
 
             # 6. Compute and persist payment breakdown
             breakdown_rows = await _compute_breakdown_rows(
@@ -1686,6 +1944,7 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 "totalTipTax":          preview["totalTipTax"],
                 "totalCharged":         preview["totalCharged"],
                 "cashTips":             preview["cashTips"],
+                "openingCash":          opening_cash,
                 "totalCash":            preview["totalCash"],
                 "totalCard":            preview["totalCard"],
                 "totalDigital":         preview["totalDigital"],
@@ -1719,7 +1978,7 @@ _CIERRE_SUMMARY_COLUMNS = """
     cs.total_sales, cs.items_sold,
     cs.total_tips, cs.total_tip_tax, cs.cash_tips,
     cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
-    cs.gastos_efectivo, cs.cash_expected, cs.cash_counted, cs.cash_difference,
+    cs.gastos_efectivo, cs.opening_cash, cs.cash_expected, cs.cash_counted, cs.cash_difference,
     cs.notes
 """
 
@@ -2002,6 +2261,7 @@ def _row_to_dict(row) -> dict:
         "totalDigital":         float(row["total_digital"]),
         "totalCredit":          float(row["total_credit"]),
         "gastosEfectivo":       float(row["gastos_efectivo"]),
+        "openingCash":          float(row["opening_cash"] or 0),
         "cashExpected":         float(row["cash_expected"]),
         "cashCounted":          float(row["cash_counted"]),
         "cashDifference":       float(row["cash_difference"]),
