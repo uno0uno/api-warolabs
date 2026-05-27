@@ -15,7 +15,7 @@ from fastapi import Request, Response
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
-from app.models.cierre import CierreCreate, OpenShiftCreate
+from app.models.cierre import CierreCashSettingsUpdate, CierreCreate, OpenShiftCreate
 from app.services.tip_tax_service import tip_settlement_total
 
 logger = logging.getLogger(__name__)
@@ -1070,6 +1070,42 @@ def _open_shift_row_to_dict(row) -> dict:
     }
 
 
+async def _fetch_tenant_default_opening_cash(conn, tenant_id: UUID) -> float:
+    row = await conn.fetchrow(
+        "SELECT default_opening_cash FROM tenants WHERE id = $1",
+        tenant_id,
+    )
+    if not row or row["default_opening_cash"] is None:
+        return 0.0
+    return float(row["default_opening_cash"])
+
+
+async def _resolve_suggested_opening_cash(
+    conn,
+    tenant_id: UUID,
+    shift_template_id: Optional[UUID] = None,
+) -> float:
+    """Last declared leave-in-drawer for template, else tenant default (#922)."""
+    row = await conn.fetchrow(
+        """
+        SELECT cs.cash_left_in_drawer
+        FROM closing_summary cs
+        JOIN accounting_period ap ON ap.id = cs.accounting_period_id
+        WHERE cs.tenant_id = $1
+          AND ap.deleted_at IS NULL
+          AND cs.cash_left_in_drawer IS NOT NULL
+          AND ($2::uuid IS NULL OR ap.shift_template_id = $2)
+        ORDER BY ap.closed_at DESC
+        LIMIT 1
+        """,
+        tenant_id,
+        shift_template_id,
+    )
+    if row and row["cash_left_in_drawer"] is not None:
+        return float(row["cash_left_in_drawer"])
+    return await _fetch_tenant_default_opening_cash(conn, tenant_id)
+
+
 async def _compute_preview(
     conn,
     tenant_id: UUID,
@@ -1687,16 +1723,72 @@ async def get_shift_status(
             )
             row = await _fetch_open_shift_for_window(conn, tenant_id, eff_start, eff_end)
 
-        if not row:
-            return {"success": True, "data": {"status": "none"}}
+            if not row:
+                suggested = await _resolve_suggested_opening_cash(
+                    conn, tenant_id, resolved.shift_template_id,
+                )
+                return {
+                    "success": True,
+                    "data": {
+                        "status": "none",
+                        "suggestedOpeningCash": suggested,
+                    },
+                }
 
-        return {"success": True, "data": _open_shift_row_to_dict(row)}
+            return {"success": True, "data": _open_shift_row_to_dict(row)}
 
     except (AuthenticationError, APIError):
         raise
     except Exception as exc:
         logger.error(f"Error in get_shift_status: {exc}")
         raise APIError(f"Error in get_shift_status: {exc}", status_code=500)
+
+
+async def get_cash_settings(request: Request) -> dict:
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=False) as conn:
+            default_cash = await _fetch_tenant_default_opening_cash(conn, tenant_id)
+
+        return {"success": True, "data": {"defaultOpeningCash": default_cash}}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in get_cash_settings: {exc}")
+        raise APIError(f"Error in get_cash_settings: {exc}", status_code=500)
+
+
+async def update_cash_settings(request: Request, body: CierreCashSettingsUpdate) -> dict:
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=True) as conn:
+            await conn.execute(
+                """
+                UPDATE tenants
+                SET default_opening_cash = $2
+                WHERE id = $1
+                """,
+                tenant_id,
+                body.default_opening_cash,
+            )
+            default_cash = await _fetch_tenant_default_opening_cash(conn, tenant_id)
+
+        return {"success": True, "data": {"defaultOpeningCash": default_cash}}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in update_cash_settings: {exc}")
+        raise APIError(f"Error in update_cash_settings: {exc}", status_code=500)
 
 
 # ---------------------------------------------------------------------------
@@ -1860,6 +1952,11 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
 
             # 5. INSERT closing_summary
             cash_difference = body.cash_counted - preview["cashExpected"]
+            cash_left = (
+                body.cash_left_in_drawer
+                if body.cash_left_in_drawer is not None
+                else body.cash_counted
+            )
             summary_row = await conn.fetchrow(
                 """
                 INSERT INTO closing_summary (
@@ -1868,14 +1965,14 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                     total_tips, total_tip_tax, cash_tips,
                     total_cash, total_card, total_digital, total_credit,
                     gastos_efectivo, opening_cash, cash_expected, cash_counted, cash_difference,
-                    notes
+                    cash_left_in_drawer, notes
                 ) VALUES (
                     $1, $2,
                     $3, $4,
                     $5, $6, $7,
                     $8, $9, $10, $11,
                     $12, $13, $14, $15, $16,
-                    $17
+                    $17, $18
                 )
                 RETURNING id, created_at
                 """,
@@ -1886,6 +1983,7 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 preview["totalDigital"], preview["totalCredit"],
                 preview["gastosEfectivo"], opening_cash, preview["cashExpected"],
                 body.cash_counted, cash_difference,
+                cash_left,
                 body.notes,
             )
 
@@ -1953,6 +2051,7 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 "cashExpected":         preview["cashExpected"],
                 "cashCounted":          body.cash_counted,
                 "cashDifference":       cash_difference,
+                "cashLeftInDrawer":     cash_left,
                 "notes":                body.notes,
                 "closedAt":             closed_at.isoformat(),
                 "breakdown":            breakdown_rows,
@@ -1979,7 +2078,7 @@ _CIERRE_SUMMARY_COLUMNS = """
     cs.total_tips, cs.total_tip_tax, cs.cash_tips,
     cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
     cs.gastos_efectivo, cs.opening_cash, cs.cash_expected, cs.cash_counted, cs.cash_difference,
-    cs.notes
+    cs.cash_left_in_drawer, cs.notes
 """
 
 _CIERRE_SUMMARY_FROM = """
@@ -2265,6 +2364,7 @@ def _row_to_dict(row) -> dict:
         "cashExpected":         float(row["cash_expected"]),
         "cashCounted":          float(row["cash_counted"]),
         "cashDifference":       float(row["cash_difference"]),
+        "cashLeftInDrawer":     float(row["cash_left_in_drawer"]) if row["cash_left_in_drawer"] is not None else None,
         "notes":                row["notes"],
         "closedAt":             row["closed_at"].isoformat(),
     }
