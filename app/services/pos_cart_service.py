@@ -15,7 +15,12 @@ from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from app.services.waros_service import evaluate_and_award
 from app.services.email_helpers import send_pos_receipt_email
-from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
+from app.services.cierre_service import (
+    _get_tenant_tax_config,
+    _post_order_gl_entry,
+    _post_order_cogs_gl_entry,
+    _post_deferred_order_tip_gl,
+)
 from app.services.tip_tax_service import (
     compute_tip_tax_amount,
     normalize_tip_payload,
@@ -1144,6 +1149,29 @@ async def add_order_payment(
                         order_id
                     )
 
+                if is_complete and resolved_tip_amount > 0:
+                    try:
+                        order_meta = await conn.fetchrow(
+                            "SELECT order_number FROM orders WHERE id = $1",
+                            order_id,
+                        )
+                        tip_tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        await _post_deferred_order_tip_gl(
+                            conn=conn,
+                            tenant_id=tenant_id,
+                            order_id=order_id,
+                            tip_amount=Decimal(str(resolved_tip_amount)),
+                            tip_tax_amount=Decimal(str(resolved_tip_tax_amount)),
+                            payment_method=payment_method,
+                            payment_method_id=UUID(payment_method_id) if payment_method_id else None,
+                            tax_config=tip_tax_config,
+                            order_number=int(order_meta["order_number"]) if order_meta else None,
+                        )
+                    except Exception as _tip_gl_err:
+                        logger.error(
+                            f"Deferred tip GL failed for POS order {order_id}: {_tip_gl_err}"
+                        )
+
         # 6. Fire-and-forget side effects OUTSIDE transaction (only on completion)
         if is_complete:
             try:
@@ -1990,6 +2018,11 @@ async def complete_pos_order(
 
                 # GL journal entry — failure never blocks order completion
                 try:
+                    _gl_tip = Decimal("0")
+                    _gl_tip_tax = Decimal("0")
+                    if not split_mode or _split_is_complete:
+                        _gl_tip = Decimal(str(tip_amount))
+                        _gl_tip_tax = Decimal(str(_tip_tax_amount))
                     await _post_order_gl_entry(
                         conn=conn,
                         tenant_id=tenant_id,
@@ -2000,6 +2033,8 @@ async def complete_pos_order(
                         payment_method_id=payment_method_id,
                         tax_config=tax_config,
                         order_number=int(order_number),
+                        tip_amount=_gl_tip,
+                        tip_tax_amount=_gl_tip_tax,
                     )
                 except Exception as e:
                     logger.error(f"GL entry failed for POS order {order_id}: {e}")
