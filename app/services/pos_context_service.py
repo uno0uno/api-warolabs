@@ -34,6 +34,7 @@ SELECT
     tpp.tip_taxable_default,
     tpp.tip_default_percentages,
     tpp.tip_preselect_index,
+    tpp.logo_url,
     fd.nit,
     fd.business_name,
     fd.type_organization_id,
@@ -44,6 +45,8 @@ SELECT
     fd.city_id,
     fd.phone           AS fiscal_phone,
     fd.email           AS fiscal_email,
+    fd.receipt_document_label,
+    fd.show_logo_on_receipts,
     ttc.inc_applicable,
     ttc.inc_rate,
     ttc.inc_included_in_price,
@@ -113,6 +116,13 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             if row['tip_default_percentages'] else [10.0]
         ),
         'tip_preselect_index': row['tip_preselect_index'],
+        'logo_url': row['logo_url'],
+        'receipt_print_settings': {
+            'document_label': (row['receipt_document_label'] or 'Prefactura').strip()[:40],
+            'show_logo': bool(row['show_logo_on_receipts'])
+            if row['show_logo_on_receipts'] is not None
+            else True,
+        },
         'fiscal_data': {
             'nit': row['nit'],
             'business_name': row['business_name'],

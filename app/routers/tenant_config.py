@@ -164,6 +164,15 @@ async def update_tax_config_endpoint(
     return await tenant_config_service.update_tax_config(request, data)
 
 
+def _normalize_receipt_document_label(raw) -> str:
+    label = (raw or 'Prefactura').strip()
+    if not label:
+        return 'Prefactura'
+    if len(label) > 40:
+        raise HTTPException(status_code=400, detail='Document label must be at most 40 characters')
+    return label
+
+
 @router.get("/fiscal-data", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def get_fiscal_data(request: Request):
     """
@@ -202,6 +211,10 @@ async def get_fiscal_data(request: Request):
             'city_id': row['city_id'],
             'phone': row['phone'],
             'email': row['email'],
+            'receipt_document_label': _normalize_receipt_document_label(row['receipt_document_label']),
+            'show_logo_on_receipts': row['show_logo_on_receipts']
+            if row['show_logo_on_receipts'] is not None
+            else True,
         },
     }
 
@@ -217,12 +230,16 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
     session = require_valid_session(request)
     tenant_id = session.tenant_id
 
+    document_label = _normalize_receipt_document_label(data.get('receipt_document_label'))
+    show_logo = bool(data.get('show_logo_on_receipts', True))
+
     async with get_db_connection() as conn:
         await conn.execute(
             """INSERT INTO tenant_fiscal_data (tenant_id, nit, business_name,
                    type_organization_id, tax_regime_id, tax_level_id,
-                   fiscal_address, city, city_id, phone, email, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+                   fiscal_address, city, city_id, phone, email,
+                   receipt_document_label, show_logo_on_receipts, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
                ON CONFLICT (tenant_id) DO UPDATE SET
                    nit = EXCLUDED.nit,
                    business_name = EXCLUDED.business_name,
@@ -234,6 +251,8 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
                    city_id = EXCLUDED.city_id,
                    phone = EXCLUDED.phone,
                    email = EXCLUDED.email,
+                   receipt_document_label = EXCLUDED.receipt_document_label,
+                   show_logo_on_receipts = EXCLUDED.show_logo_on_receipts,
                    updated_at = now()""",
             tenant_id,
             data.get('nit'),
@@ -246,6 +265,8 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
             data.get('city_id', 149),
             data.get('phone'),
             data.get('email'),
+            document_label,
+            show_logo,
         )
 
     return {'success': True, 'message': 'Datos fiscales actualizados'}
