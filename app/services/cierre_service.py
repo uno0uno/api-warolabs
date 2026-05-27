@@ -15,6 +15,7 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from app.models.cierre import CierreCreate
+from app.services.tip_tax_service import tip_settlement_total
 
 logger = logging.getLogger(__name__)
 
@@ -763,6 +764,34 @@ async def _compute_preview(
         tenant_id, *date_params,
     )
 
+    tips_row = await conn.fetchrow(
+        f"""
+        SELECT
+            COALESCE(SUM(tip_amount), 0)      AS total_tips,
+            COALESCE(SUM(tip_tax_amount), 0)  AS total_tip_tax
+        FROM orders
+        WHERE tenant_id = $1
+          {status_filter}
+          {date_filter}
+        """,
+        tenant_id, *date_params,
+    )
+
+    cash_tips_row = await conn.fetchrow(
+        f"""
+        SELECT COALESCE(SUM(o.tip_amount + o.tip_tax_amount), 0) AS cash_tips
+        FROM orders o
+        LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
+        LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+        WHERE o.tenant_id = $1
+          {status_filter.replace('status', 'o.status')}
+          {date_filter.replace('order_date', 'o.order_date')}
+          AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
+          AND COALESCE(pmg.slug, o.payment_method) = 'cash'
+        """,
+        tenant_id, *date_params,
+    )
+
     # Payment method totals — COALESCE split vs legacy:
     # Split orders: sum from active order_payments rows
     # Legacy orders (no active order_payments rows): use orders.total_amount + stored method
@@ -857,11 +886,21 @@ async def _compute_preview(
 
     total_cash = method_totals.get("cash", 0.0)
     gastos_efectivo = float(gastos_row["gastos_efectivo"])
-    cash_expected = total_cash - gastos_efectivo
+    total_tips = float(tips_row["total_tips"])
+    total_tip_tax = float(tips_row["total_tip_tax"])
+    cash_tips = float(cash_tips_row["cash_tips"])
+    total_charged = float(sales_row["total_sales"]) + tip_settlement_total(
+        total_tips, total_tip_tax,
+    )
+    cash_expected = total_cash + cash_tips - gastos_efectivo
 
     return {
         "totalSales":       float(sales_row["total_sales"]),
         "itemsSold":        int(sales_row["items_sold"]),
+        "totalTips":        total_tips,
+        "totalTipTax":      total_tip_tax,
+        "totalCharged":     total_charged,
+        "cashTips":         cash_tips,
         "totalCash":        total_cash,
         "totalCard":        method_totals.get("card", 0.0),
         "totalDigital":     method_totals.get("digital", 0.0),
@@ -1277,20 +1316,23 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 INSERT INTO closing_summary (
                     accounting_period_id, tenant_id,
                     total_sales, items_sold,
+                    total_tips, total_tip_tax, cash_tips,
                     total_cash, total_card, total_digital, total_credit,
                     gastos_efectivo, cash_expected, cash_counted, cash_difference,
                     notes
                 ) VALUES (
                     $1, $2,
                     $3, $4,
-                    $5, $6, $7, $8,
-                    $9, $10, $11, $12,
-                    $13
+                    $5, $6, $7,
+                    $8, $9, $10, $11,
+                    $12, $13, $14, $15,
+                    $16
                 )
                 RETURNING id, created_at
                 """,
                 period_id, tenant_id,
                 preview["totalSales"], preview["itemsSold"],
+                preview["totalTips"], preview["totalTipTax"], preview["cashTips"],
                 preview["totalCash"], preview["totalCard"],
                 preview["totalDigital"], preview["totalCredit"],
                 preview["gastosEfectivo"], preview["cashExpected"],
@@ -1337,6 +1379,10 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 "shiftTemplateId":      str(shift_template_id) if shift_template_id else None,
                 "totalSales":           preview["totalSales"],
                 "itemsSold":            preview["itemsSold"],
+                "totalTips":            preview["totalTips"],
+                "totalTipTax":          preview["totalTipTax"],
+                "totalCharged":         preview["totalCharged"],
+                "cashTips":             preview["cashTips"],
                 "totalCash":            preview["totalCash"],
                 "totalCard":            preview["totalCard"],
                 "totalDigital":         preview["totalDigital"],
@@ -1368,6 +1414,7 @@ _CIERRE_SUMMARY_COLUMNS = """
     ap.shift_template_id,
     tst.name AS shift_template_name,
     cs.total_sales, cs.items_sold,
+    cs.total_tips, cs.total_tip_tax, cs.cash_tips,
     cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
     cs.gastos_efectivo, cs.cash_expected, cs.cash_counted, cs.cash_difference,
     cs.notes
@@ -1562,6 +1609,10 @@ async def get_cierre_mensual(request: Request, year: int, month: int) -> dict:
         totals = {
             "totalSales":     sum(r["totalSales"]     for r in daily),
             "itemsSold":      sum(r["itemsSold"]       for r in daily),
+            "totalTips":      sum(r["totalTips"]       for r in daily),
+            "totalTipTax":    sum(r["totalTipTax"]     for r in daily),
+            "cashTips":       sum(r["cashTips"]        for r in daily),
+            "totalCharged":   sum(r["totalCharged"]    for r in daily),
             "totalCash":      sum(r["totalCash"]       for r in daily),
             "totalCard":      sum(r["totalCard"]       for r in daily),
             "totalDigital":   sum(r["totalDigital"]    for r in daily),
@@ -1636,6 +1687,13 @@ def _row_to_dict(row) -> dict:
         "shiftTemplateName":    row["shift_template_name"],
         "totalSales":           float(row["total_sales"]),
         "itemsSold":            int(row["items_sold"]),
+        "totalTips":            float(row["total_tips"] or 0),
+        "totalTipTax":          float(row["total_tip_tax"] or 0),
+        "cashTips":             float(row["cash_tips"] or 0),
+        "totalCharged":         float(row["total_sales"]) + tip_settlement_total(
+            float(row["total_tips"] or 0),
+            float(row["total_tip_tax"] or 0),
+        ),
         "totalCash":            float(row["total_cash"]),
         "totalCard":            float(row["total_card"]),
         "totalDigital":         float(row["total_digital"]),
