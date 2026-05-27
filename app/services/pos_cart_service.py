@@ -18,6 +18,7 @@ from app.services.email_helpers import send_pos_receipt_email
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
 from app.services.tip_tax_service import (
     compute_tip_tax_amount,
+    normalize_tip_payload,
     split_settlement_amount_due,
     tip_settlement_total,
 )
@@ -947,6 +948,9 @@ async def add_order_payment(
     payment_method: str,
     payment_method_id: Optional[str] = None,
     cash_received: Optional[float] = None,
+    tip_amount: Optional[float] = None,
+    tip_source: Optional[str] = None,
+    tip_taxable: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Add a partial payment to a POS cart's underlying order.
@@ -999,7 +1003,8 @@ async def add_order_payment(
                 # 2. Fetch + lock the order linked to this cart via pos_cart_id
                 order_row = await conn.fetchrow(
                     """
-                    SELECT id, total_amount, tip_amount, tip_tax_amount, status, payment_status
+                    SELECT id, total_amount, tip_amount, tip_source, tip_taxable,
+                           tip_tax_amount, status, payment_status
                     FROM orders
                     WHERE pos_cart_id = $1 AND tenant_id = $2
                     ORDER BY created_at DESC
@@ -1024,10 +1029,55 @@ async def add_order_payment(
                     raise APIError("Order is already fully paid", status_code=409)
 
                 total_amount = float(order_row["total_amount"])
+                resolved_tip_amount = float(order_row["tip_amount"] or 0)
+                resolved_tip_source = order_row["tip_source"] or "none"
+                resolved_tip_taxable = bool(order_row["tip_taxable"])
+                resolved_tip_tax_amount = float(order_row["tip_tax_amount"] or 0)
+
+                if any(value is not None for value in (tip_amount, tip_source, tip_taxable)):
+                    try:
+                        resolved_tip_amount, resolved_tip_source, resolved_tip_taxable = normalize_tip_payload(
+                            resolved_tip_amount if tip_amount is None else tip_amount,
+                            resolved_tip_source if tip_source is None else tip_source,
+                            resolved_tip_taxable if tip_taxable is None else tip_taxable,
+                        )
+                    except ValueError as exc:
+                        raise APIError(str(exc), status_code=400)
+
+                    if resolved_tip_amount > 0:
+                        tip_enabled = await conn.fetchval(
+                            "SELECT tip_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                            tenant_id,
+                        )
+                        if not bool(tip_enabled):
+                            raise APIError("Tipping is not enabled for this tenant", status_code=400)
+                        tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        resolved_tip_tax_amount = compute_tip_tax_amount(
+                            resolved_tip_amount, resolved_tip_taxable, tax_config,
+                        )
+                    else:
+                        resolved_tip_tax_amount = 0.0
+
+                    await conn.execute(
+                        """
+                        UPDATE orders
+                        SET tip_amount = $2,
+                            tip_source = $3,
+                            tip_taxable = $4,
+                            tip_tax_amount = $5
+                        WHERE id = $1
+                        """,
+                        order_id,
+                        resolved_tip_amount,
+                        resolved_tip_source,
+                        resolved_tip_taxable,
+                        resolved_tip_tax_amount,
+                    )
+
                 amount_due = split_settlement_amount_due(
                     total_amount,
-                    float(order_row["tip_amount"] or 0),
-                    float(order_row["tip_tax_amount"] or 0),
+                    resolved_tip_amount,
+                    resolved_tip_tax_amount,
                 )
 
                 # 3. Insert payment record
@@ -1108,6 +1158,10 @@ async def add_order_payment(
                 "paid_total": paid_total,
                 "remaining": remaining,
                 "is_complete": is_complete,
+                "tip_amount": resolved_tip_amount,
+                "tip_source": resolved_tip_source,
+                "tip_taxable": resolved_tip_taxable,
+                "tip_tax_amount": resolved_tip_tax_amount,
             }
         }
 
@@ -1352,19 +1406,14 @@ async def complete_pos_order(
                     resolved_served_by = served_by_member_id
 
         # warocol.com#637 — tip validation (fail fast, before the transaction).
-        # Coerce (0, anything) → (0, 'none') for idempotency. Reject inconsistent
-        # combinations to match the DB CHECK from migration 079.
-        if tip_amount < 0:
-            raise APIError("tip_amount must be non-negative", status_code=400)
-        if tip_source not in ('preset', 'custom', 'none'):
-            raise APIError(f"invalid tip_source: {tip_source!r}", status_code=400)
-        if tip_amount == 0:
-            tip_source = 'none'  # coerce stray sources to none
-        else:
-            if tip_source == 'none':
-                raise APIError("tip_source cannot be 'none' when tip_amount > 0", status_code=400)
-            if not tip_enabled:
-                raise APIError("Tipping is not enabled for this tenant", status_code=400)
+        try:
+            tip_amount, tip_source, _tip_taxable = normalize_tip_payload(
+                tip_amount, tip_source, tip_taxable,
+            )
+        except ValueError as exc:
+            raise APIError(str(exc), status_code=400)
+        if tip_amount > 0 and not tip_enabled:
+            raise APIError("Tipping is not enabled for this tenant", status_code=400)
 
         _is_bar_sale = False
         _bar_display_name: Optional[str] = None

@@ -151,6 +151,9 @@ class AddSessionPaymentRequest(BaseModel):
     payment_method: str = Field(..., description="cash | card | digital")
     payment_method_id: Optional[UUID] = Field(None, description="UUID of the selected payment_methods row")
     cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for this payment when payment_method='cash'. Must be >= amount.")
+    tip_amount: Optional[float] = Field(None, ge=0, description="Optional session tip override during follow-up split settlement. Persists on the first completed order header.")
+    tip_source: Optional[Literal['preset', 'custom', 'none']] = Field(None, description="Optional tip source patch paired with tip_amount for split session updates.")
+    tip_taxable: Optional[bool] = Field(None, description="Optional gravada flag for split session tip updates.")
 
 
 @router.post("/{table_id}/close", dependencies=[Depends(require_module(Module.POS))])
@@ -194,6 +197,9 @@ async def add_session_payment(request: Request, table_id: UUID, body: AddSession
         request, table_id,
         body.amount, body.payment_method, body.payment_method_id,
         cash_received=body.cash_received,
+        tip_amount=body.tip_amount,
+        tip_source=body.tip_source,
+        tip_taxable=body.tip_taxable,
     )
 
 

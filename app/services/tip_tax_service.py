@@ -4,7 +4,30 @@ Tip tax helpers — warocol.com#740
 Compute consumption tax on voluntary tips when the tenant/cashier opts in
 (tip gravada). Mirrors POS receipt tax breakdown logic in pos_cart_service.
 """
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
+
+
+VALID_TIP_SOURCES = ("preset", "custom", "none")
+
+
+def normalize_tip_payload(
+    tip_amount: float,
+    tip_source: str,
+    tip_taxable: bool = False,
+) -> Tuple[float, str, bool]:
+    """Normalize tip fields to the canonical order-header shape."""
+    amount = float(tip_amount or 0)
+    source = tip_source or "none"
+
+    if amount < 0:
+        raise ValueError("tip_amount must be non-negative")
+    if source not in VALID_TIP_SOURCES:
+        raise ValueError(f"invalid tip_source: {source!r}")
+    if amount == 0:
+        return 0.0, "none", False
+    if source == "none":
+        raise ValueError("tip_source cannot be 'none' when tip_amount > 0")
+    return amount, source, bool(tip_taxable)
 
 
 def compute_tip_tax_amount(
