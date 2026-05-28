@@ -64,6 +64,10 @@ class UpdateTabItemRequest(BaseModel):
     )
 
 
+class TableQrToggleRequest(BaseModel):
+    enabled: bool
+
+
 @router.get("", dependencies=[Depends(require_module(Module.POS))])
 async def list_tables(request: Request, include_inactive: bool = Query(False)):
     """
@@ -109,6 +113,24 @@ async def deactivate_table(request: Request, table_id: UUID):
     Issue: https://github.com/uno0uno/warocol.com/issues/436
     """
     return await tables_service.deactivate_table(request, table_id)
+
+
+@router.patch("/{table_id}/qr", dependencies=[Depends(require_module(Module.POS))])
+async def set_table_qr_enabled(request: Request, table_id: UUID, body: TableQrToggleRequest):
+    """
+    Enable/disable per-table QR ordering. Generates public token on first enable.
+    Issue: https://github.com/uno0uno/warocol.com/issues/976 (api-warolabs#266)
+    """
+    return await tables_service.set_table_qr_enabled(request, table_id, body.enabled)
+
+
+@router.post("/{table_id}/qr-token/regenerate", dependencies=[Depends(require_module(Module.POS))])
+async def regenerate_table_qr_token(request: Request, table_id: UUID):
+    """
+    Issue a new public QR token; previous printed codes stop resolving.
+    Issue: https://github.com/uno0uno/warocol.com/issues/976 (api-warolabs#266)
+    """
+    return await tables_service.regenerate_table_qr_token(request, table_id)
 
 
 @router.delete("/{table_id}", dependencies=[Depends(require_module(Module.POS))])
