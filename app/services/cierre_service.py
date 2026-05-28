@@ -1106,6 +1106,23 @@ async def _resolve_suggested_opening_cash(
     return await _fetch_tenant_default_opening_cash(conn, tenant_id)
 
 
+def _compute_cash_expected(
+    opening_cash: float,
+    total_cash: float,
+    cash_tips: float,
+    total_sales: float,
+    gastos_efectivo: float,
+) -> float:
+    """Expected drawer cash: opening float + cash received − cash expenses.
+
+    When total_cash already includes tip settlement (all-cash), do not add
+    cash_tips again. Otherwise cash_tips is additive (split-pay / card tips).
+    """
+    if total_cash >= total_sales + cash_tips:
+        return opening_cash + total_cash - gastos_efectivo
+    return opening_cash + total_cash + cash_tips - gastos_efectivo
+
+
 async def _compute_preview(
     conn,
     tenant_id: UUID,
@@ -1308,7 +1325,13 @@ async def _compute_preview(
     total_charged = float(sales_row["total_sales"]) + tip_settlement_total(
         total_tips, total_tip_tax,
     )
-    cash_expected = float(opening_cash) + total_cash + cash_tips - gastos_efectivo
+    cash_expected = _compute_cash_expected(
+        float(opening_cash),
+        total_cash,
+        cash_tips,
+        float(sales_row["total_sales"]),
+        gastos_efectivo,
+    )
 
     return {
         "totalSales":       float(sales_row["total_sales"]),
