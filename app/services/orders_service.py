@@ -945,7 +945,8 @@ async def get_order_items(
                         id,
                         modifier_id,
                         modifier_name,
-                        price_at_purchase
+                        price_at_purchase,
+                        quantity
                     FROM order_item_modifiers
                     WHERE order_item_id = $1
                 """
@@ -956,7 +957,8 @@ async def get_order_items(
                         "id": str(mod['id']),  # order_item_modifier ID for deletion
                         "modifier_id": str(mod['modifier_id']) if mod['modifier_id'] else None,
                         "name": mod['modifier_name'],
-                        "price": float(mod['price_at_purchase'])
+                        "price": float(mod['price_at_purchase']),
+                        "quantity": int(mod['quantity'] or 1),
                     }
                     for mod in modifiers_rows
                 ]
