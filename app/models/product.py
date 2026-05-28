@@ -10,6 +10,7 @@ class Modifier(BaseModel):
     id: UUID
     name: str
     price: Decimal
+    max_limit: int = Field(default=1, ge=1, description="Max times this option can be added")
     is_available: Optional[bool] = True
     is_default: Optional[bool] = False
     sort_order: Optional[int] = None
