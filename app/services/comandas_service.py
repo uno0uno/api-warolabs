@@ -243,7 +243,7 @@ async def _fire_with_conn(
             # Build modifiers_snapshot from order_item_modifiers
             mod_rows = await conn.fetch(
                 """
-                SELECT modifier_name, price_at_purchase
+                SELECT modifier_name, price_at_purchase, quantity
                 FROM order_item_modifiers
                 WHERE order_item_id = $1
                 ORDER BY created_at
@@ -251,7 +251,11 @@ async def _fire_with_conn(
                 order_item_id,
             )
             modifiers_snapshot = [
-                {"name": m['modifier_name'], "price": float(m['price_at_purchase'])}
+                {
+                    "name": m['modifier_name'],
+                    "price": float(m['price_at_purchase']),
+                    "quantity": int(m['quantity']),
+                }
                 for m in mod_rows
             ] if mod_rows else None
 
