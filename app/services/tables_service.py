@@ -52,6 +52,10 @@ _QR_TOKEN_URLSAFE_BYTES = 32
 _QR_TOKEN_MAX_ATTEMPTS = 5
 
 
+def _modifier_unit_total(mod: dict) -> float:
+    return float(mod.get("price", 0)) * float(mod.get("quantity", 1))
+
+
 async def _generate_unique_qr_token(conn) -> str:
     """Opaque token for public table QR URLs (api-warolabs#266)."""
     for _ in range(_QR_TOKEN_MAX_ATTEMPTS):
@@ -1795,7 +1799,8 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                             json_build_object(
                                 'id', oim.modifier_id::text,
                                 'name', oim.modifier_name,
-                                'price', oim.price_at_purchase
+                                'price', oim.price_at_purchase,
+                                'quantity', oim.quantity
                             ) ORDER BY oim.created_at
                         ) FILTER (WHERE oim.order_item_id IS NOT NULL),
                         '[]'::json
@@ -1908,6 +1913,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                                 "id": mod["id"],
                                 "name": mod["name"],
                                 "price": float(mod["price"]),
+                                "quantity": int(mod.get("quantity") or 1),
                             }
                             for mod in (
                                 json.loads(r["modifiers"])
@@ -2030,6 +2036,7 @@ def _modifiers_from_request_item(item: dict) -> List[Dict[str, Any]]:
             "id": m.get("id"),
             "name": m.get("name"),
             "price": float(m.get("price", 0)),
+            "quantity": float(m.get("quantity", 1)),
         }
         for m in (item.get("modifiers") or [])
     ]
@@ -2413,7 +2420,11 @@ async def update_tab_item_quantity(
             modifiers = await _fetch_order_item_modifiers(conn, order_item_id)
 
             modifier_sum = await conn.fetchval(
-                "SELECT COALESCE(SUM(price_at_purchase), 0) FROM order_item_modifiers WHERE order_item_id = $1",
+                """
+                SELECT COALESCE(SUM(price_at_purchase * quantity), 0)
+                FROM order_item_modifiers
+                WHERE order_item_id = $1
+                """,
                 order_item_id,
             )
             effective_unit_price = float(row["price_at_purchase"]) + float(modifier_sum)
@@ -2510,7 +2521,7 @@ async def _add_tab_items_core(
     validate_items_unit_prices(pricing_map, items)
 
     for item in items:
-        mod_sum = sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
+        mod_sum = sum(_modifier_unit_total(m) for m in (item.get("modifiers") or []))
         logger.info(
             f"[add_tab_items] item product_id={item['product_id']} "
             f"qty={item['quantity']} unit_price={item['unit_price']} "
@@ -2520,7 +2531,7 @@ async def _add_tab_items_core(
     batch_amount = sum(
         item["quantity"] * (
             item["unit_price"]
-            + sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
+            + sum(_modifier_unit_total(m) for m in (item.get("modifiers") or []))
         )
         for item in items
     )
@@ -2573,7 +2584,7 @@ async def _add_tab_items_core(
         logger.info(f"[add_tab_items] created new order {order_id}")
 
     for item in items:
-        modifier_unit_total = sum(float(m.get("price", 0)) for m in (item.get("modifiers") or []))
+        modifier_unit_total = sum(_modifier_unit_total(m) for m in (item.get("modifiers") or []))
         subtotal = item["quantity"] * (item["unit_price"] + modifier_unit_total)
         item_notes = (item.get("notes") or "").strip() or None
         order_item_row = await conn.fetchrow(

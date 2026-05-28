@@ -41,6 +41,7 @@ class TabModifier(BaseModel):
     id: Optional[str] = None
     name: Optional[str] = None
     price: float = 0.0
+    quantity: float = Field(default=1.0, gt=0)
 
 
 class TabItem(BaseModel):
@@ -265,7 +266,7 @@ async def add_tab_items(request: Request, table_id: UUID, body: TabAddRequest):
             "quantity": item.quantity,
             "unit_price": item.unit_price,
             "modifiers": [
-                {"id": m.id, "name": m.name, "price": m.price}
+                {"id": m.id, "name": m.name, "price": m.price, "quantity": m.quantity}
                 for m in (item.modifiers or [])
             ],
             "notes": item.notes,

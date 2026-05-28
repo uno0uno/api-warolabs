@@ -77,6 +77,74 @@ async def test_add_tab_items_core_deducts_modifier_inventory():
 
 
 @pytest.mark.asyncio
+async def test_add_tab_items_core_persists_modifier_quantity():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    table_id = uuid4()
+    session_id = uuid4()
+    order_id = uuid4()
+    product_id = uuid4()
+    order_item_id = uuid4()
+    modifier_id = uuid4()
+
+    session_row = {
+        "session_id": session_id,
+        "table_name": "Mesa 3",
+        "is_bar": False,
+        "effective_waiter_member_id": None,
+    }
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow = AsyncMock(side_effect=[
+        session_row,
+        None,
+        {"id": order_id, "order_number": 42, "total_amount": 61.0},
+        {"id": order_item_id},
+    ])
+    mock_conn.fetch = AsyncMock(return_value=[])
+    mock_conn.execute = AsyncMock()
+
+    items = [{
+        "product_id": product_id,
+        "quantity": 1,
+        "unit_price": 25.0,
+        "modifiers": [{
+            "id": str(modifier_id),
+            "name": "Carne de Res",
+            "price": 9.0,
+            "quantity": 3,
+        }],
+    }]
+
+    pricing_map = {str(product_id): {"price": Decimal("25.00"), "open_priced": False}}
+
+    with patch(
+        "app.services.tables_service._record_tab_operation_event",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.tables_service._prefetch_product_names",
+        new=AsyncMock(return_value={str(product_id): "Santa inquisición"}),
+    ), patch(
+        "app.services.tables_service.fetch_product_pricing_map",
+        new=AsyncMock(return_value=pricing_map),
+    ), patch(
+        "app.services.tables_service._capture_order_item_ingredients",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.tables_service._deduct_modifier_inventory_for_order_item",
+        new=AsyncMock(),
+    ):
+        await tables_service._add_tab_items_core(
+            mock_conn, tenant_id, user_id, table_id, items
+        )
+
+    insert_call = mock_conn.execute.call_args_list[0]
+    assert insert_call.args[5] == 3
+
+    order_item_insert = mock_conn.fetchrow.call_args_list[3]
+    assert order_item_insert.args[5] == 25.0 + 9.0 * 3
+
+
+@pytest.mark.asyncio
 async def test_remove_tab_item_returns_inventory_from_snapshots():
     tenant_id = uuid4()
     user_id = uuid4()
