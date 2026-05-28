@@ -649,6 +649,7 @@ async def _record_cart_operation_event(
     pos_cart_item_id: Optional[UUID] = None,
     payload: Optional[Dict[str, Any]] = None,
     actor_member_id: Optional[UUID] = None,
+    reason: Optional[str] = None,
 ) -> None:
     merged_payload = dict(payload) if payload else {}
     if pos_cart_item_id:
@@ -663,7 +664,13 @@ async def _record_cart_operation_event(
         actor_member_id=actor_member_id,
         pos_cart_id=pos_cart_id,
         payload=merged_payload,
+        reason=reason,
     )
+
+
+def _normalize_cart_audit_reason(reason: Optional[str]) -> Optional[str]:
+    normalized = (reason or "").strip()
+    return normalized or None
 
 
 async def remove_item_from_cart(
@@ -672,6 +679,7 @@ async def remove_item_from_cart(
     item_id: UUID,
     channel: str = "mostrador",
     actor_member_id: Optional[UUID] = None,
+    reason: Optional[str] = None,
 ) -> dict:
     """
     Remove an item from cart
@@ -714,6 +722,7 @@ async def remove_item_from_cart(
                     pos_cart_id=cart_id,
                     pos_cart_item_id=item_id,
                     actor_member_id=actor_member_id,
+                    reason=_normalize_cart_audit_reason(reason),
                     payload=_build_cart_line_payload(
                         product_id=row["product_id"],
                         product_name=row["product_name"],
@@ -755,6 +764,7 @@ async def clear_cart(
     cart_id: UUID,
     channel: str = "mostrador",
     actor_member_id: Optional[UUID] = None,
+    reason: Optional[str] = None,
 ) -> dict:
     """
     Clear all items from cart
@@ -809,6 +819,7 @@ async def clear_cart(
                         pos_cart_id=cart_id,
                         pos_cart_item_id=line["cart_item_id"],
                         actor_member_id=actor_member_id,
+                        reason=_normalize_cart_audit_reason(reason),
                         payload=_build_cart_line_payload(
                             product_id=line["product_id"],
                             product_name=line["product_name"],
