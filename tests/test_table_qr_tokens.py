@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.core.exceptions import APIError
 from app.core.middleware import SessionContext
 from app.routers import public_table_qr as public_table_qr_router
+from app.routers import tables as tables_router
 from app.services import public_table_qr_service, tables_service
 
 
@@ -167,3 +168,57 @@ async def test_set_table_qr_enabled_generates_token():
         result = await tables_service.set_table_qr_enabled(MagicMock(), table_id, True)
         assert result["data"]["qr_public_token"] == token
         assert result["data"]["qr_enabled"] is True
+
+
+def test_patch_table_qr_route_delegates_to_service():
+    """HTTP layer: PATCH /tables/{id}/qr is registered (warocol.com#976)."""
+    app = FastAPI()
+    app.include_router(tables_router.router, prefix="/tables")
+    table_id = uuid4()
+    payload = {
+        "success": True,
+        "data": {
+            "id": str(table_id),
+            "name": "Mesa 1",
+            "qr_enabled": True,
+            "qr_public_token": "tok-abc",
+        },
+    }
+
+    with patch(
+        "app.routers.tables.tables_service.set_table_qr_enabled",
+        new_callable=AsyncMock,
+        return_value=payload,
+    ):
+        client = TestClient(app)
+        res = client.patch(f"/tables/{table_id}/qr", json={"enabled": True})
+
+    assert res.status_code == 200
+    assert res.json()["data"]["qr_enabled"] is True
+
+
+def test_post_table_qr_token_regenerate_route_delegates_to_service():
+    """HTTP layer: POST /tables/{id}/qr-token/regenerate is registered (warocol.com#976)."""
+    app = FastAPI()
+    app.include_router(tables_router.router, prefix="/tables")
+    table_id = uuid4()
+    payload = {
+        "success": True,
+        "data": {
+            "id": str(table_id),
+            "name": "Mesa 1",
+            "qr_enabled": True,
+            "qr_public_token": "tok-new",
+        },
+    }
+
+    with patch(
+        "app.routers.tables.tables_service.regenerate_table_qr_token",
+        new_callable=AsyncMock,
+        return_value=payload,
+    ):
+        client = TestClient(app)
+        res = client.post(f"/tables/{table_id}/qr-token/regenerate")
+
+    assert res.status_code == 200
+    assert res.json()["data"]["qr_public_token"] == "tok-new"
