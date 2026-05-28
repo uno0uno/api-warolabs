@@ -1711,108 +1711,17 @@ async def complete_pos_order(
                                 modifier_qty
                             )
 
-                            # 5b. Deduct ingredient inventory for modifier if linked
-                            modifier_ingredient_query = """
-                                SELECT
-                                    m.ingredient_id,
-                                    m.ingredient_quantity,
-                                    m.ingredient_unit,
-                                    i.name as ingredient_name,
-                                    i.controla_inventario
-                                FROM modifiers m
-                                LEFT JOIN ingredients i ON m.ingredient_id = i.id
-                                WHERE m.id = $1 AND m.ingredient_id IS NOT NULL
-                            """
-                            modifier_ingredient = await conn.fetchrow(modifier_ingredient_query, modifier['id'])
-
-                            if modifier_ingredient and modifier_ingredient['ingredient_id'] and modifier_ingredient['ingredient_quantity']:
-                                # Apply gr → und conversion if modifier unit differs from ingredient base unit
-                                resolved_mod_qty = await resolve_recipe_quantity_to_base_unit(
-                                    conn,
-                                    modifier_ingredient['ingredient_id'],
-                                    float(modifier_ingredient['ingredient_quantity']),
-                                    modifier_ingredient['ingredient_unit'] or "",
-                                )
-                                # Calculate total quantity: item_qty * modifier_qty * ingredient_quantity
-                                total_deduction = (
-                                    float(item['quantity']) *
-                                    float(modifier_qty) *
-                                    resolved_mod_qty
-                                )
-
-                                # Get current stock
-                                stock_row = await conn.fetchrow(
-                                    """
-                                    SELECT current_stock FROM tenant_inventory
-                                    WHERE ingredient_id = $1 AND tenant_id = $2
-                                    """,
-                                    modifier_ingredient['ingredient_id'],
-                                    tenant_id
-                                )
-
-                                previous_stock = float(stock_row['current_stock']) if stock_row else 0.0
-                                new_stock = previous_stock - total_deduction
-
-                                # Update or insert inventory
-                                if stock_row:
-                                    await conn.execute(
-                                        """
-                                        UPDATE tenant_inventory
-                                        SET current_stock = $1, last_updated = NOW()
-                                        WHERE ingredient_id = $2 AND tenant_id = $3
-                                        """,
-                                        new_stock,
-                                        modifier_ingredient['ingredient_id'],
-                                        tenant_id
-                                    )
-                                else:
-                                    await conn.execute(
-                                        """
-                                        INSERT INTO tenant_inventory (
-                                            tenant_id, ingredient_id, current_stock, minimum_stock, last_updated
-                                        )
-                                        VALUES ($1, $2, $3, 0, NOW())
-                                        """,
-                                        tenant_id,
-                                        modifier_ingredient['ingredient_id'],
-                                        -total_deduction
-                                    )
-
-                                # Create movement record for modifier consumption
-                                await conn.execute(
-                                    """
-                                    INSERT INTO tenant_ingredient_movements (
-                                        tenant_id, ingredient_id, movement_type,
-                                        quantity_change, unit, previous_stock, new_stock,
-                                        reference_table, reference_id, reason, created_by, created_at
-                                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
-                                    """,
-                                    tenant_id,
-                                    modifier_ingredient['ingredient_id'],
-                                    'consumption',
-                                    -total_deduction,
-                                    modifier_ingredient['ingredient_unit'] or 'und',
-                                    previous_stock,
-                                    new_stock,
-                                    'orders',
-                                    order_id,
-                                    f"Modificador {modifier['name']} ({modifier_qty}x) - Orden #{order_number}",
-                                    session_context.user_id
-                                )
-
-                                logger.info(
-                                    f"Modifier inventory deducted: {modifier_ingredient['ingredient_name']} "
-                                    f"-{total_deduction}{modifier_ingredient['ingredient_unit']} "
-                                    f"(Modifier: {modifier['name']}, Order #{order_number})"
-                                )
-
-                                # 5c. Capture modifier ingredient snapshot
-                                await _capture_modifier_ingredient_snapshot(
-                                    conn, order_item_id,
-                                    modifier_ingredient, modifier['id'],
-                                    float(item['quantity']), float(modifier_qty),
-                                    tenant_id
-                                )
+                            await _deduct_modifier_inventory_for_order_item(
+                                conn,
+                                tenant_id=tenant_id,
+                                user_id=session_context.user_id,
+                                order_id=order_id,
+                                order_item_id=order_item_id,
+                                order_number=order_number,
+                                item_quantity=float(item['quantity']),
+                                modifier=modifier,
+                                modifier_qty=float(modifier_qty),
+                            )
 
                     # 6. ALWAYS update inventory for all products (no controla_stock check)
                     # Get ALL ingredients for this product:
@@ -2317,6 +2226,128 @@ async def _capture_order_item_ingredients(
             r["source_type"],
             r["source_id"],
         )
+
+
+async def _deduct_modifier_inventory_for_order_item(
+    conn,
+    *,
+    tenant_id,
+    user_id,
+    order_id,
+    order_item_id,
+    order_number,
+    item_quantity: float,
+    modifier: dict,
+    modifier_qty: float = 1,
+) -> None:
+    """Deduct linked-ingredient inventory for one order line modifier (POS + mesa tab)."""
+    modifier_id = modifier.get("id")
+    modifier_name = modifier.get("name", "Modificador")
+    if not modifier_id:
+        return
+
+    modifier_ingredient = await conn.fetchrow(
+        """
+        SELECT
+            m.ingredient_id,
+            m.ingredient_quantity,
+            m.ingredient_unit,
+            i.name as ingredient_name,
+            i.controla_inventario
+        FROM modifiers m
+        LEFT JOIN ingredients i ON m.ingredient_id = i.id
+        WHERE m.id = $1 AND m.ingredient_id IS NOT NULL
+        """,
+        modifier_id,
+    )
+
+    if (
+        not modifier_ingredient
+        or not modifier_ingredient["ingredient_id"]
+        or not modifier_ingredient["ingredient_quantity"]
+    ):
+        return
+
+    resolved_mod_qty = await resolve_recipe_quantity_to_base_unit(
+        conn,
+        modifier_ingredient["ingredient_id"],
+        float(modifier_ingredient["ingredient_quantity"]),
+        modifier_ingredient["ingredient_unit"] or "",
+    )
+    total_deduction = float(item_quantity) * float(modifier_qty) * resolved_mod_qty
+
+    stock_row = await conn.fetchrow(
+        """
+        SELECT current_stock FROM tenant_inventory
+        WHERE ingredient_id = $1 AND tenant_id = $2
+        """,
+        modifier_ingredient["ingredient_id"],
+        tenant_id,
+    )
+
+    previous_stock = float(stock_row["current_stock"]) if stock_row else 0.0
+    new_stock = previous_stock - total_deduction
+
+    if stock_row:
+        await conn.execute(
+            """
+            UPDATE tenant_inventory
+            SET current_stock = $1, last_updated = NOW()
+            WHERE ingredient_id = $2 AND tenant_id = $3
+            """,
+            new_stock,
+            modifier_ingredient["ingredient_id"],
+            tenant_id,
+        )
+    else:
+        await conn.execute(
+            """
+            INSERT INTO tenant_inventory (
+                tenant_id, ingredient_id, current_stock, minimum_stock, last_updated
+            )
+            VALUES ($1, $2, $3, 0, NOW())
+            """,
+            tenant_id,
+            modifier_ingredient["ingredient_id"],
+            -total_deduction,
+        )
+
+    await conn.execute(
+        """
+        INSERT INTO tenant_ingredient_movements (
+            tenant_id, ingredient_id, movement_type,
+            quantity_change, unit, previous_stock, new_stock,
+            reference_table, reference_id, reason, created_by, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+        """,
+        tenant_id,
+        modifier_ingredient["ingredient_id"],
+        "consumption",
+        -total_deduction,
+        modifier_ingredient["ingredient_unit"] or "und",
+        previous_stock,
+        new_stock,
+        "orders",
+        order_id,
+        f"Modificador {modifier_name} ({modifier_qty}x) - Orden #{order_number}",
+        user_id,
+    )
+
+    logger.info(
+        f"Modifier inventory deducted: {modifier_ingredient['ingredient_name']} "
+        f"-{total_deduction}{modifier_ingredient['ingredient_unit']} "
+        f"(Modifier: {modifier_name}, Order #{order_number})"
+    )
+
+    await _capture_modifier_ingredient_snapshot(
+        conn,
+        order_item_id,
+        modifier_ingredient,
+        modifier_id,
+        item_quantity,
+        float(modifier_qty),
+        str(tenant_id),
+    )
 
 
 async def _capture_modifier_ingredient_snapshot(
