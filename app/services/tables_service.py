@@ -4,6 +4,7 @@ Business logic for table management and session lifecycle.
 
 Issue: https://github.com/uno0uno/warocol.com/issues/298
 """
+import json
 import secrets
 from typing import Optional, List, Any, Dict
 from uuid import UUID
@@ -1786,11 +1787,25 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     oi.notes,
                     oi.fulfillment_status,
                     oi.sent_at,
-                    p.name AS product_name
+                    p.name AS product_name,
+                    COALESCE(
+                        json_agg(
+                            json_build_object(
+                                'id', oim.modifier_id::text,
+                                'name', oim.modifier_name,
+                                'price', oim.price_at_purchase
+                            ) ORDER BY oim.created_at
+                        ) FILTER (WHERE oim.order_item_id IS NOT NULL),
+                        '[]'::json
+                    ) AS modifiers
                 FROM order_items oi
                 JOIN orders o ON o.id = oi.order_id
                 JOIN product p ON p.id = oi.product_id
+                LEFT JOIN order_item_modifiers oim ON oim.order_item_id = oi.id
                 WHERE o.table_session_id = $1
+                GROUP BY
+                    oi.id, oi.quantity, oi.price_at_purchase, oi.subtotal,
+                    oi.notes, oi.fulfillment_status, oi.sent_at, p.name
                 ORDER BY oi.id ASC
                 """,
                 session_row["id"],
@@ -1886,6 +1901,18 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                         "quantity": r["quantity"],
                         "unitPrice": float(r["price_at_purchase"]),
                         "subtotal": float(r["subtotal"]),
+                        "modifiers": [
+                            {
+                                "id": mod["id"],
+                                "name": mod["name"],
+                                "price": float(mod["price"]),
+                            }
+                            for mod in (
+                                json.loads(r["modifiers"])
+                                if isinstance(r["modifiers"], str)
+                                else (r["modifiers"] or [])
+                            )
+                        ],
                         "notes": r["notes"],
                         "fulfillmentStatus": r["fulfillment_status"],
                         "sentAt": r["sent_at"].isoformat() if r["sent_at"] else None,
