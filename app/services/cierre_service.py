@@ -976,12 +976,12 @@ def _requires_open_shift(
     period_start_time: Optional[datetime],
     period_end_time: Optional[datetime],
 ) -> bool:
-    """Template and custom timestamp windows require a declared fondo de caja."""
+    """All arqueo windows (template, custom, day-complete) require fondo de caja."""
     if shift_template_id:
         return True
     if period_start_time and period_end_time:
         return True
-    return False
+    return True
 
 
 _PERIOD_WINDOW_OVERLAP_SQL = """

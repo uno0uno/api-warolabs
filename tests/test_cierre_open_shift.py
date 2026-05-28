@@ -39,5 +39,5 @@ def test_requires_open_shift_custom_times():
     assert _requires_open_shift(None, start, end) is True
 
 
-def test_requires_open_shift_day_complete_optional():
-    assert _requires_open_shift(None, None, None) is False
+def test_requires_open_shift_day_complete_required():
+    assert _requires_open_shift(None, None, None) is True
