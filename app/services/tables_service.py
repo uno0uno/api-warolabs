@@ -25,8 +25,10 @@ from app.services.cierre_service import (
 from app.services.accounting_service import void_order_journal_entry_in_txn
 from app.services.pos_cart_service import (
     _capture_order_item_ingredients,
+    _deduct_modifier_inventory_for_order_item,
     _PAYMENT_VOID_ROLES,
 )
+from app.services.orders_service import _return_ingredient_to_stock
 from app.utils.table_code import infer_table_code, normalize_table_code, resolve_unique_code
 from app.services.tip_tax_service import (
     compute_tip_tax_amount,
@@ -2143,6 +2145,43 @@ async def _record_tab_cleared_pending_lines(
     return len(pending_lines)
 
 
+async def _return_tab_item_inventory_from_snapshots(
+    conn,
+    *,
+    tenant_id: UUID,
+    user_id: UUID,
+    order_id: UUID,
+    order_number: int,
+    order_item_id: UUID,
+    product_name: str,
+) -> None:
+    """Return stock captured in order_item_ingredients when a tab line is removed."""
+    snapshots = await conn.fetch(
+        """
+        SELECT ingredient_id, ingredient_name, quantity, unit
+        FROM order_item_ingredients
+        WHERE order_item_id = $1
+        """,
+        order_item_id,
+    )
+    for snap in snapshots:
+        qty = float(snap["quantity"] or 0)
+        if qty <= 0:
+            continue
+        await _return_ingredient_to_stock(
+            conn,
+            tenant_id,
+            user_id,
+            order_id,
+            order_number,
+            snap["ingredient_id"],
+            qty,
+            snap["unit"] or "und",
+            snap["ingredient_name"],
+            f"Devolución tab: {product_name}",
+        )
+
+
 async def remove_tab_item(
     request: Request,
     table_id: UUID,
@@ -2278,6 +2317,21 @@ async def remove_tab_item(
                     order_number=row["order_number"],
                 ),
             )
+
+            try:
+                await _return_tab_item_inventory_from_snapshots(
+                    conn,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    order_id=row["order_id"],
+                    order_number=row["order_number"],
+                    order_item_id=order_item_id,
+                    product_name=row["product_name"],
+                )
+            except Exception as _ret_exc:
+                logger.error(
+                    f"[tab] inventory return failed for item {order_item_id}: {_ret_exc}"
+                )
 
             await conn.execute("DELETE FROM order_items WHERE id = $1", order_item_id)
             new_total = max(0.0, float(row["total_amount"]) - float(row["subtotal"]))
@@ -2541,6 +2595,7 @@ async def _add_tab_items_core(
         order_item_id = order_item_row["id"]
 
         for mod in item.get("modifiers") or []:
+            modifier_qty = mod.get("quantity", 1)
             await conn.execute(
                 """
                 INSERT INTO order_item_modifiers (
@@ -2553,7 +2608,26 @@ async def _add_tab_items_core(
                 mod.get("id"),
                 mod.get("name"),
                 mod.get("price", 0),
-                1,
+                modifier_qty,
+            )
+
+        try:
+            for mod in item.get("modifiers") or []:
+                modifier_qty = float(mod.get("quantity", 1))
+                await _deduct_modifier_inventory_for_order_item(
+                    conn,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    order_id=order_id,
+                    order_item_id=order_item_id,
+                    order_number=order_number,
+                    item_quantity=float(item["quantity"]),
+                    modifier=mod,
+                    modifier_qty=modifier_qty,
+                )
+        except Exception as _mod_inv_exc:
+            logger.error(
+                f"[tab] modifier inventory deduction failed for item {order_item_id}: {_mod_inv_exc}"
             )
 
         await _record_tab_operation_event(
