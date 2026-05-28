@@ -95,6 +95,11 @@ class TestProductsListEndpoint:
             if len(data["data"]) > 0:
                 product = data["data"][0]
                 assert "modifier_groups" in product
+                for group in product.get("modifier_groups", []):
+                    modifiers = group.get("modifiers", [])
+                    if modifiers:
+                        assert "max_limit" in modifiers[0]
+                        break
 
     @pytest.mark.asyncio
     async def test_get_products_invalid_page(self, client: AsyncClient):

@@ -490,6 +490,7 @@ async def get_product_by_id(
                         m.price,
                         m.is_available,
                         m.is_default,
+                        m.max_limit,
                         m.sort_order
                     FROM modifiers m
                     WHERE m.modifier_group_id = ANY($1::uuid[])
@@ -509,6 +510,7 @@ async def get_product_by_id(
                         'price': mod['price'],
                         'is_available': mod['is_available'],
                         'is_default': mod['is_default'],
+                        'max_limit': mod['max_limit'],
                         'sort_order': mod['sort_order']
                     })
 
@@ -830,6 +832,7 @@ async def get_products_list(
                                 m.price,
                                 m.is_available,
                                 m.is_default,
+                                m.max_limit,
                                 m.sort_order
                             FROM modifiers m
                             WHERE m.modifier_group_id = ANY($1::uuid[])
@@ -849,6 +852,7 @@ async def get_products_list(
                                 'price': mod['price'],
                                 'is_available': mod['is_available'],
                                 'is_default': mod['is_default'],
+                                'max_limit': mod['max_limit'],
                                 'sort_order': mod['sort_order']
                             })
 
