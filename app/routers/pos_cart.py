@@ -2,7 +2,7 @@
 POS Cart Router
 Endpoints for managing POS cart persistence
 """
-from fastapi import APIRouter, Depends, Request, Query
+from fastapi import APIRouter, Body, Depends, Request, Query
 from typing import List, Optional, Any, Dict, Literal
 from uuid import UUID
 from datetime import date, datetime
@@ -115,6 +115,13 @@ async def update_item(
     )
 
 
+class CartDestructiveReasonRequest(BaseModel):
+    reason: Optional[str] = Field(
+        None,
+        description="Motivo de eliminación / vaciar carrito (bitácora POS)",
+    )
+
+
 @router.delete("/{cart_id}/items/{item_id}", dependencies=[Depends(require_module(Module.POS))])
 async def remove_item(
     request: Request,
@@ -128,6 +135,7 @@ async def remove_item(
         None,
         description="Optional tenant_members.id (served-by attribution, #575)",
     ),
+    body: CartDestructiveReasonRequest = Body(default_factory=CartDestructiveReasonRequest),
 ):
     """
     Remove item from cart
@@ -138,6 +146,7 @@ async def remove_item(
         item_id,
         channel=channel,
         actor_member_id=actor_member_id,
+        reason=body.reason,
     )
 
 
@@ -153,6 +162,7 @@ async def clear_cart(
         None,
         description="Optional tenant_members.id (served-by attribution, #575)",
     ),
+    body: CartDestructiveReasonRequest = Body(default_factory=CartDestructiveReasonRequest),
 ):
     """
     Clear all items from cart
@@ -162,6 +172,7 @@ async def clear_cart(
         cart_id,
         channel=channel,
         actor_member_id=actor_member_id,
+        reason=body.reason,
     )
 
 

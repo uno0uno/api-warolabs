@@ -133,3 +133,119 @@ async def test_clear_cart_emits_cart_cleared_per_line():
     assert len(recorded) == 1
     assert recorded[0]["action"] == "cart_cleared"
     assert recorded[0]["channel"] == "mostrador"
+
+
+@pytest.mark.asyncio
+async def test_remove_item_passes_reason_to_event():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    cart_id = uuid4()
+    item_id = uuid4()
+    recorded = []
+
+    row = {
+        "id": item_id,
+        "product_id": uuid4(),
+        "quantity": 1,
+        "unit_price": 8.0,
+        "subtotal": 8.0,
+        "notes": None,
+        "product_name": "Jugo",
+    }
+
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow = AsyncMock(return_value=row)
+    mock_conn.fetch = AsyncMock(return_value=[])
+    mock_conn.execute = AsyncMock()
+
+    class _Txn:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *args):
+            return None
+
+    mock_conn.transaction = MagicMock(return_value=_Txn())
+
+    async def capture(conn, tid, **kwargs):
+        recorded.append(kwargs)
+
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("app.services.pos_cart_service.require_valid_session") as mock_sess, \
+         patch("app.services.pos_cart_service.get_db_connection", return_value=mock_cm), \
+         patch("app.services.pos_cart_service.update_cart_total", new=AsyncMock()), \
+         patch(
+             "app.services.pos_cart_service._record_cart_operation_event",
+             side_effect=capture,
+         ):
+        mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id)
+        await pos_cart_service.remove_item_from_cart(
+            MagicMock(),
+            cart_id,
+            item_id,
+            reason="  Duplicado  ",
+        )
+
+    assert recorded[0]["reason"] == "Duplicado"
+
+
+@pytest.mark.asyncio
+async def test_clear_cart_passes_reason_to_events():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    cart_id = uuid4()
+    line_id = uuid4()
+    recorded = []
+
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow = AsyncMock(return_value={"id": cart_id})
+    mock_conn.fetch = AsyncMock(side_effect=[
+        [
+            {
+                "cart_item_id": line_id,
+                "product_id": uuid4(),
+                "quantity": 1,
+                "unit_price": 4.0,
+                "subtotal": 4.0,
+                "notes": None,
+                "product_name": "Pan",
+            },
+        ],
+        [],
+    ])
+    mock_conn.execute = AsyncMock()
+
+    class _Txn:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *args):
+            return None
+
+    mock_conn.transaction = MagicMock(return_value=_Txn())
+
+    async def capture(conn, tid, **kwargs):
+        recorded.append(kwargs)
+
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("app.services.pos_cart_service.require_valid_session") as mock_sess, \
+         patch("app.services.pos_cart_service.get_db_connection", return_value=mock_cm), \
+         patch(
+             "app.services.pos_cart_service._record_cart_operation_event",
+             side_effect=capture,
+         ):
+        mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id)
+        await pos_cart_service.clear_cart(
+            MagicMock(),
+            cart_id,
+            reason="Cambio de pedido",
+        )
+
+    assert len(recorded) == 1
+    assert recorded[0]["reason"] == "Cambio de pedido"

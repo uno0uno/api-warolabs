@@ -57,6 +57,10 @@ class TabAddRequest(BaseModel):
 
 class UpdateTabItemRequest(BaseModel):
     quantity: int = Field(..., ge=1)
+    reason: Optional[str] = Field(
+        None,
+        description="warocol.com#786 — required when decreasing qty of a fired tab line",
+    )
 
 
 @router.get("", dependencies=[Depends(require_module(Module.POS))])
@@ -154,6 +158,10 @@ class CloseSessionRequest(BaseModel):
     tip_source: Literal['preset', 'custom', 'none'] = Field('none', description="warocol.com#639 — how the tip was chosen. Must agree with tip_amount.")
     tip_taxable: bool = Field(False, description="warocol.com#740 — apply consumption tax to tip_amount when true (gravada).")
     served_by_member_id: Optional[UUID] = Field(None, description="warocol.com#663 — waiter assigned at checkout. Applied to all completed orders in the session.")
+    reason: Optional[str] = Field(
+        None,
+        description="Motivo de liberación — required when closing without payment and pending tab lines exist",
+    )
 
 
 class AddSessionPaymentRequest(BaseModel):
@@ -193,6 +201,7 @@ async def close_session(request: Request, table_id: UUID, body: CloseSessionRequ
         tip_source=body.tip_source,
         tip_taxable=body.tip_taxable,
         served_by_member_id=body.served_by_member_id,
+        reason=body.reason,
     )
 
 
@@ -289,16 +298,29 @@ async def remove_tab_item(
 @router.patch("/{table_id}/tab/items/{order_item_id}", dependencies=[Depends(require_module(Module.POS))])
 async def update_tab_item_quantity(request: Request, table_id: UUID, order_item_id: UUID, body: UpdateTabItemRequest):
     """Update the quantity of an order item in the running tab."""
-    return await tables_service.update_tab_item_quantity(request, table_id, order_item_id, body.quantity)
+    return await tables_service.update_tab_item_quantity(
+        request, table_id, order_item_id, body.quantity, body.reason,
+    )
+
+
+class ClearTabRequest(BaseModel):
+    reason: Optional[str] = Field(
+        None,
+        description="Motivo de vaciar cuenta — required when pending tab lines exist",
+    )
 
 
 @router.delete("/{table_id}/tab", dependencies=[Depends(require_module(Module.POS))])
-async def clear_tab(request: Request, table_id: UUID):
+async def clear_tab(
+    request: Request,
+    table_id: UUID,
+    body: ClearTabRequest = Body(default_factory=ClearTabRequest),
+):
     """
     Delete all pending orders for the active session without closing it.
     The table stays open and ready for new orders.
     """
-    return await tables_service.clear_tab(request, table_id)
+    return await tables_service.clear_tab(request, table_id, body.reason)
 
 
 @router.post("/{table_id}/bill", dependencies=[Depends(require_module(Module.POS))])

@@ -433,3 +433,199 @@ async def test_remove_fired_item_with_reason_records_event():
     assert len(recorded) == 1
     assert recorded[0]["reason"] == "Cliente cambió de opinión"
     assert recorded[0]["comanda_item_id"] == comanda_item_id
+
+
+@pytest.mark.asyncio
+async def test_fired_qty_decrease_without_reason_raises_400():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    table_id = uuid4()
+    order_item_id = uuid4()
+    order_id = uuid4()
+    session_id = uuid4()
+
+    row = {
+        "id": order_item_id,
+        "product_id": uuid4(),
+        "quantity": 3,
+        "price_at_purchase": 10.0,
+        "subtotal": 30.0,
+        "notes": None,
+        "fulfillment_status": "sent",
+        "order_id": order_id,
+        "total_amount": 30.0,
+        "order_number": 5,
+        "table_name": "Mesa 1",
+        "is_bar": False,
+        "table_session_id": session_id,
+        "effective_waiter_member_id": None,
+    }
+
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow = AsyncMock(side_effect=[row, None])
+    mock_conn.fetch = AsyncMock(return_value=[])
+    mock_conn.fetchval = AsyncMock(return_value=0)
+    mock_conn.execute = AsyncMock()
+
+    class _Txn:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *args):
+            return None
+
+    mock_conn.transaction = MagicMock(return_value=_Txn())
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("app.services.tables_service.require_valid_session") as mock_sess, \
+         patch("app.services.tables_service.get_db_connection", return_value=mock_cm):
+        mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id)
+        with pytest.raises(APIError) as exc:
+            await tables_service.update_tab_item_quantity(
+                MagicMock(), table_id, order_item_id, 2, reason="",
+            )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_fired_qty_decrease_with_reason_records_event():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    table_id = uuid4()
+    order_item_id = uuid4()
+    order_id = uuid4()
+    session_id = uuid4()
+    recorded = []
+
+    async def capture_record(conn, tid, **kwargs):
+        recorded.append(kwargs)
+
+    row = {
+        "id": order_item_id,
+        "product_id": uuid4(),
+        "quantity": 3,
+        "price_at_purchase": 10.0,
+        "subtotal": 30.0,
+        "notes": None,
+        "fulfillment_status": "preparing",
+        "order_id": order_id,
+        "total_amount": 30.0,
+        "order_number": 7,
+        "table_name": "Barra",
+        "is_bar": True,
+        "table_session_id": session_id,
+        "effective_waiter_member_id": None,
+    }
+
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow = AsyncMock(side_effect=[row, None])
+    mock_conn.fetch = AsyncMock(return_value=[])
+    mock_conn.fetchval = AsyncMock(return_value=0)
+    mock_conn.execute = AsyncMock()
+
+    class _Txn:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *args):
+            return None
+
+    mock_conn.transaction = MagicMock(return_value=_Txn())
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("app.services.tables_service.require_valid_session") as mock_sess, \
+         patch("app.services.tables_service.get_db_connection", return_value=mock_cm), \
+         patch(
+             "app.services.tables_service._record_tab_operation_event",
+             side_effect=capture_record,
+         ):
+        mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id)
+        await tables_service.update_tab_item_quantity(
+            MagicMock(),
+            table_id,
+            order_item_id,
+            2,
+            reason="  Error de captura  ",
+        )
+
+    assert len(recorded) == 1
+    assert recorded[0]["action"] == "tab_item_qty_changed"
+    assert recorded[0]["reason"] == "Error de captura"
+
+
+@pytest.mark.asyncio
+async def test_clear_tab_pending_without_reason_raises_400():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    table_id = uuid4()
+    session_id = uuid4()
+
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow = AsyncMock(return_value={"id": session_id})
+    mock_conn.fetchval = AsyncMock(return_value=2)
+
+    class _Txn:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *args):
+            return None
+
+    mock_conn.transaction = MagicMock(return_value=_Txn())
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("app.services.tables_service.require_valid_session") as mock_sess, \
+         patch("app.services.tables_service.get_db_connection", return_value=mock_cm):
+        mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id)
+        with pytest.raises(APIError) as exc:
+            await tables_service.clear_tab(MagicMock(), table_id, reason="")
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_clear_tab_records_reason_on_tab_cleared():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    table_id = uuid4()
+    session_id = uuid4()
+    recorded = []
+
+    async def capture_cleared(conn, tid, **kwargs):
+        recorded.append(kwargs)
+
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow = AsyncMock(return_value={"id": session_id})
+    mock_conn.fetchval = AsyncMock(side_effect=[1, 0])
+    mock_conn.execute = AsyncMock()
+
+    class _Txn:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *args):
+            return None
+
+    mock_conn.transaction = MagicMock(return_value=_Txn())
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("app.services.tables_service.require_valid_session") as mock_sess, \
+         patch("app.services.tables_service.get_db_connection", return_value=mock_cm), \
+         patch(
+             "app.services.tables_service._record_tab_cleared_pending_lines",
+             side_effect=capture_cleared,
+         ):
+        mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id)
+        await tables_service.clear_tab(
+            MagicMock(), table_id, reason="Cliente se fue",
+        )
+
+    assert len(recorded) == 1
+    assert recorded[0]["reason"] == "Cliente se fue"

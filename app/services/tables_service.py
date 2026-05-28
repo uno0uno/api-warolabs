@@ -813,7 +813,7 @@ async def open_session(
         raise APIError(f"Error opening session: {e}", status_code=500)
 
 
-async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None, split_mode: bool = False, split_first_amount: float = 0.0, *, split_first_cash_received: Optional[float] = None, cash_received: Optional[float] = None, tip_amount: float = 0, tip_source: str = 'none', tip_taxable: bool = False, served_by_member_id: Optional[UUID] = None) -> dict:
+async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None, split_mode: bool = False, split_first_amount: float = 0.0, *, split_first_cash_received: Optional[float] = None, cash_received: Optional[float] = None, tip_amount: float = 0, tip_source: str = 'none', tip_taxable: bool = False, served_by_member_id: Optional[UUID] = None, reason: Optional[str] = None) -> dict:
     """
     Close the active session for a table.
     If payment_method is provided, marks all pending orders as completed with that payment method.
@@ -847,6 +847,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
@@ -1236,6 +1237,30 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     "SELECT COUNT(*) FROM orders WHERE table_session_id = $1 AND status = 'pending'",
                     session_row["id"],
                 )
+
+                if not split_mode and not payment_method:
+                    pending_line_count = await conn.fetchval(
+                        """
+                        SELECT COUNT(*) FROM order_items oi
+                        JOIN orders o ON o.id = oi.order_id
+                        WHERE o.table_session_id = $1 AND o.status = 'pending'
+                        """,
+                        session_row["id"],
+                    )
+                    if pending_line_count and pending_line_count > 0:
+                        if not _normalize_audit_reason(reason):
+                            raise APIError(
+                                "Motivo requerido para liberar la mesa con productos pendientes",
+                                status_code=400,
+                            )
+                        await _record_tab_cleared_pending_lines(
+                            conn,
+                            tenant_id,
+                            user_id=user_id,
+                            table_id=table_id,
+                            session_id=session_row["id"],
+                            reason=reason,
+                        )
 
                 if not split_mode:
                     # Close session
@@ -2024,6 +2049,73 @@ def _tab_item_requires_remove_reason(
     return comanda_item_row is not None
 
 
+def _normalize_audit_reason(reason: Optional[str]) -> Optional[str]:
+    normalized = (reason or "").strip()
+    return normalized or None
+
+
+async def _record_tab_cleared_pending_lines(
+    conn,
+    tenant_id: UUID,
+    *,
+    user_id: UUID,
+    table_id: UUID,
+    session_id: UUID,
+    reason: Optional[str],
+) -> int:
+    """Emit tab_cleared for each pending order line (bitácora). Returns line count."""
+    tab_ctx = await _fetch_tab_operation_context(conn, tenant_id, table_id)
+    if not tab_ctx:
+        return 0
+
+    pending_lines = await conn.fetch(
+        """
+        SELECT
+            oi.id AS order_item_id,
+            oi.product_id,
+            oi.quantity,
+            oi.price_at_purchase,
+            oi.subtotal,
+            oi.notes,
+            o.id AS order_id,
+            o.order_number,
+            p.name AS product_name
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        JOIN product p ON p.id = oi.product_id
+        WHERE o.table_session_id = $1 AND o.status = 'pending'
+        """,
+        session_id,
+    )
+    event_reason = _normalize_audit_reason(reason)
+    for line in pending_lines:
+        line_modifiers = await _fetch_order_item_modifiers(conn, line["order_item_id"])
+        await _record_tab_operation_event(
+            conn,
+            tenant_id,
+            user_id=user_id,
+            table_id=table_id,
+            tab_ctx=tab_ctx,
+            action="tab_cleared",
+            order_id=line["order_id"],
+            order_item_id=line["order_item_id"],
+            reason=event_reason,
+            payload=_build_tab_item_payload(
+                product_id=line["product_id"],
+                product_name=line["product_name"],
+                quantity=line["quantity"],
+                unit_price=line["price_at_purchase"],
+                subtotal=line["subtotal"],
+                modifiers=line_modifiers,
+                notes=line["notes"],
+                table_id=table_id,
+                table_name=tab_ctx["table_name"],
+                order_number=line["order_number"],
+            ),
+        )
+    return len(pending_lines)
+
+
 async def remove_tab_item(
     request: Request,
     table_id: UUID,
@@ -2176,7 +2268,7 @@ async def remove_tab_item(
 
 
 async def update_tab_item_quantity(
-    request: Request, table_id: UUID, order_item_id: UUID, quantity: int
+    request: Request, table_id: UUID, order_item_id: UUID, quantity: int, reason: Optional[str] = None
 ) -> dict:
     """Update quantity of an order item in the running tab."""
     if quantity < 1:
@@ -2193,7 +2285,7 @@ async def update_tab_item_quantity(
                 """
                 SELECT
                     oi.id, oi.product_id, oi.quantity, oi.price_at_purchase,
-                    oi.subtotal, oi.notes,
+                    oi.subtotal, oi.notes, oi.fulfillment_status,
                     o.id AS order_id, o.total_amount, o.order_number,
                     p.name AS product_name,
                     t.name AS table_name,
@@ -2217,6 +2309,20 @@ async def update_tab_item_quantity(
                 raise NotFoundError("Order item not found or session already closed")
 
             old_quantity = float(row["quantity"])
+            comanda_item_row = await conn.fetchrow(
+                "SELECT id, comanda_id FROM comanda_items WHERE order_item_id = $1",
+                order_item_id,
+            )
+            normalized_reason = _normalize_audit_reason(reason)
+            if quantity < old_quantity and _tab_item_requires_remove_reason(
+                row["fulfillment_status"], comanda_item_row
+            ):
+                if not normalized_reason:
+                    raise APIError(
+                        "Motivo requerido para reducir cantidad de un producto enviado a cocina",
+                        status_code=400,
+                    )
+            event_reason = normalized_reason or None
             tab_ctx = {
                 "channel": "barra" if row["is_bar"] else "mesa",
                 "table_name": row["table_name"],
@@ -2267,10 +2373,11 @@ async def update_tab_item_quantity(
                 order_id=row["order_id"],
                 order_item_id=order_item_id,
                 payload=payload,
+                reason=event_reason,
             )
 
         return {"success": True, "data": {"order_item_id": str(order_item_id), "quantity": quantity, "subtotal": new_subtotal}}
-    except (AuthenticationError, NotFoundError):
+    except (AuthenticationError, NotFoundError, APIError):
         raise
     except Exception as e:
         logger.error(f"Error updating tab item {order_item_id}: {e}")
@@ -3077,7 +3184,7 @@ def _format_table_row(row: dict) -> dict:
     return result
 
 
-async def clear_tab(request: Request, table_id: UUID) -> dict:
+async def clear_tab(request: Request, table_id: UUID, reason: Optional[str] = None) -> dict:
     """
     Delete all pending orders (and their items) linked to the active session of a table.
     Does NOT close the session — the table stays open and ready for new orders.
@@ -3099,53 +3206,28 @@ async def clear_tab(request: Request, table_id: UUID) -> dict:
                 if not session_row:
                     raise NotFoundError("No open session found for this table")
 
-                tab_ctx = await _fetch_tab_operation_context(conn, tenant_id, table_id)
-                if tab_ctx:
-                    pending_lines = await conn.fetch(
-                        """
-                        SELECT
-                            oi.id AS order_item_id,
-                            oi.product_id,
-                            oi.quantity,
-                            oi.price_at_purchase,
-                            oi.subtotal,
-                            oi.notes,
-                            o.id AS order_id,
-                            o.order_number,
-                            p.name AS product_name
-                        FROM order_items oi
-                        JOIN orders o ON o.id = oi.order_id
-                        JOIN product p ON p.id = oi.product_id
-                        WHERE o.table_session_id = $1 AND o.status = 'pending'
-                        """,
-                        session_row["id"],
+                pending_line_count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM order_items oi
+                    JOIN orders o ON o.id = oi.order_id
+                    WHERE o.table_session_id = $1 AND o.status = 'pending'
+                    """,
+                    session_row["id"],
+                )
+                if pending_line_count and pending_line_count > 0:
+                    if not _normalize_audit_reason(reason):
+                        raise APIError(
+                            "Motivo requerido para vaciar la cuenta",
+                            status_code=400,
+                        )
+                    await _record_tab_cleared_pending_lines(
+                        conn,
+                        tenant_id,
+                        user_id=user_id,
+                        table_id=table_id,
+                        session_id=session_row["id"],
+                        reason=reason,
                     )
-                    for line in pending_lines:
-                        line_modifiers = await _fetch_order_item_modifiers(
-                            conn, line["order_item_id"]
-                        )
-                        await _record_tab_operation_event(
-                            conn,
-                            tenant_id,
-                            user_id=user_id,
-                            table_id=table_id,
-                            tab_ctx=tab_ctx,
-                            action="tab_cleared",
-                            order_id=line["order_id"],
-                            order_item_id=line["order_item_id"],
-                            payload=_build_tab_item_payload(
-                                product_id=line["product_id"],
-                                product_name=line["product_name"],
-                                quantity=line["quantity"],
-                                unit_price=line["price_at_purchase"],
-                                subtotal=line["subtotal"],
-                                modifiers=line_modifiers,
-                                notes=line["notes"],
-                                table_id=table_id,
-                                table_name=tab_ctx["table_name"],
-                                order_number=line["order_number"],
-                            ),
-                        )
 
                 # Cancel comanda_items that point at the order_items we're
                 # about to delete. Two reasons:
