@@ -2143,6 +2143,30 @@ async def _get_last_purchase_prices(conn, ingredient_ids: List[str], tenant_id: 
     return {r["ingredient_id"]: float(r["unit_cost"]) for r in rows}
 
 
+# Aggregate qty/cost when product recipe and modifier share an ingredient; replace on
+# same-source retry so re-running capture for one source does not double-count.
+_ORDER_ITEM_INGREDIENT_UPSERT = """
+ON CONFLICT (order_item_id, ingredient_id) DO UPDATE SET
+  quantity = CASE
+    WHEN order_item_ingredients.source_type IS NOT DISTINCT FROM EXCLUDED.source_type
+     AND order_item_ingredients.source_id IS NOT DISTINCT FROM EXCLUDED.source_id
+    THEN EXCLUDED.quantity
+    ELSE order_item_ingredients.quantity + EXCLUDED.quantity
+  END,
+  unit_cost = COALESCE(order_item_ingredients.unit_cost, EXCLUDED.unit_cost),
+  total_cost = CASE
+    WHEN COALESCE(EXCLUDED.unit_cost, order_item_ingredients.unit_cost) IS NOT NULL THEN
+      (CASE
+        WHEN order_item_ingredients.source_type IS NOT DISTINCT FROM EXCLUDED.source_type
+         AND order_item_ingredients.source_id IS NOT DISTINCT FROM EXCLUDED.source_id
+        THEN EXCLUDED.quantity
+        ELSE order_item_ingredients.quantity + EXCLUDED.quantity
+      END) * COALESCE(EXCLUDED.unit_cost, order_item_ingredients.unit_cost)
+    ELSE NULL
+  END
+"""
+
+
 async def _capture_order_item_ingredients(
     conn,
     order_item_id,
@@ -2157,7 +2181,7 @@ async def _capture_order_item_ingredients(
     - product_recipes (source_type = 'product_recipe')
     - product_base_recipes → base_recipe_templates (source_type = 'base_recipe')
 
-    Idempotent via ON CONFLICT (order_item_id, ingredient_id) DO NOTHING.
+    Idempotent per source on conflict; aggregates qty/cost across product + modifier.
     """
     rows = await conn.fetch(
         """
@@ -2214,8 +2238,8 @@ async def _capture_order_item_ingredients(
                 quantity, unit, unit_cost, total_cost,
                 source_type, source_id, created_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, NOW())
-            ON CONFLICT (order_item_id, ingredient_id) DO NOTHING
-            """,
+            """
+            + _ORDER_ITEM_INGREDIENT_UPSERT,
             order_item_id,
             r["ingredient_id"],
             r["ingredient_name"],
@@ -2362,7 +2386,7 @@ async def _capture_modifier_ingredient_snapshot(
     """
     Insert a single ingredient snapshot for a modifier that has ingredient_id set.
     source_type = 'MODIFIER_RECIPE', source_id = modifier_id.
-    Idempotent via ON CONFLICT (order_item_id, ingredient_id) DO NOTHING.
+    Idempotent per source on conflict; aggregates with product recipe rows.
     """
     ing_qty = modifier_ingredient.get("ingredient_quantity")
     if not ing_qty:
@@ -2389,8 +2413,8 @@ async def _capture_modifier_ingredient_snapshot(
             quantity, unit, unit_cost, total_cost,
             source_type, source_id, created_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, NOW())
-        ON CONFLICT (order_item_id, ingredient_id) DO NOTHING
-        """,
+        """
+        + _ORDER_ITEM_INGREDIENT_UPSERT,
         order_item_id,
         ingredient_id,
         modifier_ingredient["ingredient_name"],
