@@ -59,6 +59,8 @@ def get_pos_receipt_text(
     invoice_cufe: Optional[str] = None,
     tip_amount: float = 0.0,
     tip_label: str = "Propina",
+    promo_savings: float = 0.0,
+    promo_breakdown: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     date_str = _format_bogota_date(order_date)
     payment_label = _PAYMENT_LABELS.get(payment_method, payment_method)
@@ -92,8 +94,20 @@ def get_pos_receipt_text(
 
     # Build totals block
     totals_lines = []
-    if discount_amount > 0 and subtotal > 0:
+    _promo_breakdown = promo_breakdown or []
+    _has_promo = promo_savings > 0 or len(_promo_breakdown) > 0
+    _has_manual_discount = discount_amount > 0
+    if (_has_promo or _has_manual_discount) and subtotal > 0:
         totals_lines.append(f"Subtotal: {_format_cop(subtotal)}")
+    if _promo_breakdown:
+        for promo in _promo_breakdown:
+            promo_name = promo.get("promotion_name") or promo.get("name") or "Promoción"
+            savings = float(promo.get("savings") or promo.get("amount") or 0)
+            if savings > 0:
+                totals_lines.append(f"{promo_name}: -{_format_cop(savings)}")
+    elif promo_savings > 0:
+        totals_lines.append(f"Promoción: -{_format_cop(promo_savings)}")
+    if _has_manual_discount:
         totals_lines.append(f"Descuento: -{_format_cop(discount_amount)}")
     if standard_tax > 0:
         totals_lines.append(f"{standard_tax_label}: {_format_cop(standard_tax)}")

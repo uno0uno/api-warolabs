@@ -3236,17 +3236,18 @@ async def send_invoice_email(
                 detail="El PDF de la factura aún no está disponible. Reintentá en unos segundos.",
             )
 
-        # 3. Tax breakdown — same helpers get_order_by_id uses.
+        # 3. Tax breakdown — net line base matches GL / cierre_service.
         tax_config = await _get_tenant_tax_config(conn, tenant_id)
         items_for_tax = await conn.fetch(
             """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
-                      COALESCE(oi.subtotal, 0) AS subtotal
+                      COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal
                FROM order_items oi
                JOIN product p ON p.id = oi.product_id
                WHERE oi.order_id = $1""",
             order_id,
         )
         std_tax, liq_tax, tax_label = _compute_tax_breakdown(items_for_tax, tax_config)
+        promo_summary = await _get_order_promo_summary(conn, order_id)
 
         # 4. Items in the shape `pos_receipt_template` expects.
         item_rows = await conn.fetch(
@@ -3286,10 +3287,14 @@ async def send_invoice_email(
         )
 
     discount_amount = float(order_row['discount_amount']) if order_row['discount_amount'] is not None else 0.0
-    # Subtotal: only carried into the template when there's a discount (the
-    # template falls back to total_amount when no discount). Matches the POS
-    # cart caller convention at pos_cart_service.py:1577.
-    subtotal_for_email = sum(float(it['subtotal']) for it in item_rows) if discount_amount > 0 else 0.0
+    promo_savings = float(promo_summary["promo_savings"])
+    promo_breakdown = promo_summary["promo_breakdown"]
+    # Subtotal: gross list total when manual discount or promos need a reference line.
+    subtotal_for_email = (
+        sum(float(it['subtotal']) for it in item_rows)
+        if discount_amount > 0 or promo_savings > 0
+        else 0.0
+    )
 
     success = await send_pos_receipt_email(
         customer_email=recipient_email,
@@ -3308,6 +3313,8 @@ async def send_invoice_email(
         standard_tax=std_tax,
         liquor_tax=liq_tax,
         standard_tax_label=tax_label,
+        promo_savings=promo_savings,
+        promo_breakdown=promo_breakdown,
         invoice_prefix=invoice_row['prefix'],
         invoice_number=int(invoice_row['invoice_number']),
         invoice_cufe=invoice_row['cufe'],

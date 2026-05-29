@@ -486,6 +486,8 @@ async def send_pos_receipt_email(
     invoice_cufe: Optional[str] = None,
     tip_amount: float = 0.0,
     tip_label: Optional[str] = None,
+    promo_savings: float = 0.0,
+    promo_breakdown: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
     """
     Send a POS receipt email to the customer after a point-of-sale order completes.
@@ -539,6 +541,8 @@ async def send_pos_receipt_email(
             invoice_cufe=invoice_cufe,
             tip_amount=tip_amount,
             tip_label=resolved_tip_label,
+            promo_savings=promo_savings,
+            promo_breakdown=promo_breakdown,
         )
         subject = get_pos_receipt_subject(order_number, business_name=business_name)
 
