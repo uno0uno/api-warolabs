@@ -22,12 +22,64 @@ logger = logging.getLogger(__name__)
 
 BOGOTA = ZoneInfo("America/Bogota")
 
-# v1 contract: higher priority wins; default non-stackable (documented on router).
+VALID_PROMO_TYPES = frozenset({"percent_off", "fixed_off", "bogo"})
+DEFAULT_PROMO_CONFLICT_STRATEGY = "priority"
+ALLOWED_PROMO_CONFLICT_STRATEGIES = frozenset({DEFAULT_PROMO_CONFLICT_STRATEGY})
+DEFAULT_PROMO_TYPE_BLOCK_MAP: Dict[str, List[str]] = {
+    "bogo": ["percent_off", "fixed_off"],
+}
+
+# Checkout contract (documented on promotion router + tenant context).
 CONFLICT_RULES_DOC = (
-    "When multiple promotions match a line, the highest priority wins. "
+    "Overlapping promotions may coexist in admin; at checkout exactly one automatic "
+    "promotion applies per line. When multiple promotions match a line, the tenant "
+    "promo_conflict_strategy applies (default: highest priority wins). "
+    "Tenant promo_type_block_map defines type exclusions on the same line "
+    "(default: BOGO blocks percent_off and fixed_off). "
     "stackable=false (default) means one promotion per line. "
-    "Manual order-level discounts are applied separately in checkout (batch #982)."
+    "Manual order-level discounts are applied separately in checkout."
 )
+
+
+def normalize_promo_type_block_map(
+    raw: Optional[Dict[str, Any]],
+) -> Dict[str, List[str]]:
+    """Return a validated type-block map, falling back to tenant defaults."""
+    if not raw:
+        return dict(DEFAULT_PROMO_TYPE_BLOCK_MAP)
+    normalized: Dict[str, List[str]] = {}
+    for winner, blocked in raw.items():
+        if winner not in VALID_PROMO_TYPES:
+            continue
+        if not isinstance(blocked, list):
+            continue
+        cleaned = [b for b in blocked if isinstance(b, str) and b in VALID_PROMO_TYPES]
+        if cleaned:
+            normalized[winner] = cleaned
+    return normalized or dict(DEFAULT_PROMO_TYPE_BLOCK_MAP)
+
+
+def validate_promo_type_block_map(
+    raw: Dict[str, Any],
+) -> Dict[str, List[str]]:
+    """Validate a type-block map for PATCH writes; raises ValueError on bad input."""
+    if not isinstance(raw, dict):
+        raise ValueError("promo_type_block_map must be an object")
+    normalized: Dict[str, List[str]] = {}
+    for winner, blocked in raw.items():
+        if winner not in VALID_PROMO_TYPES:
+            raise ValueError(f"Unknown promo_type in block map: {winner}")
+        if not isinstance(blocked, list):
+            raise ValueError(f"Blocked types for {winner} must be a list")
+        cleaned: List[str] = []
+        for promo_type in blocked:
+            if not isinstance(promo_type, str) or promo_type not in VALID_PROMO_TYPES:
+                raise ValueError(f"Unknown blocked promo_type: {promo_type}")
+            if promo_type not in cleaned:
+                cleaned.append(promo_type)
+        if cleaned:
+            normalized[winner] = cleaned
+    return normalized or dict(DEFAULT_PROMO_TYPE_BLOCK_MAP)
 
 
 def day_bit_for_datetime(at: datetime) -> int:
