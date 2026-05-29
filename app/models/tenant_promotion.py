@@ -70,6 +70,7 @@ class PromotionCreate(BaseModel):
     stackable: bool = False
     starts_at: Optional[datetime] = None
     ends_at: Optional[datetime] = None
+    overlap_acknowledged: bool = False
 
     @model_validator(mode="after")
     def _validate_scope_and_values(self):
@@ -107,6 +108,7 @@ class PromotionUpdate(BaseModel):
     stackable: Optional[bool] = None
     starts_at: Optional[datetime] = None
     ends_at: Optional[datetime] = None
+    overlap_acknowledged: bool = False
 
 
 class PromotionResponse(BaseModel):

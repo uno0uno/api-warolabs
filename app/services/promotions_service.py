@@ -157,6 +157,253 @@ def product_in_scope(
     return False
 
 
+def _time_to_minutes(value: Any) -> int:
+    if isinstance(value, time):
+        return value.hour * 60 + value.minute
+    text = str(value)
+    hours, minutes = text[:5].split(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def schedules_overlap(
+    a: Dict[str, Any],
+    b: Dict[str, Any],
+) -> bool:
+    """Pairwise schedule overlap (parity with front promotionPreview.ts)."""
+    if not (int(a["days_of_week"]) & int(b["days_of_week"])):
+        return False
+    a_start = _time_to_minutes(a["start_time"])
+    a_end = _time_to_minutes(a["end_time"])
+    b_start = _time_to_minutes(b["start_time"])
+    b_end = _time_to_minutes(b["end_time"])
+    if not a.get("crosses_midnight") and not b.get("crosses_midnight"):
+        return a_start < b_end and b_start < a_end
+    return True
+
+
+def find_intra_promo_schedule_overlap(
+    schedules: Sequence[Any],
+) -> Optional[str]:
+    """Return Spanish error when two rows in the same promo overlap."""
+    rows: List[Dict[str, Any]] = []
+    for sched in schedules:
+        if isinstance(sched, dict):
+            rows.append(sched)
+        else:
+            rows.append({
+                "days_of_week": sched.days_of_week,
+                "start_time": sched.start_time,
+                "end_time": sched.end_time,
+                "crosses_midnight": sched.crosses_midnight,
+            })
+    for i in range(len(rows)):
+        for j in range(i + 1, len(rows)):
+            if schedules_overlap(rows[i], rows[j]):
+                return (
+                    f"Los horarios {i + 1} y {j + 1} "
+                    "se superponen en los mismos días."
+                )
+    return None
+
+
+def schedule_lists_overlap(
+    schedules_a: Sequence[Dict[str, Any]],
+    schedules_b: Sequence[Dict[str, Any]],
+) -> bool:
+    if not schedules_a or not schedules_b:
+        return True
+    return any(
+        schedules_overlap(a, b)
+        for a in schedules_a
+        for b in schedules_b
+    )
+
+
+def campaign_dates_overlap(
+    starts_a: Optional[datetime],
+    ends_a: Optional[datetime],
+    starts_b: Optional[datetime],
+    ends_b: Optional[datetime],
+) -> bool:
+    if ends_a is not None and starts_b is not None and ends_a <= starts_b:
+        return False
+    if ends_b is not None and starts_a is not None and ends_b <= starts_a:
+        return False
+    return True
+
+
+def product_scopes_overlap(
+    product_ids_a: Optional[Set[UUID]],
+    product_ids_b: Optional[Set[UUID]],
+) -> bool:
+    if product_ids_a is None or product_ids_b is None:
+        return True
+    return bool(product_ids_a & product_ids_b)
+
+
+async def _expand_scope_product_ids(
+    conn: asyncpg.Connection,
+    tenant_id: UUID,
+    *,
+    scope_type: str,
+    category_ids: Sequence[UUID],
+    product_ids: Sequence[UUID],
+) -> Optional[Set[UUID]]:
+    if scope_type == ScopeType.ALL_PRODUCTS.value:
+        return None
+    if scope_type == ScopeType.PRODUCTS.value:
+        return set(product_ids)
+    if not category_ids:
+        return set()
+    rows = await conn.fetch(
+        """
+        SELECT id FROM product
+        WHERE tenant_id = $1 AND category_id = ANY($2::uuid[])
+        """,
+        tenant_id,
+        list(category_ids),
+    )
+    return {row["id"] for row in rows}
+
+
+async def _count_tenant_products(conn: asyncpg.Connection, tenant_id: UUID) -> int:
+    row = await conn.fetchrow(
+        "SELECT COUNT(*) AS total FROM product WHERE tenant_id = $1",
+        tenant_id,
+    )
+    return int(row["total"]) if row else 0
+
+
+async def _shared_product_count(
+    conn: asyncpg.Connection,
+    tenant_id: UUID,
+    product_ids_a: Optional[Set[UUID]],
+    product_ids_b: Optional[Set[UUID]],
+) -> int:
+    if product_ids_a is None and product_ids_b is None:
+        return await _count_tenant_products(conn, tenant_id)
+    if product_ids_a is None:
+        return len(product_ids_b or set())
+    if product_ids_b is None:
+        return len(product_ids_a)
+    return len(product_ids_a & product_ids_b)
+
+
+def _schedule_dicts_from_inputs(schedules: Sequence[Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for sched in schedules:
+        if isinstance(sched, dict):
+            rows.append({
+                "days_of_week": int(sched["days_of_week"]),
+                "start_time": sched["start_time"],
+                "end_time": sched["end_time"],
+                "crosses_midnight": bool(sched.get("crosses_midnight", False)),
+            })
+        else:
+            rows.append({
+                "days_of_week": int(sched.days_of_week),
+                "start_time": sched.start_time,
+                "end_time": sched.end_time,
+                "crosses_midnight": bool(sched.crosses_midnight),
+            })
+    return rows
+
+
+async def detect_promotion_overlaps(
+    conn: asyncpg.Connection,
+    tenant_id: UUID,
+    candidate: Dict[str, Any],
+    *,
+    exclude_promotion_id: Optional[UUID] = None,
+) -> List[Dict[str, Any]]:
+    """Compare candidate promo against other active tenant promos."""
+    peer_rows = await conn.fetch(
+        """
+        SELECT * FROM tenant_promotions
+        WHERE tenant_id = $1 AND is_active = true
+        ORDER BY priority DESC, name
+        """,
+        tenant_id,
+    )
+    candidate_products = await _expand_scope_product_ids(
+        conn,
+        tenant_id,
+        scope_type=candidate["scope_type"],
+        category_ids=candidate.get("category_ids") or [],
+        product_ids=candidate.get("product_ids") or [],
+    )
+    candidate_schedules = candidate.get("schedules") or []
+
+    warnings: List[Dict[str, Any]] = []
+    for peer in peer_rows:
+        if exclude_promotion_id and peer["id"] == exclude_promotion_id:
+            continue
+        peer_cats, peer_prods = await _load_scope_ids(conn, peer["id"])
+        peer_products = await _expand_scope_product_ids(
+            conn,
+            tenant_id,
+            scope_type=peer["scope_type"],
+            category_ids=peer_cats,
+            product_ids=peer_prods,
+        )
+        if not product_scopes_overlap(candidate_products, peer_products):
+            continue
+        if not campaign_dates_overlap(
+            candidate.get("starts_at"),
+            candidate.get("ends_at"),
+            peer["starts_at"],
+            peer["ends_at"],
+        ):
+            continue
+        peer_schedules = [_row_to_schedule(r) for r in await _load_schedules(conn, peer["id"])]
+        if not schedule_lists_overlap(candidate_schedules, peer_schedules):
+            continue
+        shared_count = await _shared_product_count(
+            conn,
+            tenant_id,
+            candidate_products,
+            peer_products,
+        )
+        peer_priority = int(peer["priority"])
+        candidate_priority = int(candidate.get("priority") or 0)
+        risk = "high" if peer_priority == candidate_priority else "medium"
+        warnings.append({
+            "promotion_id": str(peer["id"]),
+            "promotion_name": peer["name"],
+            "priority": peer_priority,
+            "shared_product_count": shared_count,
+            "risk": risk,
+        })
+    return warnings
+
+
+def _requires_overlap_acknowledgment(
+    warnings: Sequence[Dict[str, Any]],
+    *,
+    priority: int,
+    overlap_acknowledged: bool,
+) -> bool:
+    if overlap_acknowledged or priority > 0:
+        return False
+    return any(w.get("risk") == "high" for w in warnings)
+
+
+def _overlap_advisory_response(
+    warnings: Sequence[Dict[str, Any]],
+    *,
+    requires_acknowledgment: bool,
+    data: Optional[Dict[str, Any]] = None,
+) -> dict:
+    payload: Dict[str, Any] = {
+        "success": True,
+        "overlap_warnings": list(warnings),
+        "requires_acknowledgment": requires_acknowledgment,
+    }
+    if data is not None:
+        payload["data"] = data
+    return payload
+
+
 def _parse_value_json(raw: Any) -> Dict[str, Any]:
     if raw is None:
         return {}
@@ -598,8 +845,37 @@ async def create_promotion(request: Request, body: PromotionCreate) -> dict:
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
 
+    intra_overlap = find_intra_promo_schedule_overlap(body.schedules)
+    if intra_overlap:
+        raise HTTPException(status_code=400, detail=intra_overlap)
+
+    candidate = {
+        "scope_type": body.scope_type.value,
+        "category_ids": body.category_ids,
+        "product_ids": body.product_ids,
+        "schedules": _schedule_dicts_from_inputs(body.schedules),
+        "starts_at": body.starts_at,
+        "ends_at": body.ends_at,
+        "priority": body.priority,
+    }
+
     try:
         async with get_db_connection() as conn:
+            overlap_warnings = await detect_promotion_overlaps(
+                conn,
+                tenant_id,
+                candidate,
+            )
+            if _requires_overlap_acknowledgment(
+                overlap_warnings,
+                priority=body.priority,
+                overlap_acknowledged=body.overlap_acknowledged,
+            ):
+                return _overlap_advisory_response(
+                    overlap_warnings,
+                    requires_acknowledgment=True,
+                )
+
             row = await conn.fetchrow(
                 """
                 INSERT INTO tenant_promotions (
@@ -639,10 +915,11 @@ async def create_promotion(request: Request, body: PromotionCreate) -> dict:
         ) from None
 
     logger.info("Created promotion %r for tenant %s", body.name, tenant_id)
-    return {
-        "success": True,
-        "data": _serialize_promotion(row, schedules, scope),
-    }
+    return _overlap_advisory_response(
+        overlap_warnings,
+        requires_acknowledgment=False,
+        data=_serialize_promotion(row, schedules, scope),
+    )
 
 
 async def update_promotion(
@@ -662,6 +939,12 @@ async def update_promotion(
     schedules = data.pop("schedules", None)
     category_ids = data.pop("category_ids", None)
     product_ids = data.pop("product_ids", None)
+    overlap_acknowledged = data.pop("overlap_acknowledged", False)
+
+    if schedules is not None:
+        intra_overlap = find_intra_promo_schedule_overlap(schedules)
+        if intra_overlap:
+            raise HTTPException(status_code=400, detail=intra_overlap)
 
     if "name" in data and data["name"] is not None:
         data["name"] = data["name"].strip()
@@ -674,6 +957,47 @@ async def update_promotion(
 
     async with get_db_connection() as conn:
         existing = await _get_owned_promotion(conn, promotion_id, tenant_id)
+
+        scope_type = data.get("scope_type", existing["scope_type"])
+        merged_cats = category_ids if category_ids is not None else (
+            await _load_scope_ids(conn, promotion_id)
+        )[0]
+        merged_prods = product_ids if product_ids is not None else (
+            await _load_scope_ids(conn, promotion_id)
+        )[1]
+        merged_schedules_rows = (
+            await _load_schedules(conn, promotion_id)
+            if schedules is None
+            else schedules
+        )
+        merged_priority = data.get("priority", existing["priority"])
+        merged_starts = data.get("starts_at", existing["starts_at"])
+        merged_ends = data.get("ends_at", existing["ends_at"])
+
+        candidate = {
+            "scope_type": scope_type,
+            "category_ids": merged_cats,
+            "product_ids": merged_prods,
+            "schedules": _schedule_dicts_from_inputs(merged_schedules_rows),
+            "starts_at": merged_starts,
+            "ends_at": merged_ends,
+            "priority": merged_priority,
+        }
+        overlap_warnings = await detect_promotion_overlaps(
+            conn,
+            tenant_id,
+            candidate,
+            exclude_promotion_id=promotion_id,
+        )
+        if _requires_overlap_acknowledgment(
+            overlap_warnings,
+            priority=int(merged_priority),
+            overlap_acknowledged=overlap_acknowledged,
+        ):
+            return _overlap_advisory_response(
+                overlap_warnings,
+                requires_acknowledgment=True,
+            )
 
         if data:
             set_parts = []
@@ -721,10 +1045,11 @@ async def update_promotion(
         schedules_rows = await _load_schedules(conn, promotion_id)
         scope = await _load_scope_summary(conn, promotion_id)
 
-    return {
-        "success": True,
-        "data": _serialize_promotion(row, schedules_rows, scope),
-    }
+    return _overlap_advisory_response(
+        overlap_warnings,
+        requires_acknowledgment=False,
+        data=_serialize_promotion(row, schedules_rows, scope),
+    )
 
 
 async def delete_promotion(request: Request, promotion_id: UUID) -> dict:
