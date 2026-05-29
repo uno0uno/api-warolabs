@@ -783,11 +783,64 @@ def _promo_matches_line(
     )
 
 
+def _scope_specificity_rank(scope_type: str) -> int:
+    if scope_type == ScopeType.PRODUCTS.value:
+        return 2
+    if scope_type == ScopeType.CATEGORIES.value:
+        return 1
+    return 0
+
+
+def _promo_rank_key(promo: Dict[str, Any]) -> tuple:
+    return (
+        int(promo.get("priority") or 0),
+        _scope_specificity_rank(str(promo.get("scope_type") or "")),
+        promo.get("name") or "",
+    )
+
+
+def _promo_block_rank_key(promo: Dict[str, Any]) -> tuple:
+    return (
+        int(promo.get("priority") or 0),
+        _scope_specificity_rank(str(promo.get("scope_type") or "")),
+    )
+
+
+def _filter_type_blocked_candidates(
+    matches: Sequence[Dict[str, Any]],
+    type_block_map: Dict[str, List[str]],
+) -> List[Dict[str, Any]]:
+    if not matches:
+        return []
+    eligible: List[Dict[str, Any]] = []
+    for candidate in matches:
+        candidate_type = str(candidate.get("promo_type") or "")
+        candidate_rank = _promo_block_rank_key(candidate)
+        blocked = False
+        for other in matches:
+            if other is candidate:
+                continue
+            blocked_types = type_block_map.get(str(other.get("promo_type") or "")) or []
+            if candidate_type not in blocked_types:
+                continue
+            other_rank = _promo_block_rank_key(other)
+            if other_rank > candidate_rank:
+                blocked = True
+                break
+            if other_rank == candidate_rank:
+                blocked = True
+                break
+        if not blocked:
+            eligible.append(candidate)
+    return eligible
+
+
 def _pick_best_promotion_for_line(
     promotions: Sequence[Dict[str, Any]],
     *,
     product_id: UUID,
     category_id: Optional[UUID],
+    promo_type_block_map: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     matches = [
         p for p in promotions
@@ -795,7 +848,11 @@ def _pick_best_promotion_for_line(
     ]
     if not matches:
         return None
-    return max(matches, key=lambda p: (int(p.get("priority") or 0), p.get("name") or ""))
+    block_map = normalize_promo_type_block_map(promo_type_block_map)
+    eligible = _filter_type_blocked_candidates(matches, block_map)
+    if not eligible:
+        return None
+    return max(eligible, key=_promo_rank_key)
 
 
 def _compute_line_promo_savings(line: Dict[str, Any], promo: Dict[str, Any]) -> int:
@@ -839,6 +896,8 @@ def _compute_line_promo_savings(line: Dict[str, Any], promo: Dict[str, Any]) -> 
 def evaluate_cart_promotions(
     lines: Sequence[Dict[str, Any]],
     promotions: Sequence[Dict[str, Any]],
+    *,
+    promo_type_block_map: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Evaluate active promotions against checkout lines.
@@ -868,6 +927,7 @@ def evaluate_cart_promotions(
                 promotions,
                 product_id=product_id,
                 category_id=category_id,
+                promo_type_block_map=promo_type_block_map,
             )
         promo_savings = 0
         promo_meta: Dict[str, Any] = {}
@@ -1025,7 +1085,22 @@ async def evaluate_checkout_promotions(
     """DB-backed promo evaluation + optional manual discount stacking."""
     evaluation_at = at or default_at_bogota()
     promotions = await load_promotions_for_evaluation(conn, tenant_id, evaluation_at)
-    evaluated = evaluate_cart_promotions(lines, promotions)
+    profile_row = await conn.fetchrow(
+        """
+        SELECT promo_type_block_map
+        FROM tenant_public_profiles
+        WHERE tenant_id = $1
+        """,
+        tenant_id,
+    )
+    type_block_map = normalize_promo_type_block_map(
+        profile_row["promo_type_block_map"] if profile_row else None
+    )
+    evaluated = evaluate_cart_promotions(
+        lines,
+        promotions,
+        promo_type_block_map=type_block_map,
+    )
     manual_discount = float(manual_discount_amount or 0)
     if discount_type and discount_value is not None and discount_value > 0:
         if discount_type == "percent":
