@@ -326,6 +326,28 @@ async def update_tab_item_quantity(request: Request, table_id: UUID, order_item_
     )
 
 
+class TabPromoOptOutRequest(BaseModel):
+    promo_opt_out: bool = Field(
+        description="When true, skip automatic promotions for this tab line.",
+    )
+
+
+@router.patch(
+    "/{table_id}/tab/items/{order_item_id}/promo-opt-out",
+    dependencies=[Depends(require_module(Module.POS))],
+)
+async def update_tab_item_promo_opt_out(
+    request: Request,
+    table_id: UUID,
+    order_item_id: UUID,
+    body: TabPromoOptOutRequest,
+):
+    """Toggle per-line promotion opt-out for a mesa/tab item (warocol.com#1003)."""
+    return await tables_service.update_tab_item_promo_opt_out(
+        request, table_id, order_item_id, body.promo_opt_out,
+    )
+
+
 class ClearTabRequest(BaseModel):
     reason: Optional[str] = Field(
         None,

@@ -86,6 +86,7 @@ def _cart_items_to_promo_lines(items: List[dict]) -> List[dict]:
             "quantity": item.get("quantity") or 1,
             "subtotal": float(item["subtotal"]),
             "tax_category": item.get("tax_category") or "standard",
+            "promo_opt_out": bool(item.get("promo_opt_out")),
         }
         for item in items
     ]
@@ -359,6 +360,7 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
             ci.unit_price,
             ci.subtotal,
             ci.notes,
+            ci.promo_opt_out,
             p.name as product_name,
             p.category_id as category_id,
             COALESCE(p.tax_category, 'standard') AS tax_category,
@@ -378,7 +380,7 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
         LEFT JOIN pos_cart_item_modifiers m ON m.cart_item_id = ci.id
         WHERE ci.cart_id = $1
         GROUP BY ci.id, ci.product_id, ci.quantity, ci.unit_price, ci.subtotal,
-                 ci.notes, ci.created_at, p.name, p.category_id, p.tax_category, p.is_resale
+                 ci.notes, ci.promo_opt_out, ci.created_at, p.name, p.category_id, p.tax_category, p.is_resale
         ORDER BY ci.created_at
     """
     items_rows = await conn.fetch(items_query, cart_id)
@@ -412,10 +414,80 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
                 for mod in raw_modifiers
             ],
             "notes": item_row['notes'],
-            "subtotal": float(item_row['subtotal'])
+            "subtotal": float(item_row['subtotal']),
+            "promo_opt_out": bool(item_row.get("promo_opt_out")),
         })
 
     return items
+
+
+async def _require_promo_line_opt_out_enabled(conn, tenant_id: UUID) -> None:
+    enabled = await conn.fetchval(
+        """
+        SELECT allow_promo_line_opt_out
+        FROM tenant_public_profiles
+        WHERE tenant_id = $1
+        """,
+        tenant_id,
+    )
+    if not bool(enabled):
+        raise APIError(
+            "Per-line promotion opt-out is not enabled for this tenant",
+            status_code=403,
+        )
+
+
+async def update_cart_item_promo_opt_out(
+    request: Request,
+    cart_id: UUID,
+    item_id: UUID,
+    promo_opt_out: bool,
+) -> dict:
+    """Toggle per-line promotion opt-out for a POS cart item (warocol.com#1003)."""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    SELECT pci.id
+                    FROM pos_cart_items pci
+                    JOIN pos_carts pc ON pc.id = pci.cart_id
+                    WHERE pci.id = $1 AND pci.cart_id = $2 AND pc.tenant_id = $3
+                      AND pc.status = 'active'
+                    """,
+                    item_id,
+                    cart_id,
+                    tenant_id,
+                )
+                if not row:
+                    raise APIError("Cart item not found", status_code=404)
+
+                await _require_promo_line_opt_out_enabled(conn, tenant_id)
+
+                await conn.execute(
+                    """
+                    UPDATE pos_cart_items
+                    SET promo_opt_out = $1
+                    WHERE id = $2
+                    """,
+                    promo_opt_out,
+                    item_id,
+                )
+
+        return {
+            "success": True,
+            "data": {"item_id": str(item_id), "promo_opt_out": promo_opt_out},
+        }
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error updating promo opt-out for cart item {item_id}: {e}")
+        raise APIError(f"Error updating promo opt-out: {e}", status_code=500)
 
 
 async def add_item_to_cart(
@@ -2016,19 +2088,36 @@ async def complete_pos_order(
                 _liquor_tax = 0.0
                 _standard_tax_label = "Impuesto"
                 try:
-                    from app.services.orders_service import _compute_tax_breakdown
-
                     items_tax_rows = await conn.fetch(
                         """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
-                                  COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal
+                                  COALESCE(oi.subtotal, 0) AS subtotal
                            FROM order_items oi
                            JOIN product p ON p.id = oi.product_id
                            WHERE oi.order_id = $1""",
                         order_id
                     )
-                    _standard_tax, _liquor_tax, _standard_tax_label = _compute_tax_breakdown(
-                        items_tax_rows, tax_config
-                    )
+                    std_subtotal = sum(float(r['subtotal']) for r in items_tax_rows if r['tax_category'] == 'standard')
+                    liq_subtotal = sum(float(r['subtotal']) for r in items_tax_rows if r['tax_category'] == 'liquor')
+
+                    if tax_config.get('inc_applicable') and std_subtotal > 0:
+                        rate = float(tax_config['inc_rate'])
+                        if tax_config.get('inc_included_in_price'):
+                            _standard_tax = round(std_subtotal * rate / (1 + rate))
+                        else:
+                            _standard_tax = round(std_subtotal * rate)
+                        pct = round(rate * 100)
+                        _standard_tax_label = f"INC {pct}%"
+                    elif tax_config.get('iva_applicable') and std_subtotal > 0:
+                        rate = float(tax_config['iva_rate'])
+                        if tax_config.get('iva_included_in_price'):
+                            _standard_tax = round(std_subtotal * rate / (1 + rate))
+                        else:
+                            _standard_tax = round(std_subtotal * rate)
+                        pct = round(rate * 100)
+                        _standard_tax_label = f"IVA {pct}%"
+
+                    if tax_config.get('liquor_tax_applicable') and liq_subtotal > 0:
+                        _liquor_tax = round(liq_subtotal * 0.05)
                 except Exception as e:
                     logger.warning(f"Tax breakdown computation failed for order {order_id}: {e}")
 
@@ -2127,12 +2216,7 @@ async def complete_pos_order(
                         business_city=_business_city,
                         business_phone=_business_phone,
                         discount_amount=float(_discount_amount) if _discount_amount else 0.0,
-                        subtotal=float(cart_subtotal) if (_discount_amount or _promo_savings > 0) else 0.0,
-                        standard_tax=_standard_tax,
-                        liquor_tax=_liquor_tax,
-                        standard_tax_label=_standard_tax_label,
-                        promo_savings=_promo_savings,
-                        promo_breakdown=_promo_breakdown,
+                        subtotal=float(cart_subtotal) if _discount_amount else 0.0,
                         tip_amount=float(tip_amount),
                     )
                 )

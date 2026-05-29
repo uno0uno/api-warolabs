@@ -926,7 +926,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     _promo_breakdown = []
                     item_rows = await conn.fetch(
                         """
-                        SELECT oi.id, oi.subtotal, oi.quantity, oi.product_id, p.category_id,
+                        SELECT oi.id, oi.subtotal, oi.quantity, oi.product_id, oi.promo_opt_out,
+                               p.category_id,
                                COALESCE(p.tax_category, 'standard') AS tax_category
                         FROM order_items oi
                         JOIN orders o ON o.id = oi.order_id
@@ -943,6 +944,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             "quantity": int(row["quantity"]),
                             "subtotal": float(row["subtotal"]),
                             "tax_category": row["tax_category"] or "standard",
+                            "promo_opt_out": bool(row.get("promo_opt_out")),
                         }
                         for row in item_rows
                     ]
@@ -1820,6 +1822,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                             oi.quantity,
                             oi.subtotal,
                             oi.product_id,
+                            oi.promo_opt_out,
                             p.category_id,
                             COALESCE(p.tax_category, 'standard') AS tax_category
                         FROM order_items oi
@@ -1837,6 +1840,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                             "quantity": int(row["quantity"]),
                             "subtotal": float(row["subtotal"]),
                             "tax_category": row["tax_category"] or "standard",
+                            "promo_opt_out": bool(row.get("promo_opt_out")),
                         }
                         for row in eval_rows
                     ]
@@ -1869,6 +1873,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     oi.price_at_purchase,
                     oi.subtotal,
                     oi.notes,
+                    oi.promo_opt_out,
                     oi.fulfillment_status,
                     oi.sent_at,
                     p.name AS product_name,
@@ -1891,7 +1896,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                 WHERE o.table_session_id = $1
                 GROUP BY
                     oi.id, oi.product_id, oi.quantity, oi.price_at_purchase, oi.subtotal,
-                    oi.notes, oi.fulfillment_status, oi.sent_at, p.name, p.category_id
+                    oi.notes, oi.promo_opt_out, oi.fulfillment_status, oi.sent_at, p.name, p.category_id
                 ORDER BY oi.id ASC
                 """,
                 session_row["id"],
@@ -1995,6 +2000,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                         "promoSavings": int(_promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promo_savings") or 0),
                         "promotionName": _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promotion_name"),
                         "promoType": _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promo_type"),
+                        "promoOptOut": bool(r.get("promo_opt_out")),
                         "modifiers": [
                             {
                                 "id": mod["id"],
@@ -2561,6 +2567,73 @@ async def update_tab_item_quantity(
     except Exception as e:
         logger.error(f"Error updating tab item {order_item_id}: {e}")
         raise APIError(f"Error updating item: {e}", status_code=500)
+
+
+async def update_tab_item_promo_opt_out(
+    request: Request,
+    table_id: UUID,
+    order_item_id: UUID,
+    promo_opt_out: bool,
+) -> dict:
+    """Toggle per-line promotion opt-out for a mesa/tab order item (warocol.com#1003)."""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=True) as conn:
+            enabled = await conn.fetchval(
+                """
+                SELECT allow_promo_line_opt_out
+                FROM tenant_public_profiles
+                WHERE tenant_id = $1
+                """,
+                tenant_id,
+            )
+            if not bool(enabled):
+                raise APIError(
+                    "Per-line promotion opt-out is not enabled for this tenant",
+                    status_code=403,
+                )
+
+            row = await conn.fetchrow(
+                """
+                SELECT oi.id
+                FROM order_items oi
+                JOIN orders o ON o.id = oi.order_id
+                JOIN table_sessions ts ON ts.id = o.table_session_id
+                WHERE oi.id = $1
+                  AND ts.table_id = $2
+                  AND ts.tenant_id = $3
+                  AND ts.closed_at IS NULL
+                  AND o.status = 'pending'
+                """,
+                order_item_id,
+                table_id,
+                tenant_id,
+            )
+            if not row:
+                raise NotFoundError("Order item not found or session already closed")
+
+            await conn.execute(
+                "UPDATE order_items SET promo_opt_out = $1 WHERE id = $2",
+                promo_opt_out,
+                order_item_id,
+            )
+
+        return {
+            "success": True,
+            "data": {
+                "order_item_id": str(order_item_id),
+                "promo_opt_out": promo_opt_out,
+            },
+        }
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error updating tab item promo opt-out {order_item_id}: {e}")
+        raise APIError(f"Error updating promo opt-out: {e}", status_code=500)
 
 
 async def _add_tab_items_core(

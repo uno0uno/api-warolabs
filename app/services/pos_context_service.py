@@ -35,6 +35,7 @@ SELECT
     tpp.tip_default_percentages,
     tpp.tip_preselect_index,
     tpp.logo_url,
+    tpp.allow_promo_line_opt_out,
     fd.nit,
     fd.business_name,
     fd.type_organization_id,
@@ -117,6 +118,9 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             if row['tip_default_percentages'] else [10.0]
         ),
         'tip_preselect_index': row['tip_preselect_index'],
+        'allow_promo_line_opt_out': bool(row['allow_promo_line_opt_out'])
+        if row['allow_promo_line_opt_out'] is not None
+        else False,
         'logo_url': row['logo_url'],
         'receipt_print_settings': {
             'document_label': (row['receipt_document_label'] or 'Prefactura').strip()[:40],
