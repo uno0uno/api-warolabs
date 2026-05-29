@@ -1469,3 +1469,107 @@ def promo_persist_fields_from_eval_line(
     if promo_id_raw:
         promo_uuid = promo_id_raw if isinstance(promo_id_raw, UUID) else UUID(str(promo_id_raw))
     return promo_uuid, promo_savings
+
+
+_SESSION_PENDING_PROMO_ITEMS_SQL = """
+    SELECT oi.id, oi.subtotal, oi.quantity, oi.product_id, oi.promo_opt_out,
+           p.category_id,
+           COALESCE(p.tax_category, 'standard') AS tax_category
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    JOIN product p ON p.id = oi.product_id
+    WHERE o.table_session_id = $1 AND o.status = 'pending'
+"""
+
+
+def item_rows_to_promo_lines(item_rows: Sequence[Any]) -> List[Dict[str, Any]]:
+    """Map pending order_item rows → evaluate_checkout_promotions input."""
+    return [
+        {
+            "id": str(row["id"]),
+            "product_id": str(row["product_id"]),
+            "category_id": str(row["category_id"]) if row["category_id"] else None,
+            "quantity": int(row["quantity"]),
+            "subtotal": float(row["subtotal"]),
+            "tax_category": row["tax_category"] or "standard",
+            "promo_opt_out": bool(row.get("promo_opt_out")),
+        }
+        for row in item_rows
+    ]
+
+
+async def apply_promo_eval_to_order_items(
+    conn: asyncpg.Connection,
+    item_rows: Sequence[Any],
+    checkout_eval: Dict[str, Any],
+) -> None:
+    """Persist evaluate_checkout_promotions line results on order_items (warocol.com#1020)."""
+    eval_by_id = {line["id"]: line for line in checkout_eval["lines"]}
+    for row in item_rows:
+        eval_line = eval_by_id.get(str(row["id"]), {})
+        total_alloc = eval_line.get("total_discount_allocated")
+        net_total = eval_line.get("net_total")
+        promo_id, promo_savings = promo_persist_fields_from_eval_line(eval_line)
+        if total_alloc or net_total is not None or promo_id or promo_savings:
+            await conn.execute(
+                """
+                UPDATE order_items
+                SET discount_allocated = $2, net_total = $3,
+                    applied_promotion_id = $4, promo_savings_allocated = $5
+                WHERE id = $1::uuid
+                """,
+                row["id"],
+                total_alloc,
+                net_total,
+                promo_id,
+                promo_savings,
+            )
+
+
+async def recalc_pending_session_order_totals(
+    conn: asyncpg.Connection,
+    session_id: UUID,
+) -> None:
+    """Set pending orders.total_amount from net line totals after promo persist."""
+    await conn.execute(
+        """
+        UPDATE orders o
+        SET total_amount = sub.sum_net
+        FROM (
+            SELECT oi.order_id, COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)), 0) AS sum_net
+            FROM order_items oi
+            JOIN orders ord ON ord.id = oi.order_id
+            WHERE ord.table_session_id = $1 AND ord.status = 'pending'
+            GROUP BY oi.order_id
+        ) sub
+        WHERE o.id = sub.order_id
+          AND o.table_session_id = $1
+          AND o.status = 'pending'
+        """,
+        session_id,
+    )
+
+
+async def persist_session_tab_promos(
+    conn: asyncpg.Connection,
+    tenant_id: UUID,
+    session_id: UUID,
+) -> Dict[str, Any]:
+    """Evaluate and persist promo fields for all pending tab lines in a session."""
+    item_rows = await conn.fetch(_SESSION_PENDING_PROMO_ITEMS_SQL, session_id)
+    if not item_rows:
+        return {
+            "lines": [],
+            "promo_savings": 0,
+            "subtotal_after_promos": 0,
+            "promo_breakdown": [],
+        }
+
+    checkout_eval = await evaluate_checkout_promotions(
+        conn,
+        tenant_id,
+        item_rows_to_promo_lines(item_rows),
+    )
+    await apply_promo_eval_to_order_items(conn, item_rows, checkout_eval)
+    await recalc_pending_session_order_totals(conn, session_id)
+    return checkout_eval
