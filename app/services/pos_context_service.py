@@ -46,6 +46,7 @@ SELECT
     fd.phone           AS fiscal_phone,
     fd.email           AS fiscal_email,
     fd.receipt_document_label,
+    fd.receipt_tip_label,
     fd.show_logo_on_receipts,
     ttc.inc_applicable,
     ttc.inc_rate,
@@ -119,6 +120,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         'logo_url': row['logo_url'],
         'receipt_print_settings': {
             'document_label': (row['receipt_document_label'] or 'Prefactura').strip()[:40],
+            'tip_label': (row['receipt_tip_label'] or 'Propina').strip()[:40],
             'show_logo': bool(row['show_logo_on_receipts'])
             if row['show_logo_on_receipts'] is not None
             else True,

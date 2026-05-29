@@ -58,6 +58,7 @@ def get_pos_receipt_text(
     invoice_number: Optional[int] = None,
     invoice_cufe: Optional[str] = None,
     tip_amount: float = 0.0,
+    tip_label: str = "Propina",
 ) -> str:
     date_str = _format_bogota_date(order_date)
     payment_label = _PAYMENT_LABELS.get(payment_method, payment_method)
@@ -103,11 +104,12 @@ def get_pos_receipt_text(
     # warocol.com#637 — tip line shown separately from the order total so the
     # customer can see exactly how much went to the waiter. Charged total is
     # only printed when there is a tip to avoid noise on the typical receipt.
+    tip_line_label = (tip_label or "Propina").strip()[:40] or "Propina"
     tip_block = ""
     if tip_amount > 0:
         charged_total = total_amount + tip_amount
         tip_block = (
-            f"Propina: {_format_cop(tip_amount)}\n"
+            f"{tip_line_label}: {_format_cop(tip_amount)}\n"
             f"--------------------------------\n"
             f"TOTAL COBRADO: {_format_cop(charged_total)}\n"
         )

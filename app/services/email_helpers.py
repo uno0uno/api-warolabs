@@ -485,6 +485,7 @@ async def send_pos_receipt_email(
     invoice_number: Optional[int] = None,
     invoice_cufe: Optional[str] = None,
     tip_amount: float = 0.0,
+    tip_label: Optional[str] = None,
 ) -> bool:
     """
     Send a POS receipt email to the customer after a point-of-sale order completes.
@@ -503,6 +504,19 @@ async def send_pos_receipt_email(
             f"Receipt email skipped: invalid customer_email={customer_email!r} for order #{order_number}"
         )
         return False
+
+    resolved_tip_label = (tip_label or "Propina").strip()[:40] or "Propina"
+    if tenant_id and tip_label is None:
+        try:
+            async with get_db_connection(use_transaction=False) as conn:
+                tip_row = await conn.fetchrow(
+                    "SELECT receipt_tip_label FROM tenant_fiscal_data WHERE tenant_id = $1",
+                    tenant_id,
+                )
+                if tip_row and tip_row.get("receipt_tip_label"):
+                    resolved_tip_label = str(tip_row["receipt_tip_label"]).strip()[:40] or "Propina"
+        except Exception as _tip_err:
+            logger.warning(f"Could not fetch receipt tip label for tenant {tenant_id}: {_tip_err}")
 
     try:
         text_body = get_pos_receipt_text(
@@ -524,6 +538,7 @@ async def send_pos_receipt_email(
             invoice_number=invoice_number,
             invoice_cufe=invoice_cufe,
             tip_amount=tip_amount,
+            tip_label=resolved_tip_label,
         )
         subject = get_pos_receipt_subject(order_number, business_name=business_name)
 
