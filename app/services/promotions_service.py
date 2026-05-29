@@ -432,6 +432,114 @@ async def get_promotion(
     }
 
 
+async def list_promotion_scope(
+    request: Request,
+    promotion_id: UUID,
+    *,
+    search: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> dict:
+    """Paginated scope item names for promotions list popover (warocol.com#999)."""
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    page = max(1, page)
+    page_size = min(max(1, page_size), 100)
+    offset = (page - 1) * page_size
+    search_term = search.strip() if search and search.strip() else None
+    search_pattern = f"%{search_term}%" if search_term else None
+
+    async with get_db_connection(use_transaction=False) as conn:
+        row = await _get_owned_promotion(conn, promotion_id, tenant_id)
+        scope_type = row["scope_type"]
+
+        if scope_type == ScopeType.ALL_PRODUCTS.value:
+            return {
+                "success": True,
+                "data": {
+                    "scope_type": scope_type,
+                    "promotion_name": row["name"],
+                    "items": [],
+                    "total": 0,
+                    "page": page,
+                    "page_size": page_size,
+                },
+            }
+
+        if scope_type == ScopeType.CATEGORIES.value:
+            count_row = await conn.fetchrow(
+                """
+                SELECT COUNT(*) AS total
+                FROM tenant_promotion_scope_categories sc
+                LEFT JOIN categories c ON c.id = sc.category_id
+                WHERE sc.promotion_id = $1
+                  AND ($2::text IS NULL OR c.name ILIKE $2)
+                """,
+                promotion_id,
+                search_pattern,
+            )
+            rows = await conn.fetch(
+                """
+                SELECT sc.category_id AS id, c.name
+                FROM tenant_promotion_scope_categories sc
+                LEFT JOIN categories c ON c.id = sc.category_id
+                WHERE sc.promotion_id = $1
+                  AND ($2::text IS NULL OR c.name ILIKE $2)
+                ORDER BY c.name NULLS LAST, sc.category_id
+                LIMIT $3 OFFSET $4
+                """,
+                promotion_id,
+                search_pattern,
+                page_size,
+                offset,
+            )
+        else:
+            count_row = await conn.fetchrow(
+                """
+                SELECT COUNT(*) AS total
+                FROM tenant_promotion_scope_products sp
+                LEFT JOIN product p ON p.id = sp.product_id
+                WHERE sp.promotion_id = $1
+                  AND ($2::text IS NULL OR p.name ILIKE $2)
+                """,
+                promotion_id,
+                search_pattern,
+            )
+            rows = await conn.fetch(
+                """
+                SELECT sp.product_id AS id, p.name
+                FROM tenant_promotion_scope_products sp
+                LEFT JOIN product p ON p.id = sp.product_id
+                WHERE sp.promotion_id = $1
+                  AND ($2::text IS NULL OR p.name ILIKE $2)
+                ORDER BY p.name NULLS LAST, sp.product_id
+                LIMIT $3 OFFSET $4
+                """,
+                promotion_id,
+                search_pattern,
+                page_size,
+                offset,
+            )
+
+        total = int(count_row["total"]) if count_row else 0
+
+    items = [{"id": str(r["id"]), "name": r["name"] or "(sin nombre)"} for r in rows]
+    return {
+        "success": True,
+        "data": {
+            "scope_type": scope_type,
+            "promotion_name": row["name"],
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        },
+    }
+
+
 async def create_promotion(request: Request, body: PromotionCreate) -> dict:
     session = require_valid_session(request)
     tenant_id = session.tenant_id
