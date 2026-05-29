@@ -124,15 +124,59 @@ def _row_to_schedule(row: asyncpg.Record) -> Dict[str, Any]:
     }
 
 
+def _scope_summary_from_pairs(
+    category_pairs: Sequence[tuple[UUID, Optional[str]]],
+    product_pairs: Sequence[tuple[UUID, Optional[str]]],
+) -> Dict[str, Any]:
+    category_ids = [cid for cid, _ in category_pairs]
+    product_ids = [pid for pid, _ in product_pairs]
+    category_names = [name for _, name in category_pairs if name]
+    product_names = [name for _, name in product_pairs if name]
+    return {
+        "category_ids": category_ids,
+        "product_ids": product_ids,
+        "category_count": len(category_ids),
+        "product_count": len(product_ids),
+        "category_names_preview": category_names[:3],
+        "product_names_preview": product_names[:3],
+    }
+
+
+def _empty_scope_summary() -> Dict[str, Any]:
+    return _scope_summary_from_pairs([], [])
+
+
+def _group_scope_summaries(
+    promotion_ids: Sequence[UUID],
+    cat_rows: Sequence[asyncpg.Record],
+    prod_rows: Sequence[asyncpg.Record],
+) -> Dict[UUID, Dict[str, Any]]:
+    cats_by_promo: Dict[UUID, List[tuple[UUID, Optional[str]]]] = {
+        pid: [] for pid in promotion_ids
+    }
+    prods_by_promo: Dict[UUID, List[tuple[UUID, Optional[str]]]] = {
+        pid: [] for pid in promotion_ids
+    }
+    for row in cat_rows:
+        cats_by_promo[row["promotion_id"]].append((row["category_id"], row["name"]))
+    for row in prod_rows:
+        prods_by_promo[row["promotion_id"]].append((row["product_id"], row["name"]))
+    return {
+        pid: _scope_summary_from_pairs(cats_by_promo[pid], prods_by_promo[pid])
+        for pid in promotion_ids
+    }
+
+
 def _serialize_promotion(
     promo_row: asyncpg.Record,
     schedules: List[asyncpg.Record],
-    category_ids: List[UUID],
-    product_ids: List[UUID],
+    scope: Dict[str, Any],
     *,
     at: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     schedule_dicts = [_row_to_schedule(r) for r in schedules]
+    category_ids = scope["category_ids"]
+    product_ids = scope["product_ids"]
     payload: Dict[str, Any] = {
         "id": str(promo_row["id"]),
         "tenant_id": str(promo_row["tenant_id"]),
@@ -142,6 +186,10 @@ def _serialize_promotion(
         "scope_type": promo_row["scope_type"],
         "category_ids": [str(cid) for cid in category_ids],
         "product_ids": [str(pid) for pid in product_ids],
+        "category_count": scope["category_count"],
+        "product_count": scope["product_count"],
+        "category_names_preview": list(scope["category_names_preview"]),
+        "product_names_preview": list(scope["product_names_preview"]),
         "schedules": [
             {
                 "id": str(s["id"]),
@@ -175,21 +223,44 @@ def _serialize_promotion(
 async def _load_scope_ids(
     conn: asyncpg.Connection, promotion_id: UUID
 ) -> tuple[List[UUID], List[UUID]]:
+    scope = await _load_scope_summary(conn, promotion_id)
+    return scope["category_ids"], scope["product_ids"]
+
+
+async def _load_scope_summaries_batch(
+    conn: asyncpg.Connection, promotion_ids: Sequence[UUID]
+) -> Dict[UUID, Dict[str, Any]]:
+    ids = list(promotion_ids)
+    if not ids:
+        return {}
     cat_rows = await conn.fetch(
         """
-        SELECT category_id FROM tenant_promotion_scope_categories
-        WHERE promotion_id = $1
+        SELECT sc.promotion_id, sc.category_id, c.name
+        FROM tenant_promotion_scope_categories sc
+        LEFT JOIN categories c ON c.id = sc.category_id
+        WHERE sc.promotion_id = ANY($1::uuid[])
+        ORDER BY sc.promotion_id, c.name NULLS LAST, sc.category_id
         """,
-        promotion_id,
+        ids,
     )
     prod_rows = await conn.fetch(
         """
-        SELECT product_id FROM tenant_promotion_scope_products
-        WHERE promotion_id = $1
+        SELECT sp.promotion_id, sp.product_id, p.name
+        FROM tenant_promotion_scope_products sp
+        LEFT JOIN product p ON p.id = sp.product_id
+        WHERE sp.promotion_id = ANY($1::uuid[])
+        ORDER BY sp.promotion_id, p.name NULLS LAST, sp.product_id
         """,
-        promotion_id,
+        ids,
     )
-    return [r["category_id"] for r in cat_rows], [r["product_id"] for r in prod_rows]
+    return _group_scope_summaries(ids, cat_rows, prod_rows)
+
+
+async def _load_scope_summary(
+    conn: asyncpg.Connection, promotion_id: UUID
+) -> Dict[str, Any]:
+    summaries = await _load_scope_summaries_batch(conn, [promotion_id])
+    return summaries.get(promotion_id, _empty_scope_summary())
 
 
 async def _load_schedules(conn: asyncpg.Connection, promotion_id: UUID) -> List[asyncpg.Record]:
@@ -323,13 +394,16 @@ async def list_promotions(
 
     async with get_db_connection(use_transaction=False) as conn:
         rows = await conn.fetch(query, tenant_id)
+        scope_by_id = await _load_scope_summaries_batch(conn, [row["id"] for row in rows])
         data = []
         for row in rows:
             schedules = await _load_schedules(conn, row["id"])
-            category_ids, product_ids = await _load_scope_ids(conn, row["id"])
             data.append(
                 _serialize_promotion(
-                    row, schedules, category_ids, product_ids, at=at
+                    row,
+                    schedules,
+                    scope_by_id.get(row["id"], _empty_scope_summary()),
+                    at=at,
                 )
             )
 
@@ -350,13 +424,11 @@ async def get_promotion(
     async with get_db_connection(use_transaction=False) as conn:
         row = await _get_owned_promotion(conn, promotion_id, tenant_id)
         schedules = await _load_schedules(conn, promotion_id)
-        category_ids, product_ids = await _load_scope_ids(conn, promotion_id)
+        scope = await _load_scope_summary(conn, promotion_id)
 
     return {
         "success": True,
-        "data": _serialize_promotion(
-            row, schedules, category_ids, product_ids, at=at
-        ),
+        "data": _serialize_promotion(row, schedules, scope, at=at),
     }
 
 
@@ -399,7 +471,7 @@ async def create_promotion(request: Request, body: PromotionCreate) -> dict:
                 body.product_ids,
             )
             schedules = await _load_schedules(conn, promotion_id)
-            category_ids, product_ids = await _load_scope_ids(conn, promotion_id)
+            scope = await _load_scope_summary(conn, promotion_id)
     except asyncpg.UniqueViolationError:
         raise HTTPException(
             status_code=409,
@@ -409,7 +481,7 @@ async def create_promotion(request: Request, body: PromotionCreate) -> dict:
     logger.info("Created promotion %r for tenant %s", body.name, tenant_id)
     return {
         "success": True,
-        "data": _serialize_promotion(row, schedules, category_ids, product_ids),
+        "data": _serialize_promotion(row, schedules, scope),
     }
 
 
@@ -487,11 +559,11 @@ async def update_promotion(
             )
 
         schedules_rows = await _load_schedules(conn, promotion_id)
-        cats, prods = await _load_scope_ids(conn, promotion_id)
+        scope = await _load_scope_summary(conn, promotion_id)
 
     return {
         "success": True,
-        "data": _serialize_promotion(row, schedules_rows, cats, prods),
+        "data": _serialize_promotion(row, schedules_rows, scope),
     }
 
 
