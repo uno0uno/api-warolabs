@@ -958,47 +958,13 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     _promo_savings = float(checkout_eval.get("promo_savings") or 0)
                     _promo_breakdown = checkout_eval.get("promo_breakdown") or []
                     _discount_amount = checkout_eval.get("manual_discount_amount") or None
-                    from app.services.promotions_service import promo_persist_fields_from_eval_line
-
-                    eval_by_id = {line["id"]: line for line in checkout_eval["lines"]}
-                    for row in item_rows:
-                        eval_line = eval_by_id.get(str(row["id"]), {})
-                        total_alloc = eval_line.get("total_discount_allocated")
-                        net_total = eval_line.get("net_total")
-                        _promo_id, _promo_savings = promo_persist_fields_from_eval_line(eval_line)
-                        if total_alloc or net_total is not None or _promo_id or _promo_savings:
-                            await conn.execute(
-                                """
-                                UPDATE order_items
-                                SET discount_allocated = $2, net_total = $3,
-                                    applied_promotion_id = $4, promo_savings_allocated = $5
-                                WHERE id = $1::uuid
-                                """,
-                                row["id"],
-                                total_alloc,
-                                net_total,
-                                _promo_id,
-                                _promo_savings,
-                            )
-
-                    # Recalculate pending order totals from net line amounts
-                    await conn.execute(
-                        """
-                        UPDATE orders o
-                        SET total_amount = sub.sum_net
-                        FROM (
-                            SELECT oi.order_id, COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)), 0) AS sum_net
-                            FROM order_items oi
-                            JOIN orders ord ON ord.id = oi.order_id
-                            WHERE ord.table_session_id = $1 AND ord.status = 'pending'
-                            GROUP BY oi.order_id
-                        ) sub
-                        WHERE o.id = sub.order_id
-                          AND o.table_session_id = $1
-                          AND o.status = 'pending'
-                        """,
-                        session_row["id"],
+                    from app.services.promotions_service import (
+                        apply_promo_eval_to_order_items,
+                        recalc_pending_session_order_totals,
                     )
+
+                    await apply_promo_eval_to_order_items(conn, item_rows, checkout_eval)
+                    await recalc_pending_session_order_totals(conn, session_row["id"])
 
                     completed_count = await conn.fetchval(
                         "SELECT COUNT(*) FROM orders WHERE table_session_id = $1 AND status = 'pending'",
@@ -1998,6 +1964,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                         "unitPrice": float(r["price_at_purchase"]),
                         "subtotal": float(r["subtotal"]),
                         "promoSavings": int(_promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promo_savings") or 0),
+                        "promotionId": _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promotion_id"),
                         "promotionName": _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promotion_name"),
                         "promoType": _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promo_type"),
                         "promoOptOut": bool(r.get("promo_opt_out")),
@@ -2599,7 +2566,7 @@ async def update_tab_item_promo_opt_out(
 
             row = await conn.fetchrow(
                 """
-                SELECT oi.id
+                SELECT oi.id, ts.id AS session_id
                 FROM order_items oi
                 JOIN orders o ON o.id = oi.order_id
                 JOIN table_sessions ts ON ts.id = o.table_session_id
@@ -2621,6 +2588,10 @@ async def update_tab_item_promo_opt_out(
                 promo_opt_out,
                 order_item_id,
             )
+
+            from app.services.promotions_service import persist_session_tab_promos
+
+            await persist_session_tab_promos(conn, UUID(str(tenant_id)), row["session_id"])
 
         return {
             "success": True,
@@ -2889,12 +2860,25 @@ async def _add_tab_items_core(
         except Exception as _inv_exc:
             logger.error(f"[tab] inventory deduction failed for item {order_item_id}: {_inv_exc}")
 
+    from app.services.promotions_service import persist_session_tab_promos
+
+    promo_eval = await persist_session_tab_promos(conn, tenant_id, session_id)
+    refreshed_order = await conn.fetchrow(
+        "SELECT total_amount FROM orders WHERE id = $1",
+        order_id,
+    )
+    if refreshed_order:
+        order_total = float(refreshed_order["total_amount"])
+
     return {
         "order_id": order_id,
         "order_number": order_number,
         "total_amount": order_total,
         "session_id": session_id,
         "items_count": len(items),
+        "promo_savings": float(promo_eval.get("promo_savings") or 0),
+        "promo_breakdown": promo_eval.get("promo_breakdown") or [],
+        "promo_lines": promo_eval.get("lines") or [],
     }
 
 
@@ -2924,6 +2908,9 @@ async def add_tab_items(
         order_id = tab_result["order_id"]
         order_number = tab_result["order_number"]
         order_total = tab_result["total_amount"]
+        promo_savings = tab_result.get("promo_savings", 0)
+        promo_breakdown = tab_result.get("promo_breakdown") or []
+        promo_lines = tab_result.get("promo_lines") or []
 
         # Auto-fire comandas if enabled (#753 — return comandas for POS print)
         fired_comandas: List[dict] = []
@@ -2947,6 +2934,9 @@ async def add_tab_items(
                 "order_number": order_number,
                 "items_count": len(items),
                 "total_amount": order_total,
+                "promo_savings": promo_savings,
+                "promo_breakdown": promo_breakdown,
+                "lines": promo_lines,
                 "comandas": fired_comandas,
                 "fired_items_count": fired_items_count,
             },
