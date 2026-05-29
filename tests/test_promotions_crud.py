@@ -18,7 +18,10 @@ from app.services.promotions_service import (
     _empty_scope_summary,
     _scope_summary_from_pairs,
     _serialize_promotion,
+    campaign_dates_overlap,
+    find_intra_promo_schedule_overlap,
     product_in_scope,
+    schedules_overlap,
 )
 
 
@@ -294,3 +297,67 @@ def test_cashier_denied_create_promotion_under_enforce():
         )
 
     assert response.status_code == 403
+
+
+def test_schedules_overlap_same_window():
+    a = {
+        "days_of_week": 62,
+        "start_time": "17:00",
+        "end_time": "20:00",
+        "crosses_midnight": False,
+    }
+    b = {
+        "days_of_week": 62,
+        "start_time": "18:00",
+        "end_time": "21:00",
+        "crosses_midnight": False,
+    }
+    assert schedules_overlap(a, b) is True
+
+
+def test_schedules_overlap_disjoint_days():
+    a = {
+        "days_of_week": 1,
+        "start_time": "17:00",
+        "end_time": "20:00",
+        "crosses_midnight": False,
+    }
+    b = {
+        "days_of_week": 2,
+        "start_time": "17:00",
+        "end_time": "20:00",
+        "crosses_midnight": False,
+    }
+    assert schedules_overlap(a, b) is False
+
+
+def test_find_intra_promo_schedule_overlap():
+    schedules = [
+        type("S", (), {
+            "days_of_week": 62,
+            "start_time": "17:00",
+            "end_time": "20:00",
+            "crosses_midnight": False,
+        })(),
+        type("S", (), {
+            "days_of_week": 62,
+            "start_time": "19:00",
+            "end_time": "22:00",
+            "crosses_midnight": False,
+        })(),
+    ]
+    message = find_intra_promo_schedule_overlap(schedules)
+    assert message is not None
+    assert "horarios 1 y 2" in message
+
+
+def test_campaign_dates_overlap_open_ended():
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 6, 30, tzinfo=timezone.utc)
+    assert campaign_dates_overlap(start, end, None, None) is True
+    assert campaign_dates_overlap(
+        start,
+        end,
+        datetime(2026, 7, 1, tzinfo=timezone.utc),
+        None,
+    ) is False
