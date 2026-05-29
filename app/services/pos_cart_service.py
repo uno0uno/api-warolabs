@@ -1695,19 +1695,23 @@ async def complete_pos_order(
                         )
 
                 # 4. Copy cart items to order_items
+                from app.services.promotions_service import promo_persist_fields_from_eval_line
+
                 for i, item in enumerate(items):
                     eval_line = _eval_by_id.get(item["id"], {})
                     total_alloc = int(eval_line.get("total_discount_allocated") or 0)
                     _da = total_alloc if total_alloc > 0 else None
                     _nt = eval_line.get("net_total") if total_alloc > 0 else None
+                    _promo_id, _promo_savings = promo_persist_fields_from_eval_line(eval_line)
                     # Insert order item
                     _item_notes = (item.get('notes') or '').strip() or None
                     order_item_query = """
                         INSERT INTO order_items (
                             order_id, product_id, quantity, price_at_purchase, subtotal,
-                            discount_allocated, net_total, notes
+                            discount_allocated, net_total, notes,
+                            applied_promotion_id, promo_savings_allocated
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                         RETURNING id
                     """
                     order_item_row = await conn.fetchrow(
@@ -1720,6 +1724,8 @@ async def complete_pos_order(
                         _da,
                         _nt,
                         _item_notes,
+                        _promo_id,
+                        _promo_savings,
                     )
                     order_item_id = order_item_row['id']
 

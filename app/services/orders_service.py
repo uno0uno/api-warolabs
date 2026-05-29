@@ -44,6 +44,37 @@ POS_LIKE_FILTER_ALIAS_O = (
 )
 
 
+async def _get_order_promo_summary(conn, order_id: UUID) -> Dict[str, Any]:
+    """Aggregate persisted line promos for order detail / reporting (warocol.com#984)."""
+    rows = await conn.fetch(
+        """
+        SELECT
+            oi.applied_promotion_id,
+            tp.name AS promotion_name,
+            tp.promo_type,
+            COALESCE(SUM(oi.promo_savings_allocated), 0) AS savings
+        FROM order_items oi
+        INNER JOIN tenant_promotions tp ON tp.id = oi.applied_promotion_id
+        WHERE oi.order_id = $1
+          AND oi.applied_promotion_id IS NOT NULL
+        GROUP BY oi.applied_promotion_id, tp.name, tp.promo_type
+        ORDER BY savings DESC
+        """,
+        order_id,
+    )
+    breakdown = [
+        {
+            "promotion_id": str(r["applied_promotion_id"]),
+            "promotion_name": r["promotion_name"],
+            "promo_type": r["promo_type"],
+            "savings": float(r["savings"]),
+        }
+        for r in rows
+    ]
+    promo_savings = sum(item["savings"] for item in breakdown)
+    return {"promo_savings": promo_savings, "promo_breakdown": breakdown}
+
+
 def _compute_tax_breakdown(
     items_rows: List[Any],
     tax_config: Dict[str, Any],
@@ -598,6 +629,8 @@ async def get_order_by_id(
             except Exception as _e:
                 logger.warning(f"Tax breakdown failed for order {order_id}: {_e}")
 
+            _promo_summary = await _get_order_promo_summary(conn, order_id)
+
             # Hydrate delivery address inline (None if not a delivery, or address was soft-deleted)
             delivery_address = None
             if order_row['delivery_address_id'] and order_row['addr_line1'] is not None:
@@ -657,6 +690,8 @@ async def get_order_by_id(
                     "standard_tax": _std_tax,
                     "liquor_tax": _liq_tax,
                     "standard_tax_label": _tax_label,
+                    "promo_savings": _promo_summary["promo_savings"],
+                    "promo_breakdown": _promo_summary["promo_breakdown"],
                 }
             }
 
@@ -927,11 +962,16 @@ async def get_order_items(
                     oi.subtotal,
                     oi.discount_allocated,
                     oi.net_total,
+                    oi.applied_promotion_id,
+                    oi.promo_savings_allocated,
+                    tp.name AS promotion_name,
+                    tp.promo_type AS promotion_type,
                     p.id as product_id,
                     p.name as product_name,
                     p.description as product_description
                 FROM order_items oi
                 LEFT JOIN product p ON oi.product_id = p.id
+                LEFT JOIN tenant_promotions tp ON tp.id = oi.applied_promotion_id
                 WHERE oi.order_id = $1
                 ORDER BY oi.created_at
             """
@@ -970,6 +1010,10 @@ async def get_order_items(
                     "subtotal": float(item_row['subtotal']),
                     "discount_allocated": float(item_row['discount_allocated']) if item_row['discount_allocated'] is not None else 0.0,
                     "net_total": float(item_row['net_total']) if item_row['net_total'] is not None else None,
+                    "applied_promotion_id": str(item_row['applied_promotion_id']) if item_row['applied_promotion_id'] else None,
+                    "promo_savings_allocated": float(item_row['promo_savings_allocated']) if item_row['promo_savings_allocated'] is not None else 0.0,
+                    "promotion_name": item_row['promotion_name'],
+                    "promotion_type": item_row['promotion_type'],
                     "product": {
                         "id": str(item_row['product_id']) if item_row['product_id'] else None,
                         "name": item_row['product_name'],

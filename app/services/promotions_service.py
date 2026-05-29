@@ -801,3 +801,16 @@ async def evaluate_checkout_promotions(
                 round(evaluated["subtotal_after_promos"]),
             )
     return apply_manual_discount_to_evaluated_lines(evaluated, manual_discount)
+
+
+def promo_persist_fields_from_eval_line(
+    eval_line: Dict[str, Any],
+) -> tuple[Optional[UUID], Optional[int]]:
+    """Map evaluated checkout line → order_items promo columns (warocol.com#984)."""
+    promo_id_raw = eval_line.get("promotion_id")
+    savings = float(eval_line.get("promo_savings") or 0)
+    promo_savings = round(savings) if savings > 0 else None
+    promo_uuid: Optional[UUID] = None
+    if promo_id_raw:
+        promo_uuid = promo_id_raw if isinstance(promo_id_raw, UUID) else UUID(str(promo_id_raw))
+    return promo_uuid, promo_savings

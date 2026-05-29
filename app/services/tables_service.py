@@ -956,21 +956,27 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     _promo_savings = float(checkout_eval.get("promo_savings") or 0)
                     _promo_breakdown = checkout_eval.get("promo_breakdown") or []
                     _discount_amount = checkout_eval.get("manual_discount_amount") or None
+                    from app.services.promotions_service import promo_persist_fields_from_eval_line
+
                     eval_by_id = {line["id"]: line for line in checkout_eval["lines"]}
                     for row in item_rows:
                         eval_line = eval_by_id.get(str(row["id"]), {})
                         total_alloc = eval_line.get("total_discount_allocated")
                         net_total = eval_line.get("net_total")
-                        if total_alloc or net_total is not None:
+                        _promo_id, _promo_savings = promo_persist_fields_from_eval_line(eval_line)
+                        if total_alloc or net_total is not None or _promo_id or _promo_savings:
                             await conn.execute(
                                 """
                                 UPDATE order_items
-                                SET discount_allocated = $2, net_total = $3
+                                SET discount_allocated = $2, net_total = $3,
+                                    applied_promotion_id = $4, promo_savings_allocated = $5
                                 WHERE id = $1::uuid
                                 """,
                                 row["id"],
                                 total_alloc,
                                 net_total,
+                                _promo_id,
+                                _promo_savings,
                             )
 
                     # Recalculate pending order totals from net line amounts
