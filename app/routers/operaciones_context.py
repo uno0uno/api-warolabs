@@ -12,7 +12,7 @@ column whitelist guards against SQL injection.
 from decimal import Decimal
 from uuid import UUID
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -24,9 +24,15 @@ from app.services import table_assignments_service
 from app.services.operaciones_context_service import (
     get_operaciones_context,
     set_open_sale_enabled,
+    update_promo_conflict_config,
     update_tables_label,
     update_tip_config,
     update_toggle,
+)
+from app.services.promotions_service import (
+    DEFAULT_PROMO_CONFLICT_STRATEGY,
+    DEFAULT_PROMO_TYPE_BLOCK_MAP,
+    VALID_PROMO_TYPES,
 )
 
 router = APIRouter(prefix="/operaciones", tags=["Operaciones Context"])
@@ -82,6 +88,40 @@ class TipConfigRequest(BaseModel):
                 f"percentages of length {len(self.percentages)}"
             )
         return self
+
+
+class PromoConflictConfigRequest(BaseModel):
+    """Payload for PATCH /operaciones/promo-conflict/config (warocol.com#1011).
+
+    Non-boolean tenant settings for checkout promo conflict resolution.
+    Evaluator enforcement lands in batch #1012; this batch persists the contract.
+    """
+    promo_conflict_strategy: str = DEFAULT_PROMO_CONFLICT_STRATEGY
+    promo_type_block_map: Dict[str, List[str]] = Field(
+        default_factory=lambda: dict(DEFAULT_PROMO_TYPE_BLOCK_MAP),
+    )
+
+    @field_validator("promo_conflict_strategy")
+    @classmethod
+    def _validate_strategy(cls, v: str) -> str:
+        if v != DEFAULT_PROMO_CONFLICT_STRATEGY:
+            raise ValueError(
+                f"promo_conflict_strategy must be {DEFAULT_PROMO_CONFLICT_STRATEGY!r} for now"
+            )
+        return v
+
+    @field_validator("promo_type_block_map")
+    @classmethod
+    def _validate_type_block_map(cls, v: Dict[str, List[str]]) -> Dict[str, List[str]]:
+        for winner, blocked in v.items():
+            if winner not in VALID_PROMO_TYPES:
+                raise ValueError(f"Unknown promo_type in block map: {winner}")
+            if not blocked:
+                raise ValueError(f"Blocked types for {winner} must be non-empty")
+            for promo_type in blocked:
+                if promo_type not in VALID_PROMO_TYPES:
+                    raise ValueError(f"Unknown blocked promo_type: {promo_type}")
+        return v
 
 
 @router.get(
@@ -214,6 +254,23 @@ async def toggle_promo_line_opt_out(request: Request, body: ToggleRequest):
     """Toggle per-line promotion opt-out at POS checkout (warocol.com#1003)."""
     session = require_valid_session(request)
     return await update_toggle(session.tenant_id, "allow_promo_line_opt_out", body.enabled)
+
+
+@router.patch(
+    "/promo-conflict/config",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def patch_promo_conflict_config(
+    request: Request,
+    body: PromoConflictConfigRequest,
+):
+    """Persist promo conflict strategy + type-block map (warocol.com#1011)."""
+    session = require_valid_session(request)
+    return await update_promo_conflict_config(
+        session.tenant_id,
+        body.promo_conflict_strategy,
+        body.promo_type_block_map,
+    )
 
 
 @router.patch(

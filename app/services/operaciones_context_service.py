@@ -13,12 +13,17 @@ make future divergence local to this module).
 The toggle writer parameterizes the column name dynamically; the
 `ALLOWED_TOGGLES` whitelist prevents SQL injection.
 """
-from typing import Any, Dict, Optional
+import json
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
 
 from app.database import get_db_connection
+from app.services.promotions_service import (
+    ALLOWED_PROMO_CONFLICT_STRATEGIES,
+    validate_promo_type_block_map,
+)
 from app.services.open_priced_service import (
     deactivate_open_sale_product,
     ensure_open_sale_product,
@@ -221,6 +226,63 @@ async def update_tip_config(
         "data": {
             "tip_default_percentages": [float(p) for p in row["tip_default_percentages"] or []],
             "tip_preselect_index": row["tip_preselect_index"],
+        },
+    }
+
+
+async def update_promo_conflict_config(
+    tenant_id: UUID,
+    strategy: str,
+    type_block_map: Dict[str, List[str]],
+) -> Dict[str, Any]:
+    """Persist promo conflict strategy + type-block map (warocol.com#1011).
+
+    Non-boolean sibling to update_tip_config. Evaluator consumes these in #1012;
+    this batch only stores and exposes the contract.
+    """
+    if strategy not in ALLOWED_PROMO_CONFLICT_STRATEGIES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown promo_conflict_strategy: {strategy}",
+        )
+    try:
+        normalized_map = validate_promo_type_block_map(type_block_map)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    query = """
+        INSERT INTO tenant_public_profiles
+            (tenant_id, slug, display_name, promo_conflict_strategy, promo_type_block_map)
+        SELECT t.id, t.slug, t.name, $2, $3::jsonb
+        FROM tenants t
+        WHERE t.id = $1
+        ON CONFLICT (tenant_id) DO UPDATE
+            SET promo_conflict_strategy = EXCLUDED.promo_conflict_strategy,
+                promo_type_block_map    = EXCLUDED.promo_type_block_map,
+                updated_at              = now()
+        RETURNING promo_conflict_strategy, promo_type_block_map
+    """
+
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(
+            query,
+            tenant_id,
+            strategy,
+            json.dumps(normalized_map),
+        )
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    block_map = row["promo_type_block_map"]
+    if isinstance(block_map, str):
+        block_map = json.loads(block_map)
+
+    return {
+        "success": True,
+        "data": {
+            "promo_conflict_strategy": row["promo_conflict_strategy"],
+            "promo_type_block_map": block_map,
         },
     }
 

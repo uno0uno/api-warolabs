@@ -14,6 +14,10 @@ from uuid import UUID
 from app.database import get_db_connection
 from app.services.invoicing_readiness_service import get_readiness
 from app.services.open_priced_service import fetch_open_sale_product
+from app.services.promotions_service import (
+    DEFAULT_PROMO_CONFLICT_STRATEGY,
+    normalize_promo_type_block_map,
+)
 
 
 _CONTEXT_QUERY = """
@@ -36,6 +40,8 @@ SELECT
     tpp.tip_preselect_index,
     tpp.logo_url,
     tpp.allow_promo_line_opt_out,
+    tpp.promo_conflict_strategy,
+    tpp.promo_type_block_map,
     fd.nit,
     fd.business_name,
     fd.type_organization_id,
@@ -121,6 +127,14 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         'allow_promo_line_opt_out': bool(row['allow_promo_line_opt_out'])
         if row['allow_promo_line_opt_out'] is not None
         else False,
+        'promo_conflict_strategy': (
+            row['promo_conflict_strategy']
+            if row['promo_conflict_strategy'] is not None
+            else DEFAULT_PROMO_CONFLICT_STRATEGY
+        ),
+        'promo_type_block_map': normalize_promo_type_block_map(
+            row['promo_type_block_map']
+        ),
         'logo_url': row['logo_url'],
         'receipt_print_settings': {
             'document_label': (row['receipt_document_label'] or 'Prefactura').strip()[:40],
