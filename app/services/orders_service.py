@@ -619,7 +619,7 @@ async def get_order_by_id(
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
                 items_rows = await conn.fetch(
                     """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
-                              COALESCE(oi.subtotal, 0) AS subtotal
+                              COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal
                        FROM order_items oi
                        JOIN product p ON p.id = oi.product_id
                        WHERE oi.order_id = $1""",
