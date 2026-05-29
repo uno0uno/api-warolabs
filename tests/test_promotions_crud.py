@@ -14,7 +14,12 @@ from app.core.middleware import SessionContext
 from app.core.permissions import Module
 from app.models.tenant_promotion import PromotionCreate, PromoType, ScopeType
 from app.routers.promotions import router as promotions_router
-from app.services.promotions_service import product_in_scope
+from app.services.promotions_service import (
+    _empty_scope_summary,
+    _scope_summary_from_pairs,
+    _serialize_promotion,
+    product_in_scope,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -155,6 +160,71 @@ def test_cashier_passes_active_promotions_under_enforce():
         )
 
     assert response.status_code == 200
+
+
+def test_scope_summary_products_preview_capped_at_three():
+    pid1, pid2, pid3, pid4 = uuid4(), uuid4(), uuid4(), uuid4()
+    scope = _scope_summary_from_pairs(
+        [],
+        [
+            (pid1, "Zebra"),
+            (pid2, "Alpha"),
+            (pid3, "Mango"),
+            (pid4, "Beta"),
+        ],
+    )
+    assert scope["product_count"] == 4
+    assert scope["product_ids"] == [pid1, pid2, pid3, pid4]
+    assert scope["product_names_preview"] == ["Zebra", "Alpha", "Mango"]
+    assert scope["category_count"] == 0
+    assert scope["category_names_preview"] == []
+
+
+def test_scope_summary_categories():
+    cid1, cid2 = uuid4(), uuid4()
+    scope = _scope_summary_from_pairs(
+        [(cid1, "Bebidas"), (cid2, "Comidas")],
+        [],
+    )
+    assert scope["category_count"] == 2
+    assert scope["category_names_preview"] == ["Bebidas", "Comidas"]
+    assert scope["product_count"] == 0
+
+
+def test_scope_summary_all_products_empty():
+    scope = _empty_scope_summary()
+    assert scope["product_count"] == 0
+    assert scope["category_count"] == 0
+    assert scope["product_names_preview"] == []
+    assert scope["category_names_preview"] == []
+
+
+def test_serialize_promotion_includes_scope_summary_fields():
+    promo_id = uuid4()
+    tenant_id = uuid4()
+    pid = uuid4()
+    scope = _scope_summary_from_pairs([], [(pid, "Cerveza")])
+    promo_row = {
+        "id": promo_id,
+        "tenant_id": tenant_id,
+        "name": "2x1",
+        "promo_type": "bogo",
+        "value_json": {"buy_qty": 2, "get_qty": 1},
+        "scope_type": "products",
+        "priority": 0,
+        "is_active": True,
+        "stackable": False,
+        "starts_at": None,
+        "ends_at": None,
+        "created_at": datetime(2026, 5, 29, tzinfo=timezone.utc),
+        "updated_at": datetime(2026, 5, 29, tzinfo=timezone.utc),
+    }
+    payload = _serialize_promotion(promo_row, [], scope)
+    assert payload["product_count"] == 1
+    assert payload["product_names_preview"] == ["Cerveza"]
+    assert payload["product_ids"] == [str(pid)]
+    assert payload["category_count"] == 0
+    assert payload["category_names_preview"] == []
 
 
 def test_cashier_denied_create_promotion_under_enforce():
