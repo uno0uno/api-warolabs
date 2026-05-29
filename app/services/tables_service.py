@@ -27,6 +27,7 @@ from app.services.pos_cart_service import (
     _capture_order_item_ingredients,
     _deduct_modifier_inventory_for_order_item,
     _PAYMENT_VOID_ROLES,
+    _tax_rows_from_evaluated_lines,
 )
 from app.services.orders_service import _return_ingredient_to_stock
 from app.utils.table_code import infer_table_code, normalize_table_code, resolve_unique_code
@@ -900,6 +901,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 is_bar_table = bool(table_row["is_bar"])
                 _mesa_tip_taxable = bool(tip_taxable) if tip_amount > 0 else False
                 _mesa_tip_tax_amount = 0.0
+                _promo_savings = 0.0
+                _promo_breakdown: List[dict] = []
 
                 # Mark pending orders as completed if payment_method provided
                 if payment_method:
@@ -917,44 +920,77 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
 
                     payment_status = 'credit' if payment_method == 'credit' else ('partial' if split_mode else 'paid')
 
-                    # Compute discount if provided
-                    _discount_amount = None
-                    if discount_type and discount_value is not None and discount_value > 0:
-                        # Sum all pending order totals for this session
-                        session_total_row = await conn.fetchrow(
-                            "SELECT COALESCE(SUM(total_amount), 0) AS total FROM orders WHERE table_session_id = $1 AND status = 'pending'",
-                            session_row["id"],
-                        )
-                        session_total = float(session_total_row["total"])
-                        if session_total > 0:
-                            if discount_type == 'percent':
-                                _discount_amount = round(session_total * discount_value / 100)
-                            else:
-                                _discount_amount = min(round(discount_value), round(session_total))
+                    from app.services.promotions_service import evaluate_checkout_promotions
 
-                    # If discount applies, distribute proportionally across all pending order_items
-                    if _discount_amount:
-                        item_rows = await conn.fetch(
-                            """
-                            SELECT oi.id, oi.subtotal
-                            FROM order_items oi
-                            JOIN orders o ON o.id = oi.order_id
-                            WHERE o.table_session_id = $1 AND o.status = 'pending'
-                            """,
-                            session_row["id"],
-                        )
-                        items_for_dist = [
-                            {"id": str(row["id"]), "subtotal": float(row["subtotal"])}
-                            for row in item_rows
-                        ]
-                        items_for_dist = _distribute_discount(items_for_dist, float(_discount_amount))
-                        for item in items_for_dist:
+                    _discount_amount = None
+                    _promo_breakdown = []
+                    item_rows = await conn.fetch(
+                        """
+                        SELECT oi.id, oi.subtotal, oi.quantity, oi.product_id, p.category_id,
+                               COALESCE(p.tax_category, 'standard') AS tax_category
+                        FROM order_items oi
+                        JOIN orders o ON o.id = oi.order_id
+                        JOIN product p ON p.id = oi.product_id
+                        WHERE o.table_session_id = $1 AND o.status = 'pending'
+                        """,
+                        session_row["id"],
+                    )
+                    promo_lines = [
+                        {
+                            "id": str(row["id"]),
+                            "product_id": str(row["product_id"]),
+                            "category_id": str(row["category_id"]) if row["category_id"] else None,
+                            "quantity": int(row["quantity"]),
+                            "subtotal": float(row["subtotal"]),
+                            "tax_category": row["tax_category"] or "standard",
+                        }
+                        for row in item_rows
+                    ]
+                    checkout_eval = await evaluate_checkout_promotions(
+                        conn,
+                        UUID(str(tenant_id)),
+                        promo_lines,
+                        discount_type=discount_type,
+                        discount_value=discount_value,
+                    )
+                    _promo_savings = float(checkout_eval.get("promo_savings") or 0)
+                    _promo_breakdown = checkout_eval.get("promo_breakdown") or []
+                    _discount_amount = checkout_eval.get("manual_discount_amount") or None
+                    eval_by_id = {line["id"]: line for line in checkout_eval["lines"]}
+                    for row in item_rows:
+                        eval_line = eval_by_id.get(str(row["id"]), {})
+                        total_alloc = eval_line.get("total_discount_allocated")
+                        net_total = eval_line.get("net_total")
+                        if total_alloc or net_total is not None:
                             await conn.execute(
-                                "UPDATE order_items SET discount_allocated = $2, net_total = $3 WHERE id = $1::uuid",
-                                item["id"],
-                                item["discount_allocated"],
-                                item["net_total"],
+                                """
+                                UPDATE order_items
+                                SET discount_allocated = $2, net_total = $3
+                                WHERE id = $1::uuid
+                                """,
+                                row["id"],
+                                total_alloc,
+                                net_total,
                             )
+
+                    # Recalculate pending order totals from net line amounts
+                    await conn.execute(
+                        """
+                        UPDATE orders o
+                        SET total_amount = sub.sum_net
+                        FROM (
+                            SELECT oi.order_id, COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)), 0) AS sum_net
+                            FROM order_items oi
+                            JOIN orders ord ON ord.id = oi.order_id
+                            WHERE ord.table_session_id = $1 AND ord.status = 'pending'
+                            GROUP BY oi.order_id
+                        ) sub
+                        WHERE o.id = sub.order_id
+                          AND o.table_session_id = $1
+                          AND o.status = 'pending'
+                        """,
+                        session_row["id"],
+                    )
 
                     completed_count = await conn.fetchval(
                         "SELECT COUNT(*) FROM orders WHERE table_session_id = $1 AND status = 'pending'",
@@ -973,8 +1009,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 payment_method_id = $6,
                                 discount_type = $7,
                                 discount_value = $8,
-                                discount_amount = $9,
-                                total_amount = total_amount - $9
+                                discount_amount = $9
                             WHERE table_session_id = $1 AND status = 'pending'
                             """,
                             session_row["id"],
@@ -1269,14 +1304,6 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             reason=reason,
                         )
 
-                    if pending_count and pending_count > 0:
-                        cancelled_count = await _cancel_pending_session_orders_on_release(
-                            conn,
-                            tenant_id,
-                            session_row["id"],
-                        )
-                        pending_count = max(0, int(pending_count) - cancelled_count)
-
                 if not split_mode:
                     # Close session
                     await conn.execute(
@@ -1304,42 +1331,42 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             tenant_id,
                         )
 
-                # Auto-fire hook: checkout only — skip on liberar mesa (#330)
-                if payment_method:
-                    try:
-                        _prof = await conn.fetchrow(
-                            "SELECT comandas_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
-                            tenant_id
+                # Auto-fire hook: if comandas enabled, fire all 'new' items for this session
+                # This ensures any items added but not explicitly fired get sent at checkout
+                try:
+                    _prof = await conn.fetchrow(
+                        "SELECT comandas_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                        tenant_id
+                    )
+                    if _prof and _prof["comandas_enabled"]:
+                        # Find all pending orders for this session (they might have been completed just above)
+                        # We need to fire them. fire_comandas handles 'new' status check.
+                        session_orders = await conn.fetch(
+                            "SELECT id FROM orders WHERE table_session_id = $1",
+                            session_row["id"]
                         )
-                        if _prof and _prof["comandas_enabled"]:
-                            # Find all pending orders for this session (they might have been completed just above)
-                            # We need to fire them. fire_comandas handles 'new' status check.
-                            session_orders = await conn.fetch(
-                                "SELECT id FROM orders WHERE table_session_id = $1",
-                                session_row["id"]
+                        for _order in session_orders:
+                            await fire_comandas(
+                                order_id=_order["id"],
+                                tenant_id=tenant_id,
+                                source_type='table',
+                                table_display_name=table_row["name"],
+                                conn=conn
                             )
-                            for _order in session_orders:
-                                await fire_comandas(
-                                    order_id=_order["id"],
-                                    tenant_id=tenant_id,
-                                    source_type='table',
-                                    table_display_name=table_row["name"],
-                                    conn=conn
-                                )
 
-                            # Mesa: auto-deliver open comandas on payment. Barra: kitchen closes
-                            # them manually (warocol.com#799).
-                            if not is_bar_table:
-                                session_order_ids = [_o["id"] for _o in session_orders]
-                                await conn.execute("""
-                                    UPDATE comandas
-                                    SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
-                                    WHERE order_id = ANY($1::uuid[])
-                                      AND tenant_id = $2
-                                      AND status IN ('pending', 'preparing', 'ready')
-                                """, session_order_ids, tenant_id)
-                    except Exception as _fe:
-                        logger.error(f"Auto-fire failed during close_session for table {table_id}: {_fe}")
+                        # Mesa: auto-deliver open comandas on payment. Barra: kitchen closes
+                        # them manually (warocol.com#799).
+                        if not is_bar_table:
+                            session_order_ids = [_o["id"] for _o in session_orders]
+                            await conn.execute("""
+                                UPDATE comandas
+                                SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
+                                WHERE order_id = ANY($1::uuid[])
+                                  AND tenant_id = $2
+                                  AND status IN ('pending', 'preparing', 'ready')
+                            """, session_order_ids, tenant_id)
+                except Exception as _fe:
+                    logger.error(f"Auto-fire failed during close_session for table {table_id}: {_fe}")
 
         if split_mode:
             # Compute paid_total and remaining for the split response
@@ -1409,7 +1436,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     """
                     SELECT
                         COALESCE(p.tax_category, 'standard') AS tax_category,
-                        COALESCE(SUM(oi.subtotal), 0) AS subtotal
+                        COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)), 0) AS subtotal
                     FROM order_items oi
                     JOIN orders o ON o.id = oi.order_id
                     JOIN product p ON p.id = oi.product_id
@@ -1445,6 +1472,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 "standard_tax": float(_std_tax),
                 "liquor_tax": float(_liq_tax),
                 "standard_tax_label": _tax_label,
+                "promo_savings": float(_promo_savings),
+                "promo_breakdown": _promo_breakdown,
                 "tip_amount": float(tip_amount) if tip_amount > 0 else 0,
                 "tip_source": tip_source,
                 "tip_taxable": _mesa_tip_taxable if tip_amount > 0 else False,
@@ -1767,25 +1796,59 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
             _std_tax = 0.0
             _liq_tax = 0.0
             _tax_label = "Impuesto"
+            _promo_savings = 0.0
+            _subtotal_after_promos = float(session_row["running_total"])
+            _promo_breakdown: List[dict] = []
+            _promo_lines_by_id: Dict[str, dict] = {}
             try:
                 from app.services.orders_service import _compute_tax_breakdown
+                from app.services.promotions_service import evaluate_checkout_promotions
 
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
                 order_ids = [o["id"] for o in orders]
                 if order_ids:
-                    tax_rows = await conn.fetch(
+                    eval_rows = await conn.fetch(
                         """
                         SELECT
-                            COALESCE(p.tax_category, 'standard') AS tax_category,
-                            COALESCE(SUM(oi.subtotal), 0) AS subtotal
+                            oi.id,
+                            oi.quantity,
+                            oi.subtotal,
+                            oi.product_id,
+                            p.category_id,
+                            COALESCE(p.tax_category, 'standard') AS tax_category
                         FROM order_items oi
                         JOIN orders o ON o.id = oi.order_id
                         JOIN product p ON p.id = oi.product_id
                         WHERE o.id = ANY($1::uuid[])
-                        GROUP BY COALESCE(p.tax_category, 'standard')
                         """,
                         order_ids,
                     )
+                    promo_lines = [
+                        {
+                            "id": str(row["id"]),
+                            "product_id": str(row["product_id"]),
+                            "category_id": str(row["category_id"]) if row["category_id"] else None,
+                            "quantity": int(row["quantity"]),
+                            "subtotal": float(row["subtotal"]),
+                            "tax_category": row["tax_category"] or "standard",
+                        }
+                        for row in eval_rows
+                    ]
+                    checkout_eval = await evaluate_checkout_promotions(
+                        conn,
+                        UUID(str(tenant_id)),
+                        promo_lines,
+                    )
+                    _promo_savings = float(checkout_eval.get("promo_savings") or 0)
+                    _subtotal_after_promos = float(checkout_eval.get("subtotal_after_promos") or 0)
+                    _promo_breakdown = checkout_eval.get("promo_breakdown") or []
+                    for line in checkout_eval["lines"]:
+                        line["tax_category"] = next(
+                            (pl["tax_category"] for pl in promo_lines if pl["id"] == line["id"]),
+                            "standard",
+                        )
+                        _promo_lines_by_id[line["id"]] = line
+                    tax_rows = _tax_rows_from_evaluated_lines(checkout_eval["lines"])
                     _std_tax, _liq_tax, _tax_label = _compute_tax_breakdown(tax_rows, tax_config)
             except Exception as _e:
                 logger.warning(f"Tax breakdown failed for mesa current session (table {table_id}): {_e}")
@@ -1795,6 +1858,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                 """
                 SELECT
                     oi.id AS order_item_id,
+                    oi.product_id,
                     oi.quantity,
                     oi.price_at_purchase,
                     oi.subtotal,
@@ -1802,6 +1866,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     oi.fulfillment_status,
                     oi.sent_at,
                     p.name AS product_name,
+                    p.category_id,
                     COALESCE(
                         json_agg(
                             json_build_object(
@@ -1819,8 +1884,8 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                 LEFT JOIN order_item_modifiers oim ON oim.order_item_id = oi.id
                 WHERE o.table_session_id = $1
                 GROUP BY
-                    oi.id, oi.quantity, oi.price_at_purchase, oi.subtotal,
-                    oi.notes, oi.fulfillment_status, oi.sent_at, p.name
+                    oi.id, oi.product_id, oi.quantity, oi.price_at_purchase, oi.subtotal,
+                    oi.notes, oi.fulfillment_status, oi.sent_at, p.name, p.category_id
                 ORDER BY oi.id ASC
                 """,
                 session_row["id"],
@@ -1874,6 +1939,9 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     "opened_at": session_row["opened_at"].isoformat(),
                     "duration_minutes": round(float(session_row["duration_minutes"]), 1),
                     "running_total": float(session_row["running_total"]),
+                    "subtotal_after_promos": _subtotal_after_promos,
+                    "promo_savings": _promo_savings,
+                    "promo_breakdown": _promo_breakdown,
                     "order_count": int(session_row["order_count"]),
                     "standard_tax": float(_std_tax),
                     "liquor_tax": float(_liq_tax),
@@ -1912,10 +1980,15 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                 "tab_items": [
                     {
                         "id": str(r["order_item_id"]),
+                        "productId": str(r["product_id"]),
+                        "categoryId": str(r["category_id"]) if r["category_id"] else None,
                         "productName": r["product_name"],
                         "quantity": r["quantity"],
                         "unitPrice": float(r["price_at_purchase"]),
                         "subtotal": float(r["subtotal"]),
+                        "promoSavings": int(_promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promo_savings") or 0),
+                        "promotionName": _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promotion_name"),
+                        "promoType": _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promo_type"),
                         "modifiers": [
                             {
                                 "id": mod["id"],
@@ -2158,59 +2231,6 @@ async def _record_tab_cleared_pending_lines(
             ),
         )
     return len(pending_lines)
-
-
-async def _cancel_pending_session_orders_on_release(
-    conn,
-    tenant_id: UUID,
-    session_id: UUID,
-) -> int:
-    """Cancel pending orders and comandas when liberar mesa without payment (#330)."""
-    await conn.execute(
-        """
-        UPDATE comanda_items
-        SET status = 'cancelled',
-            cancelled_at = NOW(),
-            order_item_id = NULL
-        WHERE order_item_id IN (
-            SELECT oi.id
-            FROM order_items oi
-            JOIN orders o ON o.id = oi.order_id
-            WHERE o.table_session_id = $1 AND o.status = 'pending'
-        )
-        """,
-        session_id,
-    )
-
-    await conn.execute(
-        """
-        UPDATE comandas
-        SET status = 'cancelled', updated_at = NOW()
-        WHERE order_id IN (
-            SELECT id FROM orders
-            WHERE table_session_id = $1 AND status = 'pending'
-        )
-          AND tenant_id = $2
-          AND status IN ('pending', 'preparing', 'ready')
-        """,
-        session_id,
-        tenant_id,
-    )
-
-    cancelled = await conn.fetchval(
-        """
-        WITH cancelled AS (
-            UPDATE orders
-            SET status = 'cancelled',
-                payment_status = NULL
-            WHERE table_session_id = $1 AND status = 'pending'
-            RETURNING id
-        )
-        SELECT COUNT(*) FROM cancelled
-        """,
-        session_id,
-    )
-    return int(cancelled or 0)
 
 
 async def _return_tab_item_inventory_from_snapshots(

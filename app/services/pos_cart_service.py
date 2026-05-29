@@ -4,7 +4,7 @@ Handles cart persistence for POS system
 """
 import asyncio
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 from uuid import UUID
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -75,6 +75,42 @@ def _distribute_discount(items: List[dict], discount_amount: float) -> List[dict
         largest['net_total'] -= remainder
 
     return items
+
+
+def _cart_items_to_promo_lines(items: List[dict]) -> List[dict]:
+    return [
+        {
+            "id": item["id"],
+            "product_id": item.get("product_id") or item["product"]["id"],
+            "category_id": item.get("category_id"),
+            "quantity": item.get("quantity") or 1,
+            "subtotal": float(item["subtotal"]),
+            "tax_category": item.get("tax_category") or "standard",
+        }
+        for item in items
+    ]
+
+
+def _manual_discount_amount(
+    subtotal: float,
+    discount_type: Optional[str],
+    discount_value: Optional[float],
+) -> float:
+    if not discount_type or discount_value is None or discount_value <= 0:
+        return 0.0
+    if discount_type == "percent":
+        return float(round(subtotal * discount_value / 100))
+    return float(min(round(discount_value), round(subtotal)))
+
+
+def _tax_rows_from_evaluated_lines(lines: Sequence[dict]) -> List[dict]:
+    grouped: Dict[str, float] = {}
+    for line in lines:
+        category = line.get("tax_category") or "standard"
+        grouped[category] = grouped.get(category, 0.0) + float(
+            line.get("net_total", line.get("subtotal_after_promo", line["subtotal"]))
+        )
+    return [{"tax_category": k, "subtotal": v} for k, v in grouped.items()]
 
 
 async def get_or_create_active_cart(
@@ -324,6 +360,8 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
             ci.subtotal,
             ci.notes,
             p.name as product_name,
+            p.category_id as category_id,
+            COALESCE(p.tax_category, 'standard') AS tax_category,
             p.is_resale as product_is_resale,
             COALESCE(
                 json_agg(
@@ -340,7 +378,7 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
         LEFT JOIN pos_cart_item_modifiers m ON m.cart_item_id = ci.id
         WHERE ci.cart_id = $1
         GROUP BY ci.id, ci.product_id, ci.quantity, ci.unit_price, ci.subtotal,
-                 ci.notes, ci.created_at, p.name, p.is_resale
+                 ci.notes, ci.created_at, p.name, p.category_id, p.tax_category, p.is_resale
         ORDER BY ci.created_at
     """
     items_rows = await conn.fetch(items_query, cart_id)
@@ -354,6 +392,9 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
 
         items.append({
             "id": str(item_row['id']),
+            "product_id": str(item_row['product_id']),
+            "category_id": str(item_row['category_id']) if item_row['category_id'] else None,
+            "tax_category": item_row['tax_category'] or 'standard',
             "product": {
                 "id": str(item_row['product_id']),
                 "name": item_row['product_name'],
@@ -885,26 +926,11 @@ async def get_cart_tax_preview(
     """
     Issue #526 — preview the tax breakdown for an in-flight POS cart.
 
-    Mirrors the mesa preview at tables_service.get_current_session (which
-    aggregates order_items by tax_category) but sources rows from
-    pos_cart_items because POS counter/bar carts have no orders yet.
-    Reuses the shared `_compute_tax_breakdown` helper so the sidebar
-    always agrees with the cobrar response.
-
-    pos_cart_items.subtotal already includes modifier prices (computed in
-    create_cart_with_batch_items: `subtotal = (unit_price + modifiers_total) * quantity`),
-    so no extra JOIN to pos_cart_item_modifiers is needed.
-
-    Args:
-        cart_id: the active POS cart UUID.
-        discount_amount: optional in-flight discount applied client-side
-            but used here to compute taxes on the post-discount base.
-
-    Returns:
-        {"standard_tax": float, "liquor_tax": float, "standard_tax_label": str}
+    Issue #982 — evaluates tenant promotions first, then applies optional
+    manual discount_amount on the promo-adjusted subtotal.
     """
-    # Local imports keep cierre / orders helpers cycle-free at module import
     from app.services.orders_service import _compute_tax_breakdown
+    from app.services.promotions_service import evaluate_checkout_promotions
 
     session_context = require_valid_session(request)
     tenant_id = session_context.tenant_id
@@ -912,48 +938,53 @@ async def get_cart_tax_preview(
         raise AuthenticationError("Tenant ID is required")
 
     async with get_db_connection() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT
-                COALESCE(p.tax_category, 'standard') AS tax_category,
-                COALESCE(SUM(pci.subtotal), 0) AS subtotal
-              FROM pos_cart_items pci
-              JOIN product p ON p.id = pci.product_id
-             WHERE pci.cart_id = $1
-             GROUP BY COALESCE(p.tax_category, 'standard')
-            """,
+        cart_row = await conn.fetchrow(
+            "SELECT id FROM pos_carts WHERE id = $1 AND tenant_id = $2 AND status = 'active'",
             cart_id,
+            tenant_id,
         )
+        if not cart_row:
+            raise APIError("Cart not found or already completed", status_code=404)
 
-        # Empty cart short-circuit: helper expects rows; return zero shape directly.
-        if not rows:
+        items = await get_cart_items(conn, cart_id)
+        if not items:
             return {
                 "standard_tax": 0.0,
                 "liquor_tax": 0.0,
                 "standard_tax_label": "Impuesto",
+                "subtotal": 0,
+                "promo_savings": 0,
+                "subtotal_after_promos": 0,
+                "promo_breakdown": [],
+                "lines": [],
             }
 
-        # Apply discount proportionally before tax breakdown — mirrors
-        # close_session/complete_pos_order behaviour. Guard against discount
-        # >= total (frontend should clamp, but defense in depth).
-        tax_rows: List[dict] = [{"tax_category": r["tax_category"], "subtotal": float(r["subtotal"])} for r in rows]
-        if discount_amount is not None and discount_amount > 0:
-            total_subtotal = sum(r["subtotal"] for r in tax_rows)
-            if total_subtotal > 0:
-                effective_discount = min(float(discount_amount), total_subtotal)
-                factor = 1.0 - (effective_discount / total_subtotal)
-                tax_rows = [
-                    {"tax_category": r["tax_category"], "subtotal": max(0.0, r["subtotal"] * factor)}
-                    for r in tax_rows
-                ]
+        promo_lines = _cart_items_to_promo_lines(items)
+        checkout_eval = await evaluate_checkout_promotions(
+            conn,
+            UUID(str(tenant_id)),
+            promo_lines,
+            manual_discount_amount=float(discount_amount or 0),
+        )
+        tax_category_by_id = {line["id"]: line["tax_category"] for line in promo_lines}
+        for line in checkout_eval["lines"]:
+            line["tax_category"] = tax_category_by_id.get(line["id"], "standard")
 
         tax_config = await _get_tenant_tax_config(conn, tenant_id)
+        tax_rows = _tax_rows_from_evaluated_lines(checkout_eval["lines"])
         std_tax, liq_tax, tax_label = _compute_tax_breakdown(tax_rows, tax_config)
 
     return {
         "standard_tax": float(std_tax),
         "liquor_tax": float(liq_tax),
         "standard_tax_label": tax_label,
+        "subtotal": checkout_eval["subtotal"],
+        "promo_savings": checkout_eval["promo_savings"],
+        "subtotal_after_promos": checkout_eval["subtotal_after_promos"],
+        "manual_discount_amount": checkout_eval.get("manual_discount_amount", 0),
+        "total_amount": checkout_eval["total_amount"],
+        "promo_breakdown": checkout_eval["promo_breakdown"],
+        "lines": checkout_eval["lines"],
     }
 
 
@@ -1534,24 +1565,24 @@ async def complete_pos_order(
                 else:
                     payment_status = 'paid'
 
-                # Compute discount if provided
-                cart_subtotal = float(cart_row['total_amount'])
-                _discount_amount = None  # type: Optional[float]
-                _discounted_total = cart_subtotal
-                if discount_type and discount_value is not None and discount_value > 0:
-                    if discount_type == 'percent':
-                        _discount_amount = round(cart_subtotal * discount_value / 100)
-                    else:  # fixed
-                        _discount_amount = min(round(discount_value), round(cart_subtotal))
-                    _discounted_total = cart_subtotal - _discount_amount
+                # Compute promotions + manual discount (batch #982 — promos first)
+                from app.services.promotions_service import evaluate_checkout_promotions
 
-                # Pre-compute per-item discount distribution if discount applies
-                _item_subtotals = [
-                    {'subtotal': float(item['subtotal']), '_idx': i}
-                    for i, item in enumerate(items)
-                ]
-                if _discount_amount:
-                    _item_subtotals = _distribute_discount(_item_subtotals, _discount_amount)
+                promo_lines = _cart_items_to_promo_lines(items)
+                checkout_eval = await evaluate_checkout_promotions(
+                    conn,
+                    UUID(str(tenant_id)),
+                    promo_lines,
+                    discount_type=discount_type,
+                    discount_value=discount_value,
+                )
+                cart_subtotal = float(checkout_eval["subtotal"])
+                _promo_savings = float(checkout_eval["promo_savings"])
+                _subtotal_after_promos = float(checkout_eval["subtotal_after_promos"])
+                _discount_amount = checkout_eval.get("manual_discount_amount") or None
+                _discounted_total = float(checkout_eval["total_amount"])
+                _promo_breakdown = checkout_eval.get("promo_breakdown") or []
+                _eval_by_id = {line["id"]: line for line in checkout_eval["lines"]}
 
                 # Issue #524 — single-payment cash flow stores cash_received on the orders row.
                 # Split mode keeps it NULL here and stores per-line on order_payments below (step 7a).
@@ -1665,8 +1696,10 @@ async def complete_pos_order(
 
                 # 4. Copy cart items to order_items
                 for i, item in enumerate(items):
-                    _da = _item_subtotals[i]['discount_allocated'] if _discount_amount else None
-                    _nt = _item_subtotals[i]['net_total'] if _discount_amount else None
+                    eval_line = _eval_by_id.get(item["id"], {})
+                    total_alloc = int(eval_line.get("total_discount_allocated") or 0)
+                    _da = total_alloc if total_alloc > 0 else None
+                    _nt = eval_line.get("net_total") if total_alloc > 0 else None
                     # Insert order item
                     _item_notes = (item.get('notes') or '').strip() or None
                     order_item_query = """
@@ -2041,6 +2074,10 @@ async def complete_pos_order(
                         "liquor_tax": _liquor_tax,
                         "standard_tax_label": _standard_tax_label,
                         "next_table_session_id": str(new_table_session_id) if new_table_session_id else None,
+                        "subtotal": cart_subtotal,
+                        "promo_savings": _promo_savings,
+                        "promo_breakdown": _promo_breakdown,
+                        "discount_amount": float(_discount_amount) if _discount_amount else 0.0,
                         # Split mode extras
                         **({"paid_total": _split_paid_total, "remaining": _split_remaining, "is_complete": _split_is_complete, "payment_id": _split_first_payment_id} if split_mode else {}),
                     }
