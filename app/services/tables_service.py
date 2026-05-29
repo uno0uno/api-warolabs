@@ -1269,6 +1269,14 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             reason=reason,
                         )
 
+                    if pending_count and pending_count > 0:
+                        cancelled_count = await _cancel_pending_session_orders_on_release(
+                            conn,
+                            tenant_id,
+                            session_row["id"],
+                        )
+                        pending_count = max(0, int(pending_count) - cancelled_count)
+
                 if not split_mode:
                     # Close session
                     await conn.execute(
@@ -1296,42 +1304,42 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             tenant_id,
                         )
 
-                # Auto-fire hook: if comandas enabled, fire all 'new' items for this session
-                # This ensures any items added but not explicitly fired get sent at checkout
-                try:
-                    _prof = await conn.fetchrow(
-                        "SELECT comandas_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
-                        tenant_id
-                    )
-                    if _prof and _prof["comandas_enabled"]:
-                        # Find all pending orders for this session (they might have been completed just above)
-                        # We need to fire them. fire_comandas handles 'new' status check.
-                        session_orders = await conn.fetch(
-                            "SELECT id FROM orders WHERE table_session_id = $1",
-                            session_row["id"]
+                # Auto-fire hook: checkout only — skip on liberar mesa (#330)
+                if payment_method:
+                    try:
+                        _prof = await conn.fetchrow(
+                            "SELECT comandas_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                            tenant_id
                         )
-                        for _order in session_orders:
-                            await fire_comandas(
-                                order_id=_order["id"],
-                                tenant_id=tenant_id,
-                                source_type='table',
-                                table_display_name=table_row["name"],
-                                conn=conn
+                        if _prof and _prof["comandas_enabled"]:
+                            # Find all pending orders for this session (they might have been completed just above)
+                            # We need to fire them. fire_comandas handles 'new' status check.
+                            session_orders = await conn.fetch(
+                                "SELECT id FROM orders WHERE table_session_id = $1",
+                                session_row["id"]
                             )
+                            for _order in session_orders:
+                                await fire_comandas(
+                                    order_id=_order["id"],
+                                    tenant_id=tenant_id,
+                                    source_type='table',
+                                    table_display_name=table_row["name"],
+                                    conn=conn
+                                )
 
-                        # Mesa: auto-deliver open comandas on payment. Barra: kitchen closes
-                        # them manually (warocol.com#799).
-                        if not is_bar_table:
-                            session_order_ids = [_o["id"] for _o in session_orders]
-                            await conn.execute("""
-                                UPDATE comandas
-                                SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
-                                WHERE order_id = ANY($1::uuid[])
-                                  AND tenant_id = $2
-                                  AND status IN ('pending', 'preparing', 'ready')
-                            """, session_order_ids, tenant_id)
-                except Exception as _fe:
-                    logger.error(f"Auto-fire failed during close_session for table {table_id}: {_fe}")
+                            # Mesa: auto-deliver open comandas on payment. Barra: kitchen closes
+                            # them manually (warocol.com#799).
+                            if not is_bar_table:
+                                session_order_ids = [_o["id"] for _o in session_orders]
+                                await conn.execute("""
+                                    UPDATE comandas
+                                    SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
+                                    WHERE order_id = ANY($1::uuid[])
+                                      AND tenant_id = $2
+                                      AND status IN ('pending', 'preparing', 'ready')
+                                """, session_order_ids, tenant_id)
+                    except Exception as _fe:
+                        logger.error(f"Auto-fire failed during close_session for table {table_id}: {_fe}")
 
         if split_mode:
             # Compute paid_total and remaining for the split response
@@ -2150,6 +2158,59 @@ async def _record_tab_cleared_pending_lines(
             ),
         )
     return len(pending_lines)
+
+
+async def _cancel_pending_session_orders_on_release(
+    conn,
+    tenant_id: UUID,
+    session_id: UUID,
+) -> int:
+    """Cancel pending orders and comandas when liberar mesa without payment (#330)."""
+    await conn.execute(
+        """
+        UPDATE comanda_items
+        SET status = 'cancelled',
+            cancelled_at = NOW(),
+            order_item_id = NULL
+        WHERE order_item_id IN (
+            SELECT oi.id
+            FROM order_items oi
+            JOIN orders o ON o.id = oi.order_id
+            WHERE o.table_session_id = $1 AND o.status = 'pending'
+        )
+        """,
+        session_id,
+    )
+
+    await conn.execute(
+        """
+        UPDATE comandas
+        SET status = 'cancelled', updated_at = NOW()
+        WHERE order_id IN (
+            SELECT id FROM orders
+            WHERE table_session_id = $1 AND status = 'pending'
+        )
+          AND tenant_id = $2
+          AND status IN ('pending', 'preparing', 'ready')
+        """,
+        session_id,
+        tenant_id,
+    )
+
+    cancelled = await conn.fetchval(
+        """
+        WITH cancelled AS (
+            UPDATE orders
+            SET status = 'cancelled',
+                payment_status = NULL
+            WHERE table_session_id = $1 AND status = 'pending'
+            RETURNING id
+        )
+        SELECT COUNT(*) FROM cancelled
+        """,
+        session_id,
+    )
+    return int(cancelled or 0)
 
 
 async def _return_tab_item_inventory_from_snapshots(
