@@ -809,11 +809,14 @@ def evaluate_cart_promotions(
         subtotal = float(line["subtotal"])
         original_subtotal += subtotal
 
-        promo = _pick_best_promotion_for_line(
-            promotions,
-            product_id=product_id,
-            category_id=category_id,
-        )
+        if line.get("promo_opt_out"):
+            promo = None
+        else:
+            promo = _pick_best_promotion_for_line(
+                promotions,
+                product_id=product_id,
+                category_id=category_id,
+            )
         promo_savings = 0
         promo_meta: Dict[str, Any] = {}
         if promo is not None:

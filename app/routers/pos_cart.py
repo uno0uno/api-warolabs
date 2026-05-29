@@ -115,6 +115,31 @@ async def update_item(
     )
 
 
+class PromoOptOutRequest(BaseModel):
+    promo_opt_out: bool = Field(
+        description="When true, skip automatic promotions for this cart line.",
+    )
+
+
+@router.patch(
+    "/{cart_id}/items/{item_id}/promo-opt-out",
+    dependencies=[Depends(require_module(Module.POS))],
+)
+async def update_item_promo_opt_out(
+    request: Request,
+    cart_id: UUID,
+    item_id: UUID,
+    body: PromoOptOutRequest,
+):
+    """Toggle per-line promotion opt-out for a cart item (warocol.com#1003)."""
+    return await pos_cart_service.update_cart_item_promo_opt_out(
+        request,
+        cart_id,
+        item_id,
+        body.promo_opt_out,
+    )
+
+
 class CartDestructiveReasonRequest(BaseModel):
     reason: Optional[str] = Field(
         None,

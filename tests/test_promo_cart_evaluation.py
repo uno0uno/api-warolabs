@@ -120,3 +120,45 @@ def test_percent_off_category_large_menu():
     result = evaluate_cart_promotions(lines, promos=[promo])
     assert result["promo_savings"] == 30000
     assert result["subtotal_after_promos"] == 120000
+
+
+def test_promo_opt_out_skips_line_promotion():
+    """Opted-out lines keep gross subtotal (warocol.com#1003)."""
+    product_id = uuid4()
+    promo = _promo(
+        promo_type="percent_off",
+        value_json={"percent": 10},
+        scope_type="products",
+    )
+    promo["product_ids"] = {product_id}
+    lines = [
+        {**_line(subtotal=10000, product_id=product_id), "promo_opt_out": True},
+        _line(subtotal=5000, product_id=product_id),
+    ]
+    result = evaluate_cart_promotions(lines, promos=[promo])
+    assert result["lines"][0]["promo_savings"] == 0
+    assert result["lines"][0].get("promotion_name") is None
+    assert result["lines"][1]["promo_savings"] == 500
+    assert result["promo_savings"] == 500
+    assert result["subtotal_after_promos"] == 14500
+
+
+def test_manual_discount_after_promo_opt_out():
+    """Manual discount applies on promo-adjusted subtotal when a line opts out."""
+    product_id = uuid4()
+    promo = _promo(
+        promo_type="percent_off",
+        value_json={"percent": 10},
+        scope_type="products",
+    )
+    promo["product_ids"] = {product_id}
+    lines = [
+        {**_line(subtotal=10000, product_id=product_id), "promo_opt_out": True},
+        _line(subtotal=10000, product_id=product_id),
+    ]
+    evaluated = evaluate_cart_promotions(lines, promos=[promo])
+    checkout = apply_manual_discount_to_evaluated_lines(evaluated, 900)
+    assert checkout["promo_savings"] == 1000
+    assert checkout["subtotal_after_promos"] == 19000
+    assert checkout["manual_discount_amount"] == 900
+    assert checkout["total_amount"] == 18100

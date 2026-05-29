@@ -38,6 +38,7 @@ ALLOWED_TOGGLES = frozenset({
     "tip_enabled",                  # warocol.com#638
     "tip_taxable_default",          # warocol.com#740
     "open_sale_enabled",            # warocol.com#805
+    "allow_promo_line_opt_out",     # warocol.com#1003
 })
 
 

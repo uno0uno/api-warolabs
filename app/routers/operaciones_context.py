@@ -207,6 +207,16 @@ async def toggle_tip_taxable_default(request: Request, body: ToggleRequest):
 
 
 @router.patch(
+    "/toggles/promo-line-opt-out",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def toggle_promo_line_opt_out(request: Request, body: ToggleRequest):
+    """Toggle per-line promotion opt-out at POS checkout (warocol.com#1003)."""
+    session = require_valid_session(request)
+    return await update_toggle(session.tenant_id, "allow_promo_line_opt_out", body.enabled)
+
+
+@router.patch(
     "/tip/config",
     dependencies=[Depends(require_module(Module.OPERACIONES))],
 )
