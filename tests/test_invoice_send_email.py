@@ -111,6 +111,7 @@ async def test_send_invoice_email_happy_path():
     fetchrow = [_order_row(), _invoice_row(), _profile_row()]
     fetch = [
         [],  # tax items (empty → no tax)
+        [],  # promo summary (no applied promos)
         [{'id': uuid4(), 'quantity': 1, 'subtotal': 200.0, 'product_name': 'tomate barranca'}],
         [],  # modifiers for item
     ]
@@ -141,6 +142,8 @@ async def test_send_invoice_email_happy_path():
     assert kwargs['order_date'].year == 2026
     assert kwargs['order_date'].month == 5
     assert kwargs['order_date'].day == 13
+    assert kwargs['promo_savings'] == 0.0
+    assert kwargs['promo_breakdown'] == []
 
 
 # ── Cross-tenant guard ───────────────────────────────────────────────────────
@@ -238,6 +241,7 @@ async def test_send_invoice_email_ses_failure_502():
 
     fetchrow = [_order_row(), _invoice_row(), _profile_row()]
     fetch = [
+        [],
         [],
         [{'id': uuid4(), 'quantity': 1, 'subtotal': 200.0, 'product_name': 'tomate barranca'}],
         [],

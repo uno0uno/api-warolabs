@@ -265,6 +265,11 @@ class SendReceiptRequest(BaseModel):
     invoice_number: Optional[int] = None
     invoice_cufe: Optional[str] = None
     tip_amount: float = Field(0.0, ge=0, description="Tip amount captured at checkout — shown as a separate line on the receipt (warocol.com#637).")
+    promo_savings: float = Field(0.0, ge=0, description="Total promotion savings applied at checkout (warocol.com#992).")
+    promo_breakdown: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-promotion savings breakdown for receipt display.",
+    )
 
 
 class AddPaymentRequest(BaseModel):
@@ -312,6 +317,8 @@ async def send_receipt_email(request: Request, receipt_data: SendReceiptRequest)
         invoice_number=receipt_data.invoice_number,
         invoice_cufe=receipt_data.invoice_cufe,
         tip_amount=receipt_data.tip_amount,
+        promo_savings=receipt_data.promo_savings,
+        promo_breakdown=receipt_data.promo_breakdown,
     )
     return {"success": success}
 
