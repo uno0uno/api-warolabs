@@ -534,3 +534,270 @@ async def list_active_promotions(
 
 def default_at_bogota() -> datetime:
     return datetime.now(tz=BOGOTA)
+
+
+def _promo_matches_line(
+    promo: Dict[str, Any],
+    *,
+    product_id: UUID,
+    category_id: Optional[UUID],
+) -> bool:
+    return product_in_scope(
+        scope_type=promo["scope_type"],
+        category_ids=promo["category_ids"],
+        product_ids=promo["product_ids"],
+        product_id=product_id,
+        category_id=category_id,
+    )
+
+
+def _pick_best_promotion_for_line(
+    promotions: Sequence[Dict[str, Any]],
+    *,
+    product_id: UUID,
+    category_id: Optional[UUID],
+) -> Optional[Dict[str, Any]]:
+    matches = [
+        p for p in promotions
+        if _promo_matches_line(p, product_id=product_id, category_id=category_id)
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda p: (int(p.get("priority") or 0), p.get("name") or ""))
+
+
+def _compute_line_promo_savings(line: Dict[str, Any], promo: Dict[str, Any]) -> int:
+    """Return COP savings for one cart/order line (Toast-style BOGO uses full unit price)."""
+    subtotal = float(line["subtotal"])
+    quantity = int(line.get("quantity") or 1)
+    if subtotal <= 0 or quantity <= 0:
+        return 0
+
+    promo_type = promo["promo_type"]
+    value_json = promo.get("value_json") or {}
+
+    if promo_type == "percent_off":
+        pct = float(value_json.get("percent") or 0)
+        if pct <= 0:
+            return 0
+        return min(round(subtotal * pct / 100), round(subtotal))
+
+    if promo_type == "fixed_off":
+        amount = float(value_json.get("amount_cop") or 0)
+        if amount <= 0:
+            return 0
+        return min(round(amount), round(subtotal))
+
+    if promo_type == "bogo":
+        buy_qty = int(value_json.get("buy_qty") or 0)
+        get_qty = int(value_json.get("get_qty") or 0)
+        if buy_qty < 1 or get_qty < 1:
+            return 0
+        bundle = buy_qty + get_qty
+        sets = quantity // bundle
+        if sets <= 0:
+            return 0
+        unit_price = subtotal / quantity
+        free_units = sets * get_qty
+        return min(round(free_units * unit_price), round(subtotal))
+
+    return 0
+
+
+def evaluate_cart_promotions(
+    lines: Sequence[Dict[str, Any]],
+    promotions: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Evaluate active promotions against checkout lines.
+
+    Each input line needs: id, product_id, category_id (optional), quantity, subtotal.
+    Returns authoritative promo savings and per-line breakdown (batch #982).
+    """
+    evaluated_lines: List[Dict[str, Any]] = []
+    breakdown_by_id: Dict[str, Dict[str, Any]] = {}
+    total_promo_savings = 0
+    original_subtotal = 0
+
+    for line in lines:
+        line_id = str(line["id"])
+        product_id = line["product_id"]
+        if isinstance(product_id, str):
+            product_id = UUID(product_id)
+        category_raw = line.get("category_id")
+        category_id = UUID(category_raw) if category_raw else None
+        subtotal = float(line["subtotal"])
+        original_subtotal += subtotal
+
+        promo = _pick_best_promotion_for_line(
+            promotions,
+            product_id=product_id,
+            category_id=category_id,
+        )
+        promo_savings = 0
+        promo_meta: Dict[str, Any] = {}
+        if promo is not None:
+            promo_savings = _compute_line_promo_savings(line, promo)
+            if promo_savings > 0:
+                promo_meta = {
+                    "promotion_id": str(promo["id"]),
+                    "promotion_name": promo["name"],
+                    "promo_type": promo["promo_type"],
+                }
+                pid = promo_meta["promotion_id"]
+                if pid not in breakdown_by_id:
+                    breakdown_by_id[pid] = {
+                        "promotion_id": pid,
+                        "promotion_name": promo["name"],
+                        "promo_type": promo["promo_type"],
+                        "savings": 0,
+                    }
+                breakdown_by_id[pid]["savings"] += promo_savings
+
+        total_promo_savings += promo_savings
+        subtotal_after_promo = max(0.0, subtotal - promo_savings)
+        evaluated_lines.append({
+            "id": line_id,
+            "product_id": str(product_id),
+            "category_id": str(category_id) if category_id else None,
+            "quantity": int(line.get("quantity") or 1),
+            "subtotal": subtotal,
+            "promo_savings": promo_savings,
+            "subtotal_after_promo": subtotal_after_promo,
+            **promo_meta,
+        })
+
+    subtotal_after_promos = max(0.0, original_subtotal - total_promo_savings)
+    return {
+        "lines": evaluated_lines,
+        "subtotal": round(original_subtotal),
+        "promo_savings": round(total_promo_savings),
+        "subtotal_after_promos": round(subtotal_after_promos),
+        "promo_breakdown": list(breakdown_by_id.values()),
+    }
+
+
+def apply_manual_discount_to_evaluated_lines(
+    evaluated: Dict[str, Any],
+    manual_discount_amount: float,
+) -> Dict[str, Any]:
+    """Apply manual order discount on promo-adjusted subtotals (stacking contract)."""
+    manual_discount = max(0.0, float(manual_discount_amount or 0))
+    lines = evaluated["lines"]
+    base_total = float(evaluated["subtotal_after_promos"])
+    if manual_discount <= 0 or base_total <= 0:
+        for line in lines:
+            line["manual_discount_allocated"] = 0
+            line["total_discount_allocated"] = line["promo_savings"]
+            line["net_total"] = line["subtotal"] - line["promo_savings"]
+        return {
+            **evaluated,
+            "manual_discount_amount": 0,
+            "total_amount": round(base_total),
+        }
+
+    manual_discount = min(round(manual_discount), round(base_total))
+    dist_input = [
+        {"subtotal": float(line["subtotal_after_promo"]), "_idx": idx}
+        for idx, line in enumerate(lines)
+    ]
+    dist = _distribute_discount_from_promotions(dist_input, manual_discount)
+    for idx, line in enumerate(lines):
+        manual_alloc = dist[idx]["discount_allocated"]
+        line["manual_discount_allocated"] = manual_alloc
+        line["total_discount_allocated"] = line["promo_savings"] + manual_alloc
+        line["net_total"] = line["subtotal"] - line["total_discount_allocated"]
+
+    return {
+        **evaluated,
+        "manual_discount_amount": manual_discount,
+        "total_amount": round(base_total - manual_discount),
+    }
+
+
+def _distribute_discount_from_promotions(items: List[dict], discount_amount: float) -> List[dict]:
+    """Same proportional allocation as pos_cart_service._distribute_discount."""
+    total_subtotal = sum(float(item["subtotal"]) for item in items)
+    if total_subtotal <= 0 or discount_amount <= 0:
+        for item in items:
+            item["discount_allocated"] = 0.0
+        return items
+
+    allocated_total = 0.0
+    for item in items:
+        share = float(item["subtotal"]) / total_subtotal
+        item["discount_allocated"] = round(discount_amount * share)
+        allocated_total += item["discount_allocated"]
+
+    remainder = round(discount_amount) - round(allocated_total)
+    if remainder != 0:
+        largest = max(items, key=lambda x: x["subtotal"])
+        largest["discount_allocated"] += remainder
+    return items
+
+
+async def load_promotions_for_evaluation(
+    conn: asyncpg.Connection,
+    tenant_id: UUID,
+    at: datetime,
+) -> List[Dict[str, Any]]:
+    """Load tenant promotions that are active at `at`, with scope for POS evaluation."""
+    rows = await conn.fetch(
+        """
+        SELECT * FROM tenant_promotions
+        WHERE tenant_id = $1 AND is_active = true
+        ORDER BY priority DESC, name
+        """,
+        tenant_id,
+    )
+    loaded: List[Dict[str, Any]] = []
+    for row in rows:
+        schedules = await _load_schedules(conn, row["id"])
+        schedule_dicts = [_row_to_schedule(r) for r in schedules]
+        if not is_active_at(
+            at,
+            is_active=row["is_active"],
+            starts_at=row["starts_at"],
+            ends_at=row["ends_at"],
+            schedules=schedule_dicts,
+        ):
+            continue
+        category_ids, product_ids = await _load_scope_ids(conn, row["id"])
+        loaded.append({
+            "id": row["id"],
+            "name": row["name"],
+            "promo_type": row["promo_type"],
+            "value_json": _parse_value_json(row["value_json"]),
+            "scope_type": row["scope_type"],
+            "priority": row["priority"],
+            "stackable": row["stackable"],
+            "category_ids": set(category_ids),
+            "product_ids": set(product_ids),
+        })
+    return loaded
+
+
+async def evaluate_checkout_promotions(
+    conn: asyncpg.Connection,
+    tenant_id: UUID,
+    lines: Sequence[Dict[str, Any]],
+    *,
+    at: Optional[datetime] = None,
+    manual_discount_amount: float = 0,
+    discount_type: Optional[str] = None,
+    discount_value: Optional[float] = None,
+) -> Dict[str, Any]:
+    """DB-backed promo evaluation + optional manual discount stacking."""
+    evaluation_at = at or default_at_bogota()
+    promotions = await load_promotions_for_evaluation(conn, tenant_id, evaluation_at)
+    evaluated = evaluate_cart_promotions(lines, promotions)
+    manual_discount = float(manual_discount_amount or 0)
+    if discount_type and discount_value is not None and discount_value > 0:
+        if discount_type == "percent":
+            manual_discount = round(evaluated["subtotal_after_promos"] * discount_value / 100)
+        else:
+            manual_discount = min(
+                round(discount_value),
+                round(evaluated["subtotal_after_promos"]),
+            )
+    return apply_manual_discount_to_evaluated_lines(evaluated, manual_discount)
