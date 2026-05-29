@@ -162,6 +162,47 @@ def test_cashier_passes_active_promotions_under_enforce():
     assert response.status_code == 200
 
 
+def test_list_promotion_scope_endpoint():
+    promo_id = uuid4()
+    session = _build_session()
+    app = FastAPI()
+    app.include_router(promotions_router)
+
+    scope_payload = {
+        "success": True,
+        "data": {
+            "scope_type": "products",
+            "promotion_name": "2x1",
+            "items": [{"id": str(uuid4()), "name": "Cerveza"}],
+            "total": 1,
+            "page": 1,
+            "page_size": 50,
+        },
+    }
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=frozenset({Module.MI_NEGOCIO})),
+         ), \
+         patch(
+             "app.services.promotions_service.list_promotion_scope",
+             new=AsyncMock(return_value=scope_payload),
+         ):
+        client = TestClient(app)
+        response = client.get(
+            f"/api/promotions/{promo_id}/scope",
+            params={"search": "cer", "page": 1, "page_size": 50},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"]["scope_type"] == "products"
+    assert body["data"]["total"] == 1
+
+
 def test_scope_summary_products_preview_capped_at_three():
     pid1, pid2, pid3, pid4 = uuid4(), uuid4(), uuid4(), uuid4()
     scope = _scope_summary_from_pairs(
