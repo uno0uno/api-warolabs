@@ -42,10 +42,17 @@ CONFLICT_RULES_DOC = (
 
 
 def normalize_promo_type_block_map(
-    raw: Optional[Dict[str, Any]],
+    raw: Optional[Any],
 ) -> Dict[str, List[str]]:
     """Return a validated type-block map, falling back to tenant defaults."""
-    if not raw:
+    if raw is None:
+        return dict(DEFAULT_PROMO_TYPE_BLOCK_MAP)
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return dict(DEFAULT_PROMO_TYPE_BLOCK_MAP)
+    if not isinstance(raw, dict) or not raw:
         return dict(DEFAULT_PROMO_TYPE_BLOCK_MAP)
     normalized: Dict[str, List[str]] = {}
     for winner, blocked in raw.items():
@@ -289,23 +296,35 @@ async def _shared_product_count(
     return len(product_ids_a & product_ids_b)
 
 
+def _normalize_schedule_input(sched: Any) -> Dict[str, Any]:
+    """Accept PromotionScheduleInput or model_dump dict (PATCH body)."""
+    if isinstance(sched, dict):
+        return {
+            "days_of_week": int(sched["days_of_week"]),
+            "start_time": sched["start_time"],
+            "end_time": sched["end_time"],
+            "crosses_midnight": bool(sched.get("crosses_midnight", False)),
+            "sort_order": int(sched.get("sort_order", 0)),
+        }
+    return {
+        "days_of_week": int(sched.days_of_week),
+        "start_time": sched.start_time,
+        "end_time": sched.end_time,
+        "crosses_midnight": bool(sched.crosses_midnight),
+        "sort_order": int(getattr(sched, "sort_order", 0) or 0),
+    }
+
+
 def _schedule_dicts_from_inputs(schedules: Sequence[Any]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for sched in schedules:
-        if isinstance(sched, dict):
-            rows.append({
-                "days_of_week": int(sched["days_of_week"]),
-                "start_time": sched["start_time"],
-                "end_time": sched["end_time"],
-                "crosses_midnight": bool(sched.get("crosses_midnight", False)),
-            })
-        else:
-            rows.append({
-                "days_of_week": int(sched.days_of_week),
-                "start_time": sched.start_time,
-                "end_time": sched.end_time,
-                "crosses_midnight": bool(sched.crosses_midnight),
-            })
+        normalized = _normalize_schedule_input(sched)
+        rows.append({
+            "days_of_week": normalized["days_of_week"],
+            "start_time": normalized["start_time"],
+            "end_time": normalized["end_time"],
+            "crosses_midnight": normalized["crosses_midnight"],
+        })
     return rows
 
 
@@ -644,6 +663,7 @@ async def _replace_schedules(
         promotion_id,
     )
     for sched in schedules:
+        row = _normalize_schedule_input(sched)
         await conn.execute(
             """
             INSERT INTO tenant_promotion_schedules (
@@ -653,11 +673,11 @@ async def _replace_schedules(
             VALUES ($1, $2, $3, $4, $5, $6)
             """,
             promotion_id,
-            sched.days_of_week,
-            sched.start_time,
-            sched.end_time,
-            sched.crosses_midnight,
-            sched.sort_order,
+            row["days_of_week"],
+            row["start_time"],
+            row["end_time"],
+            row["crosses_midnight"],
+            row["sort_order"],
         )
 
 

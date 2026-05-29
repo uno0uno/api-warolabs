@@ -34,6 +34,11 @@ def test_normalize_promo_type_block_map_filters_invalid_entries():
     assert normalize_promo_type_block_map(raw) == {"bogo": ["percent_off"]}
 
 
+def test_normalize_promo_type_block_map_parses_json_string():
+    raw = '{"bogo": ["percent_off", "fixed_off"]}'
+    assert normalize_promo_type_block_map(raw) == DEFAULT_PROMO_TYPE_BLOCK_MAP
+
+
 def test_validate_promo_type_block_map_rejects_unknown_winner():
     with pytest.raises(ValueError, match="Unknown promo_type"):
         validate_promo_type_block_map({"combo": ["percent_off"]})
