@@ -1,0 +1,30 @@
+issue: 984
+title: "feat(promotions): order history, receipts, and reporting hooks"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-984-order-promo-history
+
+paths:
+  - sql/20260529_order_promotions_persist.sql
+  - app/services/promotions_service.py
+  - app/services/pos_cart_service.py
+  - app/services/tables_service.py
+  - app/services/orders_service.py
+  - tests/test_order_promo_persist.py
+  - ../front_nuxt/pages/ventas/[id].vue
+  - ../front_nuxt/pages/pos/checkout.vue
+
+ac:
+  - Closed order shows applied promo(s) in /ventas/[id]
+  - Printed ticket and prefactura show promo label
+  - BOGO + manual discount both visible
+  - API order payload includes promotion breakdown
+
+hints:
+  entry: "promo_persist_fields_from_eval_line — promotions_service"
+  tests: "pytest tests/test_order_promo_persist.py -v"
+
+skip:
+  audits: [ux, color, typography]
