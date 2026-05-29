@@ -173,6 +173,15 @@ def _normalize_receipt_document_label(raw) -> str:
     return label
 
 
+def _normalize_receipt_tip_label(raw) -> str:
+    label = (raw or 'Propina').strip()
+    if not label:
+        return 'Propina'
+    if len(label) > 40:
+        raise HTTPException(status_code=400, detail='Tip label must be at most 40 characters')
+    return label
+
+
 @router.get("/fiscal-data", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def get_fiscal_data(request: Request):
     """
@@ -212,6 +221,7 @@ async def get_fiscal_data(request: Request):
             'phone': row['phone'],
             'email': row['email'],
             'receipt_document_label': _normalize_receipt_document_label(row['receipt_document_label']),
+            'receipt_tip_label': _normalize_receipt_tip_label(row.get('receipt_tip_label')),
             'show_logo_on_receipts': row['show_logo_on_receipts']
             if row['show_logo_on_receipts'] is not None
             else True,
@@ -231,6 +241,7 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
     tenant_id = session.tenant_id
 
     document_label = _normalize_receipt_document_label(data.get('receipt_document_label'))
+    tip_label = _normalize_receipt_tip_label(data.get('receipt_tip_label'))
     show_logo = bool(data.get('show_logo_on_receipts', True))
 
     async with get_db_connection() as conn:
@@ -238,8 +249,8 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
             """INSERT INTO tenant_fiscal_data (tenant_id, nit, business_name,
                    type_organization_id, tax_regime_id, tax_level_id,
                    fiscal_address, city, city_id, phone, email,
-                   receipt_document_label, show_logo_on_receipts, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+                   receipt_document_label, receipt_tip_label, show_logo_on_receipts, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
                ON CONFLICT (tenant_id) DO UPDATE SET
                    nit = EXCLUDED.nit,
                    business_name = EXCLUDED.business_name,
@@ -252,6 +263,7 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
                    phone = EXCLUDED.phone,
                    email = EXCLUDED.email,
                    receipt_document_label = EXCLUDED.receipt_document_label,
+                   receipt_tip_label = EXCLUDED.receipt_tip_label,
                    show_logo_on_receipts = EXCLUDED.show_logo_on_receipts,
                    updated_at = now()""",
             tenant_id,
@@ -266,6 +278,7 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
             data.get('phone'),
             data.get('email'),
             document_label,
+            tip_label,
             show_logo,
         )
 
