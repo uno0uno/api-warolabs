@@ -81,3 +81,42 @@ def test_ineligible_lines_unchanged():
     result = evaluate_cart_promotions(lines, promos=[])
     assert result["promo_savings"] == 0
     assert result["subtotal_after_promos"] == 8000
+
+
+def test_percent_off_category_scoped():
+    """Happy hour % off all items in a category (warocol.com#983)."""
+    category_id = uuid4()
+    other_category = uuid4()
+    promo = _promo(
+        promo_type="percent_off",
+        value_json={"percent": 10},
+        scope_type="categories",
+        name="Happy hour Cervezas",
+    )
+    promo["category_ids"] = {category_id}
+    lines = [
+        _line(subtotal=10000, category_id=category_id),
+        _line(subtotal=5000, category_id=other_category),
+    ]
+    result = evaluate_cart_promotions(lines, promos=[promo])
+    assert result["promo_savings"] == 1000
+    assert result["subtotal_after_promos"] == 14000
+    assert result["lines"][0]["promotion_name"] == "Happy hour Cervezas"
+    assert result["lines"][1]["promo_savings"] == 0
+
+
+def test_percent_off_category_large_menu():
+    """Category-wide rule applies across many SKUs (warocol.com#983)."""
+    category_id = uuid4()
+    promo = _promo(
+        promo_type="percent_off",
+        value_json={"percent": 20},
+        scope_type="categories",
+    )
+    promo["category_ids"] = {category_id}
+    lines = [
+        _line(subtotal=1000, category_id=category_id) for _ in range(150)
+    ]
+    result = evaluate_cart_promotions(lines, promos=[promo])
+    assert result["promo_savings"] == 30000
+    assert result["subtotal_after_promos"] == 120000
