@@ -20,6 +20,7 @@ class ComandaItem(BaseModel):
     quantity: Decimal
     notes: Optional[str] = None
     modifiers_snapshot: Optional[List[Dict[str, Any]]] = None
+    is_promo_free: Optional[bool] = False
     status: str
     ready_at: Optional[datetime] = None
     created_at: datetime

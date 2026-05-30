@@ -24,7 +24,7 @@ from fastapi import Request
 logger = logging.getLogger(__name__)
 
 
-def _parse_item_row(ir: Any) -> Dict[str, Any]:
+def _parse_item_row(ir: Any, *, is_promo_free: bool = False) -> Dict[str, Any]:
     """Convert an asyncpg comanda_items row to a serializable dict.
     asyncpg returns JSONB columns as raw strings — parse modifiers_snapshot
     so the frontend receives a proper array, not a JSON-encoded string.
@@ -36,7 +36,97 @@ def _parse_item_row(ir: Any) -> Dict[str, Any]:
             d['modifiers_snapshot'] = json.loads(snap)
         except (ValueError, TypeError):
             d['modifiers_snapshot'] = None
+    d['is_promo_free'] = is_promo_free
     return d
+
+
+def _parse_promotion_value_json(raw: Any) -> Dict[str, Any]:
+    if raw is None:
+        return {}
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
+def _bogo_comanda_kitchen_lines(
+    quantity: float,
+    *,
+    buy_qty: int,
+    get_qty: int,
+    promotion_name: str,
+    base_notes: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Split a BOGO order line into paid + free comanda rows (warocol.com#1021)."""
+    qty = int(quantity)
+    if qty <= 0:
+        return []
+
+    bundle = buy_qty + get_qty
+    sets = qty // bundle if buy_qty >= 1 and get_qty >= 1 and bundle > 0 else 0
+    if sets <= 0:
+        return [{"quantity": qty, "notes": base_notes, "is_promo_free": False}]
+
+    free_units = sets * get_qty
+    paid_units = qty - free_units
+    promo_label = (promotion_name or "BOGO").strip()
+    lines: List[Dict[str, Any]] = []
+
+    if paid_units > 0:
+        lines.append({"quantity": paid_units, "notes": base_notes, "is_promo_free": False})
+    if free_units > 0:
+        gratis_note = f"GRATIS ({promo_label})"
+        free_notes = f"{base_notes} — {gratis_note}" if base_notes else gratis_note
+        lines.append({"quantity": free_units, "notes": free_notes, "is_promo_free": True})
+    return lines
+
+
+def _comanda_kitchen_lines_for_order_item(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Map one order_item row → one or more comanda kitchen lines."""
+    base_notes = (item.get("notes") or "").strip() or None
+    qty = float(item.get("quantity") or 0)
+    if qty <= 0:
+        return []
+
+    if item.get("promo_type") != "bogo" or not item.get("applied_promotion_id"):
+        return [{"quantity": qty, "notes": base_notes, "is_promo_free": False}]
+
+    value_json = _parse_promotion_value_json(item.get("promotion_value_json"))
+    buy_qty = int(value_json.get("buy_qty") or 0)
+    get_qty = int(value_json.get("get_qty") or 0)
+    if buy_qty < 1 or get_qty < 1:
+        return [{"quantity": qty, "notes": base_notes, "is_promo_free": False}]
+
+    return _bogo_comanda_kitchen_lines(
+        qty,
+        buy_qty=buy_qty,
+        get_qty=get_qty,
+        promotion_name=item.get("promotion_name") or "",
+        base_notes=base_notes,
+    )
+
+
+_UNFIRED_ORDER_ITEMS_SELECT = """
+    SELECT
+        oi.id,
+        oi.quantity,
+        oi.product_id,
+        oi.notes,
+        oi.applied_promotion_id,
+        oi.promo_savings_allocated,
+        tp.promo_type,
+        tp.name AS promotion_name,
+        tp.value_json AS promotion_value_json,
+        COALESCE(p.kitchen_name, p.name) AS kitchen_name
+    FROM order_items oi
+    JOIN product p ON oi.product_id = p.id
+    LEFT JOIN tenant_promotions tp ON tp.id = oi.applied_promotion_id
+"""
 
 # Allowed status transitions — any move not in this map is rejected with 422.
 # 'recall' (delivered → ready) is handled by recall_comanda() separately.
@@ -142,15 +232,8 @@ async def _fire_with_conn(
     # ─── Step 1: Load unfired items ─────────────────────────────────────────
     if item_ids:
         rows = await conn.fetch(
-            """
-            SELECT
-                oi.id,
-                oi.quantity,
-                oi.product_id,
-                oi.notes,
-                COALESCE(p.kitchen_name, p.name) AS kitchen_name
-            FROM order_items oi
-            JOIN product p ON oi.product_id = p.id
+            f"""
+            {_UNFIRED_ORDER_ITEMS_SELECT}
             WHERE oi.order_id = $1
               AND oi.fulfillment_status = 'new'
               AND oi.id = ANY($2::uuid[])
@@ -160,15 +243,8 @@ async def _fire_with_conn(
         )
     else:
         rows = await conn.fetch(
-            """
-            SELECT
-                oi.id,
-                oi.quantity,
-                oi.product_id,
-                oi.notes,
-                COALESCE(p.kitchen_name, p.name) AS kitchen_name
-            FROM order_items oi
-            JOIN product p ON oi.product_id = p.id
+            f"""
+            {_UNFIRED_ORDER_ITEMS_SELECT}
             WHERE oi.order_id = $1
               AND oi.fulfillment_status = 'new'
             ORDER BY oi.created_at
@@ -232,7 +308,7 @@ async def _fire_with_conn(
         )
         comanda_id = comanda_row['id']
 
-        # 3c. INSERT comanda_items — one per order_item in this station's group
+        # 3c. INSERT comanda_items — BOGO lines may split paid vs free units (#1021)
         inserted_items: List[Dict[str, Any]] = []
         item_ids_in_group: List[UUID] = []
 
@@ -240,7 +316,6 @@ async def _fire_with_conn(
             order_item_id = item['id']
             item_ids_in_group.append(order_item_id)
 
-            # Build modifiers_snapshot from order_item_modifiers
             mod_rows = await conn.fetch(
                 """
                 SELECT modifier_name, price_at_purchase, quantity
@@ -258,26 +333,30 @@ async def _fire_with_conn(
                 }
                 for m in mod_rows
             ] if mod_rows else None
+            modifiers_json = json.dumps(modifiers_snapshot) if modifiers_snapshot else None
 
-            item_notes = (item.get('notes') or '').strip() or None
-            ci_row = await conn.fetchrow(
-                """
-                INSERT INTO comanda_items (
-                    comanda_id, order_item_id, kitchen_name,
-                    quantity, modifiers_snapshot, notes
+            kitchen_lines = _comanda_kitchen_lines_for_order_item(dict(item))
+            for kitchen_line in kitchen_lines:
+                ci_row = await conn.fetchrow(
+                    """
+                    INSERT INTO comanda_items (
+                        comanda_id, order_item_id, kitchen_name,
+                        quantity, modifiers_snapshot, notes
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    RETURNING id, order_item_id, kitchen_name, quantity,
+                              notes, modifiers_snapshot, status, ready_at, created_at
+                    """,
+                    comanda_id,
+                    order_item_id,
+                    item['kitchen_name'],
+                    kitchen_line['quantity'],
+                    modifiers_json,
+                    kitchen_line['notes'],
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
-                RETURNING id, order_item_id, kitchen_name, quantity,
-                          notes, modifiers_snapshot, status, ready_at, created_at
-                """,
-                comanda_id,
-                order_item_id,
-                item['kitchen_name'],
-                item['quantity'],
-                json.dumps(modifiers_snapshot) if modifiers_snapshot else None,
-                item_notes,
-            )
-            inserted_items.append(_parse_item_row(ci_row))
+                inserted_items.append(
+                    _parse_item_row(ci_row, is_promo_free=kitchen_line['is_promo_free'])
+                )
 
         # 3d. Mark fired items as 'sent'
         await conn.execute(
