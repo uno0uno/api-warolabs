@@ -1,0 +1,25 @@
+issue: 1021
+title: "feat(api): align comanda firing with BOGO bundle quantities"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-1021-comanda-bogo-bundles
+
+paths:
+  - app/services/comandas_service.py
+  - app/models/comanda.py
+  - tests/test_comanda_bogo_fire.py
+
+ac:
+  - Fire qty=3 under 3×1 (buy 2 get 1) → comanda payload exposes 3 kitchen units with correct product + modifiers
+  - Free bundle units identifiable on ticket (notes annotation or response flag) without breaking KDS flow
+  - Partial bundles (qty below buy_qty+get_qty) fire full kitchen qty with no promo/free labeling
+  - Test covers tab-line promo persist (#1020) → fire_comandas → comanda items match bundle qty
+
+hints:
+  entry: "_fire_with_conn — comandas_service.py"
+  tests: "pytest tests/test_comanda_bogo_fire.py tests/test_comanda_item_notes.py -v"
+
+skip:
+  audits: [ux, color, typography]
