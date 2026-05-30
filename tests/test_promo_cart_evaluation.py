@@ -254,3 +254,21 @@ def test_product_scope_beats_category_at_equal_priority():
     result = evaluate_cart_promotions(lines, [category_promo, product_promo])
     assert result["lines"][0]["promotion_name"] == "Product specific"
     assert result["promo_savings"] == 1000
+
+
+def test_bogo_cross_line_cheapest_first():
+    """Sibling qty=1 lines same product — free units hit cheapest line (warocol.com#1023)."""
+    product_id = uuid4()
+    promos = [_promo(promo_type="bogo", value_json={"buy_qty": 2, "get_qty": 1}, name="3x1")]
+    lines = [
+        _line(subtotal=15000, quantity=1, product_id=product_id),
+        _line(subtotal=12000, quantity=1, product_id=product_id),
+        _line(subtotal=10000, quantity=1, product_id=product_id),
+    ]
+    result = evaluate_cart_promotions(lines, promos)
+    assert result["promo_savings"] == 10000
+    assert result["subtotal_after_promos"] == 27000
+    by_subtotal = {line["subtotal"]: line["promo_savings"] for line in result["lines"]}
+    assert by_subtotal[10000] == 10000
+    assert by_subtotal[12000] == 0
+    assert by_subtotal[15000] == 0
