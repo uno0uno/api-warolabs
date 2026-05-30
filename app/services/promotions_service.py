@@ -1238,6 +1238,55 @@ def _compute_line_promo_savings(line: Dict[str, Any], promo: Dict[str, Any]) -> 
     return 0
 
 
+def _line_unit_price(line: Dict[str, Any]) -> float:
+    quantity = int(line.get("quantity") or 1)
+    subtotal = float(line["subtotal"])
+    if quantity <= 0 or subtotal <= 0:
+        return 0.0
+    return subtotal / quantity
+
+
+def _allocate_bogo_savings_cheapest_first(
+    entries: Sequence[Dict[str, Any]],
+    promo: Dict[str, Any],
+) -> Dict[str, int]:
+    """
+    Cross-line BOGO (warocol.com#1023): expand sibling lines to units, form
+    buy_qty+get_qty bundles, mark free units cheapest-first across lines.
+    """
+    value_json = promo.get("value_json") or {}
+    buy_qty = int(value_json.get("buy_qty") or 0)
+    get_qty = int(value_json.get("get_qty") or 0)
+    if buy_qty < 1 or get_qty < 1:
+        return {str(entry["line_id"]): 0 for entry in entries}
+
+    bundle = buy_qty + get_qty
+    units: List[tuple[str, float]] = []
+    subtotal_by_line: Dict[str, float] = {}
+    for entry in entries:
+        line_id = str(entry["line_id"])
+        qty = max(0, int(entry.get("quantity") or 1))
+        unit_price = float(entry["unit_price"])
+        subtotal_by_line[line_id] = float(entry.get("subtotal") or (unit_price * qty))
+        for _ in range(qty):
+            units.append((line_id, unit_price))
+
+    sets = len(units) // bundle
+    free_count = sets * get_qty
+    savings_by_line: Dict[str, float] = {lid: 0.0 for lid in subtotal_by_line}
+    if free_count <= 0:
+        return {lid: 0 for lid in subtotal_by_line}
+
+    units.sort(key=lambda item: item[1])
+    for line_id, unit_price in units[:free_count]:
+        savings_by_line[line_id] += unit_price
+
+    return {
+        line_id: min(round(savings), round(subtotal_by_line[line_id]))
+        for line_id, savings in savings_by_line.items()
+    }
+
+
 def evaluate_cart_promotions(
     lines: Sequence[Dict[str, Any]],
     promotions: Sequence[Dict[str, Any]],
@@ -1254,6 +1303,9 @@ def evaluate_cart_promotions(
     breakdown_by_id: Dict[str, Dict[str, Any]] = {}
     total_promo_savings = 0
     original_subtotal = 0
+
+    pending: List[Dict[str, Any]] = []
+    bogo_group_indices: Dict[tuple[str, str], List[int]] = {}
 
     for line in lines:
         line_id = str(line["id"])
@@ -1274,33 +1326,78 @@ def evaluate_cart_promotions(
                 category_id=category_id,
                 promo_type_block_map=promo_type_block_map,
             )
-        promo_savings = 0
+
+        idx = len(pending)
+        pending.append({
+            "line": line,
+            "line_id": line_id,
+            "product_id": product_id,
+            "category_id": category_id,
+            "subtotal": subtotal,
+            "promo": promo,
+        })
+
+        if promo is not None and promo["promo_type"] == "bogo":
+            group_key = (str(product_id), str(promo["id"]))
+            bogo_group_indices.setdefault(group_key, []).append(idx)
+
+    savings_by_line_id: Dict[str, int] = {}
+
+    for indices in bogo_group_indices.values():
+        group_states = [pending[i] for i in indices]
+        promo = group_states[0]["promo"]
+        entries = [
+            {
+                "line_id": state["line_id"],
+                "quantity": int(state["line"].get("quantity") or 1),
+                "unit_price": _line_unit_price(state["line"]),
+                "subtotal": state["subtotal"],
+            }
+            for state in group_states
+        ]
+        allocated = _allocate_bogo_savings_cheapest_first(entries, promo)
+        savings_by_line_id.update(allocated)
+
+    for state in pending:
+        line_id = state["line_id"]
+        promo = state["promo"]
+        if promo is None:
+            savings_by_line_id.setdefault(line_id, 0)
+            continue
+        if promo["promo_type"] == "bogo":
+            savings_by_line_id.setdefault(line_id, 0)
+            continue
+        savings_by_line_id[line_id] = _compute_line_promo_savings(state["line"], promo)
+
+    for state in pending:
+        line_id = state["line_id"]
+        subtotal = state["subtotal"]
+        promo = state["promo"]
+        promo_savings = savings_by_line_id.get(line_id, 0)
         promo_meta: Dict[str, Any] = {}
-        if promo is not None:
-            promo_savings = _compute_line_promo_savings(line, promo)
-            if promo_savings > 0:
-                promo_meta = {
-                    "promotion_id": str(promo["id"]),
+        if promo is not None and promo_savings > 0:
+            promo_meta = {
+                "promotion_id": str(promo["id"]),
+                "promotion_name": promo["name"],
+                "promo_type": promo["promo_type"],
+            }
+            pid = promo_meta["promotion_id"]
+            if pid not in breakdown_by_id:
+                breakdown_by_id[pid] = {
+                    "promotion_id": pid,
                     "promotion_name": promo["name"],
                     "promo_type": promo["promo_type"],
+                    "savings": 0,
                 }
-                pid = promo_meta["promotion_id"]
-                if pid not in breakdown_by_id:
-                    breakdown_by_id[pid] = {
-                        "promotion_id": pid,
-                        "promotion_name": promo["name"],
-                        "promo_type": promo["promo_type"],
-                        "savings": 0,
-                    }
-                breakdown_by_id[pid]["savings"] += promo_savings
+            breakdown_by_id[pid]["savings"] += promo_savings
 
         total_promo_savings += promo_savings
         subtotal_after_promo = max(0.0, subtotal - promo_savings)
         evaluated_lines.append({
             "id": line_id,
-            "product_id": str(product_id),
-            "category_id": str(category_id) if category_id else None,
-            "quantity": int(line.get("quantity") or 1),
+            "product_id": str(state["product_id"]),
+            "category_id": str(state["category_id"]) if state["category_id"] else None,
+            "quantity": int(state["line"].get("quantity") or 1),
             "subtotal": subtotal,
             "promo_savings": promo_savings,
             "subtotal_after_promo": subtotal_after_promo,
