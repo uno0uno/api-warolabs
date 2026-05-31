@@ -16,7 +16,22 @@ from uuid import UUID
 
 from fastapi import HTTPException
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
+
+
+def _billing_exempt_tenant_ids() -> set[UUID]:
+    """Tenant UUIDs that skip grace-period downgrades (internal/dogfood)."""
+    raw = settings.billing_exempt_tenant_ids.strip()
+    if not raw:
+        return set()
+    result: set[UUID] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if part:
+            result.add(UUID(part))
+    return result
 
 
 async def check_scan_quota(tenant_id: UUID, conn) -> None:
@@ -612,6 +627,15 @@ async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
 
     Uses timezone.utc (Python 3.9 safe — NOT datetime.UTC which requires 3.11+).
     """
+    if tenant_id in _billing_exempt_tenant_ids():
+        return SubscriptionAccess(
+            level="full",
+            grace_days_remaining=0,
+            subscription_status="active",
+            next_payment_date=None,
+            message="Acceso completo.",
+        )
+
     sub = await conn.fetchrow("""
         SELECT status, current_period_end, plan_id
         FROM tenant_subscriptions
