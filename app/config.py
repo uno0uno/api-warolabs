@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     # Cron secret — grace period reminders (issue #62)
     cron_secret: Optional[str] = Field(default=None, alias='CRON_SECRET')
 
+    # Comma-separated tenant UUIDs that bypass grace-period downgrades (issue #1057).
+    # Internal/dogfood tenants keep full IA scanner access even when past_due.
+    billing_exempt_tenant_ids: str = Field(default="", alias='BILLING_EXEMPT_TENANT_IDS')
+
     # Outgoing webhook fired on subscription payment approval (issue #156).
     # Empty / None → no-op. Set to any URL (Discord, n8n, Slack, custom) to
     # receive a JSON payload describing each successful renewal.
