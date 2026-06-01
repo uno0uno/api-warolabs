@@ -282,16 +282,14 @@ async def update_direct_purchase_endpoint(
     purchase_id: UUID,
     purchase_data: DirectPurchaseUpdate,
     request: Request,
-    response: Response
+    response: Response,
+    background_tasks: BackgroundTasks,
 ):
     """
     Update a direct purchase (Compra Directa) - JSON payload
     Updates purchase items and metadata. Use separate endpoints for file uploads.
     """
-    # Import locally to avoid circular imports if any, keeping with existing pattern
-    
-    # Map Pydantic model to function arguments
-    return await update_direct_purchase(
+    result = await update_direct_purchase(
         request=request,
         response=response,
         purchase_id=purchase_id,
@@ -304,6 +302,18 @@ async def update_direct_purchase_endpoint(
         payment_amount=purchase_data.payment_amount,
         payment_date=purchase_data.payment_date
     )
+
+    try:
+        if result.get("success"):
+            session_context = require_valid_session(request)
+            tenant_id = session_context.tenant_id
+            background_tasks.add_task(
+                run_anomaly_checks_for_purchase, purchase_id, tenant_id
+            )
+    except Exception:
+        pass
+
+    return result
 
 
 @router.post("/direct/{purchase_id}/attachments", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])

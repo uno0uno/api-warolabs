@@ -871,8 +871,47 @@ def _check_unit_mismatch(
     }
 
 
+async def backfill_anomaly_checks_for_tenant(
+    tenant_id: str,
+    days: int = 30,
+) -> None:
+    """
+    Scan purchase items in the last `days` and upsert alerts (issue #46 GET contract).
+
+    Reuses run_anomaly_checks_for_purchase per purchase — idempotent via ON CONFLICT.
+    """
+    try:
+        async with get_db_connection(use_transaction=False) as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT tp.id AS purchase_id
+                FROM tenant_purchases tp
+                JOIN tenant_purchase_items tpi ON tpi.purchase_id = tp.id
+                WHERE tp.tenant_id = $1
+                  AND tp.purchase_date >= (CURRENT_DATE - $2::int)
+                  AND tpi.unit_cost IS NOT NULL
+                ORDER BY tp.purchase_date DESC
+                """,
+                tenant_id,
+                days,
+            )
+
+        tenant_uuid = UUID(str(tenant_id))
+        for row in rows:
+            await run_anomaly_checks_for_purchase(
+                UUID(str(row["purchase_id"])),
+                tenant_uuid,
+            )
+    except Exception as e:
+        logger.error(
+            f"backfill_anomaly_checks_for_tenant failed (tenant={tenant_id}): {e}"
+        )
+
+
 async def _get_data_quality_for_tenant(tenant_id: str) -> dict:
     """Auth-agnostic core for data quality. Called by session wrapper and public API."""
+    await backfill_anomaly_checks_for_tenant(tenant_id, days=30)
+
     async with get_db_connection(use_transaction=False) as conn:
         alerts_query = """
             SELECT
@@ -945,10 +984,10 @@ async def _get_data_quality_for_tenant(tenant_id: str) -> dict:
 
 async def get_data_quality(request: Request) -> dict:
     """
-    Returns existing alerts from data_quality_alerts plus a summary score.
+    Scans 30-day purchase history for anomalies, upserts alerts, returns score.
 
-    Read-only endpoint — anomaly detection and upserts happen in the background
-    task run_anomaly_checks_for_purchase(), triggered after each purchase save.
+    Also triggered incrementally via run_anomaly_checks_for_purchase() after each
+    direct purchase save (POST/PUT /suppliers/purchases/direct).
 
     Score: max(0, 100 - critical*10 - warning*2)
     """
