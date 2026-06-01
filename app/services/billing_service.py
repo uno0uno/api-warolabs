@@ -392,6 +392,46 @@ async def subscribe_tenant(
     }
 
 
+_ACTIVATABLE_STATUSES = frozenset({"pending", "past_due"})
+
+
+def _billing_period_interval(billing_cycle: str) -> str:
+    return "1 month" if billing_cycle == "monthly" else "1 year"
+
+
+async def _activate_subscription_with_period(
+    conn,
+    *,
+    subscription_id: UUID,
+    tenant_id: UUID,
+    billing_cycle: str,
+    amount: float,
+    currency: str,
+    metadata: Dict[str, Any],
+) -> Optional[datetime]:
+    """Set subscription active, extend billing period, record payment_approved."""
+    interval = _billing_period_interval(billing_cycle)
+    updated = await conn.fetchrow("""
+        UPDATE tenant_subscriptions
+        SET status               = 'active',
+            current_period_start = now(),
+            current_period_end   = now() + $2::interval,
+            updated_at           = now()
+        WHERE id = $1
+        RETURNING current_period_end
+    """, subscription_id, interval)
+
+    await conn.execute("""
+        INSERT INTO billing_events
+            (tenant_id, subscription_id, event_type, amount, currency, metadata)
+        VALUES ($1, $2, 'payment_approved', $3, $4, $5)
+    """, tenant_id, subscription_id, amount, currency, json.dumps(metadata))
+
+    if updated is None:
+        return None
+    return updated["current_period_end"]
+
+
 async def activate_subscription_by_gateway_ref(
     conn,
     tenant_id: UUID,
@@ -400,11 +440,13 @@ async def activate_subscription_by_gateway_ref(
     amount: float,
 ) -> None:
     """
-    Activa la suscripción del tenant cuando Wompi confirma el pago.
-    Solo activa si el gateway_reference coincide con la suscripción pendiente.
+    Activa la suscripción del tenant cuando Wompi confirma el pago (verify-payment).
+    Extiende el período según billing_cycle para filas pending o past_due.
     """
     row = await conn.fetchrow(
-        "SELECT id, status FROM tenant_subscriptions WHERE tenant_id = $1 AND gateway_reference = $2",
+        """SELECT id, status, billing_cycle
+           FROM tenant_subscriptions
+           WHERE tenant_id = $1 AND gateway_reference = $2""",
         tenant_id, gateway_reference,
     )
     if not row:
@@ -418,23 +460,29 @@ async def activate_subscription_by_gateway_ref(
         logger.info("activate_subscription: already active tenant=%s", tenant_id)
         return
 
-    await conn.execute("""
-        UPDATE tenant_subscriptions
-        SET status = 'active', updated_at = now()
-        WHERE id = $1
-    """, row["id"])
+    if row["status"] not in _ACTIVATABLE_STATUSES:
+        logger.warning(
+            "activate_subscription: status=%s not activatable tenant=%s gateway_ref=%s",
+            row["status"], tenant_id, gateway_reference,
+        )
+        return
 
-    await conn.execute("""
-        INSERT INTO billing_events (tenant_id, subscription_id, event_type, amount, currency, metadata)
-        VALUES ($1, $2, 'payment_approved', $3, 'COP', $4)
-    """, tenant_id, row["id"], amount, json.dumps({
-        "wompi_transaction_id": wompi_transaction_id,
-        "gateway_reference": gateway_reference,
-    }))
+    period_end = await _activate_subscription_with_period(
+        conn,
+        subscription_id=row["id"],
+        tenant_id=tenant_id,
+        billing_cycle=row["billing_cycle"],
+        amount=amount,
+        currency="COP",
+        metadata={
+            "wompi_transaction_id": wompi_transaction_id,
+            "gateway_reference": gateway_reference,
+        },
+    )
 
     logger.info(
-        "Subscription activated: tenant=%s transaction=%s amount=%s",
-        tenant_id, wompi_transaction_id, amount,
+        "Subscription activated: tenant=%s transaction=%s amount=%s period_end=%s",
+        tenant_id, wompi_transaction_id, amount, period_end,
     )
 
 
@@ -538,7 +586,7 @@ async def activate_tenant_subscription(
     """
     Llamado desde el webhook de Wompi cuando la transacción es APPROVED.
     Activa la suscripción y extiende el período según billing_cycle.
-    Retorna tenant_info dict o None si no hay fila pendiente.
+    Retorna tenant_info dict o None si no hay fila pending/past_due.
     """
     row = await conn.fetchrow("""
         SELECT ts.id, ts.tenant_id, ts.billing_cycle,
@@ -548,37 +596,31 @@ async def activate_tenant_subscription(
         JOIN tenants t ON t.id = ts.tenant_id
         JOIN subscription_plans sp ON sp.id = ts.plan_id
         WHERE ts.gateway_reference = $1
-          AND ts.status = 'pending'
+          AND ts.status IN ('pending', 'past_due')
     """, gateway_reference)
 
     if row is None:
         logger.warning(
-            "activate_tenant_subscription: no pending row for gateway_reference=%s",
+            "activate_tenant_subscription: no pending/past_due row for gateway_reference=%s",
             gateway_reference,
         )
         return None
 
     billing_cycle = row["billing_cycle"]
-    interval = "1 month" if billing_cycle == "monthly" else "1 year"
+    metadata: Dict[str, Any] = {"gateway_reference": gateway_reference}
+    if payment_id:
+        metadata["wompi_transaction_id"] = payment_id
 
-    updated = await conn.fetchrow("""
-        UPDATE tenant_subscriptions
-        SET status               = 'active',
-            current_period_start = now(),
-            current_period_end   = now() + $2::interval,
-            updated_at           = now()
-        WHERE id = $1
-        RETURNING current_period_end
-    """, row["id"], interval)
-
-    next_period_end = updated["current_period_end"].isoformat() if updated else None
-
-    await conn.execute("""
-        INSERT INTO billing_events
-            (tenant_id, subscription_id, event_type, amount, currency, metadata)
-        VALUES ($1, $2, 'payment_approved', $3, $4, $5)
-    """, row["tenant_id"], row["id"], amount, currency,
-        json.dumps({"gateway_reference": gateway_reference}))
+    period_end = await _activate_subscription_with_period(
+        conn,
+        subscription_id=row["id"],
+        tenant_id=row["tenant_id"],
+        billing_cycle=billing_cycle,
+        amount=amount,
+        currency=currency,
+        metadata=metadata,
+    )
+    next_period_end = period_end.isoformat() if period_end else None
 
     logger.info(
         "subscription_activated: tenant=%s gateway_reference=%s cycle=%s",
