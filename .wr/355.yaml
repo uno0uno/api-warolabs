@@ -1,0 +1,24 @@
+issue: 355
+title: "test(payments): Router dispatches WT-* vs billing payment_link_id correctly"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-355-wompi-router-dispatch-tests
+epic: 351
+
+paths:
+  - tests/test_wompi_webhook_router.py
+
+ac:
+  - WT reference → forward_to_tickets; Colombia not called
+  - payment_link_id + gateway_reference → Colombia handler
+  - redirect_url warocol.com/billing → Colombia handler
+  - unknown → no downstream; classification unknown in response
+  - invalid signature → 401
+
+hints:
+  tests: pytest tests/test_wompi_webhook_router.py -v
+
+skip:
+  audits: [ux, color, typography]
