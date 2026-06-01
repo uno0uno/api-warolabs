@@ -31,6 +31,7 @@ _SLUG_DEBIT_CODE: Dict[str, str] = {
     "digital": "1110",   # Bancos (Nequi, Daviplata)
     "card":    "1110",   # Bancos
     "credit":  "1305",   # Clientes (fiado — accounts receivable)
+    "customer_wallet": "2810",  # Anticipos clientes (api#369; tenant override in _post_order_gl_entry)
 }
 
 INGRESOS_CODE   = "4175"   # Servicios de restaurante y similares
@@ -337,6 +338,17 @@ async def _post_order_gl_entry(
             debit_code = pm_row["code"]
     if not debit_code:
         debit_code = _SLUG_DEBIT_CODE.get(payment_method or "", "1105")
+    if payment_method == "customer_wallet":
+        liability_row = await conn.fetchrow(
+            """
+            SELECT customer_wallet_liability_gl_code
+            FROM tenant_public_profiles
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+        if liability_row and liability_row["customer_wallet_liability_gl_code"]:
+            debit_code = str(liability_row["customer_wallet_liability_gl_code"])
 
     debit_acct = await conn.fetchrow(
         "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
@@ -976,12 +988,12 @@ def _requires_open_shift(
     period_start_time: Optional[datetime],
     period_end_time: Optional[datetime],
 ) -> bool:
-    """All arqueo windows (template, custom, day-complete) require fondo de caja."""
+    """Template and custom timestamp windows require a declared fondo de caja."""
     if shift_template_id:
         return True
     if period_start_time and period_end_time:
         return True
-    return True
+    return False
 
 
 _PERIOD_WINDOW_OVERLAP_SQL = """
@@ -1291,6 +1303,19 @@ async def _compute_preview(
         m = row["method"]
         if m:
             method_totals[m] = method_totals.get(m, 0.0) + float(row["total"])
+
+    from app.services.customer_wallet_service import fetch_wallet_recharge_totals_for_cierre
+
+    recharge_totals = await fetch_wallet_recharge_totals_for_cierre(
+        conn,
+        tenant_id,
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+    )
+    for method, total in recharge_totals.items():
+        method_totals[method] = method_totals.get(method, 0.0) + total
 
     gastos_row = await conn.fetchrow(
         f"""

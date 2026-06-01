@@ -906,17 +906,22 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
 
                 # Mark pending orders as completed if payment_method provided
                 if payment_method:
-                    # Backend guard: credit requires an identified (non-anonymous) customer
-                    if payment_method == 'credit' and customer_id:
+                    # Backend guard: credit / wallet require an identified (non-anonymous) customer
+                    if payment_method in ('credit', 'customer_wallet') and customer_id:
                         cust_row = await conn.fetchrow(
                             "SELECT phone_number FROM profile WHERE id = $1::uuid",
                             customer_id
                         )
                         if cust_row and cust_row['phone_number'] == '0000000000':
                             raise APIError(
-                                "El pago a crédito requiere un cliente identificado (no anónimo)",
+                                "El pago a crédito o billetera requiere un cliente identificado (no anónimo)",
                                 status_code=400
                             )
+                    if payment_method == 'customer_wallet' and not customer_id:
+                        raise APIError(
+                            "La billetera requiere un cliente en la mesa",
+                            status_code=400,
+                        )
 
                     payment_status = 'credit' if payment_method == 'credit' else ('partial' if split_mode else 'paid')
 
@@ -1106,6 +1111,35 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             session_row["id"],
                             _mesa_tip_taxable,
                             float(_mesa_tip_tax_amount),
+                        )
+
+                    if payment_method == 'customer_wallet' and customer_id:
+                        from app.services.customer_wallet_service import (
+                            apply_wallet_for_session_orders,
+                        )
+                        from decimal import Decimal as _Dec
+
+                        _mesa_orders = await conn.fetch(
+                            """
+                            SELECT id, total_amount
+                            FROM orders
+                            WHERE table_session_id = $1 AND status = 'completed'
+                            ORDER BY created_at
+                            """,
+                            session_row["id"],
+                        )
+                        _tip_settlement = _Dec("0")
+                        if not split_mode and float(tip_amount or 0) > 0:
+                            _tip_settlement = _Dec(str(tip_settlement_total(
+                                float(tip_amount), float(_mesa_tip_tax_amount),
+                            )))
+                        await apply_wallet_for_session_orders(
+                            conn,
+                            UUID(str(customer_id)),
+                            UUID(str(tenant_id)),
+                            _mesa_orders,
+                            _tip_settlement,
+                            UUID(str(session_context.user_id)) if session_context.user_id else None,
                         )
 
                     # GL journal entries — one per order, atomic with session close

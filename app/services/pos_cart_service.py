@@ -31,6 +31,12 @@ from app.services.accounting_service import void_order_journal_entry_in_txn
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas, finalize_open_comandas
 from app.services.operation_events_service import DOMAIN_POS, record_operation_event
+from app.services.customer_wallet_service import (
+    WALLET_PAYMENT_SLUG,
+    apply_wallet_for_order,
+    assert_wallet_customer_identified,
+    validate_wallet_payment_tender,
+)
 from app.services.open_priced_service import (
     fetch_product_pricing_map,
     resolve_line_unit_price,
@@ -1090,6 +1096,7 @@ async def add_order_payment(
                 f"Efectivo recibido ({cash_received}) debe ser mayor o igual al monto a cobrar ({amount})",
                 status_code=400,
             )
+    validate_wallet_payment_tender(payment_method, cash_received)
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
@@ -1199,8 +1206,27 @@ async def add_order_payment(
                     resolved_tip_tax_amount,
                 )
 
-                # 3. Insert payment record
                 user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+                if payment_method == WALLET_PAYMENT_SLUG:
+                    customer_uuid = await conn.fetchval(
+                        "SELECT customer_id FROM orders WHERE id = $1",
+                        order_id,
+                    )
+                    if not customer_uuid:
+                        raise APIError(
+                            "La billetera requiere un cliente en la orden",
+                            status_code=400,
+                        )
+                    await apply_wallet_for_order(
+                        conn,
+                        customer_uuid,
+                        UUID(str(tenant_id)),
+                        Decimal(str(amount)),
+                        order_id,
+                        UUID(str(user_id)) if user_id else None,
+                    )
+
+                # 3. Insert payment record
                 payment_row = await conn.fetchrow(
                     """
                     INSERT INTO order_payments
@@ -1562,17 +1588,18 @@ async def complete_pos_order(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
-                # 0. Backend guard: credit requires an identified (non-anonymous) customer
-                if payment_method == 'credit':
+                # 0. Backend guard: credit / wallet require an identified (non-anonymous) customer
+                if payment_method in ('credit', WALLET_PAYMENT_SLUG):
                     customer_check = await conn.fetchrow(
                         "SELECT phone_number FROM profile WHERE id = $1",
                         customer_id
                     )
                     if customer_check and customer_check['phone_number'] == '0000000000':
                         raise APIError(
-                            "El pago a crédito requiere un cliente identificado (no anónimo)",
+                            "El pago a crédito o billetera requiere un cliente identificado (no anónimo)",
                             status_code=400
                         )
+                validate_wallet_payment_tender(payment_method, cash_received)
 
                 # 0b. Delivery validation: address ownership + soft-delete + non-anonymous customer
                 if delivery_address_id is not None:
@@ -1724,6 +1751,21 @@ async def complete_pos_order(
                 order_number = order_row['order_number']
 
                 logger.info(f"Created order #{order_number} from cart {cart_id}")
+
+                if not split_mode and payment_method == WALLET_PAYMENT_SLUG:
+                    wallet_due = Decimal(str(split_settlement_amount_due(
+                        float(_discounted_total),
+                        float(tip_amount),
+                        float(_tip_tax_amount),
+                    )))
+                    await apply_wallet_for_order(
+                        conn,
+                        customer_id,
+                        UUID(str(tenant_id)),
+                        wallet_due,
+                        order_id,
+                        UUID(str(user_id)) if user_id else None,
+                    )
 
                 # 3b. Bar session rotation: when this POS sale was attached to a bar
                 # table session, close it and open a new one so the next entry shows a
@@ -2003,6 +2045,15 @@ async def complete_pos_order(
                             )
                     # Issue warocol.com#649 — RETURNING id so the frontend has a
                     # real UUID for void operations (was: None → placeholder → 422).
+                    if payment_method == WALLET_PAYMENT_SLUG:
+                        await apply_wallet_for_order(
+                            conn,
+                            customer_id,
+                            UUID(str(tenant_id)),
+                            Decimal(str(split_first_amount)),
+                            order_id,
+                            UUID(str(user_id)) if user_id else None,
+                        )
                     _split_first_payment_row = await conn.fetchrow(
                         """
                         INSERT INTO order_payments
