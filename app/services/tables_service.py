@@ -821,7 +821,7 @@ async def open_session(
         raise APIError(f"Error opening session: {e}", status_code=500)
 
 
-async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None, split_mode: bool = False, split_first_amount: float = 0.0, *, split_first_cash_received: Optional[float] = None, cash_received: Optional[float] = None, tip_amount: float = 0, tip_source: str = 'none', tip_taxable: bool = False, served_by_member_id: Optional[UUID] = None, reason: Optional[str] = None) -> dict:
+async def close_session(request: Request, table_id: UUID, payment_method: Optional[str] = None, customer_id: Optional[str] = None, credit_due_date: Optional[date] = None, payment_method_id: Optional[UUID] = None, discount_type: Optional[str] = None, discount_value: Optional[float] = None, split_mode: bool = False, split_first_amount: float = 0.0, *, split_first_cash_received: Optional[float] = None, cash_received: Optional[float] = None, tip_amount: float = 0, tip_source: str = 'none', tip_taxable: bool = False, served_by_member_id: Optional[UUID] = None, reason: Optional[str] = None, waros_to_redeem: Optional[int] = None, waro_reward_id: Optional[UUID] = None) -> dict:
     """
     Close the active session for a table.
     If payment_method is provided, marks all pending orders as completed with that payment method.
@@ -960,6 +960,33 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         discount_type=discount_type,
                         discount_value=discount_value,
                     )
+                    from app.services.waros_service import (
+                        apply_checkout_waro_redemption,
+                        settle_waro_redemption,
+                    )
+                    from fastapi import HTTPException as FastAPIHTTPException
+
+                    _mesa_customer_uuid: Optional[UUID] = None
+                    if customer_id:
+                        try:
+                            _mesa_customer_uuid = UUID(str(customer_id))
+                        except ValueError:
+                            raise APIError("customer_id no es un UUID válido", status_code=422)
+
+                    try:
+                        checkout_eval = await apply_checkout_waro_redemption(
+                            conn,
+                            tenant_id,
+                            _mesa_customer_uuid,
+                            checkout_eval,
+                            waros_to_redeem=waros_to_redeem,
+                            waro_reward_id=waro_reward_id,
+                        )
+                    except FastAPIHTTPException as waro_exc:
+                        raise APIError(waro_exc.detail, status_code=waro_exc.status_code)
+
+                    _waro_preview = checkout_eval.pop("_waro_redemption_preview", None)
+
                     _promo_savings = float(checkout_eval.get("promo_savings") or 0)
                     _promo_breakdown = checkout_eval.get("promo_breakdown") or []
                     _discount_amount = checkout_eval.get("manual_discount_amount") or None
@@ -970,6 +997,28 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
 
                     await apply_promo_eval_to_order_items(conn, item_rows, checkout_eval)
                     await recalc_pending_session_order_totals(conn, session_row["id"])
+
+                    if _waro_preview and _mesa_customer_uuid:
+                        _first_pending_order = await conn.fetchval(
+                            """
+                            SELECT id FROM orders
+                            WHERE table_session_id = $1 AND status = 'pending'
+                            ORDER BY created_at LIMIT 1
+                            """,
+                            session_row["id"],
+                        )
+                        if _first_pending_order:
+                            try:
+                                await settle_waro_redemption(
+                                    conn,
+                                    tenant_id,
+                                    _mesa_customer_uuid,
+                                    _first_pending_order,
+                                    _waro_preview,
+                                )
+                            except FastAPIHTTPException as waro_exc:
+                                raise APIError(waro_exc.detail, status_code=waro_exc.status_code)
+                            await recalc_pending_session_order_totals(conn, session_row["id"])
 
                     completed_count = await conn.fetchval(
                         "SELECT COUNT(*) FROM orders WHERE table_session_id = $1 AND status = 'pending'",

@@ -1452,6 +1452,45 @@ def apply_manual_discount_to_evaluated_lines(
     }
 
 
+def apply_waro_redemption_to_evaluated_lines(
+    evaluated: Dict[str, Any],
+    waro_discount_cop: float,
+) -> Dict[str, Any]:
+    """Apply WaRo COP discount on promo+manual-adjusted subtotals (checkout layer 4)."""
+    waro_discount = max(0.0, float(waro_discount_cop or 0))
+    lines = evaluated["lines"]
+    base_total = float(evaluated["total_amount"])
+    if waro_discount <= 0 or base_total <= 0:
+        for line in lines:
+            line["waro_discount_allocated"] = 0
+        return {
+            **evaluated,
+            "waro_redemption_amount_cop": 0,
+            "total_amount": round(base_total),
+        }
+
+    waro_discount = min(round(waro_discount), round(base_total))
+    dist_input = [
+        {"subtotal": float(line["net_total"]), "_idx": idx}
+        for idx, line in enumerate(lines)
+    ]
+    dist = _distribute_discount_from_promotions(dist_input, waro_discount)
+    for idx, line in enumerate(lines):
+        waro_alloc = dist[idx]["discount_allocated"]
+        line["waro_discount_allocated"] = waro_alloc
+        line["total_discount_allocated"] = (
+            float(line.get("total_discount_allocated") or line.get("promo_savings") or 0)
+            + waro_alloc
+        )
+        line["net_total"] = float(line["subtotal"]) - line["total_discount_allocated"]
+
+    return {
+        **evaluated,
+        "waro_redemption_amount_cop": waro_discount,
+        "total_amount": round(base_total - waro_discount),
+    }
+
+
 def _distribute_discount_from_promotions(items: List[dict], discount_amount: float) -> List[dict]:
     """Same proportional allocation as pos_cart_service._distribute_discount."""
     total_subtotal = sum(float(item["subtotal"]) for item in items)
