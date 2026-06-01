@@ -42,6 +42,7 @@ async def handle_transaction_updated(
         return
 
     if wompi_status == "APPROVED":
+        period_anchor = billing_service.parse_wompi_period_anchor(transaction)
         async with get_db_connection() as conn:
             tenant_info = await billing_service.activate_tenant_subscription(
                 conn,
@@ -49,6 +50,7 @@ async def handle_transaction_updated(
                 payment_id=transaction_id,
                 amount=amount_cents / 100,
                 currency="COP",
+                period_anchor=period_anchor,
             )
         if tenant_info:
             background_tasks.add_task(

@@ -146,6 +146,8 @@ async def verify_payment(request: Request, transaction_id: str = Query(...)):
     internal_status = wompi_service.map_status(wompi_status)
     payment_link_id = transaction.get("payment_link_id")
 
+    period_anchor = billing_service.parse_wompi_period_anchor(transaction)
+
     async with get_db_connection() as conn:
         if internal_status == "active" and payment_link_id:
             await billing_service.activate_subscription_by_gateway_ref(
@@ -154,6 +156,7 @@ async def verify_payment(request: Request, transaction_id: str = Query(...)):
                 gateway_reference=payment_link_id,
                 wompi_transaction_id=transaction_id,
                 amount=transaction.get("amount_in_cents", 0) / 100,
+                period_anchor=period_anchor,
             )
 
     return {

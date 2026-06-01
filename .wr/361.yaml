@@ -1,0 +1,32 @@
+# wr-fast contract — issue #361
+issue: 361
+title: "fix(billing): Idempotent Wompi activation, payment-date period anchor, customer-only history"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-361-billing-idempotency-history
+
+paths:
+  - app/services/billing_service.py
+  - app/services/wompi_colombia_webhook_service.py
+  - app/routers/billing.py
+  - tests/test_billing_activation.py
+
+ac:
+  - Idempotency by metadata wompi_transaction_id before payment_approved (webhook + verify-payment)
+  - Period anchor from transaction finalized_at (fallback created_at), not server now()
+  - GET /billing/events returns customer-visible event types only
+  - Tests for all three
+
+out_of_scope:
+  - Wompi dashboard URL cutover
+  - Front-end filtering (API allowlist is source of truth)
+
+hints:
+  entry: billing_service.activate_tenant_subscription / activate_subscription_by_gateway_ref
+  pattern: payment_approved_exists + parse_wompi_period_anchor
+  tests: pytest tests/test_billing_activation.py -v
+
+skip:
+  audits: [ux, color, typography]
