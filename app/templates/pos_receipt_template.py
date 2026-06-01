@@ -21,6 +21,20 @@ _PAYMENT_LABELS = {
     "credit": "Crédito",
 }
 
+_WARO_TYPE_LABELS = {
+    "points_cop": "Canje WaRo (puntos)",
+    "reward_fixed_cop": "Canje WaRo",
+    "reward_free_product": "Canje WaRo (producto gratis)",
+}
+
+
+def _waro_line_label(entry: Dict[str, Any]) -> str:
+    reward_name = entry.get("reward_name")
+    if reward_name:
+        return f"Canje WaRo ({reward_name})"
+    redemption_type = entry.get("redemption_type") or ""
+    return _WARO_TYPE_LABELS.get(redemption_type, "Canje WaRo")
+
 
 def _format_cop(amount: float) -> str:
     return f"${amount:,.0f}".replace(",", ".")
@@ -61,6 +75,7 @@ def get_pos_receipt_text(
     tip_label: str = "Propina",
     promo_savings: float = 0.0,
     promo_breakdown: Optional[List[Dict[str, Any]]] = None,
+    waro_redemption_summary: Optional[Dict[str, Any]] = None,
 ) -> str:
     date_str = _format_bogota_date(order_date)
     payment_label = _PAYMENT_LABELS.get(payment_method, payment_method)
@@ -95,20 +110,33 @@ def get_pos_receipt_text(
     # Build totals block
     totals_lines = []
     _promo_breakdown = promo_breakdown or []
+    _waro = waro_redemption_summary or {}
+    _waro_breakdown = _waro.get("waro_breakdown") or []
+    _waro_discount = float(_waro.get("waro_discount_cop") or 0)
     _has_promo = promo_savings > 0 or len(_promo_breakdown) > 0
-    _has_manual_discount = discount_amount > 0
-    if (_has_promo or _has_manual_discount) and subtotal > 0:
+    _has_waro = _waro_discount > 0 or len(_waro_breakdown) > 0
+    _show_subtotal = subtotal > 0 and (
+        discount_amount > 0 or _has_promo or _has_waro
+    )
+    if _show_subtotal:
         totals_lines.append(f"Subtotal: {_format_cop(subtotal)}")
     if _promo_breakdown:
         for promo in _promo_breakdown:
-            promo_name = promo.get("promotion_name") or promo.get("name") or "Promoción"
-            savings = float(promo.get("savings") or promo.get("amount") or 0)
+            label = promo.get("promotion_name") or "Promoción"
+            savings = float(promo.get("savings") or 0)
             if savings > 0:
-                totals_lines.append(f"{promo_name}: -{_format_cop(savings)}")
+                totals_lines.append(f"{label}: -{_format_cop(savings)}")
     elif promo_savings > 0:
         totals_lines.append(f"Promoción: -{_format_cop(promo_savings)}")
-    if _has_manual_discount:
+    if discount_amount > 0:
         totals_lines.append(f"Descuento: -{_format_cop(discount_amount)}")
+    if _waro_breakdown:
+        for entry in _waro_breakdown:
+            cop = float(entry.get("cop_discount") or 0)
+            if cop > 0:
+                totals_lines.append(f"{_waro_line_label(entry)}: -{_format_cop(cop)}")
+    elif _waro_discount > 0:
+        totals_lines.append(f"Canje WaRo: -{_format_cop(_waro_discount)}")
     if standard_tax > 0:
         totals_lines.append(f"{standard_tax_label}: {_format_cop(standard_tax)}")
     if liquor_tax > 0:
