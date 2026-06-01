@@ -40,6 +40,8 @@ async def test_get_order_waro_redemption_summary_aggregates_b2_row():
 async def test_get_order_waro_redemption_summary_empty_order():
     conn = AsyncMock()
     conn.fetch = AsyncMock(return_value=[])
+    conn.fetchrow = AsyncMock(return_value={"waro_discount_cop": 0})
+    conn.fetchval = AsyncMock(return_value=0)
 
     result = await _get_order_waro_redemption_summary(conn, uuid4())
 
@@ -48,3 +50,18 @@ async def test_get_order_waro_redemption_summary_empty_order():
         "waros_spent": 0,
         "waro_breakdown": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_get_order_waro_redemption_summary_infers_mesa_line_discount():
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+    conn.fetchrow = AsyncMock(return_value={"waro_discount_cop": 500.0})
+    conn.fetchval = AsyncMock(side_effect=[0.0, False])
+
+    result = await _get_order_waro_redemption_summary(conn, order_id)
+
+    assert result["waro_discount_cop"] == 500.0
+    assert result["waro_breakdown"][0]["cop_discount"] == 500.0
+    assert result["waro_breakdown"][0]["redemption_type"] == "inferred_line_discount"

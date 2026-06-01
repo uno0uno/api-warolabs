@@ -104,10 +104,63 @@ async def _get_order_waro_redemption_summary(conn, order_id: UUID) -> Dict[str, 
     ]
     waro_discount_cop = sum(item["cop_discount"] for item in breakdown)
     waros_spent = sum(item["waros_spent"] for item in breakdown)
+    if breakdown:
+        return {
+            "waro_discount_cop": waro_discount_cop,
+            "waros_spent": waros_spent,
+            "waro_breakdown": breakdown,
+        }
+
+    empty = {"waro_discount_cop": 0.0, "waros_spent": 0, "waro_breakdown": []}
+
+    # Mesa checkout sometimes applied WaRo to line net_total without persisting
+    # order_waro_redemptions (e.g. close before settle). Infer for display only.
+    inferred_row = await conn.fetchrow(
+        """
+        SELECT COALESCE(SUM(
+            GREATEST(0, oi.subtotal - COALESCE(oi.net_total, oi.subtotal))
+        ), 0) AS waro_discount_cop
+        FROM order_items oi
+        WHERE oi.order_id = $1
+          AND oi.applied_promotion_id IS NULL
+        """,
+        order_id,
+    )
+    inferred_cop = float(inferred_row["waro_discount_cop"] or 0) if inferred_row else 0.0
+    if inferred_cop <= 0:
+        return empty
+
+    order_discount = await conn.fetchval(
+        "SELECT COALESCE(discount_amount, 0) FROM orders WHERE id = $1",
+        order_id,
+    )
+    if float(order_discount or 0) > 0:
+        return empty
+
+    has_promo_lines = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM order_items
+            WHERE order_id = $1 AND applied_promotion_id IS NOT NULL
+        )
+        """,
+        order_id,
+    )
+    if has_promo_lines:
+        return empty
+
     return {
-        "waro_discount_cop": waro_discount_cop,
-        "waros_spent": waros_spent,
-        "waro_breakdown": breakdown,
+        "waro_discount_cop": inferred_cop,
+        "waros_spent": 0,
+        "waro_breakdown": [
+            {
+                "redemption_type": "inferred_line_discount",
+                "waros_spent": 0,
+                "cop_discount": inferred_cop,
+                "waro_reward_id": None,
+                "reward_name": None,
+            },
+        ],
     }
 
 
