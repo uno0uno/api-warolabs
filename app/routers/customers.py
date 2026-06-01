@@ -1,7 +1,11 @@
 """
 Customers Router - HTTP endpoints for customer management
 """
+from decimal import Decimal
+from typing import Optional
+
 from fastapi import APIRouter, Depends, Request, Query
+from pydantic import BaseModel, Field
 from uuid import UUID
 from app.core.permissions import Module, require_module
 from app.services.customers_service import (
@@ -11,6 +15,11 @@ from app.services.customers_service import (
     get_customer_insights,
     get_customer_by_id,
     update_customer,
+)
+from app.services.customer_wallet_service import (
+    get_customer_wallet,
+    recharge_customer_wallet,
+    refund_customer_wallet,
 )
 from app.models.customer import (
     CustomerSearchOrCreate,
@@ -23,6 +32,78 @@ from app.models.customer import (
 )
 
 router = APIRouter()
+
+
+class WalletRechargeRequest(BaseModel):
+    amount_cop: Decimal = Field(..., gt=0, description="Recarga en COP")
+    payment_method: str = Field(..., description="cash | card | digital")
+    payment_method_id: Optional[UUID] = None
+    notes: Optional[str] = None
+    idempotency_key: Optional[str] = Field(None, max_length=128)
+
+
+class WalletRefundRequest(BaseModel):
+    amount_cop: Decimal = Field(..., gt=0, description="Devolución en COP")
+    payment_method: str = Field(..., description="cash | card | digital")
+    payment_method_id: Optional[UUID] = None
+    notes: Optional[str] = None
+
+
+@router.get(
+    "/{customer_id}/wallet",
+    status_code=200,
+    dependencies=[Depends(require_module(Module.VENTAS))],
+)
+async def get_customer_wallet_endpoint(
+    request: Request,
+    customer_id: UUID,
+    limit: int = Query(20, ge=1, le=50),
+):
+    """Saldo COP y movimientos recientes de la billetera del cliente."""
+    return await get_customer_wallet(request, customer_id, limit=limit)
+
+
+@router.post(
+    "/{customer_id}/wallet/recharge",
+    status_code=200,
+    dependencies=[Depends(require_module(Module.VENTAS))],
+)
+async def recharge_customer_wallet_endpoint(
+    request: Request,
+    customer_id: UUID,
+    body: WalletRechargeRequest,
+):
+    """Recarga de anticipo (staff). Registra Dr caja/banco / Cr 2810."""
+    return await recharge_customer_wallet(
+        request,
+        customer_id,
+        body.amount_cop,
+        body.payment_method,
+        body.payment_method_id,
+        body.notes,
+        body.idempotency_key,
+    )
+
+
+@router.post(
+    "/{customer_id}/wallet/refund",
+    status_code=200,
+    dependencies=[Depends(require_module(Module.FINANZAS))],
+)
+async def refund_customer_wallet_endpoint(
+    request: Request,
+    customer_id: UUID,
+    body: WalletRefundRequest,
+):
+    """Devolución de saldo a favor (Finanzas)."""
+    return await refund_customer_wallet(
+        request,
+        customer_id,
+        body.amount_cop,
+        body.payment_method,
+        body.payment_method_id,
+        body.notes,
+    )
 
 
 @router.post("/search-or-create", response_model=CustomerResponse, status_code=200, dependencies=[Depends(require_module(Module.VENTAS))])
