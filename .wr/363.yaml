@@ -1,0 +1,33 @@
+# wr-fast contract — issue #363
+issue: 363
+title: "chore(billing): Remove BILLING_EXEMPT_TENANT_IDS grace bypass"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-363-remove-billing-exempt
+
+paths:
+  - app/services/billing_service.py
+  - app/config.py
+  - .env.example
+  - tests/test_billing_subscription_access.py
+
+ac:
+  - Remove _billing_exempt_tenant_ids and early return in get_subscription_access
+  - Remove config env BILLING_EXEMPT_TENANT_IDS
+  - Regression tests for past_due access levels
+  - pytest tests/test_billing_*.py passes
+
+out_of_scope:
+  - Front-end changes
+  - Grace day threshold changes
+
+hints:
+  entry: get_subscription_access — billing_service.py
+  tests: pytest tests/test_billing_*.py -v
+
+skip:
+  audits: [ux, color, typography]
+
+deploy_note: Unset BILLING_EXEMPT_TENANT_IDS in prod/staging after merge
