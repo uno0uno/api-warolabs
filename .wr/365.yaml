@@ -1,0 +1,28 @@
+# wr-fast contract — issue #365
+issue: 365
+title: "fix(billing): Do not apply grace period on failed Wompi payment attempts"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-365-grace-only-when-overdue
+
+paths:
+  - app/services/billing_service.py
+  - tests/test_billing_payment_failure.py
+
+ac:
+  - No past_due when current_period_end > now or status pending with valid period
+  - past_due when period expired or already past_due
+  - payment_rejected event always recorded
+
+out_of_scope:
+  - Grace day thresholds
+  - Front-end changes
+
+hints:
+  entry: mark_subscription_past_due — billing_service.py
+  tests: pytest tests/test_billing_payment_failure.py -v
+
+skip:
+  audits: [ux, color, typography]

@@ -887,20 +887,19 @@ async def mark_subscription_past_due(
     conn, gateway_reference: str, event_type: str
 ) -> Optional[Dict[str, Any]]:
     """
-    Set subscription status='past_due' for a given preapproval ID.
+    Record a failed payment and set past_due only when grace applies.
 
-    Called when MP sends:
-    - subscription_preapproval → paused  (event_type='subscription_paused')
-    - payment → rejected                 (event_type='payment_rejected')
+    Grace (past_due) is allowed when the billing period has ended or the row is
+    already past_due. Failed attempts while pending or while the period is still
+    valid only append a billing event — they do not start the grace window.
 
-    Does NOT filter by current status — allows active → past_due transition.
-    Returns tenant info dict for email trigger, or None if preapproval not found.
+    Returns tenant info dict for email trigger, or None if not found.
     """
     row = await conn.fetchrow("""
-        UPDATE tenant_subscriptions ts
-        SET status = 'past_due', updated_at = now()
+        SELECT ts.id AS subscription_id, ts.tenant_id, ts.status,
+               ts.current_period_end
+        FROM tenant_subscriptions ts
         WHERE ts.gateway_reference = $1
-        RETURNING ts.id AS subscription_id, ts.tenant_id
     """, gateway_reference)
 
     if row is None:
@@ -912,6 +911,27 @@ async def mark_subscription_past_due(
 
     sub_id = row["subscription_id"]
     tenant_id = row["tenant_id"]
+    status = row["status"]
+    period_end = row["current_period_end"]
+    if period_end is not None and period_end.tzinfo is None:
+        period_end = period_end.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    period_expired = period_end is not None and period_end < now
+    should_mark_past_due = status == "past_due" or period_expired
+
+    if should_mark_past_due:
+        await conn.execute("""
+            UPDATE tenant_subscriptions
+            SET status = 'past_due', updated_at = now()
+            WHERE id = $1
+        """, sub_id)
+    else:
+        logger.info(
+            "mark_subscription_past_due: skipped past_due status=%s period_end=%s ref=%s",
+            status,
+            period_end,
+            gateway_reference,
+        )
 
     # Fetch tenant info for email
     tenant = await conn.fetchrow(
