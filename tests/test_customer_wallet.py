@@ -7,6 +7,7 @@ from uuid import uuid4
 from app.core.exceptions import APIError
 from app.services.customer_wallet_service import (
     WALLET_PAYMENT_SLUG,
+    _assert_tenant_customer,
     apply_wallet_for_order,
     assert_wallet_customer_identified,
     validate_wallet_payment_tender,
@@ -33,6 +34,27 @@ class TestAnonymousGuard:
         with pytest.raises(APIError) as exc:
             await assert_wallet_customer_identified(conn, uuid4())
         assert "anónimo" in str(exc.value).lower() or "identificado" in str(exc.value)
+
+
+class TestTenantCustomerGuard:
+    @pytest.mark.asyncio
+    async def test_uses_user_id_column(self):
+        conn = AsyncMock()
+        conn.fetchval = AsyncMock(return_value=1)
+        profile_id = uuid4()
+        tenant_id = uuid4()
+        await _assert_tenant_customer(conn, profile_id, tenant_id)
+        query = conn.fetchval.await_args.args[0]
+        assert "user_id" in query
+        assert "profile_id" not in query
+
+    @pytest.mark.asyncio
+    async def test_missing_association_raises_404(self):
+        conn = AsyncMock()
+        conn.fetchval = AsyncMock(return_value=None)
+        with pytest.raises(APIError) as exc:
+            await _assert_tenant_customer(conn, uuid4(), uuid4())
+        assert exc.value.status_code == 404
 
 
 class TestApplyWalletInsufficientBalance:

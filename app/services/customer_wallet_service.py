@@ -90,7 +90,7 @@ async def _assert_tenant_customer(conn, profile_id: UUID, tenant_id: UUID) -> No
     ok = await conn.fetchval(
         """
         SELECT 1 FROM tenant_members
-        WHERE profile_id = $1 AND tenant_id = $2 AND role = 'customer'
+        WHERE user_id = $1 AND tenant_id = $2 AND role = 'customer'
         """,
         profile_id,
         tenant_id,
@@ -215,8 +215,8 @@ async def _post_two_line_gl(
         INSERT INTO tenant_journal_entries
             (tenant_id, entry_date, period_year, period_month,
              description, reference, source_module, source_id,
-             status, created_by, posted_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'posted', $9, now())
+             status, total_debit, total_credit, created_by, posted_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'posted', $9, $9, $10, now())
         RETURNING id
         """,
         tenant_id,
@@ -227,6 +227,7 @@ async def _post_two_line_gl(
         reference,
         source_module,
         source_id,
+        amt,
         created_by,
     )
     entry_id = entry_row["id"]
@@ -253,6 +254,35 @@ async def _post_two_line_gl(
         credit_desc,
     )
     return entry_id
+
+
+async def _try_post_wallet_gl(
+    conn,
+    post_fn,
+    *,
+    movement_id: UUID,
+) -> Optional[UUID]:
+    """
+    Post wallet GL inside a savepoint so a constraint/GL failure does not
+    abort the outer wallet movement transaction.
+    """
+    try:
+        async with conn.transaction():
+            journal_id = await post_fn()
+            if journal_id:
+                await conn.execute(
+                    """
+                    UPDATE customer_wallet_movements
+                    SET journal_entry_id = $1
+                    WHERE id = $2
+                    """,
+                    journal_id,
+                    movement_id,
+                )
+            return journal_id
+    except Exception as exc:
+        logger.error("Wallet GL failed: %s", exc)
+        return None
 
 
 async def _post_recharge_gl(
@@ -530,8 +560,9 @@ async def recharge_customer_wallet(
                 idempotency_key=idempotency_key,
             )
             await _upsert_balance(conn, customer_id, UUID(str(tenant_id)), new_balance)
-            try:
-                journal_id = await _post_recharge_gl(
+            await _try_post_wallet_gl(
+                conn,
+                lambda: _post_recharge_gl(
                     conn,
                     UUID(str(tenant_id)),
                     movement_id,
@@ -540,19 +571,9 @@ async def recharge_customer_wallet(
                     payment_method_id,
                     date.today(),
                     UUID(str(user_id)) if user_id else None,
-                )
-                if journal_id:
-                    await conn.execute(
-                        """
-                        UPDATE customer_wallet_movements
-                        SET journal_entry_id = $1
-                        WHERE id = $2
-                        """,
-                        journal_id,
-                        movement_id,
-                    )
-            except Exception as exc:
-                logger.error("Wallet recharge GL failed: %s", exc)
+                ),
+                movement_id=movement_id,
+            )
 
     return {
         "success": True,
@@ -605,8 +626,9 @@ async def refund_customer_wallet(
                 created_by_user_id=UUID(str(user_id)) if user_id else None,
             )
             await _upsert_balance(conn, customer_id, UUID(str(tenant_id)), new_balance)
-            try:
-                journal_id = await _post_refund_gl(
+            await _try_post_wallet_gl(
+                conn,
+                lambda: _post_refund_gl(
                     conn,
                     UUID(str(tenant_id)),
                     movement_id,
@@ -615,19 +637,9 @@ async def refund_customer_wallet(
                     payment_method_id,
                     date.today(),
                     UUID(str(user_id)) if user_id else None,
-                )
-                if journal_id:
-                    await conn.execute(
-                        """
-                        UPDATE customer_wallet_movements
-                        SET journal_entry_id = $1
-                        WHERE id = $2
-                        """,
-                        journal_id,
-                        movement_id,
-                    )
-            except Exception as exc:
-                logger.error("Wallet refund GL failed: %s", exc)
+                ),
+                movement_id=movement_id,
+            )
 
     return {
         "success": True,

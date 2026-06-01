@@ -1088,20 +1088,35 @@ async def _estimate_waros_for_tenant(
     tenant_id: str,
     total_amount: float,
     customer_id: Optional[UUID],
+    payment_method: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Auth-agnostic core for waros estimate. Called by session wrapper and public API."""
     async with get_db_connection(use_transaction=False) as conn:
         # 1. Check system enabled + daily cap config
         config_row = await conn.fetchrow(
             """
-            SELECT is_enabled, max_daily_waros
+            SELECT is_enabled, max_daily_waros, earn_on_wallet_payment
             FROM gamification_config
             WHERE tenant_id = $1
             """,
             tenant_id,
         )
         if not config_row or not config_row["is_enabled"]:
-            return {"estimated_waros": 0, "system_enabled": False, "breakdown": []}
+            return {
+                "estimated_waros": 0,
+                "system_enabled": False,
+                "breakdown": [],
+                "earn_eligible": False,
+            }
+
+        if payment_method == "customer_wallet" and not config_row["earn_on_wallet_payment"]:
+            return {
+                "estimated_waros": 0,
+                "system_enabled": True,
+                "breakdown": [],
+                "earn_eligible": False,
+                "earn_block_reason": "wallet_payment",
+            }
 
         max_daily = int(config_row["max_daily_waros"] or 0)
 
@@ -1115,7 +1130,12 @@ async def _estimate_waros_for_tenant(
             tenant_id,
         )
         if not rule_rows:
-            return {"estimated_waros": 0, "system_enabled": True, "breakdown": []}
+            return {
+                "estimated_waros": 0,
+                "system_enabled": True,
+                "breakdown": [],
+                "earn_eligible": True,
+            }
 
         active_types = {r["rule_type"] for r in rule_rows}
 
@@ -1205,6 +1225,7 @@ async def _estimate_waros_for_tenant(
         "estimated_waros": total_waros,
         "system_enabled": True,
         "breakdown": breakdown,
+        "earn_eligible": True,
     }
 
 
@@ -1213,6 +1234,7 @@ async def estimate_waros(
     request: Request,
     total_amount: float,
     customer_id: Optional[UUID],
+    payment_method: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     GET /admin/waros/estimate
@@ -1223,7 +1245,7 @@ async def estimate_waros(
     try:
         session = require_valid_session(request)
         tenant_id = session.tenant_id
-        return await _estimate_waros_for_tenant(tenant_id, total_amount, customer_id)
+        return await _estimate_waros_for_tenant(tenant_id, total_amount, customer_id, payment_method)
     except HTTPException:
         raise
     except Exception as e:

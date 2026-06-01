@@ -127,6 +127,10 @@ async def estimate_waros(
     request: Request,
     total_amount: float = Query(..., description="Cart total in COP", gt=0),
     customer_id: Optional[str] = Query(None, description="Customer profile UUID (optional)"),
+    payment_method: Optional[str] = Query(
+        None,
+        description="Payment method slug (e.g. customer_wallet). When wallet and earn_on_wallet_payment=false, returns 0.",
+    ),
 ):
     """
     Read-only estimate of Waros that would be earned for an order with the given total.
@@ -141,7 +145,7 @@ async def estimate_waros(
             parsed_customer_id = UUID(customer_id)
         except ValueError:
             raise HTTPException(status_code=422, detail="customer_id no es un UUID válido")
-    return await waros_service.estimate_waros(request, total_amount, parsed_customer_id)
+    return await waros_service.estimate_waros(request, total_amount, parsed_customer_id, payment_method)
 
 
 @router.get("/customers/balances", dependencies=[Depends(require_module(Module.POS))])
