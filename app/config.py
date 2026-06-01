@@ -82,6 +82,14 @@ class Settings(BaseSettings):
     wompi_integrity_secret: Optional[str] = Field(default=None, alias='WOMPI_INTEGRITY_SECRET')
     wompi_environment: str = Field(default='sandbox', alias='WOMPI_ENVIRONMENT')
 
+    # Central Wompi router → Tickets forward (#353 / api_warotickets#46)
+    warotickets_api_url: Optional[str] = Field(
+        default=None, alias='WAROTICKETS_API_URL'
+    )
+    wompi_webhook_forward_secret: Optional[str] = Field(
+        default=None, alias='WOMPI_WEBHOOK_FORWARD_SECRET'
+    )
+
     # Cron secret — grace period reminders (issue #62)
     cron_secret: Optional[str] = Field(default=None, alias='CRON_SECRET')
 

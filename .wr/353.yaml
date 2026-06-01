@@ -1,0 +1,31 @@
+issue: 353
+title: "feat(payments): Add Wompi ingress router at POST /payments/webhooks/wompi"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-353-wompi-ingress-router
+epic: 351
+
+paths:
+  - app/routers/payments_webhook.py
+  - app/services/wompi_webhook_router_service.py
+  - app/services/wompi_colombia_webhook_service.py
+  - app/routers/billing.py
+  - app/main.py
+  - app/core/middleware.py
+  - app/config.py
+
+ac:
+  - POST /payments/webhooks/wompi classifies and dispatches
+  - Legacy POST /billing/webhook unchanged behavior via shared Colombia handler
+  - Middleware skips for webhook paths
+  - Tickets forward via WAROTICKETS_API_URL + X-Wompi-Forward-Secret
+
+hints:
+  entry: payments_webhook.py — wompi_central_webhook
+  classify: wompi_webhook_router_service.classify_transaction_updated
+  tests: pytest tests/test_wompi_webhook_router.py -v
+
+skip:
+  audits: [ux, color, typography]

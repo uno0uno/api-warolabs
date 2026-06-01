@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, me, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, ingredient_purchase_units, customers, pos_cart, pos_context, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, public_table_qr, table_qr_requests, tenant_config, promotions, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, admin_ingredients, menu, tables, credit, cartera, cierre, payment_methods, accounting, stations, comandas, operaciones_context, operaciones_shifts, operaciones_operation_events, invoices as invoices_router, support_documents, documents as documents_router, facturacion as facturacion_router, webhooks as webhooks_router
+from app.routers import auth, me, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, categories, recipe_bases, modifiers, ingredient_purchase_units, customers, pos_cart, pos_context, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, public_table_qr, table_qr_requests, tenant_config, promotions, online_cart, online_verification, address_profile, analytics, online_orders, notifications, customer_portal, leads, waros, billing, payments_webhook, admin_ingredients, menu, tables, credit, cartera, cierre, payment_methods, accounting, stations, comandas, operaciones_context, operaciones_shifts, operaciones_operation_events, invoices as invoices_router, support_documents, documents as documents_router, facturacion as facturacion_router, webhooks as webhooks_router
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -184,6 +184,7 @@ app.include_router(inventory.router)
 app.include_router(analytics.router)
 app.include_router(waros.router)
 app.include_router(billing.tenant_router)
+app.include_router(payments_webhook.router)
 app.include_router(articles.router, prefix="/blog", tags=["blog"])
 app.include_router(invitations.router, prefix="/invitations", tags=["invitations"])
 app.include_router(api_tokens.router, prefix="/api-tokens", tags=["api-tokens"])
