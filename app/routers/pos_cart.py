@@ -299,6 +299,10 @@ class SendReceiptRequest(BaseModel):
         default_factory=list,
         description="Per-promotion savings breakdown for receipt display.",
     )
+    waro_redemption_summary: Optional[Dict[str, Any]] = Field(
+        None,
+        description="WaRo redemption summary from complete order / GET order (api-warolabs#375).",
+    )
 
 
 class AddPaymentRequest(BaseModel):
@@ -348,6 +352,7 @@ async def send_receipt_email(request: Request, receipt_data: SendReceiptRequest)
         tip_amount=receipt_data.tip_amount,
         promo_savings=receipt_data.promo_savings,
         promo_breakdown=receipt_data.promo_breakdown,
+        waro_redemption_summary=receipt_data.waro_redemption_summary,
     )
     return {"success": success}
 

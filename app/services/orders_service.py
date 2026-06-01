@@ -75,6 +75,42 @@ async def _get_order_promo_summary(conn, order_id: UUID) -> Dict[str, Any]:
     return {"promo_savings": promo_savings, "promo_breakdown": breakdown}
 
 
+async def _get_order_waro_redemption_summary(conn, order_id: UUID) -> Dict[str, Any]:
+    """Aggregate persisted WaRo redemptions for order detail / receipts (api-warolabs#375)."""
+    rows = await conn.fetch(
+        """
+        SELECT
+            owr.redemption_type,
+            owr.waros_spent,
+            owr.cop_discount,
+            owr.waro_reward_id,
+            wr.name AS reward_name
+        FROM order_waro_redemptions owr
+        LEFT JOIN waro_rewards wr ON wr.id = owr.waro_reward_id
+        WHERE owr.order_id = $1
+        ORDER BY owr.created_at
+        """,
+        order_id,
+    )
+    breakdown = [
+        {
+            "redemption_type": r["redemption_type"],
+            "waros_spent": int(r["waros_spent"]),
+            "cop_discount": float(r["cop_discount"]),
+            "waro_reward_id": str(r["waro_reward_id"]) if r["waro_reward_id"] else None,
+            "reward_name": r["reward_name"],
+        }
+        for r in rows
+    ]
+    waro_discount_cop = sum(item["cop_discount"] for item in breakdown)
+    waros_spent = sum(item["waros_spent"] for item in breakdown)
+    return {
+        "waro_discount_cop": waro_discount_cop,
+        "waros_spent": waros_spent,
+        "waro_breakdown": breakdown,
+    }
+
+
 def _compute_tax_breakdown(
     items_rows: List[Any],
     tax_config: Dict[str, Any],
@@ -630,6 +666,7 @@ async def get_order_by_id(
                 logger.warning(f"Tax breakdown failed for order {order_id}: {_e}")
 
             _promo_summary = await _get_order_promo_summary(conn, order_id)
+            _waro_summary = await _get_order_waro_redemption_summary(conn, order_id)
 
             # Hydrate delivery address inline (None if not a delivery, or address was soft-deleted)
             delivery_address = None
@@ -692,6 +729,7 @@ async def get_order_by_id(
                     "standard_tax_label": _tax_label,
                     "promo_savings": _promo_summary["promo_savings"],
                     "promo_breakdown": _promo_summary["promo_breakdown"],
+                    "waro_redemption_summary": _waro_summary,
                 }
             }
 
@@ -3248,6 +3286,7 @@ async def send_invoice_email(
         )
         std_tax, liq_tax, tax_label = _compute_tax_breakdown(items_for_tax, tax_config)
         promo_summary = await _get_order_promo_summary(conn, order_id)
+        waro_summary = await _get_order_waro_redemption_summary(conn, order_id)
 
         # 4. Items in the shape `pos_receipt_template` expects.
         item_rows = await conn.fetch(
@@ -3289,10 +3328,11 @@ async def send_invoice_email(
     discount_amount = float(order_row['discount_amount']) if order_row['discount_amount'] is not None else 0.0
     promo_savings = float(promo_summary["promo_savings"])
     promo_breakdown = promo_summary["promo_breakdown"]
-    # Subtotal: gross list total when manual discount or promos need a reference line.
+    waro_discount_cop = float(waro_summary["waro_discount_cop"])
+    # Subtotal: gross list total when manual discount, promos, or WaRo need a reference line.
     subtotal_for_email = (
         sum(float(it['subtotal']) for it in item_rows)
-        if discount_amount > 0 or promo_savings > 0
+        if discount_amount > 0 or promo_savings > 0 or waro_discount_cop > 0
         else 0.0
     )
 
@@ -3315,6 +3355,7 @@ async def send_invoice_email(
         standard_tax_label=tax_label,
         promo_savings=promo_savings,
         promo_breakdown=promo_breakdown,
+        waro_redemption_summary=waro_summary,
         invoice_prefix=invoice_row['prefix'],
         invoice_number=int(invoice_row['invoice_number']),
         invoice_cufe=invoice_row['cufe'],

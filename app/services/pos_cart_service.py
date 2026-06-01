@@ -14,6 +14,7 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from app.services.waros_service import evaluate_and_award
+from app.services.orders_service import _get_order_waro_redemption_summary
 from app.services.email_helpers import send_pos_receipt_email
 from app.services.cierre_service import (
     _get_tenant_tax_config,
@@ -2214,6 +2215,8 @@ async def complete_pos_order(
                 except Exception as e:
                     logger.warning(f"Tax breakdown computation failed for order {order_id}: {e}")
 
+                _waro_redemption_summary = await _get_order_waro_redemption_summary(conn, order_id)
+
                 # Capture values needed after the transaction closes
                 _order_id = order_id
                 _customer_id = customer_id
@@ -2248,6 +2251,7 @@ async def complete_pos_order(
                         "subtotal": cart_subtotal,
                         "promo_savings": _promo_savings,
                         "promo_breakdown": _promo_breakdown,
+                        "waro_redemption_summary": _waro_redemption_summary,
                         "discount_amount": float(_discount_amount) if _discount_amount else 0.0,
                         # Split mode extras
                         **({"paid_total": _split_paid_total, "remaining": _split_remaining, "is_complete": _split_is_complete, "payment_id": _split_first_payment_id} if split_mode else {}),
@@ -2295,6 +2299,12 @@ async def complete_pos_order(
                 except Exception as _profile_err:
                     logger.warning(f"Could not fetch tenant profile for receipt: {_profile_err}")
 
+                _waro_disc = float(_waro_redemption_summary.get("waro_discount_cop") or 0)
+                _email_subtotal = (
+                    float(cart_subtotal)
+                    if (_discount_amount or _promo_savings or _waro_disc)
+                    else 0.0
+                )
                 asyncio.create_task(
                     send_pos_receipt_email(
                         customer_email=receipt_email,
@@ -2309,7 +2319,10 @@ async def complete_pos_order(
                         business_city=_business_city,
                         business_phone=_business_phone,
                         discount_amount=float(_discount_amount) if _discount_amount else 0.0,
-                        subtotal=float(cart_subtotal) if _discount_amount else 0.0,
+                        subtotal=_email_subtotal,
+                        promo_savings=float(_promo_savings),
+                        promo_breakdown=_promo_breakdown,
+                        waro_redemption_summary=_waro_redemption_summary,
                         tip_amount=float(tip_amount),
                     )
                 )

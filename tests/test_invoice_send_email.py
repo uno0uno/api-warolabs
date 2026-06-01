@@ -112,6 +112,7 @@ async def test_send_invoice_email_happy_path():
     fetch = [
         [],  # tax items (empty → no tax)
         [],  # promo summary (no applied promos)
+        [],  # waro redemption summary (none)
         [{'id': uuid4(), 'quantity': 1, 'subtotal': 200.0, 'product_name': 'tomate barranca'}],
         [],  # modifiers for item
     ]
@@ -241,6 +242,7 @@ async def test_send_invoice_email_ses_failure_502():
 
     fetchrow = [_order_row(), _invoice_row(), _profile_row()]
     fetch = [
+        [],
         [],
         [],
         [{'id': uuid4(), 'quantity': 1, 'subtotal': 200.0, 'product_name': 'tomate barranca'}],
