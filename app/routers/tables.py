@@ -185,6 +185,8 @@ class CloseSessionRequest(BaseModel):
         None,
         description="Motivo de liberación — required when closing without payment and pending tab lines exist",
     )
+    waros_to_redeem: Optional[int] = Field(None, ge=0, description="B1 WaRos to redeem (api#370)")
+    waro_reward_id: Optional[UUID] = Field(None, description="B2 reward UUID (api#370)")
 
 
 class AddSessionPaymentRequest(BaseModel):
@@ -225,6 +227,8 @@ async def close_session(request: Request, table_id: UUID, body: CloseSessionRequ
         tip_taxable=body.tip_taxable,
         served_by_member_id=body.served_by_member_id,
         reason=body.reason,
+        waros_to_redeem=body.waros_to_redeem,
+        waro_reward_id=body.waro_reward_id,
     )
 
 

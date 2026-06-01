@@ -1109,6 +1109,7 @@ async def add_order_payment(
         remaining = 0.0
         is_complete = False
         order_id = None
+        award_customer_id = None
 
         async with get_db_connection() as conn:
             async with conn.transaction():
@@ -1253,6 +1254,10 @@ async def add_order_payment(
 
                 # 5. Update order status
                 if is_complete:
+                    award_customer_id = await conn.fetchval(
+                        "SELECT customer_id FROM orders WHERE id = $1",
+                        order_id,
+                    )
                     await conn.execute(
                         """
                         UPDATE orders
@@ -1313,9 +1318,11 @@ async def add_order_payment(
                         )
 
         # 6. Fire-and-forget side effects OUTSIDE transaction (only on completion)
-        if is_complete:
+        if is_complete and award_customer_id:
             try:
-                asyncio.create_task(evaluate_and_award(order_id, tenant_id))
+                asyncio.create_task(
+                    evaluate_and_award(order_id, award_customer_id, tenant_id)
+                )
             except Exception as _w_err:
                 logger.warning(f"Could not schedule waros for order {order_id}: {_w_err}")
 
@@ -1525,6 +1532,8 @@ async def complete_pos_order(
     tip_amount: float = 0,
     tip_source: str = 'none',
     tip_taxable: bool = False,
+    waros_to_redeem: Optional[int] = None,
+    waro_reward_id: Optional[UUID] = None,
 ) -> dict:
     """
     Complete a POS order:
@@ -1675,6 +1684,27 @@ async def complete_pos_order(
                     discount_type=discount_type,
                     discount_value=discount_value,
                 )
+
+                from app.services.waros_service import (
+                    apply_checkout_waro_redemption,
+                    settle_waro_redemption,
+                )
+                from fastapi import HTTPException as FastAPIHTTPException
+
+                try:
+                    checkout_eval = await apply_checkout_waro_redemption(
+                        conn,
+                        tenant_id,
+                        customer_id,
+                        checkout_eval,
+                        waros_to_redeem=waros_to_redeem,
+                        waro_reward_id=waro_reward_id,
+                    )
+                except FastAPIHTTPException as waro_exc:
+                    raise APIError(waro_exc.detail, status_code=waro_exc.status_code)
+
+                _waro_preview = checkout_eval.pop("_waro_redemption_preview", None)
+
                 cart_subtotal = float(checkout_eval["subtotal"])
                 _promo_savings = float(checkout_eval["promo_savings"])
                 _subtotal_after_promos = float(checkout_eval["subtotal_after_promos"])
@@ -1749,6 +1779,18 @@ async def complete_pos_order(
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']
+
+                if _waro_preview:
+                    try:
+                        await settle_waro_redemption(
+                            conn,
+                            tenant_id,
+                            customer_id,
+                            order_id,
+                            _waro_preview,
+                        )
+                    except FastAPIHTTPException as waro_exc:
+                        raise APIError(waro_exc.detail, status_code=waro_exc.status_code)
 
                 logger.info(f"Created order #{order_number} from cart {cart_id}")
 

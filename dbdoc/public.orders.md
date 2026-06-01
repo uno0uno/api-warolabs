@@ -47,6 +47,8 @@
 | tip_source | varchar(20) | 'none'::character varying | false |  |  | How the tip was selected (warocol.com#635): preset (chip from tenant config), custom (free input), or none. Used for analytics. Must agree with tip_amount via chk_orders_tip_source_consistency. |
 | tip_taxable | boolean | false | false |  |  | warocol.com#740 — whether IVA/INC was applied to tip_amount for this sale |
 | tip_tax_amount | numeric(12,2) | 0 | false |  |  | warocol.com#740 — tax on tip_amount when tip_taxable=true; separate from total_amount |
+| waros_redeemed | integer | 0 | false |  |  | api#370 — total WaRos spent |
+| waro_redeemed_amount_cop | numeric(12,2) | 0 | false |  |  | api#370 — total COP discount from WaRo |
 
 ## Constraints
 

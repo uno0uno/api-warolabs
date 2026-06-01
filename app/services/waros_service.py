@@ -499,6 +499,589 @@ async def assign_manual_waros(
         raise HTTPException(status_code=500, detail="Error al asignar Waros")
 
 
+# ── Redemption (checkout B1/B2/B3) — api#370 ─────────────────────────────────
+
+REWARD_TYPES = {"fixed_cop_off", "free_product"}
+
+
+async def _fetch_redemption_config_row(
+    conn: Any,
+    tenant_id: Any,
+) -> Optional[Any]:
+    return await conn.fetchrow(
+        """
+        SELECT is_enabled, redemption_enabled, waros_per_1000_cop,
+               max_redeem_percent_per_order, min_waros_to_redeem,
+               earn_on_wallet_payment, earn_base_excludes_waro_redemption
+        FROM gamification_config
+        WHERE tenant_id = $1
+        """,
+        tenant_id,
+    )
+
+
+def _b1_cop_from_waros(waros_amount: int, waros_per_1000_cop: int) -> int:
+    if waros_amount <= 0 or waros_per_1000_cop <= 0:
+        return 0
+    return int(waros_amount * 1000 / waros_per_1000_cop)
+
+
+async def _fetch_waro_reward_row(
+    conn: Any,
+    tenant_id: Any,
+    reward_id: UUID,
+) -> Optional[Any]:
+    return await conn.fetchrow(
+        """
+        SELECT id, name, reward_type, waros_cost, fixed_cop_off, product_id, is_active
+        FROM waro_rewards
+        WHERE id = $1 AND tenant_id = $2
+        """,
+        reward_id,
+        tenant_id,
+    )
+
+
+async def compute_redemption_preview(
+    conn: Any,
+    tenant_id: Any,
+    customer_id: Optional[UUID],
+    checkout_eval: Dict[str, Any],
+    waros_to_redeem: Optional[int] = None,
+    waro_reward_id: Optional[UUID] = None,
+) -> Dict[str, Any]:
+    """
+    Read-only redemption math for preview and settlement validation.
+    Layer: promos → manual → WaRo (this function).
+    """
+    from app.services.promotions_service import apply_waro_redemption_to_evaluated_lines
+
+    config_row = await _fetch_redemption_config_row(conn, tenant_id)
+    redemption_enabled = bool(config_row and config_row["redemption_enabled"])
+    system_enabled = bool(config_row and config_row["is_enabled"])
+
+    subtotal_after_promos = float(checkout_eval.get("subtotal_after_promos") or 0)
+    manual_discount = float(checkout_eval.get("manual_discount_amount") or 0)
+    base_after_manual = max(0.0, subtotal_after_promos - manual_discount)
+
+    waros_per_1000 = int(config_row["waros_per_1000_cop"] or 100) if config_row else 100
+    max_percent = float(config_row["max_redeem_percent_per_order"] or 50) if config_row else 50.0
+    min_waros = int(config_row["min_waros_to_redeem"] or 1) if config_row else 1
+
+    b1_waros = max(0, int(waros_to_redeem or 0))
+    b2_waros = 0
+    reward_fixed_off = 0.0
+    free_product_id: Optional[UUID] = None
+    reward_name: Optional[str] = None
+    reward_type: Optional[str] = None
+
+    if waro_reward_id:
+        reward_row = await _fetch_waro_reward_row(conn, tenant_id, waro_reward_id)
+        if not reward_row or not reward_row["is_active"]:
+            raise HTTPException(status_code=422, detail="Recompensa WaRo no encontrada o inactiva")
+        b2_waros = int(reward_row["waros_cost"])
+        reward_name = reward_row["name"]
+        reward_type = reward_row["reward_type"]
+        if reward_type == "fixed_cop_off":
+            reward_fixed_off = float(reward_row["fixed_cop_off"] or 0)
+        elif reward_type == "free_product":
+            free_product_id = reward_row["product_id"]
+
+    base_canje = max(0.0, base_after_manual - reward_fixed_off)
+
+    b1_cop_raw = 0
+    b1_cop = 0
+    if b1_waros > 0:
+        if not redemption_enabled or not system_enabled:
+            raise HTTPException(status_code=422, detail="Canje de WaRos no está habilitado")
+        if b1_waros < min_waros:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Mínimo {min_waros} WaRos para canjear en esta orden",
+            )
+        b1_cop_raw = _b1_cop_from_waros(b1_waros, waros_per_1000)
+        max_b1_cop = int(base_canje * max_percent / 100)
+        b1_cop = min(b1_cop_raw, max_b1_cop, int(base_canje))
+
+    if b2_waros > 0 and (not redemption_enabled or not system_enabled):
+        raise HTTPException(status_code=422, detail="Canje de WaRos no está habilitado")
+
+    total_waro_discount_cop = b1_cop + reward_fixed_off
+    total_waros_cost = b1_waros + b2_waros
+
+    wallet_balance = 0
+    if customer_id and total_waros_cost > 0:
+        bal_row = await conn.fetchrow(
+            """
+            SELECT current_balance FROM waros_wallets
+            WHERE profile_id = $1 AND tenant_id = $2
+            """,
+            customer_id,
+            tenant_id,
+        )
+        wallet_balance = int(bal_row["current_balance"]) if bal_row else 0
+        if wallet_balance < total_waros_cost:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Saldo WaRo insuficiente. Disponible: {wallet_balance}, "
+                    f"requerido: {total_waros_cost}"
+                ),
+            )
+
+    updated_eval = apply_waro_redemption_to_evaluated_lines(checkout_eval, total_waro_discount_cop)
+
+    return {
+        "redemption_enabled": redemption_enabled and system_enabled,
+        "subtotal_after_promos": round(subtotal_after_promos),
+        "manual_discount_amount": round(manual_discount),
+        "base_after_manual": round(base_after_manual),
+        "base_canje": round(base_canje),
+        "b1_waros": b1_waros,
+        "b1_cop": b1_cop,
+        "b1_cop_raw": b1_cop_raw,
+        "b2_waros": b2_waros,
+        "reward_fixed_off": round(reward_fixed_off),
+        "reward_type": reward_type,
+        "reward_name": reward_name,
+        "free_product_id": str(free_product_id) if free_product_id else None,
+        "waro_reward_id": str(waro_reward_id) if waro_reward_id else None,
+        "total_waro_discount_cop": round(total_waro_discount_cop),
+        "total_waros_cost": total_waros_cost,
+        "max_redeem_percent": max_percent,
+        "max_b1_cop_cap": int(base_canje * max_percent / 100),
+        "wallet_balance": wallet_balance,
+        "total_after_redemption": updated_eval["total_amount"],
+        "checkout_eval": updated_eval,
+    }
+
+
+async def settle_waro_redemption(
+    conn: Any,
+    tenant_id: Any,
+    customer_id: UUID,
+    order_id: Any,
+    preview: Dict[str, Any],
+) -> None:
+    """Atomic WaRo wallet debit + detail rows inside caller transaction."""
+    total_waros = int(preview.get("total_waros_cost") or 0)
+    if total_waros <= 0:
+        return
+
+    total_cop = float(preview.get("total_waro_discount_cop") or 0)
+
+    wallet_row = await conn.fetchrow(
+        """
+        SELECT current_balance
+        FROM waros_wallets
+        WHERE profile_id = $1 AND tenant_id = $2
+        FOR UPDATE
+        """,
+        customer_id,
+        tenant_id,
+    )
+    current_balance = int(wallet_row["current_balance"]) if wallet_row else 0
+    if current_balance < total_waros:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Saldo WaRo insuficiente ({current_balance} < {total_waros})",
+        )
+
+    if wallet_row:
+        await conn.execute(
+            """
+            UPDATE waros_wallets SET
+                current_balance = current_balance - $3,
+                lifetime_spent = lifetime_spent + $3,
+                last_activity_date = CURRENT_DATE,
+                updated_at = now()
+            WHERE profile_id = $1 AND tenant_id = $2
+            """,
+            customer_id,
+            tenant_id,
+            total_waros,
+        )
+        new_balance = current_balance - total_waros
+    else:
+        raise HTTPException(status_code=422, detail="Cliente sin billetera WaRo")
+
+    await conn.execute(
+        """
+        INSERT INTO waros_transactions (
+            profile_id, tenant_id, transaction_type, waros_amount,
+            balance_after, description, related_entity_type, related_entity_id
+        )
+        VALUES ($1, $2, 'redeemed', $3, $4, $5, 'order', $6)
+        """,
+        customer_id,
+        tenant_id,
+        -total_waros,
+        new_balance,
+        f"WaRos canjeados en orden ({total_waros} pts, -${int(total_cop)} COP)",
+        str(order_id),
+    )
+
+    await conn.execute(
+        """
+        UPDATE orders
+        SET waros_redeemed = $2, waro_redeemed_amount_cop = $3
+        WHERE id = $1
+        """,
+        order_id,
+        total_waros,
+        total_cop,
+    )
+
+    b1_waros = int(preview.get("b1_waros") or 0)
+    b1_cop = float(preview.get("b1_cop") or 0)
+    if b1_waros > 0:
+        await conn.execute(
+            """
+            INSERT INTO order_waro_redemptions (
+                order_id, tenant_id, redemption_type, waros_spent, cop_discount
+            )
+            VALUES ($1, $2, 'points_cop', $3, $4)
+            """,
+            order_id,
+            tenant_id,
+            b1_waros,
+            b1_cop,
+        )
+
+    b2_waros = int(preview.get("b2_waros") or 0)
+    reward_type = preview.get("reward_type")
+    waro_reward_id = preview.get("waro_reward_id")
+    reward_uuid = UUID(waro_reward_id) if waro_reward_id else None
+
+    if b2_waros > 0 and reward_type == "fixed_cop_off":
+        await conn.execute(
+            """
+            INSERT INTO order_waro_redemptions (
+                order_id, tenant_id, redemption_type, waros_spent, cop_discount, waro_reward_id
+            )
+            VALUES ($1, $2, 'reward_fixed_cop', $3, $4, $5)
+            """,
+            order_id,
+            tenant_id,
+            b2_waros,
+            float(preview.get("reward_fixed_off") or 0),
+            reward_uuid,
+        )
+    elif b2_waros > 0 and reward_type == "free_product":
+        free_product_id = preview.get("free_product_id")
+        order_item_id = None
+        if free_product_id:
+            item_row = await conn.fetchrow(
+                """
+                INSERT INTO order_items (
+                    order_id, product_id, quantity, price_at_purchase, subtotal,
+                    discount_allocated, net_total, promo_opt_out, line_source
+                )
+                VALUES ($1, $2::uuid, 1, 0, 0, 0, 0, true, 'waro_reward')
+                RETURNING id
+                """,
+                order_id,
+                free_product_id,
+            )
+            order_item_id = item_row["id"] if item_row else None
+        await conn.execute(
+            """
+            INSERT INTO order_waro_redemptions (
+                order_id, tenant_id, redemption_type, waros_spent, cop_discount,
+                waro_reward_id, order_item_id
+            )
+            VALUES ($1, $2, 'reward_free_product', $3, 0, $4, $5)
+            """,
+            order_id,
+            tenant_id,
+            b2_waros,
+            reward_uuid,
+            order_item_id,
+        )
+
+
+async def apply_checkout_waro_redemption(
+    conn: Any,
+    tenant_id: Any,
+    customer_id: Optional[UUID],
+    checkout_eval: Dict[str, Any],
+    waros_to_redeem: Optional[int] = None,
+    waro_reward_id: Optional[UUID] = None,
+) -> Dict[str, Any]:
+    """Preview + apply layer 4 to checkout_eval. No wallet write."""
+    if not waros_to_redeem and not waro_reward_id:
+        return checkout_eval
+    if not customer_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Canje WaRo requiere un cliente identificado",
+        )
+    preview = await compute_redemption_preview(
+        conn,
+        tenant_id,
+        customer_id,
+        checkout_eval,
+        waros_to_redeem=waros_to_redeem,
+        waro_reward_id=waro_reward_id,
+    )
+    checkout_eval["_waro_redemption_preview"] = preview
+    return preview["checkout_eval"]
+
+
+async def preview_redemption(
+    request: Request,
+    lines: List[Dict[str, Any]],
+    customer_id: Optional[UUID] = None,
+    manual_discount_amount: float = 0,
+    discount_type: Optional[str] = None,
+    discount_value: Optional[float] = None,
+    waros_to_redeem: Optional[int] = None,
+    waro_reward_id: Optional[UUID] = None,
+) -> Dict[str, Any]:
+    """GET /admin/waros/preview-redemption service entry."""
+    from app.services.promotions_service import evaluate_checkout_promotions
+
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+
+    async with get_db_connection(use_transaction=False) as conn:
+        checkout_eval = await evaluate_checkout_promotions(
+            conn,
+            UUID(str(tenant_id)),
+            lines,
+            manual_discount_amount=manual_discount_amount,
+            discount_type=discount_type,
+            discount_value=discount_value,
+        )
+        preview = await compute_redemption_preview(
+            conn,
+            tenant_id,
+            customer_id,
+            checkout_eval,
+            waros_to_redeem=waros_to_redeem,
+            waro_reward_id=waro_reward_id,
+        )
+    preview.pop("checkout_eval", None)
+    return preview
+
+
+async def list_waro_rewards(request: Request) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    async with get_db_connection(use_transaction=False) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, name, reward_type, waros_cost, fixed_cop_off, product_id, is_active,
+                   created_at, updated_at
+            FROM waro_rewards
+            WHERE tenant_id = $1
+            ORDER BY name
+            """,
+            tenant_id,
+        )
+    rewards = [
+        {
+            "id": str(r["id"]),
+            "name": r["name"],
+            "reward_type": r["reward_type"],
+            "waros_cost": int(r["waros_cost"]),
+            "fixed_cop_off": float(r["fixed_cop_off"]) if r["fixed_cop_off"] is not None else None,
+            "product_id": str(r["product_id"]) if r["product_id"] else None,
+            "is_active": r["is_active"],
+            "created_at": r["created_at"].isoformat(),
+            "updated_at": r["updated_at"].isoformat(),
+        }
+        for r in rows
+    ]
+    return {"rewards": rewards}
+
+
+async def create_waro_reward(
+    request: Request,
+    name: str,
+    reward_type: str,
+    waros_cost: int,
+    fixed_cop_off: Optional[float] = None,
+    product_id: Optional[UUID] = None,
+    is_active: bool = True,
+) -> Dict[str, Any]:
+    if reward_type not in REWARD_TYPES:
+        raise HTTPException(status_code=422, detail=f"reward_type inválido: {sorted(REWARD_TYPES)}")
+    if waros_cost <= 0:
+        raise HTTPException(status_code=422, detail="waros_cost debe ser positivo")
+    if reward_type == "fixed_cop_off" and (fixed_cop_off is None or fixed_cop_off <= 0):
+        raise HTTPException(status_code=422, detail="fixed_cop_off requerido para fixed_cop_off")
+    if reward_type == "free_product" and product_id is None:
+        raise HTTPException(status_code=422, detail="product_id requerido para free_product")
+
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO waro_rewards (
+                tenant_id, name, reward_type, waros_cost, fixed_cop_off, product_id, is_active
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, name, reward_type, waros_cost, fixed_cop_off, product_id, is_active
+            """,
+            tenant_id,
+            name,
+            reward_type,
+            waros_cost,
+            fixed_cop_off,
+            product_id,
+            is_active,
+        )
+    return {"reward": dict(row)}
+
+
+async def update_waro_reward(
+    request: Request,
+    reward_id: UUID,
+    name: Optional[str] = None,
+    waros_cost: Optional[int] = None,
+    fixed_cop_off: Optional[float] = None,
+    product_id: Optional[UUID] = None,
+    is_active: Optional[bool] = None,
+) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    async with get_db_connection() as conn:
+        existing = await _fetch_waro_reward_row(conn, tenant_id, reward_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Recompensa no encontrada")
+        row = await conn.fetchrow(
+            """
+            UPDATE waro_rewards SET
+                name = COALESCE($3, name),
+                waros_cost = COALESCE($4, waros_cost),
+                fixed_cop_off = COALESCE($5, fixed_cop_off),
+                product_id = COALESCE($6, product_id),
+                is_active = COALESCE($7, is_active),
+                updated_at = now()
+            WHERE id = $1 AND tenant_id = $2
+            RETURNING id, name, reward_type, waros_cost, fixed_cop_off, product_id, is_active
+            """,
+            reward_id,
+            tenant_id,
+            name,
+            waros_cost,
+            fixed_cop_off,
+            product_id,
+            is_active,
+        )
+    return {"reward": dict(row)}
+
+
+async def delete_waro_reward(request: Request, reward_id: UUID) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    async with get_db_connection() as conn:
+        result = await conn.execute(
+            "DELETE FROM waro_rewards WHERE id = $1 AND tenant_id = $2",
+            reward_id,
+            tenant_id,
+        )
+        if result == "DELETE 0":
+            raise HTTPException(status_code=404, detail="Recompensa no encontrada")
+    return {"deleted": True, "id": str(reward_id)}
+
+
+async def update_redemption_config(
+    request: Request,
+    redemption_enabled: Optional[bool] = None,
+    waros_per_1000_cop: Optional[int] = None,
+    max_redeem_percent_per_order: Optional[float] = None,
+    min_waros_to_redeem: Optional[int] = None,
+    earn_on_wallet_payment: Optional[bool] = None,
+    earn_base_excludes_waro_redemption: Optional[bool] = None,
+    is_enabled: Optional[bool] = None,
+) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO gamification_config (
+                tenant_id, is_enabled, redemption_enabled, waros_per_1000_cop,
+                max_redeem_percent_per_order, min_waros_to_redeem,
+                earn_on_wallet_payment, earn_base_excludes_waro_redemption
+            )
+            VALUES (
+                $1,
+                COALESCE($8, true),
+                COALESCE($2, false),
+                COALESCE($3, 100),
+                COALESCE($4, 50),
+                COALESCE($5, 1),
+                COALESCE($6, false),
+                COALESCE($7, true)
+            )
+            ON CONFLICT (tenant_id) DO UPDATE SET
+                is_enabled = COALESCE($8, gamification_config.is_enabled),
+                redemption_enabled = COALESCE($2, gamification_config.redemption_enabled),
+                waros_per_1000_cop = COALESCE($3, gamification_config.waros_per_1000_cop),
+                max_redeem_percent_per_order = COALESCE(
+                    $4, gamification_config.max_redeem_percent_per_order
+                ),
+                min_waros_to_redeem = COALESCE($5, gamification_config.min_waros_to_redeem),
+                earn_on_wallet_payment = COALESCE($6, gamification_config.earn_on_wallet_payment),
+                earn_base_excludes_waro_redemption = COALESCE(
+                    $7, gamification_config.earn_base_excludes_waro_redemption
+                ),
+                updated_at = now()
+            RETURNING tenant_id, is_enabled, redemption_enabled, waros_per_1000_cop,
+                      max_redeem_percent_per_order, min_waros_to_redeem,
+                      earn_on_wallet_payment, earn_base_excludes_waro_redemption
+            """,
+            tenant_id,
+            redemption_enabled,
+            waros_per_1000_cop,
+            max_redeem_percent_per_order,
+            min_waros_to_redeem,
+            earn_on_wallet_payment,
+            earn_base_excludes_waro_redemption,
+            is_enabled,
+        )
+    return {
+        "tenant_id": str(row["tenant_id"]),
+        "is_enabled": row["is_enabled"],
+        "redemption_enabled": row["redemption_enabled"],
+        "waros_per_1000_cop": int(row["waros_per_1000_cop"]),
+        "max_redeem_percent_per_order": float(row["max_redeem_percent_per_order"]),
+        "min_waros_to_redeem": int(row["min_waros_to_redeem"]),
+        "earn_on_wallet_payment": row["earn_on_wallet_payment"],
+        "earn_base_excludes_waro_redemption": row["earn_base_excludes_waro_redemption"],
+    }
+
+
+async def get_redemption_config(request: Request) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    async with get_db_connection(use_transaction=False) as conn:
+        row = await _fetch_redemption_config_row(conn, tenant_id)
+    if not row:
+        return {
+            "is_enabled": False,
+            "redemption_enabled": False,
+            "waros_per_1000_cop": 100,
+            "max_redeem_percent_per_order": 50.0,
+            "min_waros_to_redeem": 1,
+            "earn_on_wallet_payment": False,
+            "earn_base_excludes_waro_redemption": True,
+        }
+    return {
+        "is_enabled": row["is_enabled"],
+        "redemption_enabled": row["redemption_enabled"],
+        "waros_per_1000_cop": int(row["waros_per_1000_cop"]),
+        "max_redeem_percent_per_order": float(row["max_redeem_percent_per_order"]),
+        "min_waros_to_redeem": int(row["min_waros_to_redeem"]),
+        "earn_on_wallet_payment": row["earn_on_wallet_payment"],
+        "earn_base_excludes_waro_redemption": row["earn_base_excludes_waro_redemption"],
+    }
+
+
 # ── Estimate (read-only) ─────────────────────────────────────────────────────
 
 async def _estimate_waros_for_tenant(
@@ -747,7 +1330,8 @@ async def evaluate_and_award(
             # 1. Check system enabled + daily cap
             config_row = await conn.fetchrow(
                 """
-                SELECT is_enabled, max_daily_waros
+                SELECT is_enabled, max_daily_waros,
+                       earn_on_wallet_payment, earn_base_excludes_waro_redemption
                 FROM gamification_config
                 WHERE tenant_id = $1
                 """,
@@ -757,11 +1341,13 @@ async def evaluate_and_award(
                 return 0
 
             max_daily = int(config_row["max_daily_waros"] or 0)
+            earn_on_wallet = bool(config_row["earn_on_wallet_payment"])
+            exclude_waro_redemption = bool(config_row["earn_base_excludes_waro_redemption"])
 
-            # 2. Fetch order total
+            # 2. Fetch order totals for eligible earn base
             order_row = await conn.fetchrow(
                 """
-                SELECT total_amount
+                SELECT total_amount, waro_redeemed_amount_cop, payment_method
                 FROM orders
                 WHERE id = $1 AND tenant_id = $2
                 """,
@@ -773,6 +1359,29 @@ async def evaluate_and_award(
                 return 0
 
             total_amount = float(order_row["total_amount"])
+            waro_redeemed_cop = float(order_row["waro_redeemed_amount_cop"] or 0)
+
+            eligible_amount = total_amount
+            if exclude_waro_redemption and waro_redeemed_cop > 0:
+                eligible_amount += waro_redeemed_cop
+
+            if not earn_on_wallet and order_row["payment_method"] == "customer_wallet":
+                eligible_amount = 0.0
+            elif not earn_on_wallet:
+                wallet_paid = await conn.fetchval(
+                    """
+                    SELECT COALESCE(SUM(amount), 0)
+                    FROM order_payments
+                    WHERE order_id = $1 AND payment_method = 'customer_wallet'
+                    """,
+                    order_id,
+                )
+                if wallet_paid:
+                    eligible_amount = max(0.0, eligible_amount - float(wallet_paid))
+
+            total_amount = eligible_amount
+            if total_amount <= 0:
+                return 0
 
             # 3. Fetch active rules
             rule_rows = await conn.fetch(

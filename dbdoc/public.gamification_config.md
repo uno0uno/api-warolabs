@@ -16,6 +16,12 @@
 | level_multiplier | numeric(3,2) | 1.5 | true |  |  |  |
 | created_at | timestamp with time zone | now() | true |  |  |  |
 | updated_at | timestamp with time zone | now() | true |  |  |  |
+| redemption_enabled | boolean | false | false |  |  | api#370 — checkout redemption master toggle |
+| waros_per_1000_cop | integer | 100 | false |  |  | WaRos required per 1000 COP B1 discount |
+| max_redeem_percent_per_order | numeric(5,2) | 50.00 | false |  |  | Max B1 % of base_canje |
+| min_waros_to_redeem | integer | 1 | false |  |  | Minimum B1 waros per order |
+| earn_on_wallet_payment | boolean | false | false |  |  | Earn on wallet-paid portion |
+| earn_base_excludes_waro_redemption | boolean | true | false |  |  | Add back waro discount for earn base |
 
 ## Constraints
 
