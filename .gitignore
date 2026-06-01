@@ -22,8 +22,12 @@ wheels/
 
 # Virtual Environment
 venv/
+.venv-ship/
 env/
 ENV/
+
+# WR workflow LLM contracts (local/branch only — see issue #367)
+.wr/
 
 # Environment Variables
 .env
