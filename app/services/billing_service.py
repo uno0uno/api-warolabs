@@ -265,6 +265,7 @@ async def list_tenant_billing_events(
     conn, tenant_id, limit: int = 20, offset: int = 0
 ) -> Dict[str, Any]:
     """Paginated billing events for the session tenant, newest first."""
+    visible_types = list(CUSTOMER_VISIBLE_BILLING_EVENT_TYPES)
     rows = await conn.fetch("""
         SELECT
             be.id, be.tenant_id, t.name AS tenant_name,
@@ -273,11 +274,18 @@ async def list_tenant_billing_events(
         FROM billing_events be
         JOIN tenants t ON t.id = be.tenant_id
         WHERE be.tenant_id = $3
+          AND be.event_type = ANY($4::text[])
         ORDER BY be.created_at DESC
         LIMIT $1 OFFSET $2
-    """, limit, offset, tenant_id)
+    """, limit, offset, tenant_id, visible_types)
     total = await conn.fetchval(
-        "SELECT COUNT(*) FROM billing_events WHERE tenant_id = $1", tenant_id
+        """
+        SELECT COUNT(*) FROM billing_events
+        WHERE tenant_id = $1
+          AND event_type = ANY($2::text[])
+        """,
+        tenant_id,
+        visible_types,
     )
     return _serialize_billing_events(rows, total, limit, offset)
 
@@ -394,6 +402,60 @@ async def subscribe_tenant(
 
 _ACTIVATABLE_STATUSES = frozenset({"pending", "past_due"})
 
+# Tenant-facing Mi Plan history (GET /billing/events) — excludes cron/ops noise.
+CUSTOMER_VISIBLE_BILLING_EVENT_TYPES = (
+    "subscribe_initiated",
+    "payment_approved",
+    "payment_rejected",
+    "payment_failed",
+    "payment_pending",
+    "subscription_cancelled",
+    "subscription_created",
+    "subscription_renewed",
+    "subscription_expired",
+    "gift_granted",
+    "plan_changed",
+)
+
+
+def parse_wompi_period_anchor(transaction: Dict[str, Any]) -> datetime:
+    """Anchor billing period to Wompi payment time, not webhook processing time."""
+    for key in ("finalized_at", "created_at"):
+        raw = transaction.get(key)
+        if not raw:
+            continue
+        text = str(raw).replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    return datetime.now(timezone.utc)
+
+
+async def payment_approved_exists(
+    conn,
+    subscription_id: UUID,
+    wompi_transaction_id: str,
+) -> bool:
+    """True if this Wompi transaction already recorded as payment_approved."""
+    if not wompi_transaction_id:
+        return False
+    row = await conn.fetchval(
+        """
+        SELECT 1 FROM billing_events
+        WHERE subscription_id = $1
+          AND event_type = 'payment_approved'
+          AND metadata->>'wompi_transaction_id' = $2
+        LIMIT 1
+        """,
+        subscription_id,
+        wompi_transaction_id,
+    )
+    return row is not None
+
 
 async def _activate_subscription_with_period(
     conn,
@@ -404,22 +466,26 @@ async def _activate_subscription_with_period(
     amount: float,
     currency: str,
     metadata: Dict[str, Any],
+    period_anchor: Optional[datetime] = None,
 ) -> Optional[datetime]:
     """Set subscription active, extend billing period, record payment_approved."""
     # Interval literals stay in SQL — asyncpg cannot bind '1 year' strings as interval.
     cycle = billing_cycle if billing_cycle in ("monthly", "annual") else "annual"
+    anchor = period_anchor or datetime.now(timezone.utc)
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
     updated = await conn.fetchrow("""
         UPDATE tenant_subscriptions
         SET status               = 'active',
-            current_period_start = now(),
-            current_period_end   = now() + CASE
+            current_period_start = $3,
+            current_period_end   = $3 + CASE
                 WHEN $2::text = 'monthly' THEN interval '1 month'
                 ELSE interval '1 year'
             END,
             updated_at           = now()
         WHERE id = $1
         RETURNING current_period_end
-    """, subscription_id, cycle)
+    """, subscription_id, cycle, anchor)
 
     await conn.execute("""
         INSERT INTO billing_events
@@ -438,6 +504,7 @@ async def activate_subscription_by_gateway_ref(
     gateway_reference: str,
     wompi_transaction_id: str,
     amount: float,
+    period_anchor: Optional[datetime] = None,
 ) -> None:
     """
     Activa la suscripción del tenant cuando Wompi confirma el pago (verify-payment).
@@ -467,6 +534,14 @@ async def activate_subscription_by_gateway_ref(
         )
         return
 
+    if await payment_approved_exists(conn, row["id"], wompi_transaction_id):
+        logger.info(
+            "activate_subscription: duplicate wompi_transaction_id=%s tenant=%s — skipped",
+            wompi_transaction_id,
+            tenant_id,
+        )
+        return
+
     period_end = await _activate_subscription_with_period(
         conn,
         subscription_id=row["id"],
@@ -478,6 +553,7 @@ async def activate_subscription_by_gateway_ref(
             "wompi_transaction_id": wompi_transaction_id,
             "gateway_reference": gateway_reference,
         },
+        period_anchor=period_anchor,
     )
 
     logger.info(
@@ -582,6 +658,7 @@ async def activate_tenant_subscription(
     payment_id: str = "",
     amount: float = 0,
     currency: str = "COP",
+    period_anchor: Optional[datetime] = None,
 ):
     """
     Llamado desde el webhook de Wompi cuando la transacción es APPROVED.
@@ -606,6 +683,14 @@ async def activate_tenant_subscription(
         )
         return None
 
+    if await payment_approved_exists(conn, row["id"], payment_id):
+        logger.info(
+            "activate_tenant_subscription: duplicate wompi_transaction_id=%s ref=%s — skipped",
+            payment_id,
+            gateway_reference,
+        )
+        return None
+
     billing_cycle = row["billing_cycle"]
     metadata: Dict[str, Any] = {"gateway_reference": gateway_reference}
     if payment_id:
@@ -619,6 +704,7 @@ async def activate_tenant_subscription(
         amount=amount,
         currency=currency,
         metadata=metadata,
+        period_anchor=period_anchor,
     )
     next_period_end = period_end.isoformat() if period_end else None
 
