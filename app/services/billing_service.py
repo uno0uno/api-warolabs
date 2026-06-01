@@ -395,10 +395,6 @@ async def subscribe_tenant(
 _ACTIVATABLE_STATUSES = frozenset({"pending", "past_due"})
 
 
-def _billing_period_interval(billing_cycle: str) -> str:
-    return "1 month" if billing_cycle == "monthly" else "1 year"
-
-
 async def _activate_subscription_with_period(
     conn,
     *,
@@ -410,16 +406,20 @@ async def _activate_subscription_with_period(
     metadata: Dict[str, Any],
 ) -> Optional[datetime]:
     """Set subscription active, extend billing period, record payment_approved."""
-    interval = _billing_period_interval(billing_cycle)
+    # Interval literals stay in SQL — asyncpg cannot bind '1 year' strings as interval.
+    cycle = billing_cycle if billing_cycle in ("monthly", "annual") else "annual"
     updated = await conn.fetchrow("""
         UPDATE tenant_subscriptions
         SET status               = 'active',
             current_period_start = now(),
-            current_period_end   = now() + $2::interval,
+            current_period_end   = now() + CASE
+                WHEN $2::text = 'monthly' THEN interval '1 month'
+                ELSE interval '1 year'
+            END,
             updated_at           = now()
         WHERE id = $1
         RETURNING current_period_end
-    """, subscription_id, interval)
+    """, subscription_id, cycle)
 
     await conn.execute("""
         INSERT INTO billing_events

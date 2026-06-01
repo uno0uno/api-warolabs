@@ -108,7 +108,7 @@ flowchart TD
 
 | Item | Value |
 |------|--------|
-| Target public URL | `https://api.warocol.com/payments/webhooks/wompi` |
+| Target public URL | `https://api.warolabs.com/payments/webhooks/wompi` (prod hostname; `api.warocol.com` is not in public DNS) |
 | Behavior | Verify signature once → classify per this doc → HTTP forward to handler above |
 | Colombia legacy URL | Keep `POST /billing/webhook` during transition or proxy from router |
 

@@ -22,7 +22,7 @@ async def test_activate_by_gateway_ref_past_due_extends_period():
         if "FROM tenant_subscriptions" in sql and "gateway_reference" in sql:
             return {"id": sub_id, "status": "past_due", "billing_cycle": "annual"}
         if "UPDATE tenant_subscriptions" in sql:
-            assert args[1] == "1 year"
+            assert args[1] == "annual"
             return {"current_period_end": new_end}
         return None
 
@@ -109,7 +109,7 @@ async def test_activate_tenant_subscription_past_due_extends_period():
                 "plan_name": "Pro",
             }
         if "UPDATE tenant_subscriptions" in sql:
-            assert args[1] == "1 month"
+            assert args[1] == "monthly"
             return {"current_period_end": new_end}
         return None
 

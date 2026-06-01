@@ -113,21 +113,18 @@ async def tenant_detection_middleware(request: Request, call_next):
     Middleware to detect and validate tenant from request origin or API key
     Sets request.state.tenant_context for use in endpoints
     """
+    path = request.url.path
+
+    # Public / webhook ingress — bypass tenant logic entirely so handler errors
+    # are not misreported as "tenant detection" failures.
+    if path in ['/health', '/docs', '/redoc', '/openapi.json', '/']:
+        return await call_next(request)
+
+    if path.startswith('/payments/webhooks') or path == '/billing/webhook':
+        request.state.tenant_context = TenantContext()
+        return await call_next(request)
+
     try:
-        # Skip tenant detection for health checks, docs and root endpoint
-        if request.url.path in ['/health', '/docs', '/redoc', '/openapi.json', '/']:
-            response = await call_next(request)
-            return response
-
-        # Wompi webhooks — no tenant site header (signature-verified ingress)
-        if (
-            request.url.path.startswith('/payments/webhooks')
-            or request.url.path == '/billing/webhook'
-        ):
-            request.state.tenant_context = TenantContext()
-            response = await call_next(request)
-            return response
-
         # Skip tenant detection for public restaurant endpoints (they use slug-based lookup)
         if (
             request.url.path.startswith('/public/restaurant')

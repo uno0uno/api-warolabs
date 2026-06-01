@@ -146,26 +146,42 @@ async def dispatch_verified_event(
     if event != "transaction.updated":
         return {"received": True}
 
-    route = await classify_transaction_updated(body)
+    try:
+        route = await classify_transaction_updated(body)
+    except Exception as exc:
+        logger.exception("Wompi ingress: classification failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Webhook classification failed",
+        ) from exc
     transaction = body.get("data", {}).get("transaction", {}) or {}
 
-    if route == WompiRoute.TICKETS:
-        await forward_to_tickets(body)
-        return {"status": "received"}
+    try:
+        if route == WompiRoute.TICKETS:
+            await forward_to_tickets(body)
+            return {"status": "received"}
 
-    if route == WompiRoute.COLOMBIA:
-        await wompi_colombia_webhook_service.handle_transaction_updated(
-            body, background_tasks
+        if route == WompiRoute.COLOMBIA:
+            await wompi_colombia_webhook_service.handle_transaction_updated(
+                body, background_tasks
+            )
+            return {"received": True}
+
+        logger.warning(
+            "Wompi ingress: unknown classification — tx=%s ref=%s link=%s redirect=%s sku=%s amount=%s",
+            transaction.get("id"),
+            transaction.get("reference"),
+            transaction.get("payment_link_id"),
+            transaction.get("redirect_url"),
+            transaction.get("sku"),
+            transaction.get("amount_in_cents"),
         )
-        return {"received": True}
-
-    logger.warning(
-        "Wompi ingress: unknown classification — tx=%s ref=%s link=%s redirect=%s sku=%s amount=%s",
-        transaction.get("id"),
-        transaction.get("reference"),
-        transaction.get("payment_link_id"),
-        transaction.get("redirect_url"),
-        transaction.get("sku"),
-        transaction.get("amount_in_cents"),
-    )
-    return {"received": True, "classification": "unknown"}
+        return {"received": True, "classification": "unknown"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Wompi ingress: dispatch failed route=%s", route.value)
+        raise HTTPException(
+            status_code=500,
+            detail="Webhook dispatch failed",
+        ) from exc
