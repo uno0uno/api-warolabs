@@ -63,7 +63,7 @@ async def get_session_token(request: Request) -> str:
         session_result = await conn.fetchrow(
             """
             SELECT id FROM sessions
-            WHERE id = ANY($1::text[])
+            WHERE id = ANY($1::uuid[])
               AND expires_at > NOW()
               AND is_active = true
             ORDER BY created_at DESC
@@ -73,7 +73,7 @@ async def get_session_token(request: Request) -> str:
         )
 
         if session_result:
-            valid_token = session_result["id"]
+            valid_token = str(session_result["id"])
             invalid_tokens = [t for t in session_tokens if t != valid_token]
             await _deactivate_session_tokens(conn, invalid_tokens)
             logger.info(f"✅ Using valid session token: {valid_token}")
