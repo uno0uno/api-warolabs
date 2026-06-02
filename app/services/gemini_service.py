@@ -160,6 +160,10 @@ async def process_invoice(
 
         9. Todos los valores numéricos sin símbolos de moneda ($, COP, etc.).
 
+        10. Emite UN item en el array por cada fila impresa en la tabla de productos.
+            NO fusiones líneas aunque el producto se repita (ej. 2 filas "LECHUGA" = 2 items).
+            Cantidades con decimales (1,345 / 1.345 kg) son reales — no redondees a entero.
+
         9b. DETECCIÓN DE CÓDIGO PLU MAL INTERPRETADO COMO CANTIDAD:
             Algunas facturas colombianas imprimen un código PLU o referencia interna
             en la columna de cantidad. Si ves que `cantidad` > 500 Y `precio_unitario` < 10,
