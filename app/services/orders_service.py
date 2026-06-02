@@ -1137,8 +1137,9 @@ async def get_customers_list(
     offset: int = 0
 ) -> dict:
     """
-    Get list of customers aggregated from POS orders.
-    Returns customers ranked by total_spent DESC.
+    List tenant customers with POS order metrics for the filtered period.
+    Includes profiles linked via tenant_members even when they have zero orders
+    (warocol.com#1099). Payment/status filters require a matching order.
     """
     try:
         session_context = require_valid_session(request)
@@ -1148,22 +1149,22 @@ async def get_customers_list(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
-            where_conditions = [
+            order_conditions = [
                 "o.tenant_id = $1",
                 "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
                 "o.customer_id IS NOT NULL",
             ]
-            params = [tenant_id]
+            params: list = [tenant_id]
             param_count = 1
 
             if payment_method:
                 param_count += 1
-                where_conditions.append(f"o.payment_method = ${param_count}")
+                order_conditions.append(f"o.payment_method = ${param_count}")
                 params.append(payment_method)
 
             if status:
                 param_count += 1
-                where_conditions.append(f"o.status = ${param_count}")
+                order_conditions.append(f"o.status = ${param_count}")
                 params.append(status)
 
             parsed_date_from = parse_date(date_from)
@@ -1171,26 +1172,34 @@ async def get_customers_list(
 
             if parsed_date_from:
                 param_count += 1
-                where_conditions.append(
+                order_conditions.append(
                     f"o.order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')"
                 )
                 params.append(parsed_date_from)
 
             if parsed_date_to:
                 param_count += 1
-                where_conditions.append(
+                order_conditions.append(
                     f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')"
                 )
                 params.append(parsed_date_to)
 
+            order_where = " AND ".join(order_conditions)
+
+            outer_conditions: list[str] = []
             if search:
                 param_count += 1
-                where_conditions.append(
-                    f"(p.name ILIKE ${param_count} OR p.phone_number ILIKE ${param_count})"
+                outer_conditions.append(
+                    f"(tc.name ILIKE ${param_count} OR tc.phone ILIKE ${param_count})"
                 )
                 params.append(f"%{search}%")
 
-            where_clause = " AND ".join(where_conditions)
+            outer_where = ""
+            if outer_conditions:
+                outer_where = "WHERE " + " AND ".join(outer_conditions)
+
+            require_order_match = bool(payment_method or status)
+            join_type = "INNER" if require_order_match else "LEFT"
 
             param_count += 1
             limit_param = param_count
@@ -1198,26 +1207,43 @@ async def get_customers_list(
             offset_param = param_count
 
             query = f"""
-                WITH customer_agg AS (
+                WITH tenant_customers AS (
+                    SELECT
+                        p.id AS customer_id,
+                        COALESCE(p.name, 'Sin identificar') AS name,
+                        p.phone_number AS phone
+                    FROM profile p
+                    INNER JOIN tenant_members tm ON tm.user_id = p.id
+                    WHERE tm.tenant_id = $1
+                      AND tm.role = 'customer'
+                      AND tm.is_active = true
+                      AND tm.terminated_at IS NULL
+                ),
+                order_agg AS (
                     SELECT
                         o.customer_id,
-                        COALESCE(p.name, 'Sin identificar') AS name,
-                        p.phone_number                       AS phone,
-                        SUM(o.total_amount)                  AS total_spent,
-                        COUNT(o.id)                          AS order_count,
-                        AVG(o.total_amount)                  AS avg_ticket,
-                        MAX(o.order_date)                    AS last_order_date
+                        SUM(o.total_amount) AS total_spent,
+                        COUNT(o.id)         AS order_count,
+                        AVG(o.total_amount) AS avg_ticket,
+                        MAX(o.order_date)   AS last_order_date
                     FROM orders o
-                    LEFT JOIN profile p ON o.customer_id = p.id
-                    WHERE {where_clause}
-                    GROUP BY o.customer_id, p.name, p.phone_number
+                    WHERE {order_where}
+                    GROUP BY o.customer_id
                 )
                 SELECT
-                    *,
-                    COUNT(*) OVER()          AS total_count,
-                    SUM(total_spent) OVER()  AS total_revenue
-                FROM customer_agg
-                ORDER BY total_spent DESC
+                    tc.customer_id,
+                    tc.name,
+                    tc.phone,
+                    COALESCE(oa.total_spent, 0)   AS total_spent,
+                    COALESCE(oa.order_count, 0)   AS order_count,
+                    COALESCE(oa.avg_ticket, 0)    AS avg_ticket,
+                    oa.last_order_date,
+                    COUNT(*) OVER() AS total_count,
+                    SUM(COALESCE(oa.total_spent, 0)) OVER() AS total_revenue
+                FROM tenant_customers tc
+                {join_type} JOIN order_agg oa ON oa.customer_id = tc.customer_id
+                {outer_where}
+                ORDER BY COALESCE(oa.total_spent, 0) DESC, tc.name ASC
                 LIMIT ${limit_param} OFFSET ${offset_param}
             """
 
@@ -1233,8 +1259,12 @@ async def get_customers_list(
                     "phone": row['phone'],
                     "total_spent": float(row['total_spent']),
                     "order_count": int(row['order_count']),
-                    "avg_ticket": float(row['avg_ticket']),
-                    "last_order_date": row['last_order_date'].isoformat(),
+                    "avg_ticket": float(row['avg_ticket'] or 0),
+                    "last_order_date": (
+                        row['last_order_date'].isoformat()
+                        if row['last_order_date']
+                        else None
+                    ),
                 }
                 for row in rows
             ]
