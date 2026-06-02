@@ -10,6 +10,42 @@ from app.models.ingredient import Ingredient, IngredientsListResponse, TenantIng
 
 logger = logging.getLogger(__name__)
 
+FOOD_UNITS = frozenset({"gr", "ml", "kg", "und", "lt"})
+INGREDIENT_TYPES = frozenset({"food", "service", "supply"})
+
+
+def _normalize_ingredient_type(type_val: Optional[str]) -> str:
+    ingredient_type = (type_val or "food").strip().lower()
+    if ingredient_type not in INGREDIENT_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid type '{type_val}'. Must be one of: {', '.join(sorted(INGREDIENT_TYPES))}",
+        )
+    return ingredient_type
+
+
+def _validate_unit_for_type(unit: str, ingredient_type: str) -> None:
+    if ingredient_type == "service":
+        if unit != "hr":
+            raise HTTPException(
+                status_code=422,
+                detail="Service ingredients must use unit 'hr'.",
+            )
+        return
+    if ingredient_type == "supply":
+        if unit != "und":
+            raise HTTPException(
+                status_code=422,
+                detail="Supply ingredients must use unit 'und'.",
+            )
+        return
+    if unit not in FOOD_UNITS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid unit '{unit}'. Must be one of: {', '.join(sorted(FOOD_UNITS))}",
+        )
+
+
 # Catalog of allowed purchase units. Label and conversion_factor are resolved
 # server-side — the client only sends the key. Add new units here as needed.
 PURCHASE_UNIT_CATALOG: Dict[str, Dict[str, Any]] = {
@@ -313,20 +349,15 @@ async def create_tenant_ingredient(
     Creates a custom ingredient scoped to the given tenant.
 
     - name: trimmed, unique within tenant (enforced by ingredients_name_tenant_unique index)
-    - unit: must be one of gr, ml, kg, und, lt (enforced by DB CHECK constraint)
+    - unit: food → gr/ml/kg/und/lt; service → hr; supply → und (DB CHECK includes hr)
     - parent_id (optional): must reference a global ingredient (tenant_id IS NULL)
     """
-    ALLOWED_UNITS = {"gr", "ml", "kg", "und", "lt"}
-
     name = data.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Ingredient name cannot be empty")
 
-    if data.unit not in ALLOWED_UNITS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Invalid unit '{data.unit}'. Must be one of: {', '.join(sorted(ALLOWED_UNITS))}"
-        )
+    ingredient_type = _normalize_ingredient_type(data.type)
+    _validate_unit_for_type(data.unit, ingredient_type)
 
     if (data.is_resale or False) and data.unit != "und":
         raise HTTPException(
@@ -363,7 +394,7 @@ async def create_tenant_ingredient(
             """,
             name,
             data.unit,
-            data.type or "food",
+            ingredient_type,
             data.category,
             data.costo_unitario,
             parent_uuid,
@@ -417,10 +448,8 @@ async def update_tenant_ingredient(
     Only fields provided (non-None) are updated.
     tenant_id guard ensures tenants can only edit their own ingredients.
     """
-    ALLOWED_UNITS = {"gr", "ml", "kg", "und", "lt"}
-
     row = await conn.fetchrow(
-        "SELECT id, name, unit, category, costo_unitario, parent_id::text FROM ingredients WHERE id = $1 AND tenant_id = $2",
+        "SELECT id, name, unit, type, category, costo_unitario, parent_id::text FROM ingredients WHERE id = $1 AND tenant_id = $2",
         ingredient_id,
         tenant_id,
     )
@@ -436,11 +465,8 @@ async def update_tenant_ingredient(
         updates["name"] = name
 
     if data.unit is not None:
-        if data.unit not in ALLOWED_UNITS:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Invalid unit '{data.unit}'. Must be one of: {', '.join(sorted(ALLOWED_UNITS))}"
-            )
+        effective_type = _normalize_ingredient_type(row["type"])
+        _validate_unit_for_type(data.unit, effective_type)
         updates["unit"] = data.unit
 
     if data.category is not None:

@@ -36,7 +36,7 @@ class PurchaseUnitInput(BaseModel):
 class TenantIngredientCreate(BaseModel):
     """Request body for tenant-scoped custom ingredient creation (POST /suppliers/ingredients)."""
     name: str = Field(..., min_length=1, max_length=255)
-    unit: str = Field(..., description="Must be one of: gr, ml, kg, und, lt")
+    unit: str = Field(..., description="food: gr/ml/kg/und/lt; service: hr; supply: und")
     type: Optional[str] = Field(default="food", description="food | service | supply")
     category: Optional[str] = Field(default=None, max_length=255)
     costo_unitario: Optional[float] = Field(default=None, ge=0)
@@ -50,7 +50,7 @@ class TenantIngredientCreate(BaseModel):
 class TenantIngredientUpdate(BaseModel):
     """Request body for updating a tenant-scoped custom ingredient (PATCH /suppliers/ingredients/:id)."""
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
-    unit: Optional[str] = Field(default=None, description="Must be one of: gr, ml, kg, und, lt")
+    unit: Optional[str] = Field(default=None, description="food: gr/ml/kg/und/lt; service: hr; supply: und")
     category: Optional[str] = Field(default=None, max_length=255)
     costo_unitario: Optional[float] = Field(default=None, ge=0)
     parent_id: Optional[str] = Field(default=None, description="UUID of a global base ingredient, or empty string to clear")
