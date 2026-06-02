@@ -1,6 +1,8 @@
 import jwt
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import unquote
+from uuid import UUID
 from fastapi import Request, HTTPException, Response
 from app.config import settings
 from typing import List, Optional
@@ -10,25 +12,42 @@ logger = logging.getLogger(__name__)
 SESSION_COOKIE_NAME = "session-token"
 
 
+def _normalize_session_token(raw: str) -> Optional[str]:
+    """Decode cookie value and return canonical UUID string, or None if malformed."""
+    token = unquote(raw).strip().strip('"').strip("'")
+    try:
+        return str(UUID(token))
+    except ValueError:
+        return None
+
+
 def collect_session_tokens(request: Request) -> List[str]:
     """Parse every session-token value from the Cookie header (deduped, order preserved)."""
     cookie_header = request.headers.get("cookie", "")
-    session_tokens: List[str] = []
+    raw_tokens: List[str] = []
 
     if cookie_header:
         for cookie_pair in cookie_header.split(";"):
             cookie_pair = cookie_pair.strip()
             if cookie_pair.startswith(f"{SESSION_COOKIE_NAME}="):
-                session_tokens.append(cookie_pair.split("=", 1)[1])
+                raw_tokens.append(cookie_pair.split("=", 1)[1])
 
-    if not session_tokens:
+    if not raw_tokens:
         fallback = request.cookies.get(SESSION_COOKIE_NAME)
         if fallback:
-            session_tokens.append(fallback)
+            raw_tokens.append(fallback)
 
     seen = set()
     unique: List[str] = []
-    for token in session_tokens:
+    for raw in raw_tokens:
+        token = _normalize_session_token(raw)
+        if not token:
+            logger.warning(
+                "Ignoring malformed %s cookie value (prefix=%s)",
+                SESSION_COOKIE_NAME,
+                raw[:12],
+            )
+            continue
         if token not in seen:
             seen.add(token)
             unique.append(token)
@@ -79,12 +98,36 @@ async def get_session_token(request: Request) -> str:
             logger.info(f"✅ Using valid session token: {valid_token}")
             return valid_token
 
-        await _deactivate_session_tokens(conn, session_tokens)
-        logger.warning(
-            "No valid session tokens found (count=%d, prefixes=%s)",
-            len(session_tokens),
-            ", ".join(t[:8] for t in session_tokens[:3]),
+        # Diagnose without deactivating — avoids killing a row on transient mismatch.
+        diag_rows = await conn.fetch(
+            """
+            SELECT id::text AS id,
+                   is_active,
+                   expires_at,
+                   (expires_at > NOW()) AS not_expired
+            FROM sessions
+            WHERE id = ANY($1::uuid[])
+            """,
+            session_tokens,
         )
+        if diag_rows:
+            logger.warning(
+                "No valid session tokens (candidates=%s)",
+                [
+                    {
+                        "id": r["id"][:8],
+                        "is_active": r["is_active"],
+                        "not_expired": r["not_expired"],
+                    }
+                    for r in diag_rows
+                ],
+            )
+        else:
+            logger.warning(
+                "No valid session tokens found (count=%d, prefixes=%s) — not in DB",
+                len(session_tokens),
+                ", ".join(t[:8] for t in session_tokens[:3]),
+            )
         raise HTTPException(status_code=401, detail="No valid session found")
 
 async def set_session_cookie(response: Response, session_token: str, tenant_site: str = None):
