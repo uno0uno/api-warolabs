@@ -196,6 +196,7 @@ async def create_direct_purchase_endpoint(
         invoice_amount=purchase_data.invoice_amount,
         invoice_date=purchase_data.invoice_date,
         payment_method=purchase_data.payment_method,
+        payment_method_id=purchase_data.payment_method_id,
         payment_reference=purchase_data.payment_reference,
         payment_amount=purchase_data.payment_amount,
         payment_date=purchase_data.payment_date,
@@ -298,6 +299,7 @@ async def update_direct_purchase_endpoint(
         notes=purchase_data.notes,
         invoice_number=purchase_data.invoice_number,
         payment_method=purchase_data.payment_method,
+        payment_method_id=purchase_data.payment_method_id,
         payment_reference=purchase_data.payment_reference,
         payment_amount=purchase_data.payment_amount,
         payment_date=purchase_data.payment_date

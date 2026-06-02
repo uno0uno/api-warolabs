@@ -45,6 +45,42 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 
+async def _normalize_direct_purchase_payment(
+    conn,
+    payment_method: Optional[str],
+    payment_method_id: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve group slug + optional sub-method UUID for tenant_purchases."""
+    if payment_method_id:
+        row = await conn.fetchrow(
+            """
+            SELECT pmg.slug
+            FROM payment_methods pm
+            JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+            WHERE pm.id = $1::uuid
+            """,
+            payment_method_id,
+        )
+        if row:
+            return row["slug"], payment_method_id
+        return payment_method, payment_method_id
+
+    if payment_method and len(payment_method) == 36 and "-" in payment_method:
+        row = await conn.fetchrow(
+            """
+            SELECT pmg.slug
+            FROM payment_methods pm
+            JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+            WHERE pm.id = $1::uuid
+            """,
+            payment_method,
+        )
+        if row:
+            return row["slug"], payment_method
+
+    return payment_method, None
+
+
 # ---------------------------------------------------------------------------
 # GL helper — Auto-posting compras-directas → GL (#106)
 # ---------------------------------------------------------------------------
@@ -267,6 +303,7 @@ async def create_direct_purchase(
     invoice_amount: Optional[float] = None,
     invoice_date: Optional[str] = None,
     payment_method: Optional[str] = None,
+    payment_method_id: Optional[str] = None,
     payment_reference: Optional[str] = None,
     payment_amount: Optional[float] = None,
     payment_date: Optional[str] = None,
@@ -304,22 +341,11 @@ async def create_direct_purchase(
                 # 1. Generate purchase number with WR-CD prefix
                 purchase_number = await get_next_direct_purchase_number(conn, tenant_id)
 
-                # Resolve payment_method: if it looks like a UUID (sub-method ID),
-                # store the parent group slug in payment_method and the UUID in payment_method_id.
-                payment_method_id: Optional[str] = None
-                if payment_method and len(payment_method) == 36 and '-' in payment_method:
-                    row = await conn.fetchrow(
-                        """
-                        SELECT pmg.slug
-                        FROM payment_methods pm
-                        JOIN payment_method_groups pmg ON pmg.id = pm.group_id
-                        WHERE pm.id = $1::uuid
-                        """,
-                        payment_method,
-                    )
-                    if row:
-                        payment_method_id = payment_method
-                        payment_method = row["slug"]
+                payment_method, payment_method_id = await _normalize_direct_purchase_payment(
+                    conn,
+                    payment_method,
+                    payment_method_id,
+                )
 
                 # 2. Calculate totals from items
                 total_amount = sum(
@@ -960,6 +986,7 @@ async def update_direct_purchase(
     notes: Optional[str] = None,
     invoice_number: Optional[str] = None,
     payment_method: Optional[str] = None,
+    payment_method_id: Optional[str] = None,
     payment_reference: Optional[str] = None,
     payment_amount: Optional[float] = None,
     payment_date: Optional[str] = None
@@ -1306,6 +1333,12 @@ async def update_direct_purchase(
                 elif invoice_number:
                     new_status = 'invoiced'
 
+                payment_method, payment_method_id = await _normalize_direct_purchase_payment(
+                    conn,
+                    payment_method,
+                    payment_method_id,
+                )
+
                 # 9. Update purchase record
                 await conn.execute("""
                     UPDATE tenant_purchases
@@ -1314,19 +1347,21 @@ async def update_direct_purchase(
                         notes = $2,
                         invoice_number = $3,
                         payment_method = $4,
-                        payment_reference = $5,
-                        payment_amount = $6,
-                        payment_date = $7,
-                        status = $8,
+                        payment_method_id = $5::uuid,
+                        payment_reference = $6,
+                        payment_amount = $7,
+                        payment_date = $8,
+                        status = $9,
                         updated_at = NOW(),
-                        paid_at = CASE WHEN $9 THEN NOW() ELSE paid_at END,
-                        purchase_date = COALESCE($11, purchase_date)
-                    WHERE id = $10
+                        paid_at = CASE WHEN $10 THEN NOW() ELSE paid_at END,
+                        purchase_date = COALESCE($12, purchase_date)
+                    WHERE id = $11
                 """,
                     total_amount,
                     notes,
                     invoice_number,
                     payment_method,
+                    payment_method_id,
                     payment_reference,
                     payment_amount,
                     _parse_date(payment_date),
