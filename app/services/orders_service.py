@@ -33,6 +33,19 @@ def parse_date(date_str: Optional[str]) -> Optional[date]:
 
 logger = logging.getLogger(__name__)
 
+def _pos_modifier_inventory_helpers():
+    from app.services.pos_cart_service import (
+        _deduct_modifier_inventory_for_order_item,
+        return_modifier_inventory_for_order_item,
+        return_order_item_inventory_from_snapshots,
+    )
+    return (
+        _deduct_modifier_inventory_for_order_item,
+        return_modifier_inventory_for_order_item,
+        return_order_item_inventory_from_snapshots,
+    )
+
+
 
 POS_LIKE_FILTER = (
     "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL "
@@ -2331,75 +2344,60 @@ async def delete_order_item(
                 item_quantity = float(item_row['quantity'])
                 product_name = item_row['product_name']
 
-                # 1. Return ingredients from product recipes + base recipes
-                ingredients_query = """
-                    -- Direct product ingredients
-                    SELECT
-                        pr.ingredient_id,
-                        pr.quantity,
-                        pr.unit,
-                        i.name as ingredient_name
-                    FROM product_recipes pr
-                    JOIN ingredients i ON pr.ingredient_id = i.id
-                    WHERE pr.product_id = $1
+                _, return_modifier_inventory_for_order_item, return_order_item_inventory_from_snapshots = _pos_modifier_inventory_helpers()
+                returned_from_snapshots = await return_order_item_inventory_from_snapshots(
+                    conn,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    order_id=order_id,
+                    order_number=order_number,
+                    order_item_id=item_id,
+                    reason_detail=f"Devolución por eliminación de {int(item_quantity)}x {product_name}",
+                )
 
-                    UNION ALL
-
-                    -- Ingredients from recipe bases (Issue #517: multiply by pbr.quantity)
-                    SELECT
-                        brt.ingredient_id,
-                        brt.base_quantity * pbr.quantity as quantity,
-                        brt.unit,
-                        i.name as ingredient_name
-                    FROM product_base_recipes pbr
-                    JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
-                    JOIN ingredients i ON brt.ingredient_id = i.id
-                    WHERE pbr.product_id = $1
-                """
-                ingredients = await conn.fetch(ingredients_query, product_id)
-
-                for ingredient in ingredients:
-                    quantity_to_return = item_quantity * float(ingredient['quantity'])
-                    await _return_ingredient_to_stock(
-                        conn, tenant_id, user_id, order_id, order_number,
-                        ingredient['ingredient_id'],
-                        quantity_to_return,
-                        ingredient['unit'],
-                        ingredient['ingredient_name'],
-                        f"Devolución por eliminación de {int(item_quantity)}x {product_name}"
-                    )
-
-                # 2. Return ingredients from modifiers
-                modifiers_query = """
-                    SELECT
-                        oim.modifier_id,
-                        oim.modifier_name,
-                        oim.quantity as modifier_qty,
-                        m.ingredient_id,
-                        m.ingredient_quantity,
-                        m.ingredient_unit,
-                        i.name as ingredient_name
-                    FROM order_item_modifiers oim
-                    LEFT JOIN modifiers m ON oim.modifier_id = m.id
-                    LEFT JOIN ingredients i ON m.ingredient_id = i.id
-                    WHERE oim.order_item_id = $1
-                """
-                modifiers = await conn.fetch(modifiers_query, item_id)
-
-                for modifier in modifiers:
-                    if modifier['ingredient_id'] and modifier['ingredient_quantity']:
-                        modifier_qty = float(modifier['modifier_qty']) if modifier['modifier_qty'] else 1.0
-                        quantity_to_return = item_quantity * modifier_qty * float(modifier['ingredient_quantity'])
+                if not returned_from_snapshots:
+                    ingredients = await conn.fetch(_INGREDIENTS_QUERY, product_id)
+                    for ingredient in ingredients:
+                        quantity_to_return = item_quantity * float(ingredient['quantity'])
                         await _return_ingredient_to_stock(
                             conn, tenant_id, user_id, order_id, order_number,
-                            modifier['ingredient_id'],
+                            ingredient['ingredient_id'],
                             quantity_to_return,
-                            modifier['ingredient_unit'] or 'und',
-                            modifier['ingredient_name'],
-                            f"Devolución modificador {modifier['modifier_name']} de {product_name}"
+                            ingredient['unit'],
+                            ingredient['ingredient_name'],
+                            f"Devolución por eliminación de {int(item_quantity)}x {product_name}",
                         )
 
-                # 3. Delete associated modifiers (foreign key constraint)
+                    modifiers = await conn.fetch(
+                        """
+                        SELECT
+                            oim.modifier_id,
+                            oim.modifier_name,
+                            oim.quantity AS modifier_qty
+                        FROM order_item_modifiers oim
+                        WHERE oim.order_item_id = $1
+                        """,
+                        item_id,
+                    )
+                    for modifier in modifiers:
+                        if not modifier['modifier_id']:
+                            continue
+                        modifier_qty = float(modifier['modifier_qty']) if modifier['modifier_qty'] else 1.0
+                        await return_modifier_inventory_for_order_item(
+                            conn,
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                            order_id=order_id,
+                            order_number=order_number,
+                            order_item_id=item_id,
+                            item_quantity=item_quantity,
+                            modifier_id=modifier['modifier_id'],
+                            modifier_qty=modifier_qty,
+                            modifier_name=modifier['modifier_name'],
+                            product_name=product_name,
+                        )
+
+                # Delete associated modifiers (foreign key constraint)
                 await conn.execute(
                     "DELETE FROM order_item_modifiers WHERE order_item_id = $1",
                     item_id
@@ -2658,19 +2656,22 @@ async def delete_order_item_modifier(
                     raise APIError("Modifier not found", status_code=404)
 
                 modifier_name = modifier_row['modifier_name']
+                modifier_qty = float(modifier_row['modifier_qty']) if modifier_row['modifier_qty'] else 1.0
 
-                # Return ingredient to stock if modifier has linked ingredient
-                if modifier_row['ingredient_id'] and modifier_row['ingredient_quantity']:
-                    modifier_qty = float(modifier_row['modifier_qty']) if modifier_row['modifier_qty'] else 1.0
-                    quantity_to_return = item_quantity * modifier_qty * float(modifier_row['ingredient_quantity'])
-
-                    await _return_ingredient_to_stock(
-                        conn, tenant_id, user_id, order_id, order_number,
-                        modifier_row['ingredient_id'],
-                        quantity_to_return,
-                        modifier_row['ingredient_unit'] or 'und',
-                        modifier_row['ingredient_name'],
-                        f"Devolución modificador {modifier_name} de {product_name}"
+                _, return_modifier_inventory_for_order_item, _ = _pos_modifier_inventory_helpers()
+                if modifier_row['original_modifier_id']:
+                    await return_modifier_inventory_for_order_item(
+                        conn,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        order_id=order_id,
+                        order_number=order_number,
+                        order_item_id=item_id,
+                        item_quantity=item_quantity,
+                        modifier_id=modifier_row['original_modifier_id'],
+                        modifier_qty=modifier_qty,
+                        modifier_name=modifier_name,
+                        product_name=product_name,
                     )
 
                 # Delete the modifier
@@ -3031,6 +3032,8 @@ async def create_manual_order(
 
                 order_id = order_row["id"]
 
+                deduct_modifier_inventory, _, _ = _pos_modifier_inventory_helpers()
+
                 for item in items:
                     modifiers = item.get("modifiers", [])
                     modifiers_total = sum(float(m.get("price", 0)) for m in modifiers)
@@ -3066,62 +3069,20 @@ async def create_manual_order(
                             float(modifier.get("price", 0))
                         )
 
-                        # Deduct inventory for modifier ingredient (if linked)
-                        modifier_ingredient = await conn.fetchrow(
-                            """
-                            SELECT
-                                m.ingredient_id,
-                                m.ingredient_quantity,
-                                m.ingredient_unit,
-                                i.name AS ingredient_name
-                            FROM modifiers m
-                            LEFT JOIN ingredients i ON m.ingredient_id = i.id
-                            WHERE m.id = $1 AND m.ingredient_id IS NOT NULL
-                            """,
-                            UUID(modifier["id"])
+                        await deduct_modifier_inventory(
+                            conn,
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                            order_id=order_id,
+                            order_item_id=order_item_id,
+                            order_number=order_row["order_number"],
+                            item_quantity=float(item["quantity"]),
+                            modifier={
+                                "id": modifier["id"],
+                                "name": modifier["name"],
+                            },
+                            modifier_qty=1.0,
                         )
-
-                        if modifier_ingredient and modifier_ingredient["ingredient_id"] and modifier_ingredient["ingredient_quantity"]:
-                            total_deduction = float(item["quantity"]) * float(modifier_ingredient["ingredient_quantity"])
-                            stock_row = await conn.fetchrow(
-                                "SELECT current_stock FROM tenant_inventory WHERE ingredient_id = $1 AND tenant_id = $2",
-                                modifier_ingredient["ingredient_id"],
-                                tenant_id
-                            )
-                            previous_stock = float(stock_row["current_stock"]) if stock_row else 0.0
-                            new_stock = previous_stock - total_deduction
-
-                            if stock_row:
-                                await conn.execute(
-                                    "UPDATE tenant_inventory SET current_stock = $1, last_updated = NOW() WHERE ingredient_id = $2 AND tenant_id = $3",
-                                    new_stock, modifier_ingredient["ingredient_id"], tenant_id
-                                )
-                            else:
-                                await conn.execute(
-                                    "INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock, last_updated) VALUES ($1, $2, $3, 0, NOW())",
-                                    tenant_id, modifier_ingredient["ingredient_id"], -total_deduction
-                                )
-
-                            await conn.execute(
-                                """
-                                INSERT INTO tenant_ingredient_movements (
-                                    tenant_id, ingredient_id, movement_type,
-                                    quantity_change, unit, previous_stock, new_stock,
-                                    reference_table, reference_id, reason, created_by, created_at
-                                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
-                                """,
-                                tenant_id,
-                                modifier_ingredient["ingredient_id"],
-                                "consumption",
-                                -total_deduction,
-                                modifier_ingredient["ingredient_unit"] or "und",
-                                previous_stock,
-                                new_stock,
-                                "orders",
-                                order_id,
-                                f"Modificador {modifier['name']} - Orden #{order_row['order_number']}",
-                                user_id
-                            )
 
                     # Deduct inventory for product ingredients (direct + base recipes)
                     ingredients = await conn.fetch(

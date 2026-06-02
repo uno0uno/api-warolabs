@@ -2657,6 +2657,155 @@ async def _capture_modifier_ingredient_snapshot(
     )
 
 
+async def _subtract_order_item_ingredient_snapshot(
+    conn,
+    order_item_id,
+    ingredient_id,
+    quantity: float,
+) -> None:
+    """Reduce or remove a COGS snapshot row after returning modifier stock."""
+    row = await conn.fetchrow(
+        """
+        SELECT quantity, unit_cost
+        FROM order_item_ingredients
+        WHERE order_item_id = $1 AND ingredient_id = $2
+        """,
+        order_item_id,
+        ingredient_id,
+    )
+    if not row:
+        return
+
+    new_qty = float(row["quantity"] or 0) - quantity
+    if new_qty <= 0:
+        await conn.execute(
+            """
+            DELETE FROM order_item_ingredients
+            WHERE order_item_id = $1 AND ingredient_id = $2
+            """,
+            order_item_id,
+            ingredient_id,
+        )
+        return
+
+    unit_cost = row["unit_cost"]
+    total_cost = new_qty * float(unit_cost) if unit_cost is not None else None
+    await conn.execute(
+        """
+        UPDATE order_item_ingredients
+        SET quantity = $3,
+            total_cost = $4
+        WHERE order_item_id = $1 AND ingredient_id = $2
+        """,
+        order_item_id,
+        ingredient_id,
+        new_qty,
+        total_cost,
+    )
+
+
+async def return_order_item_inventory_from_snapshots(
+    conn,
+    *,
+    tenant_id,
+    user_id,
+    order_id,
+    order_number: int,
+    order_item_id,
+    reason_detail: str,
+) -> bool:
+    """
+    Return stock from order_item_ingredients and delete snapshot rows.
+    Returns True when snapshots existed (caller may skip legacy recipe returns).
+    """
+    from app.services.orders_service import _return_ingredient_to_stock
+
+    snapshots = await conn.fetch(
+        """
+        SELECT ingredient_id, ingredient_name, quantity, unit
+        FROM order_item_ingredients
+        WHERE order_item_id = $1
+        """,
+        order_item_id,
+    )
+    if not snapshots:
+        return False
+
+    for snap in snapshots:
+        qty = float(snap["quantity"] or 0)
+        if qty <= 0:
+            continue
+        await _return_ingredient_to_stock(
+            conn,
+            tenant_id,
+            user_id,
+            order_id,
+            order_number,
+            snap["ingredient_id"],
+            qty,
+            snap["unit"] or "und",
+            snap["ingredient_name"],
+            reason_detail,
+        )
+
+    await conn.execute(
+        "DELETE FROM order_item_ingredients WHERE order_item_id = $1",
+        order_item_id,
+    )
+    return True
+
+
+async def return_modifier_inventory_for_order_item(
+    conn,
+    *,
+    tenant_id,
+    user_id,
+    order_id,
+    order_number: int,
+    order_item_id,
+    item_quantity: float,
+    modifier_id,
+    modifier_qty: float,
+    modifier_name: str,
+    product_name: str,
+) -> None:
+    """Reverse composite modifier consumption and adjust COGS snapshots."""
+    from app.services.modifier_option_service import resolve_modifier_ingredient_lines
+    from app.services.orders_service import _return_ingredient_to_stock
+
+    ingredient_lines = await resolve_modifier_ingredient_lines(
+        conn, modifier_id, tenant_id
+    )
+    if not ingredient_lines:
+        return
+
+    for line in ingredient_lines:
+        qty = float(item_quantity) * float(modifier_qty) * float(line["quantity"])
+        if qty <= 0:
+            continue
+
+        if line.get("controla_inventario") is not False:
+            await _return_ingredient_to_stock(
+                conn,
+                tenant_id,
+                user_id,
+                order_id,
+                order_number,
+                line["ingredient_id"],
+                qty,
+                line.get("unit") or "und",
+                line["ingredient_name"],
+                f"Devolución modificador {modifier_name} de {product_name}",
+            )
+
+        await _subtract_order_item_ingredient_snapshot(
+            conn,
+            order_item_id,
+            line["ingredient_id"],
+            qty,
+        )
+
+
 async def fire_pos_cart(request: Request, cart_id: UUID) -> dict:
     """
     Explicitly fire all 'new' items in a POS cart to the kitchen stations.
