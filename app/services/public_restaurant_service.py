@@ -470,7 +470,8 @@ async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
                     m.is_available as modifier_is_available,
                     m.is_default as modifier_is_default,
                     m.max_limit as modifier_max_limit,
-                    m.sort_order as modifier_sort_order
+                    m.sort_order as modifier_sort_order,
+                    m.option_type as modifier_option_type
                 FROM product_modifier_groups pmg
                 JOIN modifier_groups mg ON mg.id = pmg.modifier_group_id
                 LEFT JOIN modifiers m ON m.modifier_group_id = mg.id
@@ -502,7 +503,8 @@ async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
                         'price': float(row['modifier_price']),
                         'is_available': row['modifier_is_available'],
                         'is_default': row['modifier_is_default'],
-                        'max_limit': row['modifier_max_limit']
+                        'max_limit': row['modifier_max_limit'],
+                        'option_type': row['modifier_option_type'] or 'INGREDIENT',
                     })
 
             product['modifier_groups'] = list(modifier_groups.values())
