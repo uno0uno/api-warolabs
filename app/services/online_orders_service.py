@@ -21,7 +21,10 @@ from app.services.comandas_service import fire_comandas
 # order_item_ingredients (per-line ingredient cost). Without this the COGS
 # GL entry posted right after deduction sums an empty table and skips,
 # leaving online sales out of CMV. Same function, same idempotency guarantees.
-from app.services.pos_cart_service import _capture_order_item_ingredients
+from app.services.pos_cart_service import (
+    _capture_order_item_ingredients,
+    _deduct_modifier_inventory_for_order_item,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -128,6 +131,33 @@ async def _deduct_stock_for_order(conn, order_id: UUID, tenant_id, changed_by) -
             logger.info(
                 f"Stock deducted (online order): {ingredient['ingredient_name']} "
                 f"-{quantity_to_deduct}{ingredient['unit']} (Order #{order_number})"
+            )
+
+        modifier_rows = await conn.fetch(
+            """
+            SELECT modifier_id, modifier_name, quantity
+            FROM order_item_modifiers
+            WHERE order_item_id = $1
+            """,
+            item["order_item_id"],
+        )
+        for mod in modifier_rows:
+            if not mod["modifier_id"]:
+                continue
+            modifier_qty = float(mod["quantity"]) if mod["quantity"] else 1.0
+            await _deduct_modifier_inventory_for_order_item(
+                conn,
+                tenant_id=tenant_id,
+                user_id=changed_by,
+                order_id=order_id,
+                order_item_id=item["order_item_id"],
+                order_number=order_number,
+                item_quantity=float(item["quantity"]),
+                modifier={
+                    "id": str(mod["modifier_id"]),
+                    "name": mod["modifier_name"],
+                },
+                modifier_qty=modifier_qty,
             )
 
 
