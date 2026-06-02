@@ -128,4 +128,15 @@ Commit the regenerated `dbdoc/` in the same PR as the migration.
 
 ## License
 
-Proprietary — [warocol.com](https://warocol.com)
+This repository is source-available proprietary software owned by WARO Colombia
+and/or its authorized owner(s). It is not open source.
+
+You may view, clone, and run the code privately for non-commercial evaluation,
+review, education, security research, interoperability, or authorized
+contribution preparation. Commercial use, production deployment, hosted use,
+redistribution, sublicensing, white-label use, competing products, public
+deployments, or third-party services require a separate written commercial
+license from WARO Colombia.
+
+See [`LICENSE.md`](LICENSE.md), [`NOTICE.md`](NOTICE.md), and
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
