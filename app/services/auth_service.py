@@ -207,8 +207,9 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
                 login_method
             )
             
-            # Set new session cookie with correct domain from encrypted origin or fallback to DB
+            # Clear stale cookie variants before issuing the new session (tenant switch).
             cookie_site = target_site or tenant_site
+            await clear_session_cookie(response, current_session_token)
             await set_session_cookie(response, new_session_id, cookie_site)
             logger.info(f"🍪 Setting session cookie for site: {cookie_site} (encrypted: {bool(target_site)})")
             

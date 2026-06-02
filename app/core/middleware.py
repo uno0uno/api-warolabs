@@ -553,7 +553,17 @@ def require_valid_session(request: Request) -> SessionContext:
     """
     session_context = get_session_context(request)
     if not session_context.is_valid:
+        from app.core.security import collect_session_tokens
         from app.core.exceptions import AuthenticationError
+
+        tokens = collect_session_tokens(request)
+        token_prefix = tokens[0][:8] if tokens else "none"
+        logger.warning(
+            "Valid session required: path=%s cookie_count=%d token_prefix=%s",
+            request.url.path,
+            len(tokens),
+            token_prefix,
+        )
         raise AuthenticationError("Valid session required")
     return session_context
 

@@ -3,76 +3,89 @@ import logging
 from datetime import datetime, timedelta
 from fastapi import Request, HTTPException, Response
 from app.config import settings
-from typing import Optional
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+SESSION_COOKIE_NAME = "session-token"
+
+
+def collect_session_tokens(request: Request) -> List[str]:
+    """Parse every session-token value from the Cookie header (deduped, order preserved)."""
+    cookie_header = request.headers.get("cookie", "")
+    session_tokens: List[str] = []
+
+    if cookie_header:
+        for cookie_pair in cookie_header.split(";"):
+            cookie_pair = cookie_pair.strip()
+            if cookie_pair.startswith(f"{SESSION_COOKIE_NAME}="):
+                session_tokens.append(cookie_pair.split("=", 1)[1])
+
+    if not session_tokens:
+        fallback = request.cookies.get(SESSION_COOKIE_NAME)
+        if fallback:
+            session_tokens.append(fallback)
+
+    seen = set()
+    unique: List[str] = []
+    for token in session_tokens:
+        if token not in seen:
+            seen.add(token)
+            unique.append(token)
+    return unique
+
+
+async def _deactivate_session_tokens(conn, token_ids: List[str]) -> None:
+    if not token_ids:
+        return
+    logger.info(f"🧹 Cleaning up {len(token_ids)} invalid session tokens")
+    for token in token_ids:
+        try:
+            await conn.execute(
+                "UPDATE sessions SET is_active = false WHERE id = $1 AND is_active = true",
+                token,
+            )
+        except Exception:
+            pass
 
 
 async def get_session_token(request: Request) -> str:
     """Extract valid session-token from cookies - validates and cleans up invalid tokens"""
     from app.database import get_db_connection
-    
-    # Get raw cookie header to handle multiple session-token cookies
-    cookie_header = request.headers.get("cookie", "")
-    session_tokens = []
-    
-    # Parse all session-token cookies from the header
-    if cookie_header:
-        for cookie_pair in cookie_header.split(";"):
-            cookie_pair = cookie_pair.strip()
-            if cookie_pair.startswith("session-token="):
-                token = cookie_pair.split("=", 1)[1]
-                session_tokens.append(token)
-    
-    # If no session tokens found, try the standard way as fallback
+
+    session_tokens = collect_session_tokens(request)
     if not session_tokens:
-        session_token = request.cookies.get("session-token")
-        if not session_token:
-            raise HTTPException(status_code=401, detail="No session found")
-        logger.info(f"🍪 Using standard cookie method: {session_token}")
-        return session_token
-    
-    # Validate each session token and find the valid one
-    valid_token = None
-    invalid_tokens = []
-    
+        raise HTTPException(status_code=401, detail="No session found")
+
     async with get_db_connection() as conn:
-        for token in session_tokens:
-            try:
-                # Check if session is valid in database
-                session_query = """
-                    SELECT id FROM sessions 
-                    WHERE id = $1 AND expires_at > NOW() AND is_active = true
-                    LIMIT 1
-                """
-                session_result = await conn.fetchrow(session_query, token)
-                
-                if session_result:
-                    valid_token = token
-                    break
-                else:
-                    invalid_tokens.append(token)
-            except Exception:
-                invalid_tokens.append(token)
-        
-        # Clean up invalid sessions from database
-        if invalid_tokens:
-            logger.info(f"🧹 Cleaning up {len(invalid_tokens)} invalid session tokens")
-            for invalid_token in invalid_tokens:
-                try:
-                    await conn.execute(
-                        "UPDATE sessions SET is_active = false WHERE id = $1",
-                        invalid_token
-                    )
-                except Exception:
-                    pass  # Silent cleanup
-    
-    if not valid_token:
-        logger.warning("No valid session tokens found")
+        # When the browser sends duplicate cookies (e.g. after tenant switch),
+        # pick the newest valid session instead of failing on the first stale token.
+        session_result = await conn.fetchrow(
+            """
+            SELECT id FROM sessions
+            WHERE id = ANY($1::text[])
+              AND expires_at > NOW()
+              AND is_active = true
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            session_tokens,
+        )
+
+        if session_result:
+            valid_token = session_result["id"]
+            invalid_tokens = [t for t in session_tokens if t != valid_token]
+            await _deactivate_session_tokens(conn, invalid_tokens)
+            logger.info(f"✅ Using valid session token: {valid_token}")
+            return valid_token
+
+        await _deactivate_session_tokens(conn, session_tokens)
+        logger.warning(
+            "No valid session tokens found (count=%d, prefixes=%s)",
+            len(session_tokens),
+            ", ".join(t[:8] for t in session_tokens[:3]),
+        )
         raise HTTPException(status_code=401, detail="No valid session found")
-    
-    logger.info(f"✅ Using valid session token: {valid_token}")
-    return valid_token
 
 async def set_session_cookie(response: Response, session_token: str, tenant_site: str = None):
     """Set session cookie with correct domain for the tenant - clears previous cookies first"""
@@ -107,15 +120,12 @@ async def set_session_cookie(response: Response, session_token: str, tenant_site
                 logger.warning(f"🍪 Error getting site from DB: {e}")
     
     logger.info(f"🍪 Final cookie settings - domain: {cookie_domain}, token: {session_token[:8]}...")
-    
-    # Clear any existing session-token cookies first by setting expired ones
-    response.delete_cookie("session-token", domain=cookie_domain)
-    if cookie_domain:
-        response.delete_cookie("session-token")  # Also clear without domain
-    
+
+    _expire_session_cookie_variants(response, cookie_domain)
+
     # Set the new session cookie with improved proxy compatibility
     response.set_cookie(
-        key="session-token",
+        key=SESSION_COOKIE_NAME,
         value=session_token,
         httponly=True,
         secure=not settings.is_development,
@@ -125,35 +135,38 @@ async def set_session_cookie(response: Response, session_token: str, tenant_site
         path="/"  # Ensure cookie is available for all paths
     )
 
+def _expire_session_cookie_variants(response: Response, cookie_domain: Optional[str] = None) -> None:
+    """Expire session-token for host-only and domain-scoped variants (proxy-safe)."""
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    if cookie_domain:
+        response.delete_cookie(SESSION_COOKIE_NAME, domain=cookie_domain, path="/")
+    # Some browsers keep a host-only cookie alongside a domain-scoped one.
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/", secure=not settings.is_development)
+
+
 async def clear_session_cookie(response: Response, session_token: str = None):
     """Clear session cookie with dynamic domain from database"""
     cookie_domain = None
-    
+
     if session_token and not settings.is_development:
         try:
             from app.database import get_db_connection
             async with get_db_connection(use_transaction=False) as conn:
-                # Get tenant site from session
                 site_query = """
                     SELECT ts.site
                     FROM sessions s
                     JOIN tenant_sites ts ON s.tenant_id = ts.tenant_id
-                    WHERE s.id = $1 AND s.is_active = true AND ts.is_active = true
+                    WHERE s.id = $1 AND ts.is_active = true
                     LIMIT 1
                 """
                 site_result = await conn.fetchrow(site_query, session_token)
-                
+
                 if site_result and site_result['site']:
-                    tenant_site = site_result['site']
-                    cookie_domain = f".{tenant_site}"
+                    cookie_domain = f".{site_result['site']}"
         except Exception:
-            pass  # Silent fallback to no domain
-    
-    # Clear cookie with domain if found
-    response.delete_cookie("session-token", domain=cookie_domain, path="/")
-    # Also clear without domain as fallback
-    if cookie_domain:
-        response.delete_cookie("session-token", path="/")
+            pass
+
+    _expire_session_cookie_variants(response, cookie_domain)
 
 CUSTOMER_COOKIE_NAME = "waro_customer_session"
 CUSTOMER_SESSION_DAYS = 7
