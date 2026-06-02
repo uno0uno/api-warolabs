@@ -492,26 +492,29 @@ async def get_product_by_id(
                         m.is_default,
                         m.max_limit,
                         m.sort_order,
-                        m.option_type,
-                        m.ingredient_id,
-                        m.ingredient_quantity,
-                        m.ingredient_unit,
-                        m.recipe_base_type_id,
-                        m.recipe_base_quantity,
-                        m.linked_product_id,
-                        m.linked_product_quantity
+                        m.option_type
                     FROM modifiers m
                     WHERE m.modifier_group_id = ANY($1::uuid[])
                     ORDER BY m.sort_order, m.name
                 """
                 modifiers_rows = await connection.fetch(modifiers_query, group_ids)
 
+                # Group modifiers by modifier_group_id
                 modifiers_by_group = {}
                 for mod in modifiers_rows:
                     group_id = mod['modifier_group_id']
                     if group_id not in modifiers_by_group:
                         modifiers_by_group[group_id] = []
-                    modifiers_by_group[group_id].append(dict(mod))
+                    modifiers_by_group[group_id].append({
+                        'id': mod['id'],
+                        'name': mod['name'],
+                        'price': mod['price'],
+                        'is_available': mod['is_available'],
+                        'is_default': mod['is_default'],
+                        'max_limit': mod['max_limit'],
+                        'sort_order': mod['sort_order'],
+                        'option_type': mod['option_type'] or 'INGREDIENT',
+                    })
 
                 # Build modifier groups with their modifiers
                 modifier_groups = []
@@ -832,7 +835,8 @@ async def get_products_list(
                                 m.is_available,
                                 m.is_default,
                                 m.max_limit,
-                                m.sort_order
+                                m.sort_order,
+                                m.option_type
                             FROM modifiers m
                             WHERE m.modifier_group_id = ANY($1::uuid[])
                             ORDER BY m.sort_order, m.name
@@ -852,7 +856,8 @@ async def get_products_list(
                                 'is_available': mod['is_available'],
                                 'is_default': mod['is_default'],
                                 'max_limit': mod['max_limit'],
-                                'sort_order': mod['sort_order']
+                                'sort_order': mod['sort_order'],
+                                'option_type': mod['option_type'] or 'INGREDIENT',
                             })
 
                         # Build modifier groups with their modifiers

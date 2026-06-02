@@ -229,7 +229,8 @@ async def get_product_detail_for_token(token: str, product_id: UUID) -> Dict[str
                 m.is_available AS modifier_is_available,
                 m.is_default AS modifier_is_default,
                 m.max_limit AS modifier_max_limit,
-                m.sort_order AS modifier_sort_order
+                m.sort_order AS modifier_sort_order,
+                m.option_type AS modifier_option_type
             FROM product_modifier_groups pmg
             JOIN modifier_groups mg ON mg.id = pmg.modifier_group_id
             LEFT JOIN modifiers m ON m.modifier_group_id = mg.id
@@ -259,6 +260,7 @@ async def get_product_detail_for_token(token: str, product_id: UUID) -> Dict[str
                 "is_available": row["modifier_is_available"],
                 "is_default": row["modifier_is_default"],
                 "max_limit": row["modifier_max_limit"],
+                "option_type": row["modifier_option_type"] or "INGREDIENT",
             })
 
     product["modifier_groups"] = list(modifier_groups.values())
