@@ -1,5 +1,6 @@
 """Session cookie parsing and duplicate-token resolution (#387)."""
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 from fastapi import HTTPException, Request
@@ -66,7 +67,11 @@ async def test_get_session_token_picks_newest_valid_among_duplicates():
 
     assert token == fresh
     conn.fetchrow.assert_awaited_once()
+    _sql, bound_ids = conn.fetchrow.await_args.args
+    assert bound_ids == [UUID(stale), UUID(fresh)]
     assert conn.execute.await_count == 1
+    _deactivate_sql, stale_uuid = conn.execute.await_args.args
+    assert stale_uuid == UUID(stale)
 
 
 @pytest.mark.asyncio

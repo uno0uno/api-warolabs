@@ -21,6 +21,11 @@ def _normalize_session_token(raw: str) -> Optional[str]:
         return None
 
 
+def _session_token_uuids(token_ids: List[str]) -> List[UUID]:
+    """Bind session cookie strings as asyncpg uuid[] (avoids uuid = text errors)."""
+    return [UUID(t) for t in token_ids]
+
+
 def collect_session_tokens(request: Request) -> List[str]:
     """Parse every session-token value from the Cookie header (deduped, order preserved)."""
     cookie_header = request.headers.get("cookie", "")
@@ -61,8 +66,8 @@ async def _deactivate_session_tokens(conn, token_ids: List[str]) -> None:
     for token in token_ids:
         try:
             await conn.execute(
-                "UPDATE sessions SET is_active = false WHERE id = $1 AND is_active = true",
-                token,
+                "UPDATE sessions SET is_active = false WHERE id = $1::uuid AND is_active = true",
+                UUID(token),
             )
         except Exception:
             pass
@@ -76,6 +81,8 @@ async def get_session_token(request: Request) -> str:
     if not session_tokens:
         raise HTTPException(status_code=401, detail="No session found")
 
+    session_uuids = _session_token_uuids(session_tokens)
+
     async with get_db_connection() as conn:
         # When the browser sends duplicate cookies (e.g. after tenant switch),
         # pick the newest valid session instead of failing on the first stale token.
@@ -88,7 +95,7 @@ async def get_session_token(request: Request) -> str:
             ORDER BY created_at DESC
             LIMIT 1
             """,
-            session_tokens,
+            session_uuids,
         )
 
         if session_result:
@@ -108,7 +115,7 @@ async def get_session_token(request: Request) -> str:
             FROM sessions
             WHERE id = ANY($1::uuid[])
             """,
-            session_tokens,
+            session_uuids,
         )
         if diag_rows:
             logger.warning(
