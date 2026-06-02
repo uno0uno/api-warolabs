@@ -627,7 +627,10 @@ async def get_modifier_group_snapshot(conn, modifier_group_id: UUID, tenant_id: 
         # Modificadores
         modifiers = await conn.fetch("""
             SELECT id, name, price, is_available, is_default, sort_order,
-                   ingredient_id, ingredient_quantity, ingredient_unit
+                   option_type,
+                   ingredient_id, ingredient_quantity, ingredient_unit,
+                   recipe_base_type_id, recipe_base_quantity,
+                   linked_product_id, linked_product_quantity
             FROM modifiers WHERE modifier_group_id = $1
         """, modifier_group_id)
         snapshot['modifiers'] = [dict(m) for m in modifiers]
