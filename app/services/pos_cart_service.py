@@ -2364,6 +2364,29 @@ async def _get_last_purchase_prices(conn, ingredient_ids: List[str], tenant_id: 
     )
     return {r["ingredient_id"]: float(r["unit_cost"]) for r in rows}
 
+# Aggregate qty/cost when product recipe and modifier share an ingredient; replace on
+# same-source retry so re-running capture for one source does not double-count.
+_ORDER_ITEM_INGREDIENT_UPSERT = """
+ON CONFLICT (order_item_id, ingredient_id) DO UPDATE SET
+  quantity = CASE
+    WHEN order_item_ingredients.source_type IS NOT DISTINCT FROM EXCLUDED.source_type
+     AND order_item_ingredients.source_id IS NOT DISTINCT FROM EXCLUDED.source_id
+    THEN EXCLUDED.quantity
+    ELSE order_item_ingredients.quantity + EXCLUDED.quantity
+  END,
+  unit_cost = COALESCE(order_item_ingredients.unit_cost, EXCLUDED.unit_cost),
+  total_cost = CASE
+    WHEN COALESCE(EXCLUDED.unit_cost, order_item_ingredients.unit_cost) IS NOT NULL THEN
+      (CASE
+        WHEN order_item_ingredients.source_type IS NOT DISTINCT FROM EXCLUDED.source_type
+         AND order_item_ingredients.source_id IS NOT DISTINCT FROM EXCLUDED.source_id
+        THEN EXCLUDED.quantity
+        ELSE order_item_ingredients.quantity + EXCLUDED.quantity
+      END) * COALESCE(EXCLUDED.unit_cost, order_item_ingredients.unit_cost)
+    ELSE NULL
+  END
+"""
+
 
 async def _capture_order_item_ingredients(
     conn,
@@ -2379,7 +2402,7 @@ async def _capture_order_item_ingredients(
     - product_recipes (source_type = 'product_recipe')
     - product_base_recipes → base_recipe_templates (source_type = 'base_recipe')
 
-    Idempotent via ON CONFLICT (order_item_id, ingredient_id) DO NOTHING.
+    Idempotent per source on conflict; aggregates qty/cost across product + modifier.
     """
     rows = await conn.fetch(
         """
@@ -2436,8 +2459,8 @@ async def _capture_order_item_ingredients(
                 quantity, unit, unit_cost, total_cost,
                 source_type, source_id, created_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, NOW())
-            ON CONFLICT (order_item_id, ingredient_id) DO NOTHING
-            """,
+            """
+            + _ORDER_ITEM_INGREDIENT_UPSERT,
             order_item_id,
             r["ingredient_id"],
             r["ingredient_name"],
@@ -2462,113 +2485,139 @@ async def _deduct_modifier_inventory_for_order_item(
     modifier: dict,
     modifier_qty: float = 1,
 ) -> None:
-    """Deduct linked-ingredient inventory for one order line modifier (POS + mesa tab)."""
+    """Deduct inventory for one order line modifier (all option types). Issue #1121."""
+    from app.services.modifier_option_service import resolve_modifier_ingredient_lines
+
     modifier_id = modifier.get("id")
     modifier_name = modifier.get("name", "Modificador")
     if not modifier_id:
         return
 
-    modifier_ingredient = await conn.fetchrow(
-        """
-        SELECT
-            m.ingredient_id,
-            m.ingredient_quantity,
-            m.ingredient_unit,
-            i.name as ingredient_name,
-            i.controla_inventario
-        FROM modifiers m
-        LEFT JOIN ingredients i ON m.ingredient_id = i.id
-        WHERE m.id = $1 AND m.ingredient_id IS NOT NULL
-        """,
-        modifier_id,
+    ingredient_lines = await resolve_modifier_ingredient_lines(
+        conn, modifier_id, tenant_id
     )
-
-    if (
-        not modifier_ingredient
-        or not modifier_ingredient["ingredient_id"]
-        or not modifier_ingredient["ingredient_quantity"]
-    ):
+    if not ingredient_lines:
         return
 
-    resolved_mod_qty = await resolve_recipe_quantity_to_base_unit(
-        conn,
-        modifier_ingredient["ingredient_id"],
-        float(modifier_ingredient["ingredient_quantity"]),
-        modifier_ingredient["ingredient_unit"] or "",
-    )
-    total_deduction = float(item_quantity) * float(modifier_qty) * resolved_mod_qty
-
-    stock_row = await conn.fetchrow(
-        """
-        SELECT current_stock FROM tenant_inventory
-        WHERE ingredient_id = $1 AND tenant_id = $2
-        """,
-        modifier_ingredient["ingredient_id"],
-        tenant_id,
-    )
-
-    previous_stock = float(stock_row["current_stock"]) if stock_row else 0.0
-    new_stock = previous_stock - total_deduction
-
-    if stock_row:
-        await conn.execute(
-            """
-            UPDATE tenant_inventory
-            SET current_stock = $1, last_updated = NOW()
-            WHERE ingredient_id = $2 AND tenant_id = $3
-            """,
-            new_stock,
-            modifier_ingredient["ingredient_id"],
-            tenant_id,
+    for line in ingredient_lines:
+        total_deduction = (
+            float(item_quantity) * float(modifier_qty) * float(line["quantity"])
         )
-    else:
-        await conn.execute(
-            """
-            INSERT INTO tenant_inventory (
-                tenant_id, ingredient_id, current_stock, minimum_stock, last_updated
+
+        if line.get("controla_inventario") is not False:
+            stock_row = await conn.fetchrow(
+                """
+                SELECT current_stock FROM tenant_inventory
+                WHERE ingredient_id = $1 AND tenant_id = $2
+                """,
+                line["ingredient_id"],
+                tenant_id,
             )
-            VALUES ($1, $2, $3, 0, NOW())
-            """,
-            tenant_id,
-            modifier_ingredient["ingredient_id"],
-            -total_deduction,
+
+            previous_stock = float(stock_row["current_stock"]) if stock_row else 0.0
+            new_stock = previous_stock - total_deduction
+
+            if stock_row:
+                await conn.execute(
+                    """
+                    UPDATE tenant_inventory
+                    SET current_stock = $1, last_updated = NOW()
+                    WHERE ingredient_id = $2 AND tenant_id = $3
+                    """,
+                    new_stock,
+                    line["ingredient_id"],
+                    tenant_id,
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO tenant_inventory (
+                        tenant_id, ingredient_id, current_stock, minimum_stock, last_updated
+                    )
+                    VALUES ($1, $2, $3, 0, NOW())
+                    """,
+                    tenant_id,
+                    line["ingredient_id"],
+                    -total_deduction,
+                )
+
+            await conn.execute(
+                """
+                INSERT INTO tenant_ingredient_movements (
+                    tenant_id, ingredient_id, movement_type,
+                    quantity_change, unit, previous_stock, new_stock,
+                    reference_table, reference_id, reason, created_by, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+                """,
+                tenant_id,
+                line["ingredient_id"],
+                "consumption",
+                -total_deduction,
+                line["unit"] or "und",
+                previous_stock,
+                new_stock,
+                "orders",
+                order_id,
+                f"Modificador {modifier_name} ({modifier_qty}x) - Orden #{order_number}",
+                user_id,
+            )
+
+            logger.info(
+                f"Modifier inventory deducted: {line['ingredient_name']} "
+                f"-{total_deduction}{line['unit']} "
+                f"(Modifier: {modifier_name}, Order #{order_number})"
+            )
+
+        await _capture_modifier_ingredient_line_snapshot(
+            conn,
+            order_item_id,
+            line,
+            modifier_id,
+            item_quantity,
+            float(modifier_qty),
+            str(tenant_id),
         )
+
+
+async def _capture_modifier_ingredient_line_snapshot(
+    conn,
+    order_item_id,
+    line: dict,
+    modifier_id,
+    item_quantity: float,
+    modifier_qty: float,
+    tenant_id: str,
+) -> None:
+    """
+    COGS snapshot for one exploded modifier ingredient line.
+    source_type = 'MODIFIER_RECIPE', source_id = modifier_id.
+    """
+    ingredient_id = line["ingredient_id"]
+    ingredient_id_str = str(ingredient_id)
+    prices = await _get_last_purchase_prices(conn, [ingredient_id_str], tenant_id)
+
+    quantity = float(line["quantity"]) * item_quantity * modifier_qty
+    unit_cost = prices.get(ingredient_id_str)
+    total_cost = quantity * unit_cost if unit_cost is not None else None
 
     await conn.execute(
         """
-        INSERT INTO tenant_ingredient_movements (
-            tenant_id, ingredient_id, movement_type,
-            quantity_change, unit, previous_stock, new_stock,
-            reference_table, reference_id, reason, created_by, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
-        """,
-        tenant_id,
-        modifier_ingredient["ingredient_id"],
-        "consumption",
-        -total_deduction,
-        modifier_ingredient["ingredient_unit"] or "und",
-        previous_stock,
-        new_stock,
-        "orders",
-        order_id,
-        f"Modificador {modifier_name} ({modifier_qty}x) - Orden #{order_number}",
-        user_id,
-    )
-
-    logger.info(
-        f"Modifier inventory deducted: {modifier_ingredient['ingredient_name']} "
-        f"-{total_deduction}{modifier_ingredient['ingredient_unit']} "
-        f"(Modifier: {modifier_name}, Order #{order_number})"
-    )
-
-    await _capture_modifier_ingredient_snapshot(
-        conn,
+        INSERT INTO order_item_ingredients (
+            order_item_id, ingredient_id, ingredient_name,
+            quantity, unit, unit_cost, total_cost,
+            source_type, source_id, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, NOW())
+        """
+        + _ORDER_ITEM_INGREDIENT_UPSERT,
         order_item_id,
-        modifier_ingredient,
-        modifier_id,
-        item_quantity,
-        float(modifier_qty),
-        str(tenant_id),
+        ingredient_id,
+        line["ingredient_name"],
+        quantity,
+        line.get("unit") or "und",
+        unit_cost,
+        total_cost,
+        "MODIFIER_RECIPE",
+        str(modifier_id),
     )
 
 
@@ -2581,47 +2630,30 @@ async def _capture_modifier_ingredient_snapshot(
     modifier_qty: float,
     tenant_id: str,
 ) -> None:
-    """
-    Insert a single ingredient snapshot for a modifier that has ingredient_id set.
-    source_type = 'MODIFIER_RECIPE', source_id = modifier_id.
-    Idempotent via ON CONFLICT (order_item_id, ingredient_id) DO NOTHING.
-    """
+    """Backward-compatible wrapper for single-ingredient modifier rows (tests)."""
     ing_qty = modifier_ingredient.get("ingredient_quantity")
     if not ing_qty:
         return
 
-    ingredient_id = modifier_ingredient["ingredient_id"]
-    ingredient_id_str = str(ingredient_id)
-    prices = await _get_last_purchase_prices(conn, [ingredient_id_str], tenant_id)
-
     resolved_ing_qty = await resolve_recipe_quantity_to_base_unit(
         conn,
-        ingredient_id,
+        modifier_ingredient["ingredient_id"],
         float(ing_qty),
         modifier_ingredient.get("ingredient_unit") or "",
     )
-    quantity = resolved_ing_qty * item_quantity * modifier_qty
-    unit_cost = prices.get(ingredient_id_str)
-    total_cost = quantity * unit_cost if unit_cost is not None else None
-
-    await conn.execute(
-        """
-        INSERT INTO order_item_ingredients (
-            order_item_id, ingredient_id, ingredient_name,
-            quantity, unit, unit_cost, total_cost,
-            source_type, source_id, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, NOW())
-        ON CONFLICT (order_item_id, ingredient_id) DO NOTHING
-        """,
+    await _capture_modifier_ingredient_line_snapshot(
+        conn,
         order_item_id,
-        ingredient_id,
-        modifier_ingredient["ingredient_name"],
-        quantity,
-        modifier_ingredient["ingredient_unit"] or "und",
-        unit_cost,
-        total_cost,
-        "MODIFIER_RECIPE",
-        str(modifier_id),
+        {
+            "ingredient_id": modifier_ingredient["ingredient_id"],
+            "quantity": resolved_ing_qty,
+            "unit": modifier_ingredient.get("ingredient_unit") or "und",
+            "ingredient_name": modifier_ingredient["ingredient_name"],
+        },
+        modifier_id,
+        item_quantity,
+        modifier_qty,
+        tenant_id,
     )
 
 
