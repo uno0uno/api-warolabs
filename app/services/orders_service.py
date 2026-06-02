@@ -1265,7 +1265,8 @@ async def get_customer_detail(
 ) -> dict:
     """
     Get a single customer's aggregate stats plus their paginated POS order history.
-    Returns 404 if the customer has no POS orders for this tenant.
+    Returns 404 if the customer is not linked to the tenant.
+    Profiles without POS orders return zeroed stats and empty order history.
     """
     try:
         session_context = require_valid_session(request)
@@ -1299,7 +1300,35 @@ async def get_customer_detail(
             )
 
             if not customer_row:
-                raise APIError("Customer not found", status_code=404)
+                profile_row = await conn.fetchrow(
+                    """
+                    SELECT
+                        p.id                                 AS customer_id,
+                        COALESCE(p.name, 'Sin identificar') AS name,
+                        p.phone_number                       AS phone,
+                        p.email                              AS email
+                    FROM profile p
+                    JOIN tenant_members tm ON tm.user_id = p.id
+                    WHERE p.id = $1
+                      AND tm.tenant_id = $2
+                      AND tm.role = 'customer'
+                    LIMIT 1
+                    """,
+                    customer_id,
+                    tenant_id,
+                )
+                if not profile_row:
+                    raise APIError("Customer not found", status_code=404)
+                customer_row = {
+                    "customer_id": profile_row["customer_id"],
+                    "name": profile_row["name"],
+                    "phone": profile_row["phone"],
+                    "email": profile_row["email"],
+                    "total_orders": 0,
+                    "total_spent": 0,
+                    "first_purchase": None,
+                    "last_purchase": None,
+                }
 
             # --- Paginated order history ---
             where_conditions = [
@@ -1443,8 +1472,14 @@ async def get_customer_detail(
                     "email": customer_row['email'],
                     "total_orders": int(customer_row['total_orders']),
                     "total_spent": float(customer_row['total_spent']),
-                    "first_purchase": customer_row['first_purchase'].date().isoformat(),
-                    "last_purchase": customer_row['last_purchase'].date().isoformat(),
+                    "first_purchase": (
+                        customer_row['first_purchase'].date().isoformat()
+                        if customer_row['first_purchase'] else None
+                    ),
+                    "last_purchase": (
+                        customer_row['last_purchase'].date().isoformat()
+                        if customer_row['last_purchase'] else None
+                    ),
                 },
                 "orders": {
                     "items": orders,
