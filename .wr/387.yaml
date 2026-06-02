@@ -1,0 +1,38 @@
+issue: 387
+title: "fix(auth): session cookie stale after tenant switch breaks ingredient create (Natural Food)"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-387-session-stale-cookie
+
+paths:
+  - app/core/security.py
+  - app/core/middleware.py
+  - app/services/auth_service.py
+  - tests/test_session_token.py
+  - front_nuxt/stores/tenants.ts
+  - front_nuxt/components/ingredientes/IngredientePropioPanel.vue
+
+ac:
+  - login → switch Natural Food → POST /suppliers/ingredients succeeds
+  - API clears stale session-token cookies on tenant switch
+  - API picks newest valid token when duplicate cookies sent
+  - Front redirects to login on 401 during ingredient save
+  - require_valid_session logs path + token prefix
+
+out_of_scope:
+  - RBAC 403 handling
+  - Global $fetch 401 interceptor
+
+hints:
+  entry: "get_session_token — batch ANY($1) ORDER BY created_at DESC"
+  pattern: "auth.global.js navigateTo login on invalid session"
+  tests: "pytest tests/test_session_token.py -v"
+
+skip:
+  audits: [ux, color, typography]
+
+companion:
+  front_branch: wr-387-session-stale-cookie
+  front_remote: uno0uno/warocol.com
