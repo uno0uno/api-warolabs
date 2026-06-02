@@ -1,0 +1,36 @@
+# Machine contract for wr-fast / wr-ship — LLM reads once; humans use issue summary + PR.
+issue: 380
+title: "feat(api): allow hr unit for service-type ingredients"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-380-ingredients-hr-unit
+extends: uno0uno/warocol.com#1089
+
+paths:
+  - app/services/ingredients_service.py
+  - app/models/ingredient.py
+  - sql/20260601_ingredients_unit_hr.sql
+  - tests/test_ingredients.py
+
+ac:
+  - POST /suppliers/ingredients accepts unit hr when type service
+  - PATCH /suppliers/ingredients/:id accepts unit hr for service rows
+  - type service rejects non-hr units with clear 422
+  - type supply rejects non-und units with clear 422
+  - DB ingredients_unit_check includes hr (migration)
+  - Tests for service+hr create and invalid type-unit pairs
+
+out_of_scope:
+  - Front slide-over UI (warocol.com#1090)
+  - Migrating legacy service+und tenant row (1 row; grandfather OK)
+  - Adding type to TenantIngredientUpdate (type immutable after create)
+
+hints:
+  entry: "create_tenant_ingredient / update_tenant_ingredient — ingredients_service.py"
+  pattern: "_validate_unit_for_type — service→hr, supply→und, food→FOOD_UNITS"
+  tests: "pytest tests/test_ingredients.py -v -k unit_type"
+
+skip:
+  audits: [ux, color, typography]
