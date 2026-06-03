@@ -2228,6 +2228,301 @@ def _tab_item_requires_remove_reason(
     return comanda_item_row is not None
 
 
+_TAB_ITEM_EDIT_BLOCKED_FULFILLMENT = frozenset({"preparing", "ready", "cancelled"})
+_TAB_ITEM_EDIT_BLOCKED_COMANDA = frozenset({"preparing", "ready", "delivered", "cancelled"})
+
+_FULFILLMENT_LABELS = {
+    "new": "Sin enviar",
+    "sent": "En cocina",
+    "preparing": "Preparando",
+    "ready": "Listo",
+    "cancelled": "Cancelado",
+}
+
+
+def _tab_item_edit_block_reason(
+    fulfillment_status: Optional[str],
+    comanda_status: Optional[str] = None,
+) -> Optional[str]:
+    """Return human-readable block reason, or None if tab line content edit is allowed (#1151)."""
+    status = fulfillment_status or "new"
+    if status in _TAB_ITEM_EDIT_BLOCKED_FULFILLMENT:
+        label = _FULFILLMENT_LABELS.get(status, status)
+        return (
+            f"La cocina ya aceptó este ítem (estado: {label}). "
+            "No se pueden cambiar modificadores ni notas."
+        )
+    if comanda_status and comanda_status in _TAB_ITEM_EDIT_BLOCKED_COMANDA:
+        return (
+            "La cocina ya aceptó este ítem en comanda. "
+            "No se pueden cambiar modificadores ni notas."
+        )
+    return None
+
+
+async def _fetch_tab_item_comanda_context(conn, order_item_id: UUID) -> Optional[Any]:
+    return await conn.fetchrow(
+        """
+        SELECT ci.id AS comanda_item_id, ci.status AS comanda_item_status,
+               c.id AS comanda_id, c.status AS comanda_status
+        FROM comanda_items ci
+        JOIN comandas c ON c.id = ci.comanda_id
+        WHERE ci.order_item_id = $1
+          AND ci.status <> 'cancelled'
+        ORDER BY c.created_at DESC
+        LIMIT 1
+        """,
+        order_item_id,
+    )
+
+
+async def _fetch_open_tab_item_row(
+    conn, order_item_id: UUID, table_id: UUID, tenant_id: UUID,
+) -> Optional[Any]:
+    return await conn.fetchrow(
+        """
+        SELECT
+            oi.id, oi.product_id, oi.quantity, oi.price_at_purchase,
+            oi.subtotal, oi.notes, oi.fulfillment_status,
+            o.id AS order_id, o.total_amount, o.order_number,
+            p.name AS product_name,
+            t.name AS table_name,
+            t.is_bar,
+            ts.id AS table_session_id,
+            COALESCE(ts.attended_by_member_id, t.assigned_member_id)
+                AS effective_waiter_member_id
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        JOIN table_sessions ts ON ts.id = o.table_session_id
+        JOIN tables t ON t.id = ts.table_id
+        JOIN product p ON p.id = oi.product_id
+        WHERE oi.id = $1
+          AND ts.table_id = $2
+          AND ts.tenant_id = $3
+          AND ts.closed_at IS NULL
+        """,
+        order_item_id, table_id, tenant_id,
+    )
+
+
+async def get_tab_item_edit_eligibility(
+    request: Request,
+    table_id: UUID,
+    order_item_id: UUID,
+    *,
+    record_attempt: bool = False,
+) -> dict:
+    """Check whether tab line content edit is allowed; optionally audit blocked attempts."""
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    user_id = session_context.user_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    async with get_db_connection(use_transaction=True) as conn:
+        row = await _fetch_open_tab_item_row(conn, order_item_id, table_id, tenant_id)
+        if not row:
+            raise NotFoundError("Order item not found or session already closed")
+
+        comanda_ctx = await _fetch_tab_item_comanda_context(conn, order_item_id)
+        comanda_status = comanda_ctx["comanda_status"] if comanda_ctx else None
+        block_reason = _tab_item_edit_block_reason(row["fulfillment_status"], comanda_status)
+        fulfillment_status = row["fulfillment_status"] or "new"
+
+        if block_reason and record_attempt:
+            tab_ctx = {
+                "channel": "barra" if row["is_bar"] else "mesa",
+                "table_name": row["table_name"],
+                "table_session_id": row["table_session_id"],
+                "effective_waiter_member_id": row["effective_waiter_member_id"],
+            }
+            await _record_tab_operation_event(
+                conn,
+                tenant_id,
+                user_id=user_id,
+                table_id=table_id,
+                tab_ctx=tab_ctx,
+                action="tab_item_edit_blocked",
+                order_id=row["order_id"],
+                order_item_id=order_item_id,
+                comanda_item_id=comanda_ctx["comanda_item_id"] if comanda_ctx else None,
+                payload={
+                    "product_name": row["product_name"],
+                    "fulfillment_status": fulfillment_status,
+                    "comanda_status": comanda_status,
+                },
+            )
+
+        if block_reason:
+            raise APIError(
+                block_reason,
+                status_code=409,
+                details={
+                    "code": "TAB_ITEM_EDIT_KITCHEN_ACCEPTED",
+                    "fulfillment_status": fulfillment_status,
+                    "comanda_status": comanda_status,
+                },
+            )
+
+        return {
+            "success": True,
+            "data": {
+                "allowed": True,
+                "fulfillment_status": fulfillment_status,
+                "comanda_status": comanda_status,
+            },
+        }
+
+
+async def update_tab_item_content(
+    request: Request,
+    table_id: UUID,
+    order_item_id: UUID,
+    modifiers: List[dict],
+    notes: Optional[str],
+) -> dict:
+    """Replace modifiers and notes on a tab line when kitchen has not accepted yet (#1151)."""
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    user_id = session_context.user_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    async with get_db_connection(use_transaction=True) as conn:
+        row = await _fetch_open_tab_item_row(conn, order_item_id, table_id, tenant_id)
+        if not row:
+            raise NotFoundError("Order item not found or session already closed")
+
+        comanda_ctx = await _fetch_tab_item_comanda_context(conn, order_item_id)
+        comanda_status = comanda_ctx["comanda_status"] if comanda_ctx else None
+        block_reason = _tab_item_edit_block_reason(row["fulfillment_status"], comanda_status)
+        if block_reason:
+            raise APIError(
+                block_reason,
+                status_code=409,
+                details={
+                    "code": "TAB_ITEM_EDIT_KITCHEN_ACCEPTED",
+                    "fulfillment_status": row["fulfillment_status"] or "new",
+                    "comanda_status": comanda_status,
+                },
+            )
+
+        old_modifiers = await _fetch_order_item_modifiers(conn, order_item_id)
+        old_notes = row["notes"]
+        quantity = float(row["quantity"])
+
+        await conn.execute(
+            "DELETE FROM order_item_modifiers WHERE order_item_id = $1",
+            order_item_id,
+        )
+        modifier_sum = 0.0
+        for mod in modifiers or []:
+            mod_qty = float(mod.get("quantity") or 1)
+            mod_price = float(mod.get("price") or 0)
+            modifier_sum += mod_price * mod_qty
+            mod_id = mod.get("id")
+            await conn.execute(
+                """
+                INSERT INTO order_item_modifiers (
+                    order_item_id, modifier_id, modifier_name, price_at_purchase, quantity
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                order_item_id,
+                mod_id,
+                mod.get("name"),
+                mod_price,
+                mod_qty,
+            )
+
+        normalized_notes = (notes or "").strip() or None
+        effective_unit_price = float(row["price_at_purchase"]) + modifier_sum
+        new_subtotal = effective_unit_price * quantity
+        old_subtotal = float(row["subtotal"])
+
+        await conn.execute(
+            """
+            UPDATE order_items
+            SET notes = $1, subtotal = $2
+            WHERE id = $3
+            """,
+            normalized_notes,
+            new_subtotal,
+            order_item_id,
+        )
+        new_total = max(0.0, float(row["total_amount"]) - old_subtotal + new_subtotal)
+        await conn.execute(
+            "UPDATE orders SET total_amount = $1 WHERE id = $2",
+            new_total,
+            row["order_id"],
+        )
+
+        if comanda_ctx and comanda_status == "pending":
+            snapshot = [
+                {
+                    "name": m.get("name"),
+                    "price": float(m.get("price") or 0),
+                    "quantity": int(m.get("quantity") or 1),
+                }
+                for m in (modifiers or [])
+            ]
+            await conn.execute(
+                """
+                UPDATE comanda_items
+                SET modifiers_snapshot = $1::jsonb, notes = $2
+                WHERE id = $3
+                """,
+                json.dumps(snapshot) if snapshot else None,
+                normalized_notes,
+                comanda_ctx["comanda_item_id"],
+            )
+
+        new_modifiers = await _fetch_order_item_modifiers(conn, order_item_id)
+        tab_ctx = {
+            "channel": "barra" if row["is_bar"] else "mesa",
+            "table_name": row["table_name"],
+            "table_session_id": row["table_session_id"],
+            "effective_waiter_member_id": row["effective_waiter_member_id"],
+        }
+        payload = _build_tab_item_payload(
+            product_id=row["product_id"],
+            product_name=row["product_name"],
+            quantity=quantity,
+            unit_price=row["price_at_purchase"],
+            subtotal=new_subtotal,
+            modifiers=new_modifiers,
+            notes=normalized_notes,
+            table_id=table_id,
+            table_name=row["table_name"],
+            order_number=row["order_number"],
+        )
+        payload["previous_modifiers"] = old_modifiers
+        payload["previous_notes"] = old_notes
+
+        await _record_tab_operation_event(
+            conn,
+            tenant_id,
+            user_id=user_id,
+            table_id=table_id,
+            tab_ctx=tab_ctx,
+            action="tab_item_edited",
+            order_id=row["order_id"],
+            order_item_id=order_item_id,
+            comanda_item_id=comanda_ctx["comanda_item_id"] if comanda_ctx else None,
+            payload=payload,
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "order_item_id": str(order_item_id),
+                "subtotal": new_subtotal,
+                "notes": normalized_notes,
+                "modifiers": new_modifiers,
+            },
+        }
+
+
 def _normalize_audit_reason(reason: Optional[str]) -> Optional[str]:
     normalized = (reason or "").strip()
     return normalized or None
