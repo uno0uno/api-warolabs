@@ -64,6 +64,18 @@ class UpdateTabItemRequest(BaseModel):
     )
 
 
+class TabItemContentModifier(BaseModel):
+    id: Optional[str] = None
+    name: str
+    price: float = Field(..., ge=0)
+    quantity: int = Field(1, ge=1)
+
+
+class UpdateTabItemContentRequest(BaseModel):
+    modifiers: List[TabItemContentModifier] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
 class TableQrToggleRequest(BaseModel):
     enabled: bool
 
@@ -327,6 +339,42 @@ async def update_tab_item_quantity(request: Request, table_id: UUID, order_item_
     """Update the quantity of an order item in the running tab."""
     return await tables_service.update_tab_item_quantity(
         request, table_id, order_item_id, body.quantity, body.reason,
+    )
+
+
+@router.get(
+    "/{table_id}/tab/items/{order_item_id}/edit-eligibility",
+    dependencies=[Depends(require_module(Module.POS))],
+)
+async def tab_item_edit_eligibility(
+    request: Request,
+    table_id: UUID,
+    order_item_id: UUID,
+    record_attempt: bool = Query(False, description="Record bitácora when edit is blocked"),
+):
+    """Whether tab line modifiers/notes can be edited (kitchen-acceptance gate, #1151)."""
+    return await tables_service.get_tab_item_edit_eligibility(
+        request, table_id, order_item_id, record_attempt=record_attempt,
+    )
+
+
+@router.patch(
+    "/{table_id}/tab/items/{order_item_id}/content",
+    dependencies=[Depends(require_module(Module.POS))],
+)
+async def update_tab_item_content(
+    request: Request,
+    table_id: UUID,
+    order_item_id: UUID,
+    body: UpdateTabItemContentRequest,
+):
+    """Replace modifiers and notes on a tab line (#1151)."""
+    modifiers = [
+        {"id": m.id, "name": m.name, "price": m.price, "quantity": m.quantity}
+        for m in body.modifiers
+    ]
+    return await tables_service.update_tab_item_content(
+        request, table_id, order_item_id, modifiers, body.notes,
     )
 
 
