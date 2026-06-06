@@ -932,11 +932,14 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     item_rows = await conn.fetch(
                         """
                         SELECT oi.id, oi.subtotal, oi.quantity, oi.product_id, oi.promo_opt_out,
+                               oi.applied_promotion_id, oi.promo_savings_allocated,
+                               tp.name AS promotion_name, tp.promo_type,
                                p.category_id,
                                COALESCE(p.tax_category, 'standard') AS tax_category
                         FROM order_items oi
                         JOIN orders o ON o.id = oi.order_id
                         JOIN product p ON p.id = oi.product_id
+                        LEFT JOIN tenant_promotions tp ON tp.id = oi.applied_promotion_id
                         WHERE o.table_session_id = $1 AND o.status = 'pending'
                         """,
                         session_row["id"],
@@ -950,6 +953,10 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             "subtotal": float(row["subtotal"]),
                             "tax_category": row["tax_category"] or "standard",
                             "promo_opt_out": bool(row.get("promo_opt_out")),
+                            "applied_promotion_id": str(row["applied_promotion_id"]) if row.get("applied_promotion_id") else None,
+                            "promo_savings_allocated": float(row["promo_savings_allocated"] or 0) if row.get("promo_savings_allocated") is not None else 0,
+                            "promotion_name": row.get("promotion_name"),
+                            "promo_type": row.get("promo_type"),
                         }
                         for row in item_rows
                     ]
@@ -959,6 +966,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         promo_lines,
                         discount_type=discount_type,
                         discount_value=discount_value,
+                        preserve_persisted_promos=True,
                     )
                     from app.services.waros_service import (
                         apply_checkout_waro_redemption,
@@ -1872,11 +1880,16 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                             oi.subtotal,
                             oi.product_id,
                             oi.promo_opt_out,
+                            oi.applied_promotion_id,
+                            oi.promo_savings_allocated,
+                            tp.name AS promotion_name,
+                            tp.promo_type,
                             p.category_id,
                             COALESCE(p.tax_category, 'standard') AS tax_category
                         FROM order_items oi
                         JOIN orders o ON o.id = oi.order_id
                         JOIN product p ON p.id = oi.product_id
+                        LEFT JOIN tenant_promotions tp ON tp.id = oi.applied_promotion_id
                         WHERE o.id = ANY($1::uuid[])
                         """,
                         order_ids,
@@ -1890,6 +1903,10 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                             "subtotal": float(row["subtotal"]),
                             "tax_category": row["tax_category"] or "standard",
                             "promo_opt_out": bool(row.get("promo_opt_out")),
+                            "applied_promotion_id": str(row["applied_promotion_id"]) if row.get("applied_promotion_id") else None,
+                            "promo_savings_allocated": float(row["promo_savings_allocated"] or 0) if row.get("promo_savings_allocated") is not None else 0,
+                            "promotion_name": row.get("promotion_name"),
+                            "promo_type": row.get("promo_type"),
                         }
                         for row in eval_rows
                     ]
@@ -1897,6 +1914,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                         conn,
                         UUID(str(tenant_id)),
                         promo_lines,
+                        preserve_persisted_promos=True,
                     )
                     _promo_savings = float(checkout_eval.get("promo_savings") or 0)
                     _subtotal_after_promos = float(checkout_eval.get("subtotal_after_promos") or 0)

@@ -1289,9 +1289,11 @@ def _allocate_bogo_savings_cheapest_first(
 
 def evaluate_cart_promotions(
     lines: Sequence[Dict[str, Any]],
-    promotions: Sequence[Dict[str, Any]],
+    promotions: Optional[Sequence[Dict[str, Any]]] = None,
     *,
     promo_type_block_map: Optional[Dict[str, Any]] = None,
+    preserve_persisted_promos: bool = False,
+    promos: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Evaluate active promotions against checkout lines.
@@ -1299,6 +1301,9 @@ def evaluate_cart_promotions(
     Each input line needs: id, product_id, category_id (optional), quantity, subtotal.
     Returns authoritative promo savings and per-line breakdown (batch #982).
     """
+    if promotions is None:
+        promotions = promos or []
+
     evaluated_lines: List[Dict[str, Any]] = []
     breakdown_by_id: Dict[str, Dict[str, Any]] = {}
     total_promo_savings = 0
@@ -1317,8 +1322,20 @@ def evaluate_cart_promotions(
         subtotal = float(line["subtotal"])
         original_subtotal += subtotal
 
+        persisted_promo_id = line.get("applied_promotion_id")
+        persisted_savings = round(float(line.get("promo_savings_allocated") or 0))
+        persisted_promo: Optional[Dict[str, Any]] = None
+        if preserve_persisted_promos and persisted_promo_id and persisted_savings > 0:
+            persisted_promo = {
+                "id": persisted_promo_id,
+                "name": line.get("promotion_name") or "Promoción",
+                "promo_type": line.get("promo_type") or line.get("promotion_type") or "",
+            }
+
         if line.get("promo_opt_out"):
             promo = None
+        elif persisted_promo is not None:
+            promo = persisted_promo
         else:
             promo = _pick_best_promotion_for_line(
                 promotions,
@@ -1335,9 +1352,18 @@ def evaluate_cart_promotions(
             "category_id": category_id,
             "subtotal": subtotal,
             "promo": promo,
+            "persisted_promo_savings": (
+                persisted_savings
+                if persisted_promo is not None and promo is persisted_promo
+                else None
+            ),
         })
 
-        if promo is not None and promo["promo_type"] == "bogo":
+        if (
+            promo is not None
+            and promo["promo_type"] == "bogo"
+            and persisted_promo is None
+        ):
             group_key = (str(product_id), str(promo["id"]))
             bogo_group_indices.setdefault(group_key, []).append(idx)
 
@@ -1361,6 +1387,13 @@ def evaluate_cart_promotions(
     for state in pending:
         line_id = state["line_id"]
         promo = state["promo"]
+        persisted_promo_savings = state.get("persisted_promo_savings")
+        if persisted_promo_savings is not None:
+            savings_by_line_id[line_id] = min(
+                round(float(persisted_promo_savings)),
+                round(float(state["subtotal"])),
+            )
+            continue
         if promo is None:
             savings_by_line_id.setdefault(line_id, 0)
             continue
@@ -1562,6 +1595,7 @@ async def evaluate_checkout_promotions(
     manual_discount_amount: float = 0,
     discount_type: Optional[str] = None,
     discount_value: Optional[float] = None,
+    preserve_persisted_promos: bool = False,
 ) -> Dict[str, Any]:
     """DB-backed promo evaluation + optional manual discount stacking."""
     evaluation_at = at or default_at_bogota()
@@ -1581,6 +1615,7 @@ async def evaluate_checkout_promotions(
         lines,
         promotions,
         promo_type_block_map=type_block_map,
+        preserve_persisted_promos=preserve_persisted_promos,
     )
     manual_discount = float(manual_discount_amount or 0)
     if discount_type and discount_value is not None and discount_value > 0:
@@ -1609,11 +1644,14 @@ def promo_persist_fields_from_eval_line(
 
 _SESSION_PENDING_PROMO_ITEMS_SQL = """
     SELECT oi.id, oi.subtotal, oi.quantity, oi.product_id, oi.promo_opt_out,
+           oi.applied_promotion_id, oi.promo_savings_allocated,
+           tp.name AS promotion_name, tp.promo_type,
            p.category_id,
            COALESCE(p.tax_category, 'standard') AS tax_category
     FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
     JOIN product p ON p.id = oi.product_id
+    LEFT JOIN tenant_promotions tp ON tp.id = oi.applied_promotion_id
     WHERE o.table_session_id = $1 AND o.status = 'pending'
 """
 
@@ -1629,6 +1667,16 @@ def item_rows_to_promo_lines(item_rows: Sequence[Any]) -> List[Dict[str, Any]]:
             "subtotal": float(row["subtotal"]),
             "tax_category": row["tax_category"] or "standard",
             "promo_opt_out": bool(row.get("promo_opt_out")),
+            "applied_promotion_id": (
+                str(row["applied_promotion_id"])
+                if row.get("applied_promotion_id") else None
+            ),
+            "promo_savings_allocated": (
+                float(row["promo_savings_allocated"] or 0)
+                if row.get("promo_savings_allocated") is not None else 0
+            ),
+            "promotion_name": row.get("promotion_name"),
+            "promo_type": row.get("promo_type"),
         }
         for row in item_rows
     ]
