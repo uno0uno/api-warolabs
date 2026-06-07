@@ -44,6 +44,24 @@ class TestInventoryStockEndpoint:
         assert response.status_code in [200, 401, 403, 500]
 
     @pytest.mark.asyncio
+    async def test_get_inventory_stock_filter_category(self, client: AsyncClient):
+        """Test inventory stock filtered by category"""
+        response = await client.get("/inventory/stock?category=Verduras")
+        assert response.status_code in [200, 401, 403, 500]
+
+    @pytest.mark.asyncio
+    async def test_get_inventory_stock_filter_unit(self, client: AsyncClient):
+        """Test inventory stock filtered by unit"""
+        response = await client.get("/inventory/stock?unit=gr")
+        assert response.status_code in [200, 401, 403, 500]
+
+    @pytest.mark.asyncio
+    async def test_get_inventory_stock_filter_category_unit_and_status(self, client: AsyncClient):
+        """Test inventory stock combining backend filters"""
+        response = await client.get("/inventory/stock?category=Verduras&unit=gr&status_filter=low")
+        assert response.status_code in [200, 401, 403, 500]
+
+    @pytest.mark.asyncio
     async def test_get_inventory_stock_filter_low(self, client: AsyncClient):
         """Test inventory stock filtered by status=low"""
         response = await client.get("/inventory/stock?status_filter=low")

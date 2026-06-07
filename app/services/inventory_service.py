@@ -20,6 +20,8 @@ async def get_inventory_stock(
     offset: int = 0,
     search: Optional[str] = None,
     status_filter: Optional[str] = None,  # 'low', 'critical', 'ok', 'all'
+    category: Optional[str] = None,
+    unit: Optional[str] = None,
     sort_field: str = "current_stock",
     sort_direction: str = "desc"
 ) -> Dict[str, Any]:
@@ -33,6 +35,8 @@ async def get_inventory_stock(
         offset: Number of records to skip
         search: Search term for ingredient name
         status_filter: Filter by stock status (low, critical, ok, all)
+        category: Filter by ingredient category
+        unit: Filter by ingredient unit
         sort_field: Field to sort by
         sort_direction: Sort direction (asc, desc)
 
@@ -122,6 +126,18 @@ async def get_inventory_stock(
                     base_query += " AND ti.current_stock > ti.minimum_stock"
                     count_query += " AND ti.current_stock > ti.minimum_stock"
 
+            if category:
+                base_query += f" AND i.category = ${param_count}"
+                count_query += f" AND i.category = ${param_count}"
+                params.append(category)
+                param_count += 1
+
+            if unit:
+                base_query += f" AND i.unit = ${param_count}"
+                count_query += f" AND i.unit = ${param_count}"
+                params.append(unit)
+                param_count += 1
+
             # Add sorting
             valid_sort_fields = {
                 'ingredient_name': 'i.name',
@@ -157,6 +173,33 @@ async def get_inventory_stock(
             """
             stats = await conn.fetchrow(stats_query, tenant_id)
 
+            filter_options_query = """
+                SELECT
+                    COALESCE((
+                        SELECT ARRAY_AGG(category ORDER BY category)
+                        FROM (
+                            SELECT DISTINCT i.category
+                            FROM tenant_inventory ti
+                            JOIN ingredients i ON ti.ingredient_id = i.id
+                            WHERE ti.tenant_id = $1
+                              AND ti.current_stock != 0
+                              AND i.category IS NOT NULL
+                        ) categories
+                    ), ARRAY[]::text[]) AS categories,
+                    COALESCE((
+                        SELECT ARRAY_AGG(unit ORDER BY unit)
+                        FROM (
+                            SELECT DISTINCT i.unit
+                            FROM tenant_inventory ti
+                            JOIN ingredients i ON ti.ingredient_id = i.id
+                            WHERE ti.tenant_id = $1
+                              AND ti.current_stock != 0
+                              AND i.unit IS NOT NULL
+                        ) units
+                    ), ARRAY[]::text[]) AS units
+            """
+            filter_options = await conn.fetchrow(filter_options_query, tenant_id)
+
             # Format inventory data
             inventory_list = []
             for row in inventory_data:
@@ -191,6 +234,10 @@ async def get_inventory_stock(
                     "low_stock_count": stats['low_stock_count'],
                     "ok_count": stats['ok_count'],
                     "total_inventory_value": float(stats['total_inventory_value']) if stats['total_inventory_value'] else 0
+                },
+                "filter_options": {
+                    "categories": list(filter_options['categories'] or []),
+                    "units": list(filter_options['units'] or [])
                 }
             }
 
