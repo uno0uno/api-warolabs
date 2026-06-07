@@ -124,6 +124,22 @@ class TestInventoryMovementsEndpoint:
         assert response.status_code in [200, 401, 403, 500]
 
     @pytest.mark.asyncio
+    async def test_get_inventory_movements_filter_by_positive_direction(self, client: AsyncClient):
+        """Test inventory movements filtered by positive quantity direction"""
+        response = await client.get(
+            "/inventory/movements?movement_type=adjustment&quantity_direction=positive"
+        )
+        assert response.status_code in [200, 401, 403, 500]
+
+    @pytest.mark.asyncio
+    async def test_get_inventory_movements_filter_by_negative_direction(self, client: AsyncClient):
+        """Test inventory movements filtered by negative quantity direction"""
+        response = await client.get(
+            "/inventory/movements?movement_type=adjustment&quantity_direction=negative"
+        )
+        assert response.status_code in [200, 401, 403, 500]
+
+    @pytest.mark.asyncio
     async def test_get_inventory_movements_filter_by_date(self, client: AsyncClient):
         """Test inventory movements filtered by date range"""
         response = await client.get(

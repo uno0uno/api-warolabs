@@ -255,6 +255,7 @@ async def get_inventory_movements(
     offset: int = 0,
     ingredient_id: Optional[UUID] = None,
     movement_type: Optional[str] = None,  # 'purchase', 'consumption', 'adjustment', etc.
+    quantity_direction: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -268,6 +269,7 @@ async def get_inventory_movements(
         offset: Number of records to skip
         ingredient_id: Filter by specific ingredient
         movement_type: Filter by movement type
+        quantity_direction: Filter by quantity sign ('positive' or 'negative')
         start_date: Filter by start date
         end_date: Filter by end date
 
@@ -336,6 +338,13 @@ async def get_inventory_movements(
                 count_query += f" AND tim.movement_type = ${param_count}"
                 params.append(movement_type)
                 param_count += 1
+
+            if quantity_direction == "positive":
+                base_query += " AND tim.quantity_change >= 0"
+                count_query += " AND tim.quantity_change >= 0"
+            elif quantity_direction == "negative":
+                base_query += " AND tim.quantity_change < 0"
+                count_query += " AND tim.quantity_change < 0"
 
             if start_date:
                 base_query += f" AND tim.created_at >= ${param_count}::timestamp"
