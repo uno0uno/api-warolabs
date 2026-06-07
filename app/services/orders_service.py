@@ -812,6 +812,7 @@ async def bulk_update_order_status(
     status: str,
     payment_method: Optional[str] = None,
     customer_id: Optional[str] = None,
+    payment_method_id: Optional[str] = None,
 ) -> dict:
     """Bulk update status for multiple orders belonging to the tenant."""
     allowed = {"completed", "cancelled", "pending"}
@@ -852,7 +853,8 @@ async def bulk_update_order_status(
 
             # Fetch current state of all orders before updating
             order_rows = await conn.fetch(
-                """SELECT id, status, order_number, table_session_id, pos_cart_id, payment_status
+                """SELECT id, status, order_number, table_session_id, pos_cart_id,
+                          payment_status, total_amount
                    FROM orders WHERE id = ANY($1) AND tenant_id = $2""",
                 ids, tenant_id
             )
@@ -868,14 +870,84 @@ async def bulk_update_order_status(
 
             from uuid import UUID as _UUID2
             cid = _UUID2(customer_id) if customer_id else None
+            pmid = _UUID2(payment_method_id) if payment_method_id else None
+
+            if payment_method_id and not payment_method:
+                raise APIError("payment_method es requerido cuando se envía payment_method_id", status_code=400)
+
+            if payment_method:
+                group_row = await conn.fetchrow(
+                    """
+                    SELECT id
+                    FROM payment_method_groups
+                    WHERE tenant_id = $1
+                      AND slug = $2
+                    """,
+                    tenant_id,
+                    payment_method,
+                )
+                if payment_method_id:
+                    if not group_row:
+                        raise APIError(
+                            f"Método de pago '{payment_method}' no es válido para este restaurante.",
+                            status_code=400,
+                        )
+                    method_row = await conn.fetchrow(
+                        """
+                        SELECT id
+                        FROM payment_methods
+                        WHERE id = $1
+                          AND tenant_id = $2
+                          AND group_id = $3
+                          AND is_active = true
+                        """,
+                        pmid,
+                        tenant_id,
+                        group_row["id"],
+                    )
+                    if not method_row:
+                        raise APIError("El método seleccionado no pertenece al grupo elegido.", status_code=400)
+
+                if payment_method == "customer_wallet" and not cid:
+                    raise APIError("La billetera requiere un cliente identificado", status_code=400)
+
+                if payment_method == "customer_wallet" and cid:
+                    from app.services.customer_wallet_service import assert_wallet_customer_identified
+
+                    await assert_wallet_customer_identified(conn, cid)
+
+            payment_status_update = None
+            if status == "completed" and payment_method:
+                payment_status_update = "credit" if payment_method == "credit" else "paid"
+
             result = await conn.execute(
                 """UPDATE orders
                    SET status = $1,
                        payment_method = COALESCE($2, payment_method),
-                       customer_id = COALESCE($5, customer_id)
+                       customer_id = COALESCE($5, customer_id),
+                       payment_method_id = CASE WHEN $2::text IS NULL THEN payment_method_id ELSE $6::uuid END,
+                       payment_status = COALESCE($7, payment_status)
                    WHERE id = ANY($3) AND tenant_id = $4""",
-                status, payment_method, ids, tenant_id, cid
+                status, payment_method, ids, tenant_id, cid, pmid, payment_status_update
             )
+
+            if status == "completed" and payment_method == "customer_wallet" and cid:
+                from decimal import Decimal
+                from app.services.customer_wallet_service import apply_wallet_for_order
+
+                for row in order_rows:
+                    if row["status"] == "completed":
+                        continue
+                    amount_cop = Decimal(str(row["total_amount"]))
+                    if amount_cop > 0:
+                        await apply_wallet_for_order(
+                            conn,
+                            cid,
+                            tenant_id,
+                            amount_cop,
+                            row["id"],
+                            user_id,
+                        )
 
             # Stock adjustments and mesa session releases per order
             released_sessions = set()
