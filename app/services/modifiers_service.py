@@ -376,7 +376,8 @@ async def get_modifier_groups_list(
     page: int = 1,
     limit: int = 50,
     search: Optional[str] = None,
-    product_id: Optional[UUID] = None
+    product_id: Optional[UUID] = None,
+    is_required: Optional[bool] = None
 ) -> ModifierGroupsListResponse:
     """Get list of modifier groups with filters. Now supports multiple products per group."""
     try:
@@ -427,6 +428,12 @@ async def get_modifier_groups_list(
                 base_query += f" AND pmg.product_id = ${param_count}"
                 count_query += f" AND pmg.product_id = ${param_count}"
                 params.append(product_id)
+                param_count += 1
+
+            if is_required is not None:
+                base_query += f" AND mg.is_required = ${param_count}"
+                count_query += f" AND mg.is_required = ${param_count}"
+                params.append(is_required)
                 param_count += 1
 
             # Add pagination

@@ -38,11 +38,12 @@ async def get_modifier_groups(
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=250),
     search: Optional[str] = Query(None),
-    product_id: Optional[UUID] = Query(None)
+    product_id: Optional[UUID] = Query(None),
+    is_required: Optional[bool] = Query(None)
 ):
     """Get list of modifier groups with pagination and filters"""
     return await modifiers_service.get_modifier_groups_list(
-        request, response, page, limit, search, product_id
+        request, response, page, limit, search, product_id, is_required
     )
 
 
