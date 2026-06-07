@@ -941,7 +941,7 @@ def _build_open_tables_filter(
     """
     Open tables (closed_at IS NULL applied by caller).
 
-    Date-only: opened on a calendar day in [period_start, period_end].
+    Date-only: opened on a Bogota calendar day in [period_start, period_end].
     Shift window: session started on or before shift end (still-open tables
     that began before the shift still block the close).
     """
@@ -951,8 +951,8 @@ def _build_open_tables_filter(
     p2 = f"${param_offset}"
     p3 = f"${param_offset + 1}"
     sql = (
-        f"AND ts.opened_at::date >= {p2} "
-        f"AND ts.opened_at::date <= {p3}"
+        f"AND (ts.opened_at AT TIME ZONE 'America/Bogota')::date >= {p2} "
+        f"AND (ts.opened_at AT TIME ZONE 'America/Bogota')::date <= {p3}"
     )
     return sql, [period_start, period_end]
 
