@@ -2211,7 +2211,8 @@ async def complete_pos_order(
                         _standard_tax_label = f"IVA {pct}%"
 
                     if tax_config.get('liquor_tax_applicable') and liq_subtotal > 0:
-                        _liquor_tax = round(liq_subtotal * 0.05)
+                        liq_rate = float(tax_config.get('liquor_tax_rate') or 0.05)
+                        _liquor_tax = round(liq_subtotal * liq_rate)
                 except Exception as e:
                     logger.warning(f"Tax breakdown computation failed for order {order_id}: {e}")
 
