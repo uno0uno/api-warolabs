@@ -10,9 +10,10 @@ from decimal import Decimal
 
 
 class ModifierInput(BaseModel):
-    """Modifier input for cart items — only the ID is required.
+    """Modifier input for cart items.
     Price and name are always looked up from the DB."""
     id: UUID
+    quantity: int = Field(default=1, ge=1)
 
 
 class OnlineCartItemCreate(BaseModel):
@@ -29,6 +30,7 @@ class OnlineCartItemModifier(BaseModel):
     modifier_id: UUID
     modifier_name: str
     price: Decimal
+    quantity: Decimal
 
 
 class OnlineCartItem(BaseModel):
