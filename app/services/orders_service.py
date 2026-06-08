@@ -946,7 +946,6 @@ async def bulk_update_order_status(
             )
 
             if status == "completed" and payment_method == "customer_wallet" and cid:
-                from decimal import Decimal
                 from app.services.customer_wallet_service import apply_wallet_for_order
 
                 for row in order_rows:
@@ -965,6 +964,7 @@ async def bulk_update_order_status(
 
             # Stock adjustments and mesa session releases per order
             released_sessions = set()
+            newly_completed_order_ids = []
             for row in order_rows:
                 old_status = row['status']
                 if old_status == status:
@@ -976,6 +976,7 @@ async def bulk_update_order_status(
                 # Stock
                 if old_status != 'completed' and status == 'completed':
                     await _deduct_stock_for_status_update(conn, order_id_row, tenant_id, user_id, order_number)
+                    newly_completed_order_ids.append(order_id_row)
                 elif old_status == 'completed' and status in ('cancelled', 'pending'):
                     await _return_stock_for_order_cancellation(conn, order_id_row, tenant_id, user_id, order_number)
 
@@ -1001,6 +1002,47 @@ async def bulk_update_order_status(
                                  AND tenant_id = $2""",
                             sid, tenant_id
                         )
+
+            if newly_completed_order_ids:
+                try:
+                    completed_orders = await conn.fetch(
+                        """
+                        SELECT id, order_number, total_amount, payment_method,
+                               payment_method_id, order_date
+                        FROM orders
+                        WHERE id = ANY($1) AND tenant_id = $2 AND status = 'completed'
+                        """,
+                        newly_completed_order_ids,
+                        tenant_id,
+                    )
+                    tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                    for ord_row in completed_orders:
+                        order_date = ord_row["order_date"]
+                        gl_order_date = (
+                            order_date.astimezone(_BOG).date()
+                            if order_date.tzinfo
+                            else order_date.date()
+                        )
+                        await _post_order_gl_entry(
+                            conn=conn,
+                            tenant_id=tenant_id,
+                            order_id=ord_row["id"],
+                            order_date=gl_order_date,
+                            total_amount=Decimal(str(ord_row["total_amount"])),
+                            payment_method=ord_row["payment_method"] or payment_method or "digital",
+                            payment_method_id=ord_row["payment_method_id"],
+                            tax_config=tax_config,
+                            order_number=int(ord_row["order_number"]),
+                        )
+                        await _post_order_cogs_gl_entry(
+                            conn=conn,
+                            tenant_id=tenant_id,
+                            order_id=ord_row["id"],
+                            order_date=gl_order_date,
+                            order_number=int(ord_row["order_number"]),
+                        )
+                except Exception as gl_exc:
+                    logger.error(f"GL entries failed for bulk status update: {gl_exc}")
 
         updated = int(result.split()[-1])
         return {"success": True, "updated": updated, "message": f"{updated} orden(es) actualizadas a {status}"}
