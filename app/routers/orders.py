@@ -216,6 +216,7 @@ class ManualOrderModifier(BaseModel):
     id: str
     name: str
     price: float = 0.0
+    quantity: float = Field(default=1, gt=0)
 
 
 class ManualOrderItem(BaseModel):

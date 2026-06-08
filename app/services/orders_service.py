@@ -3147,10 +3147,18 @@ async def create_manual_order(
 
                     await assert_wallet_customer_identified(conn, customer_uuid)
 
+                def modifier_quantity(modifier: dict) -> float:
+                    return float(modifier.get("quantity") or 1)
+
+                def modifier_unit_total(modifier: dict) -> float:
+                    return float(modifier.get("price", 0)) * modifier_quantity(modifier)
+
                 # Compute total server-side — never trust client total
                 total_amount = sum(
-                    float(item["quantity"]) * float(item["unit_price"])
-                    + sum(float(m.get("price", 0)) for m in item.get("modifiers", []))
+                    float(item["quantity"]) * (
+                        float(item["unit_price"])
+                        + sum(modifier_unit_total(m) for m in item.get("modifiers", []))
+                    )
                     for item in items
                 )
 
@@ -3179,8 +3187,10 @@ async def create_manual_order(
 
                 for item in items:
                     modifiers = item.get("modifiers", [])
-                    modifiers_total = sum(float(m.get("price", 0)) for m in modifiers)
-                    subtotal = float(item["quantity"]) * float(item["unit_price"]) + modifiers_total
+                    modifiers_total = sum(modifier_unit_total(m) for m in modifiers)
+                    subtotal = float(item["quantity"]) * (
+                        float(item["unit_price"]) + modifiers_total
+                    )
                     product_id = UUID(item["product_id"])
                     order_item_row = await conn.fetchrow(
                         """
@@ -3199,18 +3209,20 @@ async def create_manual_order(
                     order_item_id = order_item_row["id"]
 
                     for modifier in modifiers:
+                        modifier_qty = modifier_quantity(modifier)
                         await conn.execute(
                             """
                             INSERT INTO order_item_modifiers (
                                 order_item_id, modifier_id, modifier_name,
                                 price_at_purchase, quantity
                             )
-                            VALUES ($1, $2, $3, $4, 1)
+                            VALUES ($1, $2, $3, $4, $5)
                             """,
                             order_item_id,
                             UUID(modifier["id"]),
                             modifier["name"],
-                            float(modifier.get("price", 0))
+                            float(modifier.get("price", 0)),
+                            modifier_qty
                         )
 
                         await deduct_modifier_inventory(
@@ -3221,11 +3233,8 @@ async def create_manual_order(
                             order_item_id=order_item_id,
                             order_number=order_row["order_number"],
                             item_quantity=float(item["quantity"]),
-                            modifier={
-                                "id": modifier["id"],
-                                "name": modifier["name"],
-                            },
-                            modifier_qty=1.0,
+                            modifier=modifier,
+                            modifier_qty=modifier_qty,
                         )
 
                     # Deduct inventory for product ingredients (direct + base recipes)
