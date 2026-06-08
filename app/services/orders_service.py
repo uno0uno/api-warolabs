@@ -3,15 +3,22 @@ Orders Service
 Handles listing and filtering of POS orders
 """
 import asyncio
+from decimal import Decimal
 from typing import Any, Dict, Optional, List
 from uuid import UUID
+from zoneinfo import ZoneInfo
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from app.services.aws_ses_service import ses_service
 from app.services.waros_service import evaluate_and_award
-from app.services.cierre_service import assert_order_not_in_closed_monthly_period, _get_tenant_tax_config
+from app.services.cierre_service import (
+    assert_order_not_in_closed_monthly_period,
+    _get_tenant_tax_config,
+    _post_order_cogs_gl_entry,
+    _post_order_gl_entry,
+)
 from app.services.email_helpers import send_pos_receipt_email
 from fastapi import HTTPException
 from datetime import datetime, date
@@ -32,6 +39,7 @@ def parse_date(date_str: Optional[str]) -> Optional[date]:
         return None
 
 logger = logging.getLogger(__name__)
+_BOG = ZoneInfo("America/Bogota")
 
 def _pos_modifier_inventory_helpers():
     from app.services.pos_cart_service import (
@@ -44,6 +52,12 @@ def _pos_modifier_inventory_helpers():
         return_modifier_inventory_for_order_item,
         return_order_item_inventory_from_snapshots,
     )
+
+
+def _pos_order_item_ingredient_snapshot_helper():
+    from app.services.pos_cart_service import _capture_order_item_ingredients
+
+    return _capture_order_item_ingredients
 
 
 
@@ -3105,11 +3119,13 @@ async def create_manual_order(
                 order_id = order_row["id"]
 
                 deduct_modifier_inventory, _, _ = _pos_modifier_inventory_helpers()
+                capture_order_item_ingredients = _pos_order_item_ingredient_snapshot_helper()
 
                 for item in items:
                     modifiers = item.get("modifiers", [])
                     modifiers_total = sum(float(m.get("price", 0)) for m in modifiers)
                     subtotal = float(item["quantity"]) * float(item["unit_price"]) + modifiers_total
+                    product_id = UUID(item["product_id"])
                     order_item_row = await conn.fetchrow(
                         """
                         INSERT INTO order_items (
@@ -3119,7 +3135,7 @@ async def create_manual_order(
                         RETURNING id
                         """,
                         order_id,
-                        UUID(item["product_id"]),
+                        product_id,
                         float(item["quantity"]),
                         float(item["unit_price"]),
                         subtotal
@@ -3173,7 +3189,7 @@ async def create_manual_order(
                         JOIN ingredients i ON brt.ingredient_id = i.id
                         WHERE pbr.product_id = $1
                         """,
-                        UUID(item["product_id"])
+                        product_id
                     )
 
                     for ingredient in ingredients:
@@ -3217,6 +3233,48 @@ async def create_manual_order(
                             f"Venta de {item['quantity']}x {item.get('product_name', '')} - Orden #{order_row['order_number']}",
                             user_id
                         )
+
+                    await capture_order_item_ingredients(
+                        conn,
+                        order_item_id,
+                        product_id,
+                        float(item["quantity"]),
+                        str(tenant_id),
+                    )
+
+                gl_order_date = (
+                    order_datetime.astimezone(_BOG).date()
+                    if order_datetime.tzinfo
+                    else order_datetime.date()
+                )
+                gl_payment_method_id = UUID(payment_method_id) if payment_method_id else None
+
+                try:
+                    tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                    await _post_order_gl_entry(
+                        conn=conn,
+                        tenant_id=tenant_id,
+                        order_id=order_id,
+                        order_date=gl_order_date,
+                        total_amount=Decimal(str(total_amount)),
+                        payment_method=payment_method,
+                        payment_method_id=gl_payment_method_id,
+                        tax_config=tax_config,
+                        order_number=int(order_row["order_number"]),
+                    )
+                except Exception as e:
+                    logger.error(f"GL entry failed for manual order {order_id}: {e}")
+
+                try:
+                    await _post_order_cogs_gl_entry(
+                        conn=conn,
+                        tenant_id=tenant_id,
+                        order_id=order_id,
+                        order_date=gl_order_date,
+                        order_number=int(order_row["order_number"]),
+                    )
+                except Exception as e:
+                    logger.error(f"COGS GL entry failed for manual order {order_id}: {e}")
 
         # Award waros for completed manual order (fire-and-forget — never blocks)
         if customer_id:
