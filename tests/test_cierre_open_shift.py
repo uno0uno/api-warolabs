@@ -120,3 +120,69 @@ async def test_create_cierre_rejects_day_only_when_open_shift_overlaps():
     compute_preview.assert_not_awaited()
     conn.fetchrow.assert_not_awaited()
     conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_cierre_rejects_rebel_rebel_open_table_before_writes():
+    tenant_id = uuid4()
+    conn = AsyncMock()
+
+    @asynccontextmanager
+    async def db_ctx(**_kwargs):
+        yield conn
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            current = datetime(2026, 6, 6, 22, 35, tzinfo=BOG)
+            return current if tz is None else current.astimezone(tz)
+
+    preview = {
+        "totalSales": 0.0,
+        "itemsSold": 0,
+        "totalTips": 0.0,
+        "totalTipTax": 0.0,
+        "totalCharged": 0.0,
+        "cashTips": 0.0,
+        "totalCash": 0.0,
+        "totalCard": 0.0,
+        "totalDigital": 0.0,
+        "totalCredit": 0.0,
+        "gastosEfectivo": 0.0,
+        "cashExpected": 0.0,
+        "openTablesCount": 1,
+    }
+    body = CierreCreate(
+        periodStart=date(2026, 6, 6),
+        periodEnd=date(2026, 6, 6),
+        cashCounted=0,
+    )
+
+    with patch(
+        "app.services.cierre_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id),
+    ), patch(
+        "app.services.cierre_service.get_db_connection",
+        side_effect=db_ctx,
+    ), patch(
+        "app.services.cierre_service._find_overlapping_period_id",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "app.services.cierre_service._fetch_open_shift_for_window",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "app.services.cierre_service._compute_preview",
+        new=AsyncMock(return_value=preview),
+    ) as compute_preview, patch(
+        "app.services.cierre_service.datetime",
+        FrozenDateTime,
+    ):
+        with pytest.raises(APIError) as exc:
+            await create_cierre(AsyncMock(), body)
+
+    assert exc.value.status_code == 409
+    assert "Hay 1 mesa(s) con cuenta abierta" in exc.value.message
+    assert "Cierra todas las mesas antes de registrar el cierre del día" in exc.value.message
+    compute_preview.assert_awaited_once()
+    conn.fetchrow.assert_not_awaited()
+    conn.execute.assert_not_awaited()
