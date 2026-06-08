@@ -3128,10 +3128,24 @@ async def create_manual_order(
         except ValueError:
             raise APIError("Invalid order_date format. Expected YYYY-MM-DDTHH:MM", status_code=400)
 
+        customer_uuid = UUID(customer_id) if customer_id else None
+        payment_method_uuid = UUID(payment_method_id) if payment_method_id else None
+
+        if payment_method == "customer_wallet":
+            if not customer_uuid:
+                raise APIError("La billetera requiere un cliente identificado", status_code=400)
+            if payment_method_uuid:
+                raise APIError("payment_method_id no aplica al método billetera del cliente", status_code=400)
+
         async with get_db_connection() as conn:
             async with conn.transaction():
                 # Guard: block creation if order_date falls in a closed monthly accounting period (#362)
                 await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_datetime)
+
+                if payment_method == "customer_wallet" and customer_uuid:
+                    from app.services.customer_wallet_service import assert_wallet_customer_identified
+
+                    await assert_wallet_customer_identified(conn, customer_uuid)
 
                 # Compute total server-side — never trust client total
                 total_amount = sum(
@@ -3150,9 +3164,9 @@ async def create_manual_order(
                     RETURNING id, order_number, order_date, created_at
                     """,
                     tenant_id,
-                    UUID(customer_id) if customer_id else None,
+                    customer_uuid,
                     payment_method,
-                    UUID(payment_method_id) if payment_method_id else None,
+                    payment_method_uuid,
                     order_datetime,
                     total_amount,
                     json.dumps({"source": "manual"})
@@ -3284,12 +3298,24 @@ async def create_manual_order(
                         str(tenant_id),
                     )
 
+                if payment_method == "customer_wallet" and customer_uuid:
+                    from app.services.customer_wallet_service import apply_wallet_for_order
+
+                    await apply_wallet_for_order(
+                        conn,
+                        customer_uuid,
+                        tenant_id,
+                        Decimal(str(total_amount)),
+                        order_id,
+                        user_id,
+                    )
+
                 gl_order_date = (
                     order_datetime.astimezone(_BOG).date()
                     if order_datetime.tzinfo
                     else order_datetime.date()
                 )
-                gl_payment_method_id = UUID(payment_method_id) if payment_method_id else None
+                gl_payment_method_id = payment_method_uuid
 
                 try:
                     tax_config = await _get_tenant_tax_config(conn, tenant_id)
