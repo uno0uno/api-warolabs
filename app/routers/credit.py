@@ -18,7 +18,11 @@ router = APIRouter(prefix="/credit", tags=["credit"])
 
 class RegisterCreditPaymentRequest(BaseModel):
     amount: Decimal = Field(..., gt=0, description="Payment amount (must be > 0)")
-    payment_method: str = Field(..., description="cash | card | digital")
+    payment_method: str = Field(..., description="Payment method group slug")
+    payment_method_id: Optional[UUID] = Field(
+        None,
+        description="UUID of the selected payment_methods row",
+    )
     notes: Optional[str] = Field(None, description="Optional notes for this payment")
     payment_date: Optional[date] = Field(None, description="Payment date (defaults to now)")
 
@@ -43,6 +47,7 @@ async def register_payment(
         order_id,
         body.amount,
         body.payment_method,
+        body.payment_method_id,
         body.notes,
         body.payment_date,
     )

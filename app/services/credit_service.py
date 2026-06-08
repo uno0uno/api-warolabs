@@ -22,6 +22,7 @@ async def register_credit_payment(
     order_id: UUID,
     amount: Decimal,
     payment_method: str,
+    payment_method_id: Optional[UUID] = None,
     notes: Optional[str] = None,
     payment_date: Optional[date] = None,
 ) -> dict:
@@ -83,6 +84,45 @@ async def register_credit_payment(
                         status_code=400,
                     )
 
+                group_row = await conn.fetchrow(
+                    """
+                    SELECT id
+                    FROM payment_method_groups
+                    WHERE slug = $1
+                      AND is_active = true
+                      AND (tenant_id IS NULL OR tenant_id = $2)
+                    """,
+                    payment_method,
+                    tenant_id,
+                )
+                if not group_row:
+                    raise APIError(
+                        f"Método de pago '{payment_method}' no es válido para este restaurante.",
+                        status_code=400,
+                        details={"code": "payment_method_invalid"},
+                    )
+
+                if payment_method_id:
+                    method_row = await conn.fetchrow(
+                        """
+                        SELECT id
+                        FROM payment_methods
+                        WHERE id = $1
+                          AND tenant_id = $2
+                          AND group_id = $3
+                          AND is_active = true
+                        """,
+                        payment_method_id,
+                        tenant_id,
+                        group_row["id"],
+                    )
+                    if not method_row:
+                        raise APIError(
+                            "El método seleccionado no pertenece al grupo elegido.",
+                            status_code=400,
+                            details={"code": "payment_method_id_invalid"},
+                        )
+
                 # 3. Insert payment record
                 from datetime import datetime, timezone
                 effective_payment_date = (
@@ -95,11 +135,11 @@ async def register_credit_payment(
                     """
                     INSERT INTO credit_payments (
                         order_id, customer_id, tenant_id,
-                        amount, payment_method, notes,
+                        amount, payment_method, payment_method_id, notes,
                         created_by_user_id,
                         payment_date
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()))
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, now()))
                     RETURNING id, payment_date, created_at
                     """,
                     order_id,
@@ -107,6 +147,7 @@ async def register_credit_payment(
                     tenant_id,
                     amount,
                     payment_method,
+                    payment_method_id,
                     notes,
                     user_id,
                     effective_payment_date,
@@ -147,6 +188,7 @@ async def register_credit_payment(
                         "order_id": str(order_id),
                         "amount": float(amount),
                         "payment_method": payment_method,
+                        "payment_method_id": str(payment_method_id) if payment_method_id else None,
                         "payment_date": payment_row["payment_date"].isoformat(),
                         "new_payment_status": new_status,
                         "credit_paid_amount": float(new_paid),
@@ -189,6 +231,7 @@ async def get_credit_payments(request: Request, order_id: UUID) -> dict:
                     cp.id,
                     cp.amount,
                     cp.payment_method,
+                    cp.payment_method_id,
                     cp.payment_date,
                     cp.notes,
                     cp.created_at,
@@ -217,6 +260,11 @@ async def get_credit_payments(request: Request, order_id: UUID) -> dict:
                         "id": str(row["id"]),
                         "amount": float(row["amount"]),
                         "payment_method": row["payment_method"],
+                        "payment_method_id": (
+                            str(row["payment_method_id"])
+                            if row["payment_method_id"]
+                            else None
+                        ),
                         "payment_date": row["payment_date"].isoformat(),
                         "notes": row["notes"],
                         "created_at": row["created_at"].isoformat(),
