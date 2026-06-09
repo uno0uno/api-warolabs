@@ -93,6 +93,40 @@ def test_ineligible_lines_unchanged():
     assert result["subtotal_after_promos"] == 8000
 
 
+def test_locked_line_keeps_promo_when_current_promos_empty():
+    promo_id = uuid4()
+    lines = [
+        {
+            **_line(subtotal=10000),
+            "locked_promotion_id": str(promo_id),
+            "locked_promotion_name": "Happy hour",
+            "locked_promo_type": "percent_off",
+            "locked_promo_savings": 1000,
+        },
+        _line(subtotal=5000),
+    ]
+    result = evaluate_cart_promotions(lines, [])
+    assert result["promo_savings"] == 1000
+    assert result["subtotal_after_promos"] == 14000
+    assert result["lines"][0]["promotion_id"] == str(promo_id)
+    assert result["lines"][0]["promotion_name"] == "Happy hour"
+    assert result["lines"][1]["promo_savings"] == 0
+
+
+def test_locked_line_opt_out_ignores_snapshot():
+    lines = [{
+        **_line(subtotal=10000),
+        "promo_opt_out": True,
+        "locked_promotion_id": str(uuid4()),
+        "locked_promotion_name": "Happy hour",
+        "locked_promo_type": "percent_off",
+        "locked_promo_savings": 1000,
+    }]
+    result = evaluate_cart_promotions(lines, [])
+    assert result["promo_savings"] == 0
+    assert result["lines"][0].get("promotion_id") is None
+
+
 def test_percent_off_category_scoped():
     """Happy hour % off all items in a category (warocol.com#983)."""
     category_id = uuid4()

@@ -1257,6 +1257,19 @@ def _compute_line_promo_savings(line: Dict[str, Any], promo: Dict[str, Any]) -> 
     return 0
 
 
+def _locked_promo_from_line(line: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    promo_id = line.get("locked_promotion_id")
+    savings = round(float(line.get("locked_promo_savings") or 0))
+    if not promo_id or savings <= 0:
+        return None
+    return {
+        "id": promo_id,
+        "name": line.get("locked_promotion_name") or "Promocion",
+        "promo_type": line.get("locked_promo_type") or "locked",
+        "locked_savings": savings,
+    }
+
+
 def _line_promo_eligible_unit_price(line: Dict[str, Any]) -> float:
     quantity = int(line.get("quantity") or 1)
     if quantity <= 0:
@@ -1339,8 +1352,12 @@ def evaluate_cart_promotions(
         subtotal = float(line["subtotal"])
         original_subtotal += subtotal
 
+        locked_promo = None if line.get("promo_opt_out") else _locked_promo_from_line(line)
+
         if line.get("promo_opt_out"):
             promo = None
+        elif locked_promo is not None:
+            promo = locked_promo
         else:
             promo = _pick_best_promotion_for_line(
                 promotions,
@@ -1386,6 +1403,12 @@ def evaluate_cart_promotions(
         promo = state["promo"]
         if promo is None:
             savings_by_line_id.setdefault(line_id, 0)
+            continue
+        if promo.get("locked_savings") is not None:
+            savings_by_line_id[line_id] = min(
+                int(promo["locked_savings"]),
+                round(float(state["line"].get("subtotal") or 0)),
+            )
             continue
         if promo["promo_type"] == "bogo":
             savings_by_line_id.setdefault(line_id, 0)
