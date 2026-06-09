@@ -15,6 +15,7 @@ router = APIRouter()
 
 class TableQrRequestModifier(BaseModel):
     id: UUID
+    quantity: int = Field(1, ge=1)
 
 
 class TableQrRequestItem(BaseModel):
@@ -72,7 +73,10 @@ async def submit_table_qr_request(
         {
             "product_id": str(item.product_id),
             "quantity": item.quantity,
-            "modifiers": [{"id": str(m.id)} for m in item.modifiers] if item.modifiers else [],
+            "modifiers": [
+                {"id": str(m.id), "quantity": m.quantity}
+                for m in item.modifiers
+            ] if item.modifiers else [],
             "notes": item.notes,
         }
         for item in body.items

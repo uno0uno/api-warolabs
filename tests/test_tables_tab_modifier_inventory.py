@@ -31,6 +31,7 @@ async def test_add_tab_items_core_deducts_modifier_inventory():
         None,
         {"id": order_id, "order_number": 42, "total_amount": 43.0},
         {"id": order_item_id},
+        {"total_amount": 43.0},
     ])
     mock_conn.fetch = AsyncMock(return_value=[])
     mock_conn.execute = AsyncMock()
@@ -99,6 +100,7 @@ async def test_add_tab_items_core_persists_modifier_quantity():
         None,
         {"id": order_id, "order_number": 42, "total_amount": 61.0},
         {"id": order_item_id},
+        {"total_amount": 52.0},
     ])
     mock_conn.fetch = AsyncMock(return_value=[])
     mock_conn.execute = AsyncMock()
@@ -219,6 +221,7 @@ async def test_deduct_modifier_inventory_for_order_item_writes_movement():
     mock_conn = AsyncMock()
     mock_conn.fetchrow = AsyncMock(side_effect=[
         {
+            "option_type": "INGREDIENT",
             "ingredient_id": ingredient_id,
             "ingredient_quantity": 1,
             "ingredient_unit": "und",
@@ -230,10 +233,10 @@ async def test_deduct_modifier_inventory_for_order_item_writes_movement():
     mock_conn.execute = AsyncMock()
 
     with patch(
-        "app.services.pos_cart_service.resolve_recipe_quantity_to_base_unit",
+        "app.services.modifier_option_service.resolve_recipe_quantity_to_base_unit",
         new=AsyncMock(return_value=1.0),
     ), patch(
-        "app.services.pos_cart_service._capture_modifier_ingredient_snapshot",
+        "app.services.pos_cart_service._capture_modifier_ingredient_line_snapshot",
         new=AsyncMock(),
     ) as snapshot_mock:
         await pos_cart_service._deduct_modifier_inventory_for_order_item(

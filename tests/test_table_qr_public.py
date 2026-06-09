@@ -120,6 +120,7 @@ def test_submit_endpoint_delegates_to_service():
     app = FastAPI()
     app.include_router(public_table_qr_router.router, prefix="/public/table-qr")
 
+    modifier_id = uuid4()
     submit_result = {
         "request_id": str(uuid4()),
         "status": "pending",
@@ -138,9 +139,140 @@ def test_submit_endpoint_delegates_to_service():
         res = client.post(
             f"/public/table-qr/tok-abc/requests",
             json={
-                "items": [{"product_id": product_id, "quantity": 1}],
+                "items": [{
+                    "product_id": product_id,
+                    "quantity": 1,
+                    "modifiers": [{"id": str(modifier_id), "quantity": 2}],
+                }],
                 "payment_method": "cash",
             },
         )
         assert res.status_code == 200
         assert res.json()["data"]["status"] == "pending"
+
+        forwarded_items = (
+            public_table_qr_service.submit_table_qr_request.await_args.kwargs["items"]
+        )
+        assert forwarded_items[0]["modifiers"] == [{
+            "id": str(modifier_id),
+            "quantity": 2,
+        }]
+
+
+def test_submit_endpoint_defaults_modifier_quantity_to_one():
+    app = FastAPI()
+    app.include_router(public_table_qr_router.router, prefix="/public/table-qr")
+
+    with patch(
+        "app.routers.public_table_qr.public_table_qr_service.submit_table_qr_request",
+        new_callable=AsyncMock,
+        return_value={"status": "pending"},
+    ):
+        client = TestClient(app)
+        product_id = str(uuid4())
+        modifier_id = uuid4()
+        res = client.post(
+            "/public/table-qr/tok-abc/requests",
+            json={
+                "items": [{
+                    "product_id": product_id,
+                    "quantity": 1,
+                    "modifiers": [{"id": str(modifier_id)}],
+                }],
+            },
+        )
+
+        assert res.status_code == 200
+        forwarded_items = (
+            public_table_qr_service.submit_table_qr_request.await_args.kwargs["items"]
+        )
+        assert forwarded_items[0]["modifiers"][0]["quantity"] == 1
+
+
+def test_submit_endpoint_rejects_invalid_modifier_quantity():
+    app = FastAPI()
+    app.include_router(public_table_qr_router.router, prefix="/public/table-qr")
+
+    client = TestClient(app)
+    res = client.post(
+        "/public/table-qr/tok-abc/requests",
+        json={
+            "items": [{
+                "product_id": str(uuid4()),
+                "quantity": 1,
+                "modifiers": [{"id": str(uuid4()), "quantity": 0}],
+            }],
+        },
+    )
+
+    assert res.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_build_item_snapshots_multiplies_and_persists_modifier_quantity():
+    tenant_id = uuid4()
+    product_id = uuid4()
+    modifier_id = uuid4()
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=[
+        [{"id": product_id, "name": "Hamburguesa", "price": 10000}],
+        [{"id": modifier_id, "name": "Tocineta", "price": 2500}],
+    ])
+
+    with patch(
+        "app.services.public_table_qr_service.validate_products_belong_to_tenant",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.public_table_qr_service.validate_modifiers_for_item",
+        new=AsyncMock(),
+    ):
+        snapshots, total = await public_table_qr_service._build_item_snapshots(
+            conn,
+            tenant_id,
+            [{
+                "product_id": str(product_id),
+                "quantity": 2,
+                "modifiers": [{"id": str(modifier_id), "quantity": 3}],
+            }],
+        )
+
+    assert total == 35000
+    assert snapshots[0]["line_total"] == 35000.0
+    assert snapshots[0]["modifiers"] == [{
+        "id": str(modifier_id),
+        "name": "Tocineta",
+        "price": 2500.0,
+        "quantity": 3,
+    }]
+
+
+@pytest.mark.asyncio
+async def test_build_item_snapshots_rejects_invalid_modifier_quantity():
+    tenant_id = uuid4()
+    product_id = uuid4()
+    modifier_id = uuid4()
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=[
+        [{"id": product_id, "name": "Hamburguesa", "price": 10000}],
+        [{"id": modifier_id, "name": "Tocineta", "price": 2500}],
+    ])
+
+    with patch(
+        "app.services.public_table_qr_service.validate_products_belong_to_tenant",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.public_table_qr_service.validate_modifiers_for_item",
+        new=AsyncMock(),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await public_table_qr_service._build_item_snapshots(
+                conn,
+                tenant_id,
+                [{
+                    "product_id": str(product_id),
+                    "quantity": 1,
+                    "modifiers": [{"id": str(modifier_id), "quantity": 0}],
+                }],
+            )
+
+    assert exc.value.status_code == 400
