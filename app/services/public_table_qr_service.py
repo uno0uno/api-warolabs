@@ -398,6 +398,12 @@ async def _build_item_snapshots(
             mod_map = {row["id"]: row for row in mod_rows}
             for mod in modifiers_in:
                 mod_id = UUID(str(mod["id"]))
+                mod_quantity = int(mod.get("quantity", 1))
+                if mod_quantity < 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="La cantidad del modificador debe ser al menos 1.",
+                    )
                 db_mod = mod_map.get(mod_id)
                 if not db_mod:
                     raise HTTPException(
@@ -405,11 +411,12 @@ async def _build_item_snapshots(
                         detail=f"Modifier '{mod_id}' does not exist or is not available",
                     )
                 price = Decimal(str(db_mod["price"]))
-                modifier_total += price
+                modifier_total += price * mod_quantity
                 resolved_modifiers.append({
                     "id": str(mod_id),
                     "name": db_mod["name"],
                     "price": float(price),
+                    "quantity": mod_quantity,
                 })
 
         line_total = (unit_price + modifier_total) * quantity

@@ -162,6 +162,81 @@ async def test_accept_conflicting_payment_methods_409():
         assert exc.value.status_code == 409
 
 
+@pytest.mark.asyncio
+async def test_accept_requests_passes_persisted_modifier_quantity_to_tab_core():
+    session = _session()
+    request_id = uuid4()
+    table_id = uuid4()
+    request_items = [{
+        "product_id": str(uuid4()),
+        "quantity": 1,
+        "unit_price": 10.0,
+        "modifiers": [{
+            "id": str(uuid4()),
+            "name": "Tocineta",
+            "price": 2.5,
+            "quantity": 3,
+        }],
+        "line_total": 17.5,
+    }]
+
+    conn = MagicMock()
+    tx = MagicMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction.return_value = tx
+    conn.fetch = AsyncMock(side_effect=[
+        [{
+            "id": request_id,
+            "table_id": table_id,
+            "status": "pending",
+            "items": json.dumps(request_items),
+            "payment_method": None,
+            "payment_method_id": None,
+            "customer_notes": None,
+            "created_at": MagicMock(),
+        }],
+        [{"id": request_id}],
+    ])
+    conn.execute = AsyncMock()
+
+    with patch(
+        "app.services.table_qr_requests_service.require_valid_session",
+        return_value=session,
+    ), patch(
+        "app.services.table_qr_requests_service.get_db_connection",
+    ) as mock_conn, patch(
+        "app.services.table_qr_requests_service._resolve_tenant_member_id",
+        new=AsyncMock(return_value=uuid4()),
+    ), patch(
+        "app.services.table_qr_requests_service._ensure_open_session_in_tx",
+        new=AsyncMock(return_value=uuid4()),
+    ), patch(
+        "app.services.table_qr_requests_service._add_tab_items_core",
+        new=AsyncMock(return_value={
+            "session_id": uuid4(),
+            "order_id": uuid4(),
+            "order_number": 12,
+            "items_count": 1,
+            "total_amount": 17.5,
+        }),
+    ) as add_tab_mock, patch(
+        "app.services.table_qr_requests_service.fire_table_items",
+        new=AsyncMock(),
+    ):
+        mock_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
+        mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await table_qr_requests_service.accept_requests(
+            MagicMock(),
+            [request_id],
+        )
+
+    assert result["success"] is True
+    forwarded_items = add_tab_mock.await_args.args[4]
+    assert forwarded_items[0]["modifiers"][0]["quantity"] == 3
+
+
 def test_list_endpoint_delegates():
     app = FastAPI()
     app.include_router(table_qr_requests_router.router, prefix="/table-qr-requests")
