@@ -7,6 +7,7 @@ import pytest
 from app.services import tables_service
 from app.services.promotions_service import (
     apply_promo_eval_to_order_items,
+    enrich_order_item_rows_with_promo_basis,
     evaluate_cart_promotions,
     item_rows_to_promo_lines,
     persist_session_tab_promos,
@@ -36,6 +37,8 @@ def test_item_rows_to_promo_lines_maps_pending_rows():
         "product_id": product_id,
         "category_id": None,
         "quantity": 3,
+        "price_at_purchase": 8000.0,
+        "promo_eligible_modifier_unit_total": 2000.0,
         "subtotal": 30000.0,
         "tax_category": "standard",
         "promo_opt_out": False,
@@ -44,6 +47,33 @@ def test_item_rows_to_promo_lines_maps_pending_rows():
     assert lines[0]["id"] == str(item_id)
     assert lines[0]["quantity"] == 3
     assert lines[0]["subtotal"] == 30000.0
+    assert lines[0]["promo_eligible_subtotal"] == 30000.0
+
+
+@pytest.mark.asyncio
+async def test_enrich_order_item_rows_with_required_default_modifier_basis():
+    item_id = uuid4()
+    rows = [{
+        "id": item_id,
+        "product_id": uuid4(),
+        "category_id": None,
+        "quantity": 2,
+        "price_at_purchase": 10000.0,
+        "subtotal": 26000.0,
+        "tax_category": "standard",
+        "promo_opt_out": False,
+    }]
+    mock_conn = AsyncMock()
+    mock_conn.fetch = AsyncMock(return_value=[{
+        "order_item_id": item_id,
+        "eligible_modifier_unit_total": 2000.0,
+    }])
+
+    enriched = await enrich_order_item_rows_with_promo_basis(mock_conn, rows)
+    lines = item_rows_to_promo_lines(enriched)
+
+    assert enriched[0]["promo_eligible_modifier_unit_total"] == 2000.0
+    assert lines[0]["promo_eligible_subtotal"] == 24000.0
 
 
 def test_bogo_3x1_on_tab_line_quantity():
@@ -152,7 +182,7 @@ async def test_persist_session_tab_promos_evaluates_and_recalcs():
         "promo_breakdown": [],
     }
     mock_conn = AsyncMock()
-    mock_conn.fetch = AsyncMock(return_value=item_rows)
+    mock_conn.fetch = AsyncMock(side_effect=[item_rows, []])
 
     with patch(
         "app.services.promotions_service.evaluate_checkout_promotions",

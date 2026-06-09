@@ -7,14 +7,24 @@ from app.services.promotions_service import (
 )
 
 
-def _line(*, subtotal: float, quantity: int = 1, product_id=None, category_id=None):
-    return {
+def _line(
+    *,
+    subtotal: float,
+    quantity: int = 1,
+    product_id=None,
+    category_id=None,
+    promo_eligible_subtotal=None,
+):
+    line = {
         "id": str(uuid4()),
         "product_id": str(product_id or uuid4()),
         "category_id": str(category_id) if category_id else None,
         "quantity": quantity,
         "subtotal": subtotal,
     }
+    if promo_eligible_subtotal is not None:
+        line["promo_eligible_subtotal"] = promo_eligible_subtotal
+    return line
 
 
 def _promo(
@@ -272,3 +282,62 @@ def test_bogo_cross_line_cheapest_first():
     assert by_subtotal[10000] == 10000
     assert by_subtotal[12000] == 0
     assert by_subtotal[15000] == 0
+
+
+def test_percent_off_uses_promo_eligible_subtotal():
+    """Optional modifier extras stay charged outside percent promos (api-warolabs#422)."""
+    lines = [_line(subtotal=12000, promo_eligible_subtotal=10000)]
+    promo = _promo(promo_type="percent_off", value_json={"percent": 10})
+
+    result = evaluate_cart_promotions(lines, [promo])
+
+    assert result["promo_savings"] == 1000
+    assert result["subtotal_after_promos"] == 11000
+    assert result["lines"][0]["subtotal_after_promo"] == 11000
+
+
+def test_fixed_off_caps_at_promo_eligible_subtotal():
+    """Fixed promos cannot consume optional modifier extras (api-warolabs#422)."""
+    lines = [_line(subtotal=14000, promo_eligible_subtotal=9000)]
+    promo = _promo(promo_type="fixed_off", value_json={"amount_cop": 12000})
+
+    result = evaluate_cart_promotions(lines, [promo])
+
+    assert result["promo_savings"] == 9000
+    assert result["subtotal_after_promos"] == 5000
+
+
+def test_same_line_bogo_uses_eligible_unit_price():
+    """BOGO free units use eligible unit price, not gross unit with optional extras."""
+    product_id = uuid4()
+    lines = [_line(
+        subtotal=24000,
+        quantity=2,
+        product_id=product_id,
+        promo_eligible_subtotal=20000,
+    )]
+    promo = _promo(promo_type="bogo", value_json={"buy_qty": 1, "get_qty": 1})
+
+    result = evaluate_cart_promotions(lines, [promo])
+
+    assert result["promo_savings"] == 10000
+    assert result["subtotal_after_promos"] == 14000
+
+
+def test_cross_line_bogo_uses_eligible_unit_price_and_cap():
+    """Cross-line BOGO allocation ignores optional extras when choosing free units."""
+    product_id = uuid4()
+    promo = _promo(promo_type="bogo", value_json={"buy_qty": 2, "get_qty": 1}, name="3x1")
+    lines = [
+        _line(subtotal=20000, quantity=1, product_id=product_id, promo_eligible_subtotal=10000),
+        _line(subtotal=12000, quantity=1, product_id=product_id, promo_eligible_subtotal=12000),
+        _line(subtotal=11000, quantity=1, product_id=product_id, promo_eligible_subtotal=11000),
+    ]
+
+    result = evaluate_cart_promotions(lines, [promo])
+
+    assert result["promo_savings"] == 10000
+    by_subtotal = {line["subtotal"]: line["promo_savings"] for line in result["lines"]}
+    assert by_subtotal[20000] == 10000
+    assert by_subtotal[12000] == 0
+    assert by_subtotal[11000] == 0

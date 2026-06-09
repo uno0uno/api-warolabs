@@ -925,13 +925,18 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
 
                     payment_status = 'credit' if payment_method == 'credit' else ('partial' if split_mode else 'paid')
 
-                    from app.services.promotions_service import evaluate_checkout_promotions
+                    from app.services.promotions_service import (
+                        enrich_order_item_rows_with_promo_basis,
+                        evaluate_checkout_promotions,
+                        item_rows_to_promo_lines,
+                    )
 
                     _discount_amount = None
                     _promo_breakdown = []
                     item_rows = await conn.fetch(
                         """
-                        SELECT oi.id, oi.subtotal, oi.quantity, oi.product_id, oi.promo_opt_out,
+                        SELECT oi.id, oi.subtotal, oi.quantity, oi.price_at_purchase,
+                               oi.product_id, oi.promo_opt_out,
                                p.category_id,
                                COALESCE(p.tax_category, 'standard') AS tax_category
                         FROM order_items oi
@@ -941,18 +946,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         """,
                         session_row["id"],
                     )
-                    promo_lines = [
-                        {
-                            "id": str(row["id"]),
-                            "product_id": str(row["product_id"]),
-                            "category_id": str(row["category_id"]) if row["category_id"] else None,
-                            "quantity": int(row["quantity"]),
-                            "subtotal": float(row["subtotal"]),
-                            "tax_category": row["tax_category"] or "standard",
-                            "promo_opt_out": bool(row.get("promo_opt_out")),
-                        }
-                        for row in item_rows
-                    ]
+                    item_rows = await enrich_order_item_rows_with_promo_basis(conn, item_rows)
+                    promo_lines = item_rows_to_promo_lines(item_rows)
                     checkout_eval = await evaluate_checkout_promotions(
                         conn,
                         UUID(str(tenant_id)),
@@ -1859,7 +1854,11 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
             _promo_lines_by_id: Dict[str, dict] = {}
             try:
                 from app.services.orders_service import _compute_tax_breakdown
-                from app.services.promotions_service import evaluate_checkout_promotions
+                from app.services.promotions_service import (
+                    enrich_order_item_rows_with_promo_basis,
+                    evaluate_checkout_promotions,
+                    item_rows_to_promo_lines,
+                )
 
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
                 order_ids = [o["id"] for o in orders]
@@ -1870,6 +1869,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                             oi.id,
                             oi.quantity,
                             oi.subtotal,
+                            oi.price_at_purchase,
                             oi.product_id,
                             oi.promo_opt_out,
                             p.category_id,
@@ -1881,18 +1881,8 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                         """,
                         order_ids,
                     )
-                    promo_lines = [
-                        {
-                            "id": str(row["id"]),
-                            "product_id": str(row["product_id"]),
-                            "category_id": str(row["category_id"]) if row["category_id"] else None,
-                            "quantity": int(row["quantity"]),
-                            "subtotal": float(row["subtotal"]),
-                            "tax_category": row["tax_category"] or "standard",
-                            "promo_opt_out": bool(row.get("promo_opt_out")),
-                        }
-                        for row in eval_rows
-                    ]
+                    eval_rows = await enrich_order_item_rows_with_promo_basis(conn, eval_rows)
+                    promo_lines = item_rows_to_promo_lines(eval_rows)
                     checkout_eval = await evaluate_checkout_promotions(
                         conn,
                         UUID(str(tenant_id)),
