@@ -1200,11 +1200,30 @@ def _pick_best_promotion_for_line(
     return max(eligible, key=_promo_rank_key)
 
 
-def _compute_line_promo_savings(line: Dict[str, Any], promo: Dict[str, Any]) -> int:
-    """Return COP savings for one cart/order line (Toast-style BOGO uses full unit price)."""
+def _promo_eligible_subtotal(line: Dict[str, Any]) -> float:
     subtotal = float(line["subtotal"])
+    raw = line.get("promo_eligible_subtotal")
+    if raw is None:
+        return subtotal
+    return min(subtotal, max(0.0, float(raw)))
+
+
+def _promo_eligible_unit_price(line: Dict[str, Any]) -> float:
     quantity = int(line.get("quantity") or 1)
-    if subtotal <= 0 or quantity <= 0:
+    if quantity <= 0:
+        return 0.0
+    raw = line.get("promo_eligible_unit_price")
+    if raw is not None:
+        return min(max(0.0, float(raw)), _promo_eligible_subtotal(line) / quantity)
+    return _promo_eligible_subtotal(line) / quantity
+
+
+def _compute_line_promo_savings(line: Dict[str, Any], promo: Dict[str, Any]) -> int:
+    """Return COP savings for one cart/order line using its promo-eligible basis."""
+    subtotal = float(line["subtotal"])
+    eligible_subtotal = _promo_eligible_subtotal(line)
+    quantity = int(line.get("quantity") or 1)
+    if subtotal <= 0 or eligible_subtotal <= 0 or quantity <= 0:
         return 0
 
     promo_type = promo["promo_type"]
@@ -1214,13 +1233,13 @@ def _compute_line_promo_savings(line: Dict[str, Any], promo: Dict[str, Any]) -> 
         pct = float(value_json.get("percent") or 0)
         if pct <= 0:
             return 0
-        return min(round(subtotal * pct / 100), round(subtotal))
+        return min(round(eligible_subtotal * pct / 100), round(eligible_subtotal))
 
     if promo_type == "fixed_off":
         amount = float(value_json.get("amount_cop") or 0)
         if amount <= 0:
             return 0
-        return min(round(amount), round(subtotal))
+        return min(round(amount), round(eligible_subtotal))
 
     if promo_type == "bogo":
         buy_qty = int(value_json.get("buy_qty") or 0)
@@ -1231,19 +1250,18 @@ def _compute_line_promo_savings(line: Dict[str, Any], promo: Dict[str, Any]) -> 
         sets = quantity // bundle
         if sets <= 0:
             return 0
-        unit_price = subtotal / quantity
+        unit_price = _promo_eligible_unit_price(line)
         free_units = sets * get_qty
-        return min(round(free_units * unit_price), round(subtotal))
+        return min(round(free_units * unit_price), round(eligible_subtotal))
 
     return 0
 
 
-def _line_unit_price(line: Dict[str, Any]) -> float:
+def _line_promo_eligible_unit_price(line: Dict[str, Any]) -> float:
     quantity = int(line.get("quantity") or 1)
-    subtotal = float(line["subtotal"])
-    if quantity <= 0 or subtotal <= 0:
+    if quantity <= 0:
         return 0.0
-    return subtotal / quantity
+    return _promo_eligible_subtotal(line) / quantity
 
 
 def _allocate_bogo_savings_cheapest_first(
@@ -1262,27 +1280,31 @@ def _allocate_bogo_savings_cheapest_first(
 
     bundle = buy_qty + get_qty
     units: List[tuple[str, float]] = []
-    subtotal_by_line: Dict[str, float] = {}
+    cap_by_line: Dict[str, float] = {}
     for entry in entries:
         line_id = str(entry["line_id"])
         qty = max(0, int(entry.get("quantity") or 1))
         unit_price = float(entry["unit_price"])
-        subtotal_by_line[line_id] = float(entry.get("subtotal") or (unit_price * qty))
+        cap_by_line[line_id] = float(
+            entry.get("promo_eligible_subtotal")
+            if entry.get("promo_eligible_subtotal") is not None
+            else entry.get("subtotal") or (unit_price * qty)
+        )
         for _ in range(qty):
             units.append((line_id, unit_price))
 
     sets = len(units) // bundle
     free_count = sets * get_qty
-    savings_by_line: Dict[str, float] = {lid: 0.0 for lid in subtotal_by_line}
+    savings_by_line: Dict[str, float] = {lid: 0.0 for lid in cap_by_line}
     if free_count <= 0:
-        return {lid: 0 for lid in subtotal_by_line}
+        return {lid: 0 for lid in cap_by_line}
 
     units.sort(key=lambda item: item[1])
     for line_id, unit_price in units[:free_count]:
         savings_by_line[line_id] += unit_price
 
     return {
-        line_id: min(round(savings), round(subtotal_by_line[line_id]))
+        line_id: min(round(savings), round(cap_by_line[line_id]))
         for line_id, savings in savings_by_line.items()
     }
 
@@ -1350,8 +1372,9 @@ def evaluate_cart_promotions(
             {
                 "line_id": state["line_id"],
                 "quantity": int(state["line"].get("quantity") or 1),
-                "unit_price": _line_unit_price(state["line"]),
+                "unit_price": _line_promo_eligible_unit_price(state["line"]),
                 "subtotal": state["subtotal"],
+                "promo_eligible_subtotal": _promo_eligible_subtotal(state["line"]),
             }
             for state in group_states
         ]
@@ -1608,7 +1631,8 @@ def promo_persist_fields_from_eval_line(
 
 
 _SESSION_PENDING_PROMO_ITEMS_SQL = """
-    SELECT oi.id, oi.subtotal, oi.quantity, oi.product_id, oi.promo_opt_out,
+    SELECT oi.id, oi.subtotal, oi.quantity, oi.price_at_purchase,
+           oi.product_id, oi.promo_opt_out,
            p.category_id,
            COALESCE(p.tax_category, 'standard') AS tax_category
     FROM order_items oi
@@ -1618,20 +1642,84 @@ _SESSION_PENDING_PROMO_ITEMS_SQL = """
 """
 
 
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        if hasattr(row, "get"):
+            return row.get(key, default)
+        return default
+
+
+def _row_to_dict(row: Any) -> Dict[str, Any]:
+    if isinstance(row, dict):
+        return dict(row)
+    return {key: row[key] for key in row.keys()}
+
+
 def item_rows_to_promo_lines(item_rows: Sequence[Any]) -> List[Dict[str, Any]]:
     """Map pending order_item rows → evaluate_checkout_promotions input."""
-    return [
-        {
+    lines: List[Dict[str, Any]] = []
+    for row in item_rows:
+        quantity = int(row["quantity"])
+        line = {
             "id": str(row["id"]),
             "product_id": str(row["product_id"]),
             "category_id": str(row["category_id"]) if row["category_id"] else None,
-            "quantity": int(row["quantity"]),
+            "quantity": quantity,
             "subtotal": float(row["subtotal"]),
             "tax_category": row["tax_category"] or "standard",
-            "promo_opt_out": bool(row.get("promo_opt_out")),
+            "promo_opt_out": bool(_row_value(row, "promo_opt_out")),
         }
-        for row in item_rows
-    ]
+        explicit_eligible = _row_value(row, "promo_eligible_subtotal")
+        base_price = _row_value(row, "price_at_purchase")
+        eligible_modifier_total = _row_value(row, "promo_eligible_modifier_unit_total", 0)
+        if explicit_eligible is not None:
+            line["promo_eligible_subtotal"] = float(explicit_eligible)
+        elif base_price is not None:
+            line["promo_eligible_subtotal"] = (
+                float(base_price) + float(eligible_modifier_total or 0)
+            ) * quantity
+        lines.append(line)
+    return lines
+
+
+async def enrich_order_item_rows_with_promo_basis(
+    conn: asyncpg.Connection,
+    item_rows: Sequence[Any],
+) -> List[Dict[str, Any]]:
+    """Attach required/default modifier totals used as the promo-eligible basis."""
+    rows = [_row_to_dict(row) for row in item_rows]
+    order_item_ids = [row["id"] for row in rows]
+    if not order_item_ids:
+        return rows
+
+    basis_rows = await conn.fetch(
+        """
+        SELECT
+            oim.order_item_id,
+            SUM(
+                CASE
+                    WHEN COALESCE(mg.is_required, false) OR COALESCE(m.is_default, false)
+                    THEN oim.price_at_purchase * COALESCE(oim.quantity, 1)
+                    ELSE 0
+                END
+            ) AS eligible_modifier_unit_total
+        FROM order_item_modifiers oim
+        JOIN modifiers m ON m.id = oim.modifier_id
+        JOIN modifier_groups mg ON mg.id = m.modifier_group_id
+        WHERE oim.order_item_id = ANY($1::uuid[])
+        GROUP BY oim.order_item_id
+        """,
+        order_item_ids,
+    )
+    basis_by_id = {
+        row["order_item_id"]: float(row["eligible_modifier_unit_total"] or 0)
+        for row in basis_rows
+    }
+    for row in rows:
+        row["promo_eligible_modifier_unit_total"] = basis_by_id.get(row["id"], 0.0)
+    return rows
 
 
 async def apply_promo_eval_to_order_items(
@@ -1701,10 +1789,11 @@ async def persist_session_tab_promos(
             "promo_breakdown": [],
         }
 
+    enriched_rows = await enrich_order_item_rows_with_promo_basis(conn, item_rows)
     checkout_eval = await evaluate_checkout_promotions(
         conn,
         tenant_id,
-        item_rows_to_promo_lines(item_rows),
+        item_rows_to_promo_lines(enriched_rows),
     )
     await apply_promo_eval_to_order_items(conn, item_rows, checkout_eval)
     await recalc_pending_session_order_totals(conn, session_id)

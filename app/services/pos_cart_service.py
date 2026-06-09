@@ -85,18 +85,32 @@ def _distribute_discount(items: List[dict], discount_amount: float) -> List[dict
 
 
 def _cart_items_to_promo_lines(items: List[dict]) -> List[dict]:
-    return [
-        {
+    lines = []
+    for item in items:
+        quantity = item.get("quantity") or 1
+        raw_unit_price = item.get("unit_price")
+        if raw_unit_price is None:
+            raw_unit_price = item.get("product", {}).get("price")
+        eligible_modifier_total = sum(
+            float(mod.get("price") or 0)
+            for mod in item.get("modifiers", [])
+            if mod.get("group_is_required") or mod.get("is_default")
+        )
+        line = {
             "id": item["id"],
             "product_id": item.get("product_id") or item["product"]["id"],
             "category_id": item.get("category_id"),
-            "quantity": item.get("quantity") or 1,
+            "quantity": quantity,
             "subtotal": float(item["subtotal"]),
             "tax_category": item.get("tax_category") or "standard",
             "promo_opt_out": bool(item.get("promo_opt_out")),
         }
-        for item in items
-    ]
+        if raw_unit_price is not None:
+            line["promo_eligible_subtotal"] = (
+                float(raw_unit_price) + eligible_modifier_total
+            ) * quantity
+        lines.append(line)
+    return lines
 
 
 def _manual_discount_amount(
@@ -377,7 +391,9 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
                     json_build_object(
                         'id', m.modifier_id::text,
                         'name', m.modifier_name,
-                        'price', m.price
+                        'price', m.price,
+                        'is_default', COALESCE(mod.is_default, false),
+                        'group_is_required', COALESCE(mg.is_required, false)
                     ) ORDER BY m.created_at
                 ) FILTER (WHERE m.cart_item_id IS NOT NULL),
                 '[]'::json
@@ -385,6 +401,8 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
         FROM pos_cart_items ci
         JOIN product p ON ci.product_id = p.id
         LEFT JOIN pos_cart_item_modifiers m ON m.cart_item_id = ci.id
+        LEFT JOIN modifiers mod ON mod.id = m.modifier_id
+        LEFT JOIN modifier_groups mg ON mg.id = mod.modifier_group_id
         WHERE ci.cart_id = $1
         GROUP BY ci.id, ci.product_id, ci.quantity, ci.unit_price, ci.subtotal,
                  ci.notes, ci.promo_opt_out, ci.created_at, p.name, p.category_id, p.tax_category, p.is_resale
@@ -416,7 +434,9 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
                 {
                     "id": mod['id'],
                     "name": mod['name'],
-                    "price": float(mod['price'])
+                    "price": float(mod['price']),
+                    "is_default": bool(mod.get("is_default")),
+                    "group_is_required": bool(mod.get("group_is_required")),
                 }
                 for mod in raw_modifiers
             ],
