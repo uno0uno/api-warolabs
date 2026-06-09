@@ -786,9 +786,10 @@ async def checkout_cart(
                         tenant_id, customer_id, online_cart_id,
                         order_date, total_amount, status, scheduled_time,
                         payment_method, payment_method_id,
-                        tip_amount, tip_source
+                        tip_amount, tip_source,
+                        delivery_address_id, delivery_instructions
                     )
-                    VALUES ($1, $2, $3, NOW(), $4, 'pending', $5, $6, $7, $8, $9)
+                    VALUES ($1, $2, $3, NOW(), $4, 'pending', $5, $6, $7, $8, $9, $10, $11)
                     RETURNING id, order_number
                 """
                 order_row = await conn.fetchrow(
@@ -802,6 +803,8 @@ async def checkout_cart(
                     payment_method_id,
                     Decimal(str(tip_amount)),
                     tip_source,
+                    cart['delivery_address_id'],
+                    cart['delivery_instructions'],
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']

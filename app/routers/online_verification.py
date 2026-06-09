@@ -35,6 +35,7 @@ class ValidateCustomerRequest(BaseModel):
     """Validate customer eligibility"""
     phone_number: str
     cart_total: float = 0.0
+    cart_id: Optional[UUID] = None
 
 
 @router.post("/send")
@@ -131,5 +132,6 @@ async def validate_customer(request: ValidateCustomerRequest):
     """
     return await otp_service.validate_customer(
         phone_number=request.phone_number,
-        cart_total=request.cart_total
+        cart_total=request.cart_total,
+        cart_id=request.cart_id,
     )

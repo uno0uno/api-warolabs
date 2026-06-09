@@ -294,7 +294,9 @@ def generate_pickup_pin() -> str:
 
 async def validate_customer(
     phone_number: str,
-    cart_total: float
+    cart_total: float,
+    tenant_id: Optional[UUID] = None,
+    cart_id: Optional[UUID] = None,
 ) -> dict:
     """
     Validate customer eligibility to order (PUBLIC)
@@ -313,6 +315,7 @@ async def validate_customer(
     try:
         async with get_db_connection() as conn:
             warnings = []
+            tenant_limit = await get_tenant_online_order_limit(conn, tenant_id, cart_id)
 
             # 1. Check blacklist
             blacklist_query = """
@@ -349,8 +352,8 @@ async def validate_customer(
 
             if not customer_row:
                 # New customer - apply strict limits
-                max_amount = 50000  # COP
-                if cart_total > max_amount:
+                max_amount = resolve_customer_max_amount("new", tenant_limit)
+                if max_amount and cart_total > max_amount:
                     return {
                         "can_order": False,
                         "is_blacklisted": False,
@@ -382,13 +385,12 @@ async def validate_customer(
 
             if order_count == 0:
                 tier = "new"
-                max_amount = 50000
             elif order_count < 3:
                 tier = "intermediate"
-                max_amount = 100000
             else:
                 tier = "trusted"
-                max_amount = None  # No limit
+
+            max_amount = resolve_customer_max_amount(tier, tenant_limit)
 
             # Check limit
             if max_amount and cart_total > max_amount:
@@ -425,3 +427,40 @@ async def validate_customer(
     except Exception as e:
         logger.error(f"Error validating customer: {str(e)}")
         raise APIError(f"Error al validar cliente: {str(e)}", status_code=500)
+
+
+async def get_tenant_online_order_limit(conn, tenant_id: Optional[UUID], cart_id: Optional[UUID]) -> Optional[float]:
+    """
+    Return tenant override for online order amount validation.
+
+    NULL means use the existing tier defaults. 0 means no amount limit.
+    """
+    resolved_tenant_id = tenant_id
+    if not resolved_tenant_id and cart_id:
+        resolved_tenant_id = await conn.fetchval(
+            "SELECT tenant_id FROM online_carts WHERE id = $1",
+            cart_id,
+        )
+
+    if not resolved_tenant_id:
+        return None
+
+    value = await conn.fetchval(
+        "SELECT online_order_max_amount FROM tenant_public_profiles WHERE tenant_id = $1",
+        resolved_tenant_id,
+    )
+    if value is None:
+        return None
+
+    return float(value)
+
+
+def resolve_customer_max_amount(tier: str, tenant_limit: Optional[float]) -> Optional[float]:
+    if tenant_limit is not None:
+        return None if tenant_limit <= 0 else tenant_limit
+
+    if tier == "new":
+        return 50000
+    if tier == "intermediate":
+        return 100000
+    return None

@@ -66,6 +66,7 @@ class TenantPublicProfileBase(BaseModel):
     # Online ordering gate — controls storefront catalog ordering AND POS delivery toggle
     accepts_online_orders: bool = Field(False, description="Whether the tenant accepts online orders. Gates storefront catalog ordering AND the POS delivery toggle.")
     min_order_amount: Decimal = Field(Decimal('0'), description="Minimum order amount (future)")
+    online_order_max_amount: Optional[Decimal] = Field(None, ge=0, description="Maximum online order amount for customer validation. NULL keeps tier defaults; 0 disables amount limit.")
     estimated_preparation_time: int = Field(30, description="Estimated preparation time in minutes")
 
     # Manual open/close toggle (operator override)
@@ -223,6 +224,7 @@ class TenantPublicProfileUpdate(BaseModel):
     is_active: Optional[bool] = None
     accepts_online_orders: Optional[bool] = None
     min_order_amount: Optional[Decimal] = None
+    online_order_max_amount: Optional[Decimal] = Field(None, ge=0)
     estimated_preparation_time: Optional[int] = None
     is_manually_open: Optional[bool] = None
     tables_enabled: Optional[bool] = None
