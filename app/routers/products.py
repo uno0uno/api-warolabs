@@ -6,6 +6,7 @@ from app.core.exceptions import AuthenticationError
 from app.core.permissions import Module, require_module
 from app.services.products_service import (
     create_product_with_recipe,
+    convert_product_to_resale,
     get_product_by_id,
     get_products_list,
     get_product_stats,
@@ -15,6 +16,7 @@ from app.services.products_service import (
 )
 from app.models.product import (
     ProductCreate,
+    ProductConvertToResale,
     ProductUpdate,
     ProductResponse,
     ProductsListResponse,
@@ -167,6 +169,25 @@ async def get_product_endpoint(
     Requires valid session with tenant context.
     """
     return await get_product_by_id(request, product_id)
+
+
+@router.post(
+    "/{product_id}/convert-to-resale",
+    response_model=ProductResponse,
+    dependencies=[Depends(require_module(Module.MENU))],
+)
+async def convert_product_to_resale_endpoint(
+    request: Request,
+    product_id: UUID,
+    body: ProductConvertToResale = Body(...),
+):
+    """
+    Convert a menu product without recipe into atomic resale (1 sale = 1 und).
+
+    Requires: not already resale, no recipe rows, not combo/open-priced, no modifier groups.
+    Atomically creates linked tenant ingredient + product_recipes row and sets is_resale=true.
+    """
+    return await convert_product_to_resale(request, product_id, body)
 
 
 @router.put("/{product_id}", response_model=ProductResponse, dependencies=[Depends(require_module(Module.MENU))])
