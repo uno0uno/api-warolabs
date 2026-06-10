@@ -6,7 +6,7 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from app.models.product import (
-    Product, ProductCreate, ProductUpdate, ProductsListResponse,
+    Product, ProductCreate, ProductConvertToResale, ProductUpdate, ProductsListResponse,
     ProductResponse, ProductStats, RecipeBaseLink
 )
 from app.services import menu_history_service
@@ -937,6 +937,180 @@ async def get_product_stats(request: Request) -> ProductStats:
     except Exception as e:
         logger.error(f"Error fetching product stats: {str(e)}")
         raise APIError(f"Error fetching product stats: {str(e)}", status_code=500)
+
+
+async def convert_product_to_resale(
+    request: Request,
+    product_id: UUID,
+    data: ProductConvertToResale,
+) -> ProductResponse:
+    """
+    Convert a menu product without recipe into atomic resale in one transaction.
+    Mirrors create_product_with_recipe auto_resale_ingredient on an existing row.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            product_row = await conn.fetchrow(
+                """
+                SELECT id, name, category_id, is_resale, open_priced, is_combo,
+                       product_base_type_id, costo_percibido
+                FROM product
+                WHERE id = $1 AND tenant_id = $2
+                """,
+                product_id,
+                tenant_id,
+            )
+
+            if not product_row:
+                raise HTTPException(status_code=404, detail="Product not found")
+
+            if product_row["is_resale"]:
+                raise HTTPException(status_code=422, detail="El producto ya es de reventa")
+
+            if product_row["open_priced"]:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Los productos de venta libre no se pueden convertir a reventa",
+                )
+
+            if product_row["is_combo"]:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Los combos no se pueden convertir a reventa desde aquí",
+                )
+
+            if product_row["product_base_type_id"] is not None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="El producto tiene una receta base asignada; quítala antes de convertir",
+                )
+
+            if await cost_resolution_service.product_has_any_recipe(product_id, conn):
+                raise HTTPException(
+                    status_code=422,
+                    detail="El producto tiene ingredientes o recetas; quítalos antes de convertir",
+                )
+
+            modifier_count = await conn.fetchval(
+                "SELECT COUNT(*)::int FROM product_modifier_groups WHERE product_id = $1",
+                product_id,
+            )
+            if modifier_count and modifier_count > 0:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Quita los modificadores asignados antes de convertir a reventa",
+                )
+
+            old_snapshot = await menu_history_service.get_product_snapshot(conn, product_id, tenant_id)
+            product_name = product_row["name"]
+            user_id = session_context.user_id if hasattr(session_context, "user_id") else None
+            auto_resale_ingredient_id: Optional[UUID] = None
+
+            async with conn.transaction():
+                ingredient_category = await _resolve_resale_ingredient_category(
+                    conn,
+                    tenant_id,
+                    product_row["category_id"],
+                    data.resale_ingredient_category,
+                )
+                costo_ingredient = None
+                if product_row["costo_percibido"] is not None:
+                    costo_ingredient = float(product_row["costo_percibido"])
+
+                ing_result = await create_tenant_ingredient(
+                    conn,
+                    tenant_id,
+                    TenantIngredientCreate(
+                        name=product_row["name"].strip(),
+                        unit="und",
+                        type=data.resale_ingredient_type,
+                        category=ingredient_category,
+                        is_resale=True,
+                        unit_weight_gr=data.resale_unit_weight_gr,
+                        unit_weight_unit=data.resale_unit_weight_unit,
+                        costo_unitario=costo_ingredient,
+                        purchase_units=[
+                            PurchaseUnitInput(purchase_unit="und", is_default=True),
+                        ],
+                    ),
+                )
+                auto_resale_ingredient_id = UUID(ing_result["id"])
+
+                await conn.execute(
+                    """
+                    UPDATE product
+                    SET is_resale = TRUE,
+                        allow_modifiers = FALSE,
+                        controla_stock = TRUE,
+                        updated_at = NOW()
+                    WHERE id = $1 AND tenant_id = $2
+                    """,
+                    product_id,
+                    tenant_id,
+                )
+
+                base_qty, base_unit = await resolve_to_base_unit(
+                    conn,
+                    auto_resale_ingredient_id,
+                    1,
+                    "und",
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO product_recipes (
+                        product_id, ingredient_id, quantity, unit, tenant_id
+                    )
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    product_id,
+                    auto_resale_ingredient_id,
+                    base_qty,
+                    base_unit,
+                    tenant_id,
+                )
+
+                await cost_resolution_service.persist_product_costo_calculado(
+                    product_id,
+                    tenant_id,
+                    conn,
+                    tracks_inventory=True,
+                )
+
+                if old_snapshot:
+                    new_snapshot = await menu_history_service.get_product_snapshot(
+                        conn, product_id, tenant_id
+                    )
+                    if new_snapshot:
+                        await menu_history_service.compare_and_record_product_changes(
+                            conn,
+                            tenant_id,
+                            product_id,
+                            product_name,
+                            old_snapshot,
+                            new_snapshot,
+                            user_id,
+                        )
+
+                response = await get_product_by_id(request, product_id, conn)
+                if auto_resale_ingredient_id:
+                    response.data.resale_ingredient_id = auto_resale_ingredient_id
+                return response
+
+    except HTTPException:
+        raise
+    except AuthenticationError as e:
+        raise e
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(status_code=409, detail=_DUPLICATE_PRODUCT_NAME_DETAIL)
+    except Exception as e:
+        logger.error(f"Error converting product to resale: {str(e)}")
+        raise APIError(f"Error converting product to resale: {str(e)}", status_code=500)
 
 
 async def update_product_with_recipe(

@@ -154,6 +154,25 @@ class ProductCreate(ProductBase):
             raise ValueError("resale_unit_weight_gr is required when auto_resale_ingredient is true")
         return self
 
+class ProductConvertToResale(BaseModel):
+    """Convert an existing menu product (no recipe) to atomic resale."""
+
+    resale_unit_weight_gr: float = Field(..., gt=0, description="Weight/volume per und for linked ingredient")
+    resale_unit_weight_unit: Literal["gr", "ml"] = Field(
+        "gr",
+        description="Unit for resale_unit_weight_gr on auto-created ingredient",
+    )
+    resale_ingredient_type: Literal["food", "supply"] = Field(
+        "food",
+        description="Ingredient type for auto-created resale ingredient",
+    )
+    resale_ingredient_category: Optional[str] = Field(
+        None,
+        max_length=255,
+        description="Ingredient category label; defaults to menu category name when omitted",
+    )
+
+
 class ProductUpdate(BaseModel):
     """Update product fields"""
     name: Optional[str] = Field(None, min_length=1, max_length=255)
