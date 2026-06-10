@@ -305,6 +305,13 @@ async def create_purchase_unit(
                     notes
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (ingredient_id, purchase_unit, purchase_unit_label)
+                DO UPDATE SET
+                    conversion_factor = EXCLUDED.conversion_factor,
+                    unit_cost = COALESCE(EXCLUDED.unit_cost, ingredient_purchase_units.unit_cost),
+                    is_default = EXCLUDED.is_default,
+                    is_active = EXCLUDED.is_active,
+                    notes = COALESCE(EXCLUDED.notes, ingredient_purchase_units.notes)
                 RETURNING
                     id,
                     ingredient_id,
