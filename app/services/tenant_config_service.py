@@ -67,14 +67,14 @@ async def upsert_public_profile(
                         city, neighborhood, latitude, longitude,
                         business_hours, social_media,
                         seo_title, seo_description,
-                        accepts_online_orders, min_order_amount, estimated_preparation_time,
+                        accepts_online_orders, min_order_amount, online_order_max_amount, estimated_preparation_time,
                         tables_enabled,
                         comandas_enabled, kds_enabled,
                         auto_select_generic_enabled,
                         expediter_enabled,
                         updated_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, CURRENT_TIMESTAMP)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, CURRENT_TIMESTAMP)
                     ON CONFLICT (tenant_id)
                     DO UPDATE SET
                         slug = EXCLUDED.slug,
@@ -96,6 +96,7 @@ async def upsert_public_profile(
                         seo_description = EXCLUDED.seo_description,
                         accepts_online_orders = EXCLUDED.accepts_online_orders,
                         min_order_amount = EXCLUDED.min_order_amount,
+                        online_order_max_amount = EXCLUDED.online_order_max_amount,
                         estimated_preparation_time = EXCLUDED.estimated_preparation_time,
                         tables_enabled = EXCLUDED.tables_enabled,
                         comandas_enabled = EXCLUDED.comandas_enabled,
@@ -128,6 +129,7 @@ async def upsert_public_profile(
                     profile_data.seo_description,
                     profile_data.accepts_online_orders,
                     profile_data.min_order_amount,
+                    profile_data.online_order_max_amount,
                     profile_data.estimated_preparation_time,
                     profile_data.tables_enabled,
                     profile_data.comandas_enabled,
@@ -211,12 +213,12 @@ async def update_public_profile(
                         phone_number, email, address,
                         country, city, city_slug, neighborhood,
                         business_hours, social_media,
-                        accepts_online_orders, min_order_amount, estimated_preparation_time,
+                        accepts_online_orders, min_order_amount, online_order_max_amount, estimated_preparation_time,
                         is_manually_open,
                         comandas_enabled, kds_enabled,
                         auto_select_generic_enabled,
                         expediter_enabled
-                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
                     RETURNING *
                 """
                 result = await conn.fetchrow(
@@ -243,6 +245,7 @@ async def update_public_profile(
                     # untouched by this change.
                     data_dict.get('accepts_online_orders', True),
                     data_dict.get('min_order_amount', 0),
+                    data_dict.get('online_order_max_amount'),
                     data_dict.get('estimated_preparation_time', 30),
                     data_dict.get('is_manually_open', True),
                     data_dict.get('comandas_enabled', False),

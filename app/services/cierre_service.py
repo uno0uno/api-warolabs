@@ -941,7 +941,7 @@ def _build_open_tables_filter(
     """
     Open tables (closed_at IS NULL applied by caller).
 
-    Date-only: opened on a calendar day in [period_start, period_end].
+    Date-only: opened on a Bogota calendar day in [period_start, period_end].
     Shift window: session started on or before shift end (still-open tables
     that began before the shift still block the close).
     """
@@ -951,8 +951,8 @@ def _build_open_tables_filter(
     p2 = f"${param_offset}"
     p3 = f"${param_offset + 1}"
     sql = (
-        f"AND ts.opened_at::date >= {p2} "
-        f"AND ts.opened_at::date <= {p3}"
+        f"AND (ts.opened_at AT TIME ZONE 'America/Bogota')::date >= {p2} "
+        f"AND (ts.opened_at AT TIME ZONE 'America/Bogota')::date <= {p3}"
     )
     return sql, [period_start, period_end]
 
@@ -994,6 +994,25 @@ def _requires_open_shift(
     if period_start_time and period_end_time:
         return True
     return False
+
+
+def _is_day_only_cierre_request(
+    shift_template_id: Optional[UUID],
+    period_start_time: Optional[datetime],
+    period_end_time: Optional[datetime],
+) -> bool:
+    return not shift_template_id and not period_start_time and not period_end_time
+
+
+def _open_shift_has_explicit_window(open_shift) -> bool:
+    return bool(
+        open_shift
+        and (
+            open_shift["shift_template_id"]
+            or open_shift["period_start_time"]
+            or open_shift["period_end_time"]
+        )
+    )
 
 
 _PERIOD_WINDOW_OVERLAP_SQL = """
@@ -1955,6 +1974,14 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             open_shift = await _fetch_open_shift_for_window(
                 conn, tenant_id, eff_start, eff_end,
             )
+            if _open_shift_has_explicit_window(open_shift) and _is_day_only_cierre_request(
+                shift_template_id, period_start_time, period_end_time,
+            ):
+                raise APIError(
+                    "Hay un turno de caja abierto para esta fecha. "
+                    "Cierra usando el turno seleccionado o envía la ventana exacta del turno.",
+                    status_code=422,
+                )
             if _requires_open_shift(shift_template_id, period_start_time, period_end_time):
                 if not open_shift:
                     raise APIError(

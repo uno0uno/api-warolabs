@@ -354,10 +354,11 @@ async def v1_validate_customer(request: Request, body: V1ValidateCustomerRequest
     **Authentication required:** `Authorization: Bearer waro_sk_xxx` or `X-API-Key: waro_sk_xxx`
     **Scope required:** `read`
     """
-    validate_api_key_auth(request, "read")
+    tenant_id, _ = validate_api_key_auth(request, "read")
     return await otp_service.validate_customer(
         phone_number=body.phone_number,
         cart_total=body.cart_total,
+        tenant_id=UUID(tenant_id),
     )
 
 

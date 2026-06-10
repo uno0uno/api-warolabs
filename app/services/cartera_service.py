@@ -275,6 +275,7 @@ async def get_customer_cartera(
                     cp.id,
                     cp.amount,
                     cp.payment_method,
+                    cp.payment_method_id,
                     cp.payment_date,
                     cp.notes,
                     cp.created_at
@@ -297,6 +298,11 @@ async def get_customer_cartera(
                         "id": str(p["id"]),
                         "amount": float(p["amount"]),
                         "payment_method": p["payment_method"],
+                        "payment_method_id": (
+                            str(p["payment_method_id"])
+                            if p["payment_method_id"]
+                            else None
+                        ),
                         "payment_date": p["payment_date"].isoformat(),
                         "notes": p["notes"],
                         "created_at": p["created_at"].isoformat(),

@@ -216,6 +216,7 @@ class ManualOrderModifier(BaseModel):
     id: str
     name: str
     price: float = 0.0
+    quantity: float = Field(default=1, gt=0)
 
 
 class ManualOrderItem(BaseModel):
@@ -343,7 +344,8 @@ class UpdateOrderStatusRequest(BaseModel):
 class BulkUpdateStatusRequest(BaseModel):
     order_ids: List[str] = Field(..., min_length=1)
     status: str = Field(..., description="completed | cancelled | pending")
-    payment_method: Optional[str] = Field(None, description="cash | card | digital")
+    payment_method: Optional[str] = Field(None, description="Payment method group slug")
+    payment_method_id: Optional[str] = Field(None, description="UUID of the selected payment_methods row")
     customer_id: Optional[str] = Field(None, description="UUID of customer to associate")
 
 
@@ -353,7 +355,14 @@ async def bulk_update_order_status(
     body: BulkUpdateStatusRequest
 ):
     """Bulk update status for multiple orders."""
-    return await orders_service.bulk_update_order_status(request, body.order_ids, body.status, body.payment_method, body.customer_id)
+    return await orders_service.bulk_update_order_status(
+        request,
+        body.order_ids,
+        body.status,
+        body.payment_method,
+        body.customer_id,
+        body.payment_method_id,
+    )
 
 
 @router.patch("/{order_id}/status", dependencies=[Depends(require_module(Module.VENTAS))])

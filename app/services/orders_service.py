@@ -3,15 +3,22 @@ Orders Service
 Handles listing and filtering of POS orders
 """
 import asyncio
+from decimal import Decimal
 from typing import Any, Dict, Optional, List
 from uuid import UUID
+from zoneinfo import ZoneInfo
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
 from app.services.aws_ses_service import ses_service
 from app.services.waros_service import evaluate_and_award
-from app.services.cierre_service import assert_order_not_in_closed_monthly_period, _get_tenant_tax_config
+from app.services.cierre_service import (
+    assert_order_not_in_closed_monthly_period,
+    _get_tenant_tax_config,
+    _post_order_cogs_gl_entry,
+    _post_order_gl_entry,
+)
 from app.services.email_helpers import send_pos_receipt_email
 from fastapi import HTTPException
 from datetime import datetime, date
@@ -32,6 +39,7 @@ def parse_date(date_str: Optional[str]) -> Optional[date]:
         return None
 
 logger = logging.getLogger(__name__)
+_BOG = ZoneInfo("America/Bogota")
 
 def _pos_modifier_inventory_helpers():
     from app.services.pos_cart_service import (
@@ -44,6 +52,12 @@ def _pos_modifier_inventory_helpers():
         return_modifier_inventory_for_order_item,
         return_order_item_inventory_from_snapshots,
     )
+
+
+def _pos_order_item_ingredient_snapshot_helper():
+    from app.services.pos_cart_service import _capture_order_item_ingredients
+
+    return _capture_order_item_ingredients
 
 
 
@@ -812,6 +826,7 @@ async def bulk_update_order_status(
     status: str,
     payment_method: Optional[str] = None,
     customer_id: Optional[str] = None,
+    payment_method_id: Optional[str] = None,
 ) -> dict:
     """Bulk update status for multiple orders belonging to the tenant."""
     allowed = {"completed", "cancelled", "pending"}
@@ -852,7 +867,8 @@ async def bulk_update_order_status(
 
             # Fetch current state of all orders before updating
             order_rows = await conn.fetch(
-                """SELECT id, status, order_number, table_session_id, pos_cart_id, payment_status
+                """SELECT id, status, order_number, table_session_id, pos_cart_id,
+                          payment_status, total_amount
                    FROM orders WHERE id = ANY($1) AND tenant_id = $2""",
                 ids, tenant_id
             )
@@ -868,17 +884,87 @@ async def bulk_update_order_status(
 
             from uuid import UUID as _UUID2
             cid = _UUID2(customer_id) if customer_id else None
+            pmid = _UUID2(payment_method_id) if payment_method_id else None
+
+            if payment_method_id and not payment_method:
+                raise APIError("payment_method es requerido cuando se envía payment_method_id", status_code=400)
+
+            if payment_method:
+                group_row = await conn.fetchrow(
+                    """
+                    SELECT id
+                    FROM payment_method_groups
+                    WHERE tenant_id = $1
+                      AND slug = $2
+                    """,
+                    tenant_id,
+                    payment_method,
+                )
+                if payment_method_id:
+                    if not group_row:
+                        raise APIError(
+                            f"Método de pago '{payment_method}' no es válido para este restaurante.",
+                            status_code=400,
+                        )
+                    method_row = await conn.fetchrow(
+                        """
+                        SELECT id
+                        FROM payment_methods
+                        WHERE id = $1
+                          AND tenant_id = $2
+                          AND group_id = $3
+                          AND is_active = true
+                        """,
+                        pmid,
+                        tenant_id,
+                        group_row["id"],
+                    )
+                    if not method_row:
+                        raise APIError("El método seleccionado no pertenece al grupo elegido.", status_code=400)
+
+                if payment_method == "customer_wallet" and not cid:
+                    raise APIError("La billetera requiere un cliente identificado", status_code=400)
+
+                if payment_method == "customer_wallet" and cid:
+                    from app.services.customer_wallet_service import assert_wallet_customer_identified
+
+                    await assert_wallet_customer_identified(conn, cid)
+
+            payment_status_update = None
+            if status == "completed" and payment_method:
+                payment_status_update = "credit" if payment_method == "credit" else "paid"
+
             result = await conn.execute(
                 """UPDATE orders
                    SET status = $1,
                        payment_method = COALESCE($2, payment_method),
-                       customer_id = COALESCE($5, customer_id)
+                       customer_id = COALESCE($5, customer_id),
+                       payment_method_id = CASE WHEN $2::text IS NULL THEN payment_method_id ELSE $6::uuid END,
+                       payment_status = COALESCE($7, payment_status)
                    WHERE id = ANY($3) AND tenant_id = $4""",
-                status, payment_method, ids, tenant_id, cid
+                status, payment_method, ids, tenant_id, cid, pmid, payment_status_update
             )
+
+            if status == "completed" and payment_method == "customer_wallet" and cid:
+                from app.services.customer_wallet_service import apply_wallet_for_order
+
+                for row in order_rows:
+                    if row["status"] == "completed":
+                        continue
+                    amount_cop = Decimal(str(row["total_amount"]))
+                    if amount_cop > 0:
+                        await apply_wallet_for_order(
+                            conn,
+                            cid,
+                            tenant_id,
+                            amount_cop,
+                            row["id"],
+                            user_id,
+                        )
 
             # Stock adjustments and mesa session releases per order
             released_sessions = set()
+            newly_completed_order_ids = []
             for row in order_rows:
                 old_status = row['status']
                 if old_status == status:
@@ -890,6 +976,7 @@ async def bulk_update_order_status(
                 # Stock
                 if old_status != 'completed' and status == 'completed':
                     await _deduct_stock_for_status_update(conn, order_id_row, tenant_id, user_id, order_number)
+                    newly_completed_order_ids.append(order_id_row)
                 elif old_status == 'completed' and status in ('cancelled', 'pending'):
                     await _return_stock_for_order_cancellation(conn, order_id_row, tenant_id, user_id, order_number)
 
@@ -915,6 +1002,47 @@ async def bulk_update_order_status(
                                  AND tenant_id = $2""",
                             sid, tenant_id
                         )
+
+            if newly_completed_order_ids:
+                try:
+                    completed_orders = await conn.fetch(
+                        """
+                        SELECT id, order_number, total_amount, payment_method,
+                               payment_method_id, order_date
+                        FROM orders
+                        WHERE id = ANY($1) AND tenant_id = $2 AND status = 'completed'
+                        """,
+                        newly_completed_order_ids,
+                        tenant_id,
+                    )
+                    tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                    for ord_row in completed_orders:
+                        order_date = ord_row["order_date"]
+                        gl_order_date = (
+                            order_date.astimezone(_BOG).date()
+                            if order_date.tzinfo
+                            else order_date.date()
+                        )
+                        await _post_order_gl_entry(
+                            conn=conn,
+                            tenant_id=tenant_id,
+                            order_id=ord_row["id"],
+                            order_date=gl_order_date,
+                            total_amount=Decimal(str(ord_row["total_amount"])),
+                            payment_method=ord_row["payment_method"] or payment_method or "digital",
+                            payment_method_id=ord_row["payment_method_id"],
+                            tax_config=tax_config,
+                            order_number=int(ord_row["order_number"]),
+                        )
+                        await _post_order_cogs_gl_entry(
+                            conn=conn,
+                            tenant_id=tenant_id,
+                            order_id=ord_row["id"],
+                            order_date=gl_order_date,
+                            order_number=int(ord_row["order_number"]),
+                        )
+                except Exception as gl_exc:
+                    logger.error(f"GL entries failed for bulk status update: {gl_exc}")
 
         updated = int(result.split()[-1])
         return {"success": True, "updated": updated, "message": f"{updated} orden(es) actualizadas a {status}"}
@@ -3000,15 +3128,37 @@ async def create_manual_order(
         except ValueError:
             raise APIError("Invalid order_date format. Expected YYYY-MM-DDTHH:MM", status_code=400)
 
+        customer_uuid = UUID(customer_id) if customer_id else None
+        payment_method_uuid = UUID(payment_method_id) if payment_method_id else None
+
+        if payment_method == "customer_wallet":
+            if not customer_uuid:
+                raise APIError("La billetera requiere un cliente identificado", status_code=400)
+            if payment_method_uuid:
+                raise APIError("payment_method_id no aplica al método billetera del cliente", status_code=400)
+
         async with get_db_connection() as conn:
             async with conn.transaction():
                 # Guard: block creation if order_date falls in a closed monthly accounting period (#362)
                 await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_datetime)
 
+                if payment_method == "customer_wallet" and customer_uuid:
+                    from app.services.customer_wallet_service import assert_wallet_customer_identified
+
+                    await assert_wallet_customer_identified(conn, customer_uuid)
+
+                def modifier_quantity(modifier: dict) -> float:
+                    return float(modifier.get("quantity") or 1)
+
+                def modifier_unit_total(modifier: dict) -> float:
+                    return float(modifier.get("price", 0)) * modifier_quantity(modifier)
+
                 # Compute total server-side — never trust client total
                 total_amount = sum(
-                    float(item["quantity"]) * float(item["unit_price"])
-                    + sum(float(m.get("price", 0)) for m in item.get("modifiers", []))
+                    float(item["quantity"]) * (
+                        float(item["unit_price"])
+                        + sum(modifier_unit_total(m) for m in item.get("modifiers", []))
+                    )
                     for item in items
                 )
 
@@ -3022,9 +3172,9 @@ async def create_manual_order(
                     RETURNING id, order_number, order_date, created_at
                     """,
                     tenant_id,
-                    UUID(customer_id) if customer_id else None,
+                    customer_uuid,
                     payment_method,
-                    UUID(payment_method_id) if payment_method_id else None,
+                    payment_method_uuid,
                     order_datetime,
                     total_amount,
                     json.dumps({"source": "manual"})
@@ -3033,11 +3183,15 @@ async def create_manual_order(
                 order_id = order_row["id"]
 
                 deduct_modifier_inventory, _, _ = _pos_modifier_inventory_helpers()
+                capture_order_item_ingredients = _pos_order_item_ingredient_snapshot_helper()
 
                 for item in items:
                     modifiers = item.get("modifiers", [])
-                    modifiers_total = sum(float(m.get("price", 0)) for m in modifiers)
-                    subtotal = float(item["quantity"]) * float(item["unit_price"]) + modifiers_total
+                    modifiers_total = sum(modifier_unit_total(m) for m in modifiers)
+                    subtotal = float(item["quantity"]) * (
+                        float(item["unit_price"]) + modifiers_total
+                    )
+                    product_id = UUID(item["product_id"])
                     order_item_row = await conn.fetchrow(
                         """
                         INSERT INTO order_items (
@@ -3047,7 +3201,7 @@ async def create_manual_order(
                         RETURNING id
                         """,
                         order_id,
-                        UUID(item["product_id"]),
+                        product_id,
                         float(item["quantity"]),
                         float(item["unit_price"]),
                         subtotal
@@ -3055,18 +3209,20 @@ async def create_manual_order(
                     order_item_id = order_item_row["id"]
 
                     for modifier in modifiers:
+                        modifier_qty = modifier_quantity(modifier)
                         await conn.execute(
                             """
                             INSERT INTO order_item_modifiers (
                                 order_item_id, modifier_id, modifier_name,
                                 price_at_purchase, quantity
                             )
-                            VALUES ($1, $2, $3, $4, 1)
+                            VALUES ($1, $2, $3, $4, $5)
                             """,
                             order_item_id,
                             UUID(modifier["id"]),
                             modifier["name"],
-                            float(modifier.get("price", 0))
+                            float(modifier.get("price", 0)),
+                            modifier_qty
                         )
 
                         await deduct_modifier_inventory(
@@ -3077,11 +3233,8 @@ async def create_manual_order(
                             order_item_id=order_item_id,
                             order_number=order_row["order_number"],
                             item_quantity=float(item["quantity"]),
-                            modifier={
-                                "id": modifier["id"],
-                                "name": modifier["name"],
-                            },
-                            modifier_qty=1.0,
+                            modifier=modifier,
+                            modifier_qty=modifier_qty,
                         )
 
                     # Deduct inventory for product ingredients (direct + base recipes)
@@ -3101,7 +3254,7 @@ async def create_manual_order(
                         JOIN ingredients i ON brt.ingredient_id = i.id
                         WHERE pbr.product_id = $1
                         """,
-                        UUID(item["product_id"])
+                        product_id
                     )
 
                     for ingredient in ingredients:
@@ -3145,6 +3298,60 @@ async def create_manual_order(
                             f"Venta de {item['quantity']}x {item.get('product_name', '')} - Orden #{order_row['order_number']}",
                             user_id
                         )
+
+                    await capture_order_item_ingredients(
+                        conn,
+                        order_item_id,
+                        product_id,
+                        float(item["quantity"]),
+                        str(tenant_id),
+                    )
+
+                if payment_method == "customer_wallet" and customer_uuid:
+                    from app.services.customer_wallet_service import apply_wallet_for_order
+
+                    await apply_wallet_for_order(
+                        conn,
+                        customer_uuid,
+                        tenant_id,
+                        Decimal(str(total_amount)),
+                        order_id,
+                        user_id,
+                    )
+
+                gl_order_date = (
+                    order_datetime.astimezone(_BOG).date()
+                    if order_datetime.tzinfo
+                    else order_datetime.date()
+                )
+                gl_payment_method_id = payment_method_uuid
+
+                try:
+                    tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                    await _post_order_gl_entry(
+                        conn=conn,
+                        tenant_id=tenant_id,
+                        order_id=order_id,
+                        order_date=gl_order_date,
+                        total_amount=Decimal(str(total_amount)),
+                        payment_method=payment_method,
+                        payment_method_id=gl_payment_method_id,
+                        tax_config=tax_config,
+                        order_number=int(order_row["order_number"]),
+                    )
+                except Exception as e:
+                    logger.error(f"GL entry failed for manual order {order_id}: {e}")
+
+                try:
+                    await _post_order_cogs_gl_entry(
+                        conn=conn,
+                        tenant_id=tenant_id,
+                        order_id=order_id,
+                        order_date=gl_order_date,
+                        order_number=int(order_row["order_number"]),
+                    )
+                except Exception as e:
+                    logger.error(f"COGS GL entry failed for manual order {order_id}: {e}")
 
         # Award waros for completed manual order (fire-and-forget — never blocks)
         if customer_id:

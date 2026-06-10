@@ -1,0 +1,42 @@
+issue: 408
+title: "Preserve online cart modifier quantities for COGS and accounting"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-408-online-cart-modifier-quantity
+
+paths:
+  - app/models/online_cart.py
+  - app/services/online_cart_service.py
+  - sql/20260608_online_cart_modifier_quantity.sql
+  - tests/test_online_cart_batch.py
+
+ac:
+  - OnlineCartItemCreate.modifiers accepts optional quantity default 1
+  - Online cart subtotal multiplies modifier unit price by modifier quantity
+  - online_cart_item_modifiers persists and returns quantity
+  - checkout_cart copies stored modifier quantity into order_item_modifiers
+  - Focused backend coverage for modifier quantity greater than 1
+
+out_of_scope:
+  - Frontend UI changes
+  - Broad accounting or PUC redesign
+  - POS/table/manual order flows
+
+hints:
+  entry: "app.services.online_cart_service.create_cart_with_batch_items / checkout_cart"
+  pattern: "app.services.pos_cart_service uses modifier.get('quantity', 1) and persists order_item_modifiers.quantity"
+  tests: "pytest tests/test_online_cart_batch.py"
+
+risk:
+  sensitive: false
+  areas: ["online checkout totals", "COGS/inventory quantity handoff"]
+
+skip:
+  audits:
+    - repo-wide audit
+    - frontend validation
+
+next:
+  after_pr: "none"

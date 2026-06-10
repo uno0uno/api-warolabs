@@ -7,7 +7,7 @@ Issue: https://github.com/uno0uno/warocol.com/issues/294
 from typing import Optional
 from uuid import UUID
 from decimal import Decimal
-from datetime import date
+from datetime import date, datetime, timezone
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -16,12 +16,178 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+_PAYMENT_DEBIT_FALLBACKS = {
+    "cash": "1105",
+    "digital": "1110",
+    "card": "1110",
+    "credit": "1305",
+}
+_CARTERA_RECEIVABLE_CODE = "1305"
+
+
+async def _resolve_account_id(conn, tenant_id: UUID, code: str) -> Optional[UUID]:
+    return await conn.fetchval(
+        """
+        SELECT id
+        FROM tenant_accounts
+        WHERE tenant_id = $1 AND code = $2 AND is_active = true
+        """,
+        tenant_id,
+        code,
+    )
+
+
+async def _resolve_credit_payment_debit_code(
+    conn,
+    tenant_id: UUID,
+    payment_method: str,
+    group_id: UUID,
+    payment_method_id: Optional[UUID],
+) -> str:
+    if payment_method_id:
+        method_code = await conn.fetchval(
+            """
+            SELECT COALESCE(pm.gl_account_code, pmg.gl_account_code)
+            FROM payment_methods pm
+            JOIN payment_method_groups pmg ON pm.group_id = pmg.id
+            WHERE pm.id = $1
+              AND pm.tenant_id = $2
+              AND pm.group_id = $3
+            """,
+            payment_method_id,
+            tenant_id,
+            group_id,
+        )
+        if method_code:
+            return str(method_code)
+
+    group_code = await conn.fetchval(
+        """
+        SELECT gl_account_code
+        FROM payment_method_groups
+        WHERE id = $1
+          AND is_active = true
+          AND (tenant_id IS NULL OR tenant_id = $2)
+        """,
+        group_id,
+        tenant_id,
+    )
+    if group_code:
+        return str(group_code)
+
+    return _PAYMENT_DEBIT_FALLBACKS.get(payment_method or "", "1105")
+
+
+async def _post_credit_payment_gl(
+    conn,
+    tenant_id: UUID,
+    payment_id: UUID,
+    order_id: UUID,
+    amount: Decimal,
+    payment_method: str,
+    group_id: UUID,
+    payment_method_id: Optional[UUID],
+    payment_date_value,
+    created_by: Optional[UUID],
+) -> Optional[UUID]:
+    existing = await conn.fetchval(
+        """
+        SELECT id
+        FROM tenant_journal_entries
+        WHERE tenant_id = $1
+          AND source_module = 'cartera'
+          AND source_id = $2
+        """,
+        tenant_id,
+        payment_id,
+    )
+    if existing:
+        logger.info("[credit GL] Payment %s already posted as journal %s", payment_id, existing)
+        return existing
+
+    debit_code = await _resolve_credit_payment_debit_code(
+        conn,
+        tenant_id,
+        payment_method,
+        group_id,
+        payment_method_id,
+    )
+    credit_code = _CARTERA_RECEIVABLE_CODE
+    debit_account_id = await _resolve_account_id(conn, tenant_id, debit_code)
+    credit_account_id = await _resolve_account_id(conn, tenant_id, credit_code)
+    if not debit_account_id or not credit_account_id:
+        logger.warning(
+            "[credit GL] Missing accounts debit=%s credit=%s tenant=%s payment=%s",
+            debit_code,
+            credit_code,
+            tenant_id,
+            payment_id,
+        )
+        raise APIError(
+            "No se pudo registrar el asiento contable del abono de cartera.",
+            status_code=500,
+            details={"code": "credit_payment_gl_account_missing"},
+        )
+
+    entry_date = (
+        payment_date_value.date()
+        if isinstance(payment_date_value, datetime)
+        else payment_date_value
+    )
+    amt = float(amount)
+    description = f"Abono cartera orden {order_id}"
+    entry_row = await conn.fetchrow(
+        """
+        INSERT INTO tenant_journal_entries
+            (tenant_id, entry_date, period_year, period_month,
+             description, reference, source_module, source_id,
+             status, total_debit, total_credit, created_by, posted_at)
+        VALUES ($1, $2, $3, $4, $5, $6, 'cartera', $7,
+                'posted', $8, $8, $9, now())
+        RETURNING id
+        """,
+        tenant_id,
+        entry_date,
+        entry_date.year,
+        entry_date.month,
+        description,
+        f"credit-payment-{payment_id}",
+        payment_id,
+        amt,
+        created_by,
+    )
+    entry_id = entry_row["id"]
+    await conn.execute(
+        """
+        INSERT INTO tenant_journal_lines
+            (journal_entry_id, account_id, debit, credit, description, line_order)
+        VALUES ($1, $2, $3, 0, $4, 0)
+        """,
+        entry_id,
+        debit_account_id,
+        amt,
+        f"Dr {debit_code} - abono cartera",
+    )
+    await conn.execute(
+        """
+        INSERT INTO tenant_journal_lines
+            (journal_entry_id, account_id, debit, credit, description, line_order)
+        VALUES ($1, $2, 0, $3, $4, 1)
+        """,
+        entry_id,
+        credit_account_id,
+        amt,
+        f"Cr {credit_code} - clientes por cobrar",
+    )
+    return entry_id
+
 
 async def register_credit_payment(
     request: Request,
     order_id: UUID,
     amount: Decimal,
     payment_method: str,
+    payment_method_id: Optional[UUID] = None,
     notes: Optional[str] = None,
     payment_date: Optional[date] = None,
 ) -> dict:
@@ -83,8 +249,46 @@ async def register_credit_payment(
                         status_code=400,
                     )
 
+                group_row = await conn.fetchrow(
+                    """
+                    SELECT id
+                    FROM payment_method_groups
+                    WHERE slug = $1
+                      AND is_active = true
+                      AND (tenant_id IS NULL OR tenant_id = $2)
+                    """,
+                    payment_method,
+                    tenant_id,
+                )
+                if not group_row:
+                    raise APIError(
+                        f"Método de pago '{payment_method}' no es válido para este restaurante.",
+                        status_code=400,
+                        details={"code": "payment_method_invalid"},
+                    )
+
+                if payment_method_id:
+                    method_row = await conn.fetchrow(
+                        """
+                        SELECT id
+                        FROM payment_methods
+                        WHERE id = $1
+                          AND tenant_id = $2
+                          AND group_id = $3
+                          AND is_active = true
+                        """,
+                        payment_method_id,
+                        tenant_id,
+                        group_row["id"],
+                    )
+                    if not method_row:
+                        raise APIError(
+                            "El método seleccionado no pertenece al grupo elegido.",
+                            status_code=400,
+                            details={"code": "payment_method_id_invalid"},
+                        )
+
                 # 3. Insert payment record
-                from datetime import datetime, timezone
                 effective_payment_date = (
                     datetime.combine(payment_date, datetime.min.time()).replace(tzinfo=timezone.utc)
                     if payment_date
@@ -95,11 +299,11 @@ async def register_credit_payment(
                     """
                     INSERT INTO credit_payments (
                         order_id, customer_id, tenant_id,
-                        amount, payment_method, notes,
+                        amount, payment_method, payment_method_id, notes,
                         created_by_user_id,
                         payment_date
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()))
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, now()))
                     RETURNING id, payment_date, created_at
                     """,
                     order_id,
@@ -107,6 +311,7 @@ async def register_credit_payment(
                     tenant_id,
                     amount,
                     payment_method,
+                    payment_method_id,
                     notes,
                     user_id,
                     effective_payment_date,
@@ -133,6 +338,19 @@ async def register_credit_payment(
                     order_id,
                 )
 
+                await _post_credit_payment_gl(
+                    conn,
+                    tenant_id,
+                    payment_row["id"],
+                    order_id,
+                    amount,
+                    payment_method,
+                    group_row["id"],
+                    payment_method_id,
+                    payment_row["payment_date"],
+                    user_id,
+                )
+
                 logger.info(
                     f"[register_credit_payment] order={order_id} "
                     f"amount={amount} new_status={new_status} "
@@ -147,6 +365,7 @@ async def register_credit_payment(
                         "order_id": str(order_id),
                         "amount": float(amount),
                         "payment_method": payment_method,
+                        "payment_method_id": str(payment_method_id) if payment_method_id else None,
                         "payment_date": payment_row["payment_date"].isoformat(),
                         "new_payment_status": new_status,
                         "credit_paid_amount": float(new_paid),
@@ -189,6 +408,7 @@ async def get_credit_payments(request: Request, order_id: UUID) -> dict:
                     cp.id,
                     cp.amount,
                     cp.payment_method,
+                    cp.payment_method_id,
                     cp.payment_date,
                     cp.notes,
                     cp.created_at,
@@ -217,6 +437,11 @@ async def get_credit_payments(request: Request, order_id: UUID) -> dict:
                         "id": str(row["id"]),
                         "amount": float(row["amount"]),
                         "payment_method": row["payment_method"],
+                        "payment_method_id": (
+                            str(row["payment_method_id"])
+                            if row["payment_method_id"]
+                            else None
+                        ),
                         "payment_date": row["payment_date"].isoformat(),
                         "notes": row["notes"],
                         "created_at": row["created_at"].isoformat(),

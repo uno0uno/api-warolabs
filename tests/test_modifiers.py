@@ -55,6 +55,18 @@ class TestModifierGroupsListEndpoint:
         assert response.status_code in [200, 401, 403, 500]
 
     @pytest.mark.asyncio
+    async def test_get_modifier_groups_filter_required(self, client: AsyncClient):
+        """Test modifier groups filtered by required state"""
+        response = await client.get("/menu/modifier-groups?is_required=true")
+        assert response.status_code in [200, 401, 403, 500]
+
+    @pytest.mark.asyncio
+    async def test_get_modifier_groups_filter_optional(self, client: AsyncClient):
+        """Test modifier groups filtered by optional state"""
+        response = await client.get("/menu/modifier-groups?is_required=false")
+        assert response.status_code in [200, 401, 403, 500]
+
+    @pytest.mark.asyncio
     async def test_get_modifier_groups_invalid_page(self, client: AsyncClient):
         """Test modifier groups with invalid page"""
         response = await client.get("/menu/modifier-groups?page=0")

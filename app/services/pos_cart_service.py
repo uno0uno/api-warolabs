@@ -85,18 +85,118 @@ def _distribute_discount(items: List[dict], discount_amount: float) -> List[dict
 
 
 def _cart_items_to_promo_lines(items: List[dict]) -> List[dict]:
-    return [
-        {
+    lines = []
+    for item in items:
+        quantity = item.get("quantity") or 1
+        raw_unit_price = item.get("unit_price")
+        if raw_unit_price is None:
+            raw_unit_price = item.get("product", {}).get("price")
+        eligible_modifier_total = sum(
+            float(mod.get("price") or 0)
+            for mod in item.get("modifiers", [])
+            if mod.get("group_is_required") or mod.get("is_default")
+        )
+        line = {
             "id": item["id"],
             "product_id": item.get("product_id") or item["product"]["id"],
             "category_id": item.get("category_id"),
-            "quantity": item.get("quantity") or 1,
+            "quantity": quantity,
             "subtotal": float(item["subtotal"]),
             "tax_category": item.get("tax_category") or "standard",
             "promo_opt_out": bool(item.get("promo_opt_out")),
         }
-        for item in items
-    ]
+        if raw_unit_price is not None:
+            line["promo_eligible_subtotal"] = (
+                float(raw_unit_price) + eligible_modifier_total
+            ) * quantity
+        for key in (
+            "locked_promotion_id",
+            "locked_promotion_name",
+            "locked_promo_type",
+            "locked_promo_savings",
+        ):
+            if item.get(key) is not None:
+                line[key] = item[key]
+        lines.append(line)
+    return lines
+
+
+async def _refresh_cart_item_promotion_lock(
+    conn,
+    tenant_id: UUID,
+    cart_id: UUID,
+    item_id: UUID,
+) -> None:
+    reset_ids = {str(item_id)}
+    await conn.execute(
+        """
+        UPDATE pos_cart_items
+        SET locked_promotion_id = NULL,
+            promotion_locked_at = NULL,
+            locked_promo_eligible_subtotal = NULL,
+            locked_promo_eligible_unit_price = NULL,
+            locked_promotion_name = NULL,
+            locked_promo_type = NULL,
+            locked_promo_savings = NULL
+        WHERE id = $1
+        """,
+        item_id,
+    )
+    items = await get_cart_items(conn, cart_id)
+    if not items:
+        return
+
+    from app.services.promotions_service import evaluate_checkout_promotions
+
+    locked_at = datetime.now(_BOG)
+    promo_lines = _cart_items_to_promo_lines(items)
+    checkout_eval = await evaluate_checkout_promotions(
+        conn,
+        UUID(str(tenant_id)),
+        promo_lines,
+        at=locked_at,
+    )
+    items_by_id = {item["id"]: item for item in items}
+    promo_lines_by_id = {line["id"]: line for line in promo_lines}
+    for eval_line in checkout_eval.get("lines") or []:
+        line_id = eval_line["id"]
+        item = items_by_id.get(line_id)
+        if not item or item.get("promo_opt_out"):
+            continue
+        if line_id not in reset_ids and item.get("locked_promotion_id"):
+            continue
+        promo_id = eval_line.get("promotion_id")
+        promo_savings = round(float(eval_line.get("promo_savings") or 0))
+        if not promo_id or promo_savings <= 0:
+            continue
+
+        promo_line = promo_lines_by_id[line_id]
+        eligible_subtotal = float(
+            promo_line.get("promo_eligible_subtotal") or promo_line.get("subtotal") or 0
+        )
+        quantity = int(promo_line.get("quantity") or 1)
+        eligible_unit_price = eligible_subtotal / quantity if quantity > 0 else 0
+        await conn.execute(
+            """
+            UPDATE pos_cart_items
+            SET locked_promotion_id = $1,
+                promotion_locked_at = $2,
+                locked_promo_eligible_subtotal = $3,
+                locked_promo_eligible_unit_price = $4,
+                locked_promotion_name = $5,
+                locked_promo_type = $6,
+                locked_promo_savings = $7
+            WHERE id = $8
+            """,
+            UUID(str(promo_id)),
+            locked_at,
+            eligible_subtotal,
+            eligible_unit_price,
+            eval_line.get("promotion_name"),
+            eval_line.get("promo_type"),
+            promo_savings,
+            UUID(str(line_id)),
+        )
 
 
 def _manual_discount_amount(
@@ -323,6 +423,8 @@ async def create_cart_with_batch_items(
                                 mod['price']
                             )
 
+                    await _refresh_cart_item_promotion_lock(conn, tenant_id, cart_id, item_id)
+
                 # Update cart total
                 await update_cart_total(conn, cart_id)
 
@@ -368,6 +470,13 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
             ci.subtotal,
             ci.notes,
             ci.promo_opt_out,
+            ci.locked_promotion_id,
+            ci.promotion_locked_at,
+            ci.locked_promo_eligible_subtotal,
+            ci.locked_promo_eligible_unit_price,
+            ci.locked_promotion_name,
+            ci.locked_promo_type,
+            ci.locked_promo_savings,
             p.name as product_name,
             p.category_id as category_id,
             COALESCE(p.tax_category, 'standard') AS tax_category,
@@ -377,7 +486,9 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
                     json_build_object(
                         'id', m.modifier_id::text,
                         'name', m.modifier_name,
-                        'price', m.price
+                        'price', m.price,
+                        'is_default', COALESCE(mod.is_default, false),
+                        'group_is_required', COALESCE(mg.is_required, false)
                     ) ORDER BY m.created_at
                 ) FILTER (WHERE m.cart_item_id IS NOT NULL),
                 '[]'::json
@@ -385,9 +496,14 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
         FROM pos_cart_items ci
         JOIN product p ON ci.product_id = p.id
         LEFT JOIN pos_cart_item_modifiers m ON m.cart_item_id = ci.id
+        LEFT JOIN modifiers mod ON mod.id = m.modifier_id
+        LEFT JOIN modifier_groups mg ON mg.id = mod.modifier_group_id
         WHERE ci.cart_id = $1
         GROUP BY ci.id, ci.product_id, ci.quantity, ci.unit_price, ci.subtotal,
-                 ci.notes, ci.promo_opt_out, ci.created_at, p.name, p.category_id, p.tax_category, p.is_resale
+                 ci.notes, ci.promo_opt_out, ci.locked_promotion_id, ci.promotion_locked_at,
+                 ci.locked_promo_eligible_subtotal, ci.locked_promo_eligible_unit_price,
+                 ci.locked_promotion_name, ci.locked_promo_type, ci.locked_promo_savings,
+                 ci.created_at, p.name, p.category_id, p.tax_category, p.is_resale
         ORDER BY ci.created_at
     """
     items_rows = await conn.fetch(items_query, cart_id)
@@ -416,13 +532,34 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
                 {
                     "id": mod['id'],
                     "name": mod['name'],
-                    "price": float(mod['price'])
+                    "price": float(mod['price']),
+                    "is_default": bool(mod.get("is_default")),
+                    "group_is_required": bool(mod.get("group_is_required")),
                 }
                 for mod in raw_modifiers
             ],
             "notes": item_row['notes'],
             "subtotal": float(item_row['subtotal']),
             "promo_opt_out": bool(item_row.get("promo_opt_out")),
+            "locked_promotion_id": (
+                str(item_row["locked_promotion_id"])
+                if item_row["locked_promotion_id"] else None
+            ),
+            "promotion_locked_at": item_row["promotion_locked_at"],
+            "locked_promo_eligible_subtotal": (
+                float(item_row["locked_promo_eligible_subtotal"])
+                if item_row["locked_promo_eligible_subtotal"] is not None else None
+            ),
+            "locked_promo_eligible_unit_price": (
+                float(item_row["locked_promo_eligible_unit_price"])
+                if item_row["locked_promo_eligible_unit_price"] is not None else None
+            ),
+            "locked_promotion_name": item_row["locked_promotion_name"],
+            "locked_promo_type": item_row["locked_promo_type"],
+            "locked_promo_savings": (
+                float(item_row["locked_promo_savings"])
+                if item_row["locked_promo_savings"] is not None else None
+            ),
         })
 
     return items
@@ -485,6 +622,7 @@ async def update_cart_item_promo_opt_out(
                     promo_opt_out,
                     item_id,
                 )
+                await _refresh_cart_item_promotion_lock(conn, tenant_id, cart_id, item_id)
 
         return {
             "success": True,
@@ -564,6 +702,8 @@ async def add_item_to_cart(
                             mod['name'],
                             mod['price']
                         )
+
+                await _refresh_cart_item_promotion_lock(conn, tenant_id, cart_id, item_id)
 
                 # Update cart total
                 await update_cart_total(conn, cart_id)
@@ -684,6 +824,8 @@ async def update_cart_item(
                             mod['name'],
                             mod['price']
                         )
+
+                await _refresh_cart_item_promotion_lock(conn, tenant_id, cart_id, item_id)
 
                 # Update cart total
                 await update_cart_total(conn, cart_id)
@@ -2211,7 +2353,8 @@ async def complete_pos_order(
                         _standard_tax_label = f"IVA {pct}%"
 
                     if tax_config.get('liquor_tax_applicable') and liq_subtotal > 0:
-                        _liquor_tax = round(liq_subtotal * 0.05)
+                        liq_rate = float(tax_config.get('liquor_tax_rate') or 0.05)
+                        _liquor_tax = round(liq_subtotal * liq_rate)
                 except Exception as e:
                     logger.warning(f"Tax breakdown computation failed for order {order_id}: {e}")
 

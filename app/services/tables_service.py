@@ -925,15 +925,22 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
 
                     payment_status = 'credit' if payment_method == 'credit' else ('partial' if split_mode else 'paid')
 
-                    from app.services.promotions_service import evaluate_checkout_promotions
+                    from app.services.promotions_service import (
+                        enrich_order_item_rows_with_promo_basis,
+                        evaluate_checkout_promotions,
+                        item_rows_to_promo_lines,
+                    )
 
                     _discount_amount = None
                     _promo_breakdown = []
                     item_rows = await conn.fetch(
                         """
-                        SELECT oi.id, oi.subtotal, oi.quantity, oi.product_id, oi.promo_opt_out,
-                               oi.applied_promotion_id, oi.promo_savings_allocated,
-                               tp.name AS promotion_name, tp.promo_type,
+                        SELECT oi.id, oi.subtotal, oi.quantity, oi.price_at_purchase,
+                               oi.product_id, oi.promo_opt_out,
+                               oi.applied_promotion_id AS locked_promotion_id,
+                               tp.name AS locked_promotion_name,
+                               tp.promo_type AS locked_promo_type,
+                               oi.promo_savings_allocated AS locked_promo_savings,
                                p.category_id,
                                COALESCE(p.tax_category, 'standard') AS tax_category
                         FROM order_items oi
@@ -944,22 +951,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         """,
                         session_row["id"],
                     )
-                    promo_lines = [
-                        {
-                            "id": str(row["id"]),
-                            "product_id": str(row["product_id"]),
-                            "category_id": str(row["category_id"]) if row["category_id"] else None,
-                            "quantity": int(row["quantity"]),
-                            "subtotal": float(row["subtotal"]),
-                            "tax_category": row["tax_category"] or "standard",
-                            "promo_opt_out": bool(row.get("promo_opt_out")),
-                            "applied_promotion_id": str(row["applied_promotion_id"]) if row.get("applied_promotion_id") else None,
-                            "promo_savings_allocated": float(row["promo_savings_allocated"] or 0) if row.get("promo_savings_allocated") is not None else 0,
-                            "promotion_name": row.get("promotion_name"),
-                            "promo_type": row.get("promo_type"),
-                        }
-                        for row in item_rows
-                    ]
+                    item_rows = await enrich_order_item_rows_with_promo_basis(conn, item_rows)
+                    promo_lines = item_rows_to_promo_lines(item_rows)
                     checkout_eval = await evaluate_checkout_promotions(
                         conn,
                         UUID(str(tenant_id)),
@@ -1867,7 +1860,11 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
             _promo_lines_by_id: Dict[str, dict] = {}
             try:
                 from app.services.orders_service import _compute_tax_breakdown
-                from app.services.promotions_service import evaluate_checkout_promotions
+                from app.services.promotions_service import (
+                    enrich_order_item_rows_with_promo_basis,
+                    evaluate_checkout_promotions,
+                    item_rows_to_promo_lines,
+                )
 
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
                 order_ids = [o["id"] for o in orders]
@@ -1878,12 +1875,13 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                             oi.id,
                             oi.quantity,
                             oi.subtotal,
+                            oi.price_at_purchase,
                             oi.product_id,
                             oi.promo_opt_out,
-                            oi.applied_promotion_id,
-                            oi.promo_savings_allocated,
-                            tp.name AS promotion_name,
-                            tp.promo_type,
+                            oi.applied_promotion_id AS locked_promotion_id,
+                            tp.name AS locked_promotion_name,
+                            tp.promo_type AS locked_promo_type,
+                            oi.promo_savings_allocated AS locked_promo_savings,
                             p.category_id,
                             COALESCE(p.tax_category, 'standard') AS tax_category
                         FROM order_items oi
@@ -1894,22 +1892,8 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                         """,
                         order_ids,
                     )
-                    promo_lines = [
-                        {
-                            "id": str(row["id"]),
-                            "product_id": str(row["product_id"]),
-                            "category_id": str(row["category_id"]) if row["category_id"] else None,
-                            "quantity": int(row["quantity"]),
-                            "subtotal": float(row["subtotal"]),
-                            "tax_category": row["tax_category"] or "standard",
-                            "promo_opt_out": bool(row.get("promo_opt_out")),
-                            "applied_promotion_id": str(row["applied_promotion_id"]) if row.get("applied_promotion_id") else None,
-                            "promo_savings_allocated": float(row["promo_savings_allocated"] or 0) if row.get("promo_savings_allocated") is not None else 0,
-                            "promotion_name": row.get("promotion_name"),
-                            "promo_type": row.get("promo_type"),
-                        }
-                        for row in eval_rows
-                    ]
+                    eval_rows = await enrich_order_item_rows_with_promo_basis(conn, eval_rows)
+                    promo_lines = item_rows_to_promo_lines(eval_rows)
                     checkout_eval = await evaluate_checkout_promotions(
                         conn,
                         UUID(str(tenant_id)),
@@ -1941,10 +1925,14 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     oi.subtotal,
                     oi.notes,
                     oi.promo_opt_out,
+                    oi.applied_promotion_id,
+                    oi.promo_savings_allocated,
                     oi.fulfillment_status,
                     oi.sent_at,
                     p.name AS product_name,
                     p.category_id,
+                    tp.name AS promotion_name,
+                    tp.promo_type,
                     COALESCE(
                         json_agg(
                             json_build_object(
@@ -1959,11 +1947,13 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                 FROM order_items oi
                 JOIN orders o ON o.id = oi.order_id
                 JOIN product p ON p.id = oi.product_id
+                LEFT JOIN tenant_promotions tp ON tp.id = oi.applied_promotion_id
                 LEFT JOIN order_item_modifiers oim ON oim.order_item_id = oi.id
                 WHERE o.table_session_id = $1
                 GROUP BY
                     oi.id, oi.product_id, oi.quantity, oi.price_at_purchase, oi.subtotal,
-                    oi.notes, oi.promo_opt_out, oi.fulfillment_status, oi.sent_at, p.name, p.category_id
+                    oi.notes, oi.promo_opt_out, oi.applied_promotion_id, oi.promo_savings_allocated,
+                    oi.fulfillment_status, oi.sent_at, p.name, p.category_id, tp.name, tp.promo_type
                 ORDER BY oi.id ASC
                 """,
                 session_row["id"],
@@ -2064,10 +2054,23 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                         "quantity": r["quantity"],
                         "unitPrice": float(r["price_at_purchase"]),
                         "subtotal": float(r["subtotal"]),
-                        "promoSavings": int(_promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promo_savings") or 0),
-                        "promotionId": _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promotion_id"),
-                        "promotionName": _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promotion_name"),
-                        "promoType": _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promo_type"),
+                        "promoSavings": int(
+                            _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promo_savings")
+                            or r["promo_savings_allocated"]
+                            or 0
+                        ),
+                        "promotionId": (
+                            _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promotion_id")
+                            or (str(r["applied_promotion_id"]) if r["applied_promotion_id"] else None)
+                        ),
+                        "promotionName": (
+                            _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promotion_name")
+                            or r["promotion_name"]
+                        ),
+                        "promoType": (
+                            _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("promo_type")
+                            or r["promo_type"]
+                        ),
                         "promoOptOut": bool(r.get("promo_opt_out")),
                         "modifiers": [
                             {

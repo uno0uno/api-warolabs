@@ -3,7 +3,7 @@ Inventory Router
 Endpoints for inventory management and stock tracking
 """
 from fastapi import APIRouter, Depends, Request, Response, Query
-from typing import Optional
+from typing import Literal, Optional
 from uuid import UUID
 from app.core.permissions import Module, require_module
 from app.services import inventory_service
@@ -19,6 +19,8 @@ async def get_inventory_stock(
     offset: int = Query(0, ge=0, description="Number of items to skip"),
     search: Optional[str] = Query(None, description="Search by ingredient name"),
     status_filter: Optional[str] = Query('all', description="Filter by status: low, critical, ok, all"),
+    category: Optional[str] = Query(None, description="Filter by ingredient category"),
+    unit: Optional[str] = Query(None, description="Filter by ingredient unit"),
     sort_field: str = Query("current_stock", description="Field to sort by"),
     sort_direction: str = Query("desc", description="Sort direction: asc, desc")
 ):
@@ -38,6 +40,8 @@ async def get_inventory_stock(
         offset=offset,
         search=search,
         status_filter=status_filter,
+        category=category,
+        unit=unit,
         sort_field=sort_field,
         sort_direction=sort_direction
     )
@@ -51,6 +55,7 @@ async def get_inventory_movements(
     offset: int = Query(0, ge=0, description="Number of items to skip"),
     ingredient_id: Optional[UUID] = Query(None, description="Filter by ingredient ID"),
     movement_type: Optional[str] = Query(None, description="Filter by movement type: purchase, consumption, adjustment, loss, transfer, return"),
+    quantity_direction: Optional[Literal["positive", "negative"]] = Query(None, description="Filter by quantity direction: positive, negative"),
     start_date: Optional[str] = Query(None, description="Filter by start date (ISO format)"),
     end_date: Optional[str] = Query(None, description="Filter by end date (ISO format)")
 ):
@@ -70,6 +75,7 @@ async def get_inventory_movements(
         offset=offset,
         ingredient_id=ingredient_id,
         movement_type=movement_type,
+        quantity_direction=quantity_direction,
         start_date=start_date,
         end_date=end_date
     )

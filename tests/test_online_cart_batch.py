@@ -112,6 +112,29 @@ class TestOnlineCartBatchModifierValidation:
         assert data["data"]["items"][0]["subtotal"] == 56000.0
 
     @pytest.mark.asyncio
+    async def test_modifier_quantity_multiplies_subtotal_and_response(self, client: AsyncClient):
+        """Modifier quantity is preserved and priced with DB-sourced unit price."""
+        payload = _batch_payload([{
+            "product_id": PRODUCT_ID,
+            "quantity": 2,
+            "unit_price": 25000.0,
+            "modifiers": [
+                {"id": MODIFIER_ACHIOTE, "name": "Ignored", "price": 0.0, "quantity": 2},
+            ],
+        }])
+        response = await client.post("/online/cart/batch", json=payload)
+        assert response.status_code == 200
+        data = response.json()["data"]
+        item = data["items"][0]
+        modifier = item["modifiers"][0]
+
+        # subtotal = (25000 + (3000 * 2)) * 2 = 62000
+        assert item["subtotal"] == 62000.0
+        assert data["total_amount"] == 62000.0
+        assert modifier["price"] == 3000.0
+        assert modifier["quantity"] == 2.0
+
+    @pytest.mark.asyncio
     async def test_no_modifiers_returns_200(self, client: AsyncClient):
         """Empty modifiers array skips validation entirely and creates cart."""
         payload = _batch_payload([{

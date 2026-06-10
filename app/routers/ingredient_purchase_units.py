@@ -68,6 +68,7 @@ async def get_purchase_unit_endpoint(
     return await get_purchase_unit_by_id(request, response, purchase_unit_id)
 
 
+@router.post("/", response_model=IngredientPurchaseUnitResponse, status_code=201, include_in_schema=False, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 @router.post("", response_model=IngredientPurchaseUnitResponse, status_code=201, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
 async def create_purchase_unit_endpoint(
     request: Request,

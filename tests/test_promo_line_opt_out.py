@@ -37,6 +37,31 @@ def test_cart_items_to_promo_lines_carries_opt_out_flag():
     assert promo_lines[0]["promo_opt_out"] is True
 
 
+def test_cart_items_to_promo_lines_excludes_optional_modifier_basis():
+    product_id = str(uuid4())
+    item_id = str(uuid4())
+    items = [{
+        "id": item_id,
+        "product_id": product_id,
+        "category_id": None,
+        "quantity": 2,
+        "subtotal": 31000.0,
+        "tax_category": "standard",
+        "promo_opt_out": False,
+        "product": {"id": product_id, "price": 10000.0},
+        "modifiers": [
+            {"id": str(uuid4()), "price": 2000.0, "group_is_required": True},
+            {"id": str(uuid4()), "price": 500.0, "is_default": True},
+            {"id": str(uuid4()), "price": 3000.0},
+        ],
+    }]
+
+    promo_lines = _cart_items_to_promo_lines(items)
+
+    assert promo_lines[0]["subtotal"] == 31000.0
+    assert promo_lines[0]["promo_eligible_subtotal"] == 25000.0
+
+
 def test_evaluate_from_cart_items_respects_opt_out():
     product_id = uuid4()
     line_id = str(uuid4())
@@ -53,7 +78,7 @@ def test_evaluate_from_cart_items_respects_opt_out():
         }
     ]
     promo_lines = _cart_items_to_promo_lines(items)
-    result = evaluate_cart_promotions(promo_lines, promos=[_promo(product_id=product_id)])
+    result = evaluate_cart_promotions(promo_lines, [_promo(product_id=product_id)])
     assert result["lines"][0]["id"] == line_id
     assert result["lines"][0]["promo_savings"] == 0
     assert result["promo_savings"] == 0

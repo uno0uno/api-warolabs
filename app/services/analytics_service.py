@@ -884,7 +884,7 @@ async def backfill_anomaly_checks_for_tenant(
         async with get_db_connection(use_transaction=False) as conn:
             rows = await conn.fetch(
                 """
-                SELECT DISTINCT tp.id AS purchase_id
+                SELECT DISTINCT tp.id AS purchase_id, tp.purchase_date
                 FROM tenant_purchases tp
                 JOIN tenant_purchase_items tpi ON tpi.purchase_id = tp.id
                 WHERE tp.tenant_id = $1
