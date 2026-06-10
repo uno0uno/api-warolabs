@@ -1,0 +1,44 @@
+issue: 1167
+title: "Fix promo preservation when closing mesa after promo window"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-1167-preserve-mesa-promos
+
+paths:
+  - app/services/promotions_service.py
+  - app/services/tables_service.py
+  - tests/test_tables_tab_promo_persist.py
+
+ac:
+  - Promo persisted on mesa/tab line inside schedule remains applied when mesa closes after schedule expires.
+  - Lines added outside the promo window do not receive an expired promo retroactively.
+  - promo_opt_out still prevents/purges promo application for that line.
+  - Existing active promo, BOGO, cart/tab, comanda, receipt/breakdown behavior is not degraded.
+  - Validate DB shape with API .env psql tunnel variables without destructive production writes.
+
+out_of_scope:
+  - Redesigning promo conflict/priority rules.
+  - Recalculating historical orders.
+  - Destructive data migrations or production data changes.
+
+hints:
+  entry: "app/services/tables_service.py close_session and current mesa session promo summary"
+  pattern: "app/services/promotions_service.py persist_session_tab_promos already persists applied_promotion_id/promo_savings_allocated"
+  tests: "pytest tests/test_tables_tab_promo_persist.py"
+
+risk:
+  sensitive: false
+  areas:
+    - "POS mesa close totals"
+    - "order_items promo persistence"
+    - "promotion schedule evaluation"
+
+skip:
+  audits:
+    - "No broad frontend audit; symptom maps to API persistence/re-evaluation."
+    - "No schema migration unless DB validation proves columns are missing."
+
+next:
+  after_pr: "none"

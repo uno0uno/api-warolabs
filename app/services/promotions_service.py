@@ -1270,6 +1270,19 @@ def _locked_promo_from_line(line: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+def _persisted_promo_from_line(line: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    promo_id = line.get("applied_promotion_id")
+    savings = round(float(line.get("promo_savings_allocated") or 0))
+    if not promo_id or savings <= 0:
+        return None
+    return {
+        "id": promo_id,
+        "name": line.get("promotion_name") or "Promocion",
+        "promo_type": line.get("promo_type") or line.get("promotion_type") or "locked",
+        "locked_savings": savings,
+    }
+
+
 def _line_promo_eligible_unit_price(line: Dict[str, Any]) -> float:
     quantity = int(line.get("quantity") or 1)
     if quantity <= 0:
@@ -1324,9 +1337,11 @@ def _allocate_bogo_savings_cheapest_first(
 
 def evaluate_cart_promotions(
     lines: Sequence[Dict[str, Any]],
-    promotions: Sequence[Dict[str, Any]],
+    promotions: Optional[Sequence[Dict[str, Any]]] = None,
     *,
     promo_type_block_map: Optional[Dict[str, Any]] = None,
+    preserve_persisted_promos: bool = False,
+    promos: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Evaluate active promotions against checkout lines.
@@ -1334,6 +1349,9 @@ def evaluate_cart_promotions(
     Each input line needs: id, product_id, category_id (optional), quantity, subtotal.
     Returns authoritative promo savings and per-line breakdown (batch #982).
     """
+    if promotions is None:
+        promotions = promos or []
+
     evaluated_lines: List[Dict[str, Any]] = []
     breakdown_by_id: Dict[str, Dict[str, Any]] = {}
     total_promo_savings = 0
@@ -1352,7 +1370,11 @@ def evaluate_cart_promotions(
         subtotal = float(line["subtotal"])
         original_subtotal += subtotal
 
-        locked_promo = None if line.get("promo_opt_out") else _locked_promo_from_line(line)
+        locked_promo = None
+        if not line.get("promo_opt_out"):
+            locked_promo = _locked_promo_from_line(line)
+            if locked_promo is None and preserve_persisted_promos:
+                locked_promo = _persisted_promo_from_line(line)
 
         if line.get("promo_opt_out"):
             promo = None
@@ -1608,6 +1630,7 @@ async def evaluate_checkout_promotions(
     manual_discount_amount: float = 0,
     discount_type: Optional[str] = None,
     discount_value: Optional[float] = None,
+    preserve_persisted_promos: bool = False,
 ) -> Dict[str, Any]:
     """DB-backed promo evaluation + optional manual discount stacking."""
     evaluation_at = at or default_at_bogota()
@@ -1627,6 +1650,7 @@ async def evaluate_checkout_promotions(
         lines,
         promotions,
         promo_type_block_map=type_block_map,
+        preserve_persisted_promos=preserve_persisted_promos,
     )
     manual_discount = float(manual_discount_amount or 0)
     if discount_type and discount_value is not None and discount_value > 0:
@@ -1656,11 +1680,16 @@ def promo_persist_fields_from_eval_line(
 _SESSION_PENDING_PROMO_ITEMS_SQL = """
     SELECT oi.id, oi.subtotal, oi.quantity, oi.price_at_purchase,
            oi.product_id, oi.promo_opt_out,
+           oi.applied_promotion_id AS locked_promotion_id,
+           tp.name AS locked_promotion_name,
+           tp.promo_type AS locked_promo_type,
+           oi.promo_savings_allocated AS locked_promo_savings,
            p.category_id,
            COALESCE(p.tax_category, 'standard') AS tax_category
     FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
     JOIN product p ON p.id = oi.product_id
+    LEFT JOIN tenant_promotions tp ON tp.id = oi.applied_promotion_id
     WHERE o.table_session_id = $1 AND o.status = 'pending'
 """
 
@@ -1694,6 +1723,15 @@ def item_rows_to_promo_lines(item_rows: Sequence[Any]) -> List[Dict[str, Any]]:
             "tax_category": row["tax_category"] or "standard",
             "promo_opt_out": bool(_row_value(row, "promo_opt_out")),
         }
+        for key in (
+            "locked_promotion_id",
+            "locked_promotion_name",
+            "locked_promo_type",
+            "locked_promo_savings",
+        ):
+            value = _row_value(row, key)
+            if value is not None:
+                line[key] = value
         explicit_eligible = _row_value(row, "promo_eligible_subtotal")
         base_price = _row_value(row, "price_at_purchase")
         eligible_modifier_total = _row_value(row, "promo_eligible_modifier_unit_total", 0)

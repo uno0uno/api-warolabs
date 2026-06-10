@@ -131,6 +131,82 @@ def test_bogo_wins_over_percent_on_tab_line():
     assert result["promo_savings"] == 10000
 
 
+def test_preserve_persisted_promo_when_no_active_promos():
+    promo_id = uuid4()
+    product_id = uuid4()
+    lines = [{
+        "id": str(uuid4()),
+        "product_id": str(product_id),
+        "category_id": None,
+        "quantity": 2,
+        "subtotal": 20000,
+        "applied_promotion_id": str(promo_id),
+        "promo_savings_allocated": 10000,
+        "promotion_name": "Rebel and Rebel 2x1",
+        "promo_type": "bogo",
+    }]
+
+    result = evaluate_cart_promotions(
+        lines,
+        [],
+        preserve_persisted_promos=True,
+    )
+
+    assert result["promo_savings"] == 10000
+    assert result["subtotal_after_promos"] == 10000
+    assert result["lines"][0]["promotion_id"] == str(promo_id)
+    assert result["lines"][0]["promotion_name"] == "Rebel and Rebel 2x1"
+    assert result["promo_breakdown"][0]["promotion_name"] == "Rebel and Rebel 2x1"
+
+
+def test_line_without_persisted_promo_does_not_get_expired_promo():
+    product_id = uuid4()
+    lines = [{
+        "id": str(uuid4()),
+        "product_id": str(product_id),
+        "category_id": None,
+        "quantity": 2,
+        "subtotal": 20000,
+    }]
+
+    result = evaluate_cart_promotions(
+        lines,
+        [],
+        preserve_persisted_promos=True,
+    )
+
+    assert result["promo_savings"] == 0
+    assert result["subtotal_after_promos"] == 20000
+    assert "promotion_id" not in result["lines"][0]
+
+
+def test_promo_opt_out_ignores_persisted_promo_snapshot():
+    promo_id = uuid4()
+    product_id = uuid4()
+    lines = [{
+        "id": str(uuid4()),
+        "product_id": str(product_id),
+        "category_id": None,
+        "quantity": 2,
+        "subtotal": 20000,
+        "promo_opt_out": True,
+        "applied_promotion_id": str(promo_id),
+        "promo_savings_allocated": 10000,
+        "promotion_name": "Rebel and Rebel 2x1",
+        "promo_type": "bogo",
+    }]
+
+    result = evaluate_cart_promotions(
+        lines,
+        [],
+        preserve_persisted_promos=True,
+    )
+
+    assert result["promo_savings"] == 0
+    assert result["subtotal_after_promos"] == 20000
+    assert "promotion_id" not in result["lines"][0]
+
+
 @pytest.mark.asyncio
 async def test_apply_promo_eval_to_order_items_updates_rows():
     item_id = uuid4()
