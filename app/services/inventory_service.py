@@ -532,8 +532,8 @@ async def create_adjustment(
         purchase_unit = body.get('unit')  # Optional: unit selected by user
         cost_per_unit = body.get('cost_per_unit')  # Optional: cost per unit (only for positive adjustments)
 
-        if not ingredient_id or quantity_change == 0:
-            raise HTTPException(status_code=400, detail="ingredient_id and quantity_change are required")
+        if not ingredient_id:
+            raise HTTPException(status_code=400, detail="ingredient_id is required")
 
         async with get_db_connection() as conn:
             # Start transaction
@@ -593,6 +593,21 @@ async def create_adjustment(
                     previous_stock = 0
                 else:
                     previous_stock = float(stock_row['current_stock']) if stock_row['current_stock'] else 0
+
+                # Idempotent: "set to current stock" (e.g. confirm 0 when already 0).
+                if quantity_change == 0:
+                    return {
+                        "success": True,
+                        "message": "El stock ya coincide con el valor indicado",
+                        "data": {
+                            "ingredient_id": str(ingredient_id),
+                            "quantity_change": 0,
+                            "previous_stock": previous_stock,
+                            "new_stock": previous_stock,
+                            "reason": reason,
+                            "created_at": None,
+                        },
+                    }
 
                 # Calculate new stock (using converted quantity)
                 new_stock = max(0, previous_stock + quantity_in_base_unit)
