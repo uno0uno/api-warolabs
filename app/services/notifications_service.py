@@ -28,6 +28,22 @@ async def create_order_notification(conn, tenant_id, order_id, payload: dict):
     await conn.execute("SELECT pg_notify($1, $2)", channel, json.dumps(payload))
 
 
+async def create_comanda_ready_notification(
+    conn, tenant_id: UUID, order_id: UUID, payload: dict
+) -> None:
+    """Notify POS/expediter when a comanda reaches ready (KDS or monitor)."""
+    await conn.execute(
+        """INSERT INTO notifications (tenant_id, order_id, type, payload)
+           VALUES ($1, $2, 'comanda_ready', $3::jsonb)""",
+        tenant_id,
+        order_id,
+        json.dumps(payload),
+    )
+    channel = "tenant_" + str(tenant_id).replace("-", "")
+    notify_payload = {**payload, "type": "comanda_ready"}
+    await conn.execute("SELECT pg_notify($1, $2)", channel, json.dumps(notify_payload))
+
+
 async def create_table_qr_notification(
     conn, tenant_id: UUID, request_id: UUID, payload: dict
 ) -> None:

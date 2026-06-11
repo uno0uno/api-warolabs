@@ -139,6 +139,40 @@ ALLOWED_TRANSITIONS: Dict[str, List[str]] = {
 }
 
 
+async def _notify_comanda_ready(conn, tenant_id: UUID, comanda_id: UUID) -> None:
+    """SSE + persisted notification for expediter when comanda is ready."""
+    from app.services.notifications_service import create_comanda_ready_notification
+
+    row = await conn.fetchrow(
+        """
+        SELECT c.id, c.comanda_number, c.comanda_index, c.source_type,
+               c.table_display_name, c.status, c.order_id,
+               o.table_session_id, ts.table_id, ks.name AS station_name
+          FROM comandas c
+          LEFT JOIN orders o ON o.id = c.order_id
+          LEFT JOIN table_sessions ts ON ts.id = o.table_session_id
+          LEFT JOIN kitchen_stations ks ON ks.id = c.station_id
+         WHERE c.id = $1 AND c.tenant_id = $2
+        """,
+        comanda_id,
+        tenant_id,
+    )
+    if not row or row["status"] != "ready":
+        return
+
+    payload = {
+        "comanda_id": str(row["id"]),
+        "comanda_number": int(row["comanda_number"]),
+        "comanda_index": int(row["comanda_index"]),
+        "source_type": row["source_type"],
+        "table_display_name": row["table_display_name"],
+        "table_id": str(row["table_id"]) if row["table_id"] else None,
+        "table_session_id": str(row["table_session_id"]) if row["table_session_id"] else None,
+        "station_name": row["station_name"],
+    }
+    await create_comanda_ready_notification(conn, tenant_id, row["order_id"], payload)
+
+
 async def finalize_open_comandas(conn, order_id: UUID, tenant_id: UUID) -> int:
     """
     Mark all non-terminal comandas of an order as 'delivered'. Called from
@@ -694,6 +728,9 @@ async def update_comanda_status(
                       AND ci.status != 'cancelled'
                 """, comanda_id, item_fulfillment)
 
+            if new_status == "ready":
+                await _notify_comanda_ready(conn, tenant_id, comanda_id)
+
             return {"success": True, "message": f"Comanda actualizada a {new_status}"}
 
     except (AuthenticationError, NotFoundError, ValidationError, APIError) as e:
@@ -735,6 +772,7 @@ async def bulk_update_comanda_status(
 
             found_ids = {row['id'] for row in rows}
             updated, skipped = 0, 0
+            ready_notify_ids: List[UUID] = []
 
             for row in rows:
                 current_status = row['status']
@@ -776,7 +814,13 @@ async def bulk_update_comanda_status(
                           AND ci.status != 'cancelled'
                     """, row['id'], item_fulfillment)
 
+                if effective_status == "ready":
+                    ready_notify_ids.append(row["id"])
+
                 updated += 1
+
+            for cid in ready_notify_ids:
+                await _notify_comanda_ready(conn, tenant_id, cid)
 
             not_found = len(comanda_ids) - len(found_ids)
 
@@ -926,6 +970,7 @@ async def update_comanda_item_status(
                             f"update_comanda_item_status: all active items ready — "
                             f"auto-advanced comanda {comanda_id} to 'ready'"
                         )
+                        await _notify_comanda_ready(conn, tenant_id, comanda_id)
 
                 else:  # cancelled
                     # 1. Mark item cancelled
