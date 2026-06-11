@@ -16,6 +16,7 @@ _CATALOG_TO_BASE: dict = {
     'botella':    {'factor': 750,   'base': 'ml'},
     'galon':      {'factor': 3785,  'base': 'ml'},
     'und':        {'factor': 1,     'base': 'und'},
+    'hr':         {'factor': 1,     'base': 'hr'},
 }
 from app.models.ingredient import (
     IngredientPurchaseUnit,

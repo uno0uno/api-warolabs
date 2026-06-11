@@ -26,10 +26,10 @@ def _normalize_ingredient_type(type_val: Optional[str]) -> str:
 
 def _validate_unit_for_type(unit: str, ingredient_type: str) -> None:
     if ingredient_type == "service":
-        if unit != "hr":
+        if unit not in ("hr", "und"):
             raise HTTPException(
                 status_code=422,
-                detail="Service ingredients must use unit 'hr'.",
+                detail="Service ingredients must use unit 'hr' (per hour) or 'und' (per trip/fixed service).",
             )
         return
     if ingredient_type == "supply":
@@ -60,6 +60,8 @@ PURCHASE_UNIT_CATALOG: Dict[str, Dict[str, Any]] = {
     'galon':       {'label': 'Galón',        'conversion_factor': 3785,  'compatible_units': {'ml'}},
     # Piece (base unit: und)
     'und':         {'label': 'Unidad',       'conversion_factor': 1,     'compatible_units': {'und'}},
+    # Time (base unit: hr) — e.g. monthly retainer packs
+    'hr':          {'label': 'Hora',         'conversion_factor': 1,     'compatible_units': {'hr'}},
 }
 
 
@@ -349,7 +351,7 @@ async def create_tenant_ingredient(
     Creates a custom ingredient scoped to the given tenant.
 
     - name: trimmed, unique within tenant (enforced by ingredients_name_tenant_unique index)
-    - unit: food → gr/ml/kg/und/lt; service → hr; supply → und (DB CHECK includes hr)
+    - unit: food → gr/ml/kg/und/lt; service → hr or und; supply → und
     - parent_id (optional): must reference a global ingredient (tenant_id IS NULL)
     """
     name = data.name.strip()

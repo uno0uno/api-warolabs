@@ -24,14 +24,15 @@ from app.models.ingredient import TenantIngredientUpdate
 class TestIngredientUnitTypeValidation:
     """Unit tests for service/supply/food unit rules (api-warolabs#380)."""
 
-    def test_service_requires_hr(self):
+    def test_service_allows_hr_and_und(self):
         _validate_unit_for_type("hr", "service")
+        _validate_unit_for_type("und", "service")
 
     def test_service_rejects_gr(self):
         with pytest.raises(HTTPException) as exc:
             _validate_unit_for_type("gr", "service")
         assert exc.value.status_code == 422
-        assert "hr" in exc.value.detail
+        assert "hr" in exc.value.detail or "und" in exc.value.detail
 
     def test_supply_requires_und(self):
         _validate_unit_for_type("und", "supply")
@@ -73,6 +74,36 @@ class TestIngredientUnitTypeValidation:
         data = TenantIngredientCreate(name="Mano de obra", unit="hr", type="service")
         result = await create_tenant_ingredient(conn, tenant_id, data)
         assert result["unit"] == "hr"
+        assert result["type"] == "service"
+
+    @pytest.mark.asyncio
+    async def test_create_service_ingredient_und(self):
+        tenant_id = uuid4()
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(
+            return_value={
+                "id": str(uuid4()),
+                "name": "Transporte domicilios",
+                "unit": "und",
+                "type": "service",
+                "category": "Logística",
+                "costo_unitario": None,
+                "parent_id": None,
+                "tenant_id": str(tenant_id),
+                "is_resale": False,
+                "unit_weight_gr": None,
+                "unit_weight_unit": "gr",
+                "created_at": None,
+            }
+        )
+        data = TenantIngredientCreate(
+            name="Transporte domicilios",
+            unit="und",
+            type="service",
+            category="Logística",
+        )
+        result = await create_tenant_ingredient(conn, tenant_id, data)
+        assert result["unit"] == "und"
         assert result["type"] == "service"
 
     @pytest.mark.asyncio
