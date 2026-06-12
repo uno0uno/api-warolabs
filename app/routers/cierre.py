@@ -163,6 +163,15 @@ async def open_cierre_shift(request: Request, body: OpenShiftCreate):
     return await cierre_service.open_shift(request, body)
 
 
+@router.delete("/open-shift/{opening_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def delete_open_cierre_shift(request: Request, opening_id: UUID):
+    """
+    Cancel an open shift (fondo de caja) that has not been closed yet.
+    Hard-deletes the cash_shift_openings row; no accounting_period is affected.
+    """
+    return await cierre_service.delete_open_shift(request, opening_id)
+
+
 @router.get("/cash-settings", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_cierre_cash_settings(request: Request):
     """Tenant default opening cash float for arqueo (#922)."""

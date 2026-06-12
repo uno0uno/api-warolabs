@@ -2354,6 +2354,48 @@ async def delete_cierre(request: Request, cierre_id: UUID) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# DELETE /cierre/open-shift/{opening_id}  — cancel open shift (no cierre yet)
+# ---------------------------------------------------------------------------
+
+async def delete_open_shift(request: Request, opening_id: UUID) -> dict:
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=True) as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id, status, accounting_period_id
+                FROM cash_shift_openings
+                WHERE id = $1 AND tenant_id = $2
+                """,
+                opening_id, tenant_id,
+            )
+            if not row:
+                raise APIError("Apertura no encontrada", status_code=404)
+            if row["status"] != "open" or row["accounting_period_id"] is not None:
+                raise APIError(
+                    "Solo se puede cancelar una apertura de turno abierta sin cierre",
+                    status_code=409,
+                )
+
+            await conn.execute(
+                "DELETE FROM cash_shift_openings WHERE id = $1 AND tenant_id = $2",
+                opening_id, tenant_id,
+            )
+
+        return {"success": True, "data": None}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in delete_open_shift: {exc}")
+        raise APIError(f"Error in delete_open_shift: {exc}", status_code=500)
+
+
+# ---------------------------------------------------------------------------
 # GET /cierre/mensual
 # ---------------------------------------------------------------------------
 
