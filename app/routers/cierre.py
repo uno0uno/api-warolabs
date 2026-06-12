@@ -62,8 +62,8 @@ async def list_cierres(
     period_end:   Optional[date] = Query(None, alias="period_end"),
 ):
     """
-    List closed periods for the tenant, ordered by period_start DESC.
-    Optionally filter by period_start >= period_start and period_end <= period_end.
+    List arqueos for the tenant: open shifts first, then closed periods.
+    Open shifts are always included; closed rows respect optional period_start/period_end filters.
     """
     return await cierre_service.list_cierres(request, period_start, period_end)
 

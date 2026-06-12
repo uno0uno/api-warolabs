@@ -1101,6 +1101,35 @@ def _open_shift_row_to_dict(row) -> dict:
     }
 
 
+def _open_shift_list_row_to_dict(row) -> dict:
+    """List-item shape for open shifts — aligns with closed rows where possible."""
+    base = _open_shift_row_to_dict(row)
+    template_name = row.get("shift_template_name")
+    base.update({
+        "shiftTemplateName": template_name,
+        "accountingPeriodId":   None,
+        "tenantId":             None,
+        "totalSales":           None,
+        "itemsSold":            None,
+        "totalTips":            None,
+        "totalTipTax":          None,
+        "cashTips":             None,
+        "totalCharged":         None,
+        "totalCash":            None,
+        "totalCard":            None,
+        "totalDigital":         None,
+        "totalCredit":          None,
+        "gastosEfectivo":       None,
+        "cashExpected":         None,
+        "cashCounted":          None,
+        "cashDifference":       None,
+        "cashLeftInDrawer":     None,
+        "notes":                None,
+        "closedAt":             None,
+    })
+    return base
+
+
 async def _fetch_tenant_default_opening_cash(conn, tenant_id: UUID) -> float:
     row = await conn.fetchrow(
         "SELECT default_opening_cash FROM tenants WHERE id = $1",
@@ -2184,6 +2213,21 @@ async def list_cierres(
             date_filter += f" AND ap.period_end <= ${len(params)}"
 
         async with get_db_connection(use_transaction=False) as conn:
+            open_rows = await conn.fetch(
+                """
+                SELECT
+                    cso.id, cso.opening_cash, cso.opening_breakdown, cso.opened_at,
+                    cso.opened_by_user_id, cso.shift_template_id,
+                    cso.period_start, cso.period_end,
+                    cso.period_start_time, cso.period_end_time,
+                    tst.name AS shift_template_name
+                FROM cash_shift_openings cso
+                LEFT JOIN tenant_shift_templates tst ON tst.id = cso.shift_template_id
+                WHERE cso.tenant_id = $1 AND cso.status = 'open'
+                ORDER BY cso.opened_at DESC
+                """,
+                tenant_id,
+            )
             rows = await conn.fetch(
                 f"""
                 SELECT
@@ -2202,7 +2246,8 @@ async def list_cierres(
                 *params,
             )
 
-        data = [_row_to_dict(row) for row in rows]
+        data = [_open_shift_list_row_to_dict(row) for row in open_rows]
+        data.extend(_row_to_dict(row) for row in rows)
         return {"success": True, "data": data}
 
     except (AuthenticationError, APIError):
@@ -2413,6 +2458,7 @@ async def get_ultimo_cierre(request: Request) -> dict:
 def _row_to_dict(row) -> dict:
     return {
         "id":                   str(row["id"]),
+        "status":               "closed",
         "accountingPeriodId":   str(row["accounting_period_id"]),
         "tenantId":             str(row["tenant_id"]),
         "periodStart":          row["period_start"].isoformat(),

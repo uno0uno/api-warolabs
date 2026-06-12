@@ -41,6 +41,7 @@ def _mock_row(**overrides):
 def test_row_to_dict_includes_shift_template_fields():
     tid = uuid4()
     data = _row_to_dict(_mock_row(shift_template_id=tid, shift_template_name="Mañana"))
+    assert data["status"] == "closed"
     assert data["shiftTemplateId"] == str(tid)
     assert data["shiftTemplateName"] == "Mañana"
     assert data["periodStartTime"] is not None
