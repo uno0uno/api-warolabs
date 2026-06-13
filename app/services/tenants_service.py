@@ -233,7 +233,7 @@ async def update_member_role(request: Request, member_id: str, new_role: str) ->
     Only superuser can change roles
     Cannot change your own role
     """
-    VALID_ROLES = ['superuser', 'admin', 'employee', 'member']
+    VALID_ROLES = list(LEGACY_INTERNAL_TEAM_ROLES)
 
     try:
         session_context = require_valid_session(request)
@@ -250,8 +250,16 @@ async def update_member_role(request: Request, member_id: str, new_role: str) ->
         async with get_db_connection() as conn:
             # Check current user's role - ONLY superuser can change roles
             user_role = await conn.fetchval(
-                "SELECT role FROM tenant_members WHERE user_id = $1 AND tenant_id = $2",
-                current_user_id, current_tenant_id
+                """
+                SELECT role FROM tenant_members
+                WHERE user_id = $1
+                  AND tenant_id = $2
+                  AND is_active = true
+                  AND role = ANY($3::text[])
+                """,
+                current_user_id,
+                current_tenant_id,
+                VALID_ROLES,
             )
 
             if user_role != 'superuser':
@@ -262,8 +270,13 @@ async def update_member_role(request: Request, member_id: str, new_role: str) ->
                 """SELECT tm.id, tm.user_id, tm.role, p.name, p.email
                    FROM tenant_members tm
                    JOIN profile p ON tm.user_id = p.id
-                   WHERE tm.id = $1 AND tm.tenant_id = $2""",
-                member_id, current_tenant_id
+                   WHERE tm.id = $1
+                     AND tm.tenant_id = $2
+                     AND tm.is_active = true
+                     AND tm.role = ANY($3::text[])""",
+                member_id,
+                current_tenant_id,
+                VALID_ROLES,
             )
 
             if not member_info:

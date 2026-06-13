@@ -9,6 +9,7 @@ from app.core.security import set_session_cookie, get_client_ip, get_current_use
 from app.core.middleware import require_valid_tenant, require_valid_session
 from app.core.exceptions import AuthenticationError, ValidationError, AuthorizationError
 from app.core.email_utils import normalize_email
+from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.models.invitation import (
     SendInvitationRequest,
     SendInvitationResponse,
@@ -73,6 +74,7 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
             permission_query = """
                 SELECT role FROM tenant_members
                 WHERE user_id = $1 AND tenant_id = $2
+                  AND is_active = true
             """
             user_role = await conn.fetchval(permission_query, current_user_id, session_tenant_id)
 
@@ -88,8 +90,16 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
             if existing_user:
                 # Check if already member of this tenant
                 existing_member = await conn.fetchval(
-                    "SELECT id FROM tenant_members WHERE user_id = $1 AND tenant_id = $2",
-                    existing_user['id'], session_tenant_id
+                    """
+                    SELECT id FROM tenant_members
+                    WHERE user_id = $1
+                      AND tenant_id = $2
+                      AND is_active = true
+                      AND role = ANY($3::text[])
+                    """,
+                    existing_user['id'],
+                    session_tenant_id,
+                    list(LEGACY_INTERNAL_TEAM_ROLES),
                 )
                 if existing_member:
                     raise ValidationError("User is already a member of this team")
@@ -259,13 +269,22 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
                 invitation['id']
             )
 
-            # Add user to tenant_members
-            member_exists = await conn.fetchval(
-                "SELECT id FROM tenant_members WHERE user_id = $1 AND tenant_id = $2",
-                invitation['user_id'], invitation['tenant_id']
+            # Add or reactivate an internal team membership without touching customer state.
+            team_member = await conn.fetchrow(
+                """
+                SELECT id, is_active FROM tenant_members
+                WHERE user_id = $1
+                  AND tenant_id = $2
+                  AND role = ANY($3::text[])
+                ORDER BY is_active DESC
+                LIMIT 1
+                """,
+                invitation['user_id'],
+                invitation['tenant_id'],
+                list(LEGACY_INTERNAL_TEAM_ROLES),
             )
 
-            if not member_exists:
+            if not team_member:
                 await conn.execute(
                     """INSERT INTO tenant_members (id, user_id, tenant_id, role)
                        VALUES (gen_random_uuid(), $1, $2, $3)""",
@@ -275,14 +294,18 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
                 )
                 logger.info(f"👥 User added to tenant_members with role: {invitation['role']}")
             else:
-                # Update role if already exists
                 await conn.execute(
-                    "UPDATE tenant_members SET role = $1 WHERE user_id = $2 AND tenant_id = $3",
+                    """
+                    UPDATE tenant_members
+                    SET role = $1,
+                        is_active = true,
+                        terminated_at = NULL
+                    WHERE id = $2
+                    """,
                     invitation['role'],
-                    invitation['user_id'],
-                    invitation['tenant_id']
+                    team_member['id'],
                 )
-                logger.info(f"🔄 Updated existing member role to: {invitation['role']}")
+                logger.info(f"🔄 Activated existing team member role to: {invitation['role']}")
 
             # Create session (same as magic link flow)
             session_id = secrets.token_hex(16)
@@ -364,8 +387,14 @@ async def get_pending_invitations(request: Request) -> PendingInvitationsRespons
         async with get_db_connection() as conn:
             # Check permission
             user_role = await conn.fetchval(
-                "SELECT role FROM tenant_members WHERE user_id = $1 AND tenant_id = $2",
-                current_user_id, tenant_context.tenant_id
+                """
+                SELECT role FROM tenant_members
+                WHERE user_id = $1
+                  AND tenant_id = $2
+                  AND is_active = true
+                """,
+                current_user_id,
+                tenant_context.tenant_id,
             )
 
             if user_role not in ('admin', 'superuser'):
@@ -426,8 +455,14 @@ async def cancel_invitation(request: Request, invitation_id: str) -> CancelInvit
         async with get_db_connection() as conn:
             # Check permission
             user_role = await conn.fetchval(
-                "SELECT role FROM tenant_members WHERE user_id = $1 AND tenant_id = $2",
-                current_user_id, session_tenant_id
+                """
+                SELECT role FROM tenant_members
+                WHERE user_id = $1
+                  AND tenant_id = $2
+                  AND is_active = true
+                """,
+                current_user_id,
+                session_tenant_id,
             )
 
             if user_role not in ('admin', 'superuser'):
