@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from app.database import get_db_connection
 from app.services.aws_ses_service import AWSSESService
 from app.core.exceptions import APIError
+from app.core.email_utils import normalize_email
 from app.config import settings
 import logging
 
@@ -41,12 +42,13 @@ async def send_otp_email(
         - message: str
     """
     try:
+        email = normalize_email(email)
         async with get_db_connection() as conn:
             # Check if there's a recent non-expired OTP
             recent_otp_query = """
                 SELECT id, otp_code, expires_at, created_at
                 FROM otp_verifications
-                WHERE email = $1
+                WHERE lower(trim(email)) = $1
                 AND cart_id IS NOT DISTINCT FROM $2
                 AND is_verified = false
                 AND expires_at > now()
@@ -147,13 +149,14 @@ async def verify_otp_code(
         - is_verified: bool
     """
     try:
+        email = normalize_email(email)
         async with get_db_connection() as conn:
             async with conn.transaction():
                 # Get latest OTP for this email + cart
                 otp_query = """
                     SELECT id, otp_code, is_verified, attempts, max_attempts, expires_at
                     FROM otp_verifications
-                    WHERE email = $1
+                    WHERE lower(trim(email)) = $1
                     AND cart_id IS NOT DISTINCT FROM $2
                     ORDER BY created_at DESC
                     LIMIT 1
@@ -264,10 +267,11 @@ async def get_or_create_customer(conn, email: str) -> UUID:
     Search for existing customer by email or create new one
     Returns customer_id (UUID)
     """
+    email = normalize_email(email)
     # Search by email
     customer_query = """
         SELECT id FROM profile
-        WHERE email = $1
+        WHERE lower(trim(email)) = $1
         LIMIT 1
     """
     customer_row = await conn.fetchrow(customer_query, email)

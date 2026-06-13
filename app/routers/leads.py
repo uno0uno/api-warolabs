@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, EmailStr, field_validator
 from app.database import get_db_connection
 from app.services import leads_service
+from app.core.email_utils import normalize_email
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,11 @@ class AccessRequestBody(BaseModel):
     email: EmailStr
     phone: Optional[str] = None
     button_source: str = "access_request"
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        return normalize_email(v)
 
     @field_validator("phone")
     @classmethod
@@ -35,6 +41,11 @@ class LeadCaptureRequest(BaseModel):
     email: EmailStr
     phone: str
     button_source: str = "comenzar"
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        return normalize_email(v)
 
     @field_validator("phone")
     @classmethod

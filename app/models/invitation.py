@@ -1,8 +1,10 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
 from enum import Enum
+
+from app.core.email_utils import normalize_email
 
 
 class InvitationRole(str, Enum):
@@ -23,6 +25,11 @@ class SendInvitationRequest(BaseModel):
     phone: str
     name: str
     role: InvitationRole = InvitationRole.ADMIN
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        return normalize_email(v)
 
 
 class AcceptInvitationRequest(BaseModel):

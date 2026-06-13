@@ -5,6 +5,7 @@ from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import APIError
+from app.core.email_utils import normalize_email
 from app.models.customer import (
     Customer,
     CustomerSearchOrCreate,
@@ -118,6 +119,8 @@ async def search_or_create_customer(
 
         # Check if phone_number is actually an email
         is_email_input = '@' in phone_number
+        if is_email_input:
+            phone_number = normalize_email(phone_number)
 
         async with get_db_connection() as conn:
             # Search for existing customer by phone number or email
@@ -136,7 +139,7 @@ async def search_or_create_customer(
                 FROM profile
             """
             if is_email_input:
-                search_query = base_select + " WHERE email = $1 LIMIT 1"
+                search_query = base_select + " WHERE lower(trim(email)) = $1 LIMIT 1"
             else:
                 search_query = base_select + " WHERE phone_number = $1 LIMIT 1"
 

@@ -6,6 +6,8 @@ import logging
 import json
 from typing import Optional
 
+from app.core.email_utils import normalize_email
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,6 +65,8 @@ async def capture_lead(
     2. INSERT lead linked to profile (only if not already a lead for this profile)
     3. INSERT lead_interaction to track the CTA click event
     """
+
+    email = normalize_email(email)
 
     # 1. UPSERT profile
     profile = await conn.fetchrow(
@@ -142,6 +146,8 @@ async def capture_access_request(
     3. INSERT lead_interaction to track the event
     """
 
+    email = normalize_email(email)
+
     # 1. UPSERT profile — update phone if provided, otherwise leave existing value
     if phone:
         await conn.execute(
@@ -164,7 +170,7 @@ async def capture_access_request(
             email,
         )
     profile = await conn.fetchrow(
-        "SELECT id FROM profile WHERE email = $1",
+        "SELECT id FROM profile WHERE lower(trim(email)) = $1",
         email,
     )
     profile_id = profile["id"]

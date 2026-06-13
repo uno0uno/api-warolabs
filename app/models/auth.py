@@ -1,7 +1,9 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 from typing import Optional, Dict, Any
 from uuid import UUID
+
+from app.core.email_utils import normalize_email
 
 class User(BaseModel):
     id: UUID
@@ -42,6 +44,11 @@ class MagicLinkRequest(BaseModel):
     email: str
     redirect: Optional[str] = None
 
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        return normalize_email(v)
+
 class MagicLinkResponse(BaseModel):
     success: bool = True
     message: str = "Magic link sent successfully"
@@ -50,9 +57,19 @@ class VerifyCodeRequest(BaseModel):
     email: str
     code: str
 
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        return normalize_email(v)
+
 class VerifyTokenRequest(BaseModel):
     email: str
     token: str
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        return normalize_email(v)
 
 class VerifyCodeResponse(BaseModel):
     success: bool = True

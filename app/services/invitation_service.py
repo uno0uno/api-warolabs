@@ -8,6 +8,7 @@ from app.database import get_db_connection
 from app.core.security import set_session_cookie, get_client_ip, get_current_user_id
 from app.core.middleware import require_valid_tenant, require_valid_session
 from app.core.exceptions import AuthenticationError, ValidationError, AuthorizationError
+from app.core.email_utils import normalize_email
 from app.models.invitation import (
     SendInvitationRequest,
     SendInvitationResponse,
@@ -80,8 +81,8 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
 
             # Check if email already exists in profile
             existing_user = await conn.fetchrow(
-                "SELECT id, email FROM profile WHERE email = $1",
-                payload.email
+                "SELECT id, email FROM profile WHERE lower(trim(email)) = $1",
+                payload.email,
             )
 
             if existing_user:

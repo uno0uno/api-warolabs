@@ -9,6 +9,7 @@ from app.database import get_db_connection
 from app.core.security import set_session_cookie, get_client_ip
 from app.core.middleware import require_valid_tenant
 from app.core.exceptions import AuthenticationError, ValidationError
+from app.core.email_utils import normalize_email
 from app.models.auth import User, Tenant, MagicLinkResponse, VerifyCodeResponse, VerifyTokenResponse
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
     Send magic link using tenant context from middleware
     """
     try:
+        email = normalize_email(email)
         # Get validated tenant context from middleware
         tenant_context = require_valid_tenant(request)
         
@@ -35,7 +37,7 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
                 SELECT p.id as user_id, p.email, p.name, tm.role, tm.tenant_id
                 FROM profile p
                 INNER JOIN tenant_members tm ON p.id = tm.user_id
-                WHERE p.email = $1
+                WHERE lower(trim(p.email)) = $1
                 LIMIT 1
             """
             user_result = await conn.fetchrow(user_tenant_query, email)
@@ -133,6 +135,7 @@ async def verify_code(request: Request, response: Response, email: str, code: st
     Verify magic link code using tenant context from middleware
     """
     try:
+        email = normalize_email(email)
         # Get validated tenant context from middleware
         tenant_context = require_valid_tenant(request)
         
@@ -146,7 +149,7 @@ async def verify_code(request: Request, response: Response, email: str, code: st
                 FROM magic_tokens mt
                 JOIN profile p ON mt.user_id = p.id
                 LEFT JOIN tenant_members tm ON tm.user_id = p.id AND tm.tenant_id = mt.tenant_id
-                WHERE p.email = $1 AND mt.verification_code = $2
+                WHERE lower(trim(p.email)) = $1 AND mt.verification_code = $2
                 AND mt.expires_at > NOW() AND mt.used = false
                 LIMIT 1
             """
@@ -266,6 +269,7 @@ async def verify_token(request: Request, response: Response, email: str, token: 
     Verify magic link token using tenant context from middleware
     """
     try:
+        email = normalize_email(email)
         # Get validated tenant context from middleware
         tenant_context = require_valid_tenant(request)
         
@@ -279,7 +283,7 @@ async def verify_token(request: Request, response: Response, email: str, token: 
                 FROM magic_tokens mt
                 JOIN profile p ON mt.user_id = p.id
                 LEFT JOIN tenant_members tm ON tm.user_id = p.id AND tm.tenant_id = mt.tenant_id
-                WHERE p.email = $1 AND mt.token = $2
+                WHERE lower(trim(p.email)) = $1 AND mt.token = $2
                 AND mt.expires_at > NOW() AND mt.used = false
                 LIMIT 1
             """
