@@ -6,6 +6,7 @@ from fastapi import Request, Response
 from app.database import get_db_connection
 from app.core.security import get_session_token, clear_session_cookie, set_session_cookie, get_client_ip
 from app.core.exceptions import AuthenticationError
+from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES, is_legacy_internal_team_role
 from app.core.middleware import require_valid_session
 from app.models.auth import User, Session, Tenant, SessionResponse, SwitchTenantResponse, UpdateProfileResponse
 
@@ -49,16 +50,32 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                         name=tenant_result['name'],
                         slug=tenant_result['slug']
                     )
-                # Only read role from ACTIVE memberships (#201).
-                # Terminated members keep their row with the old role value
-                # until purged; filtering ensures their stale role never
-                # reaches SessionContext. See docs/permissions-router-mapping.md §9.
+                # Only read role from ACTIVE memberships (#201). Customer rows
+                # are active memberships, but they are not internal team access.
                 role_result = await conn.fetchrow(
                     "SELECT role FROM tenant_members WHERE tenant_id = $1 AND user_id = $2 AND is_active = true LIMIT 1",
                     session_result['tenant_id'], session_result['user_id']
                 )
                 if role_result:
                     user_role = role_result['role']
+                    if not is_legacy_internal_team_role(user_role):
+                        await conn.execute(
+                            """
+                            UPDATE sessions
+                            SET is_active = false,
+                                ended_at = NOW(),
+                                end_reason = 'customer_role_denied'
+                            WHERE id = $1 AND is_active = true
+                            """,
+                            session_token,
+                        )
+                        await clear_session_cookie(response, session_token)
+                        logger.warning(
+                            "Denied /auth/session for non-team role %s on session %s",
+                            user_role,
+                            session_token[:8],
+                        )
+                        raise AuthenticationError("Access denied")
 
             # Build response models
             user = User(
@@ -98,6 +115,8 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
         # Get session context from middleware
         session_context = require_valid_session(request)
         current_session_token = await get_session_token(request)
+        if not is_legacy_internal_team_role(session_context.role):
+            raise AuthenticationError("Access denied to this tenant")
         
         # Get the target site from encrypted origin header
         target_site = None
@@ -165,10 +184,18 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
                 FROM tenants t
                 INNER JOIN tenant_members tm ON t.id = tm.tenant_id
                 LEFT JOIN tenant_sites ts ON t.id = ts.tenant_id AND ts.is_active = true
-                WHERE t.slug = $1 AND tm.user_id = $2 AND tm.is_active = true
+                WHERE t.slug = $1
+                  AND tm.user_id = $2
+                  AND tm.is_active = true
+                  AND tm.role = ANY($3::text[])
                 LIMIT 1
             """
-            tenant_access_result = await conn.fetchrow(tenant_access_query, tenant_slug, user_id)
+            tenant_access_result = await conn.fetchrow(
+                tenant_access_query,
+                tenant_slug,
+                user_id,
+                list(LEGACY_INTERNAL_TEAM_ROLES),
+            )
             
             if not tenant_access_result:
                 logger.warning(f"Access denied to tenant {tenant_slug} for user {user_id}")

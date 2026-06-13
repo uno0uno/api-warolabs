@@ -5,6 +5,7 @@ from urllib.parse import unquote
 from uuid import UUID
 from fastapi import Request, HTTPException, Response
 from app.config import settings
+from app.core.internal_roles import is_legacy_internal_team_role
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -376,6 +377,7 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
                 LEFT JOIN tenant_members tm
                   ON tm.user_id = s.user_id
                  AND tm.tenant_id = s.tenant_id
+                 AND tm.is_active = true
                 WHERE s.id = $1
                   AND s.expires_at > NOW()
                   AND s.is_active = true
@@ -386,6 +388,22 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
             if not session_result:
                 return None
 
+            resolved_role = session_result['role']
+            if resolved_role is not None and not is_legacy_internal_team_role(resolved_role):
+                await conn.execute("""
+                    UPDATE sessions
+                    SET is_active = false,
+                        ended_at = NOW(),
+                        end_reason = 'customer_role_denied'
+                    WHERE id = $1 AND is_active = true
+                """, session_token)
+                logger.warning(
+                    "Denied internal session %s for non-team role %s",
+                    session_token[:8],
+                    resolved_role,
+                )
+                return None
+
             return {
                 'user_id': session_result['user_id'],
                 'tenant_id': session_result['tenant_id'],
@@ -393,7 +411,7 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
                 'name': session_result['name'],
                 'expires_at': session_result['expires_at'],
                 'is_active': session_result['is_active'],
-                'role': session_result['role'],
+                'role': resolved_role,
             }
 
     except Exception as e:

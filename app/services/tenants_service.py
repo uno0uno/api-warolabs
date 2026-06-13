@@ -5,6 +5,7 @@ from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, AuthorizationError, ValidationError
+from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.models.auth import Tenant, UserTenantsResponse
 from app.models.tenant import (
     TenantMembersResponse, TenantMemberDetail, TenantMemberProfile,
@@ -36,11 +37,13 @@ async def get_user_tenants(request: Request) -> UserTenantsResponse:
                   t.slug
                 FROM tenants t
                 INNER JOIN tenant_members tm ON t.id = tm.tenant_id
-                WHERE tm.user_id = $1 AND tm.is_active = true
+                WHERE tm.user_id = $1
+                  AND tm.is_active = true
+                  AND tm.role = ANY($2::text[])
                 ORDER BY t.name
             """
-            
-            tenant_rows = await conn.fetch(query, user_id)
+
+            tenant_rows = await conn.fetch(query, user_id, list(LEGACY_INTERNAL_TEAM_ROLES))
             
             
             # Convert to Tenant models

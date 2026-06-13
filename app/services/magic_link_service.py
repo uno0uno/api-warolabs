@@ -10,6 +10,7 @@ from app.core.security import set_session_cookie, get_client_ip
 from app.core.middleware import require_valid_tenant
 from app.core.exceptions import AuthenticationError, ValidationError
 from app.core.email_utils import normalize_email
+from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.models.auth import User, Tenant, MagicLinkResponse, VerifyCodeResponse, VerifyTokenResponse
 
 logger = logging.getLogger(__name__)
@@ -32,18 +33,26 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             verification_code = str(random.randint(100000, 999999))  # 6-digit code
             expires_at = datetime.utcnow() + timedelta(minutes=15)  # 15 minutes
 
-            # Check if user exists AND is member of ANY tenant
+            # Internal magic-link auth is only for active team members of this tenant.
             user_tenant_query = """
                 SELECT p.id as user_id, p.email, p.name, tm.role, tm.tenant_id
                 FROM profile p
                 INNER JOIN tenant_members tm ON p.id = tm.user_id
                 WHERE lower(trim(p.email)) = $1
+                  AND tm.tenant_id = $2
+                  AND tm.is_active = true
+                  AND tm.role = ANY($3::text[])
                 LIMIT 1
             """
-            user_result = await conn.fetchrow(user_tenant_query, email)
+            user_result = await conn.fetchrow(
+                user_tenant_query,
+                email,
+                tenant_context.tenant_id,
+                list(LEGACY_INTERNAL_TEAM_ROLES),
+            )
 
             if not user_result:
-                logger.warning(f"❌ User {email} does not exist or is not a member of any tenant")
+                logger.warning(f"❌ User {email} is not an active team member for tenant {tenant_context.tenant_id}")
                 raise AuthenticationError("User not found. Please contact an administrator.")
 
             user_id = user_result['user_id']
@@ -148,13 +157,22 @@ async def verify_code(request: Request, response: Response, email: str, code: st
                        tm.role as user_role
                 FROM magic_tokens mt
                 JOIN profile p ON mt.user_id = p.id
-                LEFT JOIN tenant_members tm ON tm.user_id = p.id AND tm.tenant_id = mt.tenant_id
+                INNER JOIN tenant_members tm ON tm.user_id = p.id AND tm.tenant_id = mt.tenant_id
                 WHERE lower(trim(p.email)) = $1 AND mt.verification_code = $2
                 AND mt.expires_at > NOW() AND mt.used = false
+                AND mt.tenant_id = $3
+                AND tm.is_active = true
+                AND tm.role = ANY($4::text[])
                 LIMIT 1
             """
 
-            token_data = await conn.fetchrow(verify_query, email, code)
+            token_data = await conn.fetchrow(
+                verify_query,
+                email,
+                code,
+                tenant_context.tenant_id,
+                list(LEGACY_INTERNAL_TEAM_ROLES),
+            )
             
             if not token_data:
                 logger.warning(f"❌ Invalid verification code for {email} on {tenant_context.site}")
@@ -282,13 +300,22 @@ async def verify_token(request: Request, response: Response, email: str, token: 
                        tm.role as user_role
                 FROM magic_tokens mt
                 JOIN profile p ON mt.user_id = p.id
-                LEFT JOIN tenant_members tm ON tm.user_id = p.id AND tm.tenant_id = mt.tenant_id
+                INNER JOIN tenant_members tm ON tm.user_id = p.id AND tm.tenant_id = mt.tenant_id
                 WHERE lower(trim(p.email)) = $1 AND mt.token = $2
                 AND mt.expires_at > NOW() AND mt.used = false
+                AND mt.tenant_id = $3
+                AND tm.is_active = true
+                AND tm.role = ANY($4::text[])
                 LIMIT 1
             """
 
-            token_data = await conn.fetchrow(verify_query, email, token)
+            token_data = await conn.fetchrow(
+                verify_query,
+                email,
+                token,
+                tenant_context.tenant_id,
+                list(LEGACY_INTERNAL_TEAM_ROLES),
+            )
             
             if not token_data:
                 logger.warning(f"❌ Invalid or expired token for {email} on {tenant_context.site}")
