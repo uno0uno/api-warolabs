@@ -6,6 +6,7 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import APIError
 from app.core.email_utils import normalize_email
+from app.services.customer_relationship_service import upsert_tenant_customer
 from app.models.customer import (
     Customer,
     CustomerSearchOrCreate,
@@ -31,7 +32,7 @@ async def get_customer_by_id(
     customer_id: UUID,
 ) -> CustomerUpdateResponse:
     """
-    Fetch a customer profile by id, scoped to the current tenant (tenant_members).
+    Fetch a customer profile by id, scoped to the current tenant customer relationship.
     Includes fiscal fields so the POS can reuse invoice data.
     """
     try:
@@ -56,10 +57,10 @@ async def get_customer_by_id(
                     p.created_at,
                     p.updated_at
                 FROM profile p
-                JOIN tenant_members tm ON tm.user_id = p.id
+                JOIN tenant_customers tc ON tc.profile_id = p.id
                 WHERE p.id = $1
-                  AND tm.tenant_id = $2
-                  AND tm.role = 'customer'
+                  AND tc.tenant_id = $2
+                  AND tc.is_active = true
                 LIMIT 1
                 """,
                 customer_id,
@@ -149,30 +150,8 @@ async def search_or_create_customer(
                 # Customer found
                 logger.info(f"✅ Customer found: {existing_customer['phone_number']}")
 
-                # Check if customer is already associated with tenant
-                tenant_association_query = """
-                    SELECT tenant_id
-                    FROM tenant_members
-                    WHERE user_id = $1 AND tenant_id = $2
-                """
-
-                association = await conn.fetchrow(
-                    tenant_association_query,
-                    existing_customer['id'],
-                    tenant_id
-                )
-
-                # If not associated, create association
-                if not association:
-                    await conn.execute(
-                        """
-                        INSERT INTO tenant_members (id, user_id, tenant_id, role)
-                        VALUES (gen_random_uuid(), $1, $2, 'customer')
-                        """,
-                        existing_customer['id'],
-                        tenant_id
-                    )
-                    logger.info(f"✅ Associated customer {existing_customer['id']} with tenant {tenant_id}")
+                await upsert_tenant_customer(conn, existing_customer['id'], tenant_id)
+                logger.info(f"✅ Associated customer {existing_customer['id']} with tenant {tenant_id}")
 
                 # Backfill fiscal fields if the request brings them and they
                 # are not yet set on the profile (or differ from what we have).
@@ -268,15 +247,7 @@ async def search_or_create_customer(
                     customer_data.fiscal_email,
                 )
 
-                # Associate customer with tenant
-                await conn.execute(
-                    """
-                    INSERT INTO tenant_members (id, user_id, tenant_id, role)
-                    VALUES (gen_random_uuid(), $1, $2, 'customer')
-                    """,
-                    new_customer['id'],
-                    tenant_id
-                )
+                await upsert_tenant_customer(conn, new_customer['id'], tenant_id)
 
                 logger.info(f"✅ Customer created and associated with tenant: {new_customer['id']}")
 
@@ -387,7 +358,7 @@ async def search_customers_by_query(
 ) -> CustomerQuerySearchResponse:
     """
     Search customers by partial name or phone number (ILIKE OR).
-    Results are scoped to the current tenant via tenant_members.
+    Results are scoped to the current tenant via tenant_customers.
 
     Args:
         request: FastAPI request object
@@ -418,9 +389,9 @@ async def search_customers_by_query(
                     p.fiscal_id,
                     p.fiscal_id_type
                 FROM profile p
-                JOIN tenant_members tm ON tm.user_id = p.id
-                WHERE tm.tenant_id = $1
-                  AND tm.role = 'customer'
+                JOIN tenant_customers tc ON tc.profile_id = p.id
+                WHERE tc.tenant_id = $1
+                  AND tc.is_active = true
                   AND (
                       p.name ILIKE $2
                       OR p.phone_number ILIKE $2
@@ -569,7 +540,7 @@ async def update_customer(
     """
     Update name, email, and/or phone_number of a customer profile.
     Only fields explicitly provided (non-None) are updated.
-    Scoped to the current tenant — only updates customers who are members.
+    Scoped to the current tenant — only updates profiles with a customer relationship.
     """
     try:
         session_context = require_valid_session(request)
@@ -583,8 +554,10 @@ async def update_customer(
             member_check = await conn.fetchrow(
                 """
                 SELECT p.id FROM profile p
-                JOIN tenant_members tm ON tm.user_id = p.id
-                WHERE p.id = $1 AND tm.tenant_id = $2 AND tm.role = 'customer'
+                JOIN tenant_customers tc ON tc.profile_id = p.id
+                WHERE p.id = $1
+                  AND tc.tenant_id = $2
+                  AND tc.is_active = true
                 """,
                 customer_id, tenant_id
             )
