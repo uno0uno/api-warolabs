@@ -24,7 +24,7 @@ from app.core.middleware import SessionContext
 # ─── Fixtures ─────────────────────────────────────────────────────────
 
 
-def _build_session():
+def _build_session(role="admin"):
     """A valid session context for an arbitrary user/tenant pair."""
     return SessionContext({
         "user_id": uuid4(),
@@ -33,7 +33,7 @@ def _build_session():
         "name": "Test User",
         "expires_at": None,
         "is_active": True,
-        "role": "admin",
+        "role": role,
     })
 
 
@@ -189,6 +189,24 @@ async def test_non_member_cannot_switch_tenant():
     assert exc_info.value.status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_customer_member_cannot_switch_tenant():
+    """Customer-only memberships are not internal team access."""
+    from app.services.auth_service import switch_tenant
+
+    session = _build_session(role="customer")
+    request = _build_request_with_session(session)
+    response = _build_response()
+
+    with patch("app.services.auth_service.get_session_token", new=AsyncMock(return_value="tok")), \
+         patch("app.services.auth_service.require_valid_session", return_value=session):
+        with pytest.raises(AuthenticationError) as exc_info:
+            await switch_tenant(request, response, "target-tenant")
+
+    assert "Access denied" in str(exc_info.value)
+    assert exc_info.value.status_code == 401
+
+
 # ─── get_session_data tests ────────────────────────────────────────────
 
 
@@ -241,6 +259,49 @@ async def test_get_session_data_role_null_when_terminated():
     assert result.user.email == "term@example.com"
 
 
+@pytest.mark.asyncio
+async def test_get_session_data_denies_customer_role_and_clears_cookie():
+    """Existing active internal sessions with role=customer are invalidated."""
+    from app.services.auth_service import get_session_data
+
+    user_id = uuid4()
+    tenant_id = uuid4()
+    session_token = "fake-token"
+    request = MagicMock()
+    request.cookies = {"session-token": session_token}
+    request.headers = {}
+    response = _build_response()
+
+    fetchrow_responses = [
+        {
+            "user_id": user_id,
+            "email": "customer@example.com",
+            "name": "Customer User",
+            "user_created_at": "2024-01-01T00:00:00Z",
+            "tenant_id": tenant_id,
+            "expires_at": "2030-01-01T00:00:00Z",
+            "created_at": "2025-01-01T00:00:00Z",
+            "ip_address": "127.0.0.1",
+            "login_method": "magic-link",
+        },
+        {"id": tenant_id, "name": "Some Tenant", "slug": "some-tenant"},
+        {"role": "customer"},
+    ]
+
+    db_ctx, conn = _build_db_mock(fetchrow_side_effect=fetchrow_responses)
+
+    with patch("app.services.auth_service.get_db_connection", side_effect=db_ctx), \
+         patch("app.services.auth_service.get_session_token", new=AsyncMock(return_value=session_token)), \
+         patch("app.services.auth_service.clear_session_cookie", new=AsyncMock(return_value=None)) as clear_cookie:
+        with pytest.raises(AuthenticationError) as exc_info:
+            await get_session_data(request, response)
+
+    assert exc_info.value.status_code == 401
+    conn.execute.assert_awaited_once()
+    assert conn.execute.await_args.args[1] == session_token
+    clear_cookie.assert_awaited_once_with(response, session_token)
+
+
 # ─── get_user_tenants tests ────────────────────────────────────────────
 
 
@@ -264,7 +325,7 @@ async def test_get_user_tenants_excludes_terminated_memberships():
         {"id": active_tenant_id, "name": "Active Tenant", "slug": "active-tenant"},
     ]
 
-    db_ctx, _ = _build_db_mock(fetch_return=fetch_return)
+    db_ctx, conn = _build_db_mock(fetch_return=fetch_return)
 
     with patch("app.services.tenants_service.get_db_connection", side_effect=db_ctx), \
          patch("app.services.tenants_service.require_valid_session", return_value=session):
@@ -273,3 +334,4 @@ async def test_get_user_tenants_excludes_terminated_memberships():
     assert len(result.data) == 1
     assert result.data[0].slug == "active-tenant"
     assert result.data[0].id == active_tenant_id
+    assert conn.fetch.await_args.args[2] == ["superuser", "admin", "employee", "member"]
