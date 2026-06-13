@@ -38,15 +38,18 @@ class TestAnonymousGuard:
 
 class TestTenantCustomerGuard:
     @pytest.mark.asyncio
-    async def test_uses_user_id_column(self):
+    async def test_uses_tenant_customer_relationship(self):
         conn = AsyncMock()
         conn.fetchval = AsyncMock(return_value=1)
         profile_id = uuid4()
         tenant_id = uuid4()
         await _assert_tenant_customer(conn, profile_id, tenant_id)
         query = conn.fetchval.await_args.args[0]
-        assert "user_id" in query
-        assert "profile_id" not in query
+        assert "tenant_customers" in query
+        assert "profile_id" in query
+        assert "is_active = true" in query
+        assert "tenant_members" not in query
+        assert "role = 'customer'" not in query
 
     @pytest.mark.asyncio
     async def test_missing_association_raises_404(self):

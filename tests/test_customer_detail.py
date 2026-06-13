@@ -14,6 +14,8 @@ _CUSTOMER_ID = uuid4()
 
 
 class _SeqConnCtx:
+    latest_conn = None
+
     def __init__(self, fetchrow_responses, fetch_responses=None):
         self._frows = iter(fetchrow_responses)
         self._fetch = iter(fetch_responses or [])
@@ -22,6 +24,7 @@ class _SeqConnCtx:
         conn = MagicMock()
         conn.fetchrow = AsyncMock(side_effect=lambda *a, **k: next(self._frows))
         conn.fetch = AsyncMock(side_effect=lambda *a, **k: next(self._fetch))
+        _SeqConnCtx.latest_conn = conn
         return conn
 
     async def __aexit__(self, *_):
@@ -68,6 +71,12 @@ async def test_get_customer_detail_profile_without_orders_returns_zeroed_stats()
     assert result['customer']['last_purchase'] is None
     assert result['orders']['items'] == []
     assert result['orders']['total'] == 0
+    fallback_query = _SeqConnCtx.latest_conn.fetchrow.await_args_list[1].args[0]
+    assert "tenant_customers tc" in fallback_query
+    assert "tc.profile_id" in fallback_query
+    assert "tc.is_active = true" in fallback_query
+    assert "tenant_members" not in fallback_query
+    assert "role = 'customer'" not in fallback_query
 
 
 @pytest.mark.asyncio

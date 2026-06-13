@@ -1331,7 +1331,7 @@ async def get_customers_list(
             if search:
                 param_count += 1
                 outer_conditions.append(
-                    f"(tc.name ILIKE ${param_count} OR tc.phone ILIKE ${param_count})"
+                    f"(tcp.name ILIKE ${param_count} OR tcp.phone ILIKE ${param_count})"
                 )
                 params.append(f"%{search}%")
 
@@ -1348,17 +1348,15 @@ async def get_customers_list(
             offset_param = param_count
 
             query = f"""
-                WITH tenant_customers AS (
+                WITH tenant_customer_profiles AS (
                     SELECT
                         p.id AS customer_id,
                         COALESCE(p.name, 'Sin identificar') AS name,
                         p.phone_number AS phone
                     FROM profile p
-                    INNER JOIN tenant_members tm ON tm.user_id = p.id
-                    WHERE tm.tenant_id = $1
-                      AND tm.role = 'customer'
-                      AND tm.is_active = true
-                      AND tm.terminated_at IS NULL
+                    INNER JOIN tenant_customers tc ON tc.profile_id = p.id
+                    WHERE tc.tenant_id = $1
+                      AND tc.is_active = true
                 ),
                 order_agg AS (
                     SELECT
@@ -1372,19 +1370,19 @@ async def get_customers_list(
                     GROUP BY o.customer_id
                 )
                 SELECT
-                    tc.customer_id,
-                    tc.name,
-                    tc.phone,
+                    tcp.customer_id,
+                    tcp.name,
+                    tcp.phone,
                     COALESCE(oa.total_spent, 0)   AS total_spent,
                     COALESCE(oa.order_count, 0)   AS order_count,
                     COALESCE(oa.avg_ticket, 0)    AS avg_ticket,
                     oa.last_order_date,
                     COUNT(*) OVER() AS total_count,
                     SUM(COALESCE(oa.total_spent, 0)) OVER() AS total_revenue
-                FROM tenant_customers tc
-                {join_type} JOIN order_agg oa ON oa.customer_id = tc.customer_id
+                FROM tenant_customer_profiles tcp
+                {join_type} JOIN order_agg oa ON oa.customer_id = tcp.customer_id
                 {outer_where}
-                ORDER BY COALESCE(oa.total_spent, 0) DESC, tc.name ASC
+                ORDER BY COALESCE(oa.total_spent, 0) DESC, tcp.name ASC
                 LIMIT ${limit_param} OFFSET ${offset_param}
             """
 
@@ -1479,10 +1477,10 @@ async def get_customer_detail(
                         p.phone_number                       AS phone,
                         p.email                              AS email
                     FROM profile p
-                    JOIN tenant_members tm ON tm.user_id = p.id
+                    JOIN tenant_customers tc ON tc.profile_id = p.id
                     WHERE p.id = $1
-                      AND tm.tenant_id = $2
-                      AND tm.role = 'customer'
+                      AND tc.tenant_id = $2
+                      AND tc.is_active = true
                     LIMIT 1
                     """,
                     customer_id,
