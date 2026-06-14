@@ -17,6 +17,7 @@ from app.core.exceptions import APIError, AuthenticationError
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
 from app.services.cierre_service import _SLUG_DEBIT_CODE
+from app.services.customer_relationship_service import is_tenant_customer
 
 logger = logging.getLogger(__name__)
 
@@ -87,15 +88,7 @@ async def assert_wallet_customer_identified(conn, profile_id: UUID) -> None:
 
 
 async def _assert_tenant_customer(conn, profile_id: UUID, tenant_id: UUID) -> None:
-    ok = await conn.fetchval(
-        """
-        SELECT 1 FROM tenant_members
-        WHERE user_id = $1 AND tenant_id = $2 AND role = 'customer'
-        """,
-        profile_id,
-        tenant_id,
-    )
-    if not ok:
+    if not await is_tenant_customer(conn, profile_id, tenant_id):
         raise APIError("Cliente no pertenece a este negocio", status_code=404)
 
 

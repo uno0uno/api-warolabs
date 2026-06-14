@@ -200,7 +200,7 @@ async def get_customer_by_id_endpoint(
 ):
     """
     Get a single customer by id, including fiscal fields.
-    Customer must belong to the current tenant (tenant_members).
+    Customer must belong to the current tenant.
     """
     return await get_customer_by_id(request, customer_id)
 

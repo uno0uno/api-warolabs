@@ -13,12 +13,15 @@ _CUSTOMER_NO_ORDERS = uuid4()
 
 
 class _ConnCtx:
+    latest_conn = None
+
     def __init__(self, rows):
         self._rows = rows
 
     async def __aenter__(self):
         conn = MagicMock()
         conn.fetch = AsyncMock(return_value=self._rows)
+        _ConnCtx.latest_conn = conn
         return conn
 
     async def __aexit__(self, *_):
@@ -78,3 +81,9 @@ async def test_customers_list_includes_zero_order_customer():
   assert zero_row['order_count'] == 0
   assert zero_row['total_spent'] == 0.0
   assert zero_row['last_order_date'] is None
+  query = _ConnCtx.latest_conn.fetch.await_args.args[0]
+  assert "tenant_customers tc" in query
+  assert "tc.profile_id" in query
+  assert "tc.is_active = true" in query
+  assert "tenant_members" not in query
+  assert "role = 'customer'" not in query
