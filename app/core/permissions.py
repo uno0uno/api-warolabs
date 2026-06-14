@@ -121,6 +121,7 @@ _LEGACY_ROLE_MAP: Dict[str, Role] = {
     "superuser": Role.OWNER,
     "employee": Role.CASHIER,
     "member": Role.CASHIER,
+    "promotor": Role.CASHIER,
 }
 
 

@@ -121,7 +121,7 @@ async def test_karen_tijuana_customer_admin_coexistence_stays_visible_in_custome
     assert members.data[0].user_id == profile_id
     assert members.data[0].role == "admin"
     team_query = team_conn.fetch.await_args_list[0].args[0]
-    assert "tm.role IN ('superuser', 'admin', 'employee', 'member')" in team_query
+    assert "tm.role IN ('superuser', 'admin', 'employee', 'member', 'promotor')" in team_query
     assert "tm.role = 'customer'" not in team_query
 
 

@@ -77,7 +77,7 @@ JOIN profile p ON p.id = tm.user_id
 WHERE tm.tenant_id = $1
   AND tm.is_active = true
   AND tm.terminated_at IS NULL
-  AND tm.role IN ('superuser', 'admin', 'employee', 'member')
+  AND tm.role IN ('superuser', 'admin', 'employee', 'member', 'promotor')
 ORDER BY p.name
 """
 

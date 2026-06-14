@@ -57,6 +57,6 @@ async def update_member_role_endpoint(request: Request, member_id: str, body: Up
     Update a member's role in the current tenant
     Only superuser can change roles
     Cannot change your own role
-    Valid roles: superuser, admin, employee, member
+    Valid roles: superuser, admin, employee, member, promotor
     """
     return await update_member_role(request, member_id, body.role)

@@ -69,7 +69,7 @@ class DeleteMemberResponse(BaseModel):
 
 
 class UpdateMemberRoleRequest(BaseModel):
-    role: str = Field(..., description="New role: superuser, admin, employee, member")
+    role: str = Field(..., description="New role: superuser, admin, employee, member, promotor")
 
 
 class UpdateMemberRoleResponse(BaseModel):

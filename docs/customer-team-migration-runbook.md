@@ -4,7 +4,8 @@ Issue: api-warolabs#433
 
 This rollout separates customer relationship state from internal team role state.
 Customers live in `tenant_customers`; internal platform access remains in
-`tenant_members` with one of `superuser`, `admin`, `employee`, or `member`.
+`tenant_members` with one of `superuser`, `admin`, `employee`, `member`, or
+`promotor`.
 
 ## Preflight
 
@@ -115,7 +116,7 @@ JOIN tenant_members tm
  AND tm.user_id = tc.profile_id
  AND tm.is_active = true
 WHERE tc.is_active = true
-  AND tm.role = ANY(ARRAY['superuser', 'admin', 'employee', 'member'])
+  AND tm.role = ANY(ARRAY['superuser', 'admin', 'employee', 'member', 'promotor'])
 ORDER BY tc.tenant_id, tc.profile_id;
 ```
 

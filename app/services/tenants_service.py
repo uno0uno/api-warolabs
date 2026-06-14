@@ -96,14 +96,15 @@ async def get_tenant_members(request: Request) -> TenantMembersResponse:
                 FROM tenant_members tm
                 INNER JOIN profile p ON tm.user_id = p.id
                 WHERE tm.tenant_id = $1
-                  AND tm.role IN ('superuser', 'admin', 'employee', 'member')
+                  AND tm.role IN ('superuser', 'admin', 'employee', 'member', 'promotor')
                 ORDER BY
                     CASE tm.role
                         WHEN 'superuser' THEN 1
                         WHEN 'admin' THEN 2
                         WHEN 'employee' THEN 3
                         WHEN 'member' THEN 4
-                        ELSE 5
+                        WHEN 'promotor' THEN 5
+                        ELSE 6
                     END,
                     p.name, p.user_name
             """

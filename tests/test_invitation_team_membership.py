@@ -94,7 +94,7 @@ async def test_send_invitation_allows_existing_customer_without_team_membership(
     assert conn.fetchval.await_args_list[1].args[1:] == (
         customer_profile_id,
         tenant_id,
-        ["superuser", "admin", "employee", "member"],
+        ["superuser", "admin", "employee", "member", "promotor"],
     )
 
 
@@ -133,7 +133,7 @@ async def test_accept_invitation_inserts_team_membership_without_updating_legacy
     assert conn.fetchrow.await_args_list[1].args[1:] == (
         profile_id,
         tenant_id,
-        ["superuser", "admin", "employee", "member"],
+        ["superuser", "admin", "employee", "member", "promotor"],
     )
 
     executed_sql = [call.args[0] for call in conn.execute.await_args_list]

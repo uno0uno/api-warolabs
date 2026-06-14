@@ -334,4 +334,4 @@ async def test_get_user_tenants_excludes_terminated_memberships():
     assert len(result.data) == 1
     assert result.data[0].slug == "active-tenant"
     assert result.data[0].id == active_tenant_id
-    assert conn.fetch.await_args.args[2] == ["superuser", "admin", "employee", "member"]
+    assert conn.fetch.await_args.args[2] == ["superuser", "admin", "employee", "member", "promotor"]

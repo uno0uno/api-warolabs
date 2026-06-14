@@ -114,7 +114,7 @@ class TestUpdateMemberRoleEndpoint:
     @pytest.mark.asyncio
     async def test_update_role_valid_roles(self, client: AsyncClient):
         """Test valid role values"""
-        valid_roles = ["superuser", "admin", "employee", "member"]
+        valid_roles = ["superuser", "admin", "employee", "member", "promotor"]
         fake_id = str(uuid4())
 
         for role in valid_roles:
@@ -155,7 +155,7 @@ class TestUpdateMemberRoleEndpoint:
 class TestRoleValidationLogic:
     """Test role validation business logic (unit tests)"""
 
-    VALID_ROLES = ['superuser', 'admin', 'employee', 'member']
+    VALID_ROLES = ['superuser', 'admin', 'employee', 'member', 'promotor']
 
     def validate_role(self, role: str) -> bool:
         """Validate if a role is valid"""
