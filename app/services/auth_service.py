@@ -97,6 +97,7 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
             return SessionResponse(
                 user=user,
                 session=session,
+                has_internal_access=is_legacy_internal_team_role(user_role),
                 currentTenant=current_tenant
             )
             
