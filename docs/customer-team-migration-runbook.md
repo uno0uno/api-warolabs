@@ -123,3 +123,22 @@ ORDER BY tc.tenant_id, tc.profile_id;
 Spot-check a known customer+team profile in customer search/detail, Equipo, and
 wallet/order metrics. The same `profile.id` should remain visible as a customer
 and as an internal team member.
+
+## Auth/session regression note
+
+Issue: api-warolabs#445
+
+The backend owns internal access decisions. Frontend guards may use
+`has_internal_access` from `/auth/session` for redirects and UX, but they must
+not become the authorization source of truth or depend on a duplicated role
+allowlist as the primary decision. When a user is both a customer and an
+internal team member, `tenant_customers` preserves the customer relationship and
+`tenant_members.role` decides internal platform access.
+
+Regression coverage should keep these cases locked:
+
+- customer-only memberships are denied before an internal session can be used
+- hybrid customer+team users with an internal role such as `promotor` are
+  allowed into the internal app
+- explicit backend allow/deny fields beat frontend role inference, with the
+  local team-role list used only as a legacy fallback
