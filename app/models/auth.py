@@ -34,6 +34,7 @@ class SessionResponse(BaseModel):
     success: bool = True
     user: User
     session: Session
+    has_internal_access: bool = False
     current_tenant: Optional[Tenant] = Field(alias='currentTenant', default=None)
     
     class Config:
