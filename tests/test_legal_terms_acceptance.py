@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -148,6 +149,55 @@ async def test_accept_current_terms_is_idempotent_for_same_version():
 
 
 @pytest.mark.asyncio
+async def test_acceptance_audit_list_is_tenant_scoped_and_filterable():
+    tenant_id = uuid4()
+    version_id = uuid4()
+    row = _acceptance_row(tenant_id, version_id)
+    accepted_from = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    accepted_to = datetime(2026, 6, 30, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[row])
+
+    result = await legal_service.list_acceptance_audit_records(
+        conn,
+        tenant_id,
+        document_version_id=version_id,
+        actor_email="test@warocol.com",
+        accepted_from=accepted_from,
+        accepted_to=accepted_to,
+        limit=25,
+        offset=5,
+    )
+
+    assert result["data"]["records"][0]["tenant_id"] == str(tenant_id)
+    assert result["data"]["records"][0]["document_version_id"] == str(version_id)
+    query_args = conn.fetch.await_args.args
+    assert query_args[1] == tenant_id
+    assert query_args[2] == version_id
+    assert query_args[3] == "test@warocol.com"
+    assert query_args[4] == accepted_from
+    assert query_args[5] == accepted_to
+    assert query_args[6] == 25
+    assert query_args[7] == 5
+
+
+@pytest.mark.asyncio
+async def test_acceptance_audit_detail_requires_tenant_match():
+    tenant_id = uuid4()
+    acceptance_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await legal_service.get_acceptance_audit_record(conn, tenant_id, acceptance_id)
+
+    assert exc_info.value.status_code == 404
+    query_args = conn.fetchrow.await_args.args
+    assert query_args[1] == tenant_id
+    assert query_args[2] == acceptance_id
+
+
+@pytest.mark.asyncio
 async def test_current_version_query_filters_to_published_effective_versions():
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=None)
@@ -160,13 +210,25 @@ async def test_current_version_query_filters_to_published_effective_versions():
     assert "v.effective_at <= now()" in query
 
 
+def test_legal_acceptance_migrations_preserve_and_lock_evidence():
+    migrations_dir = Path(__file__).resolve().parents[1] / "migrations"
+    schema_sql = (migrations_dir / "085_legal_terms_acceptance.sql").read_text()
+    immutability_sql = (migrations_dir / "086_legal_acceptance_immutability.sql").read_text()
+
+    assert "retention_years INTEGER NOT NULL DEFAULT 10 CHECK (retention_years >= 10)" in schema_sql
+    assert "tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT" in schema_sql
+    assert "document_version_id UUID NOT NULL REFERENCES legal_document_versions(id) ON DELETE RESTRICT" in schema_sql
+    assert "BEFORE UPDATE OR DELETE ON tenant_legal_acceptances" in immutability_sql
+    assert "retain acceptance evidence for at least 10 years" in immutability_sql
+
+
 def test_accept_endpoint_uses_forwarded_ip_and_user_agent():
     app = FastAPI()
     app.include_router(router)
     session = _session()
 
     @asynccontextmanager
-    async def _db():
+    async def _db(**_kwargs):
         yield MagicMock()
 
     with patch("app.routers.legal.require_valid_session", return_value=session), \
@@ -187,3 +249,34 @@ def test_accept_endpoint_uses_forwarded_ip_and_user_agent():
     assert kwargs["client_ip"] == "198.51.100.10"
     assert kwargs["user_agent"] == "pytest-browser"
     assert kwargs["source"] == "billing_checkout"
+
+
+def test_audit_endpoint_returns_tenant_scoped_evidence():
+    app = FastAPI()
+    app.include_router(router)
+    session = _session()
+
+    @asynccontextmanager
+    async def _db(**_kwargs):
+        yield MagicMock()
+
+    audit_payload = {
+        "success": True,
+        "data": {
+            "records": [_acceptance_row(session.tenant_id, uuid4())],
+            "limit": 10,
+            "offset": 0,
+        },
+    }
+
+    with patch("app.routers.legal.require_valid_session", return_value=session), \
+         patch("app.routers.legal.get_db_connection", side_effect=_db), \
+         patch("app.routers.legal.legal_service.list_acceptance_audit_records", new=AsyncMock(return_value=audit_payload)) as audit_mock:
+        client = TestClient(app)
+        res = client.get("/legal/terms/audit?limit=10")
+
+    assert res.status_code == 200
+    assert res.json()["success"] is True
+    _, args, kwargs = audit_mock.mock_calls[0]
+    assert args[1] == session.tenant_id
+    assert kwargs["limit"] == 10

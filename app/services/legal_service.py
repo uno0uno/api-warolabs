@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import Any, Dict, Optional
 from uuid import UUID
 
@@ -139,6 +140,67 @@ async def get_acceptance_for_version(conn, tenant_id: UUID, version_id: UUID) ->
         version_id,
     )
     return _serialize_acceptance(row) if row else None
+
+
+async def list_acceptance_audit_records(
+    conn,
+    tenant_id: UUID,
+    *,
+    document_version_id: Optional[UUID] = None,
+    actor_email: Optional[str] = None,
+    accepted_from: Optional[datetime] = None,
+    accepted_to: Optional[datetime] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    rows = await conn.fetch(
+        """
+        SELECT *
+        FROM tenant_legal_acceptances
+        WHERE tenant_id = $1
+          AND ($2::uuid IS NULL OR document_version_id = $2)
+          AND (
+            $3::text IS NULL
+            OR actor_email_snapshot ILIKE '%' || $3 || '%'
+            OR email_snapshot ILIKE '%' || $3 || '%'
+          )
+          AND ($4::timestamptz IS NULL OR accepted_at >= $4)
+          AND ($5::timestamptz IS NULL OR accepted_at <= $5)
+        ORDER BY accepted_at DESC, created_at DESC
+        LIMIT $6 OFFSET $7
+        """,
+        tenant_id,
+        document_version_id,
+        actor_email,
+        accepted_from,
+        accepted_to,
+        limit,
+        offset,
+    )
+    return {
+        "success": True,
+        "data": {
+            "records": [_serialize_acceptance(row) for row in rows],
+            "limit": limit,
+            "offset": offset,
+        },
+    }
+
+
+async def get_acceptance_audit_record(conn, tenant_id: UUID, acceptance_id: UUID) -> Dict[str, Any]:
+    row = await conn.fetchrow(
+        """
+        SELECT *
+        FROM tenant_legal_acceptances
+        WHERE tenant_id = $1 AND id = $2
+        LIMIT 1
+        """,
+        tenant_id,
+        acceptance_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Legal acceptance evidence not found")
+    return {"success": True, "data": _serialize_acceptance(row)}
 
 
 async def get_terms_status(conn, tenant_id: Optional[UUID]) -> Dict[str, Any]:
