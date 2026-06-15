@@ -14,9 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
-import html
 import os
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -55,73 +53,6 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _extract_pdf_text(pdf_path: Path) -> str:
-    try:
-        result = subprocess.run(
-            ["pdftotext", "-layout", "-enc", "UTF-8", str(pdf_path), "-"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError("pdftotext is required to extract legal PDF content") from exc
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"pdftotext failed: {exc.stderr.strip()}") from exc
-    return result.stdout
-
-
-def _is_heading(text: str) -> bool:
-    compact = text.strip()
-    if not compact or len(compact) > 140:
-        return False
-    letters = [ch for ch in compact if ch.isalpha()]
-    if len(letters) < 4:
-        return False
-    uppercase_ratio = sum(1 for ch in letters if ch.isupper()) / len(letters)
-    return uppercase_ratio > 0.75 and not compact.endswith(".")
-
-
-def build_body_html_from_text(text: str) -> str:
-    """
-    Convert pdftotext output to safe, readable HTML for the current frontend.
-
-    This intentionally escapes all text and preserves paragraphs/headings instead
-    of trusting arbitrary HTML.
-    """
-    blocks: list[str] = []
-    paragraph: list[str] = []
-    first_heading = True
-
-    def flush_paragraph() -> None:
-        if not paragraph:
-            return
-        value = " ".join(part.strip() for part in paragraph if part.strip())
-        paragraph.clear()
-        if value:
-            blocks.append(f"<p>{html.escape(value)}</p>")
-
-    for raw_line in text.replace("\f", "\n\n").splitlines():
-        line = raw_line.strip()
-        if not line:
-            flush_paragraph()
-            continue
-        if line.startswith("Página ") and line[7:].isdigit():
-            flush_paragraph()
-            continue
-
-        if _is_heading(line):
-            flush_paragraph()
-            tag = "h1" if first_heading else "h2"
-            first_heading = False
-            blocks.append(f"<{tag}>{html.escape(line)}</{tag}>")
-            continue
-
-        paragraph.append(line)
-
-    flush_paragraph()
-    return "\n".join(blocks)
-
-
 def _connect_kwargs() -> dict:
     return {
         "host": os.getenv("DB_HOST_OVERRIDE", "localhost"),
@@ -139,14 +70,12 @@ async def _publish(args: argparse.Namespace) -> None:
 
     pdf_bytes = pdf_path.read_bytes()
     pdf_sha256 = _sha256(pdf_bytes)
-    body_html = build_body_html_from_text(_extract_pdf_text(pdf_path))
     effective_at = datetime.fromisoformat(args.effective_at)
 
     print(f"PDF: {pdf_path}")
     print(f"Version: {args.version}")
     print(f"SHA256: {pdf_sha256}")
     print(f"R2 key: {args.r2_key}")
-    print(f"HTML chars: {len(body_html)}")
 
     if args.dry_run:
         print("Dry run complete; no R2 upload or DB write performed.")
@@ -169,9 +98,8 @@ async def _publish(args: argparse.Namespace) -> None:
 
     metadata = {
         "source": pdf_path.name,
-        "body_html": body_html,
         "status": "published",
-        "privacy_policy_url": "#politica-datos-personales",
+        "display_mode": "pdf",
     }
 
     if args.database_url:

@@ -13,7 +13,6 @@ from app.routers.legal import router
 from app.services import legal_service
 from app.services import aws_s3_service
 from app.services.aws_s3_service import AWSS3Service
-from scripts.publish_legal_terms_v11 import build_body_html_from_text
 
 
 def _version_row(version="1.0"):
@@ -69,22 +68,6 @@ def _session(tenant_id=None):
         "is_active": True,
         "role": "owner",
     })
-
-
-def test_publish_script_builds_safe_body_html():
-    html = build_body_html_from_text(
-        "TÉRMINOS Y CONDICIONES\n\n"
-        "AVISO IMPORTANTE\n"
-        "Lea <todo> antes de aceptar.\n\n"
-        "Página 1\n"
-        "CONDICIONES FINALES\n"
-        "Texto final."
-    )
-
-    assert "<h1>TÉRMINOS Y CONDICIONES</h1>" in html
-    assert "<h2>AVISO IMPORTANTE</h2>" in html
-    assert "Lea &lt;todo&gt; antes de aceptar." in html
-    assert "Página 1" not in html
 
 
 @pytest.mark.asyncio
@@ -279,7 +262,7 @@ async def test_publish_terms_version_upserts_without_touching_acceptances():
         "published_at": now,
         "content_url": "https://pub.example/legal/terms/TyC_WARO_v1.1.pdf",
         "content_sha256": "abc123",
-        "metadata": {"body_html": "<p>Completo</p>"},
+        "metadata": {"display_mode": "pdf"},
     }
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value=document_id)
@@ -295,12 +278,12 @@ async def test_publish_terms_version_upserts_without_touching_acceptances():
         effective_at=now,
         content_url=final_row["content_url"],
         content_sha256="abc123",
-        metadata={"body_html": "<p>Completo</p>"},
+        metadata={"display_mode": "pdf"},
     )
 
     assert result["version"] == "1.1"
     assert result["content_url"] == final_row["content_url"]
-    assert result["metadata"]["body_html"] == "<p>Completo</p>"
+    assert result["metadata"]["display_mode"] == "pdf"
 
 
 @pytest.mark.asyncio
@@ -323,7 +306,7 @@ async def test_publish_terms_version_rejects_hash_change_after_acceptance():
             effective_at=now,
             content_url="https://pub.example/legal/terms/TyC_WARO_v1.1.pdf",
             content_sha256="new-hash",
-            metadata={"body_html": "<p>Completo</p>"},
+            metadata={"display_mode": "pdf"},
         )
 
     assert exc_info.value.status_code == 409
