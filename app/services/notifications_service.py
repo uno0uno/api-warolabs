@@ -4,13 +4,18 @@ Tenant-scoped notification management for restaurant operators.
 """
 import json
 import logging
+from datetime import datetime, timezone
+from typing import Optional
 from uuid import UUID
+from uuid import NAMESPACE_URL, uuid5
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError
+from app.services import billing_service, legal_service
 
 logger = logging.getLogger(__name__)
+TERMS_ACCEPTANCE_REQUIRED_TYPE = "terms_acceptance_required"
 
 
 async def create_order_notification(conn, tenant_id, order_id, payload: dict):
@@ -69,6 +74,7 @@ async def get_unread_notifications(request: Request) -> dict:
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
+            terms_notification = await _build_terms_acceptance_notification(conn, tenant_id)
             rows = await conn.fetch(
                 """SELECT id, order_id, type, payload, created_at
                    FROM notifications
@@ -79,7 +85,7 @@ async def get_unread_notifications(request: Request) -> dict:
             )
             return {
                 "success": True,
-                "data": [
+                "data": ([terms_notification] if terms_notification else []) + [
                     {
                         "id": str(r["id"]),
                         "order_id": str(r["order_id"]) if r["order_id"] else None,
@@ -147,3 +153,40 @@ async def mark_all_notifications_read(request: Request) -> dict:
     except Exception as e:
         logger.error(f"Error marking all notifications as read: {str(e)}")
         raise APIError(f"Error marking all notifications as read: {str(e)}", status_code=500)
+
+
+async def _build_terms_acceptance_notification(conn, tenant_id: UUID) -> Optional[dict]:
+    """
+    Return a virtual unread notification for paid tenants pending current TyC.
+
+    It is intentionally not persisted: the reminder is derived from legal and
+    subscription state, so it remains visible after "mark all read" until the
+    tenant accepts the current document version.
+    """
+    access = await billing_service.get_subscription_access(tenant_id, conn)
+    if access.subscription_status not in {"active", "past_due"}:
+        return None
+
+    status = await legal_service.get_terms_status(conn, tenant_id)
+    data = status.get("data") or {}
+    if not data.get("requires_acceptance"):
+        return None
+
+    current = data.get("current") or {}
+    version_id = current.get("version_id")
+    version = current.get("version")
+    notification_id = uuid5(
+        NAMESPACE_URL,
+        f"waro:terms_acceptance_required:{tenant_id}:{version_id or version or 'current'}",
+    )
+    return {
+        "id": str(notification_id),
+        "order_id": None,
+        "type": TERMS_ACCEPTANCE_REQUIRED_TYPE,
+        "payload": {
+            "document_version_id": version_id,
+            "version": version,
+            "return_to": "/gestion/billing",
+        },
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
