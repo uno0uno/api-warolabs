@@ -11,6 +11,7 @@ from app.config import settings
 import uuid
 import mimetypes
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +275,64 @@ class AWSS3Service:
             return None
         except Exception as e:
             logger.error(f"Unexpected error uploading public image for tenant {tenant_id}: {str(e)}")
+            logger.exception(e)
+            return None
+
+    async def upload_public_asset(
+        self,
+        file_bytes: bytes,
+        s3_key: str,
+        content_type: str,
+        metadata: Optional[dict] = None,
+    ) -> Optional[str]:
+        """
+        Upload a stable public asset to the public R2 bucket and return its URL.
+
+        Intended for versioned public documents such as legal PDFs where the
+        object key is part of the published contract metadata.
+        """
+        if not settings.r2_public_url:
+            logger.error("r2_public_url not configured — cannot generate permanent asset URL")
+            return None
+
+        normalized_key = s3_key.strip().lstrip("/")
+        if not normalized_key or ".." in normalized_key or not re.fullmatch(r"[A-Za-z0-9._/-]+", normalized_key):
+            logger.error("Invalid public asset key: %s", s3_key)
+            return None
+
+        try:
+            access_key = settings.r2_access_key_id or settings.aws_access_key_id
+            secret_key = settings.r2_secret_access_key or settings.aws_secret_access_key
+
+            public_client = boto3.client(
+                's3',
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
+                endpoint_url=settings.r2_endpoint,
+                region_name='auto',
+            )
+
+            extra_args = {'ContentType': content_type}
+            if metadata:
+                extra_args['Metadata'] = {str(k): str(v) for k, v in metadata.items()}
+
+            public_client.upload_fileobj(
+                BytesIO(file_bytes),
+                settings.r2_public_bucket,
+                normalized_key,
+                ExtraArgs=extra_args,
+            )
+
+            public_url = f"{settings.r2_public_url.rstrip('/')}/{normalized_key}"
+            logger.info("Uploaded public asset: %s", public_url)
+            return public_url
+
+        except ClientError as e:
+            logger.error(f"ClientError uploading public asset {normalized_key}: {str(e)}")
+            logger.exception(e)
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error uploading public asset {normalized_key}: {str(e)}")
             logger.exception(e)
             return None
 

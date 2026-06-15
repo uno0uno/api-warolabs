@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 from app.core.middleware import SessionContext
 from app.routers.legal import router
 from app.services import legal_service
+from app.services import aws_s3_service
+from app.services.aws_s3_service import AWSS3Service
 
 
 def _version_row(version="1.0"):
@@ -66,6 +68,40 @@ def _session(tenant_id=None):
         "is_active": True,
         "role": "owner",
     })
+
+
+@pytest.mark.asyncio
+async def test_public_asset_upload_uses_public_r2_bucket(monkeypatch):
+    calls = {}
+
+    class FakeClient:
+        def upload_fileobj(self, fileobj, bucket, key, ExtraArgs=None):
+            calls["bucket"] = bucket
+            calls["key"] = key
+            calls["extra_args"] = ExtraArgs
+            calls["bytes"] = fileobj.read()
+
+    monkeypatch.setattr(aws_s3_service.settings, "r2_public_url", "https://pub.example")
+    monkeypatch.setattr(aws_s3_service.settings, "r2_public_bucket", "warocol-public-assets")
+    monkeypatch.setattr(aws_s3_service.settings, "r2_access_key_id", "key")
+    monkeypatch.setattr(aws_s3_service.settings, "r2_secret_access_key", "secret")
+    monkeypatch.setattr(aws_s3_service.settings, "r2_endpoint", "https://r2.example")
+    monkeypatch.setattr(aws_s3_service.boto3, "client", lambda *args, **kwargs: FakeClient())
+
+    service = object.__new__(AWSS3Service)
+    url = await service.upload_public_asset(
+        b"pdf",
+        "legal/terms/TyC_WARO_v1.1.pdf",
+        "application/pdf",
+        metadata={"version": "1.1"},
+    )
+
+    assert url == "https://pub.example/legal/terms/TyC_WARO_v1.1.pdf"
+    assert calls["bucket"] == "warocol-public-assets"
+    assert calls["key"] == "legal/terms/TyC_WARO_v1.1.pdf"
+    assert calls["extra_args"]["ContentType"] == "application/pdf"
+    assert calls["extra_args"]["Metadata"]["version"] == "1.1"
+    assert calls["bytes"] == b"pdf"
 
 
 @pytest.mark.asyncio
@@ -208,6 +244,72 @@ async def test_current_version_query_filters_to_published_effective_versions():
     query = conn.fetchrow.await_args.args[0]
     assert "v.status = 'published'" in query
     assert "v.effective_at <= now()" in query
+
+
+@pytest.mark.asyncio
+async def test_publish_terms_version_upserts_without_touching_acceptances():
+    version_id = uuid4()
+    document_id = uuid4()
+    now = datetime(2026, 6, 15, 5, 0, tzinfo=timezone.utc)
+    final_row = {
+        "document_id": document_id,
+        "document_code": "terms_conditions",
+        "document_title": "Terminos y Condiciones WARO",
+        "retention_years": 10,
+        "version_id": version_id,
+        "version": "1.1",
+        "effective_at": now,
+        "published_at": now,
+        "content_url": "https://pub.example/legal/terms/TyC_WARO_v1.1.pdf",
+        "content_sha256": "abc123",
+        "metadata": {"display_mode": "pdf"},
+    }
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=document_id)
+    conn.fetchrow = AsyncMock(side_effect=[
+        None,
+        {"id": version_id},
+        final_row,
+    ])
+
+    result = await legal_service.publish_terms_version(
+        conn,
+        version="1.1",
+        effective_at=now,
+        content_url=final_row["content_url"],
+        content_sha256="abc123",
+        metadata={"display_mode": "pdf"},
+    )
+
+    assert result["version"] == "1.1"
+    assert result["content_url"] == final_row["content_url"]
+    assert result["metadata"]["display_mode"] == "pdf"
+
+
+@pytest.mark.asyncio
+async def test_publish_terms_version_rejects_hash_change_after_acceptance():
+    version_id = uuid4()
+    document_id = uuid4()
+    now = datetime(2026, 6, 15, 5, 0, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=document_id)
+    conn.fetchrow = AsyncMock(return_value={
+        "id": version_id,
+        "content_sha256": "old-hash",
+        "acceptance_count": 1,
+    })
+
+    with pytest.raises(HTTPException) as exc_info:
+        await legal_service.publish_terms_version(
+            conn,
+            version="1.1",
+            effective_at=now,
+            content_url="https://pub.example/legal/terms/TyC_WARO_v1.1.pdf",
+            content_sha256="new-hash",
+            metadata={"display_mode": "pdf"},
+        )
+
+    assert exc_info.value.status_code == 409
 
 
 def test_legal_acceptance_migrations_preserve_and_lock_evidence():
