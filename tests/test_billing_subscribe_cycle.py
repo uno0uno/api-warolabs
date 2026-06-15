@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.core import permissions
@@ -62,3 +62,51 @@ def test_subscribe_rejects_monthly_billing_cycle():
 
     assert res.status_code == 422
     assert "anual" in res.json()["detail"].lower()
+
+
+def test_subscribe_requires_current_terms_before_wompi_link():
+    app, session = _build_app()
+    plan_id = uuid4()
+
+    @asynccontextmanager
+    async def _enforce_db():
+        conn = MagicMock()
+        conn.fetchval = AsyncMock(return_value="disabled")
+        conn.fetchrow = AsyncMock(return_value=None)
+        conn.fetch = AsyncMock(return_value=[])
+        yield conn
+
+    @asynccontextmanager
+    async def _billing_db():
+        yield MagicMock()
+
+    terms_error = HTTPException(
+        status_code=409,
+        detail={
+            "code": "terms_acceptance_required",
+            "document_version_id": str(uuid4()),
+            "version": "1.0",
+        },
+    )
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.routers.billing.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db), \
+         patch("app.routers.billing.get_db_connection", side_effect=_billing_db), \
+         patch("app.routers.billing.billing_service.get_plan_for_subscribe", new=AsyncMock(return_value={
+             "id": str(plan_id),
+             "name": "Plan Pro",
+             "price_annual": 1200000.0,
+         })), \
+         patch("app.routers.billing.legal_service.ensure_current_terms_accepted", new=AsyncMock(side_effect=terms_error)), \
+         patch("app.routers.billing.wompi_service.create_payment_link", new=AsyncMock()) as wompi_mock:
+        client = TestClient(app)
+        res = client.post(
+            "/billing/subscribe",
+            json={"plan_id": str(plan_id), "billing_cycle": "annual"},
+        )
+
+    assert res.status_code == 409
+    assert res.json()["detail"]["code"] == "terms_acceptance_required"
+    wompi_mock.assert_not_awaited()

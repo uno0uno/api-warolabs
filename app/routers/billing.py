@@ -28,6 +28,7 @@ from app.services import (
     billing_service,
     billing_email_service,
     billing_webhook_service,
+    legal_service,
     wompi_service,
     wompi_colombia_webhook_service,
 )
@@ -90,6 +91,7 @@ async def subscribe(body: SubscribeBody, request: Request):
 
     async with get_db_connection() as conn:
         plan = await billing_service.get_plan_for_subscribe(conn, body.plan_id)
+        await legal_service.ensure_current_terms_accepted(conn, tenant_id)
 
         amount = plan["price_annual"]
 
