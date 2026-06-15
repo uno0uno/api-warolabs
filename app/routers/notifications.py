@@ -4,12 +4,11 @@ Authenticated endpoints for restaurant operators to manage notifications.
 """
 import asyncio
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from uuid import UUID
 from app.config import settings
 from app.core.middleware import require_valid_session
-from app.core.permissions import Module, require_module
 from app.services import notifications_service
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -51,10 +50,7 @@ async def _remove_listener_if_empty(channel: str) -> None:
             _channel_locks.pop(channel, None)
 
 
-@router.get(
-    "/stream",
-    dependencies=[Depends(require_module(Module.POS))],
-)
+@router.get("/stream")
 async def notification_stream(request: Request):
     """
     SSE endpoint — keeps connection open and pushes new order notifications in real time.
@@ -100,10 +96,7 @@ async def notification_stream(request: Request):
     )
 
 
-@router.get(
-    "",
-    dependencies=[Depends(require_module(Module.POS))],
-)
+@router.get("")
 async def get_notifications(request: Request):
     """
     List last 50 unread notifications for the authenticated tenant.
@@ -113,10 +106,7 @@ async def get_notifications(request: Request):
     return await notifications_service.get_unread_notifications(request)
 
 
-@router.patch(
-    "/{notification_id}/read",
-    dependencies=[Depends(require_module(Module.POS))],
-)
+@router.patch("/{notification_id}/read")
 async def mark_read(request: Request, notification_id: UUID):
     """
     Mark a single notification as read.
@@ -128,10 +118,7 @@ async def mark_read(request: Request, notification_id: UUID):
     return await notifications_service.mark_notification_read(request, notification_id)
 
 
-@router.post(
-    "/read-all",
-    dependencies=[Depends(require_module(Module.POS))],
-)
+@router.post("/read-all")
 async def mark_all_read(request: Request):
     """
     Mark all unread notifications as read for the authenticated tenant.
