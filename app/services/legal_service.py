@@ -128,6 +128,118 @@ async def get_current_terms(conn, tenant_id: Optional[UUID] = None) -> Optional[
     return _serialize_version(row, [_serialize_annex(a) for a in annex_rows])
 
 
+async def publish_terms_version(
+    conn,
+    *,
+    version: str,
+    effective_at: datetime,
+    content_url: str,
+    content_sha256: str,
+    metadata: Dict[str, Any],
+    status: str = "published",
+) -> Dict[str, Any]:
+    """
+    Create or update a legal terms version without touching acceptance evidence.
+
+    If a version already has tenant acceptances, its source document hash cannot
+    change. This keeps the accepted contract snapshot stable for audit purposes.
+    """
+    if status not in {"draft", "published", "archived"}:
+        raise ValueError("Invalid legal document version status")
+
+    document_id = await conn.fetchval(
+        """
+        INSERT INTO legal_documents (code, title, retention_years)
+        VALUES ($1, 'Terminos y Condiciones WARO', 10)
+        ON CONFLICT (code) DO UPDATE SET title = EXCLUDED.title
+        RETURNING id
+        """,
+        TERMS_DOCUMENT_CODE,
+    )
+
+    existing = await conn.fetchrow(
+        """
+        SELECT
+            v.id,
+            v.content_sha256,
+            COUNT(a.id)::int AS acceptance_count
+        FROM legal_document_versions v
+        LEFT JOIN tenant_legal_acceptances a ON a.document_version_id = v.id
+        WHERE v.document_id = $1 AND v.version = $2
+        GROUP BY v.id, v.content_sha256
+        """,
+        document_id,
+        version,
+    )
+
+    if (
+        existing
+        and existing["acceptance_count"] > 0
+        and existing["content_sha256"] != content_sha256
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot change source content for a legal version that already has acceptances",
+        )
+
+    row = await conn.fetchrow(
+        """
+        INSERT INTO legal_document_versions (
+            document_id,
+            version,
+            status,
+            effective_at,
+            published_at,
+            content_url,
+            content_sha256,
+            metadata
+        )
+        VALUES ($1, $2, $3, $4, now(), $5, $6, $7::jsonb)
+        ON CONFLICT (document_id, version) DO UPDATE
+        SET status = EXCLUDED.status,
+            effective_at = EXCLUDED.effective_at,
+            published_at = CASE
+                WHEN EXCLUDED.status = 'published' THEN COALESCE(legal_document_versions.published_at, now())
+                ELSE legal_document_versions.published_at
+            END,
+            content_url = EXCLUDED.content_url,
+            content_sha256 = EXCLUDED.content_sha256,
+            metadata = EXCLUDED.metadata
+        RETURNING id
+        """,
+        document_id,
+        version,
+        status,
+        effective_at,
+        content_url,
+        content_sha256,
+        json.dumps(metadata),
+    )
+
+    # RETURNING cannot reference legal_documents columns directly in the upsert.
+    version_row = await conn.fetchrow(
+        """
+        SELECT
+            d.id AS document_id,
+            d.code AS document_code,
+            d.title AS document_title,
+            d.retention_years,
+            v.id AS version_id,
+            v.version,
+            v.effective_at,
+            v.published_at,
+            v.content_url,
+            v.content_sha256,
+            v.metadata
+        FROM legal_documents d
+        JOIN legal_document_versions v ON v.document_id = d.id
+        WHERE v.id = $1
+        """,
+        row["id"],
+    )
+    return _serialize_version(version_row, [])
+
+
 async def get_acceptance_for_version(conn, tenant_id: UUID, version_id: UUID) -> Optional[Dict[str, Any]]:
     row = await conn.fetchrow(
         """
