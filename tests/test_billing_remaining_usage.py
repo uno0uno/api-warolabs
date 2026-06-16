@@ -11,6 +11,7 @@ from app.services import billing_service
 def _subscription_row(
     *,
     plan_slug: str,
+    plan_features=None,
     scans_used: int = 0,
     scans_limit: int = 500,
 ):
@@ -18,6 +19,7 @@ def _subscription_row(
         "current_period_start": datetime(2026, 6, 1, tzinfo=timezone.utc),
         "current_period_end": datetime(2026, 7, 1, tzinfo=timezone.utc),
         "plan_slug": plan_slug,
+        "plan_features": plan_features or {},
         "plan_scan_limit": scans_limit,
         "scans_used": scans_used,
         "scans_limit": scans_limit,
@@ -52,6 +54,27 @@ async def test_remaining_usage_non_fe_plan_reports_zero_invoice_quota():
     subscription_query = conn.fetchrow.await_args.args[0]
     assert "su.period_start <= now()" in subscription_query
     assert "su.period_end > now()" in subscription_query
+    assert "sp.features AS plan_features" in subscription_query
+    conn.fetchval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_remaining_usage_non_fe_plan_ignores_invoice_feature_metadata():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_subscription_row(
+            plan_slug="pro",
+            plan_features={"electronic_invoice_limit": 200},
+        )
+    )
+    conn.fetchval = AsyncMock()
+
+    result = await billing_service.get_remaining_billing_usage(conn, tenant_id)
+
+    assert result["electronic_invoice_usage"]["used"] == 0
+    assert result["electronic_invoice_usage"]["limit"] == 0
+    assert result["electronic_invoice_usage"]["remaining"] == 0
     conn.fetchval.assert_not_awaited()
 
 
@@ -62,6 +85,7 @@ async def test_remaining_usage_fe_plan_counts_accepted_invoices_in_period():
     conn.fetchrow = AsyncMock(
         return_value=_subscription_row(
             plan_slug="facturacion-electronica",
+            plan_features={"electronic_invoice_limit": 200},
             scans_used=20,
             scans_limit=500,
         )
@@ -90,12 +114,32 @@ async def test_remaining_usage_fe_plan_counts_accepted_invoices_in_period():
 
 
 @pytest.mark.asyncio
+async def test_remaining_usage_fe_plan_reads_numeric_invoice_limit_from_features():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_subscription_row(
+            plan_slug="facturacion-electronica",
+            plan_features={"electronic_invoice_limit": "150"},
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=12)
+
+    result = await billing_service.get_remaining_billing_usage(conn, tenant_id)
+
+    assert result["electronic_invoice_usage"]["used"] == 12
+    assert result["electronic_invoice_usage"]["limit"] == 150
+    assert result["electronic_invoice_usage"]["remaining"] == 138
+
+
+@pytest.mark.asyncio
 async def test_remaining_usage_caps_remaining_at_zero():
     tenant_id = uuid4()
     conn = MagicMock()
     conn.fetchrow = AsyncMock(
         return_value=_subscription_row(
             plan_slug="facturacion-electronica",
+            plan_features={"electronic_invoice_limit": 200},
             scans_used=550,
             scans_limit=500,
         )
