@@ -23,6 +23,7 @@ VALUES (
     500,
     true,
     jsonb_build_object(
+        'electronic_invoice_limit', 200,
         'electronic_invoices', '200 facturas electrónicas incluidas',
         'digital_signature', 'Firma digital incluida vía Matías API',
         'cost_control', 'Control de costos en tiempo real',
