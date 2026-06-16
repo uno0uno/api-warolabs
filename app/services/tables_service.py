@@ -1773,6 +1773,132 @@ async def add_session_payment(
         raise APIError(f"Error adding session payment: {e}", status_code=500)
 
 
+async def defer_tab_delivery_payment(
+    request: Request,
+    table_id: UUID,
+    customer_id: UUID,
+    delivery_address_id: UUID,
+    delivery_instructions: Optional[str] = None,
+) -> dict:
+    """
+    Assign customer and delivery metadata to the open bar tab without posting
+    payment/accounting yet. The order stays pending and is finalized later from
+    /ventas when the courier knows the tender.
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    instructions = (delivery_instructions or "").strip() or None
+
+    async with get_db_connection() as conn:
+        async with conn.transaction():
+            session_row = await conn.fetchrow(
+                """
+                SELECT ts.id AS session_id, t.id AS table_id, t.is_bar, t.name AS table_name
+                  FROM table_sessions ts
+                  JOIN tables t ON t.id = ts.table_id
+                 WHERE ts.table_id = $1
+                   AND ts.tenant_id = $2
+                   AND ts.closed_at IS NULL
+                """,
+                table_id,
+                tenant_id,
+            )
+            if not session_row:
+                raise NotFoundError("No hay una cuenta abierta para esta barra")
+            if not session_row["is_bar"]:
+                raise APIError("Esta acción solo aplica para barra", status_code=400)
+
+            customer_phone = await conn.fetchval(
+                "SELECT phone_number FROM profile WHERE id = $1",
+                customer_id,
+            )
+            if customer_phone is None:
+                raise NotFoundError("Cliente no encontrado")
+            if customer_phone == "0000000000":
+                raise APIError(
+                    "El domicilio requiere un cliente identificado (no anónimo)",
+                    status_code=400,
+                )
+
+            address_ok = await conn.fetchval(
+                """
+                SELECT 1
+                  FROM addresses_profile
+                 WHERE id = $1
+                   AND user_id = $2
+                   AND deleted_at IS NULL
+                """,
+                delivery_address_id,
+                customer_id,
+            )
+            if not address_ok:
+                raise APIError(
+                    "Dirección de entrega no válida o no pertenece al cliente",
+                    status_code=400,
+                )
+
+            order_row = await conn.fetchrow(
+                """
+                UPDATE orders
+                   SET customer_id = $1,
+                       delivery_address_id = $2,
+                       delivery_instructions = $3,
+                       payment_method = NULL,
+                       payment_method_id = NULL,
+                       payment_status = NULL
+                 WHERE id = (
+                       SELECT id
+                         FROM orders
+                        WHERE table_session_id = $4
+                          AND tenant_id = $5
+                          AND status = 'pending'
+                        ORDER BY order_date ASC
+                        LIMIT 1
+                 )
+                RETURNING id, order_number, total_amount, status, payment_status
+                """,
+                customer_id,
+                delivery_address_id,
+                instructions,
+                session_row["session_id"],
+                tenant_id,
+            )
+            if not order_row:
+                raise APIError("No hay productos pendientes en esta cuenta", status_code=400)
+
+            await conn.execute(
+                "UPDATE table_sessions SET closed_at = now() WHERE id = $1",
+                session_row["session_id"],
+            )
+            new_session_row = await conn.fetchrow(
+                """
+                INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id)
+                VALUES ($1, $2, NULL)
+                RETURNING id
+                """,
+                table_id,
+                tenant_id,
+            )
+
+    return {
+        "success": True,
+        "message": "Venta guardada como pendiente",
+        "data": {
+            "order_id": str(order_row["id"]),
+            "order_number": order_row["order_number"],
+            "total_amount": float(order_row["total_amount"]),
+            "status": order_row["status"],
+            "payment_status": order_row["payment_status"],
+            "payment_method": None,
+            "delivery_address_id": str(delivery_address_id),
+            "next_table_session_id": str(new_session_row["id"]),
+        },
+    }
+
+
 async def get_current_session(request: Request, table_id: UUID) -> dict:
     """
     Get the open session for a table with all linked orders and running total.

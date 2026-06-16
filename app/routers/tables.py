@@ -56,6 +56,12 @@ class TabAddRequest(BaseModel):
     items: List[TabItem] = Field(..., min_length=1)
 
 
+class TabDeferDeliveryPaymentRequest(BaseModel):
+    customer_id: UUID = Field(..., description="Identified customer that owns the delivery address")
+    delivery_address_id: UUID = Field(..., description="Delivery address owned by customer_id")
+    delivery_instructions: Optional[str] = Field(None, description="Optional delivery notes")
+
+
 class UpdateTabItemRequest(BaseModel):
     quantity: int = Field(..., ge=1)
     reason: Optional[str] = Field(
@@ -312,6 +318,25 @@ async def add_tab_items(request: Request, table_id: UUID, body: TabAddRequest):
         for item in body.items
     ]
     return await tables_service.add_tab_items(request, table_id, items)
+
+
+@router.post("/{table_id}/tab/defer-delivery-payment", dependencies=[Depends(require_module(Module.POS))])
+async def defer_tab_delivery_payment(
+    request: Request,
+    table_id: UUID,
+    body: TabDeferDeliveryPaymentRequest,
+):
+    """
+    Convert the open bar tab into a delivery order that remains pending until
+    the payment method is known.
+    """
+    return await tables_service.defer_tab_delivery_payment(
+        request,
+        table_id,
+        body.customer_id,
+        body.delivery_address_id,
+        body.delivery_instructions,
+    )
 
 
 class RemoveTabItemRequest(BaseModel):
