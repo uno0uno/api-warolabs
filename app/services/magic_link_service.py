@@ -77,6 +77,7 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             
             # Send magic link email using AWS SES
             from app.services.aws_ses_service import ses_service
+            from app.services.email_sender import resolve_sender_email_value
             from app.templates.magic_link_template import get_magic_link_template, get_magic_link_subject
             from app.config import settings
             
@@ -112,7 +113,7 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             
             # Send email via AWS SES
             email_sent = await ses_service.send_email(
-                from_email=tenant_context.tenant_email,
+                from_email=resolve_sender_email_value(tenant_context.tenant_email),
                 from_name=from_name,
                 to_emails=[email],
                 subject=subject,
@@ -120,7 +121,7 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             )
             
             if email_sent:
-                logger.info(f"✅ Magic link email sent to {email} from {tenant_context.tenant_email}")
+                logger.info(f"✅ Magic link email sent to {email} from configured SES sender")
                 logger.info(f"🔗 Magic link URL: {magic_link_url}")
             else:
                 logger.error(f"❌ Failed to send magic link email to {email}")

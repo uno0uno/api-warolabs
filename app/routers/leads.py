@@ -9,7 +9,6 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, EmailStr, field_validator
 from app.database import get_db_connection
 from app.services import leads_service
-from app.core.middleware import get_tenant_context
 from app.core.email_utils import normalize_email
 
 logger = logging.getLogger(__name__)
@@ -73,7 +72,6 @@ async def capture_lead(body: LeadCaptureRequest, request: Request):
     user_agent = request.headers.get("user-agent")
 
     logger.info(f"📥 [leads/capture] email={body.email} source={body.button_source} ip={ip_address}")
-    tenant_context = get_tenant_context(request)
 
     async with get_db_connection() as conn:
         result = await leads_service.capture_lead(
@@ -83,7 +81,6 @@ async def capture_lead(body: LeadCaptureRequest, request: Request):
             ip_address=ip_address,
             user_agent=user_agent,
             button_source=body.button_source,
-            sender_email=tenant_context.tenant_email,
         )
 
     return {
@@ -108,7 +105,6 @@ async def capture_access_request(body: AccessRequestBody, request: Request):
     user_agent = request.headers.get("user-agent")
 
     logger.info(f"📥 [leads/access-request] email={body.email} source={body.button_source} ip={ip_address}")
-    tenant_context = get_tenant_context(request)
 
     async with get_db_connection() as conn:
         await leads_service.capture_access_request(
@@ -118,7 +114,6 @@ async def capture_access_request(body: AccessRequestBody, request: Request):
             ip_address=ip_address,
             user_agent=user_agent,
             button_source=body.button_source,
-            sender_email=tenant_context.tenant_email,
         )
 
     return {"success": True, "message": "¡Solicitud enviada! Nos pondremos en contacto contigo pronto."}

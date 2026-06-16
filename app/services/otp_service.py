@@ -32,7 +32,6 @@ def generate_otp_code() -> str:
 async def send_otp_email(
     email: str,
     cart_id: Optional[UUID] = None,
-    sender_email: Optional[str] = None,
 ) -> dict:
     """
     Send OTP code via email for cart verification (PUBLIC)
@@ -109,7 +108,7 @@ WARO Colombia
             """.strip()
 
             email_sent = await ses_service.send_email(
-                from_email=resolve_sender_email_value(sender_email),
+                from_email=resolve_sender_email_value(),
                 from_name="WARO Colombia",
                 to_emails=[email],
                 subject=subject,

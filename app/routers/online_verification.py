@@ -2,12 +2,11 @@
 Online Verification Router
 PUBLIC endpoints for OTP verification and customer validation (NO authentication required)
 """
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Response
 from typing import Optional
 from uuid import UUID
 from pydantic import BaseModel, EmailStr
 from app.services import otp_service
-from app.core.middleware import get_tenant_context
 from app.core.security import create_customer_jwt, set_customer_cookie
 
 router = APIRouter(prefix="/online/otp", tags=["Online Verification (Public)"])
@@ -40,7 +39,7 @@ class ValidateCustomerRequest(BaseModel):
 
 
 @router.post("/send")
-async def send_otp(payload: SendOTPRequest, request: Request):
+async def send_otp(payload: SendOTPRequest):
     """
     Send OTP code via email (PUBLIC - no auth).
 
@@ -51,11 +50,9 @@ async def send_otp(payload: SendOTPRequest, request: Request):
 
     **Public endpoint - no authentication required**
     """
-    tenant_context = get_tenant_context(request)
     return await otp_service.send_otp_email(
         email=payload.email,
         cart_id=payload.cart_id,
-        sender_email=tenant_context.tenant_email,
     )
 
 
@@ -92,7 +89,7 @@ async def verify_otp(payload: VerifyOTPRequest, response: Response):
 
 
 @router.post("/resend")
-async def resend_otp(payload: ResendOTPRequest, request: Request):
+async def resend_otp(payload: ResendOTPRequest):
     """
     Resend OTP code (PUBLIC - no auth).
 
@@ -103,12 +100,10 @@ async def resend_otp(payload: ResendOTPRequest, request: Request):
 
     **Public endpoint - no authentication required**
     """
-    tenant_context = get_tenant_context(request)
     # Uses the same send_otp_email function which handles cooldown
     return await otp_service.send_otp_email(
         email=payload.email,
         cart_id=payload.cart_id,
-        sender_email=tenant_context.tenant_email,
     )
 
 
