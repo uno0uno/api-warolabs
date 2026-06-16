@@ -894,7 +894,7 @@ async def bulk_update_order_status(
                     """
                     SELECT id
                     FROM payment_method_groups
-                    WHERE tenant_id = $1
+                    WHERE (tenant_id = $1 OR tenant_id IS NULL)
                       AND slug = $2
                     """,
                     tenant_id,
@@ -1130,7 +1130,7 @@ async def update_order_status(
                     """
                     SELECT id
                     FROM payment_method_groups
-                    WHERE tenant_id = $1
+                    WHERE (tenant_id = $1 OR tenant_id IS NULL)
                       AND slug = $2
                     """,
                     tenant_id,
