@@ -118,6 +118,57 @@ def test_owner_role_passes_billing_under_enforce():
     assert response.json()["level"] == "full"
 
 
+def test_owner_role_passes_remaining_usage_under_enforce():
+    """Owner reaches the remaining-usage handler under enforce mode."""
+    app, session = _build_app(role="owner")
+    fake_usage = {
+        "period_start": "2026-06-01T00:00:00+00:00",
+        "period_end": "2026-07-01T00:00:00+00:00",
+        "scan_usage": {
+            "used": 1,
+            "limit": 500,
+            "remaining": 499,
+            "period_start": "2026-06-01T00:00:00+00:00",
+            "period_end": "2026-07-01T00:00:00+00:00",
+        },
+        "electronic_invoice_usage": {
+            "used": 0,
+            "limit": 0,
+            "remaining": 0,
+            "period_start": "2026-06-01T00:00:00+00:00",
+            "period_end": "2026-07-01T00:00:00+00:00",
+        },
+    }
+
+    @asynccontextmanager
+    async def _enforce_db():
+        conn = MagicMock()
+        conn.fetchval = AsyncMock(return_value="enforce")
+        conn.fetchrow = AsyncMock(return_value=None)
+        conn.fetch = AsyncMock(return_value=[])
+        yield conn
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.routers.billing.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db), \
+         patch(
+             "app.routers.billing.billing_service.get_remaining_billing_usage",
+             new=AsyncMock(return_value=fake_usage),
+         ) as usage_mock, \
+         patch(
+             "app.routers.billing.get_db_connection",
+             side_effect=lambda use_transaction=True: _fake_db_ctx_returning("enforce"),
+         ):
+        client = TestClient(app)
+        response = client.get("/billing/remaining-usage")
+
+    assert response.status_code == 200
+    assert response.json()["scan_usage"]["remaining"] == 499
+    usage_mock.assert_awaited_once()
+    assert usage_mock.await_args.args[1] == session.tenant_id
+
+
 def test_cashier_role_denied_billing_under_enforce():
     """Cashier hits 403 before the handler runs — dependency rejects."""
     app, session = _build_app(role="cashier")

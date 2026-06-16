@@ -20,6 +20,9 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+ELECTRONIC_INVOICE_PLAN_SLUG = "facturacion-electronica"
+ELECTRONIC_INVOICE_PERIOD_LIMIT = 200
+
 
 async def check_scan_quota(tenant_id: UUID, conn) -> None:
     """
@@ -605,6 +608,75 @@ async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
     return data
 
 
+async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
+    """
+    Return current-period remaining usage for scans and electronic invoices.
+
+    The measurement window is the tenant subscription period. Electronic invoice
+    quota is only exposed for the paid FE plan; other plans intentionally report
+    0/0/0 to avoid implying an included entitlement.
+    """
+    row = await conn.fetchrow("""
+        SELECT
+            ts.current_period_start,
+            ts.current_period_end,
+            sp.slug AS plan_slug,
+            sp.scan_limit AS plan_scan_limit,
+            COALESCE(su.scans_used, 0) AS scans_used,
+            COALESCE(su.scans_limit, sp.scan_limit) AS scans_limit
+        FROM tenant_subscriptions ts
+        JOIN subscription_plans sp ON sp.id = ts.plan_id
+        LEFT JOIN scan_usage su
+            ON su.tenant_id = ts.tenant_id
+           AND su.period_start <= now()
+           AND su.period_end > now()
+        WHERE ts.tenant_id = $1
+    """, tenant_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+
+    period_start = row["current_period_start"]
+    period_end = row["current_period_end"]
+    period_start_iso = period_start.isoformat()
+    period_end_iso = period_end.isoformat()
+
+    scans_used = int(row["scans_used"] or 0)
+    scans_limit = int(row["scans_limit"] or row["plan_scan_limit"] or 0)
+
+    invoice_limit = (
+        ELECTRONIC_INVOICE_PERIOD_LIMIT
+        if row["plan_slug"] == ELECTRONIC_INVOICE_PLAN_SLUG
+        else 0
+    )
+    invoice_used = 0
+    if invoice_limit > 0:
+        invoice_used = int(await conn.fetchval("""
+            SELECT COUNT(*)
+            FROM electronic_invoices
+            WHERE tenant_id = $1
+              AND status = 'accepted'
+              AND document_type = 'invoice'
+              AND COALESCE(emitted_at, created_at) >= $2
+              AND COALESCE(emitted_at, created_at) < $3
+        """, tenant_id, period_start, period_end) or 0)
+
+    def metric(used: int, limit: int) -> Dict[str, Any]:
+        return {
+            "used": used,
+            "limit": limit,
+            "remaining": max(limit - used, 0),
+            "period_start": period_start_iso,
+            "period_end": period_end_iso,
+        }
+
+    return {
+        "period_start": period_start_iso,
+        "period_end": period_end_iso,
+        "scan_usage": metric(scans_used, scans_limit),
+        "electronic_invoice_usage": metric(invoice_used, invoice_limit),
+    }
+
+
 async def cancel_tenant_subscription(conn, tenant_id: UUID) -> str:
     """
     Set subscription status='cancelled' in DB and return the gateway_reference
@@ -954,6 +1026,4 @@ async def mark_subscription_past_due(
         "tenant_name": tenant["name"] if tenant else "",
         "tenant_email": tenant["email"] if tenant else None,
     }
-
-
 
