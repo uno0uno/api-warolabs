@@ -164,7 +164,7 @@ async def _build_terms_acceptance_notification(conn, tenant_id: UUID) -> Optiona
     tenant accepts the current document version.
     """
     access = await billing_service.get_subscription_access(tenant_id, conn)
-    if access.subscription_status not in {"active", "past_due"}:
+    if access.subscription_status not in {"active", "past_due", "pending"}:
         return None
 
     status = await legal_service.get_terms_status(conn, tenant_id)

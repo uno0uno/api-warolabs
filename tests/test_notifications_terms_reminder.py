@@ -36,7 +36,7 @@ async def test_terms_acceptance_reminder_for_active_tenant_pending_terms():
 
 
 @pytest.mark.asyncio
-async def test_terms_acceptance_reminder_skips_pending_checkout_subscription():
+async def test_terms_acceptance_reminder_for_pending_checkout_subscription():
     tenant_id = uuid4()
     conn = MagicMock()
 
@@ -45,12 +45,20 @@ async def test_terms_acceptance_reminder_skips_pending_checkout_subscription():
         new=AsyncMock(return_value=SimpleNamespace(subscription_status="pending")),
     ), patch(
         "app.services.notifications_service.legal_service.get_terms_status",
-        new=AsyncMock(),
-    ) as status_mock:
+        new=AsyncMock(return_value={
+            "success": True,
+            "data": {
+                "requires_acceptance": True,
+                "current": {"version_id": str(uuid4()), "version": "1.0"},
+                "acceptance": None,
+            },
+        }),
+    ):
         notification = await notifications_service._build_terms_acceptance_notification(conn, tenant_id)
 
-    assert notification is None
-    status_mock.assert_not_awaited()
+    assert notification is not None
+    assert notification["type"] == "terms_acceptance_required"
+    assert notification["payload"]["return_to"] == "/gestion/billing"
 
 
 @pytest.mark.asyncio
