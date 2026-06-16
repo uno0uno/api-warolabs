@@ -975,7 +975,8 @@ async def bulk_update_order_status(
 
                 # Stock
                 if old_status != 'completed' and status == 'completed':
-                    await _deduct_stock_for_status_update(conn, order_id_row, tenant_id, user_id, order_number)
+                    if not (row['pos_cart_id'] and old_status == 'pending'):
+                        await _deduct_stock_for_status_update(conn, order_id_row, tenant_id, user_id, order_number)
                     newly_completed_order_ids.append(order_id_row)
                 elif old_status == 'completed' and status in ('cancelled', 'pending'):
                     await _return_stock_for_order_cancellation(conn, order_id_row, tenant_id, user_id, order_number)
@@ -1059,6 +1060,8 @@ async def update_order_status(
     order_id: UUID,
     status: str,
     payment_method: Optional[str] = None,
+    payment_method_id: Optional[str] = None,
+    customer_id: Optional[str] = None,
 ) -> dict:
     """Update the status of an order (mesa orders only)."""
     allowed = {"completed", "cancelled", "pending", "preparing"}
@@ -1074,7 +1077,8 @@ async def update_order_status(
 
         async with get_db_connection() as conn:
             row = await conn.fetchrow(
-                """SELECT id, status, order_number, table_session_id, pos_cart_id, payment_status, order_date
+                """SELECT id, status, order_number, table_session_id, pos_cart_id,
+                          payment_status, order_date, total_amount, customer_id
                    FROM orders WHERE id = $1 AND tenant_id = $2""",
                 order_id, tenant_id
             )
@@ -1094,13 +1098,85 @@ async def update_order_status(
                     status_code=400
                 )
 
+            pmid = UUID(payment_method_id) if payment_method_id else None
+            cid = UUID(customer_id) if customer_id else row["customer_id"]
+
+            if payment_method_id and not payment_method:
+                raise APIError("payment_method es requerido cuando se envía payment_method_id", status_code=400)
+
+            if status == "completed" and not payment_method:
+                raise APIError("Selecciona un método de pago para completar la orden", status_code=400)
+
+            if payment_method:
+                group_row = await conn.fetchrow(
+                    """
+                    SELECT id
+                    FROM payment_method_groups
+                    WHERE tenant_id = $1
+                      AND slug = $2
+                    """,
+                    tenant_id,
+                    payment_method,
+                )
+                if payment_method_id:
+                    if not group_row:
+                        raise APIError(
+                            f"Método de pago '{payment_method}' no es válido para este restaurante.",
+                            status_code=400,
+                        )
+                    method_row = await conn.fetchrow(
+                        """
+                        SELECT id
+                        FROM payment_methods
+                        WHERE id = $1
+                          AND tenant_id = $2
+                          AND group_id = $3
+                          AND is_active = true
+                        """,
+                        pmid,
+                        tenant_id,
+                        group_row["id"],
+                    )
+                    if not method_row:
+                        raise APIError("El método seleccionado no pertenece al grupo elegido.", status_code=400)
+
+                if payment_method == "customer_wallet" and not cid:
+                    raise APIError("La billetera requiere un cliente identificado", status_code=400)
+
+                if payment_method == "customer_wallet" and cid:
+                    from app.services.customer_wallet_service import assert_wallet_customer_identified
+
+                    await assert_wallet_customer_identified(conn, cid)
+
+            payment_status_update = None
+            if status == "completed" and payment_method:
+                payment_status_update = "credit" if payment_method == "credit" else "paid"
+
             await conn.execute(
                 """UPDATE orders
                    SET status = $1,
-                       payment_method = COALESCE($2, payment_method)
+                       payment_method = COALESCE($2, payment_method),
+                       payment_method_id = CASE WHEN $2::text IS NULL THEN payment_method_id ELSE $4::uuid END,
+                       customer_id = COALESCE($5, customer_id),
+                       payment_status = COALESCE($6, payment_status)
                    WHERE id = $3""",
-                status, payment_method, order_id
+                status, payment_method, order_id, pmid, cid, payment_status_update
             )
+
+            if status == "completed" and payment_method == "customer_wallet" and cid:
+                from app.services.customer_wallet_service import apply_wallet_for_order
+
+                if old_status != "completed":
+                    amount_cop = Decimal(str(row["total_amount"]))
+                    if amount_cop > 0:
+                        await apply_wallet_for_order(
+                            conn,
+                            cid,
+                            tenant_id,
+                            amount_cop,
+                            order_id,
+                            user_id,
+                        )
 
             # If cancelling a credit order, clear payment_status so it leaves cartera
             if status == 'cancelled' and row['payment_status'] in ('credit', 'partial'):
@@ -1112,7 +1188,49 @@ async def update_order_status(
             # Stock adjustment based on transition
             if old_status != status:
                 if old_status != 'completed' and status == 'completed':
-                    await _deduct_stock_for_status_update(conn, order_id, tenant_id, user_id, order_number)
+                    if not (row['pos_cart_id'] and old_status == 'pending'):
+                        await _deduct_stock_for_status_update(conn, order_id, tenant_id, user_id, order_number)
+                    try:
+                        completed_order = await conn.fetchrow(
+                            """
+                            SELECT id, order_number, total_amount, payment_method,
+                                   payment_method_id, order_date, tip_amount, tip_tax_amount
+                            FROM orders
+                            WHERE id = $1 AND tenant_id = $2 AND status = 'completed'
+                            """,
+                            order_id,
+                            tenant_id,
+                        )
+                        if completed_order:
+                            order_date = completed_order["order_date"]
+                            gl_order_date = (
+                                order_date.astimezone(_BOG).date()
+                                if order_date.tzinfo
+                                else order_date.date()
+                            )
+                            tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                            await _post_order_gl_entry(
+                                conn=conn,
+                                tenant_id=tenant_id,
+                                order_id=completed_order["id"],
+                                order_date=gl_order_date,
+                                total_amount=Decimal(str(completed_order["total_amount"])),
+                                payment_method=completed_order["payment_method"] or payment_method,
+                                payment_method_id=completed_order["payment_method_id"],
+                                tax_config=tax_config,
+                                order_number=int(completed_order["order_number"]),
+                                tip_amount=Decimal(str(completed_order["tip_amount"] or 0)),
+                                tip_tax_amount=Decimal(str(completed_order["tip_tax_amount"] or 0)),
+                            )
+                            await _post_order_cogs_gl_entry(
+                                conn=conn,
+                                tenant_id=tenant_id,
+                                order_id=completed_order["id"],
+                                order_date=gl_order_date,
+                                order_number=int(completed_order["order_number"]),
+                            )
+                    except Exception as gl_exc:
+                        logger.error(f"GL entries failed for order status update: {gl_exc}")
                 elif old_status == 'completed' and status in ('cancelled', 'pending'):
                     await _return_stock_for_order_cancellation(conn, order_id, tenant_id, user_id, order_number)
 
