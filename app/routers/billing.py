@@ -132,6 +132,17 @@ async def get_my_subscription(request: Request):
 
 
 @tenant_router.get(
+    "/remaining-usage",
+    dependencies=[Depends(require_module(Module.MI_PLAN))],
+)
+async def get_my_remaining_usage(request: Request):
+    """Current-period remaining usage for the authenticated tenant."""
+    session = require_valid_session(request)
+    async with get_db_connection(use_transaction=False) as conn:
+        return await billing_service.get_remaining_billing_usage(conn, session.tenant_id)
+
+
+@tenant_router.get(
     "/verify-payment",
     dependencies=[Depends(require_module(Module.MI_PLAN))],
 )
