@@ -276,10 +276,10 @@ async def get_access_status(request: Request):
 
     Levels:
       free             — no subscription; limited free plan
-      full             — active or pending subscription
+      full             — active subscription
       full_with_warning — past_due, ≤ 3 days overdue
       read_only        — past_due, 3-7 days overdue
-      blocked          — past_due > 7 days, or cancelled/expired
+      blocked          — pending checkout, past_due > 7 days, or cancelled/expired
     """
     session = require_valid_session(request)
     async with get_db_connection(use_transaction=False) as conn:
