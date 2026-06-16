@@ -1075,6 +1075,9 @@ async def update_order_status(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
+        waros_award_order_id = None
+        waros_award_customer_id = None
+
         async with get_db_connection() as conn:
             row = await conn.fetchrow(
                 """SELECT id, status, order_number, table_session_id, pos_cart_id,
@@ -1212,7 +1215,14 @@ async def update_order_status(
             # Stock adjustment based on transition
             if old_status != status:
                 if old_status != 'completed' and status == 'completed':
-                    if not (row['pos_cart_id'] and old_status == 'pending'):
+                    inventory_already_consumed = await _order_inventory_already_consumed_before_completion(
+                        conn,
+                        row=row,
+                        order_id=order_id,
+                        tenant_id=tenant_id,
+                        old_status=old_status,
+                    )
+                    if not inventory_already_consumed:
                         await _deduct_stock_for_status_update(conn, order_id, tenant_id, user_id, order_number)
                     try:
                         completed_order = await conn.fetchrow(
@@ -1226,6 +1236,9 @@ async def update_order_status(
                             tenant_id,
                         )
                         if completed_order:
+                            if cid:
+                                waros_award_order_id = completed_order["id"]
+                                waros_award_customer_id = cid
                             order_date = completed_order["order_date"]
                             gl_order_date = (
                                 order_date.astimezone(_BOG).date()
@@ -1292,6 +1305,14 @@ async def update_order_status(
                 except Exception as _fe:
                     logger.error(f"Auto-fire failed for manual order {order_id} (preparing): {_fe}")
 
+        if waros_award_order_id and waros_award_customer_id:
+            try:
+                asyncio.create_task(
+                    evaluate_and_award(waros_award_order_id, waros_award_customer_id, tenant_id)
+                )
+            except Exception as _waros_err:
+                logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
+
         return {"success": True, "message": f"Estado actualizado a {status}"}
 
     except (AuthenticationError, APIError) as e:
@@ -1299,6 +1320,39 @@ async def update_order_status(
     except Exception as e:
         logger.error(f"Error updating order status: {str(e)}")
         raise APIError(f"Error al actualizar estado: {str(e)}", status_code=500)
+
+
+async def _order_inventory_already_consumed_before_completion(
+    conn,
+    *,
+    row,
+    order_id: UUID,
+    tenant_id: UUID,
+    old_status: str,
+) -> bool:
+    """Return true when a pending order already consumed inventory at creation time."""
+    if old_status != "pending":
+        return False
+    if row["pos_cart_id"]:
+        return True
+    if not row["table_session_id"]:
+        return False
+
+    return bool(await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM tenant_ingredient_movements
+            WHERE tenant_id = $1
+              AND reference_table = 'orders'
+              AND reference_id = $2
+              AND movement_type = 'consumption'
+              AND quantity_change < 0
+        )
+        """,
+        tenant_id,
+        order_id,
+    ))
 
 
 async def get_order_items(
