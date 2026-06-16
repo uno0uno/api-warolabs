@@ -1655,7 +1655,7 @@ async def void_order_payment(
 async def complete_pos_order(
     request: Request,
     cart_id: UUID,
-    payment_method: str,
+    payment_method: Optional[str],
     customer_id: UUID,
     credit_due_date: Optional[date] = None,
     payment_method_id: Optional[UUID] = None,
@@ -1740,6 +1740,19 @@ async def complete_pos_order(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
+                pending_without_payment = payment_method is None
+                if pending_without_payment:
+                    if delivery_address_id is None:
+                        raise APIError("payment_method es requerido para ventas que no son domicilio", status_code=400)
+                    if split_mode:
+                        raise APIError("El cobro dividido requiere método de pago", status_code=400)
+                    if payment_method_id is not None:
+                        raise APIError("payment_method_id no aplica cuando la venta queda pendiente", status_code=400)
+                    if credit_due_date is not None:
+                        raise APIError("credit_due_date requiere método de pago a crédito", status_code=400)
+                    if cash_received is not None or split_first_cash_received is not None:
+                        raise APIError("El efectivo recibido requiere método de pago en efectivo", status_code=400)
+
                 # 0. Backend guard: credit / wallet require an identified (non-anonymous) customer
                 if payment_method in ('credit', WALLET_PAYMENT_SLUG):
                     customer_check = await conn.fetchrow(
@@ -1808,8 +1821,13 @@ async def complete_pos_order(
                 )
 
                 # 3. Create order record (use customer_id from parameter)
-                # Compute payment_status
-                if split_mode:
+                # Compute order/payment status. Delivery orders can be dispatched
+                # before payment is known; accounting is posted only when later
+                # finalized from /ventas/:id.
+                order_status = 'pending' if pending_without_payment else 'completed'
+                if pending_without_payment:
+                    payment_status = None
+                elif split_mode:
                     payment_status = 'partial'
                 elif payment_method == 'credit':
                     payment_status = 'credit'
@@ -1892,7 +1910,7 @@ async def complete_pos_order(
                         tip_amount, tip_source,
                         tip_taxable, tip_tax_amount
                     )
-                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'completed', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
                     RETURNING id, order_number, created_at
                 """
                 order_row = await conn.fetchrow(
@@ -1903,6 +1921,7 @@ async def complete_pos_order(
                     payment_method,
                     cart_id,
                     _discounted_total,
+                    order_status,
                     payment_status,
                     credit_due_date,
                     payment_method_id,
@@ -2272,7 +2291,7 @@ async def complete_pos_order(
                         )
                     # Mostrador/delivery: auto-deliver after checkout. Barra: kitchen
                     # closes comandas manually (warocol.com#799).
-                    if not _is_bar_sale:
+                    if order_status == 'completed' and not _is_bar_sale:
                         try:
                             await finalize_open_comandas(conn, order_id, tenant_id)
                         except Exception as _ce:
@@ -2283,41 +2302,42 @@ async def complete_pos_order(
                 # Tax config — fetched once, used for GL entry and receipt breakdown
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
 
-                # GL journal entry — failure never blocks order completion
-                try:
-                    _gl_tip = Decimal("0")
-                    _gl_tip_tax = Decimal("0")
-                    if not split_mode or _split_is_complete:
-                        _gl_tip = Decimal(str(tip_amount))
-                        _gl_tip_tax = Decimal(str(_tip_tax_amount))
-                    await _post_order_gl_entry(
-                        conn=conn,
-                        tenant_id=tenant_id,
-                        order_id=order_id,
-                        order_date=order_row['created_at'].astimezone(_BOG).date(),
-                        total_amount=Decimal(str(_discounted_total)),
-                        payment_method=payment_method,
-                        payment_method_id=payment_method_id,
-                        tax_config=tax_config,
-                        order_number=int(order_number),
-                        tip_amount=_gl_tip,
-                        tip_tax_amount=_gl_tip_tax,
-                    )
-                except Exception as e:
-                    logger.error(f"GL entry failed for POS order {order_id}: {e}")
-                    # Do NOT re-raise — order completes regardless
+                if order_status == 'completed':
+                    # GL journal entry — failure never blocks order completion
+                    try:
+                        _gl_tip = Decimal("0")
+                        _gl_tip_tax = Decimal("0")
+                        if not split_mode or _split_is_complete:
+                            _gl_tip = Decimal(str(tip_amount))
+                            _gl_tip_tax = Decimal(str(_tip_tax_amount))
+                        await _post_order_gl_entry(
+                            conn=conn,
+                            tenant_id=tenant_id,
+                            order_id=order_id,
+                            order_date=order_row['created_at'].astimezone(_BOG).date(),
+                            total_amount=Decimal(str(_discounted_total)),
+                            payment_method=payment_method,
+                            payment_method_id=payment_method_id,
+                            tax_config=tax_config,
+                            order_number=int(order_number),
+                            tip_amount=_gl_tip,
+                            tip_tax_amount=_gl_tip_tax,
+                        )
+                    except Exception as e:
+                        logger.error(f"GL entry failed for POS order {order_id}: {e}")
+                        # Do NOT re-raise — order completes regardless
 
-                # COGS GL entry — DR 6135 Costo de ventas / CR 1435 Inventarios
-                try:
-                    await _post_order_cogs_gl_entry(
-                        conn=conn,
-                        tenant_id=tenant_id,
-                        order_id=order_id,
-                        order_date=order_row['created_at'].astimezone(_BOG).date(),
-                        order_number=int(order_number),
-                    )
-                except Exception as e:
-                    logger.error(f"COGS GL entry failed for POS order {order_id}: {e}")
+                    # COGS GL entry — DR 6135 Costo de ventas / CR 1435 Inventarios
+                    try:
+                        await _post_order_cogs_gl_entry(
+                            conn=conn,
+                            tenant_id=tenant_id,
+                            order_id=order_id,
+                            order_date=order_row['created_at'].astimezone(_BOG).date(),
+                            order_number=int(order_number),
+                        )
+                    except Exception as e:
+                        logger.error(f"COGS GL entry failed for POS order {order_id}: {e}")
 
                 # Compute tax breakdown for receipt display
                 _standard_tax = 0.0
@@ -2368,9 +2388,10 @@ async def complete_pos_order(
                 _order_date = order_row['created_at']
                 _order_number = int(order_number)
                 _total_amount = float(_discounted_total)
+                _order_status = order_status
                 _result = {
                     "success": True,
-                    "message": "Order completed successfully",
+                    "message": "Order saved as pending" if order_status == 'pending' else "Order completed successfully",
                     "data": {
                         "order_id": str(order_id),
                         "order_number": int(order_number),
@@ -2384,6 +2405,7 @@ async def complete_pos_order(
                         ),
                         "payment_method": payment_method,
                         "payment_status": payment_status,
+                        "status": order_status,
                         "credit_due_date": str(credit_due_date) if credit_due_date is not None else None,
                         "items_count": len(items),
                         "created_at": order_row['created_at'].isoformat(),
@@ -2403,7 +2425,7 @@ async def complete_pos_order(
 
         # Award waros AFTER the transaction commits — avoids race condition where
         # create_task runs at an await point inside the transaction before commit.
-        if _customer_id:
+        if _order_status == 'completed' and _customer_id:
             try:
                 asyncio.create_task(
                     evaluate_and_award(_order_id, _customer_id, _tenant_id)
@@ -2412,7 +2434,7 @@ async def complete_pos_order(
                 logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
 
         # Send receipt email if requested — fire-and-forget, never blocks or fails the order
-        if receipt_email:
+        if _order_status == 'completed' and receipt_email:
             try:
                 # Look up tenant public profile for business branding in the receipt
                 _business_name = None

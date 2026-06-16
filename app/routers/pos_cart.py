@@ -202,7 +202,7 @@ async def clear_cart(
 
 
 class CompleteOrderRequest(BaseModel):
-    payment_method: str = Field(..., description="Payment method: cash, card, digital, credit")
+    payment_method: Optional[str] = Field(None, description="Payment method: cash, card, digital, credit. May be omitted only for delivery orders that remain pending until payment is known.")
     customer_id: UUID = Field(..., description="Customer ID to associate with the order")
     credit_due_date: Optional[date] = Field(None, description="Optional due date for credit orders (only used when payment_method='credit')")
     payment_method_id: Optional[UUID] = Field(None, description="UUID of the selected payment_methods row (nullable if group-level only)")
@@ -235,6 +235,7 @@ async def complete_order(
     Complete POS order:
     - Associates customer with cart (if not already)
     - Creates order record
+    - Delivery orders may be left pending when payment_method is omitted
     - Copies cart items to order_items
     - Updates inventory
     - Marks cart as completed

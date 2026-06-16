@@ -338,7 +338,9 @@ async def get_order(
 
 class UpdateOrderStatusRequest(BaseModel):
     status: str = Field(..., description="completed | cancelled | pending")
-    payment_method: Optional[str] = Field(None, description="cash | card | digital")
+    payment_method: Optional[str] = Field(None, description="Payment method group slug")
+    payment_method_id: Optional[str] = Field(None, description="UUID of the selected payment_methods row")
+    customer_id: Optional[str] = Field(None, description="UUID of customer to associate when required by payment method")
 
 
 class BulkUpdateStatusRequest(BaseModel):
@@ -374,7 +376,14 @@ async def update_order_status(
     """
     Update the status of a mesa order. Also accepts payment_method when completing.
     """
-    return await orders_service.update_order_status(request, order_id, body.status, body.payment_method)
+    return await orders_service.update_order_status(
+        request,
+        order_id,
+        body.status,
+        body.payment_method,
+        body.payment_method_id,
+        body.customer_id,
+    )
 
 
 @router.get("/{order_id}/items", dependencies=[Depends(require_module(Module.VENTAS))])
