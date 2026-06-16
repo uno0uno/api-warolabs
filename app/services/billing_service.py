@@ -825,10 +825,10 @@ class SubscriptionAccess:
 
     Levels:
       free             — no subscription row; default 1000 scans/month
-      full             — active or pending subscription
+      full             — active subscription
       full_with_warning — past_due, < 3 days overdue — access OK but banner shown
       read_only        — past_due, 3-7 days overdue — IA scanner blocked
-      blocked          — past_due > 7 days OR cancelled/expired
+      blocked          — pending checkout, past_due > 7 days, or cancelled/expired
     """
     level: str
     grace_days_remaining: int
@@ -862,13 +862,22 @@ async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
     status = sub["status"]
     period_end = sub["current_period_end"]
 
-    if status in ("active", "pending"):
+    if status == "active":
         return SubscriptionAccess(
             level="full",
             grace_days_remaining=0,
             subscription_status=status,
             next_payment_date=period_end.date().isoformat() if period_end else None,
             message="Acceso completo.",
+        )
+
+    if status == "pending":
+        return SubscriptionAccess(
+            level="blocked",
+            grace_days_remaining=0,
+            subscription_status=status,
+            next_payment_date=None,
+            message="Completa el pago pendiente para activar tu suscripción.",
         )
 
     if status == "past_due":

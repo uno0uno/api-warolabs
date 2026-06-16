@@ -70,6 +70,45 @@ async def test_active_subscription_returns_full():
 
 
 @pytest.mark.asyncio
+async def test_pending_checkout_returns_blocked():
+    tenant_id = uuid4()
+    period_end = datetime.now(timezone.utc) + timedelta(days=20)
+    conn = _conn_with_subscription("pending", period_end)
+
+    access = await billing_service.get_subscription_access(tenant_id, conn)
+
+    assert access.level == "blocked"
+    assert access.subscription_status == "pending"
+    assert access.grace_days_remaining == 0
+    assert access.next_payment_date is None
+    assert "Completa el pago pendiente" in access.message
+
+
+@pytest.mark.asyncio
+async def test_cancelled_subscription_returns_blocked():
+    tenant_id = uuid4()
+    period_end = datetime.now(timezone.utc) + timedelta(days=20)
+    conn = _conn_with_subscription("cancelled", period_end)
+
+    access = await billing_service.get_subscription_access(tenant_id, conn)
+
+    assert access.level == "blocked"
+    assert access.subscription_status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_expired_subscription_returns_blocked():
+    tenant_id = uuid4()
+    period_end = datetime.now(timezone.utc) - timedelta(days=1)
+    conn = _conn_with_subscription("expired", period_end)
+
+    access = await billing_service.get_subscription_access(tenant_id, conn)
+
+    assert access.level == "blocked"
+    assert access.subscription_status == "expired"
+
+
+@pytest.mark.asyncio
 async def test_no_subscription_returns_free():
     tenant_id = uuid4()
     conn = MagicMock()
