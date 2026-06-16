@@ -108,7 +108,13 @@ async def test_update_order_status_finalizes_pending_pos_with_gl_cogs_without_do
     ), patch(
         "app.services.orders_service._post_order_cogs_gl_entry",
         new=post_cogs,
-    ):
+    ), patch(
+        "app.services.orders_service.evaluate_and_award",
+        new=MagicMock(return_value=object()),
+    ) as award_waros, patch(
+        "app.services.orders_service.asyncio.create_task",
+        new=MagicMock(),
+    ) as create_task:
         result = await orders_service.update_order_status(
             Request({"type": "http"}),
             order_id,
@@ -134,6 +140,187 @@ async def test_update_order_status_finalizes_pending_pos_with_gl_cogs_without_do
         order_date=date(2026, 6, 16),
         order_number=8521,
     )
+    award_waros.assert_called_once_with(order_id, customer_id, tenant_id)
+    create_task.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_update_order_status_finalizes_pending_table_with_gl_cogs_without_double_stock():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    table_session_id = uuid4()
+    customer_id = uuid4()
+    payment_method_id = uuid4()
+    group_id = uuid4()
+    order_date = datetime(2026, 6, 16, 14, 30)
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": order_id,
+                "status": "pending",
+                "order_number": 8522,
+                "table_session_id": table_session_id,
+                "pos_cart_id": None,
+                "payment_status": None,
+                "order_date": order_date,
+                "total_amount": 52000,
+                "customer_id": customer_id,
+            },
+            {"id": group_id},
+            {"id": payment_method_id},
+            {
+                "id": order_id,
+                "order_number": 8522,
+                "total_amount": 52000,
+                "payment_method": "card",
+                "payment_method_id": payment_method_id,
+                "order_date": order_date,
+                "tip_amount": 0,
+                "tip_tax_amount": 0,
+            },
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=True)
+    conn.execute = AsyncMock()
+
+    deduct_stock = AsyncMock()
+    post_gl = AsyncMock()
+    post_cogs = AsyncMock()
+
+    with patch(
+        "app.services.orders_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=user_id),
+    ), patch(
+        "app.services.orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.orders_service.assert_order_not_in_closed_monthly_period",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.orders_service._deduct_stock_for_status_update",
+        new=deduct_stock,
+    ), patch(
+        "app.services.orders_service._get_tenant_tax_config",
+        new=AsyncMock(return_value={"inc_enabled": True}),
+    ), patch(
+        "app.services.orders_service._post_order_gl_entry",
+        new=post_gl,
+    ), patch(
+        "app.services.orders_service._post_order_cogs_gl_entry",
+        new=post_cogs,
+    ), patch(
+        "app.services.orders_service.evaluate_and_award",
+        new=MagicMock(return_value=object()),
+    ) as award_waros, patch(
+        "app.services.orders_service.asyncio.create_task",
+        new=MagicMock(),
+    ) as create_task:
+        result = await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "card",
+            str(payment_method_id),
+        )
+
+    assert result["success"] is True
+    conn.fetchval.assert_awaited_once()
+    deduct_stock.assert_not_awaited()
+    post_gl.assert_awaited_once()
+    post_cogs.assert_awaited_once_with(
+        conn=conn,
+        tenant_id=tenant_id,
+        order_id=order_id,
+        order_date=date(2026, 6, 16),
+        order_number=8522,
+    )
+    award_waros.assert_called_once_with(order_id, customer_id, tenant_id)
+    create_task.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_update_order_status_deducts_stock_for_pending_table_without_consumption_movements():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    table_session_id = uuid4()
+    customer_id = uuid4()
+    group_id = uuid4()
+    order_date = datetime(2026, 6, 16, 14, 30)
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": order_id,
+                "status": "pending",
+                "order_number": 8523,
+                "table_session_id": table_session_id,
+                "pos_cart_id": None,
+                "payment_status": None,
+                "order_date": order_date,
+                "total_amount": 62000,
+                "customer_id": customer_id,
+            },
+            {"id": group_id},
+            {
+                "id": order_id,
+                "order_number": 8523,
+                "total_amount": 62000,
+                "payment_method": "cash",
+                "payment_method_id": None,
+                "order_date": order_date,
+                "tip_amount": 0,
+                "tip_tax_amount": 0,
+            },
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=False)
+    conn.execute = AsyncMock()
+
+    deduct_stock = AsyncMock()
+
+    with patch(
+        "app.services.orders_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=user_id),
+    ), patch(
+        "app.services.orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.orders_service.assert_order_not_in_closed_monthly_period",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.orders_service._deduct_stock_for_status_update",
+        new=deduct_stock,
+    ), patch(
+        "app.services.orders_service._get_tenant_tax_config",
+        new=AsyncMock(return_value={"inc_enabled": True}),
+    ), patch(
+        "app.services.orders_service._post_order_gl_entry",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.orders_service._post_order_cogs_gl_entry",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.orders_service.evaluate_and_award",
+        new=MagicMock(return_value=object()),
+    ), patch(
+        "app.services.orders_service.asyncio.create_task",
+        new=MagicMock(),
+    ):
+        result = await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "cash",
+        )
+
+    assert result["success"] is True
+    conn.fetchval.assert_awaited_once()
+    deduct_stock.assert_awaited_once_with(conn, order_id, tenant_id, user_id, 8523)
 
 
 def _pending_status_conn(order_id, order_date, customer_id=None, *, group_row=None, method_row=None):
