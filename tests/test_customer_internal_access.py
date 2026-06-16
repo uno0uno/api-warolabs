@@ -67,8 +67,8 @@ async def test_send_magic_link_denies_customer_only_membership():
             await send_magic_link(_request(), "customer@example.com")
 
     conn.execute.assert_not_awaited()
-    assert conn.fetchrow.await_args.args[2] == tenant_id
-    assert conn.fetchrow.await_args.args[3] == ["superuser", "admin", "employee", "member", "promotor"]
+    assert conn.fetchrow.await_args.args[1] == "customer@example.com"
+    assert conn.fetchrow.await_args.args[2] == ["superuser", "admin", "employee", "member", "promotor"]
 
 
 @pytest.mark.asyncio
@@ -86,8 +86,7 @@ async def test_verify_token_denies_customer_only_membership_before_session_creat
             await verify_token(_request(), response, "customer@example.com", "token")
 
     conn.execute.assert_not_awaited()
-    assert conn.fetchrow.await_args.args[3] == tenant_id
-    assert conn.fetchrow.await_args.args[4] == ["superuser", "admin", "employee", "member", "promotor"]
+    assert conn.fetchrow.await_args.args[3] == ["superuser", "admin", "employee", "member", "promotor"]
 
 
 @pytest.mark.asyncio

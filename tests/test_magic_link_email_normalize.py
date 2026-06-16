@@ -14,13 +14,22 @@ async def test_send_magic_link_normalizes_mixed_case_email():
     tenant_id = uuid4()
     user_id = uuid4()
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={
-        "user_id": user_id,
-        "email": "sofiarengifo1302@gmail.com",
-        "name": "sofia",
-        "role": "employee",
-        "tenant_id": tenant_id,
-    })
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "user_id": user_id,
+                "email": "sofiarengifo1302@gmail.com",
+                "name": "sofia",
+                "role": "employee",
+                "tenant_id": tenant_id,
+            },
+            {
+                "tenant_name": "Tijuana",
+                "tenant_email": "a@b.com",
+                "brand_name": "Tijuana",
+            },
+        ]
+    )
     conn.execute = AsyncMock()
 
     @asynccontextmanager
@@ -53,5 +62,5 @@ async def test_send_magic_link_normalizes_mixed_case_email():
         mock_settings.is_development = True
         await send_magic_link(mock_request, "Sofiarengifo1302@gmail.com")
 
-    lookup_email = conn.fetchrow.await_args.args[1]
+    lookup_email = conn.fetchrow.await_args_list[0].args[1]
     assert lookup_email == "sofiarengifo1302@gmail.com"

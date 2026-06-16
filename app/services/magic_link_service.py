@@ -2,8 +2,8 @@ import logging
 import secrets
 import random
 from datetime import datetime, timedelta
-from typing import Optional
-from uuid import uuid4
+from typing import Any, Optional
+from uuid import UUID
 from fastapi import Request, Response
 from app.database import get_db_connection
 from app.core.security import set_session_cookie, get_client_ip
@@ -14,6 +14,46 @@ from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.models.auth import User, Tenant, MagicLinkResponse, VerifyCodeResponse, VerifyTokenResponse
 
 logger = logging.getLogger(__name__)
+
+_INTERNAL_TEAM_MEMBER_QUERY = """
+    SELECT p.id as user_id, p.email, p.name, tm.role, tm.tenant_id
+    FROM profile p
+    INNER JOIN tenant_members tm ON p.id = tm.user_id
+    WHERE lower(trim(p.email)) = $1
+      AND tm.is_active = true
+      AND tm.role = ANY($2::text[])
+    ORDER BY tm.id ASC
+    LIMIT 1
+"""
+
+
+async def _lookup_internal_team_member(conn, email: str) -> Optional[Any]:
+    """First active internal tenant_members row for this email (any tenant)."""
+    return await conn.fetchrow(
+        _INTERNAL_TEAM_MEMBER_QUERY,
+        email,
+        list(LEGACY_INTERNAL_TEAM_ROLES),
+    )
+
+
+async def _tenant_email_branding(conn, tenant_id: UUID) -> dict[str, str]:
+    row = await conn.fetchrow(
+        """
+        SELECT
+            t.name AS tenant_name,
+            COALESCE(t.email, '') AS tenant_email,
+            COALESCE(ts.brand_name, t.name) AS brand_name
+        FROM tenants t
+        LEFT JOIN tenant_sites ts ON ts.tenant_id = t.id AND ts.is_active = true
+        WHERE t.id = $1
+        ORDER BY ts.created_at ASC NULLS LAST
+        LIMIT 1
+        """,
+        tenant_id,
+    )
+    if not row:
+        return {"tenant_name": "WARO", "tenant_email": "", "brand_name": "WARO"}
+    return dict(row)
 
 async def send_magic_link(request: Request, email: str, redirect: Optional[str] = None) -> MagicLinkResponse:
     """
@@ -33,26 +73,13 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             verification_code = str(random.randint(100000, 999999))  # 6-digit code
             expires_at = datetime.utcnow() + timedelta(minutes=15)  # 15 minutes
 
-            # Internal magic-link auth is only for active team members of this tenant.
-            user_tenant_query = """
-                SELECT p.id as user_id, p.email, p.name, tm.role, tm.tenant_id
-                FROM profile p
-                INNER JOIN tenant_members tm ON p.id = tm.user_id
-                WHERE lower(trim(p.email)) = $1
-                  AND tm.tenant_id = $2
-                  AND tm.is_active = true
-                  AND tm.role = ANY($3::text[])
-                LIMIT 1
-            """
-            user_result = await conn.fetchrow(
-                user_tenant_query,
-                email,
-                tenant_context.tenant_id,
-                list(LEGACY_INTERNAL_TEAM_ROLES),
-            )
+            user_result = await _lookup_internal_team_member(conn, email)
 
             if not user_result:
-                logger.warning(f"❌ User {email} is not an active team member for tenant {tenant_context.tenant_id}")
+                logger.warning(
+                    "❌ User %s is not an active internal team member",
+                    email,
+                )
                 raise AuthenticationError("User not found. Please contact an administrator.")
 
             user_id = user_result['user_id']
@@ -96,24 +123,29 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             if redirect:
                 magic_link_url += f"&redirect={redirect}"
             
-            # Prepare tenant context for template
+            member_branding = await _tenant_email_branding(conn, user_tenant_id)
+            brand_name = member_branding["brand_name"]
+            tenant_name = member_branding["tenant_name"]
+            tenant_email = member_branding["tenant_email"] or tenant_context.tenant_email
+
+            # Prepare tenant context for template (use the member's restaurant, not the site tenant)
             template_context = {
-                'brand_name': tenant_context.brand_name,
-                'tenant_name': tenant_context.tenant_name,
+                'brand_name': brand_name,
+                'tenant_name': tenant_name,
                 'admin_name': 'Saifer 101 (Anderson Arévalo)',  # Default admin
-                'admin_email': tenant_context.tenant_email,
+                'admin_email': tenant_email,
             }
             
             # Generate email content
             html_template = get_magic_link_template(magic_link_url, verification_code, template_context)
-            subject = get_magic_link_subject(tenant_context.brand_name)
+            subject = get_magic_link_subject(brand_name)
             
             # Determine sender name with enterprise branding
-            from_name = f"Saifer 101 (Anderson Arévalo) - {tenant_context.brand_name}"
+            from_name = f"Saifer 101 (Anderson Arévalo) - {brand_name}"
             
             # Send email via AWS SES
             email_sent = await ses_service.send_email(
-                from_email=resolve_sender_email_value(tenant_context.tenant_email),
+                from_email=resolve_sender_email_value(tenant_email),
                 from_name=from_name,
                 to_emails=[email],
                 subject=subject,
@@ -129,7 +161,7 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
                 logger.info(f"🔢 FALLBACK: Verification code for {email}: {verification_code}")
             
             logger.info(f"📧 Email sender: {from_name}")
-            logger.info(f"🏢 Brand: {tenant_context.brand_name}")
+            logger.info(f"🏢 Brand: {brand_name}")
             
             return MagicLinkResponse()
             
@@ -161,9 +193,8 @@ async def verify_code(request: Request, response: Response, email: str, code: st
                 INNER JOIN tenant_members tm ON tm.user_id = p.id AND tm.tenant_id = mt.tenant_id
                 WHERE lower(trim(p.email)) = $1 AND mt.verification_code = $2
                 AND mt.expires_at > NOW() AND mt.used = false
-                AND mt.tenant_id = $3
                 AND tm.is_active = true
-                AND tm.role = ANY($4::text[])
+                AND tm.role = ANY($3::text[])
                 LIMIT 1
             """
 
@@ -171,7 +202,6 @@ async def verify_code(request: Request, response: Response, email: str, code: st
                 verify_query,
                 email,
                 code,
-                tenant_context.tenant_id,
                 list(LEGACY_INTERNAL_TEAM_ROLES),
             )
             
@@ -304,9 +334,8 @@ async def verify_token(request: Request, response: Response, email: str, token: 
                 INNER JOIN tenant_members tm ON tm.user_id = p.id AND tm.tenant_id = mt.tenant_id
                 WHERE lower(trim(p.email)) = $1 AND mt.token = $2
                 AND mt.expires_at > NOW() AND mt.used = false
-                AND mt.tenant_id = $3
                 AND tm.is_active = true
-                AND tm.role = ANY($4::text[])
+                AND tm.role = ANY($3::text[])
                 LIMIT 1
             """
 
@@ -314,7 +343,6 @@ async def verify_token(request: Request, response: Response, email: str, token: 
                 verify_query,
                 email,
                 token,
-                tenant_context.tenant_id,
                 list(LEGACY_INTERNAL_TEAM_ROLES),
             )
             
