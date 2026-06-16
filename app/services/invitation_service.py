@@ -167,6 +167,7 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
 
             # Send invitation email
             from app.services.aws_ses_service import ses_service
+            from app.services.email_sender import resolve_sender_email_value
             from app.templates.invitation_template import get_invitation_template, get_invitation_subject
             from app.config import settings
 
@@ -202,7 +203,7 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
 
             # Send email
             email_sent = await ses_service.send_email(
-                from_email=tenant_email,
+                from_email=resolve_sender_email_value(tenant_email),
                 from_name=from_name,
                 to_emails=[payload.email],
                 subject=subject,
