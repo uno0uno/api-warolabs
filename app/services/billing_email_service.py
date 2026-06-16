@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from app.config import settings
 from app.services.aws_ses_service import AWSSESService
+from app.services.email_sender import resolve_sender_email_value
 from app.services.billing_service import (
     GRACE_PERIOD_DAYS,
     get_past_due_tenants,
@@ -149,7 +150,7 @@ async def send_grace_reminder(tenant: Dict[str, Any]) -> bool:
     )
 
     sent = await _ses.send_email(
-        from_email=settings.email_from,
+        from_email=resolve_sender_email_value(email),
         from_name="WARO Colombia",
         to_emails=[email],
         subject=subject,
@@ -313,7 +314,7 @@ async def send_payment_rejected_email(
 </html>"""
 
     sent = await _ses.send_email(
-        from_email=settings.email_from,
+        from_email=resolve_sender_email_value(tenant_email),
         from_name="WARO Colombia",
         to_emails=[tenant_email],
         subject="WARO — Tu pago fue rechazado, actualiza tu método de pago",
@@ -387,7 +388,7 @@ async def send_payment_renewed_email(
 </html>"""
 
     sent = await _ses.send_email(
-        from_email=settings.email_from,
+        from_email=resolve_sender_email_value(tenant_email),
         from_name="WARO Colombia",
         to_emails=[tenant_email],
         subject="WARO — Tu suscripción fue renovada exitosamente",

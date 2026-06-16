@@ -722,7 +722,8 @@ async def create_purchase(
                                 payment_terms=new_purchase['payment_terms'],
                                 credit_days=new_purchase['credit_days'],
                                 requires_advance_payment=new_purchase['requires_advance_payment'],
-                                consolidation_group=new_purchase['consolidation_group']
+                                consolidation_group=new_purchase['consolidation_group'],
+                                tenant_id=str(tenant_id),
                             )
                     except Exception as email_error:
                         # Log error but don't fail the purchase creation
@@ -962,4 +963,3 @@ async def extract_invoice_data(request: Request, file: UploadFile) -> dict:
             "success": False,
             "error": str(e)
         }
-

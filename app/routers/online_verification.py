@@ -2,11 +2,12 @@
 Online Verification Router
 PUBLIC endpoints for OTP verification and customer validation (NO authentication required)
 """
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Request, Response
 from typing import Optional
 from uuid import UUID
 from pydantic import BaseModel, EmailStr
 from app.services import otp_service
+from app.core.middleware import get_tenant_context
 from app.core.security import create_customer_jwt, set_customer_cookie
 
 router = APIRouter(prefix="/online/otp", tags=["Online Verification (Public)"])
@@ -39,7 +40,7 @@ class ValidateCustomerRequest(BaseModel):
 
 
 @router.post("/send")
-async def send_otp(request: SendOTPRequest):
+async def send_otp(payload: SendOTPRequest, request: Request):
     """
     Send OTP code via email (PUBLIC - no auth).
 
@@ -50,14 +51,16 @@ async def send_otp(request: SendOTPRequest):
 
     **Public endpoint - no authentication required**
     """
+    tenant_context = get_tenant_context(request)
     return await otp_service.send_otp_email(
-        email=request.email,
-        cart_id=request.cart_id
+        email=payload.email,
+        cart_id=payload.cart_id,
+        sender_email=tenant_context.tenant_email,
     )
 
 
 @router.post("/verify")
-async def verify_otp(request: VerifyOTPRequest, response: Response):
+async def verify_otp(payload: VerifyOTPRequest, response: Response):
     """
     Verify OTP code (PUBLIC - no auth).
 
@@ -74,22 +77,22 @@ async def verify_otp(request: VerifyOTPRequest, response: Response):
     **Public endpoint - no authentication required**
     """
     result = await otp_service.verify_otp_code(
-        email=request.email,
-        cart_id=request.cart_id,
-        otp_code=request.otp_code
+        email=payload.email,
+        cart_id=payload.cart_id,
+        otp_code=payload.otp_code
     )
     # Set long-lived customer session cookie for /mis-pedidos
     if result.get("success") and result.get("customer_id"):
         jwt_token = create_customer_jwt(
             customer_id=result["customer_id"],
-            email=request.email,
+            email=payload.email,
         )
         set_customer_cookie(response, jwt_token)
     return result
 
 
 @router.post("/resend")
-async def resend_otp(request: ResendOTPRequest):
+async def resend_otp(payload: ResendOTPRequest, request: Request):
     """
     Resend OTP code (PUBLIC - no auth).
 
@@ -100,10 +103,12 @@ async def resend_otp(request: ResendOTPRequest):
 
     **Public endpoint - no authentication required**
     """
+    tenant_context = get_tenant_context(request)
     # Uses the same send_otp_email function which handles cooldown
     return await otp_service.send_otp_email(
-        email=request.email,
-        cart_id=request.cart_id
+        email=payload.email,
+        cart_id=payload.cart_id,
+        sender_email=tenant_context.tenant_email,
     )
 
 

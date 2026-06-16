@@ -430,7 +430,11 @@ async def toggle_public_profile(
                 if profile_email:
                     from app.services import email_helpers
                     asyncio.create_task(
-                        email_helpers.send_negocio_welcome_email(profile_email, profile_name)
+                        email_helpers.send_negocio_welcome_email(
+                            profile_email,
+                            profile_name,
+                            tenant_id=str(tenant_id),
+                        )
                     )
                     await conn.execute(
                         "UPDATE tenant_public_profiles SET welcome_email_sent = true WHERE tenant_id = $1",
