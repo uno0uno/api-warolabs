@@ -1098,14 +1098,29 @@ async def update_order_status(
                     status_code=400
                 )
 
-            pmid = UUID(payment_method_id) if payment_method_id else None
+            try:
+                pmid = UUID(payment_method_id) if payment_method_id else None
+            except ValueError:
+                raise APIError(
+                    "payment_method_id no es un UUID válido",
+                    status_code=400,
+                    details={"code": "payment_method_id_invalid"},
+                )
             cid = UUID(customer_id) if customer_id else row["customer_id"]
 
             if payment_method_id and not payment_method:
-                raise APIError("payment_method es requerido cuando se envía payment_method_id", status_code=400)
+                raise APIError(
+                    "payment_method es requerido cuando se envía payment_method_id",
+                    status_code=400,
+                    details={"code": "payment_method_required"},
+                )
 
             if status == "completed" and not payment_method:
-                raise APIError("Selecciona un método de pago para completar la orden", status_code=400)
+                raise APIError(
+                    "Selecciona un método de pago para completar la orden",
+                    status_code=400,
+                    details={"code": "payment_method_required"},
+                )
 
             if payment_method:
                 group_row = await conn.fetchrow(
@@ -1123,6 +1138,7 @@ async def update_order_status(
                         raise APIError(
                             f"Método de pago '{payment_method}' no es válido para este restaurante.",
                             status_code=400,
+                            details={"code": "payment_method_invalid"},
                         )
                     method_row = await conn.fetchrow(
                         """
@@ -1138,10 +1154,18 @@ async def update_order_status(
                         group_row["id"],
                     )
                     if not method_row:
-                        raise APIError("El método seleccionado no pertenece al grupo elegido.", status_code=400)
+                        raise APIError(
+                            "El método seleccionado no pertenece al grupo elegido.",
+                            status_code=400,
+                            details={"code": "payment_method_id_invalid"},
+                        )
 
                 if payment_method == "customer_wallet" and not cid:
-                    raise APIError("La billetera requiere un cliente identificado", status_code=400)
+                    raise APIError(
+                        "La billetera requiere un cliente identificado",
+                        status_code=400,
+                        details={"code": "customer_required"},
+                    )
 
                 if payment_method == "customer_wallet" and cid:
                     from app.services.customer_wallet_service import assert_wallet_customer_identified
