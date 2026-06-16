@@ -7,6 +7,7 @@ import json
 from typing import Optional
 
 from app.core.email_utils import normalize_email
+from app.services.email_sender import resolve_sender_email_value
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ async def capture_lead(
     ip_address: Optional[str],
     user_agent: Optional[str],
     button_source: str,
+    sender_email: Optional[str] = None,
 ) -> dict:
     """
     Capture a lead from the homepage.
@@ -124,7 +126,7 @@ async def capture_lead(
     logger.info(f"📥 [capture_lead] Interaction '{interaction_type}' recorded for lead {lead_id}")
 
     # Fire-and-forget: Discord notification + email (non-blocking, always fires)
-    asyncio.create_task(_send_notifications(email, phone, button_source, ip_address, is_duplicate))
+    asyncio.create_task(_send_notifications(email, phone, button_source, ip_address, is_duplicate, sender_email))
 
     return {"profile_id": str(profile_id), "lead_id": str(lead_id), "is_duplicate": is_duplicate}
 
@@ -136,6 +138,7 @@ async def capture_access_request(
     ip_address: Optional[str],
     user_agent: Optional[str],
     button_source: str = "access_request",
+    sender_email: Optional[str] = None,
 ) -> dict:
     """
     Capture an access request from the login page.
@@ -214,7 +217,7 @@ async def capture_access_request(
     logger.info(f"📥 [capture_access_request] Interaction recorded for lead {lead_id}")
 
     # Fire-and-forget notifications (non-blocking)
-    asyncio.create_task(_send_access_request_notifications(email, phone, ip_address))
+    asyncio.create_task(_send_access_request_notifications(email, phone, ip_address, sender_email))
 
     return {"profile_id": str(profile_id), "lead_id": str(lead_id)}
 
@@ -223,11 +226,11 @@ async def _send_access_request_notifications(
     email: str,
     phone: Optional[str],
     ip_address: Optional[str],
+    sender_email: Optional[str] = None,
 ) -> None:
     """Send Discord notification and confirmation email for access requests."""
     from app.services.discord_service import discord_leads_service
     from app.services.aws_ses_service import ses_service
-    from app.config import settings
 
     tasks = []
 
@@ -253,7 +256,7 @@ async def _send_access_request_notifications(
 
     tasks.append(
         ses_service.send_email(
-            from_email=settings.email_from,
+            from_email=resolve_sender_email_value(sender_email),
             from_name="WARO Colombia",
             to_emails=[email],
             subject="¡Gracias por contactarnos! — WARO Colombia",
@@ -273,11 +276,11 @@ async def _send_notifications(
     button_source: str,
     ip_address: Optional[str],
     is_duplicate: bool = False,
+    sender_email: Optional[str] = None,
 ) -> None:
     """Send Discord notification and confirmation email without blocking the response."""
     from app.services.discord_service import discord_leads_service
     from app.services.aws_ses_service import ses_service
-    from app.config import settings
 
     tasks = []
 
@@ -314,7 +317,7 @@ async def _send_notifications(
     )
     tasks.append(
         ses_service.send_email(
-            from_email=settings.email_from,
+            from_email=resolve_sender_email_value(sender_email),
             from_name="WARO Colombia",
             to_emails=[email],
             subject=subject,

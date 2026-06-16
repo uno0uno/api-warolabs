@@ -928,6 +928,7 @@ async def checkout_cart(
                     delivery_instructions=cart.get('delivery_instructions'),
                     pickup_pin=cart.get('pickup_pin'),
                     order_id=str(order_id),
+                    tenant_id=str(tenant_id),
                 )
             except Exception as email_err:
                 logger.error(f"Failed to send order confirmation email for order #{order_number}: {email_err}")

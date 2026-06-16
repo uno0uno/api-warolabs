@@ -4,8 +4,8 @@ Email helper functions for sending formatted emails
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from app.services.aws_ses_service import AWSSESService
-from app.config import settings
 from app.database import get_db_connection
+from app.services.email_sender import resolve_sender_email_for_tenant
 from app.services.aws_s3_service import AWSS3Service
 from app.templates.order_confirmation_template import (
     get_order_confirmation_text,
@@ -39,7 +39,8 @@ async def send_quotation_email(
     payment_terms: str = None,
     credit_days: int = None,
     requires_advance_payment: bool = False,
-    consolidation_group: str = None
+    consolidation_group: str = None,
+    tenant_id: Optional[str] = None,
 ) -> bool:
     """
     Send a quotation request email to a supplier
@@ -149,7 +150,7 @@ Tecnología colombiana para el mundo.
 
         ses_service = AWSSESService()
         success = await ses_service.send_email(
-            from_email=settings.email_from or "hola@warocol.com",
+            from_email=await resolve_sender_email_for_tenant(tenant_id),
             from_name="Saifer 101 de Waro Colombia",
             to_emails=[supplier_email],
             subject=f"Nueva Solicitud de Cotización - {purchase_number}",
@@ -176,7 +177,8 @@ async def send_purchase_status_notification(
     notes: str = None,
     metadata: dict = None,
     supplier_token: str = None,
-    tenant_site: str = None
+    tenant_site: str = None,
+    tenant_id: Optional[str] = None,
 ) -> bool:
     """
     Send a status update notification email to a supplier
@@ -295,7 +297,7 @@ Tecnología colombiana para el mundo.
 
         ses_service = AWSSESService()
         success = await ses_service.send_email(
-            from_email=settings.email_from or "hola@warocol.com",
+            from_email=await resolve_sender_email_for_tenant(tenant_id),
             from_name="Saifer 101 de Waro Colombia",
             to_emails=[supplier_email],
             subject=f"{purchase_number} - {info['title']}",
@@ -318,6 +320,7 @@ Tecnología colombiana para el mundo.
 async def send_negocio_welcome_email(
     owner_email: str,
     display_name: str,
+    tenant_id: Optional[str] = None,
 ) -> bool:
     """
     Send a welcome email when a negocio activates its public profile for the first time.
@@ -333,7 +336,7 @@ async def send_negocio_welcome_email(
 
         ses_service = AWSSESService()
         success = await ses_service.send_email(
-            from_email=settings.email_from or "hola@warocol.com",
+            from_email=await resolve_sender_email_for_tenant(tenant_id),
             from_name="Saifer 101 de WaRo Colombia",
             to_emails=[owner_email],
             subject=subject,
@@ -365,6 +368,7 @@ async def send_order_confirmation_email(
     delivery_instructions: Optional[str] = None,
     pickup_pin: Optional[str] = None,
     order_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> bool:
     """
     Send a transactional order confirmation email to the customer.
@@ -392,7 +396,7 @@ async def send_order_confirmation_email(
 
         ses_service = AWSSESService()
         success = await ses_service.send_email(
-            from_email=settings.email_from or "hola@warocol.com",
+            from_email=await resolve_sender_email_for_tenant(tenant_id),
             from_name="WARO Colombia",
             to_emails=[customer_email],
             subject=subject,
@@ -420,6 +424,7 @@ async def send_order_accepted_email(
     subtotal: float,
     delivery_address: Optional[Dict[str, Any]] = None,
     order_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> bool:
     """
     Send an order acceptance email to the customer.
@@ -444,7 +449,7 @@ async def send_order_accepted_email(
 
         ses_service = AWSSESService()
         success = await ses_service.send_email(
-            from_email=settings.email_from or "hola@warocol.com",
+            from_email=await resolve_sender_email_for_tenant(tenant_id),
             from_name="WARO Colombia",
             to_emails=[customer_email],
             subject=subject,
@@ -602,7 +607,7 @@ async def send_pos_receipt_email(
 
         if attachments:
             success = await ses_service.send_email_with_attachments(
-                from_email=settings.email_from or "hola@warocol.com",
+                from_email=await resolve_sender_email_for_tenant(tenant_id),
                 from_name=business_name or "WARO Colombia",
                 to_emails=[customer_email],
                 subject=subject,
@@ -611,7 +616,7 @@ async def send_pos_receipt_email(
             )
         else:
             success = await ses_service.send_email(
-                from_email=settings.email_from or "hola@warocol.com",
+                from_email=await resolve_sender_email_for_tenant(tenant_id),
                 from_name=business_name or "WARO Colombia",
                 to_emails=[customer_email],
                 subject=subject,

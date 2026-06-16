@@ -20,6 +20,7 @@ from app.services.cierre_service import (
     _post_order_gl_entry,
 )
 from app.services.email_helpers import send_pos_receipt_email
+from app.services.email_sender import resolve_sender_email_for_tenant
 from fastapi import HTTPException
 from datetime import datetime, date
 import csv
@@ -2578,7 +2579,7 @@ Tecnología colombiana para el mundo.
 
             # Send email with CSV attachment
             success = await ses_service.send_email_with_attachment(
-                from_email="hola@warocol.com",
+                from_email=await resolve_sender_email_for_tenant(tenant_id),
                 from_name="Waro Colombia - Reportes",
                 to_emails=[user_email],
                 subject=subject,

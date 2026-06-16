@@ -666,6 +666,7 @@ async def update_order_status(
                         subtotal=float(email_row["total_amount"]),
                         delivery_address=delivery_address,
                         order_id=str(order_id),
+                        tenant_id=str(tenant_id),
                     ))
 
                 # Award waros for auto-completed order (fire-and-forget — never blocks)
