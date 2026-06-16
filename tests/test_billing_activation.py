@@ -26,6 +26,8 @@ def _conn_with_activation(
         if "FROM tenant_subscriptions ts" in sql:
             return sub_row
         if "UPDATE tenant_subscriptions" in sql:
+            assert "current_period_start = $3::timestamptz" in sql
+            assert "current_period_end = $3::timestamptz + CASE" in sql
             assert args[1] in ("monthly", "annual")
             if period_anchor is not None:
                 assert args[2] == period_anchor

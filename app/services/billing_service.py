@@ -497,8 +497,8 @@ async def _activate_subscription_with_period(
     updated = await conn.fetchrow("""
         UPDATE tenant_subscriptions
         SET status               = 'active',
-            current_period_start = $3,
-            current_period_end   = $3 + CASE
+            current_period_start = $3::timestamptz,
+            current_period_end   = $3::timestamptz + CASE
                 WHEN $2::text = 'monthly' THEN interval '1 month'
                 ELSE interval '1 year'
             END,
