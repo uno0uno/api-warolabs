@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -6,8 +7,9 @@ from uuid import uuid4
 import pytest
 from fastapi import Request
 
+from app.core.exceptions import APIError
 from app.routers.orders import ManualOrderModifier
-from app.services import orders_service
+from app.services import cierre_service, orders_service
 
 
 class _AsyncContext:
@@ -121,6 +123,10 @@ async def test_update_order_status_finalizes_pending_pos_with_gl_cogs_without_do
     assert post_gl.await_args.kwargs["order_id"] == order_id
     assert post_gl.await_args.kwargs["payment_method"] == "card"
     assert post_gl.await_args.kwargs["payment_method_id"] == payment_method_id
+    update_args = conn.execute.await_args_list[0].args
+    assert update_args[2] == "card"
+    assert update_args[4] == payment_method_id
+    assert update_args[6] == "paid"
     post_cogs.assert_awaited_once_with(
         conn=conn,
         tenant_id=tenant_id,
@@ -128,6 +134,278 @@ async def test_update_order_status_finalizes_pending_pos_with_gl_cogs_without_do
         order_date=date(2026, 6, 16),
         order_number=8521,
     )
+
+
+def _pending_status_conn(order_id, order_date, customer_id=None, *, group_row=None, method_row=None):
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": order_id,
+                "status": "pending",
+                "order_number": 8521,
+                "table_session_id": None,
+                "pos_cart_id": uuid4(),
+                "payment_status": None,
+                "order_date": order_date,
+                "total_amount": 42000,
+                "customer_id": customer_id,
+            },
+            group_row,
+            method_row,
+        ]
+    )
+    conn.execute = AsyncMock()
+    return conn
+
+
+@pytest.mark.asyncio
+async def test_update_order_status_requires_payment_method_with_method_id():
+    tenant_id = uuid4()
+    order_id = uuid4()
+    conn = _pending_status_conn(order_id, datetime(2026, 6, 16, 14, 30))
+
+    with patch(
+        "app.services.orders_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=uuid4()),
+    ), patch(
+        "app.services.orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.orders_service.assert_order_not_in_closed_monthly_period",
+        new=AsyncMock(),
+    ):
+        with pytest.raises(APIError) as exc:
+            await orders_service.update_order_status(
+                Request({"type": "http"}),
+                order_id,
+                "completed",
+                payment_method_id=str(uuid4()),
+            )
+
+    assert exc.value.status_code == 400
+    assert exc.value.details["code"] == "payment_method_required"
+    conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_order_status_rejects_invalid_method_group_pair():
+    tenant_id = uuid4()
+    order_id = uuid4()
+    group_id = uuid4()
+    method_id = uuid4()
+    conn = _pending_status_conn(
+        order_id,
+        datetime(2026, 6, 16, 14, 30),
+        group_row={"id": group_id},
+        method_row=None,
+    )
+
+    with patch(
+        "app.services.orders_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=uuid4()),
+    ), patch(
+        "app.services.orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.orders_service.assert_order_not_in_closed_monthly_period",
+        new=AsyncMock(),
+    ):
+        with pytest.raises(APIError) as exc:
+            await orders_service.update_order_status(
+                Request({"type": "http"}),
+                order_id,
+                "completed",
+                "digital",
+                str(method_id),
+            )
+
+    assert exc.value.status_code == 400
+    assert exc.value.details["code"] == "payment_method_id_invalid"
+    conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_order_status_rejects_invalid_payment_group():
+    tenant_id = uuid4()
+    order_id = uuid4()
+    conn = _pending_status_conn(
+        order_id,
+        datetime(2026, 6, 16, 14, 30),
+        group_row=None,
+    )
+
+    with patch(
+        "app.services.orders_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=uuid4()),
+    ), patch(
+        "app.services.orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.orders_service.assert_order_not_in_closed_monthly_period",
+        new=AsyncMock(),
+    ):
+        with pytest.raises(APIError) as exc:
+            await orders_service.update_order_status(
+                Request({"type": "http"}),
+                order_id,
+                "completed",
+                "not-a-group",
+                str(uuid4()),
+            )
+
+    assert exc.value.status_code == 400
+    assert exc.value.details["code"] == "payment_method_invalid"
+    conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_order_status_sets_credit_payment_status():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    customer_id = uuid4()
+    order_date = datetime(2026, 6, 16, 14, 30)
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": order_id,
+                "status": "pending",
+                "order_number": 8521,
+                "table_session_id": None,
+                "pos_cart_id": uuid4(),
+                "payment_status": None,
+                "order_date": order_date,
+                "total_amount": 42000,
+                "customer_id": customer_id,
+            },
+            {"id": uuid4()},
+            {
+                "id": order_id,
+                "order_number": 8521,
+                "total_amount": 42000,
+                "payment_method": "credit",
+                "payment_method_id": None,
+                "order_date": order_date,
+                "tip_amount": 0,
+                "tip_tax_amount": 0,
+            },
+        ]
+    )
+    conn.execute = AsyncMock()
+
+    with patch(
+        "app.services.orders_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=user_id),
+    ), patch(
+        "app.services.orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.orders_service.assert_order_not_in_closed_monthly_period",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.orders_service._deduct_stock_for_status_update",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.orders_service._get_tenant_tax_config",
+        new=AsyncMock(return_value={"inc_enabled": True}),
+    ), patch(
+        "app.services.orders_service._post_order_gl_entry",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.orders_service._post_order_cogs_gl_entry",
+        new=AsyncMock(),
+    ):
+        result = await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "credit",
+        )
+
+    assert result["success"] is True
+    update_args = conn.execute.await_args_list[0].args
+    assert update_args[2] == "credit"
+    assert update_args[6] == "credit"
+
+
+@pytest.mark.asyncio
+async def test_update_order_status_rejects_wallet_without_customer():
+    tenant_id = uuid4()
+    order_id = uuid4()
+    conn = _pending_status_conn(
+        order_id,
+        datetime(2026, 6, 16, 14, 30),
+        customer_id=None,
+        group_row={"id": uuid4()},
+    )
+
+    with patch(
+        "app.services.orders_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=uuid4()),
+    ), patch(
+        "app.services.orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.orders_service.assert_order_not_in_closed_monthly_period",
+        new=AsyncMock(),
+    ):
+        with pytest.raises(APIError) as exc:
+            await orders_service.update_order_status(
+                Request({"type": "http"}),
+                order_id,
+                "completed",
+                "customer_wallet",
+            )
+
+    assert exc.value.status_code == 400
+    assert exc.value.details["code"] == "customer_required"
+    conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_order_gl_entry_uses_selected_method_account_before_slug_fallback():
+    tenant_id = uuid4()
+    order_id = uuid4()
+    method_id = uuid4()
+    debit_account_id = uuid4()
+    ingresos_account_id = uuid4()
+    entry_id = uuid4()
+
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=None)
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"code": "1120"},
+            {"id": debit_account_id},
+            {"id": ingresos_account_id},
+            {"id": entry_id},
+        ]
+    )
+    conn.fetch = AsyncMock(return_value=[])
+    conn.execute = AsyncMock()
+    conn.transaction = MagicMock(return_value=_AsyncContext())
+
+    await cierre_service._post_order_gl_entry(
+        conn=conn,
+        tenant_id=tenant_id,
+        order_id=order_id,
+        order_date=date(2026, 6, 16),
+        total_amount=Decimal("42000"),
+        payment_method="cash",
+        payment_method_id=method_id,
+        tax_config={},
+        order_number=8521,
+    )
+
+    method_lookup_args = conn.fetchrow.await_args_list[0].args
+    debit_lookup_args = conn.fetchrow.await_args_list[1].args
+    debit_line_args = conn.execute.await_args_list[0].args
+    assert method_lookup_args[1] == method_id
+    assert debit_lookup_args[1:] == (tenant_id, "1120")
+    assert debit_line_args[2] == debit_account_id
 
 
 def test_manual_order_modifier_quantity_defaults_to_one():
