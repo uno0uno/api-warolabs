@@ -92,6 +92,7 @@ ALTER TABLE tenant_journal_entries
             'customer_wallet_recharge',
             'customer_wallet_refund',
             'table_session_advance_receive',
-            'table_session_advance_void'
+            'table_session_advance_void',
+            'table_session_advance_cover'
         ]::text[])
     );

@@ -30,6 +30,8 @@ ALLOWED_ADVANCE_TENDERS = {"cash", "card", "digital"}
 TABLE_SESSION_ADVANCE_PAYMENT_SLUG = "table_session_advance"
 ADVANCE_RECEIVE_SOURCE = "table_session_advance_receive"
 ADVANCE_VOID_SOURCE = "table_session_advance_void"
+ADVANCE_COVER_SOURCE = "table_session_advance_cover"
+INGRESOS_CODE = "4175"
 
 
 def _amount_decimal(amount: Decimal | float | int | str) -> Decimal:
@@ -307,6 +309,257 @@ async def apply_session_advances_for_close(
             break
 
     return applied_total.quantize(Decimal("0.01"))
+
+
+def _standard_cover_gl_amounts(amount: Decimal, tax_config: Dict[str, Any]) -> tuple:
+    settlement = Decimal(str(amount or 0)).quantize(Decimal("0.01"))
+    tax_amount = Decimal("0")
+    tax_code = None
+    if settlement <= 0:
+        return settlement, settlement, tax_amount, tax_code
+    if tax_config.get("inc_applicable"):
+        rate = Decimal(str(tax_config["inc_rate"]))
+        tax_code = str(tax_config["inc_gl_account_code"])
+        tax_amount = settlement - (settlement / (1 + rate))
+    elif tax_config.get("iva_applicable"):
+        rate = Decimal(str(tax_config["iva_rate"]))
+        tax_code = str(tax_config["iva_gl_account_code"])
+        tax_amount = settlement - (settlement / (1 + rate))
+    return settlement, settlement - tax_amount, tax_amount, tax_code
+
+
+async def recognize_unconsumed_advance_cover_for_close(
+    conn,
+    tenant_id: UUID,
+    table_session_id: UUID,
+    amount_cop: Decimal,
+    order_ids: List[UUID],
+    tax_config: Dict[str, Any],
+    entry_date: date,
+    created_by: Optional[UUID],
+) -> Decimal:
+    cover_to_apply = Decimal(str(amount_cop or 0)).quantize(Decimal("0.01"))
+    if cover_to_apply <= 0:
+        return Decimal("0")
+
+    existing = await conn.fetchval(
+        """
+        SELECT id
+        FROM tenant_journal_entries
+        WHERE tenant_id = $1
+          AND source_module = $2
+          AND source_id = $3
+          AND status = 'posted'
+        """,
+        tenant_id,
+        ADVANCE_COVER_SOURCE,
+        table_session_id,
+    )
+    if existing:
+        logger.info("[table advance GL] Cover for session %s already posted", table_session_id)
+        return Decimal("0")
+
+    applied = await apply_session_advances_for_close(
+        conn,
+        tenant_id,
+        table_session_id,
+        cover_to_apply,
+        order_ids,
+    )
+    if applied <= 0:
+        return Decimal("0")
+
+    settlement, net_revenue, tax_amount, tax_code = _standard_cover_gl_amounts(applied, tax_config)
+    liability_acct = await _resolve_account_id(conn, tenant_id, DEFAULT_LIABILITY_CODE)
+    revenue_acct = await _resolve_account_id(conn, tenant_id, INGRESOS_CODE)
+    tax_acct = await _resolve_account_id(conn, tenant_id, tax_code) if tax_code and tax_amount > 0 else None
+    if not liability_acct or not revenue_acct:
+        logger.warning(
+            "[table advance GL] Missing cover accounts liability=%s revenue=%s tenant=%s",
+            DEFAULT_LIABILITY_CODE,
+            INGRESOS_CODE,
+            tenant_id,
+        )
+        return applied
+
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """
+            INSERT INTO tenant_journal_entries
+                (tenant_id, entry_date, period_year, period_month,
+                 description, reference, source_module, source_id, status,
+                 total_debit, total_credit, created_by_user_id, posted_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'posted',
+                    $9, $9, $10::uuid, NOW())
+            RETURNING id
+            """,
+            tenant_id,
+            entry_date,
+            entry_date.year,
+            entry_date.month,
+            "Sobrante consumo mínimo mesa",
+            f"table-session-cover-{table_session_id}",
+            ADVANCE_COVER_SOURCE,
+            table_session_id,
+            float(settlement),
+            str(created_by) if created_by else None,
+        )
+        entry_id = entry_row["id"]
+        await conn.execute(
+            """
+            INSERT INTO tenant_journal_lines
+                (journal_entry_id, account_id, debit, credit, description, line_order)
+            VALUES ($1, $2, $3, 0, $4, 0)
+            """,
+            entry_id,
+            liability_acct,
+            float(settlement),
+            "Dr 2810 - aplicación sobrante consumo mínimo",
+        )
+        await conn.execute(
+            """
+            INSERT INTO tenant_journal_lines
+                (journal_entry_id, account_id, debit, credit, description, line_order)
+            VALUES ($1, $2, 0, $3, $4, 1)
+            """,
+            entry_id,
+            revenue_acct,
+            float(net_revenue),
+            "Cr 4175 - ingreso cover consumo mínimo",
+        )
+        if tax_amount > 0 and tax_acct:
+            await conn.execute(
+                """
+                INSERT INTO tenant_journal_lines
+                    (journal_entry_id, account_id, debit, credit, description, line_order)
+                VALUES ($1, $2, 0, $3, $4, 2)
+                """,
+                entry_id,
+                tax_acct,
+                float(tax_amount),
+                "Cr impuesto - cover consumo mínimo",
+            )
+
+    logger.info(
+        "[table advance GL] Posted cover for session %s amount=%s tax=%s",
+        table_session_id,
+        float(settlement),
+        float(tax_amount),
+    )
+    return applied
+
+
+async def fetch_table_session_advance_totals_for_cierre(
+    conn,
+    tenant_id: UUID,
+    period_start: date,
+    period_end: date,
+    period_start_time=None,
+    period_end_time=None,
+) -> Dict[str, Dict[str, float]]:
+    if period_start_time and period_end_time:
+        receive_filter = "created_at >= $2 AND created_at < $3"
+        void_filter = "voided_at >= $2 AND voided_at < $3"
+        params = (tenant_id, period_start_time, period_end_time)
+    else:
+        receive_filter = "created_at::date >= $2 AND created_at::date <= $3"
+        void_filter = "voided_at::date >= $2 AND voided_at::date <= $3"
+        params = (tenant_id, period_start, period_end)
+
+    collection_rows = await conn.fetch(
+        f"""
+        SELECT payment_method AS method, COALESCE(SUM(amount_cop), 0) AS total
+        FROM table_session_advances
+        WHERE tenant_id = $1
+          AND payment_method IS NOT NULL
+          AND {receive_filter}
+        GROUP BY payment_method
+
+        UNION ALL
+
+        SELECT payment_method AS method, -COALESCE(SUM(amount_cop), 0) AS total
+        FROM table_session_advances
+        WHERE tenant_id = $1
+          AND payment_method IS NOT NULL
+          AND status = 'voided'
+          AND voided_at IS NOT NULL
+          AND {void_filter}
+        GROUP BY payment_method
+        """,
+        *params,
+    )
+
+    application_rows = await conn.fetch(
+        f"""
+        SELECT
+            COALESCE(pmg.slug, first_order.payment_method, $4) AS method,
+            COALESCE(SUM(tsa.applied_amount_cop), 0) AS total
+        FROM table_session_advances tsa
+        LEFT JOIN LATERAL (
+            SELECT o.payment_method, o.payment_method_id
+            FROM orders o
+            WHERE o.id = ANY(tsa.applied_order_ids)
+            ORDER BY o.created_at, o.id
+            LIMIT 1
+        ) first_order ON true
+        LEFT JOIN payment_methods pm ON pm.id = first_order.payment_method_id
+        LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+        WHERE tsa.tenant_id = $1
+          AND tsa.status = 'active'
+          AND COALESCE(tsa.applied_amount_cop, 0) > 0
+          AND tsa.applied_at IS NOT NULL
+          AND {receive_filter.replace("created_at", "tsa.applied_at")}
+        GROUP BY COALESCE(pmg.slug, first_order.payment_method, $4)
+        """,
+        *params,
+        TABLE_SESSION_ADVANCE_PAYMENT_SLUG,
+    )
+
+    if period_start_time and period_end_time:
+        cover_rows = await conn.fetch(
+            """
+            SELECT COALESCE(SUM(total_debit), 0) AS total
+            FROM tenant_journal_entries
+            WHERE tenant_id = $1
+              AND source_module = $4
+              AND status = 'posted'
+              AND entry_date >= $2::date
+              AND entry_date <= $3::date
+            """,
+            tenant_id,
+            period_start_time,
+            period_end_time,
+            ADVANCE_COVER_SOURCE,
+        )
+    else:
+        cover_rows = await conn.fetch(
+            """
+            SELECT COALESCE(SUM(total_debit), 0) AS total
+            FROM tenant_journal_entries
+            WHERE tenant_id = $1
+              AND source_module = $4
+              AND status = 'posted'
+              AND entry_date >= $2
+              AND entry_date <= $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+            ADVANCE_COVER_SOURCE,
+        )
+
+    out = {"collections": {}, "applications": {}, "cover": {"total": 0.0}}
+    for row in collection_rows:
+        method = row["method"]
+        if method:
+            out["collections"][method] = out["collections"].get(method, 0.0) + float(row["total"])
+    for row in application_rows:
+        method = row["method"]
+        if method:
+            out["applications"][method] = out["applications"].get(method, 0.0) + float(row["total"])
+    for row in cover_rows:
+        out["cover"]["total"] += float(row["total"] or 0)
+    return out
 
 
 async def _post_receive_gl(
