@@ -14,6 +14,7 @@ The toggle writer parameterizes the column name dynamically; the
 `ALLOWED_TOGGLES` whitelist prevents SQL injection.
 """
 import json
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -226,6 +227,61 @@ async def update_tip_config(
         "data": {
             "tip_default_percentages": [float(p) for p in row["tip_default_percentages"] or []],
             "tip_preselect_index": row["tip_preselect_index"],
+        },
+    }
+
+
+async def update_minimum_consumption_config(
+    tenant_id: UUID,
+    enabled: bool,
+    amount: Decimal,
+    restrictive: bool,
+) -> Dict[str, Any]:
+    """Persist minimum consumption / cover config (warocol.com#1368).
+
+    This is tenant config only. Later epic batches snapshot and enforce it on
+    table sessions. Mirrors the fresh-tenant UPSERT pattern used by other
+    non-boolean operaciones config writers.
+    """
+    if amount < 0:
+        raise HTTPException(status_code=422, detail="amount must be greater than or equal to 0")
+
+    query = """
+        INSERT INTO tenant_public_profiles
+            (
+                tenant_id,
+                slug,
+                display_name,
+                minimum_consumption_enabled,
+                minimum_consumption_amount,
+                minimum_consumption_restrictive
+            )
+        SELECT t.id, t.slug, t.name, $2, $3, $4
+        FROM tenants t
+        WHERE t.id = $1
+        ON CONFLICT (tenant_id) DO UPDATE
+            SET minimum_consumption_enabled     = EXCLUDED.minimum_consumption_enabled,
+                minimum_consumption_amount      = EXCLUDED.minimum_consumption_amount,
+                minimum_consumption_restrictive = EXCLUDED.minimum_consumption_restrictive,
+                updated_at                      = now()
+        RETURNING
+            minimum_consumption_enabled,
+            minimum_consumption_amount,
+            minimum_consumption_restrictive
+    """
+
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(query, tenant_id, enabled, amount, restrictive)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    return {
+        "success": True,
+        "data": {
+            "minimum_consumption_enabled": bool(row["minimum_consumption_enabled"]),
+            "minimum_consumption_amount": float(row["minimum_consumption_amount"] or 0),
+            "minimum_consumption_restrictive": bool(row["minimum_consumption_restrictive"]),
         },
     }
 

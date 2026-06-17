@@ -24,6 +24,7 @@ from app.services import table_assignments_service
 from app.services.operaciones_context_service import (
     get_operaciones_context,
     set_open_sale_enabled,
+    update_minimum_consumption_config,
     update_promo_conflict_config,
     update_tables_label,
     update_tip_config,
@@ -88,6 +89,14 @@ class TipConfigRequest(BaseModel):
                 f"percentages of length {len(self.percentages)}"
             )
         return self
+
+
+class MinimumConsumptionConfigRequest(BaseModel):
+    """Payload for PATCH /operaciones/minimum-consumption/config (#1368)."""
+
+    enabled: bool = False
+    amount: Decimal = Field(Decimal("0"), ge=0)
+    restrictive: bool = False
 
 
 class PromoConflictConfigRequest(BaseModel):
@@ -254,6 +263,24 @@ async def toggle_promo_line_opt_out(request: Request, body: ToggleRequest):
     """Toggle per-line promotion opt-out at POS checkout (warocol.com#1003)."""
     session = require_valid_session(request)
     return await update_toggle(session.tenant_id, "allow_promo_line_opt_out", body.enabled)
+
+
+@router.patch(
+    "/minimum-consumption/config",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def patch_minimum_consumption_config(
+    request: Request,
+    body: MinimumConsumptionConfigRequest,
+):
+    """Persist tenant-level minimum consumption / cover config (#1368)."""
+    session = require_valid_session(request)
+    return await update_minimum_consumption_config(
+        session.tenant_id,
+        body.enabled,
+        body.amount,
+        body.restrictive,
+    )
 
 
 @router.patch(

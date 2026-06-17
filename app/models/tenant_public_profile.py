@@ -105,6 +105,23 @@ class TenantPublicProfileBase(BaseModel):
                     "without touching the KDS. Requires comandas_enabled=true."
     )
 
+    # Minimum consumption / cover config (warocol.com#1368).
+    # This batch only persists tenant config. Later batches snapshot/apply it to
+    # sessions, deposits, close enforcement, accounting and reports.
+    minimum_consumption_enabled: bool = Field(
+        False,
+        description="When true, table sessions may use tenant minimum consumption / cover rules.",
+    )
+    minimum_consumption_amount: Decimal = Field(
+        Decimal('0'),
+        ge=0,
+        description="Minimum consumption / cover amount in COP for table sessions.",
+    )
+    minimum_consumption_restrictive: bool = Field(
+        False,
+        description="When true, later close-session logic may block closing below the minimum.",
+    )
+
     # Waiter attribution family feature flag (warocol.com#573)
     waiter_attribution_enabled: bool = Field(
         False,
@@ -233,6 +250,9 @@ class TenantPublicProfileUpdate(BaseModel):
     kds_enabled: Optional[bool] = None
     auto_select_generic_enabled: Optional[bool] = None
     expediter_enabled: Optional[bool] = None
+    minimum_consumption_enabled: Optional[bool] = None
+    minimum_consumption_amount: Optional[Decimal] = Field(None, ge=0)
+    minimum_consumption_restrictive: Optional[bool] = None
     waiter_attribution_enabled: Optional[bool] = None
 
     # Custom mesa label (warocol.com#614)
