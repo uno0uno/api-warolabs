@@ -31,6 +31,9 @@ SELECT
     tpp.accepts_online_orders,
     tpp.auto_select_generic_enabled,
     tpp.open_sale_enabled,
+    tpp.minimum_consumption_enabled,
+    tpp.minimum_consumption_amount,
+    tpp.minimum_consumption_restrictive,
     tpp.waiter_attribution_enabled,
     tpp.tables_label_singular,
     tpp.tables_label_plural,
@@ -114,6 +117,17 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         'accepts_online_orders': bool(row['accepts_online_orders']) if row['accepts_online_orders'] is not None else False,
         'auto_select_generic_enabled': bool(row['auto_select_generic_enabled']) if row['auto_select_generic_enabled'] is not None else False,
         'open_sale_enabled': bool(row['open_sale_enabled']) if row['open_sale_enabled'] is not None else False,
+        'minimum_consumption_enabled': bool(row['minimum_consumption_enabled'])
+        if row['minimum_consumption_enabled'] is not None
+        else False,
+        'minimum_consumption_amount': (
+            float(row['minimum_consumption_amount'])
+            if row['minimum_consumption_amount'] is not None
+            else 0.0
+        ),
+        'minimum_consumption_restrictive': bool(row['minimum_consumption_restrictive'])
+        if row['minimum_consumption_restrictive'] is not None
+        else False,
         'waiter_attribution_enabled': bool(row['waiter_attribution_enabled']) if row['waiter_attribution_enabled'] is not None else False,
         'tables_label_singular': row['tables_label_singular'],
         'tables_label_plural': row['tables_label_plural'],
