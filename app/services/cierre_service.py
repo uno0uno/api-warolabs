@@ -290,6 +290,7 @@ async def _post_order_gl_entry(
     order_number: Optional[int] = None,
     tip_amount: Decimal = Decimal("0"),
     tip_tax_amount: Decimal = Decimal("0"),
+    advance_amount: Decimal = Decimal("0"),
 ) -> None:
     """
     Post a double-entry GL journal entry for a single completed order (POS or domicilio).
@@ -351,16 +352,35 @@ async def _post_order_gl_entry(
         if liability_row and liability_row["customer_wallet_liability_gl_code"]:
             debit_code = str(liability_row["customer_wallet_liability_gl_code"])
 
-    debit_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, debit_code,
+    advance_debit = min(
+        Decimal(str(advance_amount or 0)).quantize(Decimal("0.01")),
+        total_amount,
     )
-    if not debit_acct:
+    payment_debit_required = advance_debit <= 0 or payment_method != "table_session_advance"
+    debit_acct = None
+    if payment_debit_required:
+        debit_acct = await conn.fetchrow(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+            tenant_id, debit_code,
+        )
+    if payment_debit_required and not debit_acct:
         logger.warning(
             f"[GL] Debit account {debit_code} not found for tenant {tenant_id} — "
             f"skip GL post for order {order_id}"
         )
         return
+    advance_acct = None
+    if advance_debit > 0:
+        advance_acct = await conn.fetchrow(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+            tenant_id, _SLUG_DEBIT_CODE["table_session_advance"],
+        )
+        if not advance_acct:
+            logger.warning(
+                f"[GL] Advance account 2810 not found for tenant {tenant_id} — "
+                f"skip GL post for order {order_id}"
+            )
+            return
 
     # ── Resolve 4135 Ingresos ──────────────────────────────────────────────
     ingresos_acct = await conn.fetchrow(
@@ -493,25 +513,45 @@ async def _post_order_gl_entry(
         )
         entry_id = entry_row["id"]
 
-        # Debit line — payment account
-        await conn.execute(
-            """INSERT INTO tenant_journal_lines
-                   (journal_entry_id, account_id, debit, credit, description, line_order)
-               VALUES ($1, $2, $3, 0, $4, 0)""",
-            entry_id, debit_acct["id"], dt, description,
-        )
+        line_order = 0
+        if advance_debit > 0 and advance_acct:
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, $3, 0, $4, $5)""",
+                entry_id,
+                advance_acct["id"],
+                float(advance_debit),
+                f"{description} — aplicación anticipo mesa",
+                line_order,
+            )
+            line_order += 1
+        payment_debit = Decimal(str(debit_total)) - advance_debit
+        if payment_debit > 0 and debit_acct:
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, $3, 0, $4, $5)""",
+                entry_id,
+                debit_acct["id"],
+                float(payment_debit),
+                description,
+                line_order,
+            )
+            line_order += 1
 
         # Credit line — product net revenue to 4175
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
-               VALUES ($1, $2, 0, $3, $4, 1)""",
+               VALUES ($1, $2, 0, $3, $4, $5)""",
             entry_id, ingresos_acct["id"], float(product_net_revenue),
             f"{description} — ingreso neto",
+            line_order,
         )
+        line_order += 1
 
         # Credit lines — one per active tax type (INC/IVA standard + IVA licores)
-        line_order = 2
         if standard_tax > 0 and standard_acct_id:
             await conn.execute(
                 """INSERT INTO tenant_journal_lines
@@ -1354,6 +1394,7 @@ async def _compute_preview(
             method_totals[m] = method_totals.get(m, 0.0) + float(row["total"])
 
     from app.services.customer_wallet_service import fetch_wallet_recharge_totals_for_cierre
+    from app.services.table_session_advances_service import fetch_table_session_advance_totals_for_cierre
 
     recharge_totals = await fetch_wallet_recharge_totals_for_cierre(
         conn,
@@ -1365,6 +1406,20 @@ async def _compute_preview(
     )
     for method, total in recharge_totals.items():
         method_totals[method] = method_totals.get(method, 0.0) + total
+
+    advance_totals = await fetch_table_session_advance_totals_for_cierre(
+        conn,
+        tenant_id,
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+    )
+    for method, total in advance_totals["applications"].items():
+        method_totals[method] = max(method_totals.get(method, 0.0) - total, 0.0)
+    for method, total in advance_totals["collections"].items():
+        method_totals[method] = method_totals.get(method, 0.0) + total
+    minimum_cover_income = float(advance_totals.get("cover", {}).get("total", 0.0))
 
     gastos_row = await conn.fetchrow(
         f"""
@@ -1396,7 +1451,7 @@ async def _compute_preview(
     total_tips = float(tips_row["total_tips"])
     total_tip_tax = float(tips_row["total_tip_tax"])
     cash_tips = float(cash_tips_row["cash_tips"])
-    total_charged = float(sales_row["total_sales"]) + tip_settlement_total(
+    total_charged = float(sales_row["total_sales"]) + minimum_cover_income + tip_settlement_total(
         total_tips, total_tip_tax,
     )
     cash_expected = _compute_cash_expected(
@@ -1409,6 +1464,7 @@ async def _compute_preview(
 
     return {
         "totalSales":       float(sales_row["total_sales"]),
+        "minimumCoverIncome": minimum_cover_income,
         "itemsSold":        int(sales_row["items_sold"]),
         "totalTips":        total_tips,
         "totalTipTax":      total_tip_tax,
@@ -1599,6 +1655,32 @@ async def _compute_breakdown_rows(
             }
         else:
             aggregated[key]["total"] += total
+    from app.services.table_session_advances_service import fetch_table_session_advance_totals_for_cierre
+    advance_totals = await fetch_table_session_advance_totals_for_cierre(
+        conn,
+        tenant_id,
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+    )
+    for method, total in advance_totals["applications"].items():
+        for key, row in aggregated.items():
+            if key[0] == method:
+                row["total"] = max(float(row["total"]) - total, 0.0)
+                break
+    for method, total in advance_totals["collections"].items():
+        if total == 0:
+            continue
+        key = (method, f"Anticipo mesa - {method}")
+        if key not in aggregated:
+            aggregated[key] = {
+                "group_slug": method,
+                "method_name": f"Anticipo mesa - {method}",
+                "total": float(total),
+            }
+        else:
+            aggregated[key]["total"] += float(total)
     return [r for r in aggregated.values() if r["total"] > 0]
 
 
@@ -2142,6 +2224,7 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 "periodEndTime":        period_end_time.isoformat()   if period_end_time   else None,
                 "shiftTemplateId":      str(shift_template_id) if shift_template_id else None,
                 "totalSales":           preview["totalSales"],
+                "minimumCoverIncome":   preview.get("minimumCoverIncome", 0.0),
                 "itemsSold":            preview["itemsSold"],
                 "totalTips":            preview["totalTips"],
                 "totalTipTax":          preview["totalTipTax"],

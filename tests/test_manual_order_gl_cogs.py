@@ -685,6 +685,48 @@ async def test_post_order_gl_entry_uses_selected_method_account_before_slug_fall
     assert debit_line_args[2] == debit_account_id
 
 
+@pytest.mark.asyncio
+async def test_post_order_gl_entry_splits_table_advance_to_2810():
+    tenant_id = uuid4()
+    order_id = uuid4()
+    advance_account_id = uuid4()
+    ingresos_account_id = uuid4()
+    entry_id = uuid4()
+
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=None)
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"id": advance_account_id},
+            {"id": ingresos_account_id},
+            {"id": entry_id},
+        ]
+    )
+    conn.fetch = AsyncMock(return_value=[])
+    conn.execute = AsyncMock()
+    conn.transaction = MagicMock(return_value=_AsyncContext())
+
+    await cierre_service._post_order_gl_entry(
+        conn=conn,
+        tenant_id=tenant_id,
+        order_id=order_id,
+        order_date=date(2026, 6, 16),
+        total_amount=Decimal("70000"),
+        payment_method="table_session_advance",
+        payment_method_id=None,
+        tax_config={},
+        order_number=8522,
+        advance_amount=Decimal("70000"),
+    )
+
+    advance_lookup_args = conn.fetchrow.await_args_list[0].args
+    advance_line_args = conn.execute.await_args_list[0].args
+    assert advance_lookup_args[1:] == (tenant_id, "2810")
+    assert advance_line_args[2] == advance_account_id
+    assert advance_line_args[3] == 70000.0
+    assert "aplicación anticipo mesa" in advance_line_args[4]
+
+
 def test_manual_order_modifier_quantity_defaults_to_one():
     modifier = ManualOrderModifier(id=str(uuid4()), name="Extra queso", price=2500)
 

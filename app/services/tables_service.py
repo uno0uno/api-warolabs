@@ -49,6 +49,7 @@ from app.services.table_session_advances_service import (
     TABLE_SESSION_ADVANCE_PAYMENT_SLUG,
     apply_session_advances_for_close,
     get_available_advance_total,
+    recognize_unconsumed_advance_cover_for_close,
 )
 import logging
 
@@ -1027,6 +1028,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 _minimum_close_state: Optional[dict] = None
                 _advance_apply_amount = Decimal("0")
                 _advance_applied_total = Decimal("0")
+                _advance_cover_total = Decimal("0")
 
                 available_advance_total = await get_available_advance_total(
                     conn,
@@ -1406,6 +1408,21 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 [row["id"] for row in completed_orders],
                             )
                         tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        _advance_remaining_after_products = max(
+                            available_advance_total - _advance_applied_total,
+                            Decimal("0"),
+                        )
+                        if not split_mode and _advance_remaining_after_products > 0:
+                            _advance_cover_total = await recognize_unconsumed_advance_cover_for_close(
+                                conn,
+                                UUID(str(tenant_id)),
+                                session_row["id"],
+                                _advance_remaining_after_products,
+                                [row["id"] for row in completed_orders],
+                                tax_config,
+                                date.today(),
+                                UUID(str(user_id)) if user_id else None,
+                            )
                         first_order_id = await conn.fetchval(
                             """
                             SELECT id FROM orders
@@ -1414,9 +1431,17 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             """,
                             session_row["id"],
                         )
+                        _advance_remaining_for_gl = _advance_applied_total
                         for ord_row in completed_orders:
                             ord_tip = Decimal("0")
                             ord_tip_tax = Decimal("0")
+                            ord_advance = Decimal("0")
+                            if not split_mode and _advance_remaining_for_gl > 0:
+                                ord_advance = min(
+                                    _advance_remaining_for_gl,
+                                    Decimal(str(ord_row["total_amount"] or 0)),
+                                )
+                                _advance_remaining_for_gl -= ord_advance
                             if not split_mode and first_order_id and ord_row["id"] == first_order_id:
                                 ord_tip = Decimal(str(tip_amount or 0))
                                 ord_tip_tax = Decimal(str(_mesa_tip_tax_amount))
@@ -1432,6 +1457,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 order_number=int(ord_row["order_number"]),
                                 tip_amount=ord_tip,
                                 tip_tax_amount=ord_tip_tax,
+                                advance_amount=ord_advance,
                             )
                             await _post_order_cogs_gl_entry(
                                 conn=conn,
@@ -1751,6 +1777,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 "minimum_consumption": {
                     **(_minimum_close_state or {}),
                     "advance_applied": float(_advance_applied_total),
+                    "cover_recognized": float(_advance_cover_total),
                 } if _minimum_close_state else None,
                 "tip_amount": float(tip_amount) if tip_amount > 0 else 0,
                 "tip_source": tip_source,

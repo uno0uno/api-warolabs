@@ -141,6 +141,21 @@ class TestAdvanceValidation:
             "voided_total_cop": 0,
         }
 
+    def test_cover_gl_amounts_extract_standard_tax_from_settlement(self):
+        settlement, net, tax, tax_code = svc._standard_cover_gl_amounts(
+            Decimal("108000"),
+            {
+                "inc_applicable": True,
+                "inc_rate": Decimal("0.0800"),
+                "inc_gl_account_code": "2495",
+            },
+        )
+
+        assert settlement == Decimal("108000.00")
+        assert net.quantize(Decimal("0.01")) == Decimal("100000.00")
+        assert tax.quantize(Decimal("0.01")) == Decimal("8000.00")
+        assert tax_code == "2495"
+
 
 class TestCreateSessionAdvance:
     @pytest.mark.asyncio
