@@ -1790,7 +1790,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         - float(_advance_applied_total),
                     )
                     + tip_settlement_total(float(tip_amount), _mesa_tip_tax_amount)
-                ) if tip_amount > 0 else None,
+                ) if tip_amount > 0 or _advance_applied_total > 0 else None,
             },
         }
 

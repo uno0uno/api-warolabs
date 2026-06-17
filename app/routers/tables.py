@@ -195,7 +195,7 @@ class CloseSessionRequest(BaseModel):
     split_mode: bool = Field(False, description="True when using split payment — keeps session open, marks orders as partial")
     split_first_amount: float = Field(0.0, description="Amount for the first split payment (used only when split_mode=True)")
     split_first_cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for the first split payment when payment_method='cash'. Must be >= split_first_amount.")
-    cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for a single (non-split) cash close. Must be >= total session amount.")
+    cash_received: Optional[float] = Field(None, description="Issue #524 — cash handed over for a single (non-split) cash close. Must be >= amount due after table-session advances.")
     tip_amount: float = Field(0, ge=0, description="warocol.com#639 — total tip for the mesa session. Applied to the first completed order in the session (like cash_received). Rejected when tip_enabled=false. Allowed with split_mode.")
     tip_source: Literal['preset', 'custom', 'none'] = Field('none', description="warocol.com#639 — how the tip was chosen. Must agree with tip_amount.")
     tip_taxable: bool = Field(False, description="warocol.com#740 — apply consumption tax to tip_amount when true (gravada).")
