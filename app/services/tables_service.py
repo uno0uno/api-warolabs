@@ -1028,6 +1028,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 _minimum_close_state: Optional[dict] = None
                 _advance_apply_amount = Decimal("0")
                 _advance_applied_total = Decimal("0")
+                _advance_tip_applied_total = Decimal("0")
                 _advance_cover_total = Decimal("0")
 
                 available_advance_total = await get_available_advance_total(
@@ -1422,16 +1423,35 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 [row["id"] for row in completed_orders],
                             )
                         tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        _tip_settlement_decimal = Decimal(str(
+                            tip_settlement_total(float(tip_amount), _mesa_tip_tax_amount)
+                        )).quantize(Decimal("0.01"))
                         _advance_remaining_after_products = max(
                             available_advance_total - _advance_applied_total,
                             Decimal("0"),
                         )
-                        if not split_mode and _advance_remaining_after_products > 0:
+                        if not split_mode and _advance_remaining_after_products > 0 and _tip_settlement_decimal > 0:
+                            _advance_tip_apply_amount = min(
+                                _advance_remaining_after_products,
+                                _tip_settlement_decimal,
+                            )
+                            _advance_tip_applied_total = await apply_session_advances_for_close(
+                                conn,
+                                UUID(str(tenant_id)),
+                                session_row["id"],
+                                _advance_tip_apply_amount,
+                                [row["id"] for row in completed_orders],
+                            )
+                        _advance_remaining_after_settlement = max(
+                            _advance_remaining_after_products - _advance_tip_applied_total,
+                            Decimal("0"),
+                        )
+                        if not split_mode and _advance_remaining_after_settlement > 0:
                             _advance_cover_total = await recognize_unconsumed_advance_cover_for_close(
                                 conn,
                                 UUID(str(tenant_id)),
                                 session_row["id"],
-                                _advance_remaining_after_products,
+                                _advance_remaining_after_settlement,
                                 [row["id"] for row in completed_orders],
                                 tax_config,
                                 date.today(),
@@ -1445,20 +1465,22 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             """,
                             session_row["id"],
                         )
-                        _advance_remaining_for_gl = _advance_applied_total
+                        _advance_remaining_for_gl = _advance_applied_total + _advance_tip_applied_total
                         for ord_row in completed_orders:
                             ord_tip = Decimal("0")
                             ord_tip_tax = Decimal("0")
                             ord_advance = Decimal("0")
-                            if not split_mode and _advance_remaining_for_gl > 0:
-                                ord_advance = min(
-                                    _advance_remaining_for_gl,
-                                    Decimal(str(ord_row["total_amount"] or 0)),
-                                )
-                                _advance_remaining_for_gl -= ord_advance
                             if not split_mode and first_order_id and ord_row["id"] == first_order_id:
                                 ord_tip = Decimal(str(tip_amount or 0))
                                 ord_tip_tax = Decimal(str(_mesa_tip_tax_amount))
+                            if not split_mode and _advance_remaining_for_gl > 0:
+                                ord_settlement = (
+                                    Decimal(str(ord_row["total_amount"] or 0))
+                                    + ord_tip
+                                    + ord_tip_tax
+                                )
+                                ord_advance = min(_advance_remaining_for_gl, ord_settlement)
+                                _advance_remaining_for_gl -= ord_advance
                             await _post_order_gl_entry(
                                 conn=conn,
                                 tenant_id=tenant_id,
@@ -1770,7 +1792,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
         )
         advance_settlement_applied = min(
             settlement_total,
-            float(_advance_applied_total + _advance_cover_total),
+            float(_advance_applied_total + _advance_tip_applied_total),
         )
         charged_amount = max(0.0, settlement_total - advance_settlement_applied)
 
@@ -1804,6 +1826,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 "minimum_consumption": {
                     **(_minimum_close_state or {}),
                     "advance_applied": float(_advance_applied_total),
+                    "advance_tip_applied": float(_advance_tip_applied_total),
                     "cover_recognized": float(_advance_cover_total),
                 } if _minimum_close_state else None,
                 "tip_amount": float(tip_amount) if tip_amount > 0 else 0,
