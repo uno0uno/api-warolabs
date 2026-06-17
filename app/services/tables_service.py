@@ -2223,6 +2223,13 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                 session_row["id"],
             )
             partial_paid_total = sum(float(r["group_amount"] or 0) for r in partial_payments_rows)
+            from app.services.table_session_advances_service import get_session_advances_payload
+
+            advances_payload = await get_session_advances_payload(
+                conn,
+                UUID(str(tenant_id)),
+                session_row["id"],
+            )
 
         return {
             "success": True,
@@ -2245,6 +2252,8 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     "liquor_tax": float(_liq_tax),
                     "standard_tax_label": _tax_label,
                     "minimum_consumption": _minimum_consumption_state(session_row, partial_paid_total),
+                    "session_advances": advances_payload["advances"],
+                    "session_advance_totals": advances_payload["advance_totals"],
                     # Waiter attribution (warocol.com#574)
                     "attended_by_member_id": str(session_row["attended_by_member_id"]) if session_row.get("attended_by_member_id") else None,
                     "attended_by_member_name": session_row.get("attended_by_member_name"),

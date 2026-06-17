@@ -8,11 +8,12 @@ from fastapi import APIRouter, Body, Depends, Request, Query
 from typing import Optional, List, Literal
 from uuid import UUID
 from datetime import date
+from decimal import Decimal
 from pydantic import BaseModel, Field
 from app.core.permissions import Module, require_module
 from app.models.table_member_assignment import OpenTableRequest
 from app.models.comanda import FireTableItemsRequest
-from app.services import tables_service
+from app.services import table_session_advances_service, tables_service
 
 router = APIRouter(tags=["Tables"])
 
@@ -217,6 +218,18 @@ class AddSessionPaymentRequest(BaseModel):
     tip_taxable: Optional[bool] = Field(None, description="Optional gravada flag for split session tip updates.")
 
 
+class CreateSessionAdvanceRequest(BaseModel):
+    amount_cop: Decimal = Field(..., gt=0, description="COP amount for this session advance")
+    payment_method: str = Field(..., description="cash | card | digital")
+    payment_method_id: Optional[UUID] = Field(None, description="UUID of the selected payment_methods row")
+    notes: Optional[str] = Field(None, max_length=500)
+    idempotency_key: Optional[str] = Field(None, max_length=128)
+
+
+class VoidSessionAdvanceRequest(BaseModel):
+    reason: Optional[str] = Field(None, max_length=500, description="Motivo opcional de anulación")
+
+
 @router.post("/{table_id}/close", dependencies=[Depends(require_module(Module.POS))])
 async def close_session(request: Request, table_id: UUID, body: CloseSessionRequest = CloseSessionRequest()):
     """
@@ -247,6 +260,43 @@ async def close_session(request: Request, table_id: UUID, body: CloseSessionRequ
         reason=body.reason,
         waros_to_redeem=body.waros_to_redeem,
         waro_reward_id=body.waro_reward_id,
+    )
+
+
+@router.get("/{table_id}/session-advances", dependencies=[Depends(require_module(Module.POS))])
+async def list_session_advances(request: Request, table_id: UUID):
+    """List session-scoped minimum-consumption advances for the open table session."""
+    return await table_session_advances_service.list_session_advances(request, table_id)
+
+
+@router.post("/{table_id}/session-advances", dependencies=[Depends(require_module(Module.POS))])
+async def create_session_advance(
+    request: Request,
+    table_id: UUID,
+    body: CreateSessionAdvanceRequest,
+):
+    """Create a session-scoped advance without customer wallet or order settlement."""
+    return await table_session_advances_service.create_session_advance(
+        request,
+        table_id,
+        body.amount_cop,
+        body.payment_method,
+        body.payment_method_id,
+        notes=body.notes,
+        idempotency_key=body.idempotency_key,
+    )
+
+
+@router.delete("/{table_id}/session-advances/{advance_id}", dependencies=[Depends(require_module(Module.POS))])
+async def void_session_advance(
+    request: Request,
+    table_id: UUID,
+    advance_id: UUID,
+    body: VoidSessionAdvanceRequest = Body(default_factory=VoidSessionAdvanceRequest),
+):
+    """Void a session advance and reverse its liability/payment GL when accounts exist."""
+    return await table_session_advances_service.void_session_advance(
+        request, table_id, advance_id, body.reason,
     )
 
 
