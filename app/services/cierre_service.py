@@ -1223,6 +1223,39 @@ def _compute_cash_expected(
     return opening_cash + total_cash + cash_tips - gastos_efectivo
 
 
+def _sum_advance_bucket(bucket: Dict[str, float]) -> float:
+    return sum(float(total or 0.0) for total in bucket.values())
+
+
+def _advance_audit_totals(advance_totals: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+    """Audit values used by cierre to explain table-session advance reconciliation."""
+    return {
+        "tableAdvanceCollections": _sum_advance_bucket(advance_totals.get("collections", {})),
+        "tableAdvanceApplications": _sum_advance_bucket(advance_totals.get("applications", {})),
+        "tableAdvanceCover": float(advance_totals.get("cover", {}).get("total", 0.0)),
+    }
+
+
+def _apply_table_session_advances_to_methods(
+    method_totals: Dict[str, float],
+    advance_totals: Dict[str, Dict[str, float]],
+) -> Dict[str, float]:
+    """Move table advances from order settlement methods to their tender methods.
+
+    Example: with a 60k digital advance and a 100k cash close, the order can
+    carry 100k cash settlement. Cierre subtracts the 60k applied advance from
+    cash and then adds the 60k digital collection, leaving cash=40k,
+    digital=60k. Exact/full-advance closes settle against table_session_advance
+    and are reduced to zero before adding the original tender collection.
+    """
+    adjusted = dict(method_totals)
+    for method, total in advance_totals.get("applications", {}).items():
+        adjusted[method] = max(adjusted.get(method, 0.0) - float(total or 0.0), 0.0)
+    for method, total in advance_totals.get("collections", {}).items():
+        adjusted[method] = adjusted.get(method, 0.0) + float(total or 0.0)
+    return adjusted
+
+
 async def _compute_preview(
     conn,
     tenant_id: UUID,
@@ -1414,10 +1447,8 @@ async def _compute_preview(
         period_start_time,
         period_end_time,
     )
-    for method, total in advance_totals["applications"].items():
-        method_totals[method] = max(method_totals.get(method, 0.0) - total, 0.0)
-    for method, total in advance_totals["collections"].items():
-        method_totals[method] = method_totals.get(method, 0.0) + total
+    method_totals = _apply_table_session_advances_to_methods(method_totals, advance_totals)
+    advance_audit = _advance_audit_totals(advance_totals)
     minimum_cover_income = float(advance_totals.get("cover", {}).get("total", 0.0))
 
     gastos_row = await conn.fetchrow(
@@ -1468,6 +1499,7 @@ async def _compute_preview(
         "totalTips":        total_tips,
         "totalTipTax":      total_tip_tax,
         "totalCharged":     total_charged,
+        **advance_audit,
         "cashTips":         cash_tips,
         "openingCash":      float(opening_cash),
         "totalCash":        total_cash,
@@ -1663,12 +1695,12 @@ async def _compute_breakdown_rows(
         period_start_time,
         period_end_time,
     )
-    for method, total in advance_totals["applications"].items():
+    for method, total in advance_totals.get("applications", {}).items():
         for key, row in aggregated.items():
             if key[0] == method:
-                row["total"] = max(float(row["total"]) - total, 0.0)
+                row["total"] = max(float(row["total"]) - float(total or 0.0), 0.0)
                 break
-    for method, total in advance_totals["collections"].items():
+    for method, total in advance_totals.get("collections", {}).items():
         if total == 0:
             continue
         key = (method, f"Anticipo mesa - {method}")
@@ -2228,6 +2260,9 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 "totalTips":            preview["totalTips"],
                 "totalTipTax":          preview["totalTipTax"],
                 "totalCharged":         preview["totalCharged"],
+                "tableAdvanceCollections": preview.get("tableAdvanceCollections", 0.0),
+                "tableAdvanceApplications": preview.get("tableAdvanceApplications", 0.0),
+                "tableAdvanceCover":     preview.get("tableAdvanceCover", 0.0),
                 "cashTips":             preview["cashTips"],
                 "openingCash":          opening_cash,
                 "totalCash":            preview["totalCash"],
