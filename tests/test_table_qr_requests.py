@@ -62,12 +62,17 @@ async def test_reject_request_marks_rejected():
     conn.fetchrow = AsyncMock(return_value={"id": request_id, "table_id": table_id})
 
     with patch("app.services.table_qr_requests_service.require_valid_session", return_value=session), \
-         patch("app.services.table_qr_requests_service.get_db_connection") as mock_conn:
+         patch("app.services.table_qr_requests_service.get_db_connection") as mock_conn, \
+         patch(
+             "app.services.table_qr_requests_service.notifications_service.mark_table_qr_notifications_read",
+             new_callable=AsyncMock,
+         ) as mark_read_mock:
         mock_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
         mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
 
         result = await table_qr_requests_service.reject_request(MagicMock(), request_id)
         assert result["data"]["status"] == "rejected"
+        mark_read_mock.assert_awaited_once_with(conn, session.tenant_id, request_id)
 
 
 @pytest.mark.asyncio
@@ -223,7 +228,10 @@ async def test_accept_requests_passes_persisted_modifier_quantity_to_tab_core():
     ) as add_tab_mock, patch(
         "app.services.table_qr_requests_service.fire_table_items",
         new=AsyncMock(),
-    ):
+    ), patch(
+        "app.services.table_qr_requests_service.notifications_service.mark_table_qr_notifications_read",
+        new_callable=AsyncMock,
+    ) as mark_read_mock:
         mock_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
         mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -235,6 +243,7 @@ async def test_accept_requests_passes_persisted_modifier_quantity_to_tab_core():
     assert result["success"] is True
     forwarded_items = add_tab_mock.await_args.args[4]
     assert forwarded_items[0]["modifiers"][0]["quantity"] == 3
+    mark_read_mock.assert_awaited_once_with(conn, session.tenant_id, request_id)
 
 
 def test_list_endpoint_delegates():
