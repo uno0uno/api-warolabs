@@ -1179,6 +1179,17 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         consumed_total,
                         available_advance_total,
                     )
+                    if tip_amount > 0:
+                        tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        _mesa_tip_tax_amount = compute_tip_tax_amount(
+                            float(tip_amount), bool(tip_taxable), tax_config,
+                        )
+                    _settlement_due_after_advance = max(
+                        Decimal("0"),
+                        consumed_total
+                        + Decimal(str(tip_settlement_total(float(tip_amount), _mesa_tip_tax_amount)))
+                        - available_advance_total,
+                    )
                     if (
                         not split_mode
                         and _minimum_close_state["enabled"]
@@ -1199,17 +1210,17 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         )
                     if not split_mode and available_advance_total > 0:
                         _advance_apply_amount = Decimal(str(_minimum_close_state["apply_amount"]))
-                        if Decimal(str(_minimum_close_state["overage_due"])) <= Decimal("0.01"):
+                        if _settlement_due_after_advance <= Decimal("0.01"):
                             payment_method = TABLE_SESSION_ADVANCE_PAYMENT_SLUG
                             payment_method_id = None
                             cash_received = None
                         elif payment_method == TABLE_SESSION_ADVANCE_PAYMENT_SLUG:
                             raise APIError(
-                                "Selecciona un método de pago para cobrar el excedente del consumo mínimo",
+                                "Selecciona un método de pago para cobrar el saldo pendiente",
                                 status_code=400,
                                 details={
                                     "code": "minimum_consumption_overage_payment_required",
-                                    "overage_due": _minimum_close_state["overage_due"],
+                                    "overage_due": float(_settlement_due_after_advance),
                                 },
                             )
 
@@ -1336,8 +1347,11 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 float(tip_amount), _mesa_tip_tax_amount,
                             )
                             if _minimum_close_state and _minimum_close_state["advance_total"] > 0:
-                                _required_cash = float(_minimum_close_state["overage_due"]) + tip_settlement_total(
-                                    float(tip_amount), _mesa_tip_tax_amount,
+                                _required_cash = max(
+                                    0.0,
+                                    float(session_total_with_tip or 0)
+                                    + tip_settlement_total(float(tip_amount), _mesa_tip_tax_amount)
+                                    - float(_minimum_close_state["advance_total"]),
                                 )
                             if cash_received < _required_cash:
                                 raise APIError(
@@ -1750,6 +1764,15 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 logger.warning(f"Tax breakdown failed for mesa close (table {table_id}): {_e}")
         order_ids = [str(r["id"]) for r in order_rows]
         order_numbers = [int(r["order_number"]) for r in order_rows if r["order_number"] is not None]
+        settlement_total = (
+            float(sum(float(r.get("total_amount", 0)) for r in order_rows))
+            + tip_settlement_total(float(tip_amount), _mesa_tip_tax_amount)
+        )
+        advance_settlement_applied = min(
+            settlement_total,
+            float(_advance_applied_total + _advance_cover_total),
+        )
+        charged_amount = max(0.0, settlement_total - advance_settlement_applied)
 
         # Defensive: keep alignment even if order_number is unexpectedly null
         if len(order_numbers) != len(order_ids):
@@ -1774,6 +1797,10 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 "standard_tax_label": _tax_label,
                 "promo_savings": float(_promo_savings),
                 "promo_breakdown": _promo_breakdown,
+                "payment_method": payment_method,
+                "payment_method_id": str(payment_method_id) if payment_method_id else None,
+                "advance_applied": advance_settlement_applied,
+                "advance_cover_recognized": float(_advance_cover_total),
                 "minimum_consumption": {
                     **(_minimum_close_state or {}),
                     "advance_applied": float(_advance_applied_total),
@@ -1783,14 +1810,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 "tip_source": tip_source,
                 "tip_taxable": _mesa_tip_taxable if tip_amount > 0 else False,
                 "tip_tax_amount": float(_mesa_tip_tax_amount) if tip_amount > 0 else 0,
-                "charged_amount": (
-                    max(
-                        0.0,
-                        float(sum(float(r.get("total_amount", 0)) for r in order_rows))
-                        - float(_advance_applied_total),
-                    )
-                    + tip_settlement_total(float(tip_amount), _mesa_tip_tax_amount)
-                ) if tip_amount > 0 or _advance_applied_total > 0 else None,
+                "charged_amount": charged_amount if tip_amount > 0 or advance_settlement_applied > 0 else None,
             },
         }
 

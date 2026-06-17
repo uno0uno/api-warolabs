@@ -667,6 +667,7 @@ async def get_order_by_id(
                     o.delivery_instructions,
                     o.tip_amount,
                     o.tip_source,
+                    o.tip_tax_amount,
                     t_meta2.is_bar as is_bar,
                     o.served_by_member_id,
                     p_served.name as served_by_member_name,
@@ -748,6 +749,51 @@ async def get_order_by_id(
 
             _promo_summary = await _get_order_promo_summary(conn, order_id)
             _waro_summary = await _get_order_waro_redemption_summary(conn, order_id)
+            advance_gl_row = await conn.fetchrow(
+                """
+                SELECT COALESCE(SUM(jl.debit), 0) AS advance_applied
+                FROM tenant_journal_entries je
+                JOIN tenant_journal_lines jl ON jl.journal_entry_id = je.id
+                JOIN tenant_accounts ta ON ta.id = jl.account_id
+                WHERE je.tenant_id = $1
+                  AND je.source_module = 'orden'
+                  AND je.source_id = $2
+                  AND je.status = 'posted'
+                  AND ta.code = '2810'
+                  AND jl.debit > 0
+                  AND jl.description ILIKE '%anticipo mesa%'
+                """,
+                tenant_id,
+                order_id,
+            )
+            _tip_amount = float(order_row['tip_amount']) if order_row['tip_amount'] is not None else 0.0
+            _tip_tax_amount = float(order_row['tip_tax_amount']) if order_row['tip_tax_amount'] is not None else 0.0
+            _settlement_amount = float(order_row['total_amount']) + _tip_amount + _tip_tax_amount
+            _advance_applied = float(advance_gl_row["advance_applied"] or 0) if advance_gl_row else 0.0
+            if _advance_applied <= 0:
+                advance_direct_row = await conn.fetchrow(
+                    """
+                    SELECT COALESCE(SUM(applied_amount_cop), 0) AS advance_applied
+                    FROM table_session_advances
+                    WHERE tenant_id = $1
+                      AND status = 'active'
+                      AND $2 = ANY(applied_order_ids)
+                      AND cardinality(applied_order_ids) = 1
+                    """,
+                    tenant_id,
+                    order_id,
+                )
+                _advance_applied = (
+                    float(advance_direct_row["advance_applied"] or 0)
+                    if advance_direct_row else 0.0
+                )
+            _advance_applied = min(_settlement_amount, _advance_applied)
+            _charged_amount = None
+            if _tip_amount > 0 or _advance_applied > 0:
+                _charged_amount = max(
+                    0.0,
+                    _settlement_amount - _advance_applied,
+                )
 
             # Hydrate delivery address inline (None if not a delivery, or address was soft-deleted)
             delivery_address = None
@@ -801,8 +847,11 @@ async def get_order_by_id(
                     },
                     "served_by_member_id": str(order_row['served_by_member_id']) if order_row['served_by_member_id'] else None,
                     "served_by_member_name": order_row['served_by_member_name'],
-                    "tip_amount": float(order_row['tip_amount']) if order_row['tip_amount'] is not None else 0.0,
+                    "tip_amount": _tip_amount,
                     "tip_source": order_row['tip_source'] or 'none',
+                    "tip_tax_amount": _tip_tax_amount,
+                    "advance_applied": _advance_applied,
+                    "charged_amount": _charged_amount,
                     "items_count": order_row['items_count'],
                     "split_payments": split_payments,
                     "standard_tax": _std_tax,
