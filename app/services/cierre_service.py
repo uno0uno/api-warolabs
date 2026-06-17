@@ -352,36 +352,6 @@ async def _post_order_gl_entry(
         if liability_row and liability_row["customer_wallet_liability_gl_code"]:
             debit_code = str(liability_row["customer_wallet_liability_gl_code"])
 
-    advance_debit = min(
-        Decimal(str(advance_amount or 0)).quantize(Decimal("0.01")),
-        total_amount,
-    )
-    payment_debit_required = advance_debit <= 0 or payment_method != "table_session_advance"
-    debit_acct = None
-    if payment_debit_required:
-        debit_acct = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-            tenant_id, debit_code,
-        )
-    if payment_debit_required and not debit_acct:
-        logger.warning(
-            f"[GL] Debit account {debit_code} not found for tenant {tenant_id} — "
-            f"skip GL post for order {order_id}"
-        )
-        return
-    advance_acct = None
-    if advance_debit > 0:
-        advance_acct = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-            tenant_id, _SLUG_DEBIT_CODE["table_session_advance"],
-        )
-        if not advance_acct:
-            logger.warning(
-                f"[GL] Advance account 2810 not found for tenant {tenant_id} — "
-                f"skip GL post for order {order_id}"
-            )
-            return
-
     # ── Resolve 4135 Ingresos ──────────────────────────────────────────────
     ingresos_acct = await conn.fetchrow(
         "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
@@ -495,6 +465,36 @@ async def _post_order_gl_entry(
     if tip_settlement > 0:
         debit_total += tip_settlement
 
+    advance_debit = min(
+        Decimal(str(advance_amount or 0)).quantize(Decimal("0.01")),
+        debit_total,
+    )
+    payment_debit = debit_total - advance_debit
+    debit_acct = None
+    if payment_debit > 0:
+        debit_acct = await conn.fetchrow(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+            tenant_id, debit_code,
+        )
+        if not debit_acct:
+            logger.warning(
+                f"[GL] Debit account {debit_code} not found for tenant {tenant_id} — "
+                f"skip GL post for order {order_id}"
+            )
+            return
+    advance_acct = None
+    if advance_debit > 0:
+        advance_acct = await conn.fetchrow(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+            tenant_id, _SLUG_DEBIT_CODE["table_session_advance"],
+        )
+        if not advance_acct:
+            logger.warning(
+                f"[GL] Advance account 2810 not found for tenant {tenant_id} — "
+                f"skip GL post for order {order_id}"
+            )
+            return
+
     dt = float(debit_total)
     description = f"#{order_number}" if order_number else f"Venta {order_date.isoformat()} — orden {order_id}"
     tip_description = f"{description} — propina"
@@ -526,7 +526,6 @@ async def _post_order_gl_entry(
                 line_order,
             )
             line_order += 1
-        payment_debit = Decimal(str(debit_total)) - advance_debit
         if payment_debit > 0 and debit_acct:
             await conn.execute(
                 """INSERT INTO tenant_journal_lines
