@@ -651,7 +651,16 @@ async def get_facturacion_status(request: Request):
     session = require_valid_session(request)
     tenant_id = session.tenant_id
 
+    from app.core.matias_environment import (
+        matias_environment_for_tenant,
+        matias_environment_label,
+    )
+
     async with get_db_connection() as conn:
+        tenant_row = await conn.fetchrow(
+            "SELECT slug FROM tenants WHERE id = $1",
+            tenant_id,
+        )
         last_doc = await conn.fetchrow(
             """SELECT prefix, invoice_number, status, document_type, created_at
                FROM electronic_invoices
@@ -660,6 +669,9 @@ async def get_facturacion_status(request: Request):
                LIMIT 1""",
             tenant_id,
         )
+
+    tenant_slug = tenant_row['slug'] if tenant_row else None
+    environment_id = matias_environment_for_tenant(tenant_id, tenant_slug)
 
     last_document = None
     if last_doc:
@@ -674,7 +686,8 @@ async def get_facturacion_status(request: Request):
     return {
         'success': True,
         'data': {
-            'environment': 'Habilitación (pruebas)',
+            'environment': matias_environment_label(environment_id),
+            'environment_id': environment_id,
             'last_document': last_document,
         },
     }

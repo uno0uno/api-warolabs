@@ -100,6 +100,9 @@ class Settings(BaseSettings):
 
     # api-facturacion microservice — DIAN electronic invoicing (issue #128)
     facturacion_api_url: str = Field(default='http://api-facturacion:8001', alias='FACTURACION_API_URL')
+    # Matias environment label for /facturacion-status (mirrors api_facturacion)
+    matias_environment_id: int = Field(default=2, alias='MATIAS_ENVIRONMENT_ID')
+    matias_habilitacion_tenant_ids: str = Field(default='', alias='MATIAS_HABILITACION_TENANT_IDS')
 
     # warocol.com#596 — grace window for the "ya validado" short-circuit in
     # emit_invoice. A repeated emit on a rejected-as-validado order is 409'd
