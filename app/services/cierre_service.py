@@ -32,6 +32,7 @@ _SLUG_DEBIT_CODE: Dict[str, str] = {
     "card":    "1110",   # Bancos
     "credit":  "1305",   # Clientes (fiado — accounts receivable)
     "customer_wallet": "2810",  # Anticipos clientes (api#369; tenant override in _post_order_gl_entry)
+    "table_session_advance": "2810",  # Anticipos recibidos aplicados a consumo minimo de mesa
 }
 
 INGRESOS_CODE   = "4175"   # Servicios de restaurante y similares
