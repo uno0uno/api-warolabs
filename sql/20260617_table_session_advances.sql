@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS table_session_advances (
     payment_method_id     UUID REFERENCES payment_methods(id) ON DELETE SET NULL,
     journal_entry_id      UUID REFERENCES tenant_journal_entries(id) ON DELETE SET NULL,
     void_journal_entry_id UUID REFERENCES tenant_journal_entries(id) ON DELETE SET NULL,
+    applied_amount_cop    NUMERIC(12, 2) NOT NULL DEFAULT 0,
+    applied_at            TIMESTAMPTZ,
+    applied_order_ids     UUID[],
     status                VARCHAR(20) NOT NULL DEFAULT 'active',
     notes                 TEXT,
     void_reason           TEXT,
@@ -19,8 +22,23 @@ CREATE TABLE IF NOT EXISTS table_session_advances (
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT chk_table_session_advances_amount_positive CHECK (amount_cop > 0),
+    CONSTRAINT chk_table_session_advances_applied_non_negative CHECK (applied_amount_cop >= 0),
+    CONSTRAINT chk_table_session_advances_applied_lte_amount CHECK (applied_amount_cop <= amount_cop),
     CONSTRAINT chk_table_session_advances_status CHECK (status IN ('active', 'voided'))
 );
+
+ALTER TABLE table_session_advances
+    ADD COLUMN IF NOT EXISTS applied_amount_cop NUMERIC(12, 2) NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS applied_order_ids UUID[];
+
+ALTER TABLE table_session_advances
+    DROP CONSTRAINT IF EXISTS chk_table_session_advances_applied_non_negative,
+    ADD CONSTRAINT chk_table_session_advances_applied_non_negative CHECK (applied_amount_cop >= 0);
+
+ALTER TABLE table_session_advances
+    DROP CONSTRAINT IF EXISTS chk_table_session_advances_applied_lte_amount,
+    ADD CONSTRAINT chk_table_session_advances_applied_lte_amount CHECK (applied_amount_cop <= amount_cop);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_table_session_advances_idempotency
     ON table_session_advances (tenant_id, idempotency_key)
@@ -38,6 +56,9 @@ COMMENT ON TABLE table_session_advances IS
 
 COMMENT ON COLUMN table_session_advances.table_session_id IS
     'Open or historical table session that owns the advance; no customer/profile is required.';
+
+COMMENT ON COLUMN table_session_advances.applied_amount_cop IS
+    'Portion of the session advance applied to completed table orders at final close.';
 
 ALTER TABLE tenant_journal_entries
     DROP CONSTRAINT IF EXISTS tenant_journal_entries_source_module_check;

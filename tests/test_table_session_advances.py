@@ -124,7 +124,21 @@ class TestAdvanceValidation:
         ]
         assert svc._advance_totals(rows) == {
             "active_total_cop": 10.0,
+            "available_total_cop": 10.0,
+            "applied_total_cop": 0.0,
             "voided_total_cop": 20.0,
+        }
+
+    def test_applied_amount_reduces_available_total(self):
+        rows = [
+            {"amount_cop": Decimal("50"), "applied_amount_cop": Decimal("30"), "status": "active"},
+            {"amount_cop": Decimal("20"), "applied_amount_cop": Decimal("0"), "status": "active"},
+        ]
+        assert svc._advance_totals(rows) == {
+            "active_total_cop": 40.0,
+            "available_total_cop": 40.0,
+            "applied_total_cop": 30.0,
+            "voided_total_cop": 0,
         }
 
 

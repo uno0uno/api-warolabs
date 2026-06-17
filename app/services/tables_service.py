@@ -45,6 +45,11 @@ from app.services.open_priced_service import (
     fetch_product_pricing_map,
     validate_items_unit_prices,
 )
+from app.services.table_session_advances_service import (
+    TABLE_SESSION_ADVANCE_PAYMENT_SLUG,
+    apply_session_advances_for_close,
+    get_available_advance_total,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -96,21 +101,48 @@ async def _get_minimum_consumption_snapshot(conn, tenant_id) -> Dict[str, Any]:
     }
 
 
-def _minimum_consumption_state(row: dict, paid_amount: float = 0.0) -> dict:
+def _minimum_consumption_state(
+    row: dict,
+    paid_amount: float = 0.0,
+    advance_amount: float = 0.0,
+) -> dict:
     enabled = bool(row.get("minimum_consumption_enabled_snapshot"))
     amount = float(row.get("minimum_consumption_amount_snapshot") or 0)
     consumed = float(row.get("running_total") or 0)
     paid = float(paid_amount or 0)
-    remaining = max(amount - consumed, 0) if enabled else 0
+    advance = float(advance_amount or 0)
+    covered_amount = consumed + paid + advance
+    remaining = max(amount - covered_amount, 0) if enabled else 0
     return {
         "enabled": enabled,
         "amount": amount,
         "restrictive": bool(row.get("minimum_consumption_restrictive_snapshot")),
         "consumed": consumed,
         "paid": paid,
+        "advance": advance,
+        "advance_total": advance,
+        "covered_amount": covered_amount,
         "remaining": remaining,
+        "missing": remaining,
+        "overage_due": max(consumed - paid - advance, 0),
         "covered": (not enabled) or remaining <= 0,
     }
+
+
+def _minimum_consumption_close_state(
+    session_row: dict,
+    consumed_total: Decimal,
+    advance_total: Decimal,
+) -> dict:
+    state = _minimum_consumption_state(
+        {
+            **dict(session_row),
+            "running_total": consumed_total,
+        },
+        advance_amount=float(advance_total),
+    )
+    state["apply_amount"] = float(min(consumed_total, advance_total))
+    return state
 
 
 async def _require_table_qr_module(conn, tenant_id) -> None:
@@ -334,6 +366,14 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                            AND op.voided_at IS NULL),
                         0
                     ) AS paid_total,
+                    COALESCE(
+                        (SELECT SUM(tsa.amount_cop - COALESCE(tsa.applied_amount_cop, 0))
+                         FROM table_session_advances tsa
+                         WHERE tsa.table_session_id = ts.id
+                           AND tsa.tenant_id = $1
+                           AND tsa.status = 'active'),
+                        0
+                    ) AS active_advance_total_cop,
                     COALESCE(
                         (SELECT COUNT(*)
                          FROM orders o2
@@ -951,6 +991,9 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     """
                     SELECT
                         ts.id,
+                        ts.minimum_consumption_enabled_snapshot,
+                        ts.minimum_consumption_amount_snapshot,
+                        ts.minimum_consumption_restrictive_snapshot,
                         COALESCE(ts.attended_by_member_id, t.assigned_member_id) AS effective_waiter_member_id
                     FROM table_sessions ts
                     JOIN tables t ON t.id = ts.table_id
@@ -981,6 +1024,17 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 _mesa_tip_tax_amount = 0.0
                 _promo_savings = 0.0
                 _promo_breakdown: List[dict] = []
+                _minimum_close_state: Optional[dict] = None
+                _advance_apply_amount = Decimal("0")
+                _advance_applied_total = Decimal("0")
+
+                available_advance_total = await get_available_advance_total(
+                    conn,
+                    UUID(str(tenant_id)),
+                    session_row["id"],
+                )
+                if not payment_method and available_advance_total > 0:
+                    payment_method = TABLE_SESSION_ADVANCE_PAYMENT_SLUG
 
                 # Mark pending orders as completed if payment_method provided
                 if payment_method:
@@ -998,6 +1052,11 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     if payment_method == 'customer_wallet' and not customer_id:
                         raise APIError(
                             "La billetera requiere un cliente en la mesa",
+                            status_code=400,
+                        )
+                    if payment_method == TABLE_SESSION_ADVANCE_PAYMENT_SLUG and split_mode:
+                        raise APIError(
+                            "El anticipo de mesa solo se aplica en el cierre final",
                             status_code=400,
                         )
 
@@ -1099,6 +1158,59 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 raise APIError(waro_exc.detail, status_code=waro_exc.status_code)
                             await recalc_pending_session_order_totals(conn, session_row["id"])
 
+                    consumed_total = Decimal(str(await conn.fetchval(
+                        """
+                        SELECT COALESCE(SUM(total_amount), 0)
+                        FROM orders
+                        WHERE table_session_id = $1
+                          AND status = 'pending'
+                        """,
+                        session_row["id"],
+                    ) or 0)).quantize(Decimal("0.01"))
+                    available_advance_total = await get_available_advance_total(
+                        conn,
+                        UUID(str(tenant_id)),
+                        session_row["id"],
+                    )
+                    _minimum_close_state = _minimum_consumption_close_state(
+                        session_row,
+                        consumed_total,
+                        available_advance_total,
+                    )
+                    if (
+                        not split_mode
+                        and _minimum_close_state["enabled"]
+                        and _minimum_close_state["restrictive"]
+                        and _minimum_close_state["missing"] > 0
+                    ):
+                        missing = _minimum_close_state["missing"]
+                        raise APIError(
+                            f"Faltan ${round(missing):,} para cubrir el consumo mínimo",
+                            status_code=409,
+                            details={
+                                "code": "minimum_consumption_not_covered",
+                                "minimum_amount": _minimum_close_state["amount"],
+                                "consumed": _minimum_close_state["consumed"],
+                                "advance_total": _minimum_close_state["advance_total"],
+                                "missing": missing,
+                            },
+                        )
+                    if not split_mode and available_advance_total > 0:
+                        _advance_apply_amount = Decimal(str(_minimum_close_state["apply_amount"]))
+                        if Decimal(str(_minimum_close_state["overage_due"])) <= Decimal("0.01"):
+                            payment_method = TABLE_SESSION_ADVANCE_PAYMENT_SLUG
+                            payment_method_id = None
+                            cash_received = None
+                        elif payment_method == TABLE_SESSION_ADVANCE_PAYMENT_SLUG:
+                            raise APIError(
+                                "Selecciona un método de pago para cobrar el excedente del consumo mínimo",
+                                status_code=400,
+                                details={
+                                    "code": "minimum_consumption_overage_payment_required",
+                                    "overage_due": _minimum_close_state["overage_due"],
+                                },
+                            )
+
                     completed_count = await conn.fetchval(
                         "SELECT COUNT(*) FROM orders WHERE table_session_id = $1 AND status = 'pending'",
                         session_row["id"],
@@ -1176,9 +1288,12 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             "SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE table_session_id = $1 AND status = 'completed'",
                             session_row["id"],
                         )
-                        if cash_received < float(session_total_for_check or 0):
+                        cash_required = float(session_total_for_check or 0)
+                        if _minimum_close_state and _minimum_close_state["advance_total"] > 0:
+                            cash_required = float(_minimum_close_state["overage_due"])
+                        if cash_received < cash_required:
                             raise APIError(
-                                f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total de la sesión ({session_total_for_check})",
+                                f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total a cobrar ({cash_required})",
                                 status_code=400,
                             )
                         await conn.execute(
@@ -1218,6 +1333,10 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             _required_cash = float(session_total_with_tip or 0) + tip_settlement_total(
                                 float(tip_amount), _mesa_tip_tax_amount,
                             )
+                            if _minimum_close_state and _minimum_close_state["advance_total"] > 0:
+                                _required_cash = float(_minimum_close_state["overage_due"]) + tip_settlement_total(
+                                    float(tip_amount), _mesa_tip_tax_amount,
+                                )
                             if cash_received < _required_cash:
                                 raise APIError(
                                     f"Efectivo recibido ({cash_received}) debe cubrir total + propina"
@@ -1278,6 +1397,14 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             "FROM orders WHERE table_session_id = $1 AND status = 'completed'",
                             session_row["id"],
                         )
+                        if not split_mode and _advance_apply_amount > 0:
+                            _advance_applied_total = await apply_session_advances_for_close(
+                                conn,
+                                UUID(str(tenant_id)),
+                                session_row["id"],
+                                _advance_apply_amount,
+                                [row["id"] for row in completed_orders],
+                            )
                         tax_config = await _get_tenant_tax_config(conn, tenant_id)
                         first_order_id = await conn.fetchval(
                             """
@@ -1621,12 +1748,20 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 "standard_tax_label": _tax_label,
                 "promo_savings": float(_promo_savings),
                 "promo_breakdown": _promo_breakdown,
+                "minimum_consumption": {
+                    **(_minimum_close_state or {}),
+                    "advance_applied": float(_advance_applied_total),
+                } if _minimum_close_state else None,
                 "tip_amount": float(tip_amount) if tip_amount > 0 else 0,
                 "tip_source": tip_source,
                 "tip_taxable": _mesa_tip_taxable if tip_amount > 0 else False,
                 "tip_tax_amount": float(_mesa_tip_tax_amount) if tip_amount > 0 else 0,
                 "charged_amount": (
-                    float(sum(float(r.get("total_amount", 0)) for r in order_rows))
+                    max(
+                        0.0,
+                        float(sum(float(r.get("total_amount", 0)) for r in order_rows))
+                        - float(_advance_applied_total),
+                    )
                     + tip_settlement_total(float(tip_amount), _mesa_tip_tax_amount)
                 ) if tip_amount > 0 else None,
             },
@@ -2251,7 +2386,11 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     "standard_tax": float(_std_tax),
                     "liquor_tax": float(_liq_tax),
                     "standard_tax_label": _tax_label,
-                    "minimum_consumption": _minimum_consumption_state(session_row, partial_paid_total),
+                    "minimum_consumption": _minimum_consumption_state(
+                        session_row,
+                        partial_paid_total,
+                        advances_payload["advance_totals"]["active_total_cop"],
+                    ),
                     "session_advances": advances_payload["advances"],
                     "session_advance_totals": advances_payload["advance_totals"],
                     # Waiter attribution (warocol.com#574)
@@ -4100,7 +4239,11 @@ def _format_table_row(row: dict) -> dict:
             "duration_minutes": round(float(row["session_duration_minutes"]), 1),
             "running_total": float(row["running_total"]),
             "unfired_count": int(row["unfired_count"]) if row.get("unfired_count") is not None else 0,
-            "minimum_consumption": _minimum_consumption_state(row, float(row.get("paid_total") or 0)),
+            "minimum_consumption": _minimum_consumption_state(
+                row,
+                float(row.get("paid_total") or 0),
+                float(row.get("active_advance_total_cop") or 0),
+            ),
             # Session-level waiter override (warocol.com#574)
             "attended_by_member_id": str(row["session_attended_by_member_id"]) if row.get("session_attended_by_member_id") else None,
             "attended_by_member_name": row.get("session_attended_by_member_name"),

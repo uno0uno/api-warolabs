@@ -27,6 +27,7 @@ from app.services.customer_wallet_service import (
 logger = logging.getLogger(__name__)
 
 ALLOWED_ADVANCE_TENDERS = {"cash", "card", "digital"}
+TABLE_SESSION_ADVANCE_PAYMENT_SLUG = "table_session_advance"
 ADVANCE_RECEIVE_SOURCE = "table_session_advance_receive"
 ADVANCE_VOID_SOURCE = "table_session_advance_void"
 
@@ -138,10 +139,14 @@ async def _get_open_session(conn, tenant_id: UUID, table_id: UUID, *, lock: bool
 
 
 def _serialize_advance(row) -> Dict[str, Any]:
+    amount = float(row["amount_cop"] or 0)
+    applied = float(_row_get(row, "applied_amount_cop", 0) or 0)
     return {
         "id": str(row["id"]),
         "table_session_id": str(row["table_session_id"]),
-        "amount_cop": float(row["amount_cop"] or 0),
+        "amount_cop": amount,
+        "applied_amount_cop": applied,
+        "available_amount_cop": max(amount - applied, 0),
         "payment_method": row["payment_method"],
         "payment_method_id": str(row["payment_method_id"]) if row["payment_method_id"] else None,
         "journal_entry_id": str(row["journal_entry_id"]) if row["journal_entry_id"] else None,
@@ -152,13 +157,25 @@ def _serialize_advance(row) -> Dict[str, Any]:
         "notes": _row_get(row, "notes"),
         "void_reason": _row_get(row, "void_reason"),
         "voided_at": row["voided_at"].isoformat() if _row_get(row, "voided_at") else None,
+        "applied_at": row["applied_at"].isoformat() if _row_get(row, "applied_at") else None,
         "created_at": row["created_at"].isoformat() if _row_get(row, "created_at") else None,
     }
 
 
+def _advance_available_amount(row) -> Decimal:
+    amount = Decimal(str(row["amount_cop"] or 0))
+    applied = Decimal(str(_row_get(row, "applied_amount_cop", 0) or 0))
+    return max(amount - applied, Decimal("0"))
+
+
 def _advance_totals(rows: List[Any]) -> Dict[str, float]:
     active = sum(
-        float(row["amount_cop"] or 0)
+        float(_advance_available_amount(row))
+        for row in rows
+        if row["status"] == "active"
+    )
+    applied = sum(
+        float(_row_get(row, "applied_amount_cop", 0) or 0)
         for row in rows
         if row["status"] == "active"
     )
@@ -169,6 +186,8 @@ def _advance_totals(rows: List[Any]) -> Dict[str, float]:
     )
     return {
         "active_total_cop": active,
+        "available_total_cop": active,
+        "applied_total_cop": applied,
         "voided_total_cop": voided,
     }
 
@@ -184,6 +203,8 @@ async def _fetch_advances(conn, tenant_id: UUID, table_session_id: UUID) -> List
             payment_method_id,
             journal_entry_id,
             void_journal_entry_id,
+            COALESCE(applied_amount_cop, 0) AS applied_amount_cop,
+            applied_at,
             status,
             notes,
             void_reason,
@@ -209,6 +230,83 @@ async def get_session_advances_payload(
         "advances": [_serialize_advance(row) for row in rows],
         "advance_totals": _advance_totals(rows),
     }
+
+
+async def get_available_advance_total(
+    conn,
+    tenant_id: UUID,
+    table_session_id: UUID,
+) -> Decimal:
+    value = await conn.fetchval(
+        """
+        SELECT COALESCE(SUM(amount_cop - COALESCE(applied_amount_cop, 0)), 0)
+        FROM table_session_advances
+        WHERE tenant_id = $1
+          AND table_session_id = $2
+          AND status = 'active'
+        """,
+        tenant_id,
+        table_session_id,
+    )
+    return Decimal(str(value or 0)).quantize(Decimal("0.01"))
+
+
+async def apply_session_advances_for_close(
+    conn,
+    tenant_id: UUID,
+    table_session_id: UUID,
+    amount_cop: Decimal,
+    order_ids: List[UUID],
+) -> Decimal:
+    amount_to_apply = Decimal(str(amount_cop or 0)).quantize(Decimal("0.01"))
+    if amount_to_apply <= 0:
+        return Decimal("0")
+
+    rows = await conn.fetch(
+        """
+        SELECT id, amount_cop, COALESCE(applied_amount_cop, 0) AS applied_amount_cop
+        FROM table_session_advances
+        WHERE tenant_id = $1
+          AND table_session_id = $2
+          AND status = 'active'
+          AND amount_cop > COALESCE(applied_amount_cop, 0)
+        ORDER BY created_at, id
+        FOR UPDATE
+        """,
+        tenant_id,
+        table_session_id,
+    )
+
+    applied_total = Decimal("0")
+    remaining = amount_to_apply
+    for row in rows:
+        available = _advance_available_amount(row)
+        if available <= 0:
+            continue
+        applied = min(available, remaining)
+        if applied <= 0:
+            break
+        await conn.execute(
+            """
+            UPDATE table_session_advances
+            SET applied_amount_cop = COALESCE(applied_amount_cop, 0) + $1,
+                applied_at = COALESCE(applied_at, now()),
+                applied_order_ids = $2::uuid[],
+                updated_at = now()
+            WHERE id = $3
+              AND tenant_id = $4
+            """,
+            applied,
+            order_ids,
+            row["id"],
+            tenant_id,
+        )
+        applied_total += applied
+        remaining -= applied
+        if remaining <= 0:
+            break
+
+    return applied_total.quantize(Decimal("0.01"))
 
 
 async def _post_receive_gl(
