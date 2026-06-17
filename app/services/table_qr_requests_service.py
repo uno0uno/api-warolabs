@@ -10,7 +10,11 @@ from app.core.exceptions import APIError, AuthenticationError, NotFoundError
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
 from app.services import notifications_service
-from app.services.tables_service import _add_tab_items_core, fire_table_items
+from app.services.tables_service import (
+    _add_tab_items_core,
+    _get_minimum_consumption_snapshot,
+    fire_table_items,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,15 +140,26 @@ async def _ensure_open_session_in_tx(
     if not table_row:
         raise NotFoundError("Table not found")
 
+    minimum_snapshot = await _get_minimum_consumption_snapshot(conn, tenant_id)
     session_row = await conn.fetchrow(
         """
-        INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id)
-        VALUES ($1, $2, $3)
+        INSERT INTO table_sessions (
+            table_id,
+            tenant_id,
+            opened_by_user_id,
+            minimum_consumption_enabled_snapshot,
+            minimum_consumption_amount_snapshot,
+            minimum_consumption_restrictive_snapshot
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id
         """,
         table_id,
         tenant_id,
         user_id,
+        minimum_snapshot["enabled"],
+        minimum_snapshot["amount"],
+        minimum_snapshot["restrictive"],
     )
     await conn.execute(
         "UPDATE tables SET status = 'open' WHERE id = $1 AND tenant_id = $2",

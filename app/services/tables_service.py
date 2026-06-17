@@ -70,6 +70,49 @@ async def _generate_unique_qr_token(conn) -> str:
     raise APIError("No se pudo generar un token QR único", status_code=500)
 
 
+async def _get_minimum_consumption_snapshot(conn, tenant_id) -> Dict[str, Any]:
+    row = await conn.fetchrow(
+        """
+        SELECT
+            minimum_consumption_enabled,
+            minimum_consumption_amount,
+            minimum_consumption_restrictive
+        FROM tenant_public_profiles
+        WHERE tenant_id = $1
+        """,
+        tenant_id,
+    )
+    if not row:
+        return {
+            "enabled": False,
+            "amount": Decimal("0"),
+            "restrictive": False,
+        }
+    amount = row["minimum_consumption_amount"] or Decimal("0")
+    return {
+        "enabled": bool(row["minimum_consumption_enabled"]) and amount > 0,
+        "amount": amount,
+        "restrictive": bool(row["minimum_consumption_restrictive"]),
+    }
+
+
+def _minimum_consumption_state(row: dict, paid_amount: float = 0.0) -> dict:
+    enabled = bool(row.get("minimum_consumption_enabled_snapshot"))
+    amount = float(row.get("minimum_consumption_amount_snapshot") or 0)
+    consumed = float(row.get("running_total") or 0)
+    paid = float(paid_amount or 0)
+    remaining = max(amount - consumed, 0) if enabled else 0
+    return {
+        "enabled": enabled,
+        "amount": amount,
+        "restrictive": bool(row.get("minimum_consumption_restrictive_snapshot")),
+        "consumed": consumed,
+        "paid": paid,
+        "remaining": remaining,
+        "covered": (not enabled) or remaining <= 0,
+    }
+
+
 async def _require_table_qr_module(conn, tenant_id) -> None:
     enabled = await conn.fetchval(
         """
@@ -201,13 +244,24 @@ async def _ensure_bar_table(conn, tenant_id) -> None:
         tenant_id,
     )
     if not open_session:
+        minimum_snapshot = await _get_minimum_consumption_snapshot(conn, tenant_id)
         await conn.execute(
             """
-            INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id)
-            VALUES ($1, $2, NULL)
+            INSERT INTO table_sessions (
+                table_id,
+                tenant_id,
+                opened_by_user_id,
+                minimum_consumption_enabled_snapshot,
+                minimum_consumption_amount_snapshot,
+                minimum_consumption_restrictive_snapshot
+            )
+            VALUES ($1, $2, NULL, $3, $4, $5)
             """,
             bar_table_id,
             tenant_id,
+            minimum_snapshot["enabled"],
+            minimum_snapshot["amount"],
+            minimum_snapshot["restrictive"],
         )
 
     # Ensure bar table status is 'open'
@@ -256,6 +310,9 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                     ts.opened_at,
                     ts.opened_by_user_id,
                     ts.attended_by_member_id AS session_attended_by_member_id,
+                    ts.minimum_consumption_enabled_snapshot,
+                    ts.minimum_consumption_amount_snapshot,
+                    ts.minimum_consumption_restrictive_snapshot,
                     p_attended.name AS session_attended_by_member_name,
                     tm_attended.role AS session_attended_by_member_role,
                     -- Resolver: session override > table default > NULL
@@ -269,6 +326,14 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                          WHERE o.table_session_id = ts.id),
                         0
                     ) AS running_total,
+                    COALESCE(
+                        (SELECT SUM(op.amount)
+                         FROM order_payments op
+                         JOIN orders op_o ON op_o.id = op.order_id
+                         WHERE op_o.table_session_id = ts.id
+                           AND op.voided_at IS NULL),
+                        0
+                    ) AS paid_total,
                     COALESCE(
                         (SELECT COUNT(*)
                          FROM orders o2
@@ -783,17 +848,30 @@ async def open_session(
                 if open_session_row:
                     raise APIError("Table already has an open session", status_code=409)
 
+                minimum_snapshot = await _get_minimum_consumption_snapshot(conn, tenant_id)
+
                 # Create session
                 session_row = await conn.fetchrow(
                     """
-                    INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id, attended_by_member_id)
-                    VALUES ($1, $2, $3, $4)
+                    INSERT INTO table_sessions (
+                        table_id,
+                        tenant_id,
+                        opened_by_user_id,
+                        attended_by_member_id,
+                        minimum_consumption_enabled_snapshot,
+                        minimum_consumption_amount_snapshot,
+                        minimum_consumption_restrictive_snapshot
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
                     RETURNING id, opened_at
                     """,
                     table_id,
                     tenant_id,
                     user_id,
                     resolved_attended_by,
+                    minimum_snapshot["enabled"],
+                    minimum_snapshot["amount"],
+                    minimum_snapshot["restrictive"],
                 )
 
                 # Update table status
@@ -1372,13 +1450,24 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     if is_bar_table:
                         # Bar table: immediately reopen a new session so the bar is always active.
                         # Do NOT reset status to 'free' — bar stays 'open'.
+                        minimum_snapshot = await _get_minimum_consumption_snapshot(conn, tenant_id)
                         await conn.execute(
                             """
-                            INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id)
-                            VALUES ($1, $2, NULL)
+                            INSERT INTO table_sessions (
+                                table_id,
+                                tenant_id,
+                                opened_by_user_id,
+                                minimum_consumption_enabled_snapshot,
+                                minimum_consumption_amount_snapshot,
+                                minimum_consumption_restrictive_snapshot
+                            )
+                            VALUES ($1, $2, NULL, $3, $4, $5)
                             """,
                             table_id,
                             tenant_id,
+                            minimum_snapshot["enabled"],
+                            minimum_snapshot["amount"],
+                            minimum_snapshot["restrictive"],
                         )
                         logger.info(f"Bar session rotated: {session_row['id']} for table {table_id}")
                     else:
@@ -1873,14 +1962,25 @@ async def defer_tab_delivery_payment(
                 "UPDATE table_sessions SET closed_at = now() WHERE id = $1",
                 session_row["session_id"],
             )
+            minimum_snapshot = await _get_minimum_consumption_snapshot(conn, tenant_id)
             new_session_row = await conn.fetchrow(
                 """
-                INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id)
-                VALUES ($1, $2, NULL)
+                INSERT INTO table_sessions (
+                    table_id,
+                    tenant_id,
+                    opened_by_user_id,
+                    minimum_consumption_enabled_snapshot,
+                    minimum_consumption_amount_snapshot,
+                    minimum_consumption_restrictive_snapshot
+                )
+                VALUES ($1, $2, NULL, $3, $4, $5)
                 RETURNING id
                 """,
                 table_id,
                 tenant_id,
+                minimum_snapshot["enabled"],
+                minimum_snapshot["amount"],
+                minimum_snapshot["restrictive"],
             )
 
     return {
@@ -1926,6 +2026,9 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     ts.opened_at,
                     ts.opened_by_user_id,
                     ts.attended_by_member_id,
+                    ts.minimum_consumption_enabled_snapshot,
+                    ts.minimum_consumption_amount_snapshot,
+                    ts.minimum_consumption_restrictive_snapshot,
                     p_attended.name AS attended_by_member_name,
                     tm_attended.role AS attended_by_member_role,
                     -- Resolver: session override > table default > NULL
@@ -2119,6 +2222,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                 """,
                 session_row["id"],
             )
+            partial_paid_total = sum(float(r["group_amount"] or 0) for r in partial_payments_rows)
 
         return {
             "success": True,
@@ -2140,6 +2244,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     "standard_tax": float(_std_tax),
                     "liquor_tax": float(_liq_tax),
                     "standard_tax_label": _tax_label,
+                    "minimum_consumption": _minimum_consumption_state(session_row, partial_paid_total),
                     # Waiter attribution (warocol.com#574)
                     "attended_by_member_id": str(session_row["attended_by_member_id"]) if session_row.get("attended_by_member_id") else None,
                     "attended_by_member_name": session_row.get("attended_by_member_name"),
@@ -3760,8 +3865,16 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
 
                 # 2. Fetch source open session
                 source_session = await conn.fetchrow(
-                    "SELECT id FROM table_sessions "
-                    "WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL LIMIT 1",
+                    """
+                    SELECT
+                        id,
+                        minimum_consumption_enabled_snapshot,
+                        minimum_consumption_amount_snapshot,
+                        minimum_consumption_restrictive_snapshot
+                    FROM table_sessions
+                    WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL
+                    LIMIT 1
+                    """,
                     source_table_id, tenant_id,
                 )
                 if not source_session:
@@ -3789,9 +3902,24 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
 
                 # 5. Create new session on target
                 new_session = await conn.fetchrow(
-                    "INSERT INTO table_sessions (table_id, tenant_id, opened_by_user_id) "
-                    "VALUES ($1, $2, $3) RETURNING id",
-                    target_table_id, tenant_id, user_id,
+                    """
+                    INSERT INTO table_sessions (
+                        table_id,
+                        tenant_id,
+                        opened_by_user_id,
+                        minimum_consumption_enabled_snapshot,
+                        minimum_consumption_amount_snapshot,
+                        minimum_consumption_restrictive_snapshot
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    RETURNING id
+                    """,
+                    target_table_id,
+                    tenant_id,
+                    user_id,
+                    source_session["minimum_consumption_enabled_snapshot"],
+                    source_session["minimum_consumption_amount_snapshot"],
+                    source_session["minimum_consumption_restrictive_snapshot"],
                 )
                 new_session_id = new_session["id"]
 
@@ -3963,6 +4091,7 @@ def _format_table_row(row: dict) -> dict:
             "duration_minutes": round(float(row["session_duration_minutes"]), 1),
             "running_total": float(row["running_total"]),
             "unfired_count": int(row["unfired_count"]) if row.get("unfired_count") is not None else 0,
+            "minimum_consumption": _minimum_consumption_state(row, float(row.get("paid_total") or 0)),
             # Session-level waiter override (warocol.com#574)
             "attended_by_member_id": str(row["session_attended_by_member_id"]) if row.get("session_attended_by_member_id") else None,
             "attended_by_member_name": row.get("session_attended_by_member_name"),

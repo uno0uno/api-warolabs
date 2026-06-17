@@ -12,6 +12,9 @@
 | opened_by_user_id | uuid |  | true |  | [public.profile](public.profile.md) |  |
 | is_discarded | boolean | false | false |  |  |  |
 | attended_by_member_id | uuid |  | true |  | [public.tenant_members](public.tenant_members.md) | Override of the default waiter for this specific session (warocol.com#574). NULL = inherit from tables.assigned_member_id. Set at open via POST body or changed mid-session via PATCH /pos/tables/{id}/session-waiter. Auto-handoff rule enforced in app code: only the current waiter or supervisor+ can reassign. |
+| minimum_consumption_enabled_snapshot | boolean | false | false |  |  | Snapshot of tenant minimum consumption / cover enabled flag when the session opened. |
+| minimum_consumption_amount_snapshot | numeric | 0 | false |  |  | Snapshot of tenant minimum consumption / cover amount in COP when the session opened. |
+| minimum_consumption_restrictive_snapshot | boolean | false | false |  |  | Snapshot of tenant restrictive close flag when the session opened. Enforcement is handled in later batches. |
 
 ## Constraints
 
