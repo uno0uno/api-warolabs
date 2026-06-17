@@ -49,6 +49,26 @@ async def create_comanda_ready_notification(
     await conn.execute("SELECT pg_notify($1, $2)", channel, json.dumps(notify_payload))
 
 
+async def mark_table_qr_notifications_read(
+    conn,
+    tenant_id: UUID,
+    request_id: UUID,
+) -> None:
+    """Mark staff notifications for a Table QR request as read (accept/reject)."""
+    await conn.execute(
+        """
+        UPDATE notifications
+        SET read_at = NOW()
+        WHERE tenant_id = $1
+          AND type = 'table_qr_request'
+          AND payload->>'request_id' = $2
+          AND read_at IS NULL
+        """,
+        tenant_id,
+        str(request_id),
+    )
+
+
 async def create_table_qr_notification(
     conn, tenant_id: UUID, request_id: UUID, payload: dict
 ) -> None:

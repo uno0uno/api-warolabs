@@ -9,6 +9,7 @@ from fastapi import Request
 from app.core.exceptions import APIError, AuthenticationError, NotFoundError
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
+from app.services import notifications_service
 from app.services.tables_service import _add_tab_items_core, fire_table_items
 
 logger = logging.getLogger(__name__)
@@ -258,6 +259,10 @@ async def reject_request(request: Request, request_id: UUID) -> dict:
                 status_code=404,
             )
 
+        await notifications_service.mark_table_qr_notifications_read(
+            conn, tenant_id, request_id
+        )
+
     return {
         "success": True,
         "data": {
@@ -383,6 +388,11 @@ async def accept_requests(
             accepted_ids = [r["id"] for r in updated]
             if len(accepted_ids) != len(request_ids):
                 raise APIError("Failed to mark all requests as accepted", status_code=500)
+
+            for rid in accepted_ids:
+                await notifications_service.mark_table_qr_notifications_read(
+                    conn, tenant_id, rid
+                )
 
     try:
         await fire_table_items(request, table_id)
