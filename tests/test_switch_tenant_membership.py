@@ -260,6 +260,51 @@ async def test_get_session_data_role_null_when_terminated():
 
 
 @pytest.mark.asyncio
+async def test_get_session_data_prefers_internal_role_when_customer_duplicate_exists():
+    """Regression: active admin + customer rows must resolve as admin, not customer."""
+    from app.services.auth_service import get_session_data
+
+    user_id = uuid4()
+    tenant_id = uuid4()
+    session_token = "fake-token"
+    request = MagicMock()
+    request.cookies = {"session-token": session_token}
+    request.headers = {}
+    response = _build_response()
+
+    fetchrow_responses = [
+        {
+            "user_id": user_id,
+            "email": "karen@example.com",
+            "name": "Karen Tijuana",
+            "user_created_at": "2024-01-01T00:00:00Z",
+            "tenant_id": tenant_id,
+            "expires_at": "2030-01-01T00:00:00Z",
+            "created_at": "2025-01-01T00:00:00Z",
+            "ip_address": "127.0.0.1",
+            "login_method": "magic-link",
+        },
+        {"id": tenant_id, "name": "Tijuana cafe Bar", "slug": "tijuana-cafe-bar"},
+        {"role": "admin"},
+    ]
+
+    db_ctx, conn = _build_db_mock(fetchrow_side_effect=fetchrow_responses)
+
+    with patch("app.services.auth_service.get_db_connection", side_effect=db_ctx), \
+         patch("app.services.auth_service.get_session_token", new=AsyncMock(return_value=session_token)), \
+         patch("app.services.auth_service.clear_session_cookie", new=AsyncMock(return_value=None)) as clear_cookie:
+        result = await get_session_data(request, response)
+
+    assert result.user.role == "admin"
+    assert result.has_internal_access is True
+    role_query = conn.fetchrow.await_args_list[2].args[0]
+    assert "ORDER BY CASE WHEN role = ANY($3::text[])" in role_query
+    assert conn.fetchrow.await_args_list[2].args[3] == ["superuser", "admin", "employee", "member", "promotor"]
+    conn.execute.assert_not_awaited()
+    clear_cookie.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_get_session_data_denies_customer_role_and_clears_cookie():
     """Existing active internal sessions with role=customer are invalidated."""
     from app.services.auth_service import get_session_data

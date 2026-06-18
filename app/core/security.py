@@ -5,7 +5,7 @@ from urllib.parse import unquote
 from uuid import UUID
 from fastapi import Request, HTTPException, Response
 from app.config import settings
-from app.core.internal_roles import is_legacy_internal_team_role
+from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES, is_legacy_internal_team_role
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -365,7 +365,8 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
 
             # Get valid session data + the user's role on this tenant.
             # LEFT JOIN tenant_members so a session whose user has no
-            # active membership row still resolves (role becomes None).
+            # active membership row still resolves (role becomes None). When
+            # duplicate active rows exist, prefer internal roles over customer.
             # Epic 2 (#164) — required by the require_module() dependency
             # so it can decide log/allow/deny without an extra DB hit.
             session_query = """
@@ -374,16 +375,25 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
                        tm.role AS role
                 FROM sessions s
                 JOIN profile p ON s.user_id = p.id
-                LEFT JOIN tenant_members tm
-                  ON tm.user_id = s.user_id
-                 AND tm.tenant_id = s.tenant_id
-                 AND tm.is_active = true
+                LEFT JOIN LATERAL (
+                    SELECT role
+                    FROM tenant_members tm
+                    WHERE tm.user_id = s.user_id
+                      AND tm.tenant_id = s.tenant_id
+                      AND tm.is_active = true
+                    ORDER BY CASE WHEN tm.role = ANY($2::text[]) THEN 0 ELSE 1 END
+                    LIMIT 1
+                ) tm ON true
                 WHERE s.id = $1
                   AND s.expires_at > NOW()
                   AND s.is_active = true
                 LIMIT 1
             """
-            session_result = await conn.fetchrow(session_query, session_token)
+            session_result = await conn.fetchrow(
+                session_query,
+                session_token,
+                list(LEGACY_INTERNAL_TEAM_ROLES),
+            )
 
             if not session_result:
                 return None
