@@ -53,8 +53,18 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                 # Only read role from ACTIVE memberships (#201). Customer rows
                 # are active memberships, but they are not internal team access.
                 role_result = await conn.fetchrow(
-                    "SELECT role FROM tenant_members WHERE tenant_id = $1 AND user_id = $2 AND is_active = true LIMIT 1",
-                    session_result['tenant_id'], session_result['user_id']
+                    """
+                    SELECT role
+                    FROM tenant_members
+                    WHERE tenant_id = $1
+                      AND user_id = $2
+                      AND is_active = true
+                    ORDER BY CASE WHEN role = ANY($3::text[]) THEN 0 ELSE 1 END
+                    LIMIT 1
+                    """,
+                    session_result['tenant_id'],
+                    session_result['user_id'],
+                    list(LEGACY_INTERNAL_TEAM_ROLES),
                 )
                 if role_result:
                     user_role = role_result['role']

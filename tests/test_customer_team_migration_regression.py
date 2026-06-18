@@ -126,6 +126,53 @@ async def test_karen_tijuana_customer_admin_coexistence_stays_visible_in_custome
 
 
 @pytest.mark.asyncio
+async def test_karen_tijuana_admin_customer_session_resolves_internal_role():
+    from app.core.security import get_session_from_request
+
+    session_token = str(uuid4())
+    tenant_id = uuid4()
+    profile_id = uuid4()
+    expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"id": session_token, "expires_at": expires_at, "is_active": True, "ended_at": None},
+            {
+                "user_id": profile_id,
+                "tenant_id": tenant_id,
+                "expires_at": expires_at,
+                "is_active": True,
+                "email": "karen@example.com",
+                "name": "Karen Tijuana",
+                "role": "admin",
+            },
+        ]
+    )
+    conn.fetch = AsyncMock(return_value=[])
+    conn.execute = AsyncMock(return_value=None)
+
+    with patch("app.database.get_db_connection", side_effect=_db_context(conn)), patch(
+        "app.core.security.get_session_token",
+        new=AsyncMock(return_value=session_token),
+    ):
+        result = await get_session_from_request(_request())
+
+    assert result["role"] == "admin"
+    session_query = conn.fetchrow.await_args_list[1].args[0]
+    assert "LEFT JOIN LATERAL" in session_query
+    assert "ORDER BY CASE WHEN tm.role = ANY($2::text[])" in session_query
+    assert conn.fetchrow.await_args_list[1].args[2] == [
+        "superuser",
+        "admin",
+        "employee",
+        "member",
+        "promotor",
+    ]
+    conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_karen_tijuana_legacy_customer_role_session_is_denied_after_migration():
     from app.core.security import get_session_from_request
 
