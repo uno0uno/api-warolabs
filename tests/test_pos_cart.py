@@ -11,7 +11,28 @@ Endpoints tested:
 import pytest
 from httpx import AsyncClient
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
+
+from app.core.exceptions import APIError
+from app.services import pos_cart_service
+
+
+def _txn_conn():
+    mock_conn = AsyncMock()
+
+    class _Txn:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *args):
+            return None
+
+    mock_conn.transaction = MagicMock(return_value=_Txn())
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+    return mock_conn, mock_cm
 
 
 class TestPosCartGetEndpoint:
@@ -181,3 +202,96 @@ class TestPosWalletTenderContract:
         assert "payment_method == WALLET_PAYMENT_SLUG" in text
         assert "discount_type" in text
         assert "discount_value" in text
+
+    @pytest.mark.asyncio
+    async def test_split_payment_rejects_amount_above_remaining_before_insert(self):
+        tenant_id = uuid4()
+        user_id = uuid4()
+        cart_id = uuid4()
+        order_id = uuid4()
+        customer_id = uuid4()
+        mock_conn, mock_cm = _txn_conn()
+        mock_conn.fetchrow = AsyncMock(side_effect=[
+            {"id": cart_id, "tenant_id": tenant_id},
+            {
+                "id": order_id,
+                "total_amount": 100.0,
+                "tip_amount": 0,
+                "tip_source": "none",
+                "tip_taxable": False,
+                "tip_tax_amount": 0,
+                "status": "active",
+                "payment_status": "partial",
+                "customer_id": customer_id,
+                "order_number": 77,
+            },
+            {"paid_total": 80.0},
+        ])
+
+        with patch("app.services.pos_cart_service.require_valid_session") as mock_sess, \
+             patch("app.services.pos_cart_service.get_db_connection", return_value=mock_cm):
+            mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id)
+            with pytest.raises(APIError) as exc:
+                await pos_cart_service.add_order_payment(
+                    MagicMock(),
+                    str(cart_id),
+                    amount=25.0,
+                    payment_method="card",
+                )
+
+        assert exc.value.status_code == 400
+        assert "excede el saldo pendiente" in str(exc.value)
+        assert mock_conn.fetchrow.await_count == 3
+        mock_conn.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_wallet_split_payment_links_wallet_movement_to_payment_row(self):
+        tenant_id = uuid4()
+        user_id = uuid4()
+        cart_id = uuid4()
+        order_id = uuid4()
+        payment_id = uuid4()
+        customer_id = uuid4()
+        mock_conn, mock_cm = _txn_conn()
+        mock_conn.fetchrow = AsyncMock(side_effect=[
+            {"id": cart_id, "tenant_id": tenant_id},
+            {
+                "id": order_id,
+                "total_amount": 100.0,
+                "tip_amount": 0,
+                "tip_source": "none",
+                "tip_taxable": False,
+                "tip_tax_amount": 0,
+                "status": "active",
+                "payment_status": "partial",
+                "customer_id": customer_id,
+                "order_number": 78,
+            },
+            {"paid_total": 20.0},
+            {"id": payment_id},
+            {"paid_total": 50.0},
+        ])
+        mock_conn.execute = AsyncMock()
+
+        with patch("app.services.pos_cart_service.require_valid_session") as mock_sess, \
+             patch("app.services.pos_cart_service.get_db_connection", return_value=mock_cm), \
+             patch("app.services.pos_cart_service.apply_wallet_for_order", new=AsyncMock()) as apply_wallet:
+            mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id)
+            result = await pos_cart_service.add_order_payment(
+                MagicMock(),
+                str(cart_id),
+                amount=30.0,
+                payment_method="customer_wallet",
+            )
+
+        assert result["data"]["payment_id"] == str(payment_id)
+        assert result["data"]["remaining"] == 50.0
+        apply_wallet.assert_awaited_once_with(
+            mock_conn,
+            customer_id,
+            tenant_id,
+            pos_cart_service.Decimal("30.0"),
+            order_id,
+            user_id,
+            payment_id,
+        )

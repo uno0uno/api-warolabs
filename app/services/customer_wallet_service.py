@@ -398,6 +398,38 @@ async def apply_wallet_for_order(
     return movement_id
 
 
+async def restore_wallet_for_order_payment_void(
+    conn,
+    profile_id: UUID,
+    tenant_id: UUID,
+    amount_cop: Decimal,
+    order_id: UUID,
+    order_payment_id: UUID,
+    created_by_user_id: Optional[UUID],
+    notes: Optional[str] = None,
+) -> UUID:
+    """Restore wallet balance when a wallet tender row is voided."""
+    if amount_cop <= 0:
+        raise APIError("Monto de reversión de billetera inválido", status_code=400)
+    await assert_wallet_customer_identified(conn, profile_id)
+    current = await _lock_balance_cop(conn, profile_id, tenant_id)
+    new_balance = current + amount_cop
+    movement_id = await _insert_movement(
+        conn,
+        profile_id=profile_id,
+        tenant_id=tenant_id,
+        movement_type="void_apply",
+        amount_cop=amount_cop,
+        balance_after_cop=new_balance,
+        order_id=order_id,
+        order_payment_id=order_payment_id,
+        notes=notes,
+        created_by_user_id=created_by_user_id,
+    )
+    await _upsert_balance(conn, profile_id, tenant_id, new_balance)
+    return movement_id
+
+
 async def apply_wallet_for_session_orders(
     conn,
     profile_id: UUID,

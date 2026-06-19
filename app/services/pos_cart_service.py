@@ -36,6 +36,7 @@ from app.services.customer_wallet_service import (
     WALLET_PAYMENT_SLUG,
     apply_wallet_for_order,
     assert_wallet_customer_identified,
+    restore_wallet_for_order_payment_void,
     validate_wallet_payment_tender,
 )
 from app.services.open_priced_service import (
@@ -1274,7 +1275,8 @@ async def add_order_payment(
                 order_row = await conn.fetchrow(
                     """
                     SELECT id, total_amount, tip_amount, tip_source, tip_taxable,
-                           tip_tax_amount, status, payment_status
+                           tip_tax_amount, status, payment_status, customer_id,
+                           order_number
                     FROM orders
                     WHERE pos_cart_id = $1 AND tenant_id = $2
                     ORDER BY created_at DESC
@@ -1349,25 +1351,28 @@ async def add_order_payment(
                     resolved_tip_amount,
                     resolved_tip_tax_amount,
                 )
+                paid_before_row = await conn.fetchrow(
+                    """
+                    SELECT COALESCE(SUM(amount), 0) AS paid_total
+                    FROM order_payments
+                    WHERE order_id = $1 AND voided_at IS NULL
+                    """,
+                    order_id,
+                )
+                paid_before = float(paid_before_row["paid_total"])
+                remaining_before = max(0.0, amount_due - paid_before)
+                if amount - remaining_before > 0.01:
+                    raise APIError(
+                        f"El pago excede el saldo pendiente ({remaining_before})",
+                        status_code=400,
+                    )
 
                 user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
-                if payment_method == WALLET_PAYMENT_SLUG:
-                    customer_uuid = await conn.fetchval(
-                        "SELECT customer_id FROM orders WHERE id = $1",
-                        order_id,
-                    )
-                    if not customer_uuid:
-                        raise APIError(
-                            "La billetera requiere un cliente en la orden",
-                            status_code=400,
-                        )
-                    await apply_wallet_for_order(
-                        conn,
-                        customer_uuid,
-                        UUID(str(tenant_id)),
-                        Decimal(str(amount)),
-                        order_id,
-                        UUID(str(user_id)) if user_id else None,
+                customer_uuid = order_row["customer_id"]
+                if payment_method == WALLET_PAYMENT_SLUG and not customer_uuid:
+                    raise APIError(
+                        "La billetera requiere un cliente en la orden",
+                        status_code=400,
                     )
 
                 # 3. Insert payment record
@@ -1385,6 +1390,17 @@ async def add_order_payment(
                     cash_received,
                 )
                 payment_id = str(payment_row["id"])
+
+                if payment_method == WALLET_PAYMENT_SLUG:
+                    await apply_wallet_for_order(
+                        conn,
+                        customer_uuid,
+                        UUID(str(tenant_id)),
+                        Decimal(str(amount)),
+                        order_id,
+                        UUID(str(user_id)) if user_id else None,
+                        UUID(payment_id),
+                    )
 
                 # 4. Compute paid total (warocol.com#649: ignore voided rows)
                 paid_total_row = await conn.fetchrow(
@@ -1480,6 +1496,13 @@ async def add_order_payment(
                 "tip_source": resolved_tip_source,
                 "tip_taxable": resolved_tip_taxable,
                 "tip_tax_amount": resolved_tip_tax_amount,
+                "order_id": str(order_id),
+                "order_number": int(order_row["order_number"]),
+                "total_amount": total_amount,
+                "charged_amount": amount_due,
+                "payment_method": payment_method,
+                "payment_status": "paid" if is_complete else "partial",
+                "status": "completed" if is_complete else order_row["status"],
             }
         }
 
@@ -1531,8 +1554,9 @@ async def void_order_payment(
                     """
                     SELECT op.id, op.order_id, op.amount, op.payment_method,
                            op.cash_received, op.created_by_user_id, op.voided_at,
+                           op.payment_method_id,
                            o.pos_cart_id, o.total_amount, o.tip_amount, o.tip_tax_amount,
-                           o.payment_status, o.status AS order_status
+                           o.payment_status, o.status AS order_status, o.customer_id
                     FROM order_payments op
                     JOIN orders o ON o.id = op.order_id
                     WHERE op.id = $1::uuid AND op.tenant_id = $2
@@ -1575,6 +1599,23 @@ async def void_order_payment(
                     payment_row["id"],
                     normalized_reason,
                 )
+                wallet_restore_movement_id = None
+                if payment_row["payment_method"] == WALLET_PAYMENT_SLUG:
+                    if not payment_row["customer_id"]:
+                        raise APIError(
+                            "La billetera requiere un cliente en la orden",
+                            status_code=400,
+                        )
+                    wallet_restore_movement_id = await restore_wallet_for_order_payment_void(
+                        conn,
+                        payment_row["customer_id"],
+                        UUID(str(tenant_id)),
+                        Decimal(str(payment_row["amount"])),
+                        order_id,
+                        UUID(str(payment_row["id"])),
+                        UUID(str(user_id)) if user_id else None,
+                        notes=f"Anulación pago parcial: {normalized_reason}",
+                    )
 
                 # 5. Recompute paid total ignoring voided rows.
                 paid_row = await conn.fetchrow(
@@ -1627,6 +1668,11 @@ async def void_order_payment(
                             if payment_row["cash_received"] is not None
                             else None
                         ),
+                        "wallet_restore_movement_id": (
+                            str(wallet_restore_movement_id)
+                            if wallet_restore_movement_id
+                            else None
+                        ),
                         "reopened": reopened,
                     },
                 )
@@ -1642,6 +1688,11 @@ async def void_order_payment(
                 "remaining": remaining,
                 "is_complete": is_complete,
                 "reopened": reopened,
+                "wallet_restore_movement_id": (
+                    str(wallet_restore_movement_id)
+                    if wallet_restore_movement_id
+                    else None
+                ),
             },
         }
 
@@ -2255,17 +2306,16 @@ async def complete_pos_order(
                                 f"Efectivo recibido ({split_first_cash_received}) debe ser mayor o igual al monto ({split_first_amount})",
                                 status_code=400,
                             )
+                    _amount_due = split_settlement_amount_due(
+                        float(_discounted_total), float(tip_amount), _tip_tax_amount,
+                    )
+                    if split_first_amount - _amount_due > 0.01:
+                        raise APIError(
+                            f"El pago excede el saldo pendiente ({_amount_due})",
+                            status_code=400,
+                        )
                     # Issue warocol.com#649 — RETURNING id so the frontend has a
                     # real UUID for void operations (was: None → placeholder → 422).
-                    if payment_method == WALLET_PAYMENT_SLUG:
-                        await apply_wallet_for_order(
-                            conn,
-                            customer_id,
-                            UUID(str(tenant_id)),
-                            Decimal(str(split_first_amount)),
-                            order_id,
-                            UUID(str(user_id)) if user_id else None,
-                        )
                     _split_first_payment_row = await conn.fetchrow(
                         """
                         INSERT INTO order_payments
@@ -2279,10 +2329,17 @@ async def complete_pos_order(
                         split_first_cash_received,
                     )
                     _split_first_payment_id = str(_split_first_payment_row["id"])
+                    if payment_method == WALLET_PAYMENT_SLUG:
+                        await apply_wallet_for_order(
+                            conn,
+                            customer_id,
+                            UUID(str(tenant_id)),
+                            Decimal(str(split_first_amount)),
+                            order_id,
+                            UUID(str(user_id)) if user_id else None,
+                            UUID(_split_first_payment_id),
+                        )
                     _split_paid_total = split_first_amount
-                    _amount_due = split_settlement_amount_due(
-                        float(_discounted_total), float(tip_amount), _tip_tax_amount,
-                    )
                     _split_remaining = max(0.0, _amount_due - split_first_amount)
                     _split_is_complete = _split_remaining <= 0.01
 

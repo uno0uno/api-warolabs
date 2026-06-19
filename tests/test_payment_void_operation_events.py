@@ -137,6 +137,71 @@ async def test_void_order_payment_empty_reason_defaults_sin_motivo():
 
 
 @pytest.mark.asyncio
+async def test_void_wallet_order_payment_restores_wallet_balance():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    cart_id = uuid4()
+    payment_id = uuid4()
+    order_id = uuid4()
+    customer_id = uuid4()
+    movement_id = uuid4()
+    recorded = []
+
+    payment_row = {
+        "id": payment_id,
+        "order_id": order_id,
+        "amount": 25.0,
+        "payment_method": "customer_wallet",
+        "payment_method_id": None,
+        "cash_received": None,
+        "created_by_user_id": user_id,
+        "voided_at": None,
+        "pos_cart_id": cart_id,
+        "total_amount": 100.0,
+        "tip_amount": 0,
+        "tip_tax_amount": 0,
+        "payment_status": "partial",
+        "order_status": "active",
+        "customer_id": customer_id,
+    }
+
+    mock_conn, mock_cm = _txn_conn()
+    mock_conn.fetchrow = AsyncMock(side_effect=[
+        payment_row,
+        {"paid": 0},
+    ])
+    mock_conn.execute = AsyncMock()
+
+    async def capture_event(conn, tid, **kwargs):
+        recorded.append(kwargs)
+
+    with patch("app.services.pos_cart_service.require_valid_session") as mock_sess, \
+         patch("app.services.pos_cart_service.get_db_connection", return_value=mock_cm), \
+         patch("app.services.pos_cart_service.record_operation_event", side_effect=capture_event), \
+         patch(
+             "app.services.pos_cart_service.restore_wallet_for_order_payment_void",
+             new=AsyncMock(return_value=movement_id),
+         ) as restore_wallet:
+        mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id, role="admin")
+        result = await pos_cart_service.void_order_payment(
+            MagicMock(), str(cart_id), str(payment_id), reason="Error de método",
+        )
+
+    restore_wallet.assert_awaited_once_with(
+        mock_conn,
+        customer_id,
+        tenant_id,
+        pos_cart_service.Decimal("25.0"),
+        order_id,
+        payment_id,
+        user_id,
+        notes="Anulación pago parcial: Error de método",
+    )
+    assert result["data"]["wallet_restore_movement_id"] == str(movement_id)
+    assert recorded[0]["payload"]["wallet_restore_movement_id"] == str(movement_id)
+
+
+@pytest.mark.asyncio
 async def test_void_table_payment_records_single_payment_voided_event():
     tenant_id = uuid4()
     user_id = uuid4()
