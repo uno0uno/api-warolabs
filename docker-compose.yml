@@ -14,8 +14,12 @@ services:
       - JWT_SECRET=${NUXT_PRIVATE_JWT_SECRET}
     networks:
       - default
+      - waro_runtime
       - postgresqlwarolabs_default
 
 networks:
+  waro_runtime:
+    name: ${WARO_RUNTIME_NETWORK:-waro-network}
+    external: true
   postgresqlwarolabs_default:
     external: true
