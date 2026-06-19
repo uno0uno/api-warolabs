@@ -209,6 +209,21 @@ class CompleteOrderRequest(BaseModel):
     payment_method/payment_method_id plus optional discount_type/discount_value.
     Split-payment payloads create the order with split_mode=true and
     split_first_amount; later tenders use AddPaymentRequest.
+
+    Canonical examples:
+    - cash + 10% manual discount:
+      {payment_method: "cash", discount_type: "percent", discount_value: 10,
+       cash_received: 50000}
+    - wallet tender:
+      {payment_method: "customer_wallet", customer_id: "<profile_uuid>",
+       discount_type: "fixed", discount_value: 5000}
+    - first split tender:
+      {payment_method: "cash", split_mode: true, split_first_amount: 20000,
+       split_first_cash_received: 20000}
+
+    Backward compatibility: clients that do not use manual discounts, wallet,
+    WaRo redemption, or split payments may keep sending only the legacy
+    single-payment fields.
     """
 
     payment_method: Optional[str] = Field(None, description="Payment method: cash, card, digital, credit. May be omitted only for delivery orders that remain pending until payment is known.")
@@ -321,6 +336,9 @@ class AddPaymentRequest(BaseModel):
     amount is one tender against the remaining settlement total. Wallet uses
     payment_method='customer_wallet' and never sends cash_received; cash sends
     cash_received only when the cashier needs change calculation.
+
+    Example wallet partial tender:
+    {amount: 15000, payment_method: "customer_wallet", payment_method_id: null}
     """
 
     amount: float = Field(..., gt=0, description="Amount for this payment")

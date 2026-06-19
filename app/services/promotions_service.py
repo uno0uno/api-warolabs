@@ -1659,6 +1659,8 @@ async def evaluate_checkout_promotions(
     )
     manual_discount = float(manual_discount_amount or 0)
     if discount_type and discount_value is not None and discount_value > 0:
+        # Contract: automatic line promotions are evaluated first; the manual
+        # order discount is capped against subtotal_after_promos.
         if discount_type == "percent":
             manual_discount = round(evaluated["subtotal_after_promos"] * discount_value / 100)
         else:
