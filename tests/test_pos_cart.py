@@ -192,6 +192,11 @@ class TestPosCartCompleteEndpoint:
 
 
 class TestPosWalletTenderContract:
+    def test_manual_discount_amount_uses_promo_adjusted_subtotal(self):
+        assert pos_cart_service._manual_discount_amount(80_000, "percent", 10) == 8_000
+        assert pos_cart_service._manual_discount_amount(80_000, "fixed", 90_000) == 80_000
+        assert pos_cart_service._manual_discount_amount(80_000, None, 10) == 0
+
     def test_service_keeps_customer_wallet_as_payment_tender(self):
         src = Path(__file__).resolve().parents[1] / "app/services/pos_cart_service.py"
         text = src.read_text()
@@ -202,6 +207,7 @@ class TestPosWalletTenderContract:
         assert "payment_method == WALLET_PAYMENT_SLUG" in text
         assert "discount_type" in text
         assert "discount_value" in text
+        assert "UUID(_split_first_payment_id)" in text
 
     @pytest.mark.asyncio
     async def test_split_payment_rejects_amount_above_remaining_before_insert(self):
