@@ -53,3 +53,25 @@ def test_pos_receipt_renders_waro_redemption_line():
     )
     assert "Subtotal: $50.000" in text
     assert "Canje WaRo (Empanada gratis): -$5.000" in text
+
+
+def test_pos_receipt_labels_manual_discount_separately_from_promotions():
+    text = get_pos_receipt_text(
+        order_number=45,
+        total_amount=82000,
+        payment_method="card",
+        items=[{"quantity": 1, "subtotal": 100000, "product": {"name": "Combo"}}],
+        order_date=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+        subtotal=100000,
+        promo_breakdown=[
+            {
+                "promotion_name": "Promo almuerzo",
+                "promo_type": "percentage",
+                "savings": 8000,
+            },
+        ],
+        discount_amount=10000,
+    )
+    assert "Promo almuerzo: -$8.000" in text
+    assert "Descuento manual: -$10.000" in text
+    assert "Descuento: -$10.000" not in text
