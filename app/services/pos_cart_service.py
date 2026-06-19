@@ -1679,7 +1679,15 @@ async def complete_pos_order(
     waro_reward_id: Optional[UUID] = None,
 ) -> dict:
     """
-    Complete a POS order:
+    Complete a POS order.
+
+    Manual checkout contract:
+    automatic promotions -> manual discount -> WaRo redemption -> payment
+    tender. Wallet is recorded as payment_method='customer_wallet', not as a
+    discount. Split payments create order_payments rows; orders.payment_method
+    remains a legacy/single-payment compatibility field.
+
+    Flow:
     1. Associate customer with cart
     2. Create order record
     3. Copy cart items to order_items

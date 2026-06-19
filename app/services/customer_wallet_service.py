@@ -74,6 +74,8 @@ async def _resolve_payment_debit_code(
 
 
 async def assert_wallet_customer_identified(conn, profile_id: UUID) -> None:
+    """Wallet tender is only valid for an identified, non-anonymous customer."""
+
     row = await conn.fetchrow(
         "SELECT phone_number FROM profile WHERE id = $1",
         profile_id,
@@ -96,6 +98,8 @@ def validate_wallet_payment_tender(
     payment_method: str,
     cash_received: Optional[float] = None,
 ) -> None:
+    """Reject cash-change fields for wallet payments."""
+
     if payment_method != WALLET_PAYMENT_SLUG:
         return
     if cash_received is not None:
@@ -363,7 +367,12 @@ async def apply_wallet_for_order(
     created_by_user_id: Optional[UUID],
     order_payment_id: Optional[UUID] = None,
 ) -> UUID:
-    """Debit wallet within an existing transaction. Caller must have validated customer."""
+    """Debit wallet within the checkout transaction.
+
+    Wallet is a payment tender, not a discount. The balance lock and
+    insufficient-balance error stay backend-authoritative for both single and
+    split payments.
+    """
     if amount_cop <= 0:
         raise APIError("Monto de billetera inválido", status_code=400)
     await assert_wallet_customer_identified(conn, profile_id)
