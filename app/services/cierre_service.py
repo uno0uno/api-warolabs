@@ -291,6 +291,7 @@ async def _post_order_gl_entry(
     tip_amount: Decimal = Decimal("0"),
     tip_tax_amount: Decimal = Decimal("0"),
     advance_amount: Decimal = Decimal("0"),
+    payment_splits: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """
     Post a double-entry GL journal entry for a single completed order (POS or domicilio).
@@ -326,32 +327,68 @@ async def _post_order_gl_entry(
         logger.info(f"[GL] Order {order_id}: zero amount — skip GL post")
         return
 
-    # ── Resolve debit account: specific method → group → slug fallback ────
-    debit_code = None
-    if payment_method_id:
-        pm_row = await conn.fetchrow(
-            """SELECT COALESCE(pm.gl_account_code, pmg.gl_account_code) AS code
-               FROM payment_methods pm
-               JOIN payment_method_groups pmg ON pm.group_id = pmg.id
-               WHERE pm.id = $1""",
-            payment_method_id,
-        )
-        if pm_row and pm_row["code"]:
-            debit_code = pm_row["code"]
-    if not debit_code:
-        debit_code = _SLUG_DEBIT_CODE.get(payment_method or "", "1105")
-    if payment_method == "customer_wallet":
-        liability_row = await conn.fetchrow(
-            """
-            SELECT customer_wallet_liability_gl_code
-            FROM tenant_public_profiles
-            WHERE tenant_id = $1
-            """,
-            tenant_id,
-        )
-        if liability_row and liability_row["customer_wallet_liability_gl_code"]:
-            debit_code = str(liability_row["customer_wallet_liability_gl_code"])
+    async def resolve_debit_code(method: str, method_id: Optional[UUID]) -> str:
+        debit_code = None
+        if method_id:
+            pm_row = await conn.fetchrow(
+                """SELECT COALESCE(pm.gl_account_code, pmg.gl_account_code) AS code
+                   FROM payment_methods pm
+                   JOIN payment_method_groups pmg ON pm.group_id = pmg.id
+                   WHERE pm.id = $1""",
+                method_id,
+            )
+            if pm_row and pm_row["code"]:
+                debit_code = pm_row["code"]
+        if not debit_code:
+            debit_code = _SLUG_DEBIT_CODE.get(method or "", "1105")
+        if method == "customer_wallet":
+            liability_row = await conn.fetchrow(
+                """
+                SELECT customer_wallet_liability_gl_code
+                FROM tenant_public_profiles
+                WHERE tenant_id = $1
+                """,
+                tenant_id,
+            )
+            if liability_row and liability_row["customer_wallet_liability_gl_code"]:
+                debit_code = str(liability_row["customer_wallet_liability_gl_code"])
+        return str(debit_code)
 
+    async def resolve_debit_account(code: str):
+        debit_acct = await conn.fetchrow(
+            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+            tenant_id,
+            code,
+        )
+        if not debit_acct:
+            logger.warning(
+                f"[GL] Debit account {code} not found for tenant {tenant_id} — "
+                f"skip GL post for order {order_id}"
+            )
+            return None
+        return debit_acct
+
+    # ── Resolve debit account: specific method → group → slug fallback ────
+    debit_code = await resolve_debit_code(payment_method, payment_method_id)
+    split_debits: List[Dict[str, Any]] = []
+    if payment_splits:
+        split_total = sum(Decimal(str(split.get("amount") or 0)) for split in payment_splits)
+        if split_total > 0:
+            for split in payment_splits:
+                split_method_id = split.get("payment_method_id")
+                if split_method_id and not isinstance(split_method_id, UUID):
+                    split_method_id = UUID(str(split_method_id))
+                split_debits.append(
+                    {
+                        "amount": Decimal(str(split.get("amount") or 0)),
+                        "payment_method": split.get("payment_method") or "",
+                        "payment_method_id": split_method_id,
+                        "code": await resolve_debit_code(
+                            split.get("payment_method") or "",
+                            split_method_id,
+                        ),
+                    }
+                )
     # ── Resolve 4135 Ingresos ──────────────────────────────────────────────
     ingresos_acct = await conn.fetchrow(
         "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
@@ -471,17 +508,35 @@ async def _post_order_gl_entry(
     )
     payment_debit = debit_total - advance_debit
     debit_acct = None
+    split_debit_lines: List[Dict[str, Any]] = []
     if payment_debit > 0:
-        debit_acct = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-            tenant_id, debit_code,
-        )
-        if not debit_acct:
-            logger.warning(
-                f"[GL] Debit account {debit_code} not found for tenant {tenant_id} — "
-                f"skip GL post for order {order_id}"
-            )
-            return
+        if split_debits:
+            split_total = sum(split["amount"] for split in split_debits)
+            remaining_debit = payment_debit
+            for idx, split in enumerate(split_debits):
+                if split["amount"] <= 0:
+                    continue
+                if idx == len(split_debits) - 1:
+                    debit_amount = remaining_debit
+                else:
+                    debit_amount = (payment_debit * split["amount"] / split_total).quantize(Decimal("0.01"))
+                    remaining_debit -= debit_amount
+                if debit_amount <= 0:
+                    continue
+                split_acct = await resolve_debit_account(split["code"])
+                if not split_acct:
+                    return
+                split_debit_lines.append(
+                    {
+                        "account_id": split_acct["id"],
+                        "amount": debit_amount,
+                        "payment_method": split["payment_method"],
+                    }
+                )
+        else:
+            debit_acct = await resolve_debit_account(debit_code)
+            if not debit_acct:
+                return
     advance_acct = None
     if advance_debit > 0:
         advance_acct = await conn.fetchrow(
@@ -526,7 +581,20 @@ async def _post_order_gl_entry(
                 line_order,
             )
             line_order += 1
-        if payment_debit > 0 and debit_acct:
+        if split_debit_lines:
+            for split in split_debit_lines:
+                await conn.execute(
+                    """INSERT INTO tenant_journal_lines
+                           (journal_entry_id, account_id, debit, credit, description, line_order)
+                       VALUES ($1, $2, $3, 0, $4, $5)""",
+                    entry_id,
+                    split["account_id"],
+                    float(split["amount"]),
+                    f"{description} — {split['payment_method']}",
+                    line_order,
+                )
+                line_order += 1
+        elif payment_debit > 0 and debit_acct:
             await conn.execute(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)

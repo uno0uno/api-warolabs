@@ -653,14 +653,18 @@ async def test_post_order_gl_entry_uses_selected_method_account_before_slug_fall
 
     conn = AsyncMock()
     conn.fetchval = AsyncMock(return_value=None)
-    conn.fetchrow = AsyncMock(
-        side_effect=[
-            {"code": "1120"},
-            {"id": debit_account_id},
-            {"id": ingresos_account_id},
-            {"id": entry_id},
-        ]
-    )
+    async def fetchrow_side_effect(query, *args):
+        if "FROM payment_methods pm" in query:
+            return {"code": "1120"}
+        if "FROM tenant_accounts" in query and len(args) >= 2 and args[1] == "1120":
+            return {"id": debit_account_id}
+        if "FROM tenant_accounts" in query and len(args) >= 2 and args[1] == "4175":
+            return {"id": ingresos_account_id}
+        if "INSERT INTO tenant_journal_entries" in query:
+            return {"id": entry_id}
+        return None
+
+    conn.fetchrow = AsyncMock(side_effect=fetchrow_side_effect)
     conn.fetch = AsyncMock(return_value=[])
     conn.execute = AsyncMock()
     conn.transaction = MagicMock(return_value=_AsyncContext())
@@ -678,7 +682,10 @@ async def test_post_order_gl_entry_uses_selected_method_account_before_slug_fall
     )
 
     method_lookup_args = conn.fetchrow.await_args_list[0].args
-    debit_lookup_args = conn.fetchrow.await_args_list[1].args
+    debit_lookup_args = next(
+        call.args for call in conn.fetchrow.await_args_list
+        if len(call.args) >= 3 and call.args[1:] == (tenant_id, "1120")
+    )
     debit_line_args = conn.execute.await_args_list[0].args
     assert method_lookup_args[1] == method_id
     assert debit_lookup_args[1:] == (tenant_id, "1120")
@@ -695,13 +702,16 @@ async def test_post_order_gl_entry_splits_table_advance_to_2810():
 
     conn = AsyncMock()
     conn.fetchval = AsyncMock(return_value=None)
-    conn.fetchrow = AsyncMock(
-        side_effect=[
-            {"id": advance_account_id},
-            {"id": ingresos_account_id},
-            {"id": entry_id},
-        ]
-    )
+    async def fetchrow_side_effect(query, *args):
+        if "FROM tenant_accounts" in query and len(args) >= 2 and args[1] == "2810":
+            return {"id": advance_account_id}
+        if "FROM tenant_accounts" in query and len(args) >= 2 and args[1] == "4175":
+            return {"id": ingresos_account_id}
+        if "INSERT INTO tenant_journal_entries" in query:
+            return {"id": entry_id}
+        return None
+
+    conn.fetchrow = AsyncMock(side_effect=fetchrow_side_effect)
     conn.fetch = AsyncMock(return_value=[])
     conn.execute = AsyncMock()
     conn.transaction = MagicMock(return_value=_AsyncContext())
@@ -719,12 +729,83 @@ async def test_post_order_gl_entry_splits_table_advance_to_2810():
         advance_amount=Decimal("70000"),
     )
 
-    advance_lookup_args = conn.fetchrow.await_args_list[0].args
+    advance_lookup_args = next(
+        call.args for call in conn.fetchrow.await_args_list
+        if len(call.args) >= 3 and call.args[1:] == (tenant_id, "2810")
+    )
     advance_line_args = conn.execute.await_args_list[0].args
     assert advance_lookup_args[1:] == (tenant_id, "2810")
     assert advance_line_args[2] == advance_account_id
     assert advance_line_args[3] == 70000.0
     assert "aplicación anticipo mesa" in advance_line_args[4]
+
+
+@pytest.mark.asyncio
+async def test_post_order_gl_entry_splits_debits_by_payment_puc():
+    tenant_id = uuid4()
+    order_id = uuid4()
+    digital_method_id = uuid4()
+    card_method_id = uuid4()
+    digital_account_id = uuid4()
+    card_account_id = uuid4()
+    ingresos_account_id = uuid4()
+    entry_id = uuid4()
+
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=None)
+
+    async def fetchrow_side_effect(query, *args):
+        if "FROM payment_methods pm" in query and args[0] == digital_method_id:
+            return {"code": "111025"}
+        if "FROM payment_methods pm" in query and args[0] == card_method_id:
+            return {"code": "111040"}
+        if "FROM tenant_accounts" in query and len(args) >= 2 and args[1] == "111025":
+            return {"id": digital_account_id}
+        if "FROM tenant_accounts" in query and len(args) >= 2 and args[1] == "111040":
+            return {"id": card_account_id}
+        if "FROM tenant_accounts" in query and len(args) >= 2 and args[1] == "4175":
+            return {"id": ingresos_account_id}
+        if "INSERT INTO tenant_journal_entries" in query:
+            return {"id": entry_id}
+        return None
+
+    conn.fetchrow = AsyncMock(side_effect=fetchrow_side_effect)
+    conn.fetch = AsyncMock(return_value=[])
+    conn.execute = AsyncMock()
+    conn.transaction = MagicMock(return_value=_AsyncContext())
+
+    await cierre_service._post_order_gl_entry(
+        conn=conn,
+        tenant_id=tenant_id,
+        order_id=order_id,
+        order_date=date(2026, 6, 19),
+        total_amount=Decimal("45000"),
+        payment_method="card",
+        payment_method_id=card_method_id,
+        tax_config={},
+        order_number=15342,
+        payment_splits=[
+            {
+                "amount": Decimal("42000"),
+                "payment_method": "digital",
+                "payment_method_id": digital_method_id,
+            },
+            {
+                "amount": Decimal("3000"),
+                "payment_method": "card",
+                "payment_method_id": card_method_id,
+            },
+        ],
+    )
+
+    debit_lines = [
+        call.args for call in conn.execute.await_args_list
+        if "INSERT INTO tenant_journal_lines" in call.args[0] and call.args[2] in (digital_account_id, card_account_id)
+    ]
+    assert debit_lines[0][2] == digital_account_id
+    assert debit_lines[0][3] == 42000.0
+    assert debit_lines[1][2] == card_account_id
+    assert debit_lines[1][3] == 3000.0
 
 
 def test_manual_order_modifier_quantity_defaults_to_one():

@@ -3348,6 +3348,9 @@ async def create_manual_order(
     items: List[dict],
     customer_id: Optional[str] = None,
     payment_method_id: Optional[str] = None,
+    discount_type: Optional[str] = None,
+    discount_value: Optional[float] = None,
+    payments: Optional[List[dict]] = None,
 ) -> dict:
     """
     Create an order manually with a custom date, bypassing the POS cart.
@@ -3374,12 +3377,33 @@ async def create_manual_order(
 
         customer_uuid = UUID(customer_id) if customer_id else None
         payment_method_uuid = UUID(payment_method_id) if payment_method_id else None
+        split_payments = payments or []
 
         if payment_method == "customer_wallet":
             if not customer_uuid:
                 raise APIError("La billetera requiere un cliente identificado", status_code=400)
             if payment_method_uuid:
                 raise APIError("payment_method_id no aplica al método billetera del cliente", status_code=400)
+
+        for payment in split_payments:
+            if payment.get("payment_method") == "customer_wallet" and not customer_uuid:
+                raise APIError("La billetera requiere un cliente identificado", status_code=400)
+            if payment.get("payment_method") == "customer_wallet" and payment.get("payment_method_id"):
+                raise APIError("payment_method_id no aplica al método billetera del cliente", status_code=400)
+            if payment.get("cash_received") is not None:
+                if payment.get("payment_method") != "cash":
+                    raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
+                if float(payment["cash_received"]) < float(payment["amount"]):
+                    raise APIError("Efectivo recibido debe ser mayor o igual al monto", status_code=400)
+            if payment.get("payment_method_id"):
+                try:
+                    UUID(payment["payment_method_id"])
+                except ValueError:
+                    raise APIError(
+                        "payment_method_id no es un UUID válido",
+                        status_code=400,
+                        details={"code": "payment_method_id_invalid"},
+                    )
 
         async with get_db_connection() as conn:
             async with conn.transaction():
@@ -3398,21 +3422,52 @@ async def create_manual_order(
                     return float(modifier.get("price", 0)) * modifier_quantity(modifier)
 
                 # Compute total server-side — never trust client total
-                total_amount = sum(
+                gross_total = sum(
                     float(item["quantity"]) * (
                         float(item["unit_price"])
                         + sum(modifier_unit_total(m) for m in item.get("modifiers", []))
                     )
                     for item in items
                 )
+                if gross_total < 0:
+                    raise APIError("Total de venta inválido", status_code=400)
+
+                normalized_discount_type = discount_type if discount_value is not None else None
+                normalized_discount_value = float(discount_value) if discount_value is not None else None
+                discount_amount = 0.0
+                if normalized_discount_type:
+                    if normalized_discount_type not in ("percent", "fixed"):
+                        raise APIError("discount_type debe ser 'percent' o 'fixed'", status_code=400)
+                    if normalized_discount_value is None or normalized_discount_value <= 0:
+                        raise APIError("discount_value debe ser mayor a 0", status_code=400)
+                    if normalized_discount_type == "percent":
+                        if normalized_discount_value > 100:
+                            raise APIError("El descuento porcentual no puede superar el 100%", status_code=400)
+                        discount_amount = gross_total * normalized_discount_value / 100
+                    else:
+                        discount_amount = normalized_discount_value
+                    if discount_amount - gross_total > 0.01:
+                        raise APIError("El descuento no puede superar el subtotal", status_code=400)
+                    discount_amount = round(discount_amount, 2)
+
+                total_amount = round(max(0.0, gross_total - discount_amount), 2)
+
+                if split_payments:
+                    paid_total = round(sum(float(p["amount"]) for p in split_payments), 2)
+                    if abs(paid_total - total_amount) > 0.01:
+                        raise APIError(
+                            f"Los pagos divididos ({paid_total}) deben sumar el total ({total_amount})",
+                            status_code=400,
+                        )
 
                 order_row = await conn.fetchrow(
                     """
                     INSERT INTO orders (
                         tenant_id, customer_id, payment_method, payment_method_id,
-                        order_date, total_amount, status, extra_attributes
+                        order_date, total_amount, status, payment_status,
+                        discount_type, discount_value, discount_amount, extra_attributes
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7)
+                    VALUES ($1, $2, $3, $4, $5, $6, 'completed', 'paid', $7, $8, $9, $10)
                     RETURNING id, order_number, order_date, created_at
                     """,
                     tenant_id,
@@ -3421,6 +3476,9 @@ async def create_manual_order(
                     payment_method_uuid,
                     order_datetime,
                     total_amount,
+                    normalized_discount_type,
+                    normalized_discount_value,
+                    discount_amount or None,
                     json.dumps({"source": "manual"})
                 )
 
@@ -3551,7 +3609,42 @@ async def create_manual_order(
                         str(tenant_id),
                     )
 
-                if payment_method == "customer_wallet" and customer_uuid:
+                if split_payments:
+                    from app.services.customer_wallet_service import apply_wallet_for_order
+
+                    for payment in split_payments:
+                        payment_method_for_row = payment["payment_method"]
+                        payment_method_id_for_row = payment.get("payment_method_id")
+                        payment_method_uuid_for_row = (
+                            UUID(payment_method_id_for_row) if payment_method_id_for_row else None
+                        )
+                        payment_amount = round(float(payment["amount"]), 2)
+                        payment_row = await conn.fetchrow(
+                            """
+                            INSERT INTO order_payments
+                                (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id, cash_received)
+                            VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, $7)
+                            RETURNING id
+                            """,
+                            order_id,
+                            tenant_id,
+                            payment_amount,
+                            payment_method_for_row,
+                            str(payment_method_uuid_for_row) if payment_method_uuid_for_row else None,
+                            str(user_id) if user_id else None,
+                            payment.get("cash_received"),
+                        )
+                        if payment_method_for_row == "customer_wallet":
+                            await apply_wallet_for_order(
+                                conn,
+                                customer_uuid,
+                                tenant_id,
+                                Decimal(str(payment_amount)),
+                                order_id,
+                                user_id,
+                                payment_row["id"],
+                            )
+                elif payment_method == "customer_wallet" and customer_uuid:
                     from app.services.customer_wallet_service import apply_wallet_for_order
 
                     await apply_wallet_for_order(
@@ -3582,6 +3675,7 @@ async def create_manual_order(
                         payment_method_id=gl_payment_method_id,
                         tax_config=tax_config,
                         order_number=int(order_row["order_number"]),
+                        payment_splits=split_payments or None,
                     )
                 except Exception as e:
                     logger.error(f"GL entry failed for manual order {order_id}: {e}")
@@ -3615,6 +3709,10 @@ async def create_manual_order(
                 "total_amount": float(total_amount),
                 "status": "completed",
                 "payment_method": payment_method,
+                "payment_method_id": str(payment_method_uuid) if payment_method_uuid else None,
+                "discount_type": normalized_discount_type,
+                "discount_value": normalized_discount_value,
+                "discount_amount": float(discount_amount),
             }
         }
 
