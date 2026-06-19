@@ -202,6 +202,15 @@ async def clear_cart(
 
 
 class CompleteOrderRequest(BaseModel):
+    """POS manual checkout contract.
+
+    The checkout stack is: automatic promotions, then manual discount, then
+    WaRo redemption, then payment tender. Single-payment payloads send
+    payment_method/payment_method_id plus optional discount_type/discount_value.
+    Split-payment payloads create the order with split_mode=true and
+    split_first_amount; later tenders use AddPaymentRequest.
+    """
+
     payment_method: Optional[str] = Field(None, description="Payment method: cash, card, digital, credit. May be omitted only for delivery orders that remain pending until payment is known.")
     customer_id: UUID = Field(..., description="Customer ID to associate with the order")
     credit_due_date: Optional[date] = Field(None, description="Optional due date for credit orders (only used when payment_method='credit')")
@@ -307,6 +316,13 @@ class SendReceiptRequest(BaseModel):
 
 
 class AddPaymentRequest(BaseModel):
+    """Subsequent split-payment tender.
+
+    amount is one tender against the remaining settlement total. Wallet uses
+    payment_method='customer_wallet' and never sends cash_received; cash sends
+    cash_received only when the cashier needs change calculation.
+    """
+
     amount: float = Field(..., gt=0, description="Amount for this payment")
     payment_method: str = Field(..., description="cash | card | digital | credit or custom slug")
     payment_method_id: Optional[str] = Field(None, description="UUID of payment_methods row")

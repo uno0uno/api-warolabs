@@ -1486,7 +1486,12 @@ def apply_manual_discount_to_evaluated_lines(
     evaluated: Dict[str, Any],
     manual_discount_amount: float,
 ) -> Dict[str, Any]:
-    """Apply manual order discount on promo-adjusted subtotals (stacking contract)."""
+    """Apply manual order discount on promo-adjusted subtotals.
+
+    Manual checkout discounts stack after automatic promotions. Percent
+    discounts therefore use subtotal_after_promos as their base; fixed discounts
+    are capped at that same post-promo base.
+    """
     manual_discount = max(0.0, float(manual_discount_amount or 0))
     lines = evaluated["lines"]
     base_total = float(evaluated["subtotal_after_promos"])
@@ -1524,7 +1529,7 @@ def apply_waro_redemption_to_evaluated_lines(
     evaluated: Dict[str, Any],
     waro_discount_cop: float,
 ) -> Dict[str, Any]:
-    """Apply WaRo COP discount on promo+manual-adjusted subtotals (checkout layer 4)."""
+    """Apply WaRo COP discount after promo and manual discounts."""
     waro_discount = max(0.0, float(waro_discount_cop or 0))
     lines = evaluated["lines"]
     base_total = float(evaluated["total_amount"])
@@ -1632,7 +1637,7 @@ async def evaluate_checkout_promotions(
     discount_value: Optional[float] = None,
     preserve_persisted_promos: bool = False,
 ) -> Dict[str, Any]:
-    """DB-backed promo evaluation + optional manual discount stacking."""
+    """DB-backed promo evaluation plus optional manual discount stacking."""
     evaluation_at = at or default_at_bogota()
     promotions = await load_promotions_for_evaluation(conn, tenant_id, evaluation_at)
     profile_row = await conn.fetchrow(
