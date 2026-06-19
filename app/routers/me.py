@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Request
 from app.core.middleware import SessionContext, require_valid_session
 from app.core.permissions import get_enforcement_mode, get_role_modules
 from app.models.me import AccessResponse
+from app.services.kali_access_service import get_kali_access_features
 
 router = APIRouter()
 
@@ -27,15 +28,18 @@ async def get_my_access(
             role=session.role,
             modules=[],
             enforcement_mode="disabled",
+            features={"kali_enabled": False},
         )
 
     enforcement_mode = await get_enforcement_mode(session.tenant_id)
+    features = await get_kali_access_features(session.tenant_id)
 
     if session.role is None:
         return AccessResponse(
             role=None,
             modules=[],
             enforcement_mode=enforcement_mode,
+            features=features,
         )
 
     modules = await get_role_modules(session.tenant_id, session.role)
@@ -43,4 +47,5 @@ async def get_my_access(
         role=session.role,
         modules=sorted(m.value for m in modules),
         enforcement_mode=enforcement_mode,
+        features=features,
     )

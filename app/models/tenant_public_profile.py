@@ -86,6 +86,13 @@ class TenantPublicProfileBase(BaseModel):
     comandas_enabled: bool = Field(False, description="Whether the comandas/KDS module is enabled. When false, system behaves exactly as today.")
     kds_enabled: bool = Field(False, description="Whether KDS station screens (/cocina/[id]) are enabled. Requires comandas_enabled=true.")
 
+    # Internal Kali assistant feature flag. This is intentionally controlled
+    # by SQL/config only, not exposed through tenant-facing toggle endpoints.
+    kali_enabled: bool = Field(
+        False,
+        description="Internal-only flag: whether the Kali AI assistant is enabled for this tenant.",
+    )
+
     # POS personalization (issue #529)
     auto_select_generic_enabled: bool = Field(
         False,

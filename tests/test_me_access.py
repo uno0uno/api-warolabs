@@ -71,7 +71,11 @@ def test_owner_returns_all_modules():
 
     with patch("app.core.middleware.get_session_context", return_value=session), \
          patch("app.routers.me.require_valid_session", return_value=session), \
-         patch("app.core.permissions.get_db_connection", side_effect=_mock_db_ctx("disabled")):
+         patch("app.core.permissions.get_db_connection", side_effect=_mock_db_ctx("disabled")), \
+         patch(
+             "app.routers.me.get_kali_access_features",
+             new=AsyncMock(return_value={"kali_enabled": True}),
+         ):
         client = TestClient(app)
         response = client.get("/me/access")
 
@@ -82,6 +86,7 @@ def test_owner_returns_all_modules():
     expected = sorted(m.value for m in Module)
     assert body["modules"] == expected
     assert body["enforcement_mode"] == "disabled"
+    assert body["features"]["kali_enabled"] is True
 
 
 def test_cashier_returns_pos_ventas_only():
@@ -96,6 +101,10 @@ def test_cashier_returns_pos_ventas_only():
          patch("app.routers.me.require_valid_session", return_value=session), \
          patch("app.core.permissions.get_db_connection", side_effect=_mock_db_ctx("disabled")), \
          patch(
+             "app.routers.me.get_kali_access_features",
+             new=AsyncMock(return_value={"kali_enabled": False}),
+         ), \
+         patch(
              "app.routers.me.get_role_modules",
              new=AsyncMock(return_value=cashier_modules),
          ):
@@ -106,6 +115,7 @@ def test_cashier_returns_pos_ventas_only():
     body = response.json()
     assert body["role"] == "cashier"
     assert body["modules"] == ["pos", "ventas"]
+    assert body["features"]["kali_enabled"] is False
 
 
 def test_null_role_returns_empty_modules():
@@ -116,7 +126,11 @@ def test_null_role_returns_empty_modules():
 
     with patch("app.core.middleware.get_session_context", return_value=session), \
          patch("app.routers.me.require_valid_session", return_value=session), \
-         patch("app.core.permissions.get_db_connection", side_effect=_mock_db_ctx("shadow")):
+         patch("app.core.permissions.get_db_connection", side_effect=_mock_db_ctx("shadow")), \
+         patch(
+             "app.routers.me.get_kali_access_features",
+             new=AsyncMock(return_value={"kali_enabled": True}),
+         ):
         client = TestClient(app)
         response = client.get("/me/access")
 
@@ -126,6 +140,35 @@ def test_null_role_returns_empty_modules():
     assert body["modules"] == []
     # enforcement_mode still reported — tenant_id was present, only role was None.
     assert body["enforcement_mode"] == "shadow"
+    assert body["features"]["kali_enabled"] is True
+
+
+def test_null_tenant_returns_kali_disabled_feature():
+    """Session without tenant reports safe disabled feature defaults."""
+    session = SessionContext({
+        "user_id": uuid4(),
+        "tenant_id": None,
+        "email": "test@example.com",
+        "name": "Test User",
+        "expires_at": None,
+        "is_active": True,
+        "role": "owner",
+    })
+    app = FastAPI()
+    app.include_router(me_router, prefix="/me")
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.me.require_valid_session", return_value=session), \
+         patch("app.routers.me.get_kali_access_features", new=AsyncMock()) as features:
+        client = TestClient(app)
+        response = client.get("/me/access")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["modules"] == []
+    assert body["enforcement_mode"] == "disabled"
+    assert body["features"]["kali_enabled"] is False
+    features.assert_not_awaited()
 
 
 def test_enforcement_mode_disabled_reported():
@@ -139,6 +182,10 @@ def test_enforcement_mode_disabled_reported():
     with patch("app.core.middleware.get_session_context", return_value=session), \
          patch("app.routers.me.require_valid_session", return_value=session), \
          patch("app.core.permissions.get_db_connection", side_effect=_mock_db_ctx("disabled")), \
+         patch(
+             "app.routers.me.get_kali_access_features",
+             new=AsyncMock(return_value={"kali_enabled": False}),
+         ), \
          patch(
              "app.routers.me.get_role_modules",
              new=AsyncMock(return_value=admin_modules),
@@ -161,6 +208,10 @@ def test_enforcement_mode_enforce_reported():
     with patch("app.core.middleware.get_session_context", return_value=session), \
          patch("app.routers.me.require_valid_session", return_value=session), \
          patch("app.core.permissions.get_db_connection", side_effect=_mock_db_ctx("enforce")), \
+         patch(
+             "app.routers.me.get_kali_access_features",
+             new=AsyncMock(return_value={"kali_enabled": False}),
+         ), \
          patch(
              "app.routers.me.get_role_modules",
              new=AsyncMock(return_value=admin_modules),

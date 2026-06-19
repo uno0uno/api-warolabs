@@ -1,5 +1,5 @@
-from typing import List, Optional
-from pydantic import BaseModel
+from typing import Dict, List, Optional
+from pydantic import BaseModel, Field
 
 
 class AccessResponse(BaseModel):
@@ -15,7 +15,11 @@ class AccessResponse(BaseModel):
       already accounting for tenant-specific overrides.
     - `enforcement_mode`: the tenant's current permissions mode, one of
       'disabled' | 'shadow' | 'enforce'.
+    - `features`: tenant feature capabilities that are not RBAC modules.
     """
     role: Optional[str] = None
     modules: List[str] = []
     enforcement_mode: str = "disabled"
+    features: Dict[str, bool] = Field(
+        default_factory=lambda: {"kali_enabled": False}
+    )

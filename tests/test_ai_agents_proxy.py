@@ -139,6 +139,7 @@ def test_sales_proxy_streams_frames_and_preserves_request_id():
     with patch("app.core.middleware.get_session_context", return_value=session), \
          patch("app.routers.ai_agents.require_valid_session", return_value=session), \
          patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch("app.routers.ai_agents.is_kali_enabled", AsyncMock(return_value=True)), \
          patch("app.routers.ai_agents._resolve_member_id", AsyncMock(return_value=str(MEMBER_ID))), \
          patch.object(ai_agents.settings, "agent_api_url", "http://agent-api:8100"), \
          patch.object(ai_agents.settings, "agent_internal_signature_secret", "secret"), \
@@ -178,6 +179,7 @@ def test_food_cost_proxy_uses_analytics_menu_financial_scopes():
     with patch("app.core.middleware.get_session_context", return_value=session), \
          patch("app.routers.ai_agents.require_valid_session", return_value=session), \
          patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch("app.routers.ai_agents.is_kali_enabled", AsyncMock(return_value=True)), \
          patch("app.routers.ai_agents._resolve_member_id", AsyncMock(return_value=None)), \
          patch.object(ai_agents.settings, "agent_api_url", "http://agent-api:8100"), \
          patch.object(ai_agents.settings, "agent_internal_signature_secret", "secret"), \
@@ -204,6 +206,41 @@ def test_missing_tenant_rejects_before_upstream_call():
     resolve_member.assert_not_awaited()
 
 
+def test_disabled_kali_tenant_rejects_before_upstream_setup():
+    session = _build_session(role="owner")
+    FakeAsyncClient.instances = []
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.ai_agents.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch("app.routers.ai_agents.is_kali_enabled", AsyncMock(return_value=False)), \
+         patch("app.routers.ai_agents._resolve_member_id", AsyncMock()) as resolve_member, \
+         patch("app.routers.ai_agents.httpx.AsyncClient", FakeAsyncClient):
+        response = _client().post("/ai/sales/messages/stream", content=BODY)
+
+    assert response.status_code == 403
+    assert "kali" in response.json()["detail"].lower()
+    resolve_member.assert_not_awaited()
+    assert FakeAsyncClient.instances == []
+
+
+def test_disabled_kali_tenant_blocks_food_cost_before_upstream_setup():
+    session = _build_session(role="owner")
+    FakeAsyncClient.instances = []
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.ai_agents.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch("app.routers.ai_agents.is_kali_enabled", AsyncMock(return_value=False)), \
+         patch("app.routers.ai_agents._resolve_member_id", AsyncMock()) as resolve_member, \
+         patch("app.routers.ai_agents.httpx.AsyncClient", FakeAsyncClient):
+        response = _client().post("/ai/food-cost/messages/stream", content=BODY)
+
+    assert response.status_code == 403
+    resolve_member.assert_not_awaited()
+    assert FakeAsyncClient.instances == []
+
+
 def test_missing_agent_config_rejects_before_upstream_call():
     session = _build_session(role="owner")
     FakeAsyncClient.instances = []
@@ -211,6 +248,7 @@ def test_missing_agent_config_rejects_before_upstream_call():
     with patch("app.core.middleware.get_session_context", return_value=session), \
          patch("app.routers.ai_agents.require_valid_session", return_value=session), \
          patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch("app.routers.ai_agents.is_kali_enabled", AsyncMock(return_value=True)), \
          patch("app.routers.ai_agents._resolve_member_id", AsyncMock(return_value=None)), \
          patch.object(ai_agents.settings, "agent_api_url", None), \
          patch.object(ai_agents.settings, "agent_internal_signature_secret", "secret"), \
