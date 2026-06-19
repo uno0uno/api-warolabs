@@ -111,7 +111,7 @@ def test_sign_internal_request_matches_agent_api_contract():
             tenant_id="tenant-1",
             profile_id="profile-1",
             member_id=None,
-            scopes="orders:read",
+            scopes="orders:read,financial:read",
             body=BODY,
         )
 
@@ -122,7 +122,7 @@ def test_sign_internal_request_matches_agent_api_contract():
         "tenant-1",
         "profile-1",
         "",
-        "orders:read",
+        "orders:read,financial:read",
         hashlib.sha256(BODY).hexdigest(),
     ])
     expected = hmac.new(b"secret", canonical.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -165,7 +165,7 @@ def test_sales_proxy_streams_frames_and_preserves_request_id():
     assert sent["headers"]["x-waro-profile-id"] == str(PROFILE_ID)
     assert sent["headers"]["x-waro-member-id"] == str(MEMBER_ID)
     assert sent["headers"]["x-waro-request-id"] == "req-preserved"
-    assert sent["headers"]["x-waro-scopes"] == "orders:read"
+    assert sent["headers"]["x-waro-scopes"] == "orders:read,financial:read"
     assert sent["headers"]["x-waro-internal-signature"]
     assert FakeAsyncClient.instances[0].closed is True
     assert FakeAsyncClient.response.closed is True
