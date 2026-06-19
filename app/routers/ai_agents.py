@@ -13,6 +13,7 @@ from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
 from app.database import get_db_connection
+from app.services.kali_access_service import is_kali_enabled
 
 
 logger = logging.getLogger(__name__)
@@ -161,6 +162,12 @@ async def _proxy_agent_stream(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Valid user and tenant session required",
+        )
+
+    if not await is_kali_enabled(session.tenant_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Kali is not enabled for this tenant",
         )
 
     body = await request.body()
