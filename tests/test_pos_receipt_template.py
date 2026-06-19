@@ -75,3 +75,43 @@ def test_pos_receipt_labels_manual_discount_separately_from_promotions():
     assert "Promo almuerzo: -$8.000" in text
     assert "Descuento manual: -$10.000" in text
     assert "Descuento: -$10.000" not in text
+
+
+def test_pos_receipt_keeps_checkout_discount_stack_separate():
+    text = get_pos_receipt_text(
+        order_number=46,
+        total_amount=83000,
+        payment_method="customer_wallet",
+        items=[{"quantity": 1, "subtotal": 120000, "product": {"name": "Cena"}}],
+        order_date=datetime(2026, 6, 19, 18, 30, tzinfo=timezone.utc),
+        subtotal=120000,
+        promo_breakdown=[
+            {
+                "promotion_name": "Promo noche",
+                "promo_type": "fixed_off",
+                "savings": 12000,
+            },
+        ],
+        discount_amount=15000,
+        standard_tax=3000,
+        standard_tax_label="IVA",
+        tip_amount=7000,
+        waro_redemption_summary={
+            "waro_discount_cop": 10000,
+            "waro_breakdown": [
+                {
+                    "redemption_type": "reward_fixed_cop",
+                    "cop_discount": 10000,
+                    "reward_name": "Bono fidelidad",
+                },
+            ],
+        },
+    )
+
+    assert "Subtotal: $120.000" in text
+    assert "Promo noche: -$12.000" in text
+    assert "Descuento manual: -$15.000" in text
+    assert "Canje WaRo (Bono fidelidad): -$10.000" in text
+    assert "IVA: $3.000" in text
+    assert "Propina: $7.000" in text
+    assert "TOTAL COBRADO: $90.000" in text
