@@ -129,7 +129,7 @@ def get_pos_receipt_text(
     elif promo_savings > 0:
         totals_lines.append(f"Promoción: -{_format_cop(promo_savings)}")
     if discount_amount > 0:
-        totals_lines.append(f"Descuento: -{_format_cop(discount_amount)}")
+        totals_lines.append(f"Descuento manual: -{_format_cop(discount_amount)}")
     if _waro_breakdown:
         for entry in _waro_breakdown:
             cop = float(entry.get("cop_discount") or 0)
