@@ -53,6 +53,12 @@ class Settings(BaseSettings):
 
     # Ollama Extract API
     ollama_api_url: str = Field(default="https://chat.warocol.com", alias='OLLAMA_API_URL')
+
+    # Internal WARO agent-api proxy
+    agent_api_url: Optional[str] = Field(default=None, alias='AGENT_API_URL')
+    agent_internal_signature_secret: Optional[str] = Field(default=None, alias='INTERNAL_SIGNATURE_SECRET')
+    agent_api_connect_timeout_seconds: float = Field(default=5.0, alias='AGENT_API_CONNECT_TIMEOUT_SECONDS')
+    agent_api_read_timeout_seconds: Optional[float] = Field(default=300.0, alias='AGENT_API_READ_TIMEOUT_SECONDS')
     
     # Google Gemini API
     google_api_key: Optional[str] = Field(default=None, alias='GOOGLE_API_KEY')
