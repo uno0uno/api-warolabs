@@ -10,6 +10,7 @@ Endpoints tested:
 """
 import pytest
 from httpx import AsyncClient
+from pathlib import Path
 from uuid import uuid4
 
 
@@ -167,3 +168,16 @@ class TestPosCartCompleteEndpoint:
             json={"payment_method": "digital"}
         )
         assert response.status_code in [404, 401, 403, 500]
+
+
+class TestPosWalletTenderContract:
+    def test_service_keeps_customer_wallet_as_payment_tender(self):
+        src = Path(__file__).resolve().parents[1] / "app/services/pos_cart_service.py"
+        text = src.read_text()
+
+        assert "Wallet is recorded as payment_method='customer_wallet'" in text
+        assert "validate_wallet_payment_tender(payment_method, cash_received)" in text
+        assert "if not split_mode and payment_method == WALLET_PAYMENT_SLUG" in text
+        assert "payment_method == WALLET_PAYMENT_SLUG" in text
+        assert "discount_type" in text
+        assert "discount_value" in text
