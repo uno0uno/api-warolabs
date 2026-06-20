@@ -11,6 +11,13 @@ import pytest
 from httpx import AsyncClient
 from uuid import uuid4
 
+from app.services.inventory_service import _json_decimal, _QUANTITY_JSON_SCALE
+
+
+def test_inventory_json_decimal_strips_float_residue():
+    assert _json_decimal(0.1 + 0.2 - 0.3, _QUANTITY_JSON_SCALE, 0) == 0.0
+    assert _json_decimal("1.3450000000001", _QUANTITY_JSON_SCALE, 0) == 1.345
+
 
 class TestInventoryStockEndpoint:
     """Test inventory stock endpoint"""

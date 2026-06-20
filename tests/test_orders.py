@@ -10,6 +10,13 @@ import pytest
 from httpx import AsyncClient
 from uuid import uuid4
 
+from app.services.orders_service import _inventory_quantity
+
+
+def test_inventory_quantity_normalizes_consumption_residue():
+    assert _inventory_quantity(0.1 + 0.2 - 0.3) == 0.0
+    assert _inventory_quantity("1.3450000000001") == 1.345
+
 
 class TestOrdersListEndpoint:
     """Test orders list endpoint"""

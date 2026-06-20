@@ -41,6 +41,14 @@ def parse_date(date_str: Optional[str]) -> Optional[date]:
 
 logger = logging.getLogger(__name__)
 _BOG = ZoneInfo("America/Bogota")
+_INVENTORY_QUANTITY_SCALE = Decimal("0.000001")
+
+
+def _inventory_quantity(value: Any) -> float:
+    quantized = Decimal(str(value)).quantize(_INVENTORY_QUANTITY_SCALE)
+    if quantized == 0:
+        quantized = Decimal("0")
+    return float(quantized)
 
 def _pos_modifier_inventory_helpers():
     from app.services.pos_cart_service import (
@@ -2839,13 +2847,13 @@ async def _deduct_stock_for_status_update(conn, order_id, tenant_id, user_id, or
     for item in items:
         ingredients = await conn.fetch(_INGREDIENTS_QUERY, item["product_id"])
         for ing in ingredients:
-            qty = float(item["quantity"]) * float(ing["quantity"])
+            qty = _inventory_quantity(Decimal(str(item["quantity"])) * Decimal(str(ing["quantity"])))
             stock_row = await conn.fetchrow(
                 "SELECT current_stock FROM tenant_inventory WHERE ingredient_id = $1 AND tenant_id = $2 FOR UPDATE",
                 ing["ingredient_id"], tenant_id,
             )
             prev = float(stock_row["current_stock"]) if stock_row else 0.0
-            new = prev - qty
+            new = _inventory_quantity(Decimal(str(prev)) - Decimal(str(qty)))
             if stock_row:
                 await conn.execute(
                     "UPDATE tenant_inventory SET current_stock = $1, last_updated = NOW() WHERE ingredient_id = $2 AND tenant_id = $3",
@@ -2881,7 +2889,7 @@ async def _return_stock_for_order_cancellation(conn, order_id, tenant_id, user_i
     for item in items:
         ingredients = await conn.fetch(_INGREDIENTS_QUERY, item["product_id"])
         for ing in ingredients:
-            qty = float(item["quantity"]) * float(ing["quantity"])
+            qty = _inventory_quantity(Decimal(str(item["quantity"])) * Decimal(str(ing["quantity"])))
             await _return_ingredient_to_stock(
                 conn, tenant_id, user_id, order_id, order_number,
                 ing["ingredient_id"], qty, ing["unit"], ing["ingredient_name"],
@@ -2908,7 +2916,7 @@ async def _return_ingredient_to_stock(
     )
 
     previous_stock = float(stock_row['current_stock']) if stock_row else 0.0
-    new_stock = previous_stock + quantity
+    new_stock = _inventory_quantity(Decimal(str(previous_stock)) + Decimal(str(quantity)))
 
     # Update or create inventory record
     if stock_row:
@@ -3502,14 +3510,18 @@ async def create_manual_order(
                     )
 
                     for ingredient in ingredients:
-                        quantity_to_deduct = float(item["quantity"]) * float(ingredient["quantity"])
+                        quantity_to_deduct = _inventory_quantity(
+                            Decimal(str(item["quantity"])) * Decimal(str(ingredient["quantity"]))
+                        )
                         stock_row = await conn.fetchrow(
                             "SELECT current_stock FROM tenant_inventory WHERE ingredient_id = $1 AND tenant_id = $2",
                             ingredient["ingredient_id"],
                             tenant_id
                         )
                         previous_stock = float(stock_row["current_stock"]) if stock_row else 0.0
-                        new_stock = previous_stock - quantity_to_deduct
+                        new_stock = _inventory_quantity(
+                            Decimal(str(previous_stock)) - Decimal(str(quantity_to_deduct))
+                        )
 
                         if stock_row:
                             await conn.execute(

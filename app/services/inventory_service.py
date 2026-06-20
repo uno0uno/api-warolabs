@@ -2,6 +2,7 @@
 Inventory Service
 Handles inventory queries, movements, and stock management
 """
+from decimal import Decimal
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 from fastapi import Request, Response, HTTPException
@@ -11,6 +12,19 @@ from app.core.exceptions import AuthenticationError
 import logging
 
 logger = logging.getLogger(__name__)
+
+_QUANTITY_JSON_SCALE = Decimal("0.000001")
+_MONEY_JSON_SCALE = Decimal("0.0001")
+_PERCENT_JSON_SCALE = Decimal("0.01")
+
+
+def _json_decimal(value: Any, scale: Decimal, default: Optional[float] = None) -> Optional[float]:
+    if value is None:
+        return default
+    quantized = Decimal(str(value)).quantize(scale)
+    if quantized == 0:
+        quantized = Decimal("0")
+    return float(quantized)
 
 
 async def get_inventory_stock(
@@ -209,17 +223,17 @@ async def get_inventory_stock(
                     "ingredient_name": row['ingredient_name'],
                     "unit": row['unit'],
                     "category": row['category'],
-                    "current_stock": float(row['current_stock']) if row['current_stock'] else 0,
-                    "minimum_stock": float(row['minimum_stock']) if row['minimum_stock'] else 0,
-                    "maximum_stock": float(row['maximum_stock']) if row['maximum_stock'] else None,
+                    "current_stock": _json_decimal(row['current_stock'], _QUANTITY_JSON_SCALE, 0),
+                    "minimum_stock": _json_decimal(row['minimum_stock'], _QUANTITY_JSON_SCALE, 0),
+                    "maximum_stock": _json_decimal(row['maximum_stock'], _QUANTITY_JSON_SCALE),
                     "last_updated": row['last_updated'].isoformat() if row['last_updated'] else None,
                     "location": row['location'],
                     "lote_actual": row['lote_actual'],
                     "fecha_vencimiento": row['fecha_vencimiento'].isoformat() if row['fecha_vencimiento'] else None,
                     "status": row['status'],
-                    "stock_percentage": float(row['stock_percentage']) if row['stock_percentage'] else None,
-                    "unit_cost": float(row['unit_cost']) if row['unit_cost'] else None,
-                    "total_value": float(row['total_value']) if row['total_value'] else 0
+                    "stock_percentage": _json_decimal(row['stock_percentage'], _PERCENT_JSON_SCALE),
+                    "unit_cost": _json_decimal(row['unit_cost'], _MONEY_JSON_SCALE),
+                    "total_value": _json_decimal(row['total_value'], _MONEY_JSON_SCALE, 0)
                 })
 
             return {
@@ -233,7 +247,7 @@ async def get_inventory_stock(
                     "critical_count": stats['critical_count'],
                     "low_stock_count": stats['low_stock_count'],
                     "ok_count": stats['ok_count'],
-                    "total_inventory_value": float(stats['total_inventory_value']) if stats['total_inventory_value'] else 0
+                    "total_inventory_value": _json_decimal(stats['total_inventory_value'], _MONEY_JSON_SCALE, 0)
                 },
                 "filter_options": {
                     "categories": list(filter_options['categories'] or []),
@@ -375,10 +389,10 @@ async def get_inventory_movements(
                     "ingredient_name": row['ingredient_name'],
                     "unit": row['unit'],
                     "movement_type": row['movement_type'],
-                    "quantity_change": float(row['quantity_change']),
-                    "previous_stock": float(row['previous_stock']) if row['previous_stock'] else 0,
-                    "new_stock": float(row['new_stock']) if row['new_stock'] else 0,
-                    "cost_per_unit": float(row['cost_per_unit']) if row['cost_per_unit'] else None,
+                    "quantity_change": _json_decimal(row['quantity_change'], _QUANTITY_JSON_SCALE, 0),
+                    "previous_stock": _json_decimal(row['previous_stock'], _QUANTITY_JSON_SCALE, 0),
+                    "new_stock": _json_decimal(row['new_stock'], _QUANTITY_JSON_SCALE, 0),
+                    "cost_per_unit": _json_decimal(row['cost_per_unit'], _MONEY_JSON_SCALE),
                     "reference_table": row['reference_table'],
                     "reference_id": str(row['reference_id']) if row['reference_id'] else None,
                     "reference_number": row['reference_number'],
