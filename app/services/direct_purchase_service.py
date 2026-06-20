@@ -6,9 +6,14 @@ Handles the simplified flow for immediate stock updates (Compras Directas)
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, localcontext
 from zoneinfo import ZoneInfo
 
 _BOG = ZoneInfo("America/Bogota")
+_DIRECT_PURCHASE_DECIMAL_SCALE = Decimal("0.000000000000001")
+_DIRECT_PURCHASE_DECIMAL_PRECISION = 42
+_DECIMAL_ZERO = Decimal("0")
+_DECIMAL_ONE = Decimal("1")
 
 # Catalog units matching backend PURCHASE_UNIT_CATALOG
 # Used to convert catalog keys (lt, kg, galon…) to base units (ml, gr)
@@ -24,13 +29,102 @@ _CATALOG_TO_BASE: Dict[str, Any] = {
 }
 
 
+def _direct_purchase_decimal(value: Any, default: Decimal = _DECIMAL_ZERO) -> Decimal:
+    if value is None or value == "":
+        return default
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
+
+
+def _quantize_direct_purchase_decimal(value: Decimal) -> Decimal:
+    with localcontext() as ctx:
+        ctx.prec = _DIRECT_PURCHASE_DECIMAL_PRECISION
+        return value.quantize(_DIRECT_PURCHASE_DECIMAL_SCALE)
+
+
+def _has_direct_purchase_value(value: Any) -> bool:
+    return value is not None and value != ""
+
+
+def _direct_purchase_item_total(item: Dict[str, Any]) -> Decimal:
+    if _has_direct_purchase_value(item.get('total_cost')):
+        return _direct_purchase_decimal(item.get('total_cost'))
+
+    quantity = _direct_purchase_decimal(
+        item.get('purchase_quantity'),
+        _direct_purchase_decimal(item.get('quantity')),
+    )
+    unit_cost = _direct_purchase_decimal(item.get('unit_cost'))
+    return quantity * unit_cost
+
+
+def _catalog_direct_purchase_conversion_factor(
+    purchase_unit: Optional[str],
+    base_unit: str,
+    ingredient: Any,
+) -> Optional[Decimal]:
+    catalog_entry = _CATALOG_TO_BASE.get(purchase_unit or "")
+    if not catalog_entry:
+        return None
+
+    cat_factor = _direct_purchase_decimal(catalog_entry['factor'])
+    cat_base = catalog_entry['base']
+    ingredient_weight = _direct_purchase_decimal(ingredient['unit_weight_gr'])
+    ing_weight_unit = ingredient['unit_weight_unit'] or ''
+
+    if base_unit == 'und' and cat_base == ing_weight_unit and ingredient_weight > 0:
+        return _quantize_direct_purchase_decimal(cat_factor / ingredient_weight)
+    if cat_base == base_unit:
+        return _quantize_direct_purchase_decimal(cat_factor)
+    return None
+
+
+def _resolve_direct_purchase_item_decimals(
+    item: Dict[str, Any],
+    base_unit: str,
+    purchase_unit: Optional[str],
+    conversion_factor: Decimal,
+) -> Dict[str, Decimal]:
+    quantity = _direct_purchase_decimal(item.get('quantity'))
+    purchase_quantity = _direct_purchase_decimal(
+        item.get('purchase_quantity'),
+        quantity,
+    )
+    item_total = _direct_purchase_item_total(item)
+    unit_cost = _direct_purchase_decimal(item.get('unit_cost'))
+
+    if purchase_quantity > 0 and _has_direct_purchase_value(item.get('total_cost')):
+        unit_cost = item_total / purchase_quantity
+
+    base_quantity = purchase_quantity * conversion_factor
+    base_unit_cost = (
+        unit_cost / conversion_factor
+        if conversion_factor > 0
+        else unit_cost
+    )
+
+    return {
+        "purchase_quantity": _quantize_direct_purchase_decimal(purchase_quantity),
+        "conversion_factor": _quantize_direct_purchase_decimal(conversion_factor),
+        "base_quantity": _quantize_direct_purchase_decimal(base_quantity),
+        "base_unit_cost": _quantize_direct_purchase_decimal(base_unit_cost),
+        "item_total": _quantize_direct_purchase_decimal(item_total),
+    }
+
+
+def _calculate_direct_purchase_total(items: List[Dict[str, Any]]) -> Decimal:
+    return _quantize_direct_purchase_decimal(
+        sum((_direct_purchase_item_total(item) for item in items), _DECIMAL_ZERO)
+    )
+
+
 def _parse_date(date_str: Optional[str]) -> Optional[datetime]:
     """Parse ISO date string, handling JS-style 'Z' timezone suffix."""
     if not date_str:
         return None
     return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
 from fastapi import Request, Response, HTTPException, UploadFile
-from decimal import Decimal
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
@@ -348,10 +442,7 @@ async def create_direct_purchase(
                 )
 
                 # 2. Calculate totals from items
-                total_amount = sum(
-                    float(item.get('quantity', 0)) * float(item.get('unit_cost', 0))
-                    for item in items
-                )
+                total_amount = _calculate_direct_purchase_total(items)
 
                 # Determine final status based on payment info
                 final_status = 'received'
@@ -441,10 +532,10 @@ async def create_direct_purchase(
                                 new_ing_id,
                                 str(new_unit['purchase_unit']),
                                 str(new_unit['purchase_unit_label']),
-                                float(new_unit['conversion_factor'])
+                                _direct_purchase_decimal(new_unit['conversion_factor'])
                             )
                             logger.info(f"Created purchase unit: {new_unit['purchase_unit_label']} for ingredient {new_ing_id}")
-                    except (json.JSONDecodeError, KeyError, ValueError) as e:
+                    except (json.JSONDecodeError, KeyError, ValueError, InvalidOperation) as e:
                         logger.warning(f"Error processing new_units_data: {e}")
 
                 # 5. Insert items and update inventory
@@ -467,13 +558,10 @@ async def create_direct_purchase(
                         continue
 
                     base_unit = ingredient['unit']
-                    quantity = float(item.get('quantity', 0))
-                    unit_cost = float(item.get('unit_cost', 0))
                     purchase_unit = item.get('purchase_unit', base_unit)
-                    purchase_quantity = float(item.get('purchase_quantity', quantity))
 
                     # Get conversion factor if purchase unit differs from base unit
-                    conversion_factor = 1.0
+                    conversion_factor = _DECIMAL_ONE
                     if purchase_unit and purchase_unit != base_unit:
                         conversion_row = await conn.fetchrow("""
                             SELECT conversion_factor
@@ -484,25 +572,28 @@ async def create_direct_purchase(
                         """, ingredient_id, purchase_unit)
 
                         if conversion_row:
-                            conversion_factor = float(conversion_row['conversion_factor'])
+                            conversion_factor = _direct_purchase_decimal(conversion_row['conversion_factor'])
                         else:
                             # Fallback: catalog unit (lt, kg, galon…) — two-step conversion for und ingredients
-                            catalog_entry = _CATALOG_TO_BASE.get(purchase_unit)
-                            if catalog_entry:
-                                cat_factor = catalog_entry['factor']
-                                cat_base = catalog_entry['base']
-                                w = float(ingredient['unit_weight_gr'] or 0)
-                                ing_weight_unit = ingredient['unit_weight_unit'] or ''
-                                if base_unit == 'und' and cat_base == ing_weight_unit and w > 0:
-                                    # e.g. 1 galon = 3785 ml, 1 und = 250 ml → factor = 3785/250 = 15.14
-                                    conversion_factor = cat_factor / w
-                                elif cat_base == base_unit:
-                                    # e.g. ingredient unit is ml, purchase unit is lt → factor = 1000
-                                    conversion_factor = float(cat_factor)
+                            catalog_factor = _catalog_direct_purchase_conversion_factor(
+                                purchase_unit,
+                                base_unit,
+                                ingredient,
+                            )
+                            if catalog_factor is not None:
+                                conversion_factor = catalog_factor
 
-                    # Calculate base unit quantity
-                    base_quantity = purchase_quantity * conversion_factor
-                    base_unit_cost = unit_cost / conversion_factor if conversion_factor > 0 else unit_cost
+                    values = _resolve_direct_purchase_item_decimals(
+                        item,
+                        base_unit,
+                        purchase_unit,
+                        conversion_factor,
+                    )
+                    purchase_quantity = values["purchase_quantity"]
+                    conversion_factor = values["conversion_factor"]
+                    base_quantity = values["base_quantity"]
+                    base_unit_cost = values["base_unit_cost"]
+                    item_total = values["item_total"]
 
                     logger.info(f"Direct purchase item: {purchase_quantity} {purchase_unit} -> {base_quantity} {base_unit} (factor: {conversion_factor})")
 
@@ -531,7 +622,7 @@ async def create_direct_purchase(
                         purchase_quantity,
                         purchase_unit,
                         base_unit_cost,
-                        purchase_quantity * unit_cost,
+                        item_total,
                         base_quantity,  # quantity_received = full quantity
                         item.get('notes')
                     )
@@ -544,9 +635,9 @@ async def create_direct_purchase(
                         FOR UPDATE
                     """, tenant_id, ingredient_id)
 
-                    previous_stock = 0
+                    previous_stock = _DECIMAL_ZERO
                     if inventory_row:
-                        previous_stock = float(inventory_row['current_stock'] or 0)
+                        previous_stock = _direct_purchase_decimal(inventory_row['current_stock'])
                         new_stock = previous_stock + base_quantity
 
                         await conn.execute("""
@@ -1049,7 +1140,10 @@ async def update_direct_purchase(
 
                 # Store items BEFORE edit for audit trail
                 items_before_list = [dict(row) for row in existing_items]
-                total_before = sum(float(item.get('total_cost') or 0) for item in items_before_list)
+                total_before = sum(
+                    (_direct_purchase_decimal(item.get('total_cost')) for item in items_before_list),
+                    _DECIMAL_ZERO,
+                )
 
                 # ... (rest of the update logic would go here)
                 # Since we are adding a NEW function, I will perform a pure append/insert using read_file context.
@@ -1064,7 +1158,7 @@ async def update_direct_purchase(
                 # 3. Reverse inventory for existing items
                 for old_item in existing_items:
                     ingredient_id = old_item['ingredient_id']
-                    old_quantity = float(old_item['quantity'])
+                    old_quantity = _direct_purchase_decimal(old_item['quantity'])
 
                     # Get current inventory
                     inventory_row = await conn.fetchrow("""
@@ -1075,14 +1169,14 @@ async def update_direct_purchase(
                     """, tenant_id, ingredient_id)
 
                     if inventory_row:
-                        current_stock = float(inventory_row['current_stock'] or 0)
+                        current_stock = _direct_purchase_decimal(inventory_row['current_stock'])
                         new_stock = current_stock - old_quantity
 
                         await conn.execute("""
                             UPDATE tenant_inventory
                             SET current_stock = $1, last_updated = NOW()
                             WHERE tenant_id = $2 AND ingredient_id = $3
-                        """, max(0, new_stock), tenant_id, ingredient_id)
+                        """, max(_DECIMAL_ZERO, new_stock), tenant_id, ingredient_id)
 
                         # Record inventory movement (reversal)
                         await conn.execute("""
@@ -1105,7 +1199,7 @@ async def update_direct_purchase(
                             -old_quantity,
                             old_item['unit'],
                             current_stock,
-                            max(0, new_stock),
+                            max(_DECIMAL_ZERO, new_stock),
                             purchase_id,
                             f"Ajuste por edición de compra directa - {purchase_number}",
                             user_id
@@ -1117,7 +1211,7 @@ async def update_direct_purchase(
                 """, purchase_id)
 
                 # 5. Insert new items and update inventory
-                total_amount = 0
+                total_amount = _DECIMAL_ZERO
                 for item in items:
                     ingredient_id_str = item.get('ingredient_id')
 
@@ -1137,13 +1231,10 @@ async def update_direct_purchase(
                         continue
 
                     base_unit = ingredient['unit']
-                    quantity = float(item.get('quantity', 0))
-                    unit_cost = float(item.get('unit_cost', 0))
                     purchase_unit = item.get('purchase_unit', base_unit)
-                    purchase_quantity = float(item.get('purchase_quantity', quantity))
 
                     # Get conversion factor
-                    conversion_factor = 1.0
+                    conversion_factor = _DECIMAL_ONE
                     if purchase_unit and purchase_unit != base_unit:
                         conversion_row = await conn.fetchrow("""
                             SELECT conversion_factor
@@ -1154,24 +1245,28 @@ async def update_direct_purchase(
                         """, ingredient_id, purchase_unit)
 
                         if conversion_row:
-                            conversion_factor = float(conversion_row['conversion_factor'])
+                            conversion_factor = _direct_purchase_decimal(conversion_row['conversion_factor'])
                         else:
                             # Fallback: catalog unit (lt, kg, galon…) — two-step conversion for und ingredients
-                            catalog_entry = _CATALOG_TO_BASE.get(purchase_unit)
-                            if catalog_entry:
-                                cat_factor = catalog_entry['factor']
-                                cat_base = catalog_entry['base']
-                                w = float(ingredient['unit_weight_gr'] or 0)
-                                ing_weight_unit = ingredient['unit_weight_unit'] or ''
-                                if base_unit == 'und' and cat_base == ing_weight_unit and w > 0:
-                                    conversion_factor = cat_factor / w
-                                elif cat_base == base_unit:
-                                    conversion_factor = float(cat_factor)
+                            catalog_factor = _catalog_direct_purchase_conversion_factor(
+                                purchase_unit,
+                                base_unit,
+                                ingredient,
+                            )
+                            if catalog_factor is not None:
+                                conversion_factor = catalog_factor
 
-                    # Calculate base unit quantity
-                    base_quantity = purchase_quantity * conversion_factor
-                    base_unit_cost = unit_cost / conversion_factor if conversion_factor > 0 else unit_cost
-                    item_total = purchase_quantity * unit_cost
+                    values = _resolve_direct_purchase_item_decimals(
+                        item,
+                        base_unit,
+                        purchase_unit,
+                        conversion_factor,
+                    )
+                    purchase_quantity = values["purchase_quantity"]
+                    conversion_factor = values["conversion_factor"]
+                    base_quantity = values["base_quantity"]
+                    base_unit_cost = values["base_unit_cost"]
+                    item_total = values["item_total"]
                     total_amount += item_total
 
                     # Insert purchase item
@@ -1212,9 +1307,9 @@ async def update_direct_purchase(
                         FOR UPDATE
                     """, tenant_id, ingredient_id)
 
-                    previous_stock = 0
+                    previous_stock = _DECIMAL_ZERO
                     if inventory_row:
-                        previous_stock = float(inventory_row['current_stock'] or 0)
+                        previous_stock = _direct_purchase_decimal(inventory_row['current_stock'])
                         new_stock = previous_stock + base_quantity
 
                         await conn.execute("""
