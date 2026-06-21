@@ -9,7 +9,7 @@ import pytest
 from fastapi import Request
 
 from app.core.middleware import SessionContext
-from app.models.ingredient import IngredientPurchaseUnitCreate
+from app.models.ingredient import IngredientPurchaseUnitCreate, IngredientPurchaseUnitUpdate
 from app.routers.ingredient_purchase_units import router
 from app.services.ingredient_purchase_units_service import (
     create_purchase_unit,
@@ -27,6 +27,27 @@ def _session():
         "expires_at": None,
         "is_active": True,
     })
+
+
+def test_purchase_unit_models_keep_decimal_field_roles():
+    ingredient_id = uuid4()
+
+    data = IngredientPurchaseUnitCreate(
+        ingredient_id=ingredient_id,
+        purchase_unit="paquete",
+        purchase_unit_label="Paquete precision",
+        conversion_factor="1.345678",
+        unit_cost="250.123456",
+    )
+    update = IngredientPurchaseUnitUpdate(
+        conversion_factor="0.333333",
+        unit_cost="6.617100",
+    )
+
+    assert data.conversion_factor == Decimal("1.345678")
+    assert data.unit_cost == Decimal("250.123456")
+    assert update.conversion_factor == Decimal("0.333333")
+    assert update.unit_cost == Decimal("6.617100")
 
 
 @pytest.mark.asyncio
@@ -112,6 +133,29 @@ async def test_resolve_to_base_unit_preserves_six_decimal_conversion():
     )
 
     assert base_qty == Decimal("2.691356")
+    assert base_unit == "gr"
+
+
+@pytest.mark.asyncio
+async def test_resolve_to_base_unit_rounds_to_six_without_float_tail():
+    ingredient_id = uuid4()
+    conn = MagicMock()
+
+    async def _fetchrow(query, *args):
+        if "SELECT unit FROM ingredients" in query:
+            return {"unit": "gr"}
+        return {"conversion_factor": Decimal("0.333333")}
+
+    conn.fetchrow = AsyncMock(side_effect=_fetchrow)
+
+    base_qty, base_unit = await resolve_to_base_unit(
+        conn,
+        ingredient_id,
+        Decimal("3"),
+        "porcion",
+    )
+
+    assert base_qty == Decimal("0.999999")
     assert base_unit == "gr"
 
 
