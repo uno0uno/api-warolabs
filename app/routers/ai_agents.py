@@ -20,7 +20,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai", tags=["ai-agents"])
 
-SALES_SCOPES = ("orders:read", "financial:read")
+SALES_SCOPES = (
+    "orders:read",
+    "financial:read",
+    "analytics:read",
+    "menu:read",
+    "customers:read",
+)
 FOOD_COST_SCOPES = ("analytics:read", "menu:read", "financial:read")
 
 

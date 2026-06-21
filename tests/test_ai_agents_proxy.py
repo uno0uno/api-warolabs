@@ -165,7 +165,9 @@ def test_sales_proxy_streams_frames_and_preserves_request_id():
     assert sent["headers"]["x-waro-profile-id"] == str(PROFILE_ID)
     assert sent["headers"]["x-waro-member-id"] == str(MEMBER_ID)
     assert sent["headers"]["x-waro-request-id"] == "req-preserved"
-    assert sent["headers"]["x-waro-scopes"] == "orders:read,financial:read"
+    assert sent["headers"]["x-waro-scopes"] == (
+        "orders:read,financial:read,analytics:read,menu:read,customers:read"
+    )
     assert sent["headers"]["x-waro-internal-signature"]
     assert FakeAsyncClient.instances[0].closed is True
     assert FakeAsyncClient.response.closed is True
