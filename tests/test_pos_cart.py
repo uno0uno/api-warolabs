@@ -208,6 +208,42 @@ class TestPosWalletTenderContract:
         assert "discount_type" in text
         assert "discount_value" in text
         assert "UUID(_split_first_payment_id)" in text
+        assert "payment_splits=await _order_payment_splits_for_gl(conn, order_id)" in text
+        assert "order_status == 'completed' and (not split_mode or _split_is_complete)" in text
+
+    @pytest.mark.asyncio
+    async def test_order_payment_splits_for_gl_keeps_custom_method_ids(self):
+        order_id = uuid4()
+        digital_method_id = uuid4()
+        card_method_id = uuid4()
+        mock_conn = AsyncMock()
+        mock_conn.fetch = AsyncMock(return_value=[
+            {
+                "amount": 42000,
+                "payment_method": "digital",
+                "payment_method_id": digital_method_id,
+            },
+            {
+                "amount": 3000,
+                "payment_method": "card",
+                "payment_method_id": card_method_id,
+            },
+        ])
+
+        splits = await pos_cart_service._order_payment_splits_for_gl(mock_conn, order_id)
+
+        assert splits == [
+            {
+                "amount": pos_cart_service.Decimal("42000"),
+                "payment_method": "digital",
+                "payment_method_id": digital_method_id,
+            },
+            {
+                "amount": pos_cart_service.Decimal("3000"),
+                "payment_method": "card",
+                "payment_method_id": card_method_id,
+            },
+        ]
 
     @pytest.mark.asyncio
     async def test_split_payment_rejects_amount_above_remaining_before_insert(self):

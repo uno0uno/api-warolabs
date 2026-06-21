@@ -49,6 +49,26 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+async def _order_payment_splits_for_gl(conn, order_id: UUID) -> List[Dict[str, Any]]:
+    rows = await conn.fetch(
+        """
+        SELECT amount, payment_method, payment_method_id
+        FROM order_payments
+        WHERE order_id = $1 AND voided_at IS NULL
+        ORDER BY paid_at ASC, id ASC
+        """,
+        order_id,
+    )
+    return [
+        {
+            "amount": Decimal(str(row["amount"])),
+            "payment_method": row["payment_method"],
+            "payment_method_id": row["payment_method_id"],
+        }
+        for row in rows
+    ]
+
+
 def _distribute_discount(items: List[dict], discount_amount: float) -> List[dict]:
     """
     Distribute a discount proportionally across cart items based on each item's
@@ -1476,6 +1496,32 @@ async def add_order_payment(
                             f"Deferred tip GL failed for POS order {order_id}: {_tip_gl_err}"
                         )
 
+                if is_complete:
+                    try:
+                        order_meta = await conn.fetchrow(
+                            """
+                            SELECT order_number, order_date, total_amount
+                            FROM orders
+                            WHERE id = $1
+                            """,
+                            order_id,
+                        )
+                        tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        await _post_order_gl_entry(
+                            conn=conn,
+                            tenant_id=tenant_id,
+                            order_id=order_id,
+                            order_date=order_meta["order_date"].astimezone(_BOG).date(),
+                            total_amount=Decimal(str(order_meta["total_amount"])),
+                            payment_method=payment_method,
+                            payment_method_id=UUID(payment_method_id) if payment_method_id else None,
+                            tax_config=tax_config,
+                            order_number=int(order_meta["order_number"]) if order_meta else None,
+                            payment_splits=await _order_payment_splits_for_gl(conn, order_id),
+                        )
+                    except Exception as _gl_err:
+                        logger.error(f"Split payment GL failed for POS order {order_id}: {_gl_err}")
+
         # 6. Fire-and-forget side effects OUTSIDE transaction (only on completion)
         if is_complete and award_customer_id:
             try:
@@ -2367,7 +2413,7 @@ async def complete_pos_order(
                 # Tax config — fetched once, used for GL entry and receipt breakdown
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
 
-                if order_status == 'completed':
+                if order_status == 'completed' and (not split_mode or _split_is_complete):
                     # GL journal entry — failure never blocks order completion
                     try:
                         _gl_tip = Decimal("0")
@@ -2387,6 +2433,7 @@ async def complete_pos_order(
                             order_number=int(order_number),
                             tip_amount=_gl_tip,
                             tip_tax_amount=_gl_tip_tax,
+                            payment_splits=await _order_payment_splits_for_gl(conn, order_id) if split_mode else None,
                         )
                     except Exception as e:
                         logger.error(f"GL entry failed for POS order {order_id}: {e}")
