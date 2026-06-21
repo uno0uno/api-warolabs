@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from uuid import UUID
 from datetime import datetime
+from decimal import Decimal
 
 class IngredientBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, description="Name of the ingredient")
@@ -108,8 +109,8 @@ class IngredientPurchaseUnitBase(BaseModel):
     ingredient_id: UUID = Field(..., description="ID of the ingredient")
     purchase_unit: str = Field(..., min_length=1, max_length=50, description="Purchase unit type (paquete, caja, docena, bulto)")
     purchase_unit_label: str = Field(..., min_length=1, max_length=100, description="Display label (e.g., 'Paquete x18', 'Caja x144')")
-    conversion_factor: float = Field(..., gt=0, description="Number of base units in 1 purchase unit")
-    unit_cost: Optional[float] = Field(None, ge=0, description="Cost per purchase unit")
+    conversion_factor: Decimal = Field(..., gt=0, description="Number of base units in 1 purchase unit")
+    unit_cost: Optional[Decimal] = Field(None, ge=0, description="Cost per purchase unit")
     is_default: bool = Field(default=False, description="Default purchase unit for this ingredient")
     is_active: bool = Field(default=True, description="Whether this purchase unit is active")
     notes: Optional[str] = Field(None, description="Additional notes")
@@ -124,8 +125,8 @@ class IngredientPurchaseUnitUpdate(BaseModel):
     """Update ingredient purchase unit"""
     purchase_unit: Optional[str] = Field(None, min_length=1, max_length=50)
     purchase_unit_label: Optional[str] = Field(None, min_length=1, max_length=100)
-    conversion_factor: Optional[float] = Field(None, gt=0)
-    unit_cost: Optional[float] = Field(None, ge=0)
+    conversion_factor: Optional[Decimal] = Field(None, gt=0)
+    unit_cost: Optional[Decimal] = Field(None, ge=0)
     is_default: Optional[bool] = None
     is_active: Optional[bool] = None
     notes: Optional[str] = None

@@ -9,6 +9,7 @@ Endpoints tested:
 import pytest
 from httpx import AsyncClient
 from uuid import uuid4
+from decimal import Decimal
 
 
 class TestProductsListEndpoint:
@@ -263,6 +264,7 @@ class TestProductCreateModel:
             tenant_id=uuid4(),
         )
         assert len(product.ingredients) == 1
+        assert product.ingredients[0].quantity == Decimal("100")
 
     def test_create_with_only_recipe_bases_succeeds(self):
         """ProductCreate accepts only recipe bases (no direct ingredients) — pre-existing behavior preserved."""
