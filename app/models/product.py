@@ -34,7 +34,7 @@ class ModifierGroup(BaseModel):
 class RecipeIngredientBase(BaseModel):
     """Ingredient in a product recipe"""
     ingredient_id: UUID = Field(..., description="ID of the ingredient")
-    quantity: float = Field(..., gt=0, description="Quantity of ingredient needed")
+    quantity: Decimal = Field(..., gt=0, description="Quantity of ingredient needed")
     unit: str = Field(..., min_length=1, max_length=50, description="Unit of measure (g, ml, kg, l, u)")
 
 class RecipeBaseLink(BaseModel):

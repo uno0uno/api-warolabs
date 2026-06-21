@@ -470,13 +470,13 @@ class DirectPurchaseCreate(BaseModel):
     payment_terms: Optional[str] = None
     notes: Optional[str] = None
     invoice_number: Optional[str] = None
-    invoice_amount: Optional[float] = None
+    invoice_amount: Optional[Decimal] = None
     purchase_date: Optional[str] = None
     invoice_date: Optional[str] = None
     payment_method: Optional[str] = None
     payment_method_id: Optional[str] = None
     payment_reference: Optional[str] = None
-    payment_amount: Optional[float] = None
+    payment_amount: Optional[Decimal] = None
     payment_date: Optional[str] = None
 
     class Config:
@@ -491,7 +491,7 @@ class DirectPurchaseUpdate(BaseModel):
     payment_method: Optional[str] = None
     payment_method_id: Optional[str] = None
     payment_reference: Optional[str] = None
-    payment_amount: Optional[float] = None
+    payment_amount: Optional[Decimal] = None
     payment_date: Optional[str] = None
 
     class Config:

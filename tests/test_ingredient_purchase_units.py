@@ -1,6 +1,7 @@
 """Ingredient purchase-unit creation edge cases."""
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -10,7 +11,11 @@ from fastapi import Request
 from app.core.middleware import SessionContext
 from app.models.ingredient import IngredientPurchaseUnitCreate
 from app.routers.ingredient_purchase_units import router
-from app.services.ingredient_purchase_units_service import create_purchase_unit
+from app.services.ingredient_purchase_units_service import (
+    create_purchase_unit,
+    resolve_recipe_quantity_to_base_unit,
+    resolve_to_base_unit,
+)
 
 
 def _session():
@@ -85,3 +90,42 @@ def test_purchase_unit_router_accepts_trailing_slash_post():
 
     assert slash_routes
     assert slash_routes[0].include_in_schema is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_to_base_unit_preserves_six_decimal_conversion():
+    ingredient_id = uuid4()
+    conn = MagicMock()
+
+    async def _fetchrow(query, *args):
+        if "SELECT unit FROM ingredients" in query:
+            return {"unit": "gr"}
+        return {"conversion_factor": Decimal("1.345678")}
+
+    conn.fetchrow = AsyncMock(side_effect=_fetchrow)
+
+    base_qty, base_unit = await resolve_to_base_unit(
+        conn,
+        ingredient_id,
+        Decimal("2.000000"),
+        "paquete",
+    )
+
+    assert base_qty == Decimal("2.691356")
+    assert base_unit == "gr"
+
+
+@pytest.mark.asyncio
+async def test_resolve_recipe_quantity_to_base_unit_preserves_fractional_units():
+    ingredient_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"unit": "und", "unit_weight_gr": Decimal("1.345")})
+
+    converted = await resolve_recipe_quantity_to_base_unit(
+        conn,
+        ingredient_id,
+        Decimal("8900"),
+        "gr",
+    )
+
+    assert converted == 6617.100372

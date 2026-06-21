@@ -15,7 +15,14 @@ logger = logging.getLogger(__name__)
 
 _QUANTITY_JSON_SCALE = Decimal("0.000001")
 _MONEY_JSON_SCALE = Decimal("0.0001")
+_TECHNICAL_COST_JSON_SCALE = Decimal("0.000001")
 _PERCENT_JSON_SCALE = Decimal("0.01")
+
+
+def _decimal_value(value: Any, default: Decimal = Decimal("0")) -> Decimal:
+    if value is None:
+        return default
+    return Decimal(str(value))
 
 
 def _json_decimal(value: Any, scale: Decimal, default: Optional[float] = None) -> Optional[float]:
@@ -493,14 +500,14 @@ async def get_stock_by_ingredient(
                 "ingredient_name": stock_data['ingredient_name'],
                 "unit": stock_data['unit'],
                 "category": stock_data['category'],
-                "current_stock": float(stock_data['current_stock']) if stock_data['current_stock'] else 0,
-                "minimum_stock": float(stock_data['minimum_stock']) if stock_data['minimum_stock'] else 0,
-                "maximum_stock": float(stock_data['maximum_stock']) if stock_data['maximum_stock'] else None,
+                "current_stock": _json_decimal(stock_data['current_stock'], _QUANTITY_JSON_SCALE, 0),
+                "minimum_stock": _json_decimal(stock_data['minimum_stock'], _QUANTITY_JSON_SCALE, 0),
+                "maximum_stock": _json_decimal(stock_data['maximum_stock'], _QUANTITY_JSON_SCALE),
                 "last_updated": stock_data['last_updated'].isoformat() if stock_data['last_updated'] else None,
                 "location": stock_data['location'],
                 "lote_actual": stock_data['lote_actual'],
                 "fecha_vencimiento": stock_data['fecha_vencimiento'].isoformat() if stock_data['fecha_vencimiento'] else None,
-                "unit_cost": float(stock_data['unit_cost']) if stock_data['unit_cost'] else None
+                "unit_cost": _json_decimal(stock_data['unit_cost'], _TECHNICAL_COST_JSON_SCALE)
             }
 
     except AuthenticationError:
@@ -539,7 +546,7 @@ async def create_adjustment(
         # Get request body
         body = await request.json()
         ingredient_id = UUID(body.get('ingredient_id'))
-        quantity_change = float(body.get('quantity_change'))
+        quantity_change = _decimal_value(body.get('quantity_change'))
         reason = body.get('reason', 'Manual adjustment')
         source = body.get('source', 'manual_adjustment')
         # New fields for enhanced adjustments
@@ -566,7 +573,7 @@ async def create_adjustment(
                 base_unit = ingredient_row['unit']
 
                 # If a purchase unit is provided, get conversion factor
-                conversion_factor = 1.0
+                conversion_factor = Decimal("1")
                 unit_for_movement = base_unit
 
                 if purchase_unit and purchase_unit != base_unit:
@@ -578,7 +585,7 @@ async def create_adjustment(
                     conversion_row = await conn.fetchrow(conversion_query, ingredient_id, purchase_unit)
 
                     if conversion_row:
-                        conversion_factor = float(conversion_row['conversion_factor'])
+                        conversion_factor = _decimal_value(conversion_row['conversion_factor'])
                         unit_for_movement = conversion_row['purchase_unit']
                     else:
                         # If no conversion found, use base unit
@@ -586,7 +593,7 @@ async def create_adjustment(
                         unit_for_movement = base_unit
 
                 # Convert quantity to base unit
-                quantity_in_base_unit = quantity_change * conversion_factor
+                quantity_in_base_unit = (quantity_change * conversion_factor).quantize(_QUANTITY_JSON_SCALE)
 
                 # Get current stock
                 stock_query = """
@@ -604,9 +611,9 @@ async def create_adjustment(
                         VALUES ($1, $2, 0, 0)
                     """
                     await conn.execute(insert_query, tenant_id, ingredient_id)
-                    previous_stock = 0
+                    previous_stock = Decimal("0")
                 else:
-                    previous_stock = float(stock_row['current_stock']) if stock_row['current_stock'] else 0
+                    previous_stock = _decimal_value(stock_row['current_stock'])
 
                 # Idempotent: "set to current stock" (e.g. confirm 0 when already 0).
                 if quantity_change == 0:
@@ -616,15 +623,15 @@ async def create_adjustment(
                         "data": {
                             "ingredient_id": str(ingredient_id),
                             "quantity_change": 0,
-                            "previous_stock": previous_stock,
-                            "new_stock": previous_stock,
+                            "previous_stock": _json_decimal(previous_stock, _QUANTITY_JSON_SCALE, 0),
+                            "new_stock": _json_decimal(previous_stock, _QUANTITY_JSON_SCALE, 0),
                             "reason": reason,
                             "created_at": None,
                         },
                     }
 
                 # Calculate new stock (using converted quantity)
-                new_stock = max(0, previous_stock + quantity_in_base_unit)
+                new_stock = max(Decimal("0"), previous_stock + quantity_in_base_unit).quantize(_QUANTITY_JSON_SCALE)
 
                 # Update stock
                 update_query = """
@@ -639,7 +646,12 @@ async def create_adjustment(
                 if cost_per_unit:
                     # If cost is provided with a purchase unit, convert it to base unit cost
                     # Example: $30,000 per kg → $30 per gr (30000 / 1000)
-                    cost_in_base_unit = float(cost_per_unit) / conversion_factor if conversion_factor > 0 else float(cost_per_unit)
+                    cost_decimal = _decimal_value(cost_per_unit)
+                    cost_in_base_unit = (
+                        cost_decimal / conversion_factor
+                        if conversion_factor > 0
+                        else cost_decimal
+                    ).quantize(_TECHNICAL_COST_JSON_SCALE)
 
                 # Create movement record with optional cost
                 movement_query = """
@@ -686,9 +698,9 @@ async def create_adjustment(
                     "data": {
                         "id": str(movement_row['id']),
                         "ingredient_id": str(ingredient_id),
-                        "quantity_change": quantity_change,
-                        "previous_stock": previous_stock,
-                        "new_stock": new_stock,
+                        "quantity_change": _json_decimal(quantity_in_base_unit, _QUANTITY_JSON_SCALE, 0),
+                        "previous_stock": _json_decimal(previous_stock, _QUANTITY_JSON_SCALE, 0),
+                        "new_stock": _json_decimal(new_stock, _QUANTITY_JSON_SCALE, 0),
                         "reason": reason,
                         "created_at": movement_row['created_at'].isoformat()
                     }

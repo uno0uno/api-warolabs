@@ -1,4 +1,5 @@
-from typing import List, Optional
+from decimal import Decimal
+from typing import Any, List, Optional
 from uuid import UUID
 from fastapi import Request, Response, HTTPException
 from app.database import get_db_connection
@@ -27,12 +28,26 @@ from app.models.ingredient import (
 )
 
 logger = logging.getLogger(__name__)
+_QUANTITY_SCALE = Decimal("0.000001")
+
+
+def _decimal_value(value: Any, default: Decimal = Decimal("0")) -> Decimal:
+    if value is None:
+        return default
+    return Decimal(str(value))
+
+
+def _quantity_decimal(value: Any) -> Decimal:
+    quantized = _decimal_value(value).quantize(_QUANTITY_SCALE)
+    if quantized == 0:
+        return Decimal("0")
+    return quantized
 
 
 async def resolve_to_base_unit(
     conn,
     ingredient_id: UUID,
-    quantity: float,
+    quantity: Any,
     unit: str
 ) -> tuple:
     """
@@ -42,19 +57,20 @@ async def resolve_to_base_unit(
     - If a matching entry exists in ingredient_purchase_units → applies conversion_factor.
     - If no conversion found → logs a warning and returns original values unchanged.
 
-    Returns: (base_quantity: float, base_unit: str)
+    Returns: (base_quantity: Decimal, base_unit: str)
     """
+    quantity_decimal = _quantity_decimal(quantity)
     ing_row = await conn.fetchrow(
         "SELECT unit FROM ingredients WHERE id = $1",
         ingredient_id
     )
     if not ing_row:
-        return float(quantity), unit
+        return quantity_decimal, unit
 
     base_unit = ing_row['unit']
 
     if unit == base_unit:
-        return float(quantity), base_unit
+        return quantity_decimal, base_unit
 
     conv_row = await conn.fetchrow(
         """
@@ -71,10 +87,11 @@ async def resolve_to_base_unit(
     )
 
     if conv_row and conv_row['conversion_factor']:
-        base_quantity = float(quantity) * float(conv_row['conversion_factor'])
+        conversion_factor = _decimal_value(conv_row['conversion_factor'])
+        base_quantity = _quantity_decimal(quantity_decimal * conversion_factor)
         logger.info(
             f"Unit conversion: {quantity} {unit} → {base_quantity} {base_unit} "
-            f"(factor={conv_row['conversion_factor']}, ingredient={ingredient_id})"
+            f"(factor={conversion_factor}, ingredient={ingredient_id})"
         )
         return base_quantity, base_unit
 
@@ -82,13 +99,13 @@ async def resolve_to_base_unit(
         f"No conversion found for unit '{unit}' on ingredient {ingredient_id} "
         f"(base_unit='{base_unit}'). Saving without conversion."
     )
-    return float(quantity), unit
+    return quantity_decimal, unit
 
 
 async def resolve_recipe_quantity_to_base_unit(
     conn,
     ingredient_id: UUID,
-    recipe_qty: float,
+    recipe_qty: Any,
     recipe_unit: str,
 ) -> float:
     """
@@ -104,46 +121,47 @@ async def resolve_recipe_quantity_to_base_unit(
         "SELECT unit, unit_weight_gr FROM ingredients WHERE id = $1",
         ingredient_id
     )
+    recipe_quantity = _quantity_decimal(recipe_qty)
     if not row:
-        return recipe_qty
+        return float(recipe_quantity)
     base_unit = row["unit"]
     if recipe_unit == base_unit:
-        return recipe_qty
+        return float(recipe_quantity)
     weight = row["unit_weight_gr"]
-    if weight and float(weight) > 0:
-        w = float(weight)
+    if weight and _decimal_value(weight) > 0:
+        w = _decimal_value(weight)
         if recipe_unit in ("gr", "ml") and base_unit == "und":
-            converted = recipe_qty / w
+            converted = _quantity_decimal(recipe_quantity / w)
             logger.info(
-                f"Recipe unit conversion: {recipe_qty} {recipe_unit} → {converted:.4f} und "
+                f"Recipe unit conversion: {recipe_qty} {recipe_unit} → {converted} und "
                 f"(unit_weight_gr={weight}, ingredient={ingredient_id})"
             )
-            return converted
+            return float(converted)
         if recipe_unit == "und" and base_unit in ("gr", "ml"):
-            converted = recipe_qty * w
+            converted = _quantity_decimal(recipe_quantity * w)
             logger.info(
-                f"Recipe unit conversion: {recipe_qty} und → {converted:.4f} {base_unit} "
+                f"Recipe unit conversion: {recipe_qty} und → {converted} {base_unit} "
                 f"(unit_weight_gr={weight}, ingredient={ingredient_id})"
             )
-            return converted
+            return float(converted)
         # Two-step: catalog unit (lt, kg, botella…) → gr/ml → und
         # e.g. 2 lt on a und ingredient with unit_weight_gr=750 ml/und
         #      → 2 * 1000 ml = 2000 ml → 2000 / 750 = 2.667 und
         catalog_entry = _CATALOG_TO_BASE.get(recipe_unit)
         if catalog_entry and base_unit == "und" and catalog_entry["base"] in ("gr", "ml"):
-            qty_base = recipe_qty * catalog_entry["factor"]
-            converted = qty_base / w
+            qty_base = recipe_quantity * Decimal(str(catalog_entry["factor"]))
+            converted = _quantity_decimal(qty_base / w)
             logger.info(
                 f"Recipe unit conversion (2-step): {recipe_qty} {recipe_unit} "
-                f"→ {qty_base} {catalog_entry['base']} → {converted:.4f} und "
+                f"→ {qty_base} {catalog_entry['base']} → {converted} und "
                 f"(catalog_factor={catalog_entry['factor']}, unit_weight_gr={weight}, ingredient={ingredient_id})"
             )
-            return converted
+            return float(converted)
     logger.warning(
         f"No recipe unit conversion for '{recipe_unit}' → '{base_unit}' on ingredient {ingredient_id}. "
         f"Returning recipe_qty unchanged."
     )
-    return recipe_qty
+    return float(recipe_quantity)
 
 
 async def get_purchase_units_by_ingredient(
@@ -169,8 +187,8 @@ async def get_purchase_units_by_ingredient(
                     ipu.ingredient_id,
                     ipu.purchase_unit,
                     ipu.purchase_unit_label,
-                    CAST(ipu.conversion_factor AS float) as conversion_factor,
-                    CAST(ipu.unit_cost AS float) as unit_cost,
+                    ipu.conversion_factor,
+                    ipu.unit_cost,
                     ipu.is_default,
                     ipu.is_active,
                     ipu.notes,
@@ -229,8 +247,8 @@ async def get_purchase_unit_by_id(
                     ipu.ingredient_id,
                     ipu.purchase_unit,
                     ipu.purchase_unit_label,
-                    CAST(ipu.conversion_factor AS float) as conversion_factor,
-                    CAST(ipu.unit_cost AS float) as unit_cost,
+                    ipu.conversion_factor,
+                    ipu.unit_cost,
                     ipu.is_default,
                     ipu.is_active,
                     ipu.notes,
@@ -318,8 +336,8 @@ async def create_purchase_unit(
                     ingredient_id,
                     purchase_unit,
                     purchase_unit_label,
-                    CAST(conversion_factor AS float) as conversion_factor,
-                    CAST(unit_cost AS float) as unit_cost,
+                    conversion_factor,
+                    unit_cost,
                     is_default,
                     is_active,
                     notes,
@@ -502,8 +520,8 @@ async def get_all_purchase_units(
                     ipu.ingredient_id,
                     ipu.purchase_unit,
                     ipu.purchase_unit_label,
-                    CAST(ipu.conversion_factor AS float) as conversion_factor,
-                    CAST(ipu.unit_cost AS float) as unit_cost,
+                    ipu.conversion_factor,
+                    ipu.unit_cost,
                     ipu.is_default,
                     ipu.is_active,
                     ipu.notes,
