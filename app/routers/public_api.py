@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 from app.core.permissions import Module, require_module
-from app.services import public_api_service, public_restaurant_service
+from app.services import public_api_service, public_restaurant_service, queries_service
 
 router = APIRouter(prefix="/v1", tags=["Public API"])
 
@@ -110,6 +110,23 @@ class CustomerOrdersRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=100, description="Number of orders to return (1-100)")
     offset: int = Field(default=0, ge=0, description="Number of orders to skip")
     includeItems: bool = Field(default=False, description="Include line items per order")
+
+
+class QueryOrderByRequest(BaseModel):
+    """Order rule for QuerySpec execution"""
+    field: str = Field(description="Allowlisted field name")
+    direction: str = Field(default="desc", description="Sort direction: asc | desc")
+
+
+class QuerySpecRequest(BaseModel):
+    """Safe analytical QuerySpec; never accepts SQL"""
+    dataset: str = Field(description="Dataset name: sales_items | customers | product_profitability")
+    measures: List[str] = Field(default_factory=list, description="Allowlisted measure names")
+    dimensions: List[str] = Field(default_factory=list, description="Allowlisted dimension names")
+    filters: Dict[str, Any] = Field(default_factory=dict, description="Allowlisted filters")
+    order_by: Optional[List[QueryOrderByRequest]] = Field(default=None, description="Allowlisted ordering")
+    limit: Optional[int] = Field(default=None, description="Required row limit")
+    timezone: str = Field(default="America/Bogota", description="Timezone for date filters")
 
 
 @router.get("/restaurant", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
@@ -388,6 +405,27 @@ async def get_customers_metrics(request: Request, body: CustomerMetricsRequest):
         compare_from=body.compareFrom,
         compare_date_to=body.compareDateTo,
     )
+
+
+@router.get("/queries/schema", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
+async def get_queries_schema(request: Request):
+    """
+    Retorna el schema seguro disponible para QuerySpec.
+
+    **Scope requerido:** `read`
+    """
+    public_api_service.validate_api_key_auth(request, "read")
+    return queries_service.get_queries_schema()
+
+
+@router.post("/queries/run", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
+async def run_queryspec(request: Request, body: QuerySpecRequest):
+    """
+    Ejecuta un QuerySpec analitico validado contra allowlists.
+
+    No acepta SQL libre. El tenant se infiere del API key.
+    """
+    return await queries_service.run_queryspec(request, body.dict())
 
 
 
