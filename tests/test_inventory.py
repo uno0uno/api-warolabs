@@ -21,10 +21,12 @@ from app.services.inventory_service import (
 def test_inventory_json_decimal_strips_float_residue():
     assert _json_decimal(0.1 + 0.2 - 0.3, _QUANTITY_JSON_SCALE, 0) == 0.0
     assert _json_decimal("1.3450000000001", _QUANTITY_JSON_SCALE, 0) == 1.345
+    assert _json_decimal("0.3333334", _QUANTITY_JSON_SCALE, 0) == 0.333333
 
 
 def test_inventory_json_decimal_preserves_technical_unit_cost_precision():
     assert _json_decimal("6.617100371747212", _TECHNICAL_COST_JSON_SCALE, 0) == 6.6171
+    assert _json_decimal("250.1234564", _TECHNICAL_COST_JSON_SCALE, 0) == 250.123456
 
 
 class TestInventoryStockEndpoint:

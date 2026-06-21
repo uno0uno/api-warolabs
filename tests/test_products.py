@@ -266,6 +266,32 @@ class TestProductCreateModel:
         assert len(product.ingredients) == 1
         assert product.ingredients[0].quantity == Decimal("100")
 
+    def test_recipe_quantities_preserve_six_decimal_precision(self):
+        from app.models.product import ProductCreate, RecipeBaseLink, RecipeIngredientBase
+
+        product = ProductCreate(
+            name="Salsa precision",
+            price=12000,
+            category_id=uuid4(),
+            ingredients=[
+                RecipeIngredientBase(
+                    ingredient_id=uuid4(),
+                    quantity="0.333333",
+                    unit="kg",
+                )
+            ],
+            recipe_bases=[
+                RecipeBaseLink(
+                    recipe_base_id=uuid4(),
+                    quantity="1.345678",
+                )
+            ],
+            tenant_id=uuid4(),
+        )
+
+        assert product.ingredients[0].quantity == Decimal("0.333333")
+        assert product.recipe_bases[0].quantity == Decimal("1.345678")
+
     def test_create_with_only_recipe_bases_succeeds(self):
         """ProductCreate accepts only recipe bases (no direct ingredients) — pre-existing behavior preserved."""
         from app.models.product import ProductCreate
