@@ -35,7 +35,8 @@ _PRODUCT_COSTS_CTE = """
             END AS effective_cost,
             CASE
                 WHEN p.costo_percibido IS NOT NULL AND p.costo_percibido > 0 THEN 'operativo'
-                ELSE 'real'
+                WHEN COALESCE(p.costo_calculado, 0) > 0 THEN 'real'
+                ELSE 'estimado_40pct_precio'
             END AS cost_used_for_classification
         FROM product p
         WHERE p.tenant_id = $1

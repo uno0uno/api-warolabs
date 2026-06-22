@@ -123,6 +123,31 @@ def test_compile_product_profitability_uses_product_costs_cte():
     assert "JOIN product_costs pc" in compiled["sql"]
 
 
+def test_compile_product_profitability_accepts_cost_source_dimension():
+    compiled = queries_service.compile_queryspec(
+        {
+            "dataset": "product_profitability",
+            "measures": ["quantity_sold", "profit_margin_pct", "profit_margin_real_pct", "revenue"],
+            "dimensions": ["product", "cost_source"],
+            "filters": {},
+            "order_by": [{"field": "quantity_sold", "direction": "desc"}],
+            "limit": 20,
+        }
+    )
+
+    assert [column["name"] for column in compiled["columns"]] == [
+        "product",
+        "cost_source",
+        "quantity_sold",
+        "profit_margin_pct",
+        "profit_margin_real_pct",
+        "revenue",
+    ]
+    assert compiled["columns"][1]["role"] == "dimension"
+    assert "pc.cost_used_for_classification AS cost_source" in compiled["sql"]
+    assert "pc.cost_used_for_classification" in compiled["sql"]
+
+
 @pytest.mark.asyncio
 async def test_run_queryspec_passes_tenant_and_returns_normalized_rows():
     fake_row = {

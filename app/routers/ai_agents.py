@@ -26,6 +26,7 @@ SALES_SCOPES = (
     "analytics:read",
     "menu:read",
     "customers:read",
+    "dataset_scope",
 )
 FOOD_COST_SCOPES = ("analytics:read", "menu:read", "financial:read")
 
