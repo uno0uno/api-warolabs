@@ -815,9 +815,9 @@ async def checkout_cart(
                 for item in items:
                     order_item_query = """
                         INSERT INTO order_items (
-                            order_id, product_id, quantity, price_at_purchase, subtotal
+                            order_id, product_id, quantity, price_at_purchase, subtotal, notes
                         )
-                        VALUES ($1, $2, $3, $4, $5)
+                        VALUES ($1, $2, $3, $4, $5, $6)
                         RETURNING id
                     """
                     order_item_row = await conn.fetchrow(
@@ -826,7 +826,8 @@ async def checkout_cart(
                         item['product_id'],
                         item['quantity'],
                         Decimal(str(item['unit_price'])),
-                        Decimal(str(item['subtotal']))
+                        Decimal(str(item['subtotal'])),
+                        (item.get('notes') or '').strip() or None,
                     )
                     order_item_id = order_item_row['id']
 

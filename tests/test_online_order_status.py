@@ -20,10 +20,13 @@ import pytest
 from httpx import AsyncClient
 from uuid import uuid4
 from datetime import datetime, timedelta
+from decimal import Decimal
+from contextlib import asynccontextmanager
 from unittest.mock import patch, AsyncMock
 
 from app.database import DatabasePool
 from app.core.middleware import SessionContext
+from app.services import online_cart_service, online_orders_service
 
 TENANT_ID = "93b3e582-34fa-44a6-8d0f-bf82a3608727"
 # A real pending order UUID in the test DB — used for happy-path and invalid transition tests
@@ -41,7 +44,13 @@ VALID_SESSION_DATA = {
 
 @pytest.fixture(autouse=True)
 async def reset_db_pool():
-    """Reset the asyncpg pool after each test (event-loop isolation)."""
+    """Reset the asyncpg pool before and after each test (event-loop isolation)."""
+    if DatabasePool._pool is not None:
+        try:
+            await DatabasePool._pool.close()
+        except Exception:
+            pass
+        DatabasePool._pool = None
     yield
     if DatabasePool._pool is not None:
         try:
@@ -100,6 +109,81 @@ class TestUpdateOrderStatusValidation:
             json={"new_status": "confirmed"},
         )
         assert response.status_code == 422
+
+
+class TestOnlineOrderItemNotesContract:
+    """Regression coverage for preserving item-level notes from checkout to despacho."""
+
+    def test_checkout_order_item_insert_includes_notes(self):
+        """checkout_cart must copy online_cart_items.notes into order_items.notes."""
+        import inspect
+
+        source = inspect.getsource(online_cart_service.checkout_cart)
+        assert "price_at_purchase, subtotal, notes" in source
+        assert "(item.get('notes') or '').strip() or None" in source
+
+    @pytest.mark.asyncio
+    async def test_detail_payload_includes_item_notes_with_modifiers(self):
+        order_id = uuid4()
+        item_id = uuid4()
+        now = datetime.now()
+
+        class FakeConn:
+            async def fetchrow(self, query, *args):
+                return {
+                    "id": order_id,
+                    "order_number": 15408,
+                    "order_date": now,
+                    "scheduled_time": None,
+                    "total_amount": Decimal("18000.00"),
+                    "status": "pending",
+                    "payment_method": None,
+                    "order_type": "delivery",
+                    "delivery_instructions": None,
+                    "verified_email": "cliente@example.com",
+                    "address_line1": "Calle 1",
+                    "address_line2": None,
+                    "city": "Bogota",
+                    "delivery_notes": None,
+                    "address_label": "home",
+                }
+
+            async def fetch(self, query, *args):
+                if "FROM order_items" in query:
+                    return [{
+                        "id": item_id,
+                        "quantity": Decimal("1"),
+                        "price_at_purchase": Decimal("18000.00"),
+                        "subtotal": Decimal("18000.00"),
+                        "notes": "Sin cebolla",
+                        "product_name": "Hamburguesa",
+                    }]
+                return [{
+                    "order_item_id": item_id,
+                    "modifier_name": "Queso",
+                    "price_at_purchase": Decimal("0.00"),
+                    "quantity": Decimal("1"),
+                }]
+
+        @asynccontextmanager
+        async def fake_get_db_connection(*args, **kwargs):
+            yield FakeConn()
+
+        with patch(
+            "app.services.online_orders_service.require_valid_session",
+            return_value=_mock_session_context(),
+        ), patch(
+            "app.services.online_orders_service.get_db_connection",
+            fake_get_db_connection,
+        ):
+            result = await online_orders_service.get_online_order_by_id(
+                request=object(),
+                order_id=order_id,
+            )
+
+        item = result["data"]["items"][0]
+        assert item["notes"] == "Sin cebolla"
+        assert item["modifiers"][0]["name"] == "Queso"
 
 
 class TestUpdateOrderStatusNotFound:
