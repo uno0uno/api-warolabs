@@ -18,9 +18,9 @@ from app.models.supplier import (
 
 logger = logging.getLogger(__name__)
 
-async def get_suppliers_list(
-    request: Request,
-    response: Response,
+async def _get_suppliers_for_tenant(
+    tenant_id: str,
+    *,
     page: int = 1,
     limit: int = 50,
     search: Optional[str] = None,
@@ -32,9 +32,6 @@ async def get_suppliers_list(
     Get suppliers list with tenant isolation following database governance
     """
     try:
-        session_context = require_valid_session(request)
-        tenant_id = session_context.tenant_id
-
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
@@ -171,6 +168,32 @@ async def get_suppliers_list(
     except Exception as e:
         logger.error(f"❌ Error fetching suppliers: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+async def get_suppliers_list(
+    request: Request,
+    response: Response,
+    page: int = 1,
+    limit: int = 50,
+    search: Optional[str] = None,
+    search_field: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    payment_terms: Optional[str] = None
+) -> SuppliersListResponse:
+    """
+    Get suppliers list for the current session tenant.
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    return await _get_suppliers_for_tenant(
+        tenant_id,
+        page=page,
+        limit=limit,
+        search=search,
+        search_field=search_field,
+        is_active=is_active,
+        payment_terms=payment_terms
+    )
 
 async def get_supplier_by_id(
     request: Request,

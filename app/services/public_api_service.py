@@ -2,9 +2,10 @@
 Public API Service
 Handles data access for external integrations via API tokens
 """
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 from fastapi import Request
+from fastapi.encoders import jsonable_encoder
 from app.database import get_db_connection
 from app.core.middleware import get_api_key_context
 from app.core.exceptions import AuthenticationError, AuthorizationError, APIError
@@ -49,6 +50,28 @@ def validate_api_key_auth(request: Request, required_scope: str) -> tuple[str, s
         raise AuthorizationError(f"API key no tiene el permiso requerido: {required_scope}")
 
     return api_key_context.tenant_id, api_key_context.token_id
+
+
+def _with_procurement_metadata(
+    result: Any,
+    *,
+    resource: str,
+    required_scope: str,
+    filters: Dict[str, Any],
+    limitations: List[str],
+) -> Dict[str, Any]:
+    payload = jsonable_encoder(result)
+    if not isinstance(payload, dict):
+        payload = {"success": True, "data": payload}
+
+    payload["metadata"] = {
+        **payload.get("metadata", {}),
+        "resource": resource,
+        "required_scope": required_scope,
+        "filters": {key: value for key, value in filters.items() if value is not None},
+        "limitations": limitations,
+    }
+    return payload
 
 
 async def get_sales_list(
@@ -2189,6 +2212,187 @@ async def _customer_metrics_by_month(conn, where_clause, params, param_count, ti
         }
         for row in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Procurement endpoints (read-only, API-key auth)
+# ---------------------------------------------------------------------------
+
+async def get_procurement_inventory_stock(
+    request: Request,
+    *,
+    limit: int = 250,
+    offset: int = 0,
+    search: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    category: Optional[str] = None,
+    unit: Optional[str] = None,
+    sort_field: str = "current_stock",
+    sort_direction: str = "desc",
+) -> dict:
+    """Public API: current inventory stock (inventory:read)."""
+    from app.services.inventory_service import _get_inventory_stock_for_tenant
+
+    tenant_id, _ = validate_api_key_auth(request, "inventory:read")
+    result = await _get_inventory_stock_for_tenant(
+        tenant_id,
+        limit=limit,
+        offset=offset,
+        search=search,
+        status_filter=status_filter,
+        category=category,
+        unit=unit,
+        sort_field=sort_field,
+        sort_direction=sort_direction,
+    )
+    return _with_procurement_metadata(
+        result,
+        resource="inventory_stock",
+        required_scope="inventory:read",
+        filters={
+            "limit": limit,
+            "offset": offset,
+            "search": search,
+            "status_filter": status_filter,
+            "category": category,
+            "unit": unit,
+            "sort_field": sort_field,
+            "sort_direction": sort_direction,
+        },
+        limitations=[
+            "Operational stock listing only; use /v1/queries/run inventory_stock for flexible aggregations.",
+            "Read-only; does not reserve, adjust, or purchase inventory.",
+        ],
+    )
+
+
+async def get_procurement_inventory_movements(
+    request: Request,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    ingredient_id: Optional[UUID] = None,
+    movement_type: Optional[str] = None,
+    quantity_direction: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> dict:
+    """Public API: inventory movement history (inventory:read)."""
+    from app.services.inventory_service import _get_inventory_movements_for_tenant
+
+    tenant_id, _ = validate_api_key_auth(request, "inventory:read")
+    result = await _get_inventory_movements_for_tenant(
+        tenant_id,
+        limit=limit,
+        offset=offset,
+        ingredient_id=ingredient_id,
+        movement_type=movement_type,
+        quantity_direction=quantity_direction,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return _with_procurement_metadata(
+        result,
+        resource="inventory_movements",
+        required_scope="inventory:read",
+        filters={
+            "limit": limit,
+            "offset": offset,
+            "ingredient_id": str(ingredient_id) if ingredient_id else None,
+            "movement_type": movement_type,
+            "quantity_direction": quantity_direction,
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        limitations=[
+            "Operational movement listing only; use /v1/queries/run inventory_movements for aggregations.",
+            "Read-only; movement adjustments are not available through public API keys.",
+        ],
+    )
+
+
+async def get_procurement_direct_purchases(
+    request: Request,
+    *,
+    page: int = 1,
+    limit: int = 50,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    supplier_id: Optional[UUID] = None,
+    date_filter: Optional[str] = None,
+) -> dict:
+    """Public API: direct purchases listing (purchases:read)."""
+    from app.services.direct_purchase_service import _get_direct_purchases_for_tenant
+
+    tenant_id, _ = validate_api_key_auth(request, "purchases:read")
+    result = await _get_direct_purchases_for_tenant(
+        tenant_id,
+        page=page,
+        limit=limit,
+        search=search,
+        status=status,
+        supplier_id=supplier_id,
+        date_filter=date_filter,
+    )
+    return _with_procurement_metadata(
+        result,
+        resource="direct_purchases",
+        required_scope="purchases:read",
+        filters={
+            "page": page,
+            "limit": limit,
+            "search": search,
+            "status": status,
+            "supplier_id": str(supplier_id) if supplier_id else None,
+            "date_filter": date_filter,
+        },
+        limitations=[
+            "Direct purchase headers only; use /v1/queries/run purchase_items for item-level aggregations.",
+            "Read-only; purchase creation and receiving are not available through public API keys.",
+        ],
+    )
+
+
+async def get_procurement_suppliers(
+    request: Request,
+    *,
+    page: int = 1,
+    limit: int = 50,
+    search: Optional[str] = None,
+    search_field: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    payment_terms: Optional[str] = None,
+) -> dict:
+    """Public API: suppliers listing (suppliers:read)."""
+    from app.services.suppliers_service import _get_suppliers_for_tenant
+
+    tenant_id, _ = validate_api_key_auth(request, "suppliers:read")
+    result = await _get_suppliers_for_tenant(
+        tenant_id,
+        page=page,
+        limit=limit,
+        search=search,
+        search_field=search_field,
+        is_active=is_active,
+        payment_terms=payment_terms,
+    )
+    return _with_procurement_metadata(
+        result,
+        resource="suppliers",
+        required_scope="suppliers:read",
+        filters={
+            "page": page,
+            "limit": limit,
+            "search": search,
+            "search_field": search_field,
+            "is_active": is_active,
+            "payment_terms": payment_terms,
+        },
+        limitations=[
+            "Supplier listing only; supplier creation and updates are not available through public API keys.",
+            "Commercial supplier details are tenant-scoped and require suppliers:read.",
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------

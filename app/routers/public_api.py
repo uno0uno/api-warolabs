@@ -4,7 +4,7 @@ Endpoints for external integrations authenticated via API tokens
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
 from app.core.permissions import Module, require_module
 from app.services import public_api_service, public_restaurant_service, queries_service
@@ -127,6 +127,49 @@ class QuerySpecRequest(BaseModel):
     order_by: Optional[List[QueryOrderByRequest]] = Field(default=None, description="Allowlisted ordering")
     limit: Optional[int] = Field(default=None, description="Required row limit")
     timezone: str = Field(default="America/Bogota", description="Timezone for date filters")
+
+
+class ProcurementInventoryStockRequest(BaseModel):
+    """Request body for public inventory stock listing"""
+    limit: int = Field(default=250, ge=1, le=500, description="Items per page")
+    offset: int = Field(default=0, ge=0, description="Number of items to skip")
+    search: Optional[str] = Field(default=None, description="Search by ingredient name")
+    statusFilter: Optional[str] = Field(default="all", description="Filter by status: low, negative, ok, all")
+    category: Optional[str] = Field(default=None, description="Filter by ingredient category")
+    unit: Optional[str] = Field(default=None, description="Filter by ingredient unit")
+    sortField: str = Field(default="current_stock", description="Sort field")
+    sortDirection: Literal["asc", "desc"] = Field(default="desc", description="Sort direction")
+
+
+class ProcurementInventoryMovementsRequest(BaseModel):
+    """Request body for public inventory movements listing"""
+    limit: int = Field(default=100, ge=1, le=500, description="Items per page")
+    offset: int = Field(default=0, ge=0, description="Number of items to skip")
+    ingredientId: Optional[str] = Field(default=None, description="Filter by ingredient UUID")
+    movementType: Optional[str] = Field(default=None, description="Filter by movement type")
+    quantityDirection: Optional[Literal["positive", "negative"]] = Field(default=None, description="Filter by quantity sign")
+    startDate: Optional[str] = Field(default=None, description="Filter by start date (ISO)")
+    endDate: Optional[str] = Field(default=None, description="Filter by end date (ISO)")
+
+
+class ProcurementDirectPurchasesRequest(BaseModel):
+    """Request body for public direct purchases listing"""
+    page: int = Field(default=1, ge=1, description="Page number")
+    limit: int = Field(default=50, ge=1, le=250, description="Items per page")
+    search: Optional[str] = Field(default=None, description="Search by purchase, invoice, or supplier")
+    status: Optional[str] = Field(default=None, description="Filter by purchase status")
+    supplierId: Optional[str] = Field(default=None, description="Filter by supplier UUID")
+    dateFilter: Optional[Literal["today", "yesterday", "last_week", "15_days", "1_month", "3_months"]] = Field(default=None, description="Relative date filter")
+
+
+class ProcurementSuppliersRequest(BaseModel):
+    """Request body for public suppliers listing"""
+    page: int = Field(default=1, ge=1, description="Page number")
+    limit: int = Field(default=50, ge=1, le=250, description="Items per page")
+    search: Optional[str] = Field(default=None, description="Search by supplier fields")
+    searchField: Optional[Literal["name", "tax_id", "email", "phone"]] = Field(default=None, description="Field to search")
+    isActive: Optional[bool] = Field(default=None, description="Filter by active status")
+    paymentTerms: Optional[str] = Field(default=None, description="Filter by payment terms")
 
 
 @router.get("/restaurant", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
@@ -427,6 +470,82 @@ async def run_queryspec(request: Request, body: QuerySpecRequest):
     """
     return await queries_service.run_queryspec(request, body.dict())
 
+
+@router.post("/inventory/stock", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
+async def get_procurement_inventory_stock(request: Request, body: ProcurementInventoryStockRequest):
+    """
+    Obtiene stock actual de inventario del tenant autenticado por API key.
+
+    **Scope requerido:** `inventory:read` o `read`
+    """
+    return await public_api_service.get_procurement_inventory_stock(
+        request,
+        limit=body.limit,
+        offset=body.offset,
+        search=body.search,
+        status_filter=body.statusFilter,
+        category=body.category,
+        unit=body.unit,
+        sort_field=body.sortField,
+        sort_direction=body.sortDirection,
+    )
+
+
+@router.post("/inventory/movements", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
+async def get_procurement_inventory_movements(request: Request, body: ProcurementInventoryMovementsRequest):
+    """
+    Obtiene movimientos de inventario del tenant autenticado por API key.
+
+    **Scope requerido:** `inventory:read` o `read`
+    """
+    ingredient_id = UUID(body.ingredientId) if body.ingredientId else None
+    return await public_api_service.get_procurement_inventory_movements(
+        request,
+        limit=body.limit,
+        offset=body.offset,
+        ingredient_id=ingredient_id,
+        movement_type=body.movementType,
+        quantity_direction=body.quantityDirection,
+        start_date=body.startDate,
+        end_date=body.endDate,
+    )
+
+
+@router.post("/purchases/direct", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
+async def get_procurement_direct_purchases(request: Request, body: ProcurementDirectPurchasesRequest):
+    """
+    Obtiene compras directas del tenant autenticado por API key.
+
+    **Scope requerido:** `purchases:read` o `read`
+    """
+    supplier_id = UUID(body.supplierId) if body.supplierId else None
+    return await public_api_service.get_procurement_direct_purchases(
+        request,
+        page=body.page,
+        limit=body.limit,
+        search=body.search,
+        status=body.status,
+        supplier_id=supplier_id,
+        date_filter=body.dateFilter,
+    )
+
+
+@router.post("/suppliers", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
+async def get_procurement_suppliers(request: Request, body: ProcurementSuppliersRequest):
+    """
+    Obtiene proveedores del tenant autenticado por API key.
+
+    **Scope requerido:** `suppliers:read` o `read`
+    """
+    return await public_api_service.get_procurement_suppliers(
+        request,
+        page=body.page,
+        limit=body.limit,
+        search=body.search,
+        search_field=body.searchField,
+        is_active=body.isActive,
+        payment_terms=body.paymentTerms,
+    )
 
 
 # ---------------------------------------------------------------------------
