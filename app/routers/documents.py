@@ -3,8 +3,8 @@ Documents Router — bridge to api-facturacion (issue #129)
 
 Document management: list, PDF/XML download, and email send.
 
-GET  /  and GET /{track_id}/pdf and GET /{track_id}/xml are live —
-they read electronic_invoices directly from DB and generate R2 presigned URLs.
+GET  /  and GET /{track_id}/xml read electronic_invoices directly from DB.
+GET  /{track_id}/pdf uses R2 first and can fall back to Matias via api-facturacion.
 
 POST /{track_id}/resend-email and POST /{track_id}/send-email-to proxy
 to api-facturacion which talks to Matias. Both enforce tenant ownership

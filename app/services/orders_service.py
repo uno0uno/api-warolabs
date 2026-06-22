@@ -3765,13 +3765,13 @@ async def send_invoice_email(
     Send the WARO-branded receipt email for an order's accepted invoice (warocol.com#603).
 
     Loads the order header + items + invoice + tenant business profile from DB
-    (single connection, sequential reads), validates the invoice is accepted and
-    has a PDF available in R2, then dispatches the existing `send_pos_receipt_email`
-    helper which handles SES + template + PDF/XML attachment.
+    (single connection, sequential reads), validates the invoice is accepted,
+    then dispatches the existing `send_pos_receipt_email` helper which handles
+    SES + template + optional PDF/XML attachment.
 
     Raises:
         HTTPException 404 — order not found for the session tenant
-        HTTPException 422 — no invoice / invoice not accepted / PDF not available
+        HTTPException 422 — no invoice / invoice not accepted
         HTTPException 502 — SES rejected the send
     """
     session_context = require_valid_session(request)
@@ -3791,7 +3791,8 @@ async def send_invoice_email(
         if not order_row:
             raise HTTPException(status_code=404, detail="Order not found")
 
-        # 2. Invoice header — must exist, be accepted, and have a PDF available.
+        # 2. Invoice header — must exist and be accepted. PDF attachment is optional:
+        # accepted Matias invoices may exist before the local R2 PDF key is stored.
         invoice_row = await conn.fetchrow(
             """SELECT prefix, invoice_number, cufe, status, r2_pdf_key
                FROM electronic_invoices
@@ -3809,11 +3810,6 @@ async def send_invoice_email(
             raise HTTPException(
                 status_code=422,
                 detail="La factura debe estar aceptada por DIAN para poder enviarla por correo.",
-            )
-        if not invoice_row['r2_pdf_key']:
-            raise HTTPException(
-                status_code=422,
-                detail="El PDF de la factura aún no está disponible. Reintentá en unos segundos.",
             )
 
         # 3. Tax breakdown — net line base matches GL / cierre_service.

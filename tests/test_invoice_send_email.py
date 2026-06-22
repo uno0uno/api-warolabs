@@ -219,24 +219,55 @@ async def test_send_invoice_email_rejects_non_accepted():
 # ── Missing PDF (r2_pdf_key is null) ─────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_send_invoice_email_rejects_missing_pdf():
-    """Invoice accepted but r2_pdf_key is NULL → 422, no email sent."""
+async def test_send_invoice_email_allows_missing_pdf():
+    """Invoice accepted but r2_pdf_key is NULL → email still sends."""
     request = MagicMock()
     helper_mock = AsyncMock(return_value=True)
 
     with _patch_session(), _patch_db(
-        fetchrow=[_order_row(), _invoice_row(r2_pdf_key=None)],
-        fetch=[],
-    ), patch(
+        fetchrow=[_order_row(), _invoice_row(r2_pdf_key=None), _waro_inferred_row(), _profile_row()],
+        fetch=[
+            [],
+            [],
+            [],
+            [{'id': uuid4(), 'quantity': 1, 'subtotal': 200.0, 'product_name': 'tomate barranca'}],
+            [],
+        ],
+    ), _patch_tax(), patch(
         'app.services.orders_service.send_pos_receipt_email',
         new=helper_mock,
+    ):
+        result = await orders_service.send_invoice_email(request, _ORDER_ID, _RECIPIENT)
+
+    assert result == {'success': True, 'sent_to': _RECIPIENT}
+    helper_mock.assert_awaited_once()
+    assert helper_mock.await_args.kwargs['invoice_prefix'] == 'LZT'
+    assert helper_mock.await_args.kwargs['invoice_number'] == 5462
+
+
+@pytest.mark.asyncio
+async def test_send_invoice_email_missing_pdf_still_surfaces_ses_failure():
+    """Missing local PDF does not mask real SES/provider failures."""
+    request = MagicMock()
+
+    with _patch_session(), _patch_db(
+        fetchrow=[_order_row(), _invoice_row(r2_pdf_key=None), _waro_inferred_row(), _profile_row()],
+        fetch=[
+            [],
+            [],
+            [],
+            [{'id': uuid4(), 'quantity': 1, 'subtotal': 200.0, 'product_name': 'tomate barranca'}],
+            [],
+        ],
+    ), _patch_tax(), patch(
+        'app.services.orders_service.send_pos_receipt_email',
+        new=AsyncMock(return_value=False),
     ):
         with pytest.raises(HTTPException) as exc_info:
             await orders_service.send_invoice_email(request, _ORDER_ID, _RECIPIENT)
 
-    assert exc_info.value.status_code == 422
-    assert 'pdf' in exc_info.value.detail.lower()
-    helper_mock.assert_not_awaited()
+    assert exc_info.value.status_code == 502
+    assert 'no se pudo' in exc_info.value.detail.lower()
 
 
 # ── SES failure ──────────────────────────────────────────────────────────────

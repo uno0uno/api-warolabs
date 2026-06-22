@@ -8,11 +8,13 @@ Endpoints proxied:
   POST /invoice/emit          → emit_invoice()
   GET  electronic_invoices DB → get_order_invoice(), get_dian_status()
   GET  electronic_invoices DB → get_documents_list()
-  GET  R2 presigned URL       → get_document_pdf_url(), get_document_xml_url()
+  GET  R2/Matias PDF URL      → get_document_pdf_url()
+  GET  R2 presigned XML URL   → get_document_xml_url()
   Generic proxy helper        → proxy_to_facturacion()
 
-DB-only functions do NOT call api-facturacion — they read electronic_invoices
-directly and generate R2 presigned URLs locally (api-warolabs has R2 credentials).
+Most read functions use electronic_invoices directly and generate R2 presigned URLs
+locally. PDF download may ask api-facturacion for its Matias fallback when R2 has
+not stored the artifact yet.
 """
 import httpx
 import logging
@@ -311,10 +313,11 @@ async def get_document_pdf_url(
     tenant_id: str,
 ) -> Optional[str]:
     """
-    Return a fresh R2 presigned URL for the PDF of an invoice.
+    Return a fresh URL for the PDF of an invoice.
 
     track_id maps to electronic_invoices.id (UUID primary key).
-    Returns None if the invoice has no PDF yet.
+    Uses R2 first, then api-facturacion's Matias fallback when R2 has no PDF yet.
+    Returns None if neither source can provide a URL.
     Raises HTTPException 404 if the invoice record does not exist.
     """
     async with get_db_connection(use_transaction=False) as conn:
@@ -328,15 +331,27 @@ async def get_document_pdf_url(
     if not row:
         raise HTTPException(status_code=404, detail="Invoice not found")
 
-    if not row['r2_pdf_key']:
-        return None
+    if row['r2_pdf_key']:
+        try:
+            s3 = AWSS3Service()
+            return await s3.get_presigned_url(row['r2_pdf_key'], expiration=3600)
+        except Exception as exc:
+            logger.warning(f"Could not generate PDF presigned URL for invoice {track_id}: {exc}")
 
     try:
-        s3 = AWSS3Service()
-        return await s3.get_presigned_url(row['r2_pdf_key'], expiration=3600)
-    except Exception as exc:
-        logger.warning(f"Could not generate PDF presigned URL for invoice {track_id}: {exc}")
-        return None
+        fallback = await proxy_to_facturacion(
+            method='GET',
+            path=f'/documents/{track_id}/pdf',
+            timeout=30.0,
+        )
+    except HTTPException as exc:
+        if exc.status_code in (404, 422):
+            logger.info(f"PDF fallback unavailable for invoice {track_id}: {exc.detail}")
+            return None
+        raise
+
+    pdf_url = fallback.get('pdf_url') or fallback.get('url')
+    return str(pdf_url) if pdf_url else None
 
 
 async def get_document_xml_url(

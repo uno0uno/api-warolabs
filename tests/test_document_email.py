@@ -20,6 +20,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.routers import documents as documents_router
+from app.services import facturacion_service
 
 
 _TENANT_ID = UUID('93b3e582-34fa-44a6-8d0f-bf82a3608727')
@@ -44,6 +45,13 @@ class _ConnCtx:
 def _patch_db_returns(row):
     return patch(
         'app.routers.documents.get_db_connection',
+        lambda *args, **kwargs: _ConnCtx(row),
+    )
+
+
+def _patch_facturacion_db_returns(row):
+    return patch(
+        'app.services.facturacion_service.get_db_connection',
         lambda *args, **kwargs: _ConnCtx(row),
     )
 
@@ -74,6 +82,48 @@ def _patch_httpx(status_code: int = 200, body: dict = None):
         'app.services.facturacion_service.httpx.AsyncClient',
         return_value=client,
     ), client
+
+
+# ── PDF fallback ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_document_pdf_uses_matias_fallback_when_r2_missing():
+    """Owned invoice without R2 PDF → gateway returns api-facturacion fallback URL."""
+    with _patch_facturacion_db_returns({'status': 'accepted', 'r2_pdf_key': None}), patch(
+        'app.services.facturacion_service.proxy_to_facturacion',
+        new=AsyncMock(return_value={
+            'pdf_url': 'https://matias.example/document.pdf',
+            'source': 'matias',
+            'expires_in': None,
+        }),
+    ) as proxy_mock:
+        pdf_url = await facturacion_service.get_document_pdf_url(
+            str(_TRACK_ID),
+            str(_TENANT_ID),
+        )
+
+    assert pdf_url == 'https://matias.example/document.pdf'
+    proxy_mock.assert_awaited_once_with(
+        method='GET',
+        path=f'/documents/{_TRACK_ID}/pdf',
+        timeout=30.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_document_pdf_returns_none_when_fallback_has_no_url():
+    """Owned invoice without R2 PDF and no Matias URL → existing 404 route behavior remains."""
+    with _patch_facturacion_db_returns({'status': 'accepted', 'r2_pdf_key': None}), patch(
+        'app.services.facturacion_service.proxy_to_facturacion',
+        new=AsyncMock(return_value={'pdf_url': None, 'source': 'matias'}),
+    ):
+        pdf_url = await facturacion_service.get_document_pdf_url(
+            str(_TRACK_ID),
+            str(_TENANT_ID),
+        )
+
+    assert pdf_url is None
 
 
 # ── resend-email ─────────────────────────────────────────────────────────────
