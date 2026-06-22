@@ -89,6 +89,7 @@ AVAILABLE_SCOPES = [
     "inventory:read",  # Leer inventario
     "inventory:write", # Modificar inventario
     "purchases:read",  # Leer compras
+    "suppliers:read",  # Leer proveedores
     "customers:read",  # Leer clientes
     "customers:write", # Crear/modificar clientes
     "analytics:read",  # Leer analytics (menu BCG, food cost, alertas, calidad de datos)

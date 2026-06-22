@@ -753,9 +753,9 @@ async def create_direct_purchase(
         )
 
 
-async def get_direct_purchases_list(
-    request: Request,
-    response: Response,
+async def _get_direct_purchases_for_tenant(
+    tenant_id: str,
+    *,
     page: int = 1,
     limit: int = 50,
     search: Optional[str] = None,
@@ -767,9 +767,6 @@ async def get_direct_purchases_list(
     Get list of direct purchases (is_direct_entry = TRUE) with tenant isolation
     """
     try:
-        session_context = require_valid_session(request)
-        tenant_id = session_context.tenant_id
-
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
@@ -889,6 +886,33 @@ async def get_direct_purchases_list(
         logger.error(f"Error in get_direct_purchases_list: {str(e)}")
         logger.exception(e)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+
+async def get_direct_purchases_list(
+    request: Request,
+    response: Response,
+    page: int = 1,
+    limit: int = 50,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    supplier_id: Optional[UUID] = None,
+    date_filter: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get list of direct purchases for the current session tenant.
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    return await _get_direct_purchases_for_tenant(
+        tenant_id,
+        page=page,
+        limit=limit,
+        search=search,
+        status=status,
+        supplier_id=supplier_id,
+        date_filter=date_filter
+    )
 
 
 async def get_direct_purchase_by_id(
