@@ -21,6 +21,18 @@ DEFAULT_TIMEOUT_SECONDS = 5
 DEFAULT_TIMEZONE = "America/Bogota"
 MAX_LIMIT = 100
 
+_INVENTORY_LATEST_COSTS_CTE = """
+latest_costs AS (
+    SELECT DISTINCT ON (ingredient_id)
+        ingredient_id,
+        cost_per_unit
+    FROM tenant_ingredient_movements
+    WHERE tenant_id = $1
+      AND cost_per_unit IS NOT NULL
+    ORDER BY ingredient_id, created_at DESC
+)
+"""
+
 
 @dataclass(frozen=True)
 class QueryField:
@@ -44,6 +56,7 @@ class DatasetSpec:
     base_conditions: tuple[str, ...]
     cte_sql: Optional[str] = None
     extra_group_by: tuple[str, ...] = ()
+    limitations: tuple[str, ...] = ()
 
 
 DATASETS: dict[str, DatasetSpec] = {
@@ -185,6 +198,176 @@ DATASETS: dict[str, DatasetSpec] = {
         cte_sql=_PRODUCT_COSTS_CTE,
         extra_group_by=("pc.price", "pc.effective_cost", "pc.estimated_cost", "pc.costo_percibido", "pc.cost_used_for_classification"),
     ),
+    "inventory_stock": DatasetSpec(
+        name="inventory_stock",
+        label="Inventory stock",
+        description="Current ingredient stock grouped by ingredient, category, unit, or stock status.",
+        required_scope="inventory:read",
+        dimensions={
+            "ingredient": QueryField("i.name", "string", "Ingredient", groupable=True),
+            "ingredient_id": QueryField("ti.ingredient_id", "uuid", "Ingredient ID", groupable=True),
+            "category": QueryField("i.category", "string", "Category", groupable=True),
+            "unit": QueryField("i.unit", "string", "Unit", groupable=True),
+            "status": QueryField(
+                "CASE "
+                "WHEN ti.current_stock < 0 THEN 'negative' "
+                "WHEN ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock THEN 'low' "
+                "ELSE 'ok' END",
+                "string",
+                "Status",
+                groupable=True,
+            ),
+        },
+        measures={
+            "current_stock": QueryField("COALESCE(SUM(ti.current_stock), 0)", "number", "Current stock"),
+            "minimum_stock": QueryField("COALESCE(SUM(ti.minimum_stock), 0)", "number", "Minimum stock"),
+            "maximum_stock": QueryField("COALESCE(SUM(ti.maximum_stock), 0)", "number", "Maximum stock"),
+            "unit_cost": QueryField("COALESCE(AVG(lc.cost_per_unit), 0)", "currency", "Average unit cost"),
+            "stock_value": QueryField("COALESCE(SUM(ti.current_stock * COALESCE(lc.cost_per_unit, 0)), 0)", "currency", "Stock value"),
+        },
+        filters={
+            "category": {"type": "string", "field": "i.category"},
+            "unit": {"type": "string", "field": "i.unit"},
+            "status": {
+                "type": "string",
+                "field": (
+                    "CASE "
+                    "WHEN ti.current_stock < 0 THEN 'negative' "
+                    "WHEN ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock THEN 'low' "
+                    "ELSE 'ok' END"
+                ),
+            },
+        },
+        sortable={
+            "ingredient",
+            "category",
+            "unit",
+            "status",
+            "current_stock",
+            "minimum_stock",
+            "maximum_stock",
+            "unit_cost",
+            "stock_value",
+        },
+        from_sql="""
+            FROM tenant_inventory ti
+            JOIN ingredients i ON ti.ingredient_id = i.id
+            LEFT JOIN latest_costs lc ON lc.ingredient_id = ti.ingredient_id
+        """,
+        base_conditions=("ti.tenant_id = $1",),
+        cte_sql=_INVENTORY_LATEST_COSTS_CTE,
+        limitations=("Uses the latest inventory movement cost per ingredient when available.",),
+    ),
+    "inventory_movements": DatasetSpec(
+        name="inventory_movements",
+        label="Inventory movements",
+        description="Ingredient stock movements grouped by ingredient, movement type, day, or reference.",
+        required_scope="inventory:read",
+        dimensions={
+            "ingredient": QueryField("i.name", "string", "Ingredient", groupable=True),
+            "ingredient_id": QueryField("tim.ingredient_id", "uuid", "Ingredient ID", groupable=True),
+            "movement_type": QueryField("tim.movement_type", "string", "Movement type", groupable=True),
+            "day": QueryField("DATE(tim.created_at AT TIME ZONE {tz})", "date", "Day", groupable=True),
+            "reference_table": QueryField("tim.reference_table", "string", "Reference table", groupable=True),
+            "reference_number": QueryField(
+                "COALESCE(tp.purchase_number, o.order_number::text)",
+                "string",
+                "Reference number",
+                groupable=True,
+            ),
+        },
+        measures={
+            "quantity_in": QueryField("COALESCE(SUM(GREATEST(tim.quantity_change, 0)), 0)", "number", "Quantity in"),
+            "quantity_out": QueryField("COALESCE(SUM(ABS(LEAST(tim.quantity_change, 0))), 0)", "number", "Quantity out"),
+            "net_quantity": QueryField("COALESCE(SUM(tim.quantity_change), 0)", "number", "Net quantity"),
+            "movement_count": QueryField("COUNT(tim.id)", "integer", "Movement count"),
+            "avg_cost_per_unit": QueryField("COALESCE(AVG(tim.cost_per_unit), 0)", "currency", "Average cost per unit"),
+        },
+        filters={
+            "date_range": {"type": "date_range", "field": "tim.created_at"},
+            "ingredient": {"type": "string", "field": "i.name"},
+            "movement_type": {"type": "string", "field": "tim.movement_type"},
+            "reference_table": {"type": "string", "field": "tim.reference_table"},
+        },
+        sortable={
+            "ingredient",
+            "movement_type",
+            "day",
+            "reference_table",
+            "reference_number",
+            "quantity_in",
+            "quantity_out",
+            "net_quantity",
+            "movement_count",
+            "avg_cost_per_unit",
+        },
+        from_sql="""
+            FROM tenant_ingredient_movements tim
+            JOIN ingredients i ON tim.ingredient_id = i.id
+            LEFT JOIN tenant_purchases tp
+                ON tim.reference_table = 'tenant_purchases'
+                AND tp.id = tim.reference_id
+                AND tp.tenant_id = tim.tenant_id
+            LEFT JOIN orders o
+                ON tim.reference_table = 'orders'
+                AND o.id = tim.reference_id
+                AND o.tenant_id = tim.tenant_id
+        """,
+        base_conditions=("tim.tenant_id = $1",),
+    ),
+    "purchase_items": DatasetSpec(
+        name="purchase_items",
+        label="Purchase items",
+        description="Purchased ingredient items grouped by supplier, ingredient, day, purchase number, or status.",
+        required_scope="purchases:read",
+        dimensions={
+            "supplier": QueryField("COALESCE(ts.name, 'Sin proveedor')", "string", "Supplier", groupable=True),
+            "supplier_id": QueryField("tp.supplier_id", "uuid", "Supplier ID", groupable=True),
+            "ingredient": QueryField("i.name", "string", "Ingredient", groupable=True),
+            "ingredient_id": QueryField("tpi.ingredient_id", "uuid", "Ingredient ID", groupable=True),
+            "category": QueryField("i.category", "string", "Category", groupable=True),
+            "day": QueryField("DATE(tp.purchase_date AT TIME ZONE {tz})", "date", "Day", groupable=True),
+            "purchase_number": QueryField("tp.purchase_number", "string", "Purchase number", groupable=True),
+            "status": QueryField("tp.status", "string", "Status", groupable=True),
+            "is_direct_entry": QueryField("tp.is_direct_entry", "boolean", "Is direct entry", groupable=True),
+        },
+        measures={
+            "quantity_purchased": QueryField("COALESCE(SUM(tpi.quantity), 0)", "number", "Quantity purchased"),
+            "quantity_received": QueryField("COALESCE(SUM(tpi.quantity_received), 0)", "number", "Quantity received"),
+            "total_cost": QueryField("COALESCE(SUM(tpi.total_cost), 0)", "currency", "Total cost"),
+            "avg_unit_cost": QueryField("COALESCE(AVG(tpi.unit_cost), 0)", "currency", "Average unit cost"),
+            "purchase_count": QueryField("COUNT(DISTINCT tp.id)", "integer", "Purchase count"),
+        },
+        filters={
+            "date_range": {"type": "date_range", "field": "tp.purchase_date"},
+            "supplier": {"type": "string", "field": "COALESCE(ts.name, 'Sin proveedor')"},
+            "ingredient": {"type": "string", "field": "i.name"},
+            "status": {"type": "string", "field": "tp.status"},
+            "is_direct_entry": {"type": "boolean", "field": "tp.is_direct_entry"},
+        },
+        sortable={
+            "supplier",
+            "ingredient",
+            "category",
+            "day",
+            "purchase_number",
+            "status",
+            "is_direct_entry",
+            "quantity_purchased",
+            "quantity_received",
+            "total_cost",
+            "avg_unit_cost",
+            "purchase_count",
+        },
+        from_sql="""
+            FROM tenant_purchase_items tpi
+            JOIN tenant_purchases tp ON tpi.purchase_id = tp.id
+            JOIN ingredients i ON tpi.ingredient_id = i.id
+            LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id AND ts.tenant_id = tp.tenant_id
+        """,
+        base_conditions=("tp.tenant_id = $1",),
+        limitations=("Purchase item costs reflect stored purchase records and do not forecast replenishment needs.",),
+    ),
 }
 
 
@@ -204,6 +387,7 @@ def get_queries_schema() -> dict[str, Any]:
                     "measures": _schema_fields(dataset.measures),
                     "filters": dataset.filters,
                     "sortable_fields": sorted(dataset.sortable),
+                    "limitations": list(dataset.limitations),
                 }
                 for dataset in DATASETS.values()
             ]
@@ -277,7 +461,7 @@ async def run_queryspec(request, spec: dict[str, Any]) -> dict[str, Any]:
                 "limit": compiled["limit"],
                 "row_count": len(rows),
             },
-            "limitations": [],
+            "limitations": list(dataset.limitations),
         },
     }
 
@@ -403,10 +587,16 @@ def _apply_filters(
     for key, value in filters.items():
         if key == "date_range" or value is None:
             continue
-        field = dataset.filters[key]["field"]
-        if not isinstance(value, str) or not value.strip():
-            raise ValidationError(f"{key} filter must be a non-empty string", {"field": f"filters.{key}"})
-        params.append(value.strip())
+        filter_spec = dataset.filters[key]
+        field = filter_spec["field"]
+        if filter_spec["type"] == "boolean":
+            if not isinstance(value, bool):
+                raise ValidationError(f"{key} filter must be a boolean", {"field": f"filters.{key}"})
+            params.append(value)
+        else:
+            if not isinstance(value, str) or not value.strip():
+                raise ValidationError(f"{key} filter must be a non-empty string", {"field": f"filters.{key}"})
+            params.append(value.strip())
         where_parts.append(f"{field} = ${len(params) + 1}")
 
 

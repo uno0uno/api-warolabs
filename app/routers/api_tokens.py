@@ -60,6 +60,7 @@ async def get_available_scopes():
             "products:write": "Crear y modificar productos",
             "inventory:read": "Leer inventario",
             "inventory:write": "Modificar inventario",
+            "purchases:read": "Leer compras",
             "customers:read": "Leer clientes",
             "customers:write": "Crear y modificar clientes"
         }

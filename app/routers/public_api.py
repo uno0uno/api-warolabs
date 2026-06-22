@@ -120,7 +120,7 @@ class QueryOrderByRequest(BaseModel):
 
 class QuerySpecRequest(BaseModel):
     """Safe analytical QuerySpec; never accepts SQL"""
-    dataset: str = Field(description="Dataset name: sales_items | customers | product_profitability")
+    dataset: str = Field(description="Dataset name from /v1/queries/schema")
     measures: List[str] = Field(default_factory=list, description="Allowlisted measure names")
     dimensions: List[str] = Field(default_factory=list, description="Allowlisted dimension names")
     filters: Dict[str, Any] = Field(default_factory=dict, description="Allowlisted filters")
