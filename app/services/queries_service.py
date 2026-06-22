@@ -5,6 +5,7 @@ This module exposes semantic datasets, not SQL. Clients can only reference
 allowlisted dataset fields; SQL fragments remain owned by the API.
 """
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import datetime, date
 from typing import Any, Optional
@@ -103,7 +104,12 @@ DATASETS: dict[str, DatasetSpec] = {
             LEFT JOIN profile p ON o.customer_id = p.id
             LEFT JOIN waros_wallets ww ON ww.profile_id = o.customer_id AND ww.tenant_id = o.tenant_id
         """,
-        base_conditions=("o.tenant_id = $1", POS_LIKE_FILTER_ALIAS_O, "o.status = 'completed'", "o.customer_id IS NOT NULL"),
+        base_conditions=(
+            "o.tenant_id = $1",
+            POS_LIKE_FILTER_ALIAS_O,
+            "o.status = 'completed'",
+            "o.customer_id IS NOT NULL",
+        ),
     ),
     "product_profitability": DatasetSpec(
         name="product_profitability",
@@ -114,6 +120,12 @@ DATASETS: dict[str, DatasetSpec] = {
             "product": QueryField("p.name", "string", "Product", groupable=True),
             "product_id": QueryField("p.id", "uuid", "Product ID", groupable=True),
             "category": QueryField("c.name", "string", "Category", groupable=True),
+            "cost_source": QueryField(
+                "pc.cost_used_for_classification",
+                "string",
+                "Cost source",
+                groupable=True,
+            ),
             "classification": QueryField(
                 "CASE "
                 "WHEN COALESCE(SUM(oi.quantity), 0) >= 20 "
@@ -152,6 +164,7 @@ DATASETS: dict[str, DatasetSpec] = {
         sortable={
             "product",
             "category",
+            "cost_source",
             "classification",
             "quantity_sold",
             "revenue",
@@ -170,7 +183,7 @@ DATASETS: dict[str, DatasetSpec] = {
         """,
         base_conditions=("p.tenant_id = $1", "o.tenant_id = $1", POS_LIKE_FILTER_ALIAS_O, "o.status = 'completed'"),
         cte_sql=_PRODUCT_COSTS_CTE,
-        extra_group_by=("pc.price", "pc.effective_cost", "pc.estimated_cost", "pc.costo_percibido"),
+        extra_group_by=("pc.price", "pc.effective_cost", "pc.estimated_cost", "pc.costo_percibido", "pc.cost_used_for_classification"),
     ),
 }
 
@@ -201,7 +214,41 @@ def get_queries_schema() -> dict[str, Any]:
 async def run_queryspec(request, spec: dict[str, Any]) -> dict[str, Any]:
     dataset = _get_dataset(spec.get("dataset"))
     tenant_id, _ = validate_api_key_auth(request, dataset.required_scope)
+    print(
+        "[api:queryspec] received "
+        + json.dumps(
+            {
+                "tenant_id": tenant_id,
+                "dataset": spec.get("dataset"),
+                "measures": spec.get("measures"),
+                "dimensions": spec.get("dimensions"),
+                "filters": spec.get("filters"),
+                "order_by": spec.get("order_by"),
+                "limit": spec.get("limit"),
+            },
+            ensure_ascii=False,
+            default=str,
+        ),
+        flush=True,
+    )
     compiled = compile_queryspec(spec)
+    print(
+        "[api:queryspec] compiled "
+        + json.dumps(
+            {
+                "dataset": dataset.name,
+                "dimensions": compiled["dimensions"],
+                "measures": compiled["measures"],
+                "columns": [column["name"] for column in compiled["columns"]],
+                "order_by": compiled["order_by"],
+                "limit": compiled["limit"],
+                "params_count": len(compiled["params"]),
+            },
+            ensure_ascii=False,
+            default=str,
+        ),
+        flush=True,
+    )
 
     try:
         async with get_db_connection(use_transaction=False) as conn:
