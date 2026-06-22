@@ -34,9 +34,9 @@ def _json_decimal(value: Any, scale: Decimal, default: Optional[float] = None) -
     return float(quantized)
 
 
-async def get_inventory_stock(
-    request: Request,
-    response: Response,
+async def _get_inventory_stock_for_tenant(
+    tenant_id: str,
+    *,
     limit: int = 250,
     offset: int = 0,
     search: Optional[str] = None,
@@ -47,11 +47,10 @@ async def get_inventory_stock(
     sort_direction: str = "desc"
 ) -> Dict[str, Any]:
     """
-    Get current inventory stock with stats
+    Get current inventory stock with stats for a tenant.
 
     Args:
-        request: FastAPI request
-        response: FastAPI response
+        tenant_id: Tenant to query
         limit: Number of records to return
         offset: Number of records to skip
         search: Search term for ingredient name
@@ -65,9 +64,6 @@ async def get_inventory_stock(
         Dictionary with inventory data and stats
     """
     try:
-        session_context = require_valid_session(request)
-        tenant_id = session_context.tenant_id
-
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
@@ -269,9 +265,40 @@ async def get_inventory_stock(
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 
-async def get_inventory_movements(
+async def get_inventory_stock(
     request: Request,
     response: Response,
+    limit: int = 250,
+    offset: int = 0,
+    search: Optional[str] = None,
+    status_filter: Optional[str] = None,  # 'low', 'critical', 'ok', 'all'
+    category: Optional[str] = None,
+    unit: Optional[str] = None,
+    sort_field: str = "current_stock",
+    sort_direction: str = "desc"
+) -> Dict[str, Any]:
+    """
+    Get current inventory stock with stats for the current session tenant.
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    return await _get_inventory_stock_for_tenant(
+        tenant_id,
+        limit=limit,
+        offset=offset,
+        search=search,
+        status_filter=status_filter,
+        category=category,
+        unit=unit,
+        sort_field=sort_field,
+        sort_direction=sort_direction
+    )
+
+
+async def _get_inventory_movements_for_tenant(
+    tenant_id: str,
+    *,
     limit: int = 100,
     offset: int = 0,
     ingredient_id: Optional[UUID] = None,
@@ -281,11 +308,10 @@ async def get_inventory_movements(
     end_date: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Get inventory movements history
+    Get inventory movements history for a tenant.
 
     Args:
-        request: FastAPI request
-        response: FastAPI response
+        tenant_id: Tenant to query
         limit: Number of records to return
         offset: Number of records to skip
         ingredient_id: Filter by specific ingredient
@@ -298,9 +324,6 @@ async def get_inventory_movements(
         Dictionary with movements data
     """
     try:
-        session_context = require_valid_session(request)
-        tenant_id = session_context.tenant_id
-
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
@@ -423,6 +446,35 @@ async def get_inventory_movements(
     except Exception as e:
         logger.error(f"Error getting inventory movements: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+
+async def get_inventory_movements(
+    request: Request,
+    response: Response,
+    limit: int = 100,
+    offset: int = 0,
+    ingredient_id: Optional[UUID] = None,
+    movement_type: Optional[str] = None,  # 'purchase', 'consumption', 'adjustment', etc.
+    quantity_direction: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get inventory movements history for the current session tenant.
+    """
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    return await _get_inventory_movements_for_tenant(
+        tenant_id,
+        limit=limit,
+        offset=offset,
+        ingredient_id=ingredient_id,
+        movement_type=movement_type,
+        quantity_direction=quantity_direction,
+        start_date=start_date,
+        end_date=end_date
+    )
 
 
 async def get_stock_by_ingredient(

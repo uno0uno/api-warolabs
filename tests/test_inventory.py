@@ -7,14 +7,22 @@ Endpoints tested:
 - GET /inventory/stock/{ingredient_id}
 - POST /inventory/adjustments
 """
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from httpx import AsyncClient
 from uuid import uuid4
 
 from app.services.inventory_service import (
+    _get_inventory_movements_for_tenant,
+    _get_inventory_stock_for_tenant,
     _json_decimal,
     _QUANTITY_JSON_SCALE,
     _TECHNICAL_COST_JSON_SCALE,
+    get_inventory_movements,
+    get_inventory_stock,
 )
 
 
@@ -27,6 +35,203 @@ def test_inventory_json_decimal_strips_float_residue():
 def test_inventory_json_decimal_preserves_technical_unit_cost_precision():
     assert _json_decimal("6.617100371747212", _TECHNICAL_COST_JSON_SCALE, 0) == 6.6171
     assert _json_decimal("250.1234564", _TECHNICAL_COST_JSON_SCALE, 0) == 250.123456
+
+
+class _FakeInventoryConnection:
+    def __init__(self, *, fetch_rows=None, fetchrow_rows=None):
+        self.fetch_rows = fetch_rows or []
+        self.fetchrow_rows = list(fetchrow_rows or [])
+        self.fetch_calls = []
+        self.fetchrow_calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def fetch(self, query, *params):
+        self.fetch_calls.append((query, params))
+        return self.fetch_rows
+
+    async def fetchrow(self, query, *params):
+        self.fetchrow_calls.append((query, params))
+        return self.fetchrow_rows.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_inventory_stock_core_uses_explicit_tenant_without_session():
+    tenant_id = "tenant-core-stock"
+    conn = _FakeInventoryConnection(
+        fetch_rows=[
+            {
+                "id": uuid4(),
+                "ingredient_id": uuid4(),
+                "ingredient_name": "Tomate",
+                "unit": "gr",
+                "category": "Verduras",
+                "current_stock": "12.5",
+                "minimum_stock": "5",
+                "maximum_stock": "20",
+                "last_updated": datetime(2026, 1, 1, 12, 0),
+                "location": "Bodega",
+                "lote_actual": "L1",
+                "fecha_vencimiento": datetime(2026, 2, 1, 12, 0),
+                "status": "ok",
+                "stock_percentage": "62.5",
+                "unit_cost": "100.25",
+                "total_value": "1253.125",
+            }
+        ],
+        fetchrow_rows=[
+            {"total": 1},
+            {
+                "total_ingredients": 1,
+                "critical_count": 0,
+                "low_stock_count": 0,
+                "ok_count": 1,
+                "total_inventory_value": "1253.125",
+            },
+            {"categories": ["Verduras"], "units": ["gr"]},
+        ],
+    )
+
+    with patch("app.services.inventory_service.require_valid_session", side_effect=AssertionError), \
+         patch("app.services.inventory_service.get_db_connection", return_value=conn):
+        result = await _get_inventory_stock_for_tenant(
+            tenant_id,
+            limit=10,
+            offset=5,
+            search="tom",
+            status_filter="ok",
+            category="Verduras",
+            unit="gr",
+            sort_field="ingredient_name",
+            sort_direction="asc",
+        )
+
+    assert result["success"] is True
+    assert result["total"] == 1
+    assert result["data"][0]["ingredient_name"] == "Tomate"
+    assert conn.fetch_calls[0][1][0] == tenant_id
+    assert conn.fetch_calls[0][1][-2:] == (10, 5)
+
+
+@pytest.mark.asyncio
+async def test_inventory_movements_core_uses_explicit_tenant_without_session():
+    tenant_id = "tenant-core-movements"
+    ingredient_id = uuid4()
+    conn = _FakeInventoryConnection(
+        fetch_rows=[
+            {
+                "id": uuid4(),
+                "ingredient_id": ingredient_id,
+                "ingredient_name": "Tomate",
+                "unit": "gr",
+                "movement_type": "purchase",
+                "quantity_change": "3.5",
+                "previous_stock": "1",
+                "new_stock": "4.5",
+                "cost_per_unit": "10.25",
+                "reference_table": "tenant_purchases",
+                "reference_id": uuid4(),
+                "reference_number": "CP-1",
+                "reason": "Compra",
+                "notes": None,
+                "created_by": uuid4(),
+                "created_by_name": "Ana",
+                "created_at": datetime(2026, 1, 1, 12, 0),
+            }
+        ],
+        fetchrow_rows=[{"total": 1}],
+    )
+
+    with patch("app.services.inventory_service.require_valid_session", side_effect=AssertionError), \
+         patch("app.services.inventory_service.get_db_connection", return_value=conn):
+        result = await _get_inventory_movements_for_tenant(
+            tenant_id,
+            limit=20,
+            offset=2,
+            ingredient_id=ingredient_id,
+            movement_type="purchase",
+            quantity_direction="positive",
+            start_date="2026-01-01",
+            end_date="2026-01-31",
+        )
+
+    assert result["success"] is True
+    assert result["data"][0]["ingredient_name"] == "Tomate"
+    assert conn.fetch_calls[0][1][0] == tenant_id
+    assert conn.fetch_calls[0][1][-2:] == (20, 2)
+
+
+@pytest.mark.asyncio
+async def test_inventory_stock_wrapper_resolves_tenant_before_core():
+    session = SimpleNamespace(tenant_id="tenant-wrapper-stock")
+
+    with patch("app.services.inventory_service.require_valid_session", return_value=session), \
+         patch("app.services.inventory_service._get_inventory_stock_for_tenant", new_callable=AsyncMock) as core:
+        core.return_value = {"success": True, "data": []}
+
+        result = await get_inventory_stock(
+            object(),
+            object(),
+            limit=10,
+            offset=1,
+            search="tom",
+            status_filter="low",
+            category="Verduras",
+            unit="gr",
+            sort_field="ingredient_name",
+            sort_direction="asc",
+        )
+
+    assert result == {"success": True, "data": []}
+    core.assert_awaited_once_with(
+        "tenant-wrapper-stock",
+        limit=10,
+        offset=1,
+        search="tom",
+        status_filter="low",
+        category="Verduras",
+        unit="gr",
+        sort_field="ingredient_name",
+        sort_direction="asc",
+    )
+
+
+@pytest.mark.asyncio
+async def test_inventory_movements_wrapper_resolves_tenant_before_core():
+    session = SimpleNamespace(tenant_id="tenant-wrapper-movements")
+    ingredient_id = uuid4()
+
+    with patch("app.services.inventory_service.require_valid_session", return_value=session), \
+         patch("app.services.inventory_service._get_inventory_movements_for_tenant", new_callable=AsyncMock) as core:
+        core.return_value = {"success": True, "data": []}
+
+        result = await get_inventory_movements(
+            object(),
+            object(),
+            limit=20,
+            offset=2,
+            ingredient_id=ingredient_id,
+            movement_type="purchase",
+            quantity_direction="positive",
+            start_date="2026-01-01",
+            end_date="2026-01-31",
+        )
+
+    assert result == {"success": True, "data": []}
+    core.assert_awaited_once_with(
+        "tenant-wrapper-movements",
+        limit=20,
+        offset=2,
+        ingredient_id=ingredient_id,
+        movement_type="purchase",
+        quantity_direction="positive",
+        start_date="2026-01-01",
+        end_date="2026-01-31",
+    )
 
 
 class TestInventoryStockEndpoint:
