@@ -73,6 +73,12 @@ def _profile_row():
     }
 
 
+def _waro_inferred_row(discount: float = 0.0):
+    return {
+        'waro_discount_cop': discount,
+    }
+
+
 def _patch_session():
     fake = MagicMock()
     fake.tenant_id = _TENANT_ID
@@ -108,7 +114,7 @@ async def test_send_invoice_email_happy_path():
     """Owned order + accepted invoice + PDF → 200, helper called with full payload."""
     request = MagicMock()
 
-    fetchrow = [_order_row(), _invoice_row(), _profile_row()]
+    fetchrow = [_order_row(), _invoice_row(), _waro_inferred_row(), _profile_row()]
     fetch = [
         [],  # tax items (empty → no tax)
         [],  # promo summary (no applied promos)
@@ -240,7 +246,7 @@ async def test_send_invoice_email_ses_failure_502():
     """send_pos_receipt_email returns False → 502."""
     request = MagicMock()
 
-    fetchrow = [_order_row(), _invoice_row(), _profile_row()]
+    fetchrow = [_order_row(), _invoice_row(), _waro_inferred_row(), _profile_row()]
     fetch = [
         [],
         [],
