@@ -328,6 +328,7 @@ async def get_online_order_by_id(
                     oi.quantity,
                     oi.price_at_purchase,
                     oi.subtotal,
+                    oi.notes,
                     pr.name AS product_name
                 FROM order_items oi
                 JOIN product pr ON pr.id = oi.product_id
@@ -385,6 +386,7 @@ async def get_online_order_by_id(
                             "quantity": float(item['quantity']),
                             "unit_price": float(item['price_at_purchase']),
                             "subtotal": float(item['subtotal']),
+                            "notes": item['notes'],
                             "modifiers": modifiers_by_item.get(str(item['id']), []),
                         }
                         for item in item_rows
