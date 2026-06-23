@@ -19,22 +19,24 @@ _TENANT_ID = UUID('93b3e582-34fa-44a6-8d0f-bf82a3608727')
 
 def _row(
     dev_flag_enabled: bool = True,
+    tenant_slug: str = 'acme-sas',
     nit: str = '900123456',
     business_name: str = 'ACME SAS',
     phone: str = '3001234567',
     email: str = 'contacto@acme.co',
+    matias_company_id: str = '8d4f2f79-4a4e-4d7d-bf07-7bd61c9e4f37',
     active_resolution: bool = True,
     inc_applicable: bool = False,
     iva_applicable: bool = True,
-    tax_regime_id: int = 1,   # 1 = Responsable de IVA, 2 = No responsable
 ):
     return {
         'dev_flag_enabled':  dev_flag_enabled,
+        'tenant_slug':       tenant_slug,
         'nit':               nit,
         'business_name':     business_name,
         'phone':             phone,
         'email':             email,
-        'tax_regime_id':     tax_regime_id,
+        'matias_company_id':  matias_company_id,
         'active_resolution': active_resolution,
         'inc_applicable':    inc_applicable,
         'iva_applicable':    iva_applicable,
@@ -65,7 +67,7 @@ class TestReadinessService:
     """Unit tests for `invoicing_readiness_service.get_readiness`."""
 
     @pytest.mark.asyncio
-    async def test_happy_path_all_four_checks_true(self):
+    async def test_happy_path_all_five_checks_true(self):
         with _patch_db(_row()):
             payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
 
@@ -76,6 +78,7 @@ class TestReadinessService:
             'fiscal_data_complete': True,
             'active_resolution':    True,
             'taxes_configured':     True,
+            'matias_company_id_configured': True,
         }
         assert payload['missing'] == []
 
@@ -90,8 +93,7 @@ class TestReadinessService:
 
     @pytest.mark.asyncio
     async def test_responsable_without_taxes_blocks_ready(self):
-        # Responsable de IVA (regime=1) without INC and without IVA → still blocks
-        with _patch_db(_row(inc_applicable=False, iva_applicable=False, tax_regime_id=1)):
+        with _patch_db(_row(inc_applicable=False, iva_applicable=False)):
             payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
 
         assert payload['checks']['taxes_configured'] is False
@@ -99,14 +101,56 @@ class TestReadinessService:
         assert any('impuestos configurados' in m for m in payload['missing'])
 
     @pytest.mark.asyncio
-    async def test_no_responsable_passes_without_taxes(self):
-        # No responsable de IVA (regime=2) emits without INC/IVA — Art. 437 ET parágrafo 3
-        with _patch_db(_row(inc_applicable=False, iva_applicable=False, tax_regime_id=2)):
+    async def test_no_responsable_without_taxes_still_blocks_ready(self):
+        with _patch_db(_row(inc_applicable=False, iva_applicable=False)):
             payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
 
-        assert payload['checks']['taxes_configured'] is True
+        assert payload['checks']['taxes_configured'] is False
+        assert payload['ready'] is False
+        assert any('impuestos configurados' in m for m in payload['missing'])
+
+    @pytest.mark.asyncio
+    async def test_production_missing_matias_company_id_blocks_ready(self, monkeypatch):
+        from app import config as config_module
+
+        monkeypatch.setattr(config_module.settings, 'matias_environment_id', 1)
+        monkeypatch.setattr(config_module.settings, 'matias_habilitacion_tenant_ids', '')
+        monkeypatch.setattr(config_module.settings, 'matias_sandbox_tenant_ids', '')
+
+        with _patch_db(_row(matias_company_id='  ')):
+            payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
+
+        assert payload['ready'] is False
+        assert payload['checks']['matias_company_id_configured'] is False
+        assert any('companyId' in m for m in payload['missing'])
+
+    @pytest.mark.asyncio
+    async def test_habilitacion_missing_matias_company_id_is_exempt(self, monkeypatch):
+        from app import config as config_module
+
+        monkeypatch.setattr(config_module.settings, 'matias_environment_id', 1)
+        monkeypatch.setattr(config_module.settings, 'matias_habilitacion_tenant_ids', str(_TENANT_ID))
+        monkeypatch.setattr(config_module.settings, 'matias_sandbox_tenant_ids', '')
+
+        with _patch_db(_row(matias_company_id=None)):
+            payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
+
         assert payload['ready'] is True
-        assert payload['missing'] == []
+        assert payload['checks']['matias_company_id_configured'] is True
+
+    @pytest.mark.asyncio
+    async def test_sandbox_missing_matias_company_id_is_exempt(self, monkeypatch):
+        from app import config as config_module
+
+        monkeypatch.setattr(config_module.settings, 'matias_environment_id', 1)
+        monkeypatch.setattr(config_module.settings, 'matias_habilitacion_tenant_ids', '')
+        monkeypatch.setattr(config_module.settings, 'matias_sandbox_tenant_ids', 'acme-sas')
+
+        with _patch_db(_row(matias_company_id=None)):
+            payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
+
+        assert payload['ready'] is True
+        assert payload['checks']['matias_company_id_configured'] is True
 
     @pytest.mark.asyncio
     async def test_dev_flag_off_blocks(self):
@@ -167,7 +211,6 @@ class TestReadinessService:
             active_resolution=False,
             inc_applicable=False,
             iva_applicable=False,
-            tax_regime_id=1,   # Responsable — needs taxes; if regime were 2, taxes pass
         )):
             payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
 
@@ -207,6 +250,7 @@ class TestEmitGate:
                     'fiscal_data_complete': True,
                     'active_resolution':    True,
                     'taxes_configured':     True,
+                    'matias_company_id_configured': True,
                 },
                 'missing': ['Facturación electrónica deshabilitada por el equipo de WARO'],
             }),
@@ -235,6 +279,7 @@ class TestEmitGate:
                 'fiscal_data_complete': True,
                 'active_resolution':    True,
                 'taxes_configured':     True,
+                'matias_company_id_configured': True,
             },
             'missing': [],
         }
