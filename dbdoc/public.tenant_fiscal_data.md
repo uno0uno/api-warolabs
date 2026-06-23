@@ -16,7 +16,7 @@
 | city_id | integer | 149 | true |  |  |  |
 | phone | varchar(20) |  | true |  |  |  |
 | email | varchar(200) |  | true |  |  |  |
-| matias_company_id | text |  | true |  |  | Matias Casa de Software customer companyId UUID for this tenant; not the WARO tenant_id. |
+| matias_company_id | text |  | true |  |  | Matias Casa de Software customer client_uuid for this tenant; not the WARO tenant_id. |
 | created_at | timestamp with time zone | now() | false |  |  |  |
 | updated_at | timestamp with time zone | now() | false |  |  |  |
 

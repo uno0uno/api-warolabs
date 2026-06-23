@@ -15,7 +15,8 @@ Five predicates must all be true:
                               or iva_applicable set to true.
   5. matias_company_id_configured
                             — production Matias Casa de Software emissions have
-                              tenant_fiscal_data.matias_company_id configured.
+                              tenant_fiscal_data.matias_company_id configured
+                              for the outbound Matias client_uuid.
                               Sandbox and habilitación tenants are exempt.
 
 About the no-responsable bypass that was here briefly:
@@ -128,7 +129,7 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         missing.append('No hay impuestos configurados (activa INC o IVA en Configuración fiscal)')
     if not matias_company_id_configured:
         missing.append(
-            'Falta UUID cliente Matias (companyId) para emitir en producción'
+            'Falta UUID cliente Matias (client_uuid) para emitir en producción'
         )
 
     return {
