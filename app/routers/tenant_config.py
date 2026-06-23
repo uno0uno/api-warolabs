@@ -3,6 +3,7 @@ Tenant configuration router - admin endpoints for managing public profiles
 Authentication required
 """
 from datetime import date as _date
+from uuid import UUID
 from asyncpg.exceptions import UniqueViolationError
 from fastapi import APIRouter, Depends, Request, Body, HTTPException
 from fastapi.responses import JSONResponse
@@ -182,6 +183,26 @@ def _normalize_receipt_tip_label(raw) -> str:
     return label
 
 
+def _normalize_matias_company_id(data: dict) -> Optional[str]:
+    raw = data.get('matias_company_id')
+    if raw is None and 'companyId' in data:
+        raw = data.get('companyId')
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise HTTPException(status_code=400, detail='Matias companyId must be a valid UUID string')
+
+    value = raw.strip()
+    if not value:
+        return None
+
+    try:
+        UUID(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Matias companyId must be a valid UUID') from exc
+    return value
+
+
 @router.get("/fiscal-data", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def get_fiscal_data(request: Request):
     """
@@ -220,6 +241,7 @@ async def get_fiscal_data(request: Request):
             'city_id': row['city_id'],
             'phone': row['phone'],
             'email': row['email'],
+            'matias_company_id': row['matias_company_id'],
             'receipt_document_label': _normalize_receipt_document_label(row['receipt_document_label']),
             'receipt_tip_label': _normalize_receipt_tip_label(row.get('receipt_tip_label')),
             'show_logo_on_receipts': row['show_logo_on_receipts']
@@ -243,14 +265,16 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
     document_label = _normalize_receipt_document_label(data.get('receipt_document_label'))
     tip_label = _normalize_receipt_tip_label(data.get('receipt_tip_label'))
     show_logo = bool(data.get('show_logo_on_receipts', True))
+    matias_company_id = _normalize_matias_company_id(data)
 
     async with get_db_connection() as conn:
         await conn.execute(
             """INSERT INTO tenant_fiscal_data (tenant_id, nit, business_name,
                    type_organization_id, tax_regime_id, tax_level_id,
                    fiscal_address, city, city_id, phone, email,
-                   receipt_document_label, receipt_tip_label, show_logo_on_receipts, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+                   matias_company_id, receipt_document_label, receipt_tip_label,
+                   show_logo_on_receipts, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
                ON CONFLICT (tenant_id) DO UPDATE SET
                    nit = EXCLUDED.nit,
                    business_name = EXCLUDED.business_name,
@@ -262,6 +286,7 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
                    city_id = EXCLUDED.city_id,
                    phone = EXCLUDED.phone,
                    email = EXCLUDED.email,
+                   matias_company_id = EXCLUDED.matias_company_id,
                    receipt_document_label = EXCLUDED.receipt_document_label,
                    receipt_tip_label = EXCLUDED.receipt_tip_label,
                    show_logo_on_receipts = EXCLUDED.show_logo_on_receipts,
@@ -277,6 +302,7 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
             data.get('city_id', 149),
             data.get('phone'),
             data.get('email'),
+            matias_company_id,
             document_label,
             tip_label,
             show_logo,

@@ -115,7 +115,7 @@ def test_admin_role_denied_mi_negocio_under_enforce():
         Module.POS, Module.VENTAS, Module.DESPACHO, Module.MENU,
         Module.OPERACIONES, Module.ABASTECIMIENTO, Module.ANALITICA,
         Module.FINANZAS, Module.FACTURACION, Module.INTEGRACIONES,
-        Module.MI_PLAN, Module.EVENTOS,
+        Module.MI_PLAN,
     })
 
     with patch("app.core.middleware.get_session_context", return_value=session), \
