@@ -122,7 +122,7 @@ class TestReadinessService:
 
         assert payload['ready'] is False
         assert payload['checks']['matias_company_id_configured'] is False
-        assert any('companyId' in m for m in payload['missing'])
+        assert any('client_uuid' in m for m in payload['missing'])
 
     @pytest.mark.asyncio
     async def test_habilitacion_missing_matias_company_id_is_exempt(self, monkeypatch):

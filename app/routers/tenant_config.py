@@ -185,6 +185,8 @@ def _normalize_receipt_tip_label(raw) -> str:
 
 def _normalize_matias_company_id(data: dict) -> Optional[str]:
     raw = data.get('matias_company_id')
+    if raw is None and 'client_uuid' in data:
+        raw = data.get('client_uuid')
     if raw is None and 'companyId' in data:
         raw = data.get('companyId')
     if raw is None:

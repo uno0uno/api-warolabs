@@ -117,6 +117,34 @@ def test_put_fiscal_data_persists_company_id_alias():
     assert execute_args[12] == company_id
 
 
+def test_put_fiscal_data_persists_client_uuid_alias():
+    session = _build_session()
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    company_id = "8d4f2f79-4a4e-4d7d-bf07-7bd61c9e4f37"
+
+    @asynccontextmanager
+    async def fiscal_db_ctx():
+        yield conn
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch("app.database.get_db_connection", return_value=fiscal_db_ctx()):
+        response = TestClient(_build_app()).put(
+            "/api/tenant/fiscal-data",
+            json={
+                "nit": "900123456",
+                "business_name": "Waro Test SAS",
+                "client_uuid": f"  {company_id}  ",
+            },
+        )
+
+    assert response.status_code == 200
+    execute_args = conn.execute.await_args.args
+    assert execute_args[12] == company_id
+
+
 def test_put_fiscal_data_normalizes_blank_matias_company_id_to_null():
     session = _build_session()
     conn = MagicMock()
