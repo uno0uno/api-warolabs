@@ -59,6 +59,26 @@ _QR_TOKEN_URLSAFE_BYTES = 32
 _QR_TOKEN_MAX_ATTEMPTS = 5
 
 
+def _completed_session_orders_payload(order_rows: List[Any]) -> Dict[str, Any]:
+    """Return invoice-friendly order identifiers for a completed table session."""
+    order_ids = [str(row["id"]) for row in order_rows]
+    order_numbers = [
+        int(row["order_number"]) if row["order_number"] is not None else 0
+        for row in order_rows
+    ]
+    payload: Dict[str, Any] = {
+        "order_ids": order_ids,
+        "order_numbers": order_numbers,
+        "status": "completed",
+        "payment_status": "paid",
+        "total_amount": float(sum(float(row["total_amount"] or 0) for row in order_rows)),
+    }
+    if len(order_ids) == 1:
+        payload["order_id"] = order_ids[0]
+        payload["order_number"] = order_numbers[0]
+    return payload
+
+
 def _modifier_unit_total(mod: dict) -> float:
     return float(mod.get("price", 0)) * float(mod.get("quantity", 1))
 
@@ -1708,7 +1728,12 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
             # Compute paid_total and remaining for the split response
             async with get_db_connection() as conn2:
                 order_rows = await conn2.fetch(
-                    "SELECT id, total_amount FROM orders WHERE table_session_id = $1",
+                    """
+                    SELECT id, order_number, total_amount
+                    FROM orders
+                    WHERE table_session_id = $1
+                    ORDER BY created_at
+                    """,
                     session_row["id"],
                 )
                 session_total = sum(float(r["total_amount"]) for r in order_rows)
@@ -1736,6 +1761,10 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 )
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
+                completed_orders_payload = (
+                    _completed_session_orders_payload(order_rows)
+                    if is_complete else {}
+                )
             logger.info(f"Split payment recorded for session {session_row['id']}: paid={paid_total}, remaining={remaining}")
             return {
                 "success": True,
@@ -1747,6 +1776,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     "is_complete": is_complete,
                     # Issue warocol.com#649 — real UUID of the first inserted row.
                     "payment_id": _split_first_payment_id_mesa,
+                    **completed_orders_payload,
                 },
             }
 
@@ -1893,7 +1923,12 @@ async def add_session_payment(
 
                 # Get all completed (partial) orders for this session
                 order_rows = await conn.fetch(
-                    "SELECT id, total_amount FROM orders WHERE table_session_id = $1 AND status = 'completed' ORDER BY created_at",
+                    """
+                    SELECT id, order_number, total_amount
+                    FROM orders
+                    WHERE table_session_id = $1 AND status = 'completed'
+                    ORDER BY created_at
+                    """,
                     session_row["id"],
                 )
                 if not order_rows:
@@ -2043,6 +2078,10 @@ async def add_session_payment(
                         table_id, tenant_id,
                     )
                     logger.info(f"Session {session_row['id']} closed via split payment (fully paid)")
+                completed_orders_payload = (
+                    _completed_session_orders_payload(order_rows)
+                    if is_complete else {}
+                )
 
         return {
             "success": True,
@@ -2057,6 +2096,7 @@ async def add_session_payment(
                 "tip_tax_amount": resolved_tip_tax_amount,
                 # Issue warocol.com#649 — real UUID; siblings void via heuristic.
                 "payment_id": first_payment_id,
+                **completed_orders_payload,
             },
         }
 
