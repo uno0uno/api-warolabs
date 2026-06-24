@@ -14,10 +14,9 @@ Five predicates must all be true:
   4. taxes_configured       — tenant_tax_config has at least one of inc_applicable
                               or iva_applicable set to true.
   5. matias_company_id_configured
-                            — production Matias Casa de Software emissions have
+                            — Matias Casa de Software emissions have
                               tenant_fiscal_data.matias_company_id configured
                               for the outbound Matias client_uuid.
-                              Sandbox and habilitación tenants are exempt.
 
 About the no-responsable bypass that was here briefly:
 
@@ -49,7 +48,6 @@ and microservice gate uno0uno/api-facturacion#17 must consume the same JSON):
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from app.core.matias_environment import matias_environment_for_tenant, matias_sandbox_for_tenant
 from app.database import get_db_connection
 
 
@@ -95,14 +93,9 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
     active_resolution = bool(row['active_resolution'])
 
     taxes_configured = bool(row['inc_applicable']) or bool(row['iva_applicable'])
-    requires_matias_company_id = (
-        matias_environment_for_tenant(tenant_id, row['tenant_slug']) == 1
-        and not matias_sandbox_for_tenant(tenant_id, row['tenant_slug'])
-    )
     matias_company_id = row['matias_company_id']
-    matias_company_id_configured = (
-        not requires_matias_company_id
-        or bool(matias_company_id and str(matias_company_id).strip())
+    matias_company_id_configured = bool(
+        matias_company_id and str(matias_company_id).strip()
     )
 
     missing_fiscal_fields: List[str] = []
@@ -129,7 +122,7 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         missing.append('No hay impuestos configurados (activa INC o IVA en Configuración fiscal)')
     if not matias_company_id_configured:
         missing.append(
-            'Falta UUID cliente Matias (client_uuid) para emitir en producción'
+            'Falta UUID cliente Matias (client_uuid) para emitir con Matias'
         )
 
     return {

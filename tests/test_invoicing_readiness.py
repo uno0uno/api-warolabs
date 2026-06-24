@@ -125,7 +125,7 @@ class TestReadinessService:
         assert any('client_uuid' in m for m in payload['missing'])
 
     @pytest.mark.asyncio
-    async def test_habilitacion_missing_matias_company_id_is_exempt(self, monkeypatch):
+    async def test_habilitacion_missing_matias_company_id_blocks_ready(self, monkeypatch):
         from app import config as config_module
 
         monkeypatch.setattr(config_module.settings, 'matias_environment_id', 1)
@@ -135,11 +135,12 @@ class TestReadinessService:
         with _patch_db(_row(matias_company_id=None)):
             payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
 
-        assert payload['ready'] is True
-        assert payload['checks']['matias_company_id_configured'] is True
+        assert payload['ready'] is False
+        assert payload['checks']['matias_company_id_configured'] is False
+        assert any('client_uuid' in m for m in payload['missing'])
 
     @pytest.mark.asyncio
-    async def test_sandbox_missing_matias_company_id_is_exempt(self, monkeypatch):
+    async def test_sandbox_missing_matias_company_id_blocks_ready(self, monkeypatch):
         from app import config as config_module
 
         monkeypatch.setattr(config_module.settings, 'matias_environment_id', 1)
@@ -149,8 +150,9 @@ class TestReadinessService:
         with _patch_db(_row(matias_company_id=None)):
             payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
 
-        assert payload['ready'] is True
-        assert payload['checks']['matias_company_id_configured'] is True
+        assert payload['ready'] is False
+        assert payload['checks']['matias_company_id_configured'] is False
+        assert any('client_uuid' in m for m in payload['missing'])
 
     @pytest.mark.asyncio
     async def test_dev_flag_off_blocks(self):
