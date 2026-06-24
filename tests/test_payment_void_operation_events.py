@@ -8,6 +8,37 @@ import pytest
 from app.services import pos_cart_service, tables_service
 
 
+def test_completed_session_orders_payload_single_order():
+    order_id = uuid4()
+
+    payload = tables_service._completed_session_orders_payload([
+        {"id": order_id, "order_number": 42, "total_amount": 45000},
+    ])
+
+    assert payload["order_id"] == str(order_id)
+    assert payload["order_ids"] == [str(order_id)]
+    assert payload["order_number"] == 42
+    assert payload["order_numbers"] == [42]
+    assert payload["status"] == "completed"
+    assert payload["payment_status"] == "paid"
+    assert payload["total_amount"] == 45000.0
+
+
+def test_completed_session_orders_payload_multi_order():
+    first_order_id = uuid4()
+    second_order_id = uuid4()
+
+    payload = tables_service._completed_session_orders_payload([
+        {"id": first_order_id, "order_number": 42, "total_amount": 20000},
+        {"id": second_order_id, "order_number": 43, "total_amount": 25000},
+    ])
+
+    assert "order_id" not in payload
+    assert payload["order_ids"] == [str(first_order_id), str(second_order_id)]
+    assert payload["order_numbers"] == [42, 43]
+    assert payload["total_amount"] == 45000.0
+
+
 def _txn_conn():
     mock_conn = AsyncMock()
 
