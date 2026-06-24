@@ -113,7 +113,7 @@ class TestReadinessService:
         assert payload['checks']['taxes_configured'] is False
         assert payload['checks']['tax_requirement_satisfied'] is False
         assert payload['ready'] is False
-        assert any('requiere INC o IVA activo' in m for m in payload['missing'])
+        assert any('requiere INC/IVA activo o un escenario sin impuesto válido' in m for m in payload['missing'])
 
     @pytest.mark.asyncio
     async def test_no_responsable_persona_natural_without_taxes_can_be_ready(self):
@@ -147,7 +147,7 @@ class TestReadinessService:
         assert payload['checks']['tax_requirement_satisfied'] is True
         assert payload['ready'] is False
         assert any('NIT' in m for m in payload['missing'])
-        assert not any('requiere INC o IVA activo' in m for m in payload['missing'])
+        assert not any('requiere INC/IVA activo o un escenario sin impuesto válido' in m for m in payload['missing'])
 
     @pytest.mark.asyncio
     async def test_production_missing_matias_company_id_blocks_ready(self, monkeypatch):
