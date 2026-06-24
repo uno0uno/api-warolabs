@@ -2,20 +2,22 @@
 Invoicing readiness service — issue #130
 
 Single source of truth for "can this tenant emit electronic invoices right now?"
-Five predicates must all be true:
+Six predicates must all be true:
 
-  1. dev_flag_enabled       — tenants.electronic_invoicing_enabled = true
+  1. customer_requested     — tenant_fiscal_data.electronic_invoicing_requested
+                              = true (customer intent from /facturacion)
+  2. dev_flag_enabled       — tenants.electronic_invoicing_enabled = true
                               (dev-only kill switch, set via SQL during onboarding)
-  2. fiscal_data_complete   — tenant_fiscal_data has non-null nit, business_name,
+  3. fiscal_data_complete   — tenant_fiscal_data has non-null nit, business_name,
                               phone, email
-  3. active_resolution      — at least one row in dian_resolutions with
+  4. active_resolution      — at least one row in dian_resolutions with
                               is_active=true, valid date range, available numbers,
                               and document_type='invoice'
-  4. tax_requirement_satisfied
+  5. tax_requirement_satisfied
                             — tenant_tax_config has at least one of inc_applicable
                               or iva_applicable set to true, or the issuer fiscal
                               configuration supports no IVA/INC on sale lines.
-  5. matias_company_id_configured
+  6. matias_company_id_configured
                             — Matias Casa de Software emissions have
                               tenant_fiscal_data.matias_company_id configured
                               for the outbound Matias client_uuid.
@@ -38,6 +40,7 @@ and microservice gate uno0uno/api-facturacion#17 must consume the same JSON):
     {
       "ready": bool,
       "checks": {
+        "customer_requested": bool,
         "dev_flag_enabled":     bool,
         "fiscal_data_complete": bool,
         "active_resolution":    bool,
@@ -62,6 +65,8 @@ SELECT
     fd.business_name                AS business_name,
     fd.phone                        AS phone,
     fd.email                        AS email,
+    COALESCE(fd.electronic_invoicing_requested, false)
+                                    AS customer_requested,
     fd.matias_company_id            AS matias_company_id,
     fd.type_organization_id         AS type_organization_id,
     fd.tax_regime_id                AS tax_regime_id,
@@ -95,6 +100,7 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
     if row is None:
         return None
 
+    customer_requested = bool(row['customer_requested'])
     dev_flag_enabled  = bool(row['dev_flag_enabled'])
     active_resolution = bool(row['active_resolution'])
 
@@ -123,8 +129,10 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
     fiscal_data_complete = len(missing_fiscal_fields) == 0
 
     missing: List[str] = []
+    if not customer_requested:
+        missing.append('Solicita la activación de facturación electrónica desde la configuración fiscal')
     if not dev_flag_enabled:
-        missing.append('Facturación electrónica deshabilitada por el equipo de WARO')
+        missing.append('Facturación electrónica pendiente de habilitación interna por WARO/Matias')
     if not fiscal_data_complete:
         missing.append(
             'Faltan datos fiscales: ' + ', '.join(missing_fiscal_fields)
@@ -142,13 +150,15 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
 
     return {
         'ready': (
-            dev_flag_enabled
+            customer_requested
+            and dev_flag_enabled
             and fiscal_data_complete
             and active_resolution
             and tax_requirement_satisfied
             and matias_company_id_configured
         ),
         'checks': {
+            'customer_requested':   customer_requested,
             'dev_flag_enabled':     dev_flag_enabled,
             'fiscal_data_complete': fiscal_data_complete,
             'active_resolution':    active_resolution,

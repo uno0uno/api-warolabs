@@ -54,6 +54,7 @@ def _fiscal_row(**overrides):
         "city_id": 149,
         "phone": "3001234567",
         "email": "facturacion@example.com",
+        "electronic_invoicing_requested": False,
         "matias_company_id": None,
         "receipt_document_label": "Prefactura",
         "receipt_tip_label": "Propina",
@@ -86,6 +87,7 @@ def test_get_fiscal_data_returns_nullable_matias_company_id():
 
     assert response.status_code == 200
     assert response.json()["data"]["matias_company_id"] is None
+    assert response.json()["data"]["electronic_invoicing_requested"] is False
 
 
 def test_put_fiscal_data_persists_company_id_alias():
@@ -114,7 +116,8 @@ def test_put_fiscal_data_persists_company_id_alias():
     assert response.status_code == 200
     execute_args = conn.execute.await_args.args
     assert "matias_company_id" in execute_args[0]
-    assert execute_args[12] == company_id
+    assert execute_args[12] is False
+    assert execute_args[13] == company_id
 
 
 def test_put_fiscal_data_persists_client_uuid_alias():
@@ -142,7 +145,8 @@ def test_put_fiscal_data_persists_client_uuid_alias():
 
     assert response.status_code == 200
     execute_args = conn.execute.await_args.args
-    assert execute_args[12] == company_id
+    assert execute_args[12] is False
+    assert execute_args[13] == company_id
 
 
 def test_put_fiscal_data_normalizes_blank_matias_company_id_to_null():
@@ -164,7 +168,38 @@ def test_put_fiscal_data_normalizes_blank_matias_company_id_to_null():
         )
 
     assert response.status_code == 200
-    assert conn.execute.await_args.args[12] is None
+    assert conn.execute.await_args.args[13] is None
+
+
+def test_put_fiscal_data_persists_electronic_invoicing_request_without_internal_flag():
+    session = _build_session()
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+
+    @asynccontextmanager
+    async def fiscal_db_ctx():
+        yield conn
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch("app.database.get_db_connection", return_value=fiscal_db_ctx()):
+        response = TestClient(_build_app()).put(
+            "/api/tenant/fiscal-data",
+            json={
+                "nit": "900123456",
+                "business_name": "Waro Test SAS",
+                "electronic_invoicing_requested": True,
+                "electronic_invoicing_enabled": True,
+            },
+        )
+
+    assert response.status_code == 200
+    execute_args = conn.execute.await_args.args
+    sql = execute_args[0]
+    assert "electronic_invoicing_requested" in sql
+    assert "electronic_invoicing_enabled" not in sql
+    assert execute_args[12] is True
 
 
 def test_put_fiscal_data_keeps_tax_config_separate_for_no_responsable_persona_natural():

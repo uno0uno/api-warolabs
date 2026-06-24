@@ -246,6 +246,7 @@ async def get_fiscal_data(request: Request):
             'city_id': row['city_id'],
             'phone': row['phone'],
             'email': row['email'],
+            'electronic_invoicing_requested': bool(row['electronic_invoicing_requested']),
             'matias_company_id': row['matias_company_id'],
             'receipt_document_label': _normalize_receipt_document_label(row['receipt_document_label']),
             'receipt_tip_label': _normalize_receipt_tip_label(row.get('receipt_tip_label')),
@@ -275,15 +276,17 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
     tip_label = _normalize_receipt_tip_label(data.get('receipt_tip_label'))
     show_logo = bool(data.get('show_logo_on_receipts', True))
     matias_company_id = _normalize_matias_company_id(data)
+    electronic_invoicing_requested = bool(data.get('electronic_invoicing_requested', False))
 
     async with get_db_connection() as conn:
         await conn.execute(
             """INSERT INTO tenant_fiscal_data (tenant_id, nit, business_name,
                    type_organization_id, tax_regime_id, tax_level_id,
                    fiscal_address, city, city_id, phone, email,
-                   matias_company_id, receipt_document_label, receipt_tip_label,
-                   show_logo_on_receipts, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+                   electronic_invoicing_requested, matias_company_id,
+                   receipt_document_label, receipt_tip_label, show_logo_on_receipts,
+                   updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
                ON CONFLICT (tenant_id) DO UPDATE SET
                    nit = EXCLUDED.nit,
                    business_name = EXCLUDED.business_name,
@@ -295,6 +298,7 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
                    city_id = EXCLUDED.city_id,
                    phone = EXCLUDED.phone,
                    email = EXCLUDED.email,
+                   electronic_invoicing_requested = EXCLUDED.electronic_invoicing_requested,
                    matias_company_id = EXCLUDED.matias_company_id,
                    receipt_document_label = EXCLUDED.receipt_document_label,
                    receipt_tip_label = EXCLUDED.receipt_tip_label,
@@ -311,6 +315,7 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
             data.get('city_id', 149),
             data.get('phone'),
             data.get('email'),
+            electronic_invoicing_requested,
             matias_company_id,
             document_label,
             tip_label,
