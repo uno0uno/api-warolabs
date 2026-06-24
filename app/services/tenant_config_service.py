@@ -622,7 +622,10 @@ async def get_tax_config(request: Request) -> dict:
 
 async def update_tax_config(request: Request, data) -> dict:
     """
-    Upsert the tax configuration for the active tenant.
+    Upsert the sale-tax configuration for the active tenant.
+
+    This controls which taxes are calculated on sales. Issuer identity fields
+    such as type_organization_id and tax_regime_id are stored via fiscal-data.
     Accepts a TaxConfigUpdate-shaped object.
     """
     try:

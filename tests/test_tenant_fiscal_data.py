@@ -167,6 +167,44 @@ def test_put_fiscal_data_normalizes_blank_matias_company_id_to_null():
     assert conn.execute.await_args.args[12] is None
 
 
+def test_put_fiscal_data_keeps_tax_config_separate_for_no_responsable_persona_natural():
+    session = _build_session()
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+
+    @asynccontextmanager
+    async def fiscal_db_ctx():
+        yield conn
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch("app.database.get_db_connection", return_value=fiscal_db_ctx()):
+        response = TestClient(_build_app()).put(
+            "/api/tenant/fiscal-data",
+            json={
+                "nit": "123456789",
+                "business_name": "Persona Natural Test",
+                "type_organization_id": 2,
+                "tax_regime_id": 2,
+                "tax_level_id": 5,
+                "inc_applicable": True,
+                "iva_applicable": True,
+            },
+        )
+
+    assert response.status_code == 200
+    execute_args = conn.execute.await_args.args
+    sql = execute_args[0]
+    assert "tenant_fiscal_data" in sql
+    assert "tenant_tax_config" not in sql
+    assert "inc_applicable" not in sql
+    assert "iva_applicable" not in sql
+    assert execute_args[4] == 2
+    assert execute_args[5] == 2
+    assert execute_args[6] == 5
+
+
 def test_put_fiscal_data_rejects_invalid_matias_company_id():
     session = _build_session()
 

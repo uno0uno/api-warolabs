@@ -210,6 +210,9 @@ async def get_fiscal_data(request: Request):
     """
     Get fiscal data for the active tenant.
     Inserts defaults on first access if no row exists.
+
+    Fiscal data identifies the electronic invoice issuer. Sales tax toggles
+    such as INC/IVA live in tenant_tax_config and are handled separately.
     """
     from app.core.middleware import require_valid_session
     from app.database import get_db_connection
@@ -257,6 +260,10 @@ async def get_fiscal_data(request: Request):
 async def update_fiscal_data(request: Request, data: dict = Body(...)):
     """
     Upsert fiscal data for the active tenant.
+
+    This endpoint intentionally does not mutate tenant_tax_config. A tenant can
+    update organization type or IVA responsibility without auto-enabling INC/IVA
+    on sale lines.
     """
     from app.core.middleware import require_valid_session
     from app.database import get_db_connection
