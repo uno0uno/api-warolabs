@@ -1,4 +1,5 @@
 import logging
+import asyncpg
 from decimal import Decimal
 from typing import Optional, List, Dict, Any
 from uuid import UUID
@@ -25,6 +26,56 @@ from app.services.purchase_tracking_service import upload_purchase_attachments
 from app.services.aws_s3_service import AWSS3Service
 
 logger = logging.getLogger(__name__)
+
+
+def _looks_like_uuid(value: Optional[str]) -> bool:
+    return bool(value and len(value) == 36 and '-' in value)
+
+
+async def _resolve_payment_method(
+    conn,
+    tenant_id: UUID,
+    payment_method: Optional[str],
+    payment_method_id: Optional[str] = None,
+) -> tuple[str, Optional[str]]:
+    """Resolve a group slug plus optional sub-method UUID for tenant expenses."""
+    method_slug = payment_method or 'cash'
+    method_id = payment_method_id
+
+    if _looks_like_uuid(method_slug) and not method_id:
+        method_id = method_slug
+        method_slug = None
+
+    if method_id:
+        try:
+            method_uuid = UUID(str(method_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Método de pago inválido")
+
+        pm_row = await conn.fetchrow("""
+            SELECT pm.id::text AS id, pmg.slug
+            FROM payment_methods pm
+            JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+            WHERE pm.id = $1
+              AND pm.tenant_id = $2
+              AND pm.is_active = true
+        """, method_uuid, tenant_id)
+
+        if not pm_row:
+            raise HTTPException(status_code=400, detail="Método de pago inválido para este tenant")
+
+        return pm_row["slug"], pm_row["id"]
+
+    return method_slug or 'cash', None
+
+
+def _raise_duplicate_expense_error(exc: asyncpg.UniqueViolationError) -> None:
+    if getattr(exc, "constraint_name", "") == "tenant_expenses_tenant_id_expense_category_id_month_year_de_key":
+        raise HTTPException(
+            status_code=409,
+            detail="Ya existe un gasto con la misma categoría, mes y descripción.",
+        ) from exc
+    raise exc
 
 
 async def get_next_expense_number(conn, tenant_id: UUID) -> str:
@@ -313,6 +364,7 @@ async def get_expenses_list(
                     e.frequency,
                     e.recurring_end_date,
                     e.payment_method,
+                    e.payment_method_id::text as payment_method_id,
                     e.expense_type,
                     c.id as cat_id,
                     c.category_code,
@@ -438,6 +490,7 @@ async def get_expenses_list(
                     frequency=row['frequency'],
                     recurringEndDate=row['recurring_end_date'],
                     paymentMethod=row['payment_method'],
+                    paymentMethodId=row['payment_method_id'],
                     expenseType=row['expense_type'],
                     category=category
                 ))
@@ -854,18 +907,12 @@ async def create_expense_json(
             if not category_exists:
                 raise HTTPException(status_code=400, detail="Invalid expense category")
 
-            # Resolve sub-method UUID → group slug
-            payment_method_raw = expense_data.payment_method or 'cash'
-            payment_method_id: Optional[str] = None
-            if payment_method_raw and len(payment_method_raw) == 36 and '-' in payment_method_raw:
-                pm_row = await conn.fetchrow("""
-                    SELECT pmg.slug FROM payment_methods pm
-                    JOIN payment_method_groups pmg ON pmg.id = pm.group_id
-                    WHERE pm.id = $1::uuid
-                """, payment_method_raw)
-                if pm_row:
-                    payment_method_id = payment_method_raw
-                    payment_method_raw = pm_row["slug"]
+            payment_method_raw, payment_method_id = await _resolve_payment_method(
+                conn,
+                tenant_id,
+                expense_data.payment_method,
+                expense_data.payment_method_id,
+            )
 
             # Generate expense number inside the same connection
             expense_number = await get_next_expense_number(conn, tenant_id)
@@ -924,6 +971,7 @@ async def create_expense_json(
                     e.frequency,
                     e.recurring_end_date,
                     e.payment_method,
+                    e.payment_method_id::text as payment_method_id,
                     e.expense_type,
                     c.id as cat_id,
                     c.category_code,
@@ -958,6 +1006,7 @@ async def create_expense_json(
                 frequency=full_expense['frequency'],
                 recurringEndDate=full_expense['recurring_end_date'],
                 paymentMethod=full_expense['payment_method'],
+                paymentMethodId=full_expense['payment_method_id'],
                 expenseType=full_expense['expense_type'],
                 category=category
             )
@@ -981,6 +1030,8 @@ async def create_expense_json(
         raise
     except HTTPException:
         raise
+    except asyncpg.UniqueViolationError as e:
+        _raise_duplicate_expense_error(e)
     except Exception as e:
         logger.error(f"Error creating expense: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
@@ -1389,17 +1440,12 @@ async def update_expense_json(
                 param_count += 1
 
             if expense_data.payment_method is not None:
-                upd_payment_method = expense_data.payment_method
-                upd_payment_method_id = None
-                if upd_payment_method and len(upd_payment_method) == 36 and '-' in upd_payment_method:
-                    pm_row = await conn.fetchrow("""
-                        SELECT pmg.slug FROM payment_methods pm
-                        JOIN payment_method_groups pmg ON pmg.id = pm.group_id
-                        WHERE pm.id = $1::uuid
-                    """, upd_payment_method)
-                    if pm_row:
-                        upd_payment_method_id = upd_payment_method
-                        upd_payment_method = pm_row["slug"]
+                upd_payment_method, upd_payment_method_id = await _resolve_payment_method(
+                    conn,
+                    tenant_id,
+                    expense_data.payment_method,
+                    expense_data.payment_method_id,
+                )
                 update_fields.append(f"payment_method = ${param_count}")
                 update_values.append(upd_payment_method)
                 param_count += 1
@@ -1426,7 +1472,7 @@ async def update_expense_json(
                     e.id, e.tenant_id, e.expense_category_id, e.month_year,
                     e.amount, e.description, e.source_system, e.created_at,
                     e.transaction_date, e.is_recurring, e.frequency, e.recurring_end_date,
-                    e.payment_method, e.expense_type,
+                    e.payment_method, e.payment_method_id::text as payment_method_id, e.expense_type,
                     c.id as cat_id, c.category_code, c.category_name,
                     c.description as cat_description, c.is_active as cat_active
                 FROM tenant_expenses e
@@ -1456,6 +1502,7 @@ async def update_expense_json(
                 frequency=full_expense['frequency'],
                 recurringEndDate=full_expense['recurring_end_date'],
                 paymentMethod=full_expense['payment_method'],
+                paymentMethodId=full_expense['payment_method_id'],
                 category=category
             )
 
@@ -1480,6 +1527,8 @@ async def update_expense_json(
         raise
     except HTTPException:
         raise
+    except asyncpg.UniqueViolationError as e:
+        _raise_duplicate_expense_error(e)
     except Exception as e:
         logger.error(f"Error updating expense: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error interno del servidor")

@@ -85,6 +85,7 @@ class ExpenseUpdate(BaseModel):
     frequency: Optional[RecurrenceFrequency] = None
     recurring_end_date: Optional[date] = Field(None, alias='recurringEndDate')
     payment_method: Optional[str] = Field(None, alias='paymentMethod')
+    payment_method_id: Optional[str] = Field(None, alias='paymentMethodId')
     expense_type: Optional[ExpenseType] = Field(None, alias='expenseType')
 
     class Config:
