@@ -11,8 +11,10 @@ Five predicates must all be true:
   3. active_resolution      — at least one row in dian_resolutions with
                               is_active=true, valid date range, available numbers,
                               and document_type='invoice'
-  4. taxes_configured       — tenant_tax_config has at least one of inc_applicable
-                              or iva_applicable set to true.
+  4. tax_requirement_satisfied
+                            — tenant_tax_config has at least one of inc_applicable
+                              or iva_applicable set to true, or the issuer fiscal
+                              configuration supports no IVA/INC on sale lines.
   5. matias_company_id_configured
                             — Matias Casa de Software emissions have
                               tenant_fiscal_data.matias_company_id configured
@@ -26,9 +28,9 @@ About the no-responsable bypass that was here briefly:
   AttachedDocument when the factura has no tax line, so the customer
   email goes out without the PDF attachment — degraded UX.
 
-  Decision (issue #135): require INC or IVA always. A tenant who is
-  legitimately no-responsable can either toggle IVA at 19% or wait until
-  /status/zip polling is implemented (separate work).
+  Current decision (warocol.com#1455): API WARO readiness may allow the
+  supported no-responsable/persona-natural/no-tax scenario while #1456 keeps
+  api-facturacion and Matias artifact validation explicit.
 
 Returned shape (this is the public contract — frontend issue uno0uno/warocol.com#450
 and microservice gate uno0uno/api-facturacion#17 must consume the same JSON):
@@ -39,7 +41,8 @@ and microservice gate uno0uno/api-facturacion#17 must consume the same JSON):
         "dev_flag_enabled":     bool,
         "fiscal_data_complete": bool,
         "active_resolution":    bool,
-        "taxes_configured":     bool,
+        "taxes_configured":     bool,  # compatibility: INC or IVA active
+        "tax_requirement_satisfied": bool,
         "matias_company_id_configured": bool,
       },
       "missing": [str, ...],   # human-readable Spanish reasons
@@ -60,6 +63,9 @@ SELECT
     fd.phone                        AS phone,
     fd.email                        AS email,
     fd.matias_company_id            AS matias_company_id,
+    fd.type_organization_id         AS type_organization_id,
+    fd.tax_regime_id                AS tax_regime_id,
+    fd.tax_level_id                 AS tax_level_id,
     COALESCE(ttc.inc_applicable, false) AS inc_applicable,
     COALESCE(ttc.iva_applicable, false) AS iva_applicable,
     EXISTS (
@@ -93,6 +99,13 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
     active_resolution = bool(row['active_resolution'])
 
     taxes_configured = bool(row['inc_applicable']) or bool(row['iva_applicable'])
+    no_tax_allowed = (
+        not taxes_configured
+        and row['type_organization_id'] == 2
+        and row['tax_regime_id'] == 2
+        and row['tax_level_id'] == 5
+    )
+    tax_requirement_satisfied = taxes_configured or no_tax_allowed
     matias_company_id = row['matias_company_id']
     matias_company_id_configured = bool(
         matias_company_id and str(matias_company_id).strip()
@@ -118,8 +131,10 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         )
     if not active_resolution:
         missing.append('No hay una resolución DIAN vigente con numeración disponible')
-    if not taxes_configured:
-        missing.append('No hay impuestos configurados (activa INC o IVA en Configuración fiscal)')
+    if not tax_requirement_satisfied:
+        missing.append(
+            'La configuración fiscal requiere INC o IVA activo para emitir'
+        )
     if not matias_company_id_configured:
         missing.append(
             'Falta UUID cliente Matias (client_uuid) para emitir con Matias'
@@ -130,7 +145,7 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             dev_flag_enabled
             and fiscal_data_complete
             and active_resolution
-            and taxes_configured
+            and tax_requirement_satisfied
             and matias_company_id_configured
         ),
         'checks': {
@@ -138,6 +153,7 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             'fiscal_data_complete': fiscal_data_complete,
             'active_resolution':    active_resolution,
             'taxes_configured':     taxes_configured,
+            'tax_requirement_satisfied': tax_requirement_satisfied,
             'matias_company_id_configured': matias_company_id_configured,
         },
         'missing': missing,

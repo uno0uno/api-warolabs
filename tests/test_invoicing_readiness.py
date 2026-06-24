@@ -26,6 +26,9 @@ def _row(
     email: str = 'contacto@acme.co',
     matias_company_id: str = '8d4f2f79-4a4e-4d7d-bf07-7bd61c9e4f37',
     active_resolution: bool = True,
+    type_organization_id: int = 1,
+    tax_regime_id: int = 2,
+    tax_level_id: int = 5,
     inc_applicable: bool = False,
     iva_applicable: bool = True,
 ):
@@ -37,6 +40,9 @@ def _row(
         'phone':             phone,
         'email':             email,
         'matias_company_id':  matias_company_id,
+        'type_organization_id': type_organization_id,
+        'tax_regime_id':     tax_regime_id,
+        'tax_level_id':      tax_level_id,
         'active_resolution': active_resolution,
         'inc_applicable':    inc_applicable,
         'iva_applicable':    iva_applicable,
@@ -78,6 +84,7 @@ class TestReadinessService:
             'fiscal_data_complete': True,
             'active_resolution':    True,
             'taxes_configured':     True,
+            'tax_requirement_satisfied': True,
             'matias_company_id_configured': True,
         }
         assert payload['missing'] == []
@@ -89,25 +96,58 @@ class TestReadinessService:
             payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
 
         assert payload['checks']['taxes_configured'] is True
+        assert payload['checks']['tax_requirement_satisfied'] is True
         assert payload['ready'] is True
 
     @pytest.mark.asyncio
     async def test_responsable_without_taxes_blocks_ready(self):
-        with _patch_db(_row(inc_applicable=False, iva_applicable=False)):
+        with _patch_db(_row(
+            type_organization_id=1,
+            tax_regime_id=1,
+            tax_level_id=48,
+            inc_applicable=False,
+            iva_applicable=False,
+        )):
             payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
 
         assert payload['checks']['taxes_configured'] is False
+        assert payload['checks']['tax_requirement_satisfied'] is False
         assert payload['ready'] is False
-        assert any('impuestos configurados' in m for m in payload['missing'])
+        assert any('requiere INC o IVA activo' in m for m in payload['missing'])
 
     @pytest.mark.asyncio
-    async def test_no_responsable_without_taxes_still_blocks_ready(self):
-        with _patch_db(_row(inc_applicable=False, iva_applicable=False)):
+    async def test_no_responsable_persona_natural_without_taxes_can_be_ready(self):
+        with _patch_db(_row(
+            type_organization_id=2,
+            tax_regime_id=2,
+            tax_level_id=5,
+            inc_applicable=False,
+            iva_applicable=False,
+        )):
             payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
 
         assert payload['checks']['taxes_configured'] is False
+        assert payload['checks']['tax_requirement_satisfied'] is True
+        assert payload['ready'] is True
+        assert payload['missing'] == []
+
+    @pytest.mark.asyncio
+    async def test_incomplete_no_responsable_persona_natural_still_blocks_ready(self):
+        with _patch_db(_row(
+            nit=None,
+            type_organization_id=2,
+            tax_regime_id=2,
+            tax_level_id=5,
+            inc_applicable=False,
+            iva_applicable=False,
+        )):
+            payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
+
+        assert payload['checks']['fiscal_data_complete'] is False
+        assert payload['checks']['tax_requirement_satisfied'] is True
         assert payload['ready'] is False
-        assert any('impuestos configurados' in m for m in payload['missing'])
+        assert any('NIT' in m for m in payload['missing'])
+        assert not any('requiere INC o IVA activo' in m for m in payload['missing'])
 
     @pytest.mark.asyncio
     async def test_production_missing_matias_company_id_blocks_ready(self, monkeypatch):
@@ -252,6 +292,7 @@ class TestEmitGate:
                     'fiscal_data_complete': True,
                     'active_resolution':    True,
                     'taxes_configured':     True,
+                    'tax_requirement_satisfied': True,
                     'matias_company_id_configured': True,
                 },
                 'missing': ['Facturación electrónica deshabilitada por el equipo de WARO'],
@@ -281,6 +322,7 @@ class TestEmitGate:
                 'fiscal_data_complete': True,
                 'active_resolution':    True,
                 'taxes_configured':     True,
+                'tax_requirement_satisfied': True,
                 'matias_company_id_configured': True,
             },
             'missing': [],
