@@ -374,6 +374,10 @@ async def get_orders_list(
                     p.id as customer_id,
                     p.name as customer_name,
                     p.phone_number as customer_phone,
+                    ei.id as invoice_id,
+                    ei.prefix as invoice_prefix,
+                    ei.invoice_number as invoice_number,
+                    ei.status as invoice_status,
                     (
                         SELECT COUNT(*)
                         FROM order_items oi
@@ -389,6 +393,12 @@ async def get_orders_list(
                 LEFT JOIN profile p ON o.customer_id = p.id
                 LEFT JOIN table_sessions ts_meta ON ts_meta.id = o.table_session_id
                 LEFT JOIN tables t_meta ON t_meta.id = ts_meta.table_id
+                LEFT JOIN LATERAL (
+                    SELECT id, prefix, invoice_number, status
+                    FROM electronic_invoices
+                    WHERE order_id = o.id AND tenant_id = $1
+                    ORDER BY created_at DESC LIMIT 1
+                ) ei ON true
                 WHERE {where_clause}
                 ORDER BY {sort_column} {sort_direction}
                 LIMIT ${limit_param} OFFSET ${offset_param}
@@ -426,6 +436,10 @@ async def get_orders_list(
                         "name": row['customer_name'],
                         "phone": row['customer_phone']
                     },
+                    "invoice_id": str(row['invoice_id']) if row['invoice_id'] else None,
+                    "invoice_prefix": row['invoice_prefix'],
+                    "invoice_number": row['invoice_number'],
+                    "invoice_status": row['invoice_status'],
                     "items_count": row['items_count'],
                     "split_payments_count": int(row['split_payments_count'])
                 }
