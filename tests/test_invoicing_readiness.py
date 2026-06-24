@@ -25,6 +25,7 @@ def _row(
     phone: str = '3001234567',
     email: str = 'contacto@acme.co',
     matias_company_id: str = '8d4f2f79-4a4e-4d7d-bf07-7bd61c9e4f37',
+    customer_requested: bool = True,
     active_resolution: bool = True,
     type_organization_id: int = 1,
     tax_regime_id: int = 2,
@@ -39,6 +40,7 @@ def _row(
         'business_name':     business_name,
         'phone':             phone,
         'email':             email,
+        'customer_requested': customer_requested,
         'matias_company_id':  matias_company_id,
         'type_organization_id': type_organization_id,
         'tax_regime_id':     tax_regime_id,
@@ -80,6 +82,7 @@ class TestReadinessService:
         assert payload is not None
         assert payload['ready'] is True
         assert payload['checks'] == {
+            'customer_requested':   True,
             'dev_flag_enabled':     True,
             'fiscal_data_complete': True,
             'active_resolution':    True,
@@ -88,6 +91,26 @@ class TestReadinessService:
             'matias_company_id_configured': True,
         }
         assert payload['missing'] == []
+
+    @pytest.mark.asyncio
+    async def test_customer_request_is_required_before_internal_enablement_can_be_ready(self):
+        with _patch_db(_row(customer_requested=False, dev_flag_enabled=True)):
+            payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
+
+        assert payload['checks']['customer_requested'] is False
+        assert payload['checks']['dev_flag_enabled'] is True
+        assert payload['ready'] is False
+        assert any('Solicita la activación' in m for m in payload['missing'])
+
+    @pytest.mark.asyncio
+    async def test_internal_enablement_is_still_required_after_customer_request(self):
+        with _patch_db(_row(customer_requested=True, dev_flag_enabled=False)):
+            payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
+
+        assert payload['checks']['customer_requested'] is True
+        assert payload['checks']['dev_flag_enabled'] is False
+        assert payload['ready'] is False
+        assert any('habilitación interna' in m for m in payload['missing'])
 
     @pytest.mark.asyncio
     async def test_taxes_configured_via_inc_alone(self):
@@ -201,7 +224,7 @@ class TestReadinessService:
 
         assert payload['ready'] is False
         assert payload['checks']['dev_flag_enabled'] is False
-        assert any('deshabilitada por el equipo' in m for m in payload['missing'])
+        assert any('habilitación interna' in m for m in payload['missing'])
 
     @pytest.mark.asyncio
     async def test_missing_nit_marks_fiscal_incomplete(self):
