@@ -133,7 +133,7 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         missing.append('No hay una resolución DIAN vigente con numeración disponible')
     if not tax_requirement_satisfied:
         missing.append(
-            'La configuración fiscal requiere INC o IVA activo para emitir'
+            'La configuración fiscal requiere INC/IVA activo o un escenario sin impuesto válido para emitir'
         )
     if not matias_company_id_configured:
         missing.append(
