@@ -5,7 +5,7 @@ from uuid import uuid4
 from app.services.shift_window_service import resolve_shift_template_window
 
 
-def test_overnight_template_may_18_bogota():
+def test_overnight_template_may_18_default_timezone():
     """AC: 22:00–06:00 on May 18 → start May 18 22:00, end May 19 06:00."""
     data = resolve_shift_template_window(
         anchor_date=date(2026, 5, 18),
@@ -17,6 +17,21 @@ def test_overnight_template_may_18_bogota():
     assert data["periodEnd"] == "2026-05-19"
     assert data["periodStartTime"] == "2026-05-18T22:00:00-05:00"
     assert data["periodEndTime"] == "2026-05-19T06:00:00-05:00"
+    assert data["crossesMidnight"] is True
+
+
+def test_overnight_template_uses_tenant_timezone():
+    data = resolve_shift_template_window(
+        anchor_date=date(2026, 5, 18),
+        start_time=time(22, 0),
+        end_time=time(6, 0),
+        crosses_midnight=True,
+        timezone_name="America/Los_Angeles",
+    )
+    assert data["periodStart"] == "2026-05-18"
+    assert data["periodEnd"] == "2026-05-19"
+    assert data["periodStartTime"] == "2026-05-18T22:00:00-07:00"
+    assert data["periodEndTime"] == "2026-05-19T06:00:00-07:00"
     assert data["crossesMidnight"] is True
 
 

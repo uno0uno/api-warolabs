@@ -11,6 +11,8 @@ import pytest
 from app.core.exceptions import APIError
 from app.models.cierre import CierreCreate
 from app.services.cierre_service import (
+    _build_open_tables_filter,
+    _build_order_date_filter,
     _effective_period_bounds,
     _is_day_only_cierre_request,
     _open_shift_has_explicit_window,
@@ -19,6 +21,7 @@ from app.services.cierre_service import (
 )
 
 BOG = ZoneInfo("America/Bogota")
+LA = ZoneInfo("America/Los_Angeles")
 
 
 def test_effective_period_bounds_uses_timestamps_when_present():
@@ -31,12 +34,48 @@ def test_effective_period_bounds_uses_timestamps_when_present():
     assert eff_end == end
 
 
-def test_effective_period_bounds_full_day_bogota():
+def test_effective_period_bounds_full_day_default_timezone():
     eff_start, eff_end = _effective_period_bounds(
         date(2026, 5, 18), date(2026, 5, 18), None, None,
     )
     assert eff_start == datetime(2026, 5, 18, 0, 0, 0, tzinfo=BOG)
     assert eff_end == datetime(2026, 5, 18, 23, 59, 59, tzinfo=BOG)
+
+
+def test_effective_period_bounds_full_day_tenant_timezone():
+    eff_start, eff_end = _effective_period_bounds(
+        date(2026, 5, 18),
+        date(2026, 5, 18),
+        None,
+        None,
+        "America/Los_Angeles",
+    )
+    assert eff_start == datetime(2026, 5, 18, 0, 0, 0, tzinfo=LA)
+    assert eff_end == datetime(2026, 5, 18, 23, 59, 59, tzinfo=LA)
+
+
+def test_date_only_order_filter_binds_tenant_timezone():
+    sql, params = _build_order_date_filter(
+        date(2026, 5, 18),
+        date(2026, 5, 18),
+        None,
+        None,
+        "America/Los_Angeles",
+    )
+    assert "order_date AT TIME ZONE $2" in sql
+    assert params == ["America/Los_Angeles", date(2026, 5, 18), date(2026, 5, 18)]
+
+
+def test_date_only_open_tables_filter_binds_tenant_timezone():
+    sql, params = _build_open_tables_filter(
+        date(2026, 5, 18),
+        date(2026, 5, 18),
+        None,
+        None,
+        "America/Los_Angeles",
+    )
+    assert "ts.opened_at AT TIME ZONE $2" in sql
+    assert params == ["America/Los_Angeles", date(2026, 5, 18), date(2026, 5, 18)]
 
 
 def test_requires_open_shift_template_mode():
