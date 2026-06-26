@@ -12,6 +12,7 @@ from app.config import settings
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
+from app.core.timezones import DEFAULT_TENANT_TIMEZONE, resolve_tenant_timezone
 from app.database import get_db_connection
 from app.services.kali_access_service import is_kali_enabled
 
@@ -70,6 +71,7 @@ def _sign_internal_request(
     profile_id: str,
     member_id: Optional[str],
     scopes: str,
+    timezone: str,
     body: bytes,
 ) -> str:
     body_digest = hashlib.sha256(body).hexdigest()
@@ -82,6 +84,7 @@ def _sign_internal_request(
             profile_id,
             member_id or "",
             scopes,
+            timezone,
             body_digest,
         ]
     )
@@ -114,6 +117,11 @@ async def _resolve_member_id(profile_id: str, tenant_id: str) -> Optional[str]:
     return str(member_id) if member_id else None
 
 
+async def _resolve_agent_timezone(tenant_id: str) -> str:
+    async with get_db_connection() as conn:
+        return await resolve_tenant_timezone(conn, tenant_id)
+
+
 def _build_internal_headers(
     path: str,
     request_id: str,
@@ -121,6 +129,7 @@ def _build_internal_headers(
     profile_id: str,
     member_id: Optional[str],
     scopes: str,
+    timezone: str,
     body: bytes,
 ) -> Dict[str, str]:
     headers = {
@@ -130,6 +139,7 @@ def _build_internal_headers(
         "x-waro-profile-id": profile_id,
         "x-waro-request-id": request_id,
         "x-waro-scopes": scopes,
+        "x-waro-timezone": timezone or DEFAULT_TENANT_TIMEZONE,
     }
     if member_id:
         headers["x-waro-member-id"] = member_id
@@ -141,6 +151,7 @@ def _build_internal_headers(
         profile_id=profile_id,
         member_id=member_id,
         scopes=scopes,
+        timezone=headers["x-waro-timezone"],
         body=body,
     )
     return headers
@@ -182,6 +193,7 @@ async def _proxy_agent_stream(
     tenant_id = str(session.tenant_id)
     profile_id = str(session.user_id)
     member_id = await _resolve_member_id(profile_id, tenant_id)
+    tenant_timezone = await _resolve_agent_timezone(tenant_id)
     scope_header = ",".join(scopes)
     base_url = _agent_api_base_url()
     upstream_url = f"{base_url}{upstream_path}"
@@ -192,6 +204,7 @@ async def _proxy_agent_stream(
         profile_id=profile_id,
         member_id=member_id,
         scopes=scope_header,
+        timezone=tenant_timezone,
         body=body,
     )
 
