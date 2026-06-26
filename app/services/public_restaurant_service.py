@@ -5,13 +5,11 @@ No authentication required - these are public endpoints
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 from datetime import datetime, time
-from zoneinfo import ZoneInfo
 from fastapi import HTTPException
+from app.core.timezones import get_zoneinfo, normalize_timezone
 from app.database import get_db_connection
 import json
 import logging
-
-BOGOTA_TZ = ZoneInfo("America/Bogota")
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +38,7 @@ async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
                     tpp.display_name, tpp.description, tpp.logo_url, tpp.banner_url,
                     tpp.phone_number, tpp.email, tpp.address,
                     tpp.city, tpp.neighborhood, tpp.latitude, tpp.longitude,
+                    tpp.timezone,
                     tpp.business_hours, tpp.social_media,
                     tpp.seo_title, tpp.seo_description,
                     tpp.accepts_online_orders, tpp.min_order_amount, tpp.estimated_preparation_time,
@@ -84,11 +83,13 @@ async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
                 [float(p) for p in tip_presets] if tip_presets else [10.0]
             )
             profile['tip_enabled'] = bool(profile.get('tip_enabled'))
+            profile['timezone'] = normalize_timezone(profile.get('timezone'))
 
             # Calculate if currently open — manual toggle takes priority
             profile['is_currently_open'] = is_currently_open(
                 profile.get('business_hours'),
-                profile.get('is_manually_open', True)
+                profile.get('is_manually_open', True),
+                profile.get('timezone'),
             )
 
             return profile
@@ -207,6 +208,7 @@ async def get_profile_by_tenant_id(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                     display_name, description, logo_url, banner_url,
                     phone_number, email, address,
                     city, neighborhood, latitude, longitude,
+                    timezone,
                     business_hours, social_media,
                     seo_title, seo_description,
                     accepts_online_orders, min_order_amount, estimated_preparation_time,
@@ -233,10 +235,12 @@ async def get_profile_by_tenant_id(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                     profile['social_media'] = json.loads(profile['social_media'])
                 except (json.JSONDecodeError, TypeError):
                     profile['social_media'] = {}
+            profile['timezone'] = normalize_timezone(profile.get('timezone'))
 
             profile['is_currently_open'] = is_currently_open(
                 profile.get('business_hours'),
-                profile.get('is_manually_open', True)
+                profile.get('is_manually_open', True),
+                profile.get('timezone'),
             )
 
             return profile
@@ -518,7 +522,11 @@ async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Error fetching product details")
 
 
-def is_currently_open(business_hours: Optional[Dict[str, Any]], is_manually_open: bool = True) -> bool:
+def is_currently_open(
+    business_hours: Optional[Dict[str, Any]],
+    is_manually_open: bool = True,
+    timezone_name: str | None = None,
+) -> bool:
     """
     Calculate if restaurant is currently open based on business hours and manual toggle.
 
@@ -528,6 +536,7 @@ def is_currently_open(business_hours: Optional[Dict[str, Any]], is_manually_open
             ...
         }
         is_manually_open: Operator manual override. False = closed regardless of schedule.
+        timezone_name: IANA timezone for evaluating the current local time.
 
     Returns:
         True if currently open, False otherwise
@@ -540,7 +549,7 @@ def is_currently_open(business_hours: Optional[Dict[str, Any]], is_manually_open
         return False
 
     try:
-        now = datetime.now(tz=BOGOTA_TZ)
+        now = datetime.now(tz=get_zoneinfo(timezone_name))
         current_day = now.strftime('%A').lower()  # 'monday', 'tuesday', etc.
         current_time = now.time()
 
@@ -635,6 +644,7 @@ async def list_restaurants(
                     tpp.display_name, tpp.description, tpp.logo_url, tpp.banner_url,
                     tpp.phone_number, tpp.email, tpp.address,
                     tpp.city, tpp.city_slug, tpp.country, tpp.neighborhood,
+                    tpp.timezone,
                     tpp.is_manually_open, tpp.business_hours,
                     tpp.created_at, tpp.updated_at
                 FROM tenant_public_profiles tpp
@@ -671,6 +681,8 @@ async def list_restaurants(
                     except (json.JSONDecodeError, TypeError):
                         business_hours = {}
 
+                timezone_name = normalize_timezone(row["timezone"])
+
                 restaurants.append({
                     "id": str(row["id"]),
                     "tenant_id": str(row["tenant_id"]),
@@ -687,7 +699,12 @@ async def list_restaurants(
                     "city": row["city"],
                     "city_slug": row["city_slug"],
                     "neighborhood": row["neighborhood"],
-                    "is_currently_open": is_currently_open(business_hours, row["is_manually_open"]),
+                    "timezone": timezone_name,
+                    "is_currently_open": is_currently_open(
+                        business_hours,
+                        row["is_manually_open"],
+                        timezone_name,
+                    ),
                     "created_at": row["created_at"].isoformat() if row["created_at"] else None,
                     "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None
                 })

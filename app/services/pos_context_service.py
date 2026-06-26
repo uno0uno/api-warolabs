@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 from uuid import UUID
 
 from app.database import get_db_connection
+from app.core.timezones import normalize_timezone
 from app.services.invoicing_readiness_service import get_readiness
 from app.services.open_priced_service import fetch_open_sale_product
 from app.services.promotions_service import (
@@ -23,6 +24,7 @@ from app.services.promotions_service import (
 _CONTEXT_QUERY = """
 SELECT
     tpp.display_name,
+    tpp.timezone,
     tpp.kds_enabled,
     tpp.comandas_enabled,
     tpp.expediter_enabled,
@@ -109,6 +111,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
 
     return {
         'display_name': row['display_name'],
+        'timezone': normalize_timezone(row['timezone']),
         'kds_enabled': bool(row['kds_enabled']) if row['kds_enabled'] is not None else False,
         'comandas_enabled': bool(row['comandas_enabled']) if row['comandas_enabled'] is not None else False,
         'expediter_enabled': bool(row['expediter_enabled']) if row['expediter_enabled'] is not None else False,

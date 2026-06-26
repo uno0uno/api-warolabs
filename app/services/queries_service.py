@@ -12,13 +12,14 @@ from typing import Any, Optional
 from uuid import UUID
 
 from app.core.exceptions import APIError, AuthenticationError, AuthorizationError, ValidationError
+from app.core.timezones import DEFAULT_TENANT_TIMEZONE, normalize_timezone
 from app.database import get_db_connection
 from app.services.analytics_service import _PRODUCT_COSTS_CTE
 from app.services.public_api_service import POS_LIKE_FILTER_ALIAS_O, validate_api_key_auth
 
 
 DEFAULT_TIMEOUT_SECONDS = 5
-DEFAULT_TIMEZONE = "America/Bogota"
+DEFAULT_TIMEZONE = DEFAULT_TENANT_TIMEZONE
 MAX_LIMIT = 100
 
 _INVENTORY_LATEST_COSTS_CTE = """
@@ -483,7 +484,7 @@ def compile_queryspec(spec: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > MAX_LIMIT:
         raise ValidationError("QuerySpec limit must be an integer between 1 and 100", {"field": "limit", "max": MAX_LIMIT})
 
-    timezone = spec.get("timezone") or DEFAULT_TIMEZONE
+    timezone = normalize_timezone(spec.get("timezone"))
     select_parts: list[str] = []
     group_parts: list[str] = []
     columns: list[dict[str, str]] = []

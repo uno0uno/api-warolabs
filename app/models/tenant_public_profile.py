@@ -4,6 +4,7 @@ from typing import Optional, Dict, Any
 from uuid import UUID
 from datetime import datetime
 from decimal import Decimal
+from app.core.timezones import DEFAULT_TENANT_TIMEZONE, validate_timezone
 
 class BusinessHours(BaseModel):
     """Business hours for a single day"""
@@ -46,6 +47,10 @@ class TenantPublicProfileBase(BaseModel):
     neighborhood: Optional[str] = Field(None, max_length=255)
     latitude: Optional[Decimal] = Field(None, description="Latitude coordinate")
     longitude: Optional[Decimal] = Field(None, description="Longitude coordinate")
+    timezone: str = Field(
+        DEFAULT_TENANT_TIMEZONE,
+        description="IANA timezone for tenant operational dates and business hours",
+    )
 
     # Business hours (JSONB)
     business_hours: Optional[Dict[str, Any]] = Field(
@@ -180,6 +185,11 @@ class TenantPublicProfileBase(BaseModel):
                     "checkout. NULL = nothing pre-selected (Ley 1935 voluntariness).",
     )
 
+    @field_validator('timezone')
+    @classmethod
+    def _validate_timezone(cls, v):
+        return validate_timezone(v)
+
     @field_validator('tip_default_percentages')
     @classmethod
     def _validate_tip_presets(cls, v):
@@ -238,6 +248,7 @@ class TenantPublicProfileUpdate(BaseModel):
     neighborhood: Optional[str] = Field(None, max_length=255)
     latitude: Optional[Decimal] = None
     longitude: Optional[Decimal] = None
+    timezone: Optional[str] = None
 
     business_hours: Optional[Dict[str, Any]] = None
     social_media: Optional[Dict[str, str]] = None
@@ -271,6 +282,13 @@ class TenantPublicProfileUpdate(BaseModel):
     tip_taxable_default: Optional[bool] = None
     tip_default_percentages: Optional[list[Decimal]] = None
     tip_preselect_index: Optional[int] = None
+
+    @field_validator('timezone')
+    @classmethod
+    def _validate_timezone_update(cls, v):
+        if v is None:
+            return v
+        return validate_timezone(v)
 
     @field_validator('tip_default_percentages')
     @classmethod

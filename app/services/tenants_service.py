@@ -6,6 +6,7 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, AuthorizationError, ValidationError
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
+from app.core.timezones import DEFAULT_TENANT_TIMEZONE
 from app.models.auth import Tenant, UserTenantsResponse
 from app.models.tenant import (
     TenantMembersResponse, TenantMemberDetail, TenantMemberProfile,
@@ -413,9 +414,9 @@ async def create_tenant(request: Request, body: TenantCreate) -> TenantCreateRes
                     """INSERT INTO tenant_public_profiles
                            (tenant_id, display_name, slug,
                             is_active, is_manually_open, welcome_email_sent, tables_enabled,
-                            comandas_enabled, kds_enabled)
-                       VALUES ($1, $2, $3, true, false, false, false, false, false)""",
-                    tenant_id, body.name, slug
+                            comandas_enabled, kds_enabled, timezone)
+                       VALUES ($1, $2, $3, true, false, false, false, false, false, $4)""",
+                    tenant_id, body.name, slug, DEFAULT_TENANT_TIMEZONE
                 )
 
                 # 3. Add creator as superuser
