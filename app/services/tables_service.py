@@ -2428,7 +2428,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     oi.id, oi.product_id, oi.quantity, oi.price_at_purchase, oi.subtotal,
                     oi.notes, oi.promo_opt_out, oi.applied_promotion_id, oi.promo_savings_allocated,
                     oi.fulfillment_status, oi.sent_at, p.name, p.category_id, tp.name, tp.promo_type
-                ORDER BY oi.id ASC
+                ORDER BY oi.created_at ASC, oi.id ASC
                 """,
                 session_row["id"],
             )
