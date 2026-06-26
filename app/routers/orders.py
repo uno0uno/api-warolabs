@@ -226,6 +226,13 @@ class ManualOrderItem(BaseModel):
     modifiers: List[ManualOrderModifier] = []
 
 
+class ManualOrderPayment(BaseModel):
+    amount: float = Field(gt=0)
+    payment_method: str
+    payment_method_id: Optional[str] = None
+    cash_received: Optional[float] = None
+
+
 class CreateManualOrderRequest(BaseModel):
     order_date: str
     payment_method: str
@@ -235,6 +242,7 @@ class CreateManualOrderRequest(BaseModel):
     # group slug). Optional for backward compatibility.
     payment_method_id: Optional[str] = None
     customer_id: Optional[str] = None
+    payments: Optional[List[ManualOrderPayment]] = None
     items: List[ManualOrderItem] = Field(min_length=1)
 
 
@@ -253,7 +261,8 @@ async def create_manual_order(
         payment_method=data.payment_method,
         payment_method_id=data.payment_method_id,
         items=[item.model_dump() for item in data.items],
-        customer_id=data.customer_id
+        customer_id=data.customer_id,
+        payments=[payment.model_dump() for payment in data.payments] if data.payments else None,
     )
 
 

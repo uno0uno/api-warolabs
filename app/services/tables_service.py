@@ -26,6 +26,7 @@ from app.services.accounting_service import void_order_journal_entry_in_txn
 from app.services.pos_cart_service import (
     _capture_order_item_ingredients,
     _deduct_modifier_inventory_for_order_item,
+    _order_payment_splits_for_gl,
     _PAYMENT_VOID_ROLES,
     _tax_rows_from_evaluated_lines,
 )
@@ -1426,8 +1427,9 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             UUID(str(session_context.user_id)) if session_context.user_id else None,
                         )
 
-                    # GL journal entries — one per order, atomic with session close
-                    # Failure is swallowed: GL must never block the close
+                    # GL journal entries — one per order, atomic with session close.
+                    # Split closes wait until order_payments exist and the session
+                    # is fully paid so debit lines can follow each tender account.
                     try:
                         completed_orders = await conn.fetch(
                             "SELECT id, order_number, total_amount, payment_method, payment_method_id, order_date "
@@ -1486,42 +1488,43 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             session_row["id"],
                         )
                         _advance_remaining_for_gl = _advance_applied_total + _advance_tip_applied_total
-                        for ord_row in completed_orders:
-                            ord_tip = Decimal("0")
-                            ord_tip_tax = Decimal("0")
-                            ord_advance = Decimal("0")
-                            if not split_mode and first_order_id and ord_row["id"] == first_order_id:
-                                ord_tip = Decimal(str(tip_amount or 0))
-                                ord_tip_tax = Decimal(str(_mesa_tip_tax_amount))
-                            if not split_mode and _advance_remaining_for_gl > 0:
-                                ord_settlement = (
-                                    Decimal(str(ord_row["total_amount"] or 0))
-                                    + ord_tip
-                                    + ord_tip_tax
+                        if not split_mode:
+                            for ord_row in completed_orders:
+                                ord_tip = Decimal("0")
+                                ord_tip_tax = Decimal("0")
+                                ord_advance = Decimal("0")
+                                if first_order_id and ord_row["id"] == first_order_id:
+                                    ord_tip = Decimal(str(tip_amount or 0))
+                                    ord_tip_tax = Decimal(str(_mesa_tip_tax_amount))
+                                if _advance_remaining_for_gl > 0:
+                                    ord_settlement = (
+                                        Decimal(str(ord_row["total_amount"] or 0))
+                                        + ord_tip
+                                        + ord_tip_tax
+                                    )
+                                    ord_advance = min(_advance_remaining_for_gl, ord_settlement)
+                                    _advance_remaining_for_gl -= ord_advance
+                                await _post_order_gl_entry(
+                                    conn=conn,
+                                    tenant_id=tenant_id,
+                                    order_id=ord_row["id"],
+                                    order_date=ord_row["order_date"].astimezone(_BOG).date(),
+                                    total_amount=Decimal(str(ord_row["total_amount"])),
+                                    payment_method=ord_row["payment_method"] or payment_method or "digital",
+                                    payment_method_id=ord_row["payment_method_id"],
+                                    tax_config=tax_config,
+                                    order_number=int(ord_row["order_number"]),
+                                    tip_amount=ord_tip,
+                                    tip_tax_amount=ord_tip_tax,
+                                    advance_amount=ord_advance,
                                 )
-                                ord_advance = min(_advance_remaining_for_gl, ord_settlement)
-                                _advance_remaining_for_gl -= ord_advance
-                            await _post_order_gl_entry(
-                                conn=conn,
-                                tenant_id=tenant_id,
-                                order_id=ord_row["id"],
-                                order_date=ord_row["order_date"].astimezone(_BOG).date(),
-                                total_amount=Decimal(str(ord_row["total_amount"])),
-                                payment_method=ord_row["payment_method"] or payment_method or "digital",
-                                payment_method_id=ord_row["payment_method_id"],
-                                tax_config=tax_config,
-                                order_number=int(ord_row["order_number"]),
-                                tip_amount=ord_tip,
-                                tip_tax_amount=ord_tip_tax,
-                                advance_amount=ord_advance,
-                            )
-                            await _post_order_cogs_gl_entry(
-                                conn=conn,
-                                tenant_id=tenant_id,
-                                order_id=ord_row["id"],
-                                order_date=ord_row["order_date"].astimezone(_BOG).date(),
-                                order_number=int(ord_row["order_number"]),
-                            )
+                                await _post_order_cogs_gl_entry(
+                                    conn=conn,
+                                    tenant_id=tenant_id,
+                                    order_id=ord_row["id"],
+                                    order_date=ord_row["order_date"].astimezone(_BOG).date(),
+                                    order_number=int(ord_row["order_number"]),
+                                )
                     except Exception as _gl_exc:
                         logger.error(f"GL entries failed for session {session_row['id']}: {_gl_exc}")
 
@@ -1574,7 +1577,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 if i == 0:
                                     _split_first_payment_id_mesa = str(inserted_row["id"])
 
-                        # Split tip GL when first payment completes the session (#912)
+                        # Split GL when first payment completes the session.
                         first_tip_order = await conn.fetchrow(
                             """
                             SELECT id, order_number,
@@ -1586,21 +1589,53 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             """,
                             session_row["id"],
                         )
-                        if first_tip_order and float(first_tip_order["tip_amount"]) > 0:
-                            split_order_ids = [r["id"] for r in order_rows]
-                            split_paid_row = await conn.fetchrow(
-                                "SELECT COALESCE(SUM(amount), 0) AS paid FROM order_payments WHERE order_id = ANY($1) AND voided_at IS NULL",
-                                split_order_ids,
-                            )
-                            split_paid_total = float(split_paid_row["paid"])
-                            split_amount_due = split_settlement_amount_due(
-                                session_total,
-                                float(first_tip_order["tip_amount"]),
-                                float(first_tip_order["tip_tax_amount"]),
-                            )
-                            if split_amount_due - split_paid_total <= 0.01:
-                                try:
-                                    split_tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        split_order_ids = [r["id"] for r in order_rows]
+                        split_paid_row = await conn.fetchrow(
+                            "SELECT COALESCE(SUM(amount), 0) AS paid FROM order_payments WHERE order_id = ANY($1) AND voided_at IS NULL",
+                            split_order_ids,
+                        )
+                        split_paid_total = float(split_paid_row["paid"])
+                        split_tip_amount = float(first_tip_order["tip_amount"]) if first_tip_order else 0.0
+                        split_tip_tax_amount = float(first_tip_order["tip_tax_amount"]) if first_tip_order else 0.0
+                        split_amount_due = split_settlement_amount_due(
+                            session_total,
+                            split_tip_amount,
+                            split_tip_tax_amount,
+                        )
+                        if split_amount_due - split_paid_total <= 0.01:
+                            try:
+                                split_tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                                split_completed_orders = await conn.fetch(
+                                    """
+                                    SELECT id, order_number, total_amount, payment_method,
+                                           payment_method_id, order_date
+                                    FROM orders
+                                    WHERE table_session_id = $1 AND status = 'completed'
+                                    ORDER BY created_at
+                                    """,
+                                    session_row["id"],
+                                )
+                                for split_ord in split_completed_orders:
+                                    await _post_order_gl_entry(
+                                        conn=conn,
+                                        tenant_id=tenant_id,
+                                        order_id=split_ord["id"],
+                                        order_date=split_ord["order_date"].astimezone(_BOG).date(),
+                                        total_amount=Decimal(str(split_ord["total_amount"])),
+                                        payment_method=split_ord["payment_method"] or payment_method or "digital",
+                                        payment_method_id=split_ord["payment_method_id"],
+                                        tax_config=split_tax_config,
+                                        order_number=int(split_ord["order_number"]),
+                                        payment_splits=await _order_payment_splits_for_gl(conn, split_ord["id"]),
+                                    )
+                                    await _post_order_cogs_gl_entry(
+                                        conn=conn,
+                                        tenant_id=tenant_id,
+                                        order_id=split_ord["id"],
+                                        order_date=split_ord["order_date"].astimezone(_BOG).date(),
+                                        order_number=int(split_ord["order_number"]),
+                                    )
+                                if first_tip_order and split_tip_amount > 0:
                                     await _post_deferred_order_tip_gl(
                                         conn=conn,
                                         tenant_id=tenant_id,
@@ -1612,10 +1647,10 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                         tax_config=split_tax_config,
                                         order_number=int(first_tip_order["order_number"]),
                                     )
-                                except Exception as _defer_tip_exc:
-                                    logger.error(
-                                        f"Deferred tip GL failed for mesa session {session_row['id']}: {_defer_tip_exc}"
-                                    )
+                            except Exception as _split_gl_exc:
+                                logger.error(
+                                    f"Split GL failed for mesa session {session_row['id']}: {_split_gl_exc}"
+                                )
 
                 else:
                     completed_count = 0
@@ -1924,7 +1959,8 @@ async def add_session_payment(
                 # Get all completed (partial) orders for this session
                 order_rows = await conn.fetch(
                     """
-                    SELECT id, order_number, total_amount
+                    SELECT id, order_number, total_amount, payment_method,
+                           payment_method_id, order_date
                     FROM orders
                     WHERE table_session_id = $1 AND status = 'completed'
                     ORDER BY created_at
@@ -2045,6 +2081,32 @@ async def add_session_payment(
                         "UPDATE orders SET payment_status = 'paid' WHERE table_session_id = $1 AND status = 'completed' AND payment_status = 'partial'",
                         session_row["id"],
                     )
+                    try:
+                        split_tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        for ord_row in order_rows:
+                            await _post_order_gl_entry(
+                                conn=conn,
+                                tenant_id=tenant_id,
+                                order_id=ord_row["id"],
+                                order_date=ord_row["order_date"].astimezone(_BOG).date(),
+                                total_amount=Decimal(str(ord_row["total_amount"])),
+                                payment_method=ord_row["payment_method"] or payment_method or "digital",
+                                payment_method_id=ord_row["payment_method_id"],
+                                tax_config=split_tax_config,
+                                order_number=int(ord_row["order_number"]),
+                                payment_splits=await _order_payment_splits_for_gl(conn, ord_row["id"]),
+                            )
+                            await _post_order_cogs_gl_entry(
+                                conn=conn,
+                                tenant_id=tenant_id,
+                                order_id=ord_row["id"],
+                                order_date=ord_row["order_date"].astimezone(_BOG).date(),
+                                order_number=int(ord_row["order_number"]),
+                            )
+                    except Exception as _split_gl_exc:
+                        logger.error(
+                            f"Split GL failed for mesa table {table_id}: {_split_gl_exc}"
+                        )
                     if resolved_tip_amount > 0 and session_tip_row:
                         try:
                             tip_order_meta = await conn.fetchrow(
