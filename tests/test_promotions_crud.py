@@ -34,7 +34,7 @@ def _clear_caches():
     permissions._role_modules_cache.clear()
 
 
-def _build_session(role: str):
+def _build_session(role: str = "owner"):
     return SessionContext({
         "user_id": uuid4(),
         "tenant_id": uuid4(),
@@ -269,6 +269,49 @@ def test_serialize_promotion_includes_scope_summary_fields():
     assert payload["product_ids"] == [str(pid)]
     assert payload["category_count"] == 0
     assert payload["category_names_preview"] == []
+
+
+def test_serialize_promotion_active_status_uses_tenant_timezone():
+    promo_id = uuid4()
+    tenant_id = uuid4()
+    schedule_id = uuid4()
+    scope = _empty_scope_summary()
+    promo_row = {
+        "id": promo_id,
+        "tenant_id": tenant_id,
+        "name": "Happy hour",
+        "promo_type": "percent_off",
+        "value_json": {"percent": 10},
+        "scope_type": "all_products",
+        "priority": 0,
+        "is_active": True,
+        "stackable": False,
+        "starts_at": None,
+        "ends_at": None,
+        "created_at": datetime(2026, 5, 29, tzinfo=timezone.utc),
+        "updated_at": datetime(2026, 5, 29, tzinfo=timezone.utc),
+    }
+    schedules = [{
+        "id": schedule_id,
+        "days_of_week": 1 + 2 + 4 + 8 + 16,
+        "start_time": datetime.strptime("17:00", "%H:%M").time(),
+        "end_time": datetime.strptime("20:00", "%H:%M").time(),
+        "crosses_midnight": False,
+        "sort_order": 0,
+    }]
+    at = datetime.fromisoformat("2026-05-30T01:30:00+00:00")
+
+    bogota_payload = _serialize_promotion(promo_row, schedules, scope, at=at)
+    la_payload = _serialize_promotion(
+        promo_row,
+        schedules,
+        scope,
+        at=at,
+        timezone_name="America/Los_Angeles",
+    )
+
+    assert bogota_payload["is_currently_active"] is False
+    assert la_payload["is_currently_active"] is True
 
 
 def test_cashier_denied_create_promotion_under_enforce():

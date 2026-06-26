@@ -1,10 +1,10 @@
 """Schedule matching for tenant promotions (warocol.com#980)."""
 from datetime import datetime, time
-from zoneinfo import ZoneInfo
 
+from app.core.timezones import DEFAULT_TENANT_TIMEZONE, get_zoneinfo
 from app.services.promotions_service import (
-    BOGOTA,
     day_bit_for_datetime,
+    default_at_tenant,
     is_active_at,
     time_in_schedule_window,
 )
@@ -56,6 +56,38 @@ def test_overnight_schedule_active_after_midnight():
     )
 
 
+def test_schedule_uses_tenant_timezone_for_same_instant():
+    # Same instant: 20:30 in Bogota but 18:30 in Los Angeles.
+    at = _at("2026-05-30T01:30:00+00:00")
+    assert not time_in_schedule_window(
+        at,
+        days_of_week=WEEKDAYS,
+        start_time=time(17, 0),
+        end_time=time(20, 0),
+        crosses_midnight=False,
+    )
+    assert time_in_schedule_window(
+        at,
+        days_of_week=WEEKDAYS,
+        start_time=time(17, 0),
+        end_time=time(20, 0),
+        crosses_midnight=False,
+        timezone_name="America/Los_Angeles",
+    )
+
+
+def test_overnight_schedule_uses_tenant_timezone_after_midnight():
+    at = _at("2026-05-30T08:30:00+00:00")  # Saturday 01:30 in Los Angeles
+    assert time_in_schedule_window(
+        at,
+        days_of_week=1 << 4,  # Friday
+        start_time=time(22, 0),
+        end_time=time(6, 0),
+        crosses_midnight=True,
+        timezone_name="America/Los_Angeles",
+    )
+
+
 def test_is_active_at_no_schedules_always_on_when_enabled():
     at = _at("2026-05-29T12:00:00-05:00")
     assert is_active_at(
@@ -99,9 +131,10 @@ def test_is_active_at_with_schedule_row():
     )
 
 
-def test_bogota_offset_is_minus_five():
-    at = datetime.now(tz=BOGOTA)
-    assert str(at.tzinfo) == "America/Bogota"
+def test_default_timezone_falls_back_to_bogota():
+    at = default_at_tenant(None)
+    assert str(at.tzinfo) == DEFAULT_TENANT_TIMEZONE
+    assert str(get_zoneinfo("not-a-timezone")) == DEFAULT_TENANT_TIMEZONE
 
 
 def test_is_active_at_multiple_ranges_same_day():

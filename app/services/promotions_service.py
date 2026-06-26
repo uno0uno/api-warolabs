@@ -4,13 +4,17 @@ import logging
 from datetime import datetime, time
 from typing import Any, Dict, List, Optional, Sequence, Set
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 import asyncpg
 from fastapi import HTTPException, Request
 
 from app.core.exceptions import AuthenticationError
 from app.core.middleware import require_valid_session
+from app.core.timezones import (
+    DEFAULT_TENANT_TIMEZONE,
+    get_zoneinfo,
+    resolve_tenant_timezone,
+)
 from app.database import get_db_connection
 from app.models.tenant_promotion import (
     PromotionCreate,
@@ -19,8 +23,6 @@ from app.models.tenant_promotion import (
 )
 
 logger = logging.getLogger(__name__)
-
-BOGOTA = ZoneInfo("America/Bogota")
 
 VALID_PROMO_TYPES = frozenset({"percent_off", "fixed_off", "bogo"})
 DEFAULT_PROMO_CONFLICT_STRATEGY = "priority"
@@ -89,9 +91,19 @@ def validate_promo_type_block_map(
     return normalized or dict(DEFAULT_PROMO_TYPE_BLOCK_MAP)
 
 
-def day_bit_for_datetime(at: datetime) -> int:
-    """Monday=1<<0 … Sunday=1<<6 in America/Bogota."""
-    local = at.astimezone(BOGOTA)
+def _evaluation_datetime(at: datetime, timezone_name: str | None) -> datetime:
+    zone = get_zoneinfo(timezone_name)
+    if at.tzinfo is None:
+        return at.replace(tzinfo=zone)
+    return at.astimezone(zone)
+
+
+def day_bit_for_datetime(
+    at: datetime,
+    timezone_name: str | None = DEFAULT_TENANT_TIMEZONE,
+) -> int:
+    """Monday=1<<0 … Sunday=1<<6 in the tenant operational timezone."""
+    local = _evaluation_datetime(at, timezone_name)
     return 1 << local.weekday()
 
 
@@ -102,10 +114,11 @@ def time_in_schedule_window(
     start_time: time,
     end_time: time,
     crosses_midnight: bool,
+    timezone_name: str | None = DEFAULT_TENANT_TIMEZONE,
 ) -> bool:
-    local = at.astimezone(BOGOTA)
+    local = _evaluation_datetime(at, timezone_name)
     current = local.time()
-    today_bit = day_bit_for_datetime(local)
+    today_bit = day_bit_for_datetime(local, timezone_name)
     if crosses_midnight:
         if (days_of_week & today_bit) and current >= start_time:
             return True
@@ -125,8 +138,9 @@ def is_active_at(
     starts_at: Optional[datetime],
     ends_at: Optional[datetime],
     schedules: Sequence[Dict[str, Any]],
+    timezone_name: str | None = DEFAULT_TENANT_TIMEZONE,
 ) -> bool:
-    """Return whether a promotion rule is active at `at` (evaluated in Bogotá)."""
+    """Return whether a promotion rule is active at `at` in tenant local time."""
     if not is_active:
         return False
     if starts_at is not None and at < starts_at:
@@ -142,6 +156,7 @@ def is_active_at(
             start_time=row["start_time"],
             end_time=row["end_time"],
             crosses_midnight=bool(row["crosses_midnight"]),
+            timezone_name=timezone_name,
         ):
             return True
     return False
@@ -491,6 +506,7 @@ def _serialize_promotion(
     scope: Dict[str, Any],
     *,
     at: Optional[datetime] = None,
+    timezone_name: str | None = DEFAULT_TENANT_TIMEZONE,
 ) -> Dict[str, Any]:
     schedule_dicts = [_row_to_schedule(r) for r in schedules]
     category_ids = scope["category_ids"]
@@ -534,6 +550,7 @@ def _serialize_promotion(
             starts_at=promo_row["starts_at"],
             ends_at=promo_row["ends_at"],
             schedules=schedule_dicts,
+            timezone_name=timezone_name,
         )
     return payload
 
@@ -697,6 +714,7 @@ async def list_promotions(
     *,
     include_inactive: bool = False,
     at: Optional[datetime] = None,
+    timezone_name: str | None = None,
 ) -> dict:
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -712,6 +730,9 @@ async def list_promotions(
     query += " ORDER BY priority DESC, name"
 
     async with get_db_connection(use_transaction=False) as conn:
+        evaluation_timezone = timezone_name or DEFAULT_TENANT_TIMEZONE
+        if timezone_name is None and at is not None:
+            evaluation_timezone = await resolve_tenant_timezone(conn, tenant_id)
         rows = await conn.fetch(query, tenant_id)
         scope_by_id = await _load_scope_summaries_batch(conn, [row["id"] for row in rows])
         data = []
@@ -723,6 +744,7 @@ async def list_promotions(
                     schedules,
                     scope_by_id.get(row["id"], _empty_scope_summary()),
                     at=at,
+                    timezone_name=evaluation_timezone,
                 )
             )
 
@@ -741,13 +763,24 @@ async def get_promotion(
         raise AuthenticationError("Tenant ID is required")
 
     async with get_db_connection(use_transaction=False) as conn:
+        timezone_name = (
+            await resolve_tenant_timezone(conn, tenant_id)
+            if at is not None
+            else DEFAULT_TENANT_TIMEZONE
+        )
         row = await _get_owned_promotion(conn, promotion_id, tenant_id)
         schedules = await _load_schedules(conn, promotion_id)
         scope = await _load_scope_summary(conn, promotion_id)
 
     return {
         "success": True,
-        "data": _serialize_promotion(row, schedules, scope, at=at),
+        "data": _serialize_promotion(
+            row,
+            schedules,
+            scope,
+            at=at,
+            timezone_name=timezone_name,
+        ),
     }
 
 
@@ -1091,15 +1124,24 @@ async def delete_promotion(request: Request, promotion_id: UUID) -> dict:
 
 async def list_active_promotions(
     request: Request,
-    at: datetime,
+    at: Optional[datetime] = None,
     *,
     only_current: bool = False,
 ) -> dict:
     """List tenant promotions with is_currently_active for POS (read-only)."""
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    async with get_db_connection(use_transaction=False) as conn:
+        timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+    evaluation_at = at or default_at_tenant(timezone_name)
     result = await list_promotions(
         request,
         include_inactive=False,
-        at=at,
+        at=evaluation_at,
+        timezone_name=timezone_name,
     )
     if only_current:
         result["data"] = [
@@ -1109,8 +1151,8 @@ async def list_active_promotions(
     return result
 
 
-def default_at_bogota() -> datetime:
-    return datetime.now(tz=BOGOTA)
+def default_at_tenant(timezone_name: str | None = DEFAULT_TENANT_TIMEZONE) -> datetime:
+    return datetime.now(tz=get_zoneinfo(timezone_name))
 
 
 def _promo_matches_line(
@@ -1589,8 +1631,11 @@ async def load_promotions_for_evaluation(
     conn: asyncpg.Connection,
     tenant_id: UUID,
     at: datetime,
+    *,
+    timezone_name: str | None = None,
 ) -> List[Dict[str, Any]]:
     """Load tenant promotions that are active at `at`, with scope for POS evaluation."""
+    evaluation_timezone = timezone_name or await resolve_tenant_timezone(conn, tenant_id)
     rows = await conn.fetch(
         """
         SELECT * FROM tenant_promotions
@@ -1609,6 +1654,7 @@ async def load_promotions_for_evaluation(
             starts_at=row["starts_at"],
             ends_at=row["ends_at"],
             schedules=schedule_dicts,
+            timezone_name=evaluation_timezone,
         ):
             continue
         category_ids, product_ids = await _load_scope_ids(conn, row["id"])
@@ -1638,8 +1684,14 @@ async def evaluate_checkout_promotions(
     preserve_persisted_promos: bool = False,
 ) -> Dict[str, Any]:
     """DB-backed promo evaluation plus optional manual discount stacking."""
-    evaluation_at = at or default_at_bogota()
-    promotions = await load_promotions_for_evaluation(conn, tenant_id, evaluation_at)
+    timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+    evaluation_at = at or default_at_tenant(timezone_name)
+    promotions = await load_promotions_for_evaluation(
+        conn,
+        tenant_id,
+        evaluation_at,
+        timezone_name=timezone_name,
+    )
     profile_row = await conn.fetchrow(
         """
         SELECT promo_type_block_map
