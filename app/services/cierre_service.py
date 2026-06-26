@@ -15,6 +15,12 @@ from fastapi import Request, Response
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
+from app.core.timezones import (
+    DEFAULT_TENANT_TIMEZONE,
+    get_zoneinfo,
+    resolve_tenant_timezone,
+    tenant_today,
+)
 from app.models.cierre import CierreCashSettingsUpdate, CierreCreate, OpenShiftCreate
 from app.services.tip_tax_service import tip_settlement_total
 
@@ -930,25 +936,28 @@ def _build_order_date_filter(
     period_end: date,
     period_start_time: Optional[datetime],
     period_end_time: Optional[datetime],
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
     param_offset: int = 2,
 ):
     """
     Returns (sql_fragment, [p_start, p_end]) for order_date filtering.
 
     When exact timestamps are provided, compares directly against order_date
-    (TIMESTAMPTZ).  Otherwise, truncates order_date to the Bogota calendar date
-    before comparing (legacy behaviour).
+    (TIMESTAMPTZ). Otherwise, truncates order_date to the tenant calendar date.
     """
-    p2 = f"${param_offset}"
-    p3 = f"${param_offset + 1}"
     if period_start_time and period_end_time:
+        p2 = f"${param_offset}"
+        p3 = f"${param_offset + 1}"
         sql = f"AND order_date >= {p2} AND order_date <= {p3}"
         return sql, [period_start_time, period_end_time]
+    p_tz = f"${param_offset}"
+    p2 = f"${param_offset + 1}"
+    p3 = f"${param_offset + 2}"
     sql = (
-        f"AND (order_date AT TIME ZONE 'America/Bogota')::date >= {p2} "
-        f"AND (order_date AT TIME ZONE 'America/Bogota')::date <= {p3}"
+        f"AND (order_date AT TIME ZONE {p_tz})::date >= {p2} "
+        f"AND (order_date AT TIME ZONE {p_tz})::date <= {p3}"
     )
-    return sql, [period_start, period_end]
+    return sql, [timezone_name, period_start, period_end]
 
 
 def _build_expense_filter(
@@ -976,25 +985,27 @@ def _build_open_tables_filter(
     period_end: date,
     period_start_time: Optional[datetime],
     period_end_time: Optional[datetime],
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
     param_offset: int = 2,
 ):
     """
     Open tables (closed_at IS NULL applied by caller).
 
-    Date-only: opened on a Bogota calendar day in [period_start, period_end].
+    Date-only: opened on a tenant calendar day in [period_start, period_end].
     Shift window: session started on or before shift end (still-open tables
     that began before the shift still block the close).
     """
     if period_start_time and period_end_time:
         p_end = f"${param_offset}"
         return f"AND ts.opened_at <= {p_end}", [period_end_time]
-    p2 = f"${param_offset}"
-    p3 = f"${param_offset + 1}"
+    p_tz = f"${param_offset}"
+    p2 = f"${param_offset + 1}"
+    p3 = f"${param_offset + 2}"
     sql = (
-        f"AND (ts.opened_at AT TIME ZONE 'America/Bogota')::date >= {p2} "
-        f"AND (ts.opened_at AT TIME ZONE 'America/Bogota')::date <= {p3}"
+        f"AND (ts.opened_at AT TIME ZONE {p_tz})::date >= {p2} "
+        f"AND (ts.opened_at AT TIME ZONE {p_tz})::date <= {p3}"
     )
-    return sql, [period_start, period_end]
+    return sql, [timezone_name, period_start, period_end]
 
 
 # ---------------------------------------------------------------------------
@@ -1006,19 +1017,19 @@ def _effective_period_bounds(
     period_end: date,
     period_start_time: Optional[datetime],
     period_end_time: Optional[datetime],
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
 ) -> tuple:
-    """Calendar day → Bogotá 00:00–23:59:59 unless exact timestamps supplied."""
-    from zoneinfo import ZoneInfo
-    bog = ZoneInfo("America/Bogota")
+    """Calendar day → tenant-local 00:00–23:59:59 unless exact timestamps supplied."""
+    zone = get_zoneinfo(timezone_name)
     if period_start_time and period_end_time:
         return period_start_time, period_end_time
     eff_start = datetime(
         period_start.year, period_start.month, period_start.day,
-        0, 0, 0, tzinfo=bog,
+        0, 0, 0, tzinfo=zone,
     )
     eff_end = datetime(
         period_end.year, period_end.month, period_end.day,
-        23, 59, 59, tzinfo=bog,
+        23, 59, 59, tzinfo=zone,
     )
     return eff_start, eff_end
 
@@ -1055,16 +1066,17 @@ def _open_shift_has_explicit_window(open_shift) -> bool:
     )
 
 
-_PERIOD_WINDOW_OVERLAP_SQL = """
+def _period_window_overlap_sql(timezone_param: str) -> str:
+    return f"""
     AND NOT (
         COALESCE(
             period_end_time,
-            (period_end::timestamp + INTERVAL '23:59:59') AT TIME ZONE 'America/Bogota'
+            (period_end::timestamp + INTERVAL '23:59:59') AT TIME ZONE {timezone_param}
         ) <= $2
         OR
         COALESCE(
             period_start_time,
-            period_start::timestamp AT TIME ZONE 'America/Bogota'
+            period_start::timestamp AT TIME ZONE {timezone_param}
         ) >= $3
     )
 """
@@ -1077,6 +1089,7 @@ async def _find_overlapping_period_id(
     eff_start: datetime,
     eff_end: datetime,
     *,
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
     open_only: bool = False,
 ) -> Optional[UUID]:
     if table == "accounting_period":
@@ -1091,10 +1104,10 @@ async def _find_overlapping_period_id(
         SELECT id FROM {table}
         WHERE tenant_id = $1
           {extra}
-          {_PERIOD_WINDOW_OVERLAP_SQL}
+          {_period_window_overlap_sql("$4")}
         LIMIT 1
         """,
-        tenant_id, eff_start, eff_end,
+        tenant_id, eff_start, eff_end, timezone_name,
     )
     return row["id"] if row else None
 
@@ -1104,6 +1117,7 @@ async def _fetch_open_shift_for_window(
     tenant_id: UUID,
     eff_start: datetime,
     eff_end: datetime,
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
 ):
     return await conn.fetchrow(
         f"""
@@ -1114,11 +1128,11 @@ async def _fetch_open_shift_for_window(
         FROM cash_shift_openings
         WHERE tenant_id = $1
           AND status = 'open'
-          {_PERIOD_WINDOW_OVERLAP_SQL}
+          {_period_window_overlap_sql("$4")}
         ORDER BY opened_at DESC
         LIMIT 1
         """,
-        tenant_id, eff_start, eff_end,
+        tenant_id, eff_start, eff_end, timezone_name,
     )
 
 
@@ -1265,6 +1279,7 @@ async def _compute_preview(
     period_start_time: Optional[datetime] = None,
     period_end_time: Optional[datetime] = None,
     opening_cash: float = 0.0,
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
 ) -> dict:
     """
     Runs the three aggregation queries (sales, gastos, open tables) and returns
@@ -1279,13 +1294,13 @@ async def _compute_preview(
     """
     status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
     date_filter, date_params = _build_order_date_filter(
-        period_start, period_end, period_start_time, period_end_time
+        period_start, period_end, period_start_time, period_end_time, timezone_name
     )
     expense_filter, expense_params = _build_expense_filter(
         period_start, period_end, period_start_time, period_end_time
     )
     open_tables_filter, open_tables_params = _build_open_tables_filter(
-        period_start, period_end, period_start_time, period_end_time
+        period_start, period_end, period_start_time, period_end_time, timezone_name
     )
     sales_row = await conn.fetchrow(
         f"""
@@ -1524,6 +1539,7 @@ async def _compute_breakdown_rows(
     completed_only: bool = False,
     period_start_time: Optional[datetime] = None,
     period_end_time: Optional[datetime] = None,
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
 ) -> List[Dict[str, Any]]:
     """
     Compute per-method payment totals for the period via UNION ALL:
@@ -1539,7 +1555,7 @@ async def _compute_breakdown_rows(
     """
     status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
     date_filter, date_params = _build_order_date_filter(
-        period_start, period_end, period_start_time, period_end_time
+        period_start, period_end, period_start_time, period_end_time, timezone_name
     )
     rows = await conn.fetch(
         f"""
@@ -1737,6 +1753,7 @@ async def resolve_cierre_period_fields(
     period_start_time: Optional[datetime],
     period_end_time: Optional[datetime],
     shift_template_id: Optional[UUID],
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
 ) -> ResolvedCierrePeriod:
     """Resolve template vs custom vs full-day period fields before preview/create."""
     if shift_template_id:
@@ -1772,6 +1789,7 @@ async def resolve_cierre_period_fields(
             crosses_midnight=row["crosses_midnight"],
             template_id=row["id"],
             template_name=row["name"],
+            timezone_name=timezone_name,
         )
         return ResolvedCierrePeriod(
             period_start=date.fromisoformat(payload["periodStart"]),
@@ -1832,6 +1850,7 @@ async def open_shift(request: Request, body: OpenShiftCreate) -> dict:
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection(use_transaction=True) as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             resolved = await resolve_cierre_period_fields(
                 conn,
                 tenant_id,
@@ -1840,16 +1859,19 @@ async def open_shift(request: Request, body: OpenShiftCreate) -> dict:
                 period_start_time=body.period_start_time,
                 period_end_time=body.period_end_time,
                 shift_template_id=body.shift_template_id,
+                timezone_name=timezone_name,
             )
             eff_start, eff_end = _effective_period_bounds(
                 resolved.period_start,
                 resolved.period_end,
                 resolved.period_start_time,
                 resolved.period_end_time,
+                timezone_name,
             )
 
             if await _find_overlapping_period_id(
                 conn, tenant_id, "accounting_period", eff_start, eff_end,
+                timezone_name=timezone_name,
             ):
                 raise APIError(
                     "Ya existe un cierre cerrado para este período o uno que se superpone.",
@@ -1857,7 +1879,8 @@ async def open_shift(request: Request, body: OpenShiftCreate) -> dict:
                 )
 
             if await _find_overlapping_period_id(
-                conn, tenant_id, "cash_shift_openings", eff_start, eff_end, open_only=True,
+                conn, tenant_id, "cash_shift_openings", eff_start, eff_end,
+                timezone_name=timezone_name, open_only=True,
             ):
                 raise APIError(
                     "Ya hay un turno abierto para este período o uno que se superpone.",
@@ -1916,6 +1939,7 @@ async def get_shift_status(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection(use_transaction=False) as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             resolved = await resolve_cierre_period_fields(
                 conn,
                 tenant_id,
@@ -1924,14 +1948,18 @@ async def get_shift_status(
                 period_start_time=period_start_time,
                 period_end_time=period_end_time,
                 shift_template_id=shift_template_id,
+                timezone_name=timezone_name,
             )
             eff_start, eff_end = _effective_period_bounds(
                 resolved.period_start,
                 resolved.period_end,
                 resolved.period_start_time,
                 resolved.period_end_time,
+                timezone_name,
             )
-            row = await _fetch_open_shift_for_window(conn, tenant_id, eff_start, eff_end)
+            row = await _fetch_open_shift_for_window(
+                conn, tenant_id, eff_start, eff_end, timezone_name
+            )
 
             if not row:
                 suggested = await _resolve_suggested_opening_cash(
@@ -2021,6 +2049,7 @@ async def get_cierre_preview(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection(use_transaction=False) as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             resolved = await resolve_cierre_period_fields(
                 conn,
                 tenant_id,
@@ -2029,15 +2058,17 @@ async def get_cierre_preview(
                 period_start_time=period_start_time,
                 period_end_time=period_end_time,
                 shift_template_id=shift_template_id,
+                timezone_name=timezone_name,
             )
             eff_start, eff_end = _effective_period_bounds(
                 resolved.period_start,
                 resolved.period_end,
                 resolved.period_start_time,
                 resolved.period_end_time,
+                timezone_name,
             )
             open_shift = await _fetch_open_shift_for_window(
-                conn, tenant_id, eff_start, eff_end,
+                conn, tenant_id, eff_start, eff_end, timezone_name,
             )
             opening_cash = float(open_shift["opening_cash"]) if open_shift else 0.0
             preview = await _compute_preview(
@@ -2047,6 +2078,7 @@ async def get_cierre_preview(
                 period_start_time=resolved.period_start_time,
                 period_end_time=resolved.period_end_time,
                 opening_cash=opening_cash,
+                timezone_name=timezone_name,
             )
             breakdown = await _compute_breakdown_rows(
                 conn, tenant_id,
@@ -2054,6 +2086,7 @@ async def get_cierre_preview(
                 completed_only=completed_only,
                 period_start_time=resolved.period_start_time,
                 period_end_time=resolved.period_end_time,
+                timezone_name=timezone_name,
             )
             preview["breakdown"] = breakdown
 
@@ -2078,6 +2111,7 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection(use_transaction=True) as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             resolved = await resolve_cierre_period_fields(
                 conn,
                 tenant_id,
@@ -2086,6 +2120,7 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 period_start_time=body.period_start_time,
                 period_end_time=body.period_end_time,
                 shift_template_id=body.shift_template_id,
+                timezone_name=timezone_name,
             )
             period_start = resolved.period_start
             period_end = resolved.period_end
@@ -2101,12 +2136,13 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 )
 
             eff_start, eff_end = _effective_period_bounds(
-                period_start, period_end, period_start_time, period_end_time,
+                period_start, period_end, period_start_time, period_end_time, timezone_name,
             )
 
             # 1. Unified overlap check using effective time windows.
             overlap = await _find_overlapping_period_id(
                 conn, tenant_id, "accounting_period", eff_start, eff_end,
+                timezone_name=timezone_name,
             )
             if overlap:
                 raise APIError(
@@ -2115,7 +2151,7 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 )
 
             open_shift = await _fetch_open_shift_for_window(
-                conn, tenant_id, eff_start, eff_end,
+                conn, tenant_id, eff_start, eff_end, timezone_name,
             )
             if _open_shift_has_explicit_window(open_shift) and _is_day_only_cierre_request(
                 shift_template_id, period_start_time, period_end_time,
@@ -2140,13 +2176,12 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 period_start_time=period_start_time,
                 period_end_time=period_end_time,
                 opening_cash=opening_cash,
+                timezone_name=timezone_name,
             )
 
             # 3. Open tables check — skip for past periods (mesas actuales no pertenecen al período)
-            # Use Bogota date so the check is correct even when the server runs in UTC.
-            from zoneinfo import ZoneInfo
-            today_bogota = datetime.now(ZoneInfo("America/Bogota")).date()
-            is_past_period = period_end < today_bogota
+            # Use tenant-local date so the check is correct even when the server runs in UTC.
+            is_past_period = period_end < tenant_today(timezone_name, datetime.now())
             if not is_past_period and preview["openTablesCount"] > 0:
                 raise APIError(
                     f"Hay {preview['openTablesCount']} mesa(s) con cuenta abierta. "
@@ -2223,6 +2258,7 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 completed_only=True,
                 period_start_time=period_start_time,
                 period_end_time=period_end_time,
+                timezone_name=timezone_name,
             )
             if breakdown_rows:
                 await conn.execute(
@@ -2331,6 +2367,9 @@ async def list_cierres(
             date_filter += f" AND ap.period_end <= ${len(params)}"
 
         async with get_db_connection(use_transaction=False) as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+            params.append(timezone_name)
+            timezone_param = f"${len(params)}"
             open_rows = await conn.fetch(
                 """
                 SELECT
@@ -2357,7 +2396,7 @@ async def list_cierres(
                 ORDER BY
                     COALESCE(
                         ap.period_start_time,
-                        ap.period_start::timestamp AT TIME ZONE 'America/Bogota'
+                        ap.period_start::timestamp AT TIME ZONE {timezone_param}
                     ) DESC,
                     ap.closed_at DESC
                 """,

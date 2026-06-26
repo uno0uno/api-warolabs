@@ -2,15 +2,13 @@
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, Optional
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, Request
 
 from app.core.exceptions import AuthenticationError
 from app.core.middleware import require_valid_session
+from app.core.timezones import DEFAULT_TENANT_TIMEZONE, get_zoneinfo, resolve_tenant_timezone
 from app.database import get_db_connection
-
-BOGOTA = ZoneInfo("America/Bogota")
 
 
 def resolve_shift_template_window(
@@ -21,13 +19,15 @@ def resolve_shift_template_window(
     crosses_midnight: bool,
     template_id: Optional[UUID] = None,
     template_name: Optional[str] = None,
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
 ) -> Dict[str, Any]:
-    """Pure resolver: template clock times + anchor date → cierre period fields (Bogotá)."""
+    """Pure resolver: template clock times + anchor date → cierre period fields."""
+    zone = get_zoneinfo(timezone_name)
     period_start = anchor_date
     period_end = anchor_date + timedelta(days=1) if crosses_midnight else anchor_date
 
-    period_start_time = datetime.combine(anchor_date, start_time, tzinfo=BOGOTA)
-    period_end_time = datetime.combine(period_end, end_time, tzinfo=BOGOTA)
+    period_start_time = datetime.combine(anchor_date, start_time, tzinfo=zone)
+    period_end_time = datetime.combine(period_end, end_time, tzinfo=zone)
 
     payload: Dict[str, Any] = {
         "periodStart": period_start.isoformat(),
@@ -54,6 +54,7 @@ async def get_template_window(
         raise AuthenticationError("Tenant ID is required")
 
     async with get_db_connection(use_transaction=False) as conn:
+        timezone_name = await resolve_tenant_timezone(conn, tenant_id)
         row = await conn.fetchrow(
             """
             SELECT id, name, start_time, end_time, crosses_midnight
@@ -74,6 +75,7 @@ async def get_template_window(
         crosses_midnight=row["crosses_midnight"],
         template_id=row["id"],
         template_name=row["name"],
+        timezone_name=timezone_name,
     )
     return {"success": True, "data": data}
 
@@ -82,15 +84,16 @@ async def get_suggested_window(
     request: Request,
     anchor_date: date,
 ) -> dict:
-    """Suggest a custom arqueo window from last close end through now (Bogotá)."""
+    """Suggest a custom arqueo window from last close end through now."""
     session = require_valid_session(request)
     tenant_id = session.tenant_id
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
 
-    now_bogota = datetime.now(BOGOTA)
-
     async with get_db_connection(use_transaction=False) as conn:
+        timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+        zone = get_zoneinfo(timezone_name)
+        now_local = datetime.now(zone)
         row = await conn.fetchrow(
             """
             SELECT
@@ -105,25 +108,26 @@ async def get_suggested_window(
                 COALESCE(
                     ap.period_end_time,
                     (ap.period_end::timestamp + INTERVAL '23:59:59')
-                        AT TIME ZONE 'America/Bogota'
+                        AT TIME ZONE $2
                 ) DESC
             LIMIT 1
             """,
             tenant_id,
+            timezone_name,
         )
 
     if row and row["period_end_time"]:
         period_start_time = row["period_end_time"]
-        period_start = period_start_time.astimezone(BOGOTA).date()
+        period_start = period_start_time.astimezone(zone).date()
     elif row:
         period_start = row["period_end"]
-        period_start_time = datetime.combine(period_start, time(0, 0, 0), tzinfo=BOGOTA)
+        period_start_time = datetime.combine(period_start, time(0, 0, 0), tzinfo=zone)
     else:
         period_start = anchor_date
-        period_start_time = datetime.combine(anchor_date, time(0, 0, 0), tzinfo=BOGOTA)
+        period_start_time = datetime.combine(anchor_date, time(0, 0, 0), tzinfo=zone)
 
-    period_end = now_bogota.date()
-    period_end_time = now_bogota
+    period_end = now_local.date()
+    period_end_time = now_local
 
     if period_start_time >= period_end_time:
         raise HTTPException(
