@@ -23,6 +23,8 @@ from fastapi import Request
 
 logger = logging.getLogger(__name__)
 
+FALLBACK_STATION_NAME = "Sin cocina asignada"
+
 
 def _parse_item_row(ir: Any, *, is_promo_free: bool = False) -> Dict[str, Any]:
     """Convert an asyncpg comanda_items row to a serializable dict.
@@ -109,6 +111,47 @@ def _comanda_kitchen_lines_for_order_item(item: Dict[str, Any]) -> List[Dict[str
         promotion_name=item.get("promotion_name") or "",
         base_notes=base_notes,
     )
+
+
+async def _build_comanda_print_items_for_order_item(
+    conn,
+    item: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Build printable comanda item rows from one order_item without requiring a persisted comanda."""
+    order_item_id = item["id"]
+    mod_rows = await conn.fetch(
+        """
+        SELECT modifier_name, price_at_purchase, quantity
+        FROM order_item_modifiers
+        WHERE order_item_id = $1
+        ORDER BY created_at
+        """,
+        order_item_id,
+    )
+    modifiers_snapshot = [
+        {
+            "name": m["modifier_name"],
+            "price": float(m["price_at_purchase"]),
+            "quantity": int(m["quantity"]),
+        }
+        for m in mod_rows
+    ] if mod_rows else None
+
+    rows: List[Dict[str, Any]] = []
+    for kitchen_line in _comanda_kitchen_lines_for_order_item(item):
+        rows.append({
+            "id": None,
+            "order_item_id": order_item_id,
+            "kitchen_name": item["kitchen_name"],
+            "quantity": kitchen_line["quantity"],
+            "notes": kitchen_line["notes"],
+            "modifiers_snapshot": modifiers_snapshot,
+            "status": "pending",
+            "ready_at": None,
+            "created_at": None,
+            "is_promo_free": kitchen_line["is_promo_free"],
+        })
+    return rows
 
 
 _UNFIRED_ORDER_ITEMS_SELECT = """
@@ -293,23 +336,18 @@ async def _fire_with_conn(
     # ─── Step 2: Resolve effective station per item ──────────────────────────
     # get_effective_station() uses the shared conn to run inside our transaction
     items_by_station: Dict[UUID, List[Any]] = {}
+    unrouted_items: List[Any] = []
     skipped = 0
 
     for row in rows:
         station_id = await get_effective_station(row['product_id'], tenant_id, conn)
         if station_id is None:
             skipped += 1
+            unrouted_items.append(row)
             continue
         if station_id not in items_by_station:
             items_by_station[station_id] = []
         items_by_station[station_id].append(row)
-
-    if not items_by_station:
-        logger.info(
-            f"fire_comandas: all {len(rows)} items have no station routing "
-            f"for order {order_id} (skipped={skipped})"
-        )
-        return []
 
     # ─── Step 3: Create one comanda per station ──────────────────────────────
     created_comandas: List[Dict[str, Any]] = []
@@ -350,27 +388,15 @@ async def _fire_with_conn(
             order_item_id = item['id']
             item_ids_in_group.append(order_item_id)
 
-            mod_rows = await conn.fetch(
-                """
-                SELECT modifier_name, price_at_purchase, quantity
-                FROM order_item_modifiers
-                WHERE order_item_id = $1
-                ORDER BY created_at
-                """,
-                order_item_id,
+            printable_items = await _build_comanda_print_items_for_order_item(
+                conn, dict(item)
             )
-            modifiers_snapshot = [
-                {
-                    "name": m['modifier_name'],
-                    "price": float(m['price_at_purchase']),
-                    "quantity": int(m['quantity']),
-                }
-                for m in mod_rows
-            ] if mod_rows else None
+            modifiers_snapshot = (
+                printable_items[0]["modifiers_snapshot"] if printable_items else None
+            )
             modifiers_json = json.dumps(modifiers_snapshot) if modifiers_snapshot else None
 
-            kitchen_lines = _comanda_kitchen_lines_for_order_item(dict(item))
-            for kitchen_line in kitchen_lines:
+            for printable_item in printable_items:
                 ci_row = await conn.fetchrow(
                     """
                     INSERT INTO comanda_items (
@@ -384,12 +410,12 @@ async def _fire_with_conn(
                     comanda_id,
                     order_item_id,
                     item['kitchen_name'],
-                    kitchen_line['quantity'],
+                    printable_item['quantity'],
                     modifiers_json,
-                    kitchen_line['notes'],
+                    printable_item['notes'],
                 )
                 inserted_items.append(
-                    _parse_item_row(ci_row, is_promo_free=kitchen_line['is_promo_free'])
+                    _parse_item_row(ci_row, is_promo_free=printable_item['is_promo_free'])
                 )
 
         # 3d. Mark fired items as 'sent'
@@ -416,6 +442,54 @@ async def _fire_with_conn(
         logger.info(
             f"fire_comandas: comanda #{comanda_number} created "
             f"(station={station_id}, items={len(inserted_items)}, order={order_id})"
+        )
+
+    if unrouted_items:
+        comanda_number = await conn.fetchval(
+            "SELECT order_number FROM orders WHERE id = $1",
+            order_id,
+        )
+        comanda_index = await conn.fetchval(
+            "SELECT COUNT(*) + 1 FROM comandas WHERE order_id = $1",
+            order_id,
+        )
+        fallback_items: List[Dict[str, Any]] = []
+        fallback_item_ids: List[UUID] = []
+        for item in unrouted_items:
+            fallback_item_ids.append(item["id"])
+            fallback_items.extend(
+                await _build_comanda_print_items_for_order_item(conn, dict(item))
+            )
+
+        if fallback_item_ids:
+            await conn.execute(
+                """
+                UPDATE order_items
+                SET fulfillment_status = 'sent', sent_at = now()
+                WHERE id = ANY($1::uuid[])
+                """,
+                fallback_item_ids,
+            )
+
+        created_comandas.append({
+            "id": None,
+            "comanda_number": comanda_number,
+            "comanda_index": comanda_index,
+            "station_id": None,
+            "station_name": FALLBACK_STATION_NAME,
+            "status": "pending",
+            "source_type": source_type,
+            "table_display_name": table_display_name,
+            "notes": None,
+            "fired_at": datetime.now(timezone.utc),
+            "ready_at": None,
+            "created_at": None,
+            "items": fallback_items,
+            "print_fallback": True,
+        })
+        logger.info(
+            f"fire_comandas: printable fallback created "
+            f"(items={len(fallback_items)}, order={order_id}, skipped={skipped})"
         )
 
     fired_count = sum(len(c['items']) for c in created_comandas)
