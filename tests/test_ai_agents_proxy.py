@@ -112,6 +112,7 @@ def test_sign_internal_request_matches_agent_api_contract():
             profile_id="profile-1",
             member_id=None,
             scopes="orders:read,financial:read",
+            timezone="America/Mexico_City",
             body=BODY,
         )
 
@@ -123,6 +124,7 @@ def test_sign_internal_request_matches_agent_api_contract():
         "profile-1",
         "",
         "orders:read,financial:read",
+        "America/Mexico_City",
         hashlib.sha256(BODY).hexdigest(),
     ])
     expected = hmac.new(b"secret", canonical.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -141,6 +143,7 @@ def test_sales_proxy_streams_frames_and_preserves_request_id():
          patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
          patch("app.routers.ai_agents.is_kali_enabled", AsyncMock(return_value=True)), \
          patch("app.routers.ai_agents._resolve_member_id", AsyncMock(return_value=str(MEMBER_ID))), \
+         patch("app.routers.ai_agents._resolve_agent_timezone", AsyncMock(return_value="America/Mexico_City")), \
          patch.object(ai_agents.settings, "agent_api_url", "http://agent-api:8100"), \
          patch.object(ai_agents.settings, "agent_internal_signature_secret", "secret"), \
          patch("app.routers.ai_agents.httpx.AsyncClient", FakeAsyncClient):
@@ -165,8 +168,9 @@ def test_sales_proxy_streams_frames_and_preserves_request_id():
     assert sent["headers"]["x-waro-profile-id"] == str(PROFILE_ID)
     assert sent["headers"]["x-waro-member-id"] == str(MEMBER_ID)
     assert sent["headers"]["x-waro-request-id"] == "req-preserved"
+    assert sent["headers"]["x-waro-timezone"] == "America/Mexico_City"
     assert sent["headers"]["x-waro-scopes"] == (
-        "orders:read,financial:read,analytics:read,menu:read,customers:read"
+        "orders:read,financial:read,analytics:read,menu:read,customers:read,dataset_scope"
     )
     assert sent["headers"]["x-waro-internal-signature"]
     assert FakeAsyncClient.instances[0].closed is True
@@ -183,6 +187,7 @@ def test_food_cost_proxy_uses_analytics_menu_financial_scopes():
          patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
          patch("app.routers.ai_agents.is_kali_enabled", AsyncMock(return_value=True)), \
          patch("app.routers.ai_agents._resolve_member_id", AsyncMock(return_value=None)), \
+         patch("app.routers.ai_agents._resolve_agent_timezone", AsyncMock(return_value="America/Bogota")), \
          patch.object(ai_agents.settings, "agent_api_url", "http://agent-api:8100"), \
          patch.object(ai_agents.settings, "agent_internal_signature_secret", "secret"), \
          patch("app.routers.ai_agents.httpx.AsyncClient", FakeAsyncClient):
@@ -252,6 +257,7 @@ def test_missing_agent_config_rejects_before_upstream_call():
          patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
          patch("app.routers.ai_agents.is_kali_enabled", AsyncMock(return_value=True)), \
          patch("app.routers.ai_agents._resolve_member_id", AsyncMock(return_value=None)), \
+         patch("app.routers.ai_agents._resolve_agent_timezone", AsyncMock(return_value="America/Bogota")), \
          patch.object(ai_agents.settings, "agent_api_url", None), \
          patch.object(ai_agents.settings, "agent_internal_signature_secret", "secret"), \
          patch("app.routers.ai_agents.httpx.AsyncClient", FakeAsyncClient):
@@ -286,10 +292,12 @@ def test_build_headers_generates_request_id_signature_and_content_headers():
             profile_id=str(PROFILE_ID),
             member_id=None,
             scopes="analytics:read,menu:read,financial:read",
+            timezone="America/Bogota",
             body=BODY,
         )
 
     assert headers["Content-Type"] == "application/json"
     assert headers["Accept"] == "text/event-stream"
     assert headers["x-waro-request-id"] == "req-generated"
+    assert headers["x-waro-timezone"] == "America/Bogota"
     assert headers["x-waro-internal-signature"]
