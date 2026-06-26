@@ -56,7 +56,8 @@ async def create_promotion_endpoint(request: Request, body: PromotionCreate):
     dependencies=[Depends(require_module(Module.POS))],
     summary="List promotions with active status for POS",
     description=(
-        "Read-only endpoint for POS. Evaluates schedules in America/Bogota. "
+        "Read-only endpoint for POS. Evaluates schedules in the tenant operational timezone "
+        "with America/Bogota fallback. "
         f"{_CONFLICT_DOC}"
     ),
 )
@@ -64,17 +65,18 @@ async def list_active_promotions_endpoint(
     request: Request,
     at: Optional[datetime] = Query(
         None,
-        description="Evaluation timestamp (ISO). Defaults to now in America/Bogota.",
+        description=(
+            "Evaluation timestamp (ISO). Defaults to now in the tenant operational timezone."
+        ),
     ),
     only_current: bool = Query(
         False,
         description="When true, return only promotions active at `at`.",
     ),
 ):
-    evaluation_at = at or promotions_service.default_at_bogota()
     return await promotions_service.list_active_promotions(
         request,
-        evaluation_at,
+        at,
         only_current=only_current,
     )
 
