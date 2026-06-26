@@ -3407,6 +3407,8 @@ async def create_manual_order(
     items: List[dict],
     customer_id: Optional[str] = None,
     payment_method_id: Optional[str] = None,
+    discount_type: Optional[str] = None,
+    discount_value: Optional[float] = None,
     payments: Optional[List[dict]] = None,
 ) -> dict:
     """
@@ -3474,15 +3476,36 @@ async def create_manual_order(
                 def modifier_unit_total(modifier: dict) -> float:
                     return float(modifier.get("price", 0)) * modifier_quantity(modifier)
 
-                # Compute total server-side — never trust client total
-                total_amount = sum(
+                # Compute total server-side — never trust client total.
+                gross_total = sum(
                     float(item["quantity"]) * (
                         float(item["unit_price"])
                         + sum(modifier_unit_total(m) for m in item.get("modifiers", []))
                     )
                     for item in items
                 )
-                total_amount = round(total_amount, 2)
+                if gross_total < 0:
+                    raise APIError("Total de venta inválido", status_code=400)
+
+                normalized_discount_type = discount_type if discount_value is not None else None
+                normalized_discount_value = float(discount_value) if discount_value is not None else None
+                discount_amount = 0.0
+                if normalized_discount_type:
+                    if normalized_discount_type not in ("percent", "fixed"):
+                        raise APIError("discount_type debe ser 'percent' o 'fixed'", status_code=400)
+                    if normalized_discount_value is None or normalized_discount_value <= 0:
+                        raise APIError("discount_value debe ser mayor a 0", status_code=400)
+                    if normalized_discount_type == "percent":
+                        if normalized_discount_value > 100:
+                            raise APIError("El descuento porcentual no puede superar el 100%", status_code=400)
+                        discount_amount = gross_total * normalized_discount_value / 100
+                    else:
+                        discount_amount = normalized_discount_value
+                    if discount_amount - gross_total > 0.01:
+                        raise APIError("El descuento no puede superar el subtotal", status_code=400)
+                    discount_amount = round(discount_amount, 2)
+
+                total_amount = round(max(0.0, gross_total - discount_amount), 2)
 
                 if split_payments:
                     paid_total = round(sum(float(p["amount"]) for p in split_payments), 2)
@@ -3496,9 +3519,10 @@ async def create_manual_order(
                     """
                     INSERT INTO orders (
                         tenant_id, customer_id, payment_method, payment_method_id,
-                        order_date, total_amount, status, extra_attributes
+                        order_date, total_amount, status,
+                        discount_type, discount_value, discount_amount, extra_attributes
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7)
+                    VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8, $9, $10)
                     RETURNING id, order_number, order_date, created_at
                     """,
                     tenant_id,
@@ -3507,6 +3531,9 @@ async def create_manual_order(
                     payment_method_uuid,
                     order_datetime,
                     total_amount,
+                    normalized_discount_type,
+                    normalized_discount_value,
+                    discount_amount or None,
                     json.dumps({"source": "manual"})
                 )
 
@@ -3742,6 +3769,9 @@ async def create_manual_order(
                 "status": "completed",
                 "payment_method": payment_method,
                 "payment_method_id": str(payment_method_uuid) if payment_method_uuid else None,
+                "discount_type": normalized_discount_type,
+                "discount_value": normalized_discount_value,
+                "discount_amount": float(discount_amount),
             }
         }
 
