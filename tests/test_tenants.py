@@ -6,10 +6,21 @@ Endpoints tested:
 - GET /tenants/members
 - DELETE /tenants/members/{member_id}
 - PUT /tenants/members/{member_id}/role
+- POST /tenants remains closed (tenant self-service provisioning removed)
 """
 import pytest
 from httpx import AsyncClient
 from uuid import uuid4
+
+
+class TestCreateTenantEndpoint:
+    """Regression tests for removed self-service tenant creation"""
+
+    @pytest.mark.asyncio
+    async def test_post_tenants_is_closed(self, client: AsyncClient):
+        """POST /tenants must not provision tenants from normal sessions."""
+        response = await client.post("/tenants", json={"name": "Should Not Provision"})
+        assert response.status_code in [404, 405]
 
 
 class TestUserTenantsEndpoint:

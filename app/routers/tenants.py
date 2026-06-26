@@ -1,24 +1,10 @@
 from fastapi import APIRouter, Depends, Request
 from app.core.permissions import Module, require_module
-from app.services.tenants_service import get_user_tenants, get_tenant_members, delete_tenant_member, update_member_role, create_tenant
+from app.services.tenants_service import get_user_tenants, get_tenant_members, delete_tenant_member, update_member_role
 from app.models.auth import UserTenantsResponse
-from app.models.tenant import TenantMembersResponse, DeleteMemberResponse, UpdateMemberRoleRequest, UpdateMemberRoleResponse, TenantCreate, TenantCreateResponse
+from app.models.tenant import TenantMembersResponse, DeleteMemberResponse, UpdateMemberRoleRequest, UpdateMemberRoleResponse
 
 router = APIRouter()
-
-# NOTE: NOT gated under EQUIPO — this is the onboarding / add-new-tenant flow.
-# Callers may have no current tenant (role=null) or non-owner roles wanting to
-# start their own tenant. Gating would block legitimate self-service signup.
-# The service makes the caller superuser of the newly created tenant.
-@router.post("", response_model=TenantCreateResponse)
-async def create_tenant_endpoint(request: Request, body: TenantCreate):
-    """
-    Create a new tenant for the authenticated user.
-    The caller becomes superuser and receives the 52 PUC colombiano accounts automatically.
-    Requires valid session cookie.
-    """
-    return await create_tenant(request, body)
-
 
 # NOTE: NOT gated under EQUIPO — this is the sidebar tenant-switcher endpoint
 # called by every authenticated user regardless of role. Frontend consumer:
