@@ -11,6 +11,7 @@ from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
+from app.core.timezones import resolve_tenant_timezone, tenant_today
 from app.services.aws_ses_service import ses_service
 from app.services.waros_service import evaluate_and_award
 from app.services.cierre_service import (
@@ -42,6 +43,36 @@ def parse_date(date_str: Optional[str]) -> Optional[date]:
 logger = logging.getLogger(__name__)
 _BOG = ZoneInfo("America/Bogota")
 _INVENTORY_QUANTITY_SCALE = Decimal("0.000001")
+
+
+def _append_local_date_bounds(
+    where_conditions: List[str],
+    params: List[Any],
+    param_count: int,
+    column: str,
+    parsed_date_from: Optional[date],
+    parsed_date_to: Optional[date],
+    timezone_name: str,
+) -> int:
+    if parsed_date_from:
+        param_count += 1
+        date_param = param_count
+        param_count += 1
+        tz_param = param_count
+        where_conditions.append(f"{column} >= (${date_param}::timestamp AT TIME ZONE ${tz_param})")
+        params.extend([parsed_date_from, timezone_name])
+
+    if parsed_date_to:
+        param_count += 1
+        date_param = param_count
+        param_count += 1
+        tz_param = param_count
+        where_conditions.append(
+            f"{column} < ((${date_param}::timestamp + interval '1 day') AT TIME ZONE ${tz_param})"
+        )
+        params.extend([parsed_date_to, timezone_name])
+
+    return param_count
 
 
 def _inventory_quantity(value: Any) -> float:
@@ -268,6 +299,7 @@ async def get_orders_list(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             # Build WHERE clause
             where_conditions = [
                 "o.tenant_id = $1",
@@ -310,16 +342,15 @@ async def get_orders_list(
             # Date range filter
             parsed_date_from = parse_date(date_from)
             parsed_date_to = parse_date(date_to)
-
-            if parsed_date_from:
-                param_count += 1
-                where_conditions.append(f"o.order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')")
-                params.append(parsed_date_from)
-
-            if parsed_date_to:
-                param_count += 1
-                where_conditions.append(f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')")
-                params.append(parsed_date_to)
+            param_count = _append_local_date_bounds(
+                where_conditions,
+                params,
+                param_count,
+                "o.order_date",
+                parsed_date_from,
+                parsed_date_to,
+                timezone_name,
+            )
 
             # Delivery-only filter: composes with POS_LIKE_FILTER, uses partial index idx_orders_delivery_address_id
             if delivery_only:
@@ -492,6 +523,7 @@ async def get_tips_list(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             where_conditions = [
                 "o.tenant_id = $1",
                 "o.tip_amount > 0",
@@ -525,16 +557,15 @@ async def get_tips_list(
 
             parsed_date_from = parse_date(date_from)
             parsed_date_to = parse_date(date_to)
-
-            if parsed_date_from:
-                param_count += 1
-                where_conditions.append(f"o.order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')")
-                params.append(parsed_date_from)
-
-            if parsed_date_to:
-                param_count += 1
-                where_conditions.append(f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')")
-                params.append(parsed_date_to)
+            param_count = _append_local_date_bounds(
+                where_conditions,
+                params,
+                param_count,
+                "o.order_date",
+                parsed_date_from,
+                parsed_date_to,
+                timezone_name,
+            )
 
             where_clause = " AND ".join(where_conditions)
 
@@ -916,19 +947,20 @@ async def bulk_update_order_status(
         ids = [_UUID(oid) for oid in order_ids]
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             # Guard: fail fast if any order falls in a closed monthly accounting period (#362)
             closed_check = await conn.fetchrow(
                 """
                 SELECT 1 FROM orders o
                 JOIN tenant_monthly_periods mp
                     ON mp.tenant_id = o.tenant_id
-                    AND EXTRACT(YEAR  FROM o.order_date AT TIME ZONE 'America/Bogota') = mp.year
-                    AND EXTRACT(MONTH FROM o.order_date AT TIME ZONE 'America/Bogota') = mp.month
+                    AND EXTRACT(YEAR  FROM o.order_date AT TIME ZONE $3) = mp.year
+                    AND EXTRACT(MONTH FROM o.order_date AT TIME ZONE $3) = mp.month
                     AND mp.status = 'closed'
                 WHERE o.id = ANY($1) AND o.tenant_id = $2
                 LIMIT 1
                 """,
-                ids, tenant_id,
+                ids, tenant_id, timezone_name,
             )
             if closed_check:
                 raise APIError(
@@ -1558,6 +1590,7 @@ async def get_customers_list(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             order_conditions = [
                 "o.tenant_id = $1",
                 "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
@@ -1578,20 +1611,15 @@ async def get_customers_list(
 
             parsed_date_from = parse_date(date_from)
             parsed_date_to = parse_date(date_to)
-
-            if parsed_date_from:
-                param_count += 1
-                order_conditions.append(
-                    f"o.order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')"
-                )
-                params.append(parsed_date_from)
-
-            if parsed_date_to:
-                param_count += 1
-                order_conditions.append(
-                    f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')"
-                )
-                params.append(parsed_date_to)
+            param_count = _append_local_date_bounds(
+                order_conditions,
+                params,
+                param_count,
+                "o.order_date",
+                parsed_date_from,
+                parsed_date_to,
+                timezone_name,
+            )
 
             order_where = " AND ".join(order_conditions)
 
@@ -1713,6 +1741,7 @@ async def get_customer_detail(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             # --- Customer aggregate stats ---
             customer_row = await conn.fetchrow(
                 """
@@ -1778,20 +1807,15 @@ async def get_customer_detail(
 
             parsed_date_from = parse_date(date_from)
             parsed_date_to = parse_date(date_to)
-
-            if parsed_date_from:
-                param_count += 1
-                where_conditions.append(
-                    f"o.order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')"
-                )
-                params.append(parsed_date_from)
-
-            if parsed_date_to:
-                param_count += 1
-                where_conditions.append(
-                    f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')"
-                )
-                params.append(parsed_date_to)
+            param_count = _append_local_date_bounds(
+                where_conditions,
+                params,
+                param_count,
+                "o.order_date",
+                parsed_date_from,
+                parsed_date_to,
+                timezone_name,
+            )
 
             where_clause = " AND ".join(where_conditions)
 
@@ -1953,6 +1977,7 @@ async def get_orders_metrics(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             # Build WHERE clause
             where_conditions = ["tenant_id = $1", "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"]
             params = [tenant_id]
@@ -1960,16 +1985,15 @@ async def get_orders_metrics(
 
             parsed_date_from = parse_date(date_from)
             parsed_date_to = parse_date(date_to)
-
-            if parsed_date_from:
-                param_count += 1
-                where_conditions.append(f"order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')")
-                params.append(parsed_date_from)
-
-            if parsed_date_to:
-                param_count += 1
-                where_conditions.append(f"order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')")
-                params.append(parsed_date_to)
+            param_count = _append_local_date_bounds(
+                where_conditions,
+                params,
+                param_count,
+                "order_date",
+                parsed_date_from,
+                parsed_date_to,
+                timezone_name,
+            )
 
             if payment_method:
                 param_count += 1
@@ -2015,14 +2039,15 @@ async def get_orders_metrics(
                              "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"]
                 tax_params: List[Any] = [tenant_id]
                 tax_pc = 1
-                if parsed_date_from:
-                    tax_pc += 1
-                    tax_where.append(f"o.order_date >= (${tax_pc}::timestamp AT TIME ZONE 'America/Bogota')")
-                    tax_params.append(parsed_date_from)
-                if parsed_date_to:
-                    tax_pc += 1
-                    tax_where.append(f"o.order_date < ((${tax_pc}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')")
-                    tax_params.append(parsed_date_to)
+                tax_pc = _append_local_date_bounds(
+                    tax_where,
+                    tax_params,
+                    tax_pc,
+                    "o.order_date",
+                    parsed_date_from,
+                    parsed_date_to,
+                    timezone_name,
+                )
                 if payment_method:
                     tax_pc += 1
                     tax_where.append(f"o.payment_method = ${tax_pc}")
@@ -2093,6 +2118,7 @@ async def get_orders_dashboard(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             # Build optional filters for the main (all-time) metrics
             main_filters = []
             params = [tenant_id]
@@ -2113,6 +2139,10 @@ async def get_orders_dashboard(
             if main_filters:
                 main_filter_sql = " AND " + " AND ".join(main_filters)
 
+            param_count += 1
+            timezone_param = param_count
+            params.append(timezone_name)
+
             dashboard_query = f"""
                 SELECT
                     -- Main: all-time (with optional payment/status filters)
@@ -2125,24 +2155,24 @@ async def get_orders_dashboard(
                     -- Month-to-date (with optional payment/status filters)
                     COUNT(*) FILTER (
                         WHERE status = 'completed'
-                        AND DATE(order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Bogota')::date
+                        AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
                         {main_filter_sql}
                     ) as month_completed,
                     COALESCE(SUM(total_amount) FILTER (
                         WHERE status = 'completed'
-                        AND DATE(order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Bogota')::date
+                        AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
                         {main_filter_sql}
                     ), 0) as month_sales,
 
                     -- Year-to-date (with optional payment/status filters)
                     COUNT(*) FILTER (
                         WHERE status = 'completed'
-                        AND DATE(order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('year', NOW() AT TIME ZONE 'America/Bogota')::date
+                        AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
                         {main_filter_sql}
                     ) as year_completed,
                     COALESCE(SUM(total_amount) FILTER (
                         WHERE status = 'completed'
-                        AND DATE(order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('year', NOW() AT TIME ZONE 'America/Bogota')::date
+                        AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
                         {main_filter_sql}
                     ), 0) as year_sales
 
@@ -2242,15 +2272,17 @@ async def get_orders_dashboard(
                 )
                 month_tax_rows = await conn.fetch(
                     f"""{_tax_select} WHERE {_base_filter}
-                        AND DATE(o.order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Bogota')::date
+                        AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('month', NOW() AT TIME ZONE $2)::date
                         GROUP BY COALESCE(p.tax_category, 'standard')""",
-                    tenant_id
+                    tenant_id,
+                    timezone_name,
                 )
                 year_tax_rows = await conn.fetch(
                     f"""{_tax_select} WHERE {_base_filter}
-                        AND DATE(o.order_date AT TIME ZONE 'America/Bogota') >= DATE_TRUNC('year', NOW() AT TIME ZONE 'America/Bogota')::date
+                        AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('year', NOW() AT TIME ZONE $2)::date
                         GROUP BY COALESCE(p.tax_category, 'standard')""",
-                    tenant_id
+                    tenant_id,
+                    timezone_name,
                 )
                 _main_std, _main_liq, _tax_label = _compute_tax_breakdown(main_tax_rows, tax_config)
                 _month_std, _month_liq, _ = _compute_tax_breakdown(month_tax_rows, tax_config)
@@ -2332,6 +2364,7 @@ async def export_orders_to_email(
             raise APIError("No se encontró el correo del usuario", status_code=400)
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             # Build WHERE clause (same as get_orders_list but without pagination).
             # warocol.com#640 — tips-only mode swaps the orders-list base predicate
             # for tip_amount > 0 (all tips, regardless of channel).
@@ -2380,16 +2413,15 @@ async def export_orders_to_email(
             # Date range filter
             parsed_date_from = parse_date(date_from)
             parsed_date_to = parse_date(date_to)
-
-            if parsed_date_from:
-                param_count += 1
-                where_conditions.append(f"o.order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')")
-                params.append(parsed_date_from)
-
-            if parsed_date_to:
-                param_count += 1
-                where_conditions.append(f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')")
-                params.append(parsed_date_to)
+            param_count = _append_local_date_bounds(
+                where_conditions,
+                params,
+                param_count,
+                "o.order_date",
+                parsed_date_from,
+                parsed_date_to,
+                timezone_name,
+            )
 
             # warocol.com#640 — tips-only filters (ignored when tips_only is False)
             if tips_only and member_id:
@@ -3147,35 +3179,36 @@ async def get_sales_flow(
         # Parse dates and calculate periods
         from datetime import datetime, timedelta
 
-        parsed_date_from = parse_date(date_from)
-        parsed_date_to = parse_date(date_to)
-
-        # Default to year-to-date if no dates provided (same as metrics cards)
-        if not parsed_date_from or not parsed_date_to:
-            today = datetime.now().date()
-            parsed_date_to = today
-            # Start from January 1st of current year
-            parsed_date_from = today.replace(month=1, day=1)
-
-        # Calculate range duration
-        days_diff = (parsed_date_to - parsed_date_from).days + 1
-
-        # Determine comparison period and grouping
-        if days_diff <= 30:
-            # Compare with previous period
-            comparison_date_to = parsed_date_from - timedelta(days=1)
-            comparison_date_from = comparison_date_to - timedelta(days=days_diff - 1)
-            comparison_label = "Período Anterior"
-        else:
-            # Compare with same period last year
-            comparison_date_from = parsed_date_from.replace(year=parsed_date_from.year - 1)
-            comparison_date_to = parsed_date_to.replace(year=parsed_date_to.year - 1)
-            comparison_label = "Año Anterior"
-
-        # Determine grouping: hourly (≤3 days), daily (>3 days)
-        group_by = 'hour' if days_diff <= 3 else 'day'
-
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
+
+            # Default to year-to-date if no dates provided (same as metrics cards)
+            if not parsed_date_from or not parsed_date_to:
+                today = tenant_today(timezone_name)
+                parsed_date_to = today
+                # Start from January 1st of current year
+                parsed_date_from = today.replace(month=1, day=1)
+
+            # Calculate range duration
+            days_diff = (parsed_date_to - parsed_date_from).days + 1
+
+            # Determine comparison period and grouping
+            if days_diff <= 30:
+                # Compare with previous period
+                comparison_date_to = parsed_date_from - timedelta(days=1)
+                comparison_date_from = comparison_date_to - timedelta(days=days_diff - 1)
+                comparison_label = "Período Anterior"
+            else:
+                # Compare with same period last year
+                comparison_date_from = parsed_date_from.replace(year=parsed_date_from.year - 1)
+                comparison_date_to = parsed_date_to.replace(year=parsed_date_to.year - 1)
+                comparison_label = "Año Anterior"
+
+            # Determine grouping: hourly (≤3 days), daily (>3 days)
+            group_by = 'hour' if days_diff <= 3 else 'day'
+
             # Build WHERE conditions
             where_conditions = ["tenant_id = $1", "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"]
             params = [tenant_id]
@@ -3208,8 +3241,10 @@ async def get_sales_flow(
                 comp_from_param_idx = param_count
                 param_count += 1
                 comp_to_param_idx = param_count
+                param_count += 1
+                timezone_param_idx = param_count
 
-                params.extend([parsed_date_from, parsed_date_to, comparison_date_from, comparison_date_to])
+                params.extend([parsed_date_from, parsed_date_to, comparison_date_from, comparison_date_to, timezone_name])
 
                 query = f"""
                     WITH hours AS (
@@ -3217,23 +3252,23 @@ async def get_sales_flow(
                     ),
                     current_period AS (
                         SELECT
-                            EXTRACT(HOUR FROM order_date AT TIME ZONE 'America/Bogota') AS hour,
+                            EXTRACT(HOUR FROM order_date AT TIME ZONE ${timezone_param_idx}) AS hour,
                             SUM(total_amount) AS sales
                         FROM orders
                         WHERE {where_clause}
-                          AND DATE(order_date AT TIME ZONE 'America/Bogota') >= ${date_from_param_idx}
-                          AND DATE(order_date AT TIME ZONE 'America/Bogota') <= ${date_to_param_idx}
-                        GROUP BY EXTRACT(HOUR FROM order_date AT TIME ZONE 'America/Bogota')
+                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) >= ${date_from_param_idx}
+                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) <= ${date_to_param_idx}
+                        GROUP BY EXTRACT(HOUR FROM order_date AT TIME ZONE ${timezone_param_idx})
                     ),
                     comparison_period AS (
                         SELECT
-                            EXTRACT(HOUR FROM order_date AT TIME ZONE 'America/Bogota') AS hour,
+                            EXTRACT(HOUR FROM order_date AT TIME ZONE ${timezone_param_idx}) AS hour,
                             SUM(total_amount) AS sales
                         FROM orders
                         WHERE {where_clause}
-                          AND DATE(order_date AT TIME ZONE 'America/Bogota') >= ${comp_from_param_idx}
-                          AND DATE(order_date AT TIME ZONE 'America/Bogota') <= ${comp_to_param_idx}
-                        GROUP BY EXTRACT(HOUR FROM order_date AT TIME ZONE 'America/Bogota')
+                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) >= ${comp_from_param_idx}
+                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) <= ${comp_to_param_idx}
+                        GROUP BY EXTRACT(HOUR FROM order_date AT TIME ZONE ${timezone_param_idx})
                     )
                     SELECT
                         h.hour,
@@ -3277,8 +3312,10 @@ async def get_sales_flow(
                 comp_from_param_idx = param_count
                 param_count += 1
                 comp_to_param_idx = param_count
+                param_count += 1
+                timezone_param_idx = param_count
 
-                params.extend([parsed_date_from, parsed_date_to, comparison_date_from, comparison_date_to])
+                params.extend([parsed_date_from, parsed_date_to, comparison_date_from, comparison_date_to, timezone_name])
 
                 # Use generate_series directly in the query (more efficient than recursive CTE)
                 query = f"""
@@ -3291,23 +3328,23 @@ async def get_sales_flow(
                     ),
                     current_period AS (
                         SELECT
-                            DATE(order_date AT TIME ZONE 'America/Bogota') AS day,
+                            DATE(order_date AT TIME ZONE ${timezone_param_idx}) AS day,
                             SUM(total_amount) AS sales
                         FROM orders
                         WHERE {where_clause}
-                          AND DATE(order_date AT TIME ZONE 'America/Bogota') >= ${date_from_param_idx}
-                          AND DATE(order_date AT TIME ZONE 'America/Bogota') <= ${date_to_param_idx}
-                        GROUP BY DATE(order_date AT TIME ZONE 'America/Bogota')
+                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) >= ${date_from_param_idx}
+                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) <= ${date_to_param_idx}
+                        GROUP BY DATE(order_date AT TIME ZONE ${timezone_param_idx})
                     ),
                     comparison_period AS (
                         SELECT
-                            DATE(order_date AT TIME ZONE 'America/Bogota') AS day,
+                            DATE(order_date AT TIME ZONE ${timezone_param_idx}) AS day,
                             SUM(total_amount) AS sales
                         FROM orders
                         WHERE {where_clause}
-                          AND DATE(order_date AT TIME ZONE 'America/Bogota') >= ${comp_from_param_idx}
-                          AND DATE(order_date AT TIME ZONE 'America/Bogota') <= ${comp_to_param_idx}
-                        GROUP BY DATE(order_date AT TIME ZONE 'America/Bogota')
+                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) >= ${comp_from_param_idx}
+                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) <= ${comp_to_param_idx}
+                        GROUP BY DATE(order_date AT TIME ZONE ${timezone_param_idx})
                     )
                     SELECT
                         ds.day,
@@ -3672,26 +3709,22 @@ async def get_products_sold(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             where_conditions = ["o.tenant_id = $1", "o.status = 'completed'"]
             params: List = [tenant_id]
             param_count = 1
 
             parsed_date_from = parse_date(date_from)
             parsed_date_to = parse_date(date_to)
-
-            if parsed_date_from:
-                param_count += 1
-                where_conditions.append(
-                    f"o.order_date >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')"
-                )
-                params.append(parsed_date_from)
-
-            if parsed_date_to:
-                param_count += 1
-                where_conditions.append(
-                    f"o.order_date < ((${param_count}::timestamp + interval '1 day') AT TIME ZONE 'America/Bogota')"
-                )
-                params.append(parsed_date_to)
+            param_count = _append_local_date_bounds(
+                where_conditions,
+                params,
+                param_count,
+                "o.order_date",
+                parsed_date_from,
+                parsed_date_to,
+                timezone_name,
+            )
 
             if category_id:
                 param_count += 1

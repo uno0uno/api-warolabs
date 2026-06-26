@@ -10,6 +10,7 @@ from fastapi import Request
 
 from app.core.exceptions import AuthenticationError
 from app.core.middleware import require_valid_session
+from app.core.timezones import resolve_tenant_timezone
 from app.database import get_db_connection
 
 logger = logging.getLogger(__name__)
@@ -191,20 +192,31 @@ async def list_operation_events(
     parsed_date_from = _parse_date(date_from)
     parsed_date_to = _parse_date(date_to)
 
+    async with get_db_connection(use_transaction=False) as conn:
+        timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+
     if parsed_date_from:
         param_count += 1
+        date_param = param_count
+        param_count += 1
+        tz_param = param_count
         where_conditions.append(
-            f"e.created_at >= (${param_count}::timestamp AT TIME ZONE 'America/Bogota')"
+            f"e.created_at >= (${date_param}::timestamp AT TIME ZONE ${tz_param})"
         )
         params.append(parsed_date_from)
+        params.append(timezone_name)
 
     if parsed_date_to:
         param_count += 1
+        date_param = param_count
+        param_count += 1
+        tz_param = param_count
         where_conditions.append(
-            f"e.created_at < ((${param_count}::timestamp + interval '1 day') "
-            f"AT TIME ZONE 'America/Bogota')"
+            f"e.created_at < ((${date_param}::timestamp + interval '1 day') "
+            f"AT TIME ZONE ${tz_param})"
         )
         params.append(parsed_date_to)
+        params.append(timezone_name)
 
     if channel:
         param_count += 1

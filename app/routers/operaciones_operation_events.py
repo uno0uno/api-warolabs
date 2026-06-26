@@ -17,8 +17,8 @@ router = APIRouter(prefix="/operaciones", tags=["Operaciones Bitácora"])
 async def list_operation_events_endpoint(
     request: Request,
     domain: str = Query("pos", description="Event domain (MVP: pos)"),
-    date_from: Optional[str] = Query(None, description="ISO date YYYY-MM-DD (inclusive, Bogotá)"),
-    date_to: Optional[str] = Query(None, description="ISO date YYYY-MM-DD (inclusive, Bogotá)"),
+    date_from: Optional[str] = Query(None, description="ISO date YYYY-MM-DD (inclusive, tenant local day)"),
+    date_to: Optional[str] = Query(None, description="ISO date YYYY-MM-DD (inclusive, tenant local day)"),
     channel: Optional[str] = Query(None, description="mesa | barra | mostrador"),
     action: Optional[str] = Query(None, description="Action filter (see epic catalog)"),
     actor_user_id: Optional[UUID] = Query(None),
