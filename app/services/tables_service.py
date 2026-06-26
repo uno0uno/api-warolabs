@@ -3664,6 +3664,7 @@ async def _add_tab_items_core(
         order_total = float(order_row["total_amount"])
         logger.info(f"[add_tab_items] created new order {order_id}")
 
+    created_order_item_ids: List[UUID] = []
     for item in items:
         modifier_unit_total = sum(_modifier_unit_total(m) for m in (item.get("modifiers") or []))
         subtotal = item["quantity"] * (item["unit_price"] + modifier_unit_total)
@@ -3685,6 +3686,7 @@ async def _add_tab_items_core(
             item_notes,
         )
         order_item_id = order_item_row["id"]
+        created_order_item_ids.append(order_item_id)
 
         for mod in item.get("modifiers") or []:
             modifier_qty = mod.get("quantity", 1)
@@ -3826,6 +3828,7 @@ async def _add_tab_items_core(
         "total_amount": order_total,
         "session_id": session_id,
         "items_count": len(items),
+        "created_order_item_ids": created_order_item_ids,
         "promo_savings": float(promo_eval.get("promo_savings") or 0),
         "promo_breakdown": promo_eval.get("promo_breakdown") or [],
         "promo_lines": promo_eval.get("lines") or [],
@@ -3861,12 +3864,17 @@ async def add_tab_items(
         promo_savings = tab_result.get("promo_savings", 0)
         promo_breakdown = tab_result.get("promo_breakdown") or []
         promo_lines = tab_result.get("promo_lines") or []
+        created_order_item_ids = tab_result.get("created_order_item_ids") or []
 
         # Auto-fire comandas if enabled (#753 — return comandas for POS print)
         fired_comandas: List[dict] = []
         fired_items_count = 0
         try:
-            fire_result = await fire_table_items(request, table_id)
+            fire_result = await fire_table_items(
+                request,
+                table_id,
+                item_ids=created_order_item_ids,
+            )
             if fire_result and isinstance(fire_result.get("data"), dict):
                 fired_comandas = fire_result["data"].get("comandas") or []
                 fired_items_count = int(fire_result["data"].get("fired_items_count") or 0)

@@ -35,6 +35,7 @@ async def test_add_tab_items_core_records_tab_item_added_per_line():
         None,
         {"id": order_id, "order_number": 42, "total_amount": 15.0},
         {"id": order_item_id},
+        {"total_amount": 15.0},
     ])
     mock_conn.fetch = AsyncMock(return_value=[])
     mock_conn.execute = AsyncMock()
@@ -68,6 +69,7 @@ async def test_add_tab_items_core_records_tab_item_added_per_line():
         )
 
     assert result["session_id"] == session_id
+    assert result["created_order_item_ids"] == [order_item_id]
     assert len(recorded) == 1
     assert recorded[0]["action"] == "tab_item_added"
     assert recorded[0]["tab_ctx"]["channel"] == "mesa"
@@ -180,6 +182,7 @@ async def test_add_then_remove_shares_table_session_id():
         None,
         {"id": order_id, "order_number": 1, "total_amount": 5.0},
         {"id": order_item_id},
+        {"total_amount": 5.0},
     ])
     mock_conn_add.fetch = AsyncMock(return_value=[])
     mock_conn_add.execute = AsyncMock()
@@ -190,6 +193,11 @@ async def test_add_then_remove_shares_table_session_id():
     ), patch(
         "app.services.tables_service._prefetch_product_names",
         new=AsyncMock(return_value={str(product_id): "Agua"}),
+    ), patch(
+        "app.services.tables_service.fetch_product_pricing_map",
+        new=AsyncMock(return_value={
+            str(product_id): {"price": Decimal("5.00"), "open_priced": False},
+        }),
     ), patch(
         "app.services.tables_service._capture_order_item_ingredients",
         new=AsyncMock(),
@@ -513,6 +521,7 @@ async def test_fired_qty_decrease_with_reason_records_event():
         "order_id": order_id,
         "total_amount": 30.0,
         "order_number": 7,
+        "product_name": "Agua",
         "table_name": "Barra",
         "is_bar": True,
         "table_session_id": session_id,
