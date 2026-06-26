@@ -161,6 +161,7 @@ def test_cashier_role_passes_pos_restaurant_context_under_enforce():
                  "fiscal_data": {"nit": "900000000"},
                  "tax_config": {"iva_applicable": False},
                  "invoicing_ready": False,
+                 "timezone": "America/Bogota",
              }),
          ):
         client = TestClient(app)
@@ -168,3 +169,4 @@ def test_cashier_role_passes_pos_restaurant_context_under_enforce():
 
     assert response.status_code == 200
     assert response.json()["data"]["display_name"] == "Demo"
+    assert response.json()["data"]["timezone"] == "America/Bogota"

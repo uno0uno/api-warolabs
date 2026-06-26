@@ -9,6 +9,7 @@ from fastapi import Request, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
+from app.core.timezones import DEFAULT_TENANT_TIMEZONE, normalize_timezone, validate_timezone
 from app.models.tenant_public_profile import (
     TenantPublicProfile,
     TenantPublicProfileCreate,
@@ -21,6 +22,22 @@ from app.services.aws_s3_service import AWSS3Service
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _profile_from_row(row) -> TenantPublicProfile:
+    profile_data = dict(row)
+    if isinstance(profile_data.get('business_hours'), str):
+        try:
+            profile_data['business_hours'] = json.loads(profile_data['business_hours'])
+        except Exception:
+            profile_data['business_hours'] = None
+    if isinstance(profile_data.get('social_media'), str):
+        try:
+            profile_data['social_media'] = json.loads(profile_data['social_media'])
+        except Exception:
+            profile_data['social_media'] = None
+    profile_data['timezone'] = normalize_timezone(profile_data.get('timezone'))
+    return TenantPublicProfile(**profile_data)
 
 
 async def upsert_public_profile(
@@ -64,7 +81,7 @@ async def upsert_public_profile(
                         tenant_id, slug, is_active,
                         display_name, description, logo_url, banner_url,
                         phone_number, email, address,
-                        city, neighborhood, latitude, longitude,
+                        city, neighborhood, latitude, longitude, timezone,
                         business_hours, social_media,
                         seo_title, seo_description,
                         accepts_online_orders, min_order_amount, online_order_max_amount, estimated_preparation_time,
@@ -75,7 +92,7 @@ async def upsert_public_profile(
                         minimum_consumption_enabled, minimum_consumption_amount, minimum_consumption_restrictive,
                         updated_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, CURRENT_TIMESTAMP)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, CURRENT_TIMESTAMP)
                     ON CONFLICT (tenant_id)
                     DO UPDATE SET
                         slug = EXCLUDED.slug,
@@ -91,6 +108,7 @@ async def upsert_public_profile(
                         neighborhood = EXCLUDED.neighborhood,
                         latitude = EXCLUDED.latitude,
                         longitude = EXCLUDED.longitude,
+                        timezone = EXCLUDED.timezone,
                         business_hours = EXCLUDED.business_hours,
                         social_media = EXCLUDED.social_media,
                         seo_title = EXCLUDED.seo_title,
@@ -127,6 +145,7 @@ async def upsert_public_profile(
                     profile_data.neighborhood,
                     profile_data.latitude,
                     profile_data.longitude,
+                    profile_data.timezone,
                     json.dumps(profile_data.business_hours) if profile_data.business_hours is not None else None,
                     json.dumps(profile_data.social_media) if profile_data.social_media is not None else None,
                     profile_data.seo_title,
@@ -145,7 +164,7 @@ async def upsert_public_profile(
                     profile_data.minimum_consumption_restrictive
                 )
 
-                profile = TenantPublicProfile(**dict(result))
+                profile = _profile_from_row(result)
 
                 logger.info(f"Upserted public profile for tenant {tenant_id}")
 
@@ -219,14 +238,14 @@ async def update_public_profile(
                         description, logo_url, banner_url,
                         phone_number, email, address,
                         country, city, city_slug, neighborhood,
-                        business_hours, social_media,
+                        business_hours, social_media, timezone,
                         accepts_online_orders, min_order_amount, online_order_max_amount, estimated_preparation_time,
                         is_manually_open,
                         comandas_enabled, kds_enabled,
                         auto_select_generic_enabled,
                         expediter_enabled,
                         minimum_consumption_enabled, minimum_consumption_amount, minimum_consumption_restrictive
-                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
                     RETURNING *
                 """
                 result = await conn.fetchrow(
@@ -246,6 +265,7 @@ async def update_public_profile(
                     data_dict.get('neighborhood'),
                     json.dumps(data_dict['business_hours']) if data_dict.get('business_hours') is not None else None,
                     json.dumps(data_dict['social_media']) if data_dict.get('social_media') is not None else None,
+                    data_dict.get('timezone', DEFAULT_TENANT_TIMEZONE),
                     # Default True so new tenants are immediately able to
                     # receive online orders — the platform's core value
                     # prop (warocol.com#626). Operators can still toggle
@@ -265,19 +285,7 @@ async def update_public_profile(
                     data_dict.get('minimum_consumption_restrictive', False),
                 )
 
-                profile_data_dict = dict(result)
-                if isinstance(profile_data_dict.get('business_hours'), str):
-                    try:
-                        profile_data_dict['business_hours'] = json.loads(profile_data_dict['business_hours'])
-                    except Exception:
-                        profile_data_dict['business_hours'] = None
-                if isinstance(profile_data_dict.get('social_media'), str):
-                    try:
-                        profile_data_dict['social_media'] = json.loads(profile_data_dict['social_media'])
-                    except Exception:
-                        profile_data_dict['social_media'] = None
-
-                profile = TenantPublicProfile(**profile_data_dict)
+                profile = _profile_from_row(result)
                 logger.info(f"Created new public profile for tenant {tenant_id} via PATCH upsert")
                 return TenantPublicProfileResponse(success=True, data=profile)
 
@@ -335,6 +343,9 @@ async def update_public_profile(
                                "Pick a city from /public/cities.",
                     )
 
+            if 'timezone' in data_dict:
+                data_dict['timezone'] = validate_timezone(data_dict['timezone'])
+
             _jsonb_fields = {'business_hours', 'social_media'}
             for field, value in data_dict.items():
                 update_fields.append(f"{field} = ${param_counter}")
@@ -362,19 +373,7 @@ async def update_public_profile(
 
             result = await conn.fetchrow(query, *params)
 
-            profile_data_dict = dict(result)
-            if isinstance(profile_data_dict.get('business_hours'), str):
-                try:
-                    profile_data_dict['business_hours'] = json.loads(profile_data_dict['business_hours'])
-                except Exception:
-                    profile_data_dict['business_hours'] = None
-            if isinstance(profile_data_dict.get('social_media'), str):
-                try:
-                    profile_data_dict['social_media'] = json.loads(profile_data_dict['social_media'])
-                except Exception:
-                    profile_data_dict['social_media'] = None
-
-            profile = TenantPublicProfile(**profile_data_dict)
+            profile = _profile_from_row(result)
 
             logger.info(f"Updated public profile for tenant {tenant_id}")
 
@@ -498,27 +497,12 @@ async def get_own_public_profile(request: Request) -> Optional[TenantPublicProfi
             if not result:
                 return None
 
-            profile_data = dict(result)
-
-            # asyncpg returns JSONB columns as strings — parse them
-            if isinstance(profile_data.get('business_hours'), str):
-                try:
-                    profile_data['business_hours'] = json.loads(profile_data['business_hours'])
-                except Exception:
-                    profile_data['business_hours'] = None
-
-            if isinstance(profile_data.get('social_media'), str):
-                try:
-                    profile_data['social_media'] = json.loads(profile_data['social_media'])
-                except Exception:
-                    profile_data['social_media'] = None
-
-            profile_data['is_currently_open'] = public_restaurant_service.is_currently_open(
-                profile_data.get('business_hours'),
-                profile_data.get('is_manually_open', True),
+            profile = _profile_from_row(result)
+            profile.is_currently_open = public_restaurant_service.is_currently_open(
+                profile.business_hours,
+                profile.is_manually_open,
+                profile.timezone,
             )
-
-            profile = TenantPublicProfile(**profile_data)
 
             return TenantPublicProfileResponse(
                 success=True,
