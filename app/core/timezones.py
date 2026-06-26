@@ -4,6 +4,7 @@ Operational tenant time controls local business dates, schedules, and report
 boundaries. Fiscal/legal Colombia time should use a separate named helper.
 """
 from datetime import date, datetime, time, timedelta, timezone
+from inspect import isawaitable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_TENANT_TIMEZONE = "America/Bogota"
@@ -33,6 +34,16 @@ def normalize_timezone(value: str | None) -> str:
 def get_zoneinfo(value: str | None) -> ZoneInfo:
     """Return ZoneInfo for a tenant timezone, using the safe default if needed."""
     return ZoneInfo(normalize_timezone(value))
+
+
+async def resolve_tenant_timezone(conn, tenant_id) -> str:
+    """Resolve a tenant's operational timezone from profile config."""
+    result = conn.fetchval(
+        "SELECT timezone FROM tenant_public_profiles WHERE tenant_id = $1",
+        tenant_id,
+    )
+    value = await result if isawaitable(result) else result
+    return normalize_timezone(value)
 
 
 def tenant_today(value: str | None, now: datetime | None = None) -> date:

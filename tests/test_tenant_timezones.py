@@ -10,6 +10,7 @@ from app.core.timezones import (
     DEFAULT_TENANT_TIMEZONE,
     local_day_utc_range,
     normalize_timezone,
+    resolve_tenant_timezone,
     tenant_today,
 )
 from app.models.tenant_public_profile import TenantPublicProfileUpdate
@@ -56,6 +57,23 @@ def test_profile_from_row_normalizes_legacy_invalid_timezone():
     })
 
     assert profile.timezone == DEFAULT_TENANT_TIMEZONE
+
+
+@pytest.mark.asyncio
+async def test_resolve_tenant_timezone_normalizes_profile_value():
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value="America/Mexico_City")
+
+    assert await resolve_tenant_timezone(conn, uuid4()) == "America/Mexico_City"
+
+
+@pytest.mark.asyncio
+async def test_resolve_tenant_timezone_falls_back_for_missing_or_legacy_value():
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(side_effect=[None, "Legacy/Bad"])
+
+    assert await resolve_tenant_timezone(conn, uuid4()) == DEFAULT_TENANT_TIMEZONE
+    assert await resolve_tenant_timezone(conn, uuid4()) == DEFAULT_TENANT_TIMEZONE
 
 
 def _pos_context_row(timezone_name):

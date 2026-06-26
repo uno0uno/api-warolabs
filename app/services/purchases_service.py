@@ -7,6 +7,7 @@ from fastapi import Request, Response, HTTPException, UploadFile
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
+from app.core.timezones import resolve_tenant_timezone
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ async def get_purchases_list(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             # Build query with tenant isolation, supplier name, and payment history
             base_query = """
                 SELECT
@@ -178,26 +180,29 @@ async def get_purchases_list(
                     base_query += f" AND (tp.payment_due_date IS NULL OR tp.payment_due_date > NOW() + INTERVAL '7 days')"
                     count_query += f" AND (tp.payment_due_date IS NULL OR tp.payment_due_date > NOW() + INTERVAL '7 days')"
 
-            # Date filter (using Colombia timezone)
-            if date_filter:
+            # Date filter using tenant operational timezone.
+            if date_filter in {'today', 'yesterday', 'last_week', '15_days', '1_month', '3_months'}:
+                tz_param = param_count
+                params.append(timezone_name)
+                param_count += 1
                 if date_filter == 'today':
-                    base_query += f" AND DATE(tp.purchase_date AT TIME ZONE 'America/Bogota') = (NOW() AT TIME ZONE 'America/Bogota')::date"
-                    count_query += f" AND DATE(tp.purchase_date AT TIME ZONE 'America/Bogota') = (NOW() AT TIME ZONE 'America/Bogota')::date"
+                    base_query += f" AND DATE(tp.purchase_date AT TIME ZONE ${tz_param}) = (NOW() AT TIME ZONE ${tz_param})::date"
+                    count_query += f" AND DATE(tp.purchase_date AT TIME ZONE ${tz_param}) = (NOW() AT TIME ZONE ${tz_param})::date"
                 elif date_filter == 'yesterday':
-                    base_query += f" AND DATE(tp.purchase_date AT TIME ZONE 'America/Bogota') = (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '1 day'"
-                    count_query += f" AND DATE(tp.purchase_date AT TIME ZONE 'America/Bogota') = (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '1 day'"
+                    base_query += f" AND DATE(tp.purchase_date AT TIME ZONE ${tz_param}) = (NOW() AT TIME ZONE ${tz_param})::date - INTERVAL '1 day'"
+                    count_query += f" AND DATE(tp.purchase_date AT TIME ZONE ${tz_param}) = (NOW() AT TIME ZONE ${tz_param})::date - INTERVAL '1 day'"
                 elif date_filter == 'last_week':
-                    base_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '7 days'"
-                    count_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '7 days'"
+                    base_query += f" AND (tp.purchase_date AT TIME ZONE ${tz_param}) >= (NOW() AT TIME ZONE ${tz_param})::date - INTERVAL '7 days'"
+                    count_query += f" AND (tp.purchase_date AT TIME ZONE ${tz_param}) >= (NOW() AT TIME ZONE ${tz_param})::date - INTERVAL '7 days'"
                 elif date_filter == '15_days':
-                    base_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '15 days'"
-                    count_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '15 days'"
+                    base_query += f" AND (tp.purchase_date AT TIME ZONE ${tz_param}) >= (NOW() AT TIME ZONE ${tz_param})::date - INTERVAL '15 days'"
+                    count_query += f" AND (tp.purchase_date AT TIME ZONE ${tz_param}) >= (NOW() AT TIME ZONE ${tz_param})::date - INTERVAL '15 days'"
                 elif date_filter == '1_month':
-                    base_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '1 month'"
-                    count_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '1 month'"
+                    base_query += f" AND (tp.purchase_date AT TIME ZONE ${tz_param}) >= (NOW() AT TIME ZONE ${tz_param})::date - INTERVAL '1 month'"
+                    count_query += f" AND (tp.purchase_date AT TIME ZONE ${tz_param}) >= (NOW() AT TIME ZONE ${tz_param})::date - INTERVAL '1 month'"
                 elif date_filter == '3_months':
-                    base_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '3 months'"
-                    count_query += f" AND (tp.purchase_date AT TIME ZONE 'America/Bogota') >= (NOW() AT TIME ZONE 'America/Bogota')::date - INTERVAL '3 months'"
+                    base_query += f" AND (tp.purchase_date AT TIME ZONE ${tz_param}) >= (NOW() AT TIME ZONE ${tz_param})::date - INTERVAL '3 months'"
+                    count_query += f" AND (tp.purchase_date AT TIME ZONE ${tz_param}) >= (NOW() AT TIME ZONE ${tz_param})::date - INTERVAL '3 months'"
 
             # Add pagination
             offset = (page - 1) * limit

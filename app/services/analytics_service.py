@@ -9,6 +9,7 @@ from app.database import get_db_connection
 from app.services import cost_resolution_service
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
+from app.core.timezones import normalize_timezone, resolve_tenant_timezone, tenant_today
 from datetime import datetime, date, timedelta
 from statistics import mean as st_mean, quantiles
 import logging
@@ -65,12 +66,13 @@ async def _get_menu_analysis_for_tenant(
     parsed_date_from = parse_date(date_from)
     parsed_date_to = parse_date(date_to)
 
-    if not parsed_date_from or not parsed_date_to:
-        today = datetime.now().date()
-        parsed_date_to = today
-        parsed_date_from = today.replace(month=1, day=1)
-
     async with get_db_connection() as conn:
+        timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+        if not parsed_date_from or not parsed_date_to:
+            today = tenant_today(timezone_name)
+            parsed_date_to = today
+            parsed_date_from = today.replace(month=1, day=1)
+
         # Real/perceived costs from product table (#744/#745); BCG uses operativo when set (#747).
         query = f"""
             WITH {_PRODUCT_COSTS_CTE},
@@ -98,8 +100,8 @@ async def _get_menu_analysis_for_tenant(
                     AND (
                         o.id IS NULL OR (
                             o.status = 'completed'
-                            AND DATE(o.order_date AT TIME ZONE 'America/Bogota') >= $2
-                            AND DATE(o.order_date AT TIME ZONE 'America/Bogota') <= $3
+                            AND DATE(o.order_date AT TIME ZONE $4) >= $2
+                            AND DATE(o.order_date AT TIME ZONE $4) <= $3
                         )
                     )
                 GROUP BY p.id, p.name, pc.price, pc.estimated_cost, pc.costo_percibido,
@@ -142,7 +144,7 @@ async def _get_menu_analysis_for_tenant(
             FROM product_sales ps
             CROSS JOIN sales_stats ss
             ORDER BY ps.total_revenue DESC
-            LIMIT $4
+            LIMIT $5
         """
 
         rows = await conn.fetch(
@@ -150,6 +152,7 @@ async def _get_menu_analysis_for_tenant(
             tenant_id,
             parsed_date_from,
             parsed_date_to,
+            timezone_name,
             limit
         )
 
@@ -257,28 +260,29 @@ async def _get_food_cost_for_tenant(
     parsed_date_from = parse_date(date_from)
     parsed_date_to = parse_date(date_to)
 
-    if not parsed_date_from or not parsed_date_to:
-        today = datetime.now().date()
-        parsed_date_to = today
-        parsed_date_from = today.replace(month=1, day=1)
-
-    # Determine comparison window based on compare_to mode.
-    # Default (None or "previous_period") mirrors the same duration immediately before date_from.
-    if compare_to == "previous_year":
-        prev_date_from = parsed_date_from - timedelta(days=365)
-        prev_date_to = parsed_date_to - timedelta(days=365)
-    elif compare_to == "custom":
-        cf = parse_date(compare_from)
-        ct = parse_date(compare_date_to)
-        prev_date_from = cf if cf else parsed_date_from - timedelta(days=(parsed_date_to - parsed_date_from).days + 1)
-        prev_date_to = ct if ct else parsed_date_from - timedelta(days=1)
-    else:
-        # "previous_period" (default) — same duration immediately before
-        days_diff = (parsed_date_to - parsed_date_from).days + 1
-        prev_date_to = parsed_date_from - timedelta(days=1)
-        prev_date_from = prev_date_to - timedelta(days=days_diff - 1)
-
     async with get_db_connection() as conn:
+        timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+        if not parsed_date_from or not parsed_date_to:
+            today = tenant_today(timezone_name)
+            parsed_date_to = today
+            parsed_date_from = today.replace(month=1, day=1)
+
+        # Determine comparison window based on compare_to mode.
+        # Default (None or "previous_period") mirrors the same duration immediately before date_from.
+        if compare_to == "previous_year":
+            prev_date_from = parsed_date_from - timedelta(days=365)
+            prev_date_to = parsed_date_to - timedelta(days=365)
+        elif compare_to == "custom":
+            cf = parse_date(compare_from)
+            ct = parse_date(compare_date_to)
+            prev_date_from = cf if cf else parsed_date_from - timedelta(days=(parsed_date_to - parsed_date_from).days + 1)
+            prev_date_to = ct if ct else parsed_date_from - timedelta(days=1)
+        else:
+            # "previous_period" (default) — same duration immediately before
+            days_diff = (parsed_date_to - parsed_date_from).days + 1
+            prev_date_to = parsed_date_from - timedelta(days=1)
+            prev_date_from = prev_date_to - timedelta(days=days_diff - 1)
+
         query = f"""
             WITH {_PRODUCT_COSTS_CTE},
             period_costs AS (
@@ -287,8 +291,8 @@ async def _get_food_cost_for_tenant(
                     SUM(oi.quantity * pc.estimated_cost) as total_cost,
                     SUM(oi.quantity * pc.effective_cost) as total_cost_operativo,
                     CASE
-                        WHEN DATE(o.order_date AT TIME ZONE 'America/Bogota') >= $2
-                            AND DATE(o.order_date AT TIME ZONE 'America/Bogota') <= $3
+                        WHEN DATE(o.order_date AT TIME ZONE $6) >= $2
+                            AND DATE(o.order_date AT TIME ZONE $6) <= $3
                         THEN 'current'
                         ELSE 'previous'
                     END as period
@@ -298,11 +302,11 @@ async def _get_food_cost_for_tenant(
                 WHERE o.tenant_id = $1
                     AND o.status = 'completed'
                     AND (
-                        (DATE(o.order_date AT TIME ZONE 'America/Bogota') >= $2
-                            AND DATE(o.order_date AT TIME ZONE 'America/Bogota') <= $3)
+                        (DATE(o.order_date AT TIME ZONE $6) >= $2
+                            AND DATE(o.order_date AT TIME ZONE $6) <= $3)
                         OR
-                        (DATE(o.order_date AT TIME ZONE 'America/Bogota') >= $4
-                            AND DATE(o.order_date AT TIME ZONE 'America/Bogota') <= $5)
+                        (DATE(o.order_date AT TIME ZONE $6) >= $4
+                            AND DATE(o.order_date AT TIME ZONE $6) <= $5)
                     )
                 GROUP BY period
             )
@@ -321,7 +325,8 @@ async def _get_food_cost_for_tenant(
             parsed_date_from,
             parsed_date_to,
             prev_date_from,
-            prev_date_to
+            prev_date_to,
+            timezone_name,
         )
 
         # Parse results — food_cost_pct = real (estimated_cost); operativo KPI optional (#747)
@@ -414,6 +419,7 @@ async def _get_alerts_for_tenant(
     alerts = []
 
     async with get_db_connection() as conn:
+        timezone_name = await resolve_tenant_timezone(conn, tenant_id)
         # 1. CRITICAL: Ingredients with zero stock but active consumption (POS-only detection)
         zero_stock_active_query = """
             WITH recent_consumption AS (
@@ -483,7 +489,7 @@ async def _get_alerts_for_tenant(
                     JOIN product p ON oi.product_id = p.id
                     WHERE o.tenant_id = $1
                         AND o.status = 'completed'
-                        AND DATE(o.order_date AT TIME ZONE 'America/Bogota') >= CURRENT_DATE - INTERVAL '7 days'
+                        AND DATE(o.order_date AT TIME ZONE $2) >= (NOW() AT TIME ZONE $2)::date - INTERVAL '7 days'
                     GROUP BY p.id, p.name
                     ORDER BY order_count DESC
                     LIMIT 3
@@ -515,7 +521,7 @@ async def _get_alerts_for_tenant(
                 ORDER BY order_count DESC
                 LIMIT 2
             """
-            blocked_rows = await conn.fetch(blocked_products_query, tenant_id)
+            blocked_rows = await conn.fetch(blocked_products_query, tenant_id, timezone_name)
 
             for row in blocked_rows:
                 title = f"🔴 Producto bloqueado: {row['product_name']}"
@@ -679,12 +685,12 @@ async def _get_alerts_for_tenant(
                 JOIN product p ON oi.product_id = p.id
                 WHERE o.tenant_id = $1
                     AND o.status = 'completed'
-                    AND DATE(o.order_date AT TIME ZONE 'America/Bogota') >= CURRENT_DATE - INTERVAL '7 days'
+                    AND DATE(o.order_date AT TIME ZONE $2) >= (NOW() AT TIME ZONE $2)::date - INTERVAL '7 days'
                 GROUP BY p.id, p.name
                 ORDER BY order_count DESC
                 LIMIT 1
             """
-            top_row = await conn.fetchrow(top_products_query, tenant_id)
+            top_row = await conn.fetchrow(top_products_query, tenant_id, timezone_name)
 
             if top_row:
                 alerts.append({
@@ -1402,7 +1408,8 @@ async def _get_cohort_for_tenant(
     if period not in ("weekly", "monthly"):
         raise APIError("period must be 'weekly' or 'monthly'", status_code=400)
 
-    today = datetime.now().date()
+    timezone = normalize_timezone(timezone)
+    today = tenant_today(timezone)
 
     parsed_date_from = parse_date(date_from)
     parsed_date_to = parse_date(date_to)
@@ -1424,7 +1431,7 @@ async def _get_cohort_for_tenant(
                 SELECT
                     customer_id,
                     DATE_TRUNC('{trunc_unit}',
-                        MIN(order_date) AT TIME ZONE '{timezone}') AS cohort_period
+                        MIN(order_date) AT TIME ZONE $5) AS cohort_period
                 FROM orders
                 WHERE customer_id IS NOT NULL
                   AND tenant_id = $1
@@ -1442,7 +1449,7 @@ async def _get_cohort_for_tenant(
                     fo.customer_id,
                     fo.cohort_period,
                     DATE_TRUNC('{trunc_unit}',
-                        o.order_date AT TIME ZONE '{timezone}') AS active_period
+                        o.order_date AT TIME ZONE $5) AS active_period
                 FROM orders o
                 JOIN first_orders fo ON fo.customer_id = o.customer_id
                 WHERE o.tenant_id = $1
@@ -1473,7 +1480,7 @@ async def _get_cohort_for_tenant(
                 SELECT
                     customer_id,
                     DATE_TRUNC('{trunc_unit}',
-                        MIN(order_date) AT TIME ZONE '{timezone}') AS cohort_period
+                        MIN(order_date) AT TIME ZONE $5) AS cohort_period
                 FROM orders
                 WHERE customer_id IS NOT NULL
                   AND tenant_id = $1
@@ -1491,7 +1498,7 @@ async def _get_cohort_for_tenant(
                     fo.customer_id,
                     fo.cohort_period,
                     DATE_TRUNC('{trunc_unit}',
-                        o.order_date AT TIME ZONE '{timezone}') AS active_period
+                        o.order_date AT TIME ZONE $5) AS active_period
                 FROM orders o
                 JOIN first_orders fo ON fo.customer_id = o.customer_id
                 WHERE o.tenant_id = $1
@@ -1526,6 +1533,7 @@ async def _get_cohort_for_tenant(
             parsed_date_from,
             parsed_date_to,
             periods,
+            timezone,
         )
 
     # Group rows by cohort_period and build the full retention matrix.
@@ -1591,7 +1599,8 @@ async def _get_rfm_for_tenant(
       Hibernating — low recency and low frequency
       Lost        — catch-all for remaining combinations
     """
-    today = datetime.now().date()
+    timezone = normalize_timezone(timezone)
+    today = tenant_today(timezone)
 
     parsed_date_from = parse_date(date_from)
     parsed_date_to = parse_date(date_to)
@@ -1616,12 +1625,12 @@ async def _get_rfm_for_tenant(
                 o.customer_id,
                 p.name                                                     AS customer_name,
                 COUNT(*)::int                                              AS order_count,
-                MAX(o.order_date AT TIME ZONE '{timezone}')                AS last_order_date,
+                MAX(o.order_date AT TIME ZONE $8)                          AS last_order_date,
                 SUM(o.total_amount)::bigint                                AS total_spent,
                 EXTRACT(
                     EPOCH FROM (
-                        NOW() AT TIME ZONE '{timezone}'
-                        - MAX(o.order_date AT TIME ZONE '{timezone}')
+                        NOW() AT TIME ZONE $8
+                        - MAX(o.order_date AT TIME ZONE $8)
                     )
                 ) / 86400.0                                                AS recency_days
             FROM orders o
@@ -1630,8 +1639,8 @@ async def _get_rfm_for_tenant(
               AND o.status      = 'completed'
               AND o.customer_id IS NOT NULL
               AND p.email NOT LIKE '%@customer.temp'
-              AND DATE(o.order_date AT TIME ZONE '{timezone}') >= $2
-              AND DATE(o.order_date AT TIME ZONE '{timezone}') <= $3
+              AND DATE(o.order_date AT TIME ZONE $8) >= $2
+              AND DATE(o.order_date AT TIME ZONE $8) <= $3
             GROUP BY o.customer_id, p.name
         ),
         scored AS (
@@ -1676,6 +1685,7 @@ async def _get_rfm_for_tenant(
             high_threshold,
             mid_threshold,
             low_threshold,
+            timezone,
         )
 
     customers = [
@@ -1863,15 +1873,16 @@ async def get_kitchen_metrics(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
-        parsed_date_from = parse_date(date_from)
-        parsed_date_to = parse_date(date_to)
-
-        if not parsed_date_from or not parsed_date_to:
-            today = datetime.now().date()
-            parsed_date_to = today
-            parsed_date_from = today - timedelta(days=7)
-
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
+
+            if not parsed_date_from or not parsed_date_to:
+                today = tenant_today(timezone_name)
+                parsed_date_to = today
+                parsed_date_from = today - timedelta(days=7)
+
             # 1. Summary Metrics & Station Breakdown
             # Uses kitchen_stations left join to include stations even if they had no orders in period
             query_stations = """
@@ -1886,8 +1897,8 @@ async def get_kitchen_metrics(
                     FROM comandas c
                     JOIN kitchen_stations ks ON c.station_id = ks.id
                     WHERE c.tenant_id = $1
-                        AND DATE(c.fired_at AT TIME ZONE 'America/Bogota') >= $2
-                        AND DATE(c.fired_at AT TIME ZONE 'America/Bogota') <= $3
+                        AND DATE(c.fired_at AT TIME ZONE $4) >= $2
+                        AND DATE(c.fired_at AT TIME ZONE $4) <= $3
                         AND c.status IN ('ready', 'delivered')
                         AND c.ready_at IS NOT NULL
                     GROUP BY c.station_id, ks.alert_threshold_2_min
@@ -1905,7 +1916,7 @@ async def get_kitchen_metrics(
                 ORDER BY ks.display_order
             """
             
-            station_rows = await conn.fetch(query_stations, tenant_id, parsed_date_from, parsed_date_to)
+            station_rows = await conn.fetch(query_stations, tenant_id, parsed_date_from, parsed_date_to, timezone_name)
             
             station_metrics = []
             total_orders = 0
@@ -1932,16 +1943,16 @@ async def get_kitchen_metrics(
             # 2. Daily/Hourly Volume (Peak Hours)
             query_volume = """
                 SELECT 
-                    EXTRACT(HOUR FROM fired_at AT TIME ZONE 'America/Bogota')::int as hour,
+                    EXTRACT(HOUR FROM fired_at AT TIME ZONE $4)::int as hour,
                     COUNT(id) as count
                 FROM comandas
                 WHERE tenant_id = $1
-                    AND DATE(fired_at AT TIME ZONE 'America/Bogota') >= $2
-                    AND DATE(fired_at AT TIME ZONE 'America/Bogota') <= $3
+                    AND DATE(fired_at AT TIME ZONE $4) >= $2
+                    AND DATE(fired_at AT TIME ZONE $4) <= $3
                 GROUP BY hour
                 ORDER BY hour
             """
-            volume_rows = await conn.fetch(query_volume, tenant_id, parsed_date_from, parsed_date_to)
+            volume_rows = await conn.fetch(query_volume, tenant_id, parsed_date_from, parsed_date_to, timezone_name)
             volume_by_hour = {row['hour']: row['count'] for row in volume_rows}
             
             # Fill missing hours
@@ -1958,15 +1969,15 @@ async def get_kitchen_metrics(
                 FROM comanda_items ci
                 JOIN comandas c ON ci.comanda_id = c.id
                 WHERE c.tenant_id = $1
-                    AND DATE(c.fired_at AT TIME ZONE 'America/Bogota') >= $2
-                    AND DATE(c.fired_at AT TIME ZONE 'America/Bogota') <= $3
+                    AND DATE(c.fired_at AT TIME ZONE $4) >= $2
+                    AND DATE(c.fired_at AT TIME ZONE $4) <= $3
                     AND ci.status = 'ready'
                     AND ci.ready_at IS NOT NULL
                 GROUP BY ci.kitchen_name
                 ORDER BY avg_prep_min DESC
                 LIMIT 10
             """
-            product_rows = await conn.fetch(query_products, tenant_id, parsed_date_from, parsed_date_to)
+            product_rows = await conn.fetch(query_products, tenant_id, parsed_date_from, parsed_date_to, timezone_name)
             slowest_products = [{
                 "name": r['name'],
                 "total_qty": float(r['total_qty']),

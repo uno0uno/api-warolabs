@@ -38,6 +38,7 @@ async def test_menu_analysis_response_includes_dual_margin_fields():
     }
 
     mock_conn = AsyncMock()
+    mock_conn.fetchval = AsyncMock(return_value="America/Mexico_City")
     mock_conn.fetch = AsyncMock(return_value=[fake_row])
     mock_cm = MagicMock()
     mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
@@ -63,12 +64,15 @@ async def test_menu_analysis_response_includes_dual_margin_fields():
 async def test_menu_analysis_classification_uses_operativo_margin():
     """BCG query uses effective_cost; operativo product has higher margin % on price."""
     captured_query = []
+    captured_args = []
 
     async def capture_fetch(query, *args):
         captured_query.append(query)
+        captured_args.append(args)
         return []
 
     mock_conn = AsyncMock()
+    mock_conn.fetchval = AsyncMock(return_value="America/Mexico_City")
     mock_conn.fetch = capture_fetch
     mock_cm = MagicMock()
     mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
@@ -86,6 +90,9 @@ async def test_menu_analysis_classification_uses_operativo_margin():
     assert "cost_used_for_classification" in sql
     assert "profit_margin_operativo_pct" in sql
     assert "latest_ingredient_costs" not in sql
+    assert "AT TIME ZONE $4" in sql
+    assert "AT TIME ZONE 'America/Bogota'" not in sql
+    assert captured_args[0][3] == "America/Mexico_City"
 
 
 @pytest.mark.asyncio
@@ -108,6 +115,7 @@ async def test_food_cost_includes_operativo_pct():
     ]
 
     mock_conn = AsyncMock()
+    mock_conn.fetchval = AsyncMock(return_value="America/Mexico_City")
     mock_conn.fetch = AsyncMock(return_value=rows)
     mock_cm = MagicMock()
     mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
