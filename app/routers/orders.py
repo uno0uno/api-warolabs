@@ -242,6 +242,8 @@ class CreateManualOrderRequest(BaseModel):
     # group slug). Optional for backward compatibility.
     payment_method_id: Optional[str] = None
     customer_id: Optional[str] = None
+    discount_type: Optional[str] = None
+    discount_value: Optional[float] = None
     payments: Optional[List[ManualOrderPayment]] = None
     items: List[ManualOrderItem] = Field(min_length=1)
 
@@ -262,6 +264,8 @@ async def create_manual_order(
         payment_method_id=data.payment_method_id,
         items=[item.model_dump() for item in data.items],
         customer_id=data.customer_id,
+        discount_type=data.discount_type,
+        discount_value=data.discount_value,
         payments=[payment.model_dump() for payment in data.payments] if data.payments else None,
     )
 
