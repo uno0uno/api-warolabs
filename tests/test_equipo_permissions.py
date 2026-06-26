@@ -8,8 +8,9 @@ Sub-task E2.12 of Epic 2 (#196). Validates that:
    GET /tenants/user-tenants under enforce — proves the sidebar tenant
    switcher exclusion works for non-owner roles.
 
-Scope: 2 files, 9 total endpoints (6 gated, 3 excluded):
-  - tenants.py: 3 gated (/members CRUD), 2 excluded (POST "", /user-tenants)
+Scope: 2 files, 8 total endpoints (6 gated, 2 excluded):
+  - tenants.py: 3 gated (/members CRUD), 1 excluded (/user-tenants);
+    POST "" tenant self-service creation was removed in #546.
   - invitations.py: 3 gated (/send, /pending, DELETE), 1 excluded (/accept)
 
 The 3rd test is critical regression protection — if anyone later
@@ -147,3 +148,17 @@ def test_cashier_passes_user_tenants_exclusion_under_enforce():
     # If this asserts != 200, someone gated /user-tenants by mistake and the
     # sidebar tenant switcher would break for every non-owner role.
     assert response.status_code == 200
+
+
+def test_post_tenants_self_service_create_is_closed_under_enforce():
+    """POST /tenants is no longer a self-service tenant provisioning surface."""
+    session = _build_session(role="cashier")
+    app = FastAPI()
+    app.include_router(tenants_router, prefix="/tenants")
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session):
+        client = TestClient(app)
+        response = client.post("/tenants", json={"name": "Should Not Provision"})
+
+    assert response.status_code in (404, 405)

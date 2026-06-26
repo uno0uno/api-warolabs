@@ -76,12 +76,3 @@ class UpdateMemberRoleResponse(BaseModel):
     success: bool = True
     message: str
     data: Optional[TenantMemberDetail] = None
-
-
-class TenantCreate(BaseModel):
-    name: str = Field(..., min_length=1, max_length=200)
-
-
-class TenantCreateResponse(BaseModel):
-    success: bool = True
-    data: Tenant
