@@ -21,6 +21,7 @@ from app.models.tenant_promotion import (
     PromotionUpdate,
     ScopeType,
 )
+from app.services.operation_events_service import DOMAIN_POS, record_operation_event
 
 logger = logging.getLogger(__name__)
 
@@ -1105,19 +1106,40 @@ async def update_promotion(
     )
 
 
-async def delete_promotion(request: Request, promotion_id: UUID) -> dict:
+async def delete_promotion(request: Request, promotion_id: UUID, *, reason: str) -> dict:
     session = require_valid_session(request)
     tenant_id = session.tenant_id
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
+    normalized_reason = reason.strip()
+    if not normalized_reason:
+        raise HTTPException(status_code=400, detail="reason is required")
 
     async with get_db_connection() as conn:
-        await _get_owned_promotion(conn, promotion_id, tenant_id)
-        await conn.execute(
-            "DELETE FROM tenant_promotions WHERE id = $1 AND tenant_id = $2",
-            promotion_id,
-            tenant_id,
-        )
+        async with conn.transaction():
+            row = await _get_owned_promotion(conn, promotion_id, tenant_id)
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_POS,
+                channel="mostrador",
+                action="promotion_deleted",
+                actor_user_id=session.user_id,
+                payload={
+                    "promotion_id": promotion_id,
+                    "promotion_name": row["name"],
+                    "promo_type": row["promo_type"],
+                    "scope_type": row["scope_type"],
+                    "priority": row["priority"],
+                    "is_active": row["is_active"],
+                },
+                reason=normalized_reason,
+            )
+            await conn.execute(
+                "DELETE FROM tenant_promotions WHERE id = $1 AND tenant_id = $2",
+                promotion_id,
+                tenant_id,
+            )
 
     return {"success": True, "message": "Promotion deleted successfully"}
 

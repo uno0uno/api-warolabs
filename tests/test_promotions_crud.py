@@ -138,6 +138,30 @@ def test_owner_passes_list_promotions_under_enforce():
     assert response.status_code == 200
 
 
+def test_owner_delete_promotion_sends_reason_under_enforce():
+    promo_id = uuid4()
+    session = _build_session(role="owner")
+    app = FastAPI()
+    app.include_router(promotions_router)
+    delete_mock = AsyncMock(return_value={"success": True})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch("app.services.promotions_service.delete_promotion", new=delete_mock):
+        client = TestClient(app)
+        response = client.request(
+            "DELETE",
+            f"/api/promotions/{promo_id}",
+            json={"reason": "Campaña finalizada"},
+        )
+
+    assert response.status_code == 200
+    delete_mock.assert_awaited_once()
+    assert delete_mock.await_args.args[1] == promo_id
+    assert delete_mock.await_args.kwargs["reason"] == "Campaña finalizada"
+
+
 def test_cashier_passes_active_promotions_under_enforce():
     session = _build_session(role="cashier")
     app = FastAPI()

@@ -108,6 +108,29 @@ async def test_record_operation_event_inserts_on_valid_input():
     assert args[4] == "cart_line_removed"
 
 
+@pytest.mark.asyncio
+async def test_record_operation_event_accepts_promotion_deleted():
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    tenant_id = uuid4()
+
+    await operation_events_service.record_operation_event(
+        conn,
+        tenant_id,
+        domain="pos",
+        channel="mostrador",
+        action="promotion_deleted",
+        actor_user_id=uuid4(),
+        payload={"promotion_name": "Happy hour"},
+        reason="Campaña finalizada",
+    )
+
+    conn.execute.assert_called_once()
+    args = conn.execute.call_args[0]
+    assert args[1] == tenant_id
+    assert args[4] == "promotion_deleted"
+
+
 def test_supervisor_passes_list_operation_events_under_enforce():
     session = _build_session(role="supervisor")
     app = FastAPI()

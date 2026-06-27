@@ -6,7 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Request
 
 from app.core.permissions import Module, require_module
-from app.models.tenant_promotion import PromotionCreate, PromotionUpdate
+from app.models.tenant_promotion import PromotionCreate, PromotionDeleteRequest, PromotionUpdate
 from app.services import promotions_service
 
 router = APIRouter(prefix="/api/promotions", tags=["promotions"])
@@ -134,5 +134,13 @@ async def update_promotion_endpoint(
     dependencies=[Depends(require_module(Module.MI_NEGOCIO))],
     summary="Delete promotion",
 )
-async def delete_promotion_endpoint(request: Request, promotion_id: UUID):
-    return await promotions_service.delete_promotion(request, promotion_id)
+async def delete_promotion_endpoint(
+    request: Request,
+    promotion_id: UUID,
+    body: PromotionDeleteRequest,
+):
+    return await promotions_service.delete_promotion(
+        request,
+        promotion_id,
+        reason=body.reason,
+    )

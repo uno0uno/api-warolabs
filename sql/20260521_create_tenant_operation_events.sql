@@ -25,11 +25,14 @@ CREATE TABLE IF NOT EXISTS tenant_operation_events (
             'tab_item_added'::text,
             'tab_item_removed'::text,
             'tab_item_qty_changed'::text,
+            'tab_item_edited'::text,
+            'tab_item_edit_blocked'::text,
             'tab_cleared'::text,
             'cart_line_removed'::text,
             'cart_cleared'::text,
             'payment_voided'::text,
-            'comanda_line_cancelled'::text
+            'comanda_line_cancelled'::text,
+            'promotion_deleted'::text
         ]))
 );
 
