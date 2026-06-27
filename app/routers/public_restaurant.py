@@ -67,11 +67,11 @@ async def list_public_cities(
     ),
 ) -> Dict[str, Any]:
     """
-    Return the curated city catalog (warocol.com#615).
+    Return the city/municipality catalog (warocol.com#615, #1477).
 
     Public — no auth required. Used by the operator-facing city selector
     on /negocio and the customer-facing discovery section on the root
-    landing page.
+    landing page. Includes DIVIPOLA metadata when available.
     """
     cities = await public_restaurant_service.list_cities(
         include_empty=include_empty,
