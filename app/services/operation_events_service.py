@@ -26,6 +26,7 @@ ACTIONS: FrozenSet[str] = frozenset({
     "cart_cleared",
     "payment_voided",
     "comanda_line_cancelled",
+    "promotion_deleted",
 })
 
 

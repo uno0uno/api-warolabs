@@ -111,6 +111,10 @@ class PromotionUpdate(BaseModel):
     overlap_acknowledged: bool = False
 
 
+class PromotionDeleteRequest(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=500)
+
+
 class PromotionResponse(BaseModel):
     id: UUID
     tenant_id: UUID
