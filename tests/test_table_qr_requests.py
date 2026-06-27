@@ -277,10 +277,11 @@ def test_format_request_row_payment_display_with_submethod():
         "payment_method_group_name": "Transferencia",
         "payment_method_name": "Bancolombia Ahorros",
     }
-    data = table_qr_requests_service._format_request_row(row)
+    data = table_qr_requests_service._format_request_row(row, "Pacific/Kiritimati")
     assert data["payment_display"] == "Transferencia · Bancolombia Ahorros"
     assert data["payment_method_group_name"] == "Transferencia"
     assert data["payment_method_name"] == "Bancolombia Ahorros"
+    assert data["tenant_timezone"] == "Pacific/Kiritimati"
 
 
 @pytest.mark.asyncio
@@ -296,6 +297,7 @@ async def test_get_request_returns_enriched_pending():
     product_id = json.loads(row["items"])[0]["product_id"]
 
     conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value="Pacific/Kiritimati")
     conn.fetchrow = AsyncMock(return_value=row)
     conn.fetch = AsyncMock(return_value=[{"id": UUID(product_id), "name": "Hamburguesa"}])
 
@@ -315,6 +317,7 @@ async def test_get_request_returns_enriched_pending():
     assert data["items"][0]["product_name"] == "Hamburguesa"
     assert data["customer_notes"] == "Sin cebolla"
     assert data["payment_display"] == "Efectivo"
+    assert data["tenant_timezone"] == "Pacific/Kiritimati"
 
 
 @pytest.mark.asyncio

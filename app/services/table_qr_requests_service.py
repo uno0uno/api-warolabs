@@ -8,6 +8,7 @@ from fastapi import Request
 
 from app.core.exceptions import APIError, AuthenticationError, NotFoundError
 from app.core.middleware import require_valid_session
+from app.core.timezones import resolve_tenant_timezone
 from app.database import get_db_connection
 from app.services import notifications_service
 from app.services.tables_service import (
@@ -50,7 +51,7 @@ def _parse_items_json(raw: Any) -> List[dict]:
     return list(raw)
 
 
-def _format_request_row(row: dict) -> dict:
+def _format_request_row(row: dict, tenant_timezone: Optional[str] = None) -> dict:
     items = _parse_items_json(row["items"])
     return {
         "id": str(row["id"]),
@@ -66,6 +67,7 @@ def _format_request_row(row: dict) -> dict:
         "payment_display": _payment_display(row),
         "customer_notes": row.get("customer_notes"),
         "created_at": row["created_at"].isoformat(),
+        "tenant_timezone": tenant_timezone,
     }
 
 
@@ -177,6 +179,7 @@ async def list_pending_grouped(request: Request) -> dict:
         raise AuthenticationError("Tenant ID is required")
 
     async with get_db_connection(use_transaction=False) as conn:
+        tenant_timezone = await resolve_tenant_timezone(conn, tenant_id)
         rows = await conn.fetch(
             f"""
             SELECT
@@ -203,13 +206,14 @@ async def list_pending_grouped(request: Request) -> dict:
                 "table_name": row["table_name"],
                 "requests": [],
             }
-        tables_map[table_id]["requests"].append(_format_request_row(dict(row)))
+        tables_map[table_id]["requests"].append(_format_request_row(dict(row), tenant_timezone))
 
     return {
         "success": True,
         "data": {
             "tables": list(tables_map.values()),
             "total_pending": len(rows),
+            "tenant_timezone": tenant_timezone,
         },
     }
 
@@ -222,6 +226,7 @@ async def get_request(request: Request, request_id: UUID) -> dict:
         raise AuthenticationError("Tenant ID is required")
 
     async with get_db_connection(use_transaction=False) as conn:
+        tenant_timezone = await resolve_tenant_timezone(conn, tenant_id)
         row = await conn.fetchrow(
             f"""
             SELECT
@@ -244,7 +249,7 @@ async def get_request(request: Request, request_id: UUID) -> dict:
                 status_code=404,
             )
 
-        data = _format_request_row(dict(row))
+        data = _format_request_row(dict(row), tenant_timezone)
         await _enrich_items_with_product_names(conn, tenant_id, data["items"])
         data["total_amount"] = _request_total_amount(data["items"])
 
