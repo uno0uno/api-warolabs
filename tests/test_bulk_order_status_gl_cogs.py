@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -28,9 +28,10 @@ async def test_bulk_complete_posts_gl_cogs_only_for_new_completions():
     payment_method_id = uuid4()
     pending_order_id = uuid4()
     completed_order_id = uuid4()
-    order_date = datetime(2026, 6, 7, 10, 30)
+    order_date = datetime(2026, 6, 7, 0, 30, tzinfo=timezone.utc)
 
     conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value="Europe/Madrid")
     conn.fetchrow = AsyncMock(
         side_effect=[
             None,

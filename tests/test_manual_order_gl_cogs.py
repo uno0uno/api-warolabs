@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -224,10 +224,12 @@ async def test_update_order_status_finalizes_pending_table_with_gl_cogs_without_
             "completed",
             "card",
             str(payment_method_id),
-        )
+    )
 
     assert result["success"] is True
-    conn.fetchval.assert_awaited_once()
+    assert conn.fetchval.await_count == 2
+    assert "tenant_public_profiles" in conn.fetchval.await_args_list[0].args[0]
+    assert "tenant_ingredient_movements" in conn.fetchval.await_args_list[1].args[0]
     deduct_stock.assert_not_awaited()
     post_gl.assert_awaited_once()
     post_cogs.assert_awaited_once_with(
@@ -319,7 +321,9 @@ async def test_update_order_status_deducts_stock_for_pending_table_without_consu
         )
 
     assert result["success"] is True
-    conn.fetchval.assert_awaited_once()
+    assert conn.fetchval.await_count == 2
+    assert "tenant_public_profiles" in conn.fetchval.await_args_list[0].args[0]
+    assert "tenant_ingredient_movements" in conn.fetchval.await_args_list[1].args[0]
     deduct_stock.assert_awaited_once_with(conn, order_id, tenant_id, user_id, 8523)
 
 
@@ -825,8 +829,9 @@ async def test_create_manual_order_captures_snapshots_and_posts_gl_cogs():
     order_item_id = uuid4()
     product_id = uuid4()
     payment_method_id = uuid4()
-    order_date = datetime(2026, 6, 7, 10, 30)
+    order_date = datetime(2026, 6, 7, 0, 30, tzinfo=timezone.utc)
     conn = _manual_order_conn(order_id, order_item_id, order_date)
+    conn.fetchval = AsyncMock(return_value="Europe/Madrid")
 
     capture_snapshot = AsyncMock()
     deduct_modifier_inventory = AsyncMock()
@@ -860,7 +865,7 @@ async def test_create_manual_order_captures_snapshots_and_posts_gl_cogs():
     ):
         result = await orders_service.create_manual_order(
             Request({"type": "http"}),
-            order_date="2026-06-07T10:30:00",
+            order_date="2026-06-07T00:30:00+00:00",
             payment_method="digital",
             payment_method_id=str(payment_method_id),
             items=[

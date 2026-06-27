@@ -6,12 +6,11 @@ import asyncio
 from decimal import Decimal
 from typing import Any, Dict, Optional, List
 from uuid import UUID
-from zoneinfo import ZoneInfo
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
-from app.core.timezones import resolve_tenant_timezone, tenant_today
+from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone, tenant_today
 from app.services.aws_ses_service import ses_service
 from app.services.waros_service import evaluate_and_award
 from app.services.cierre_service import (
@@ -41,7 +40,6 @@ def parse_date(date_str: Optional[str]) -> Optional[date]:
         return None
 
 logger = logging.getLogger(__name__)
-_BOG = ZoneInfo("America/Bogota")
 _INVENTORY_QUANTITY_SCALE = Decimal("0.000001")
 
 
@@ -1122,12 +1120,7 @@ async def bulk_update_order_status(
                     )
                     tax_config = await _get_tenant_tax_config(conn, tenant_id)
                     for ord_row in completed_orders:
-                        order_date = ord_row["order_date"]
-                        gl_order_date = (
-                            order_date.astimezone(_BOG).date()
-                            if order_date.tzinfo
-                            else order_date.date()
-                        )
+                        gl_order_date = local_date_for_tenant(ord_row["order_date"], timezone_name)
                         await _post_order_gl_entry(
                             conn=conn,
                             tenant_id=tenant_id,
@@ -1183,6 +1176,7 @@ async def update_order_status(
         waros_award_customer_id = None
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             row = await conn.fetchrow(
                 """SELECT id, status, order_number, table_session_id, pos_cart_id,
                           payment_status, order_date, total_amount, customer_id
@@ -1343,12 +1337,7 @@ async def update_order_status(
                             if cid:
                                 waros_award_order_id = completed_order["id"]
                                 waros_award_customer_id = cid
-                            order_date = completed_order["order_date"]
-                            gl_order_date = (
-                                order_date.astimezone(_BOG).date()
-                                if order_date.tzinfo
-                                else order_date.date()
-                            )
+                            gl_order_date = local_date_for_tenant(completed_order["order_date"], timezone_name)
                             tax_config = await _get_tenant_tax_config(conn, tenant_id)
                             await _post_order_gl_entry(
                                 conn=conn,
@@ -3461,6 +3450,7 @@ async def create_manual_order(
                     raise APIError("payment_method_id no es un UUID válido", status_code=422)
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             async with conn.transaction():
                 # Guard: block creation if order_date falls in a closed monthly accounting period (#362)
                 await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_datetime)
@@ -3715,11 +3705,7 @@ async def create_manual_order(
                         user_id,
                     )
 
-                gl_order_date = (
-                    order_datetime.astimezone(_BOG).date()
-                    if order_datetime.tzinfo
-                    else order_datetime.date()
-                )
+                gl_order_date = local_date_for_tenant(order_datetime, timezone_name)
                 gl_payment_method_id = payment_method_uuid
 
                 try:

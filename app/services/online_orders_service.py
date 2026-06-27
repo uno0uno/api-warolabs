@@ -6,12 +6,11 @@ import asyncio
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
-from zoneinfo import ZoneInfo
 from fastapi import Request
-_BOG = ZoneInfo("America/Bogota")
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError, ValidationError
+from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
 from app.services.email_helpers import send_order_accepted_email
 from app.services.waros_service import evaluate_and_award
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
@@ -434,6 +433,7 @@ async def update_order_status(
         changed_by = session.user_id
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             # 1. Fetch current order (tenant-scoped, online orders only)
             row = await conn.fetchrow(
                 """
@@ -599,11 +599,12 @@ async def update_order_status(
                         order_id,
                     )
                     tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                    gl_order_date = local_date_for_tenant(order_for_gl["order_date"], timezone_name)
                     await _post_order_gl_entry(
                         conn=conn,
                         tenant_id=tenant_id,
                         order_id=order_id,
-                        order_date=order_for_gl["order_date"].astimezone(_BOG).date(),
+                        order_date=gl_order_date,
                         total_amount=Decimal(str(order_for_gl["total_amount"])),
                         payment_method=order_for_gl["payment_method"] or "digital",
                         payment_method_id=order_for_gl["payment_method_id"],
@@ -622,7 +623,7 @@ async def update_order_status(
                         conn=conn,
                         tenant_id=tenant_id,
                         order_id=order_id,
-                        order_date=order_for_gl["order_date"].astimezone(_BOG).date(),
+                        order_date=gl_order_date,
                         order_number=int(order_for_gl["order_number"]),
                     )
                 except Exception as e:
@@ -721,11 +722,12 @@ async def update_order_status(
                         order_id,
                     )
                     tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                    gl_order_date = local_date_for_tenant(order_for_gl["order_date"], timezone_name)
                     await _post_order_gl_entry(
                         conn=conn,
                         tenant_id=tenant_id,
                         order_id=order_id,
-                        order_date=order_for_gl["order_date"].astimezone(_BOG).date(),
+                        order_date=gl_order_date,
                         total_amount=Decimal(str(order_for_gl["total_amount"])),
                         payment_method=order_for_gl["payment_method"] or "digital",
                         payment_method_id=order_for_gl["payment_method_id"],
@@ -744,7 +746,7 @@ async def update_order_status(
                         conn=conn,
                         tenant_id=tenant_id,
                         order_id=order_id,
-                        order_date=order_for_gl["order_date"].astimezone(_BOG).date(),
+                        order_date=gl_order_date,
                         order_number=int(order_for_gl["order_number"]),
                     )
                 except Exception as e:

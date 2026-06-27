@@ -36,6 +36,15 @@ def get_zoneinfo(value: str | None) -> ZoneInfo:
     return ZoneInfo(normalize_timezone(value))
 
 
+def local_date_for_tenant(value: datetime | date, timezone_name: str | None) -> date:
+    """Return a tenant-local date while preserving legacy naive date handling."""
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(get_zoneinfo(timezone_name)).date()
+        return value.date()
+    return value
+
+
 async def resolve_tenant_timezone(conn, tenant_id) -> str:
     """Resolve a tenant's operational timezone from profile config."""
     result = conn.fetchval(

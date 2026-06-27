@@ -13,6 +13,7 @@ _BOG = ZoneInfo("America/Bogota")
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
+from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
 from app.services.waros_service import evaluate_and_award
 from app.services.orders_service import _get_order_waro_redemption_summary
 from app.services.email_helpers import send_pos_receipt_email
@@ -1276,6 +1277,7 @@ async def add_order_payment(
         award_customer_id = None
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             async with conn.transaction():
                 # 1. Lock cart row
                 cart_row = await conn.fetchrow(
@@ -1511,7 +1513,7 @@ async def add_order_payment(
                             conn=conn,
                             tenant_id=tenant_id,
                             order_id=order_id,
-                            order_date=order_meta["order_date"].astimezone(_BOG).date(),
+                            order_date=local_date_for_tenant(order_meta["order_date"], timezone_name),
                             total_amount=Decimal(str(order_meta["total_amount"])),
                             payment_method=payment_method,
                             payment_method_id=UUID(payment_method_id) if payment_method_id else None,
@@ -2412,6 +2414,7 @@ async def complete_pos_order(
 
                 # Tax config — fetched once, used for GL entry and receipt breakdown
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                timezone_name = await resolve_tenant_timezone(conn, tenant_id)
 
                 if order_status == 'completed' and (not split_mode or _split_is_complete):
                     # GL journal entry — failure never blocks order completion
@@ -2425,7 +2428,7 @@ async def complete_pos_order(
                             conn=conn,
                             tenant_id=tenant_id,
                             order_id=order_id,
-                            order_date=order_row['created_at'].astimezone(_BOG).date(),
+                            order_date=local_date_for_tenant(order_row['created_at'], timezone_name),
                             total_amount=Decimal(str(_discounted_total)),
                             payment_method=payment_method,
                             payment_method_id=payment_method_id,
@@ -2445,7 +2448,7 @@ async def complete_pos_order(
                             conn=conn,
                             tenant_id=tenant_id,
                             order_id=order_id,
-                            order_date=order_row['created_at'].astimezone(_BOG).date(),
+                            order_date=local_date_for_tenant(order_row['created_at'], timezone_name),
                             order_number=int(order_number),
                         )
                     except Exception as e:

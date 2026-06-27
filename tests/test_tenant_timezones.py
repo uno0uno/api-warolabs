@@ -8,6 +8,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from app.core.timezones import (
     DEFAULT_TENANT_TIMEZONE,
+    local_date_for_tenant,
     local_day_utc_range,
     normalize_timezone,
     resolve_tenant_timezone,
@@ -33,6 +34,16 @@ def test_tenant_today_and_local_day_range_use_tenant_timezone():
     start_utc, end_utc = local_day_utc_range(date(2026, 1, 1), "America/Bogota")
     assert start_utc.isoformat() == "2026-01-01T05:00:00+00:00"
     assert end_utc.isoformat() == "2026-01-02T05:00:00+00:00"
+
+
+def test_local_date_for_tenant_preserves_naive_and_converts_aware_datetimes():
+    aware = datetime(2026, 6, 7, 0, 30, tzinfo=timezone.utc)
+    naive = datetime(2026, 6, 7, 0, 30)
+
+    assert local_date_for_tenant(aware, "Europe/Madrid") == date(2026, 6, 7)
+    assert local_date_for_tenant(aware, "America/Bogota") == date(2026, 6, 6)
+    assert local_date_for_tenant(naive, "America/Bogota") == date(2026, 6, 7)
+    assert local_date_for_tenant(date(2026, 6, 7), "America/Bogota") == date(2026, 6, 7)
 
 
 def test_public_profile_write_model_rejects_invalid_timezone():
