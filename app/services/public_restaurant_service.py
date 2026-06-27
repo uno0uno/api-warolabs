@@ -736,7 +736,7 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
             active tenants. When True, return every active catalog entry.
 
     Returns:
-        List of dicts with country, city, city_slug, tenant_count.
+        List of dicts with country, city, city_slug, DIVIPOLA metadata, and tenant_count.
         Sorted by sort_order then city name.
     """
     try:
@@ -747,6 +747,12 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
                     pc.country,
                     pc.city,
                     pc.city_slug,
+                    pc.department_code,
+                    pc.department_name,
+                    pc.municipality_code,
+                    pc.municipality_type,
+                    pc.latitude,
+                    pc.longitude,
                     pc.sort_order,
                     COUNT(tpp.id) FILTER (
                         WHERE tpp.is_active = true
@@ -758,7 +764,17 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
                 LEFT JOIN tenant_subscriptions ts
                        ON ts.tenant_id = tpp.tenant_id
                 WHERE pc.is_active = true
-                GROUP BY pc.country, pc.city, pc.city_slug, pc.sort_order
+                GROUP BY
+                    pc.country,
+                    pc.city,
+                    pc.city_slug,
+                    pc.department_code,
+                    pc.department_name,
+                    pc.municipality_code,
+                    pc.municipality_type,
+                    pc.latitude,
+                    pc.longitude,
+                    pc.sort_order
                 ORDER BY pc.sort_order ASC, pc.city ASC
                 """,
             )
@@ -767,6 +783,12 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
                     "country": r["country"],
                     "city": r["city"],
                     "city_slug": r["city_slug"],
+                    "department_code": r["department_code"],
+                    "department_name": r["department_name"],
+                    "municipality_code": r["municipality_code"],
+                    "municipality_type": r["municipality_type"],
+                    "latitude": float(r["latitude"]) if r["latitude"] is not None else None,
+                    "longitude": float(r["longitude"]) if r["longitude"] is not None else None,
                     "tenant_count": int(r["tenant_count"] or 0),
                 }
                 for r in rows
