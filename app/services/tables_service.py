@@ -10,12 +10,11 @@ from typing import Optional, List, Any, Dict
 from uuid import UUID
 from datetime import date
 from decimal import Decimal
-from zoneinfo import ZoneInfo
-_BOG = ZoneInfo("America/Bogota")
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError
+from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
 from app.services.cierre_service import (
     _get_tenant_tax_config,
     _post_order_gl_entry,
@@ -1000,6 +999,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             async with conn.transaction():
                 table_row = await conn.fetchrow(
                     "SELECT id, is_bar, name FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
@@ -1508,7 +1508,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                     conn=conn,
                                     tenant_id=tenant_id,
                                     order_id=ord_row["id"],
-                                    order_date=ord_row["order_date"].astimezone(_BOG).date(),
+                                    order_date=local_date_for_tenant(ord_row["order_date"], timezone_name),
                                     total_amount=Decimal(str(ord_row["total_amount"])),
                                     payment_method=ord_row["payment_method"] or payment_method or "digital",
                                     payment_method_id=ord_row["payment_method_id"],
@@ -1522,7 +1522,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                     conn=conn,
                                     tenant_id=tenant_id,
                                     order_id=ord_row["id"],
-                                    order_date=ord_row["order_date"].astimezone(_BOG).date(),
+                                    order_date=local_date_for_tenant(ord_row["order_date"], timezone_name),
                                     order_number=int(ord_row["order_number"]),
                                 )
                     except Exception as _gl_exc:
@@ -1620,7 +1620,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                         conn=conn,
                                         tenant_id=tenant_id,
                                         order_id=split_ord["id"],
-                                        order_date=split_ord["order_date"].astimezone(_BOG).date(),
+                                        order_date=local_date_for_tenant(split_ord["order_date"], timezone_name),
                                         total_amount=Decimal(str(split_ord["total_amount"])),
                                         payment_method=split_ord["payment_method"] or payment_method or "digital",
                                         payment_method_id=split_ord["payment_method_id"],
@@ -1632,7 +1632,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                         conn=conn,
                                         tenant_id=tenant_id,
                                         order_id=split_ord["id"],
-                                        order_date=split_ord["order_date"].astimezone(_BOG).date(),
+                                        order_date=local_date_for_tenant(split_ord["order_date"], timezone_name),
                                         order_number=int(split_ord["order_number"]),
                                     )
                                 if first_tip_order and split_tip_amount > 0:
@@ -1947,6 +1947,7 @@ async def add_session_payment(
         user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             async with conn.transaction():
                 # Get open session
                 session_row = await conn.fetchrow(
@@ -2088,7 +2089,7 @@ async def add_session_payment(
                                 conn=conn,
                                 tenant_id=tenant_id,
                                 order_id=ord_row["id"],
-                                order_date=ord_row["order_date"].astimezone(_BOG).date(),
+                                order_date=local_date_for_tenant(ord_row["order_date"], timezone_name),
                                 total_amount=Decimal(str(ord_row["total_amount"])),
                                 payment_method=ord_row["payment_method"] or payment_method or "digital",
                                 payment_method_id=ord_row["payment_method_id"],
@@ -2100,7 +2101,7 @@ async def add_session_payment(
                                 conn=conn,
                                 tenant_id=tenant_id,
                                 order_id=ord_row["id"],
-                                order_date=ord_row["order_date"].astimezone(_BOG).date(),
+                                order_date=local_date_for_tenant(ord_row["order_date"], timezone_name),
                                 order_number=int(ord_row["order_number"]),
                             )
                     except Exception as _split_gl_exc:

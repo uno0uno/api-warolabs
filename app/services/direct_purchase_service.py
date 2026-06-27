@@ -7,9 +7,7 @@ from typing import Optional, List, Dict, Any
 from uuid import UUID
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, localcontext
-from zoneinfo import ZoneInfo
 
-_BOG = ZoneInfo("America/Bogota")
 _DIRECT_PURCHASE_DECIMAL_SCALE = Decimal("0.000000000000001")
 _DIRECT_PURCHASE_DECIMAL_PRECISION = 42
 _DECIMAL_ZERO = Decimal("0")
@@ -128,7 +126,7 @@ from fastapi import Request, Response, HTTPException, UploadFile
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
-from app.core.timezones import resolve_tenant_timezone
+from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
 from app.services.purchase_tracking_service import (
     create_status_history_entry,
     upload_purchase_attachments
@@ -188,6 +186,7 @@ async def _post_purchase_gl_entry(
     purchase_date,            # datetime or date
     description: str,
     payment_method_id: Optional[UUID],
+    timezone_name: str,
 ) -> None:
     """
     Post GL entry for a received purchase:
@@ -207,12 +206,7 @@ async def _post_purchase_gl_entry(
         logger.info(f"[GL] Purchase {purchase_id}: zero amount — skip GL post")
         return
 
-    if hasattr(purchase_date, 'tzinfo') and purchase_date.tzinfo is not None:
-        entry_date = purchase_date.astimezone(_BOG).date()
-    elif hasattr(purchase_date, 'date'):
-        entry_date = purchase_date.date()
-    else:
-        entry_date = purchase_date
+    entry_date = local_date_for_tenant(purchase_date, timezone_name)
     period_year = entry_date.year
     period_month = entry_date.month
 
@@ -432,6 +426,7 @@ async def create_direct_purchase(
             raise HTTPException(status_code=400, detail="At least one item is required")
 
         async with get_db_connection() as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             async with conn.transaction():
                 # 1. Generate purchase number with WR-CD prefix
                 purchase_number = await get_next_direct_purchase_number(conn, tenant_id)
@@ -719,6 +714,7 @@ async def create_direct_purchase(
                             purchase_row['purchase_date'],
                             purchase_number,
                             UUID(payment_method_id) if payment_method_id else None,
+                            timezone_name,
                         )
                 except Exception as _gl_err:
                     logger.warning(
