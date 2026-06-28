@@ -1585,7 +1585,7 @@ async def get_customers_list(
     offset: int = 0
 ) -> dict:
     """
-    List tenant customers with POS order metrics for the filtered period.
+    List tenant customers with sales order metrics for the filtered period.
     Includes profiles linked via tenant_members even when they have zero orders
     (warocol.com#1099). Payment/status filters require a matching order.
     """
@@ -1600,7 +1600,7 @@ async def get_customers_list(
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             order_conditions = [
                 "o.tenant_id = $1",
-                "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
+                ANALYTICS_SALES_FILTER_ALIAS_O,
                 "o.customer_id IS NOT NULL",
             ]
             params: list = [tenant_id]
@@ -1740,9 +1740,9 @@ async def get_customer_detail(
     per_page: int = 20
 ) -> dict:
     """
-    Get a single customer's aggregate stats plus their paginated POS order history.
+    Get a single customer's aggregate stats plus their paginated sales order history.
     Returns 404 if the customer is not linked to the tenant.
-    Profiles without POS orders return zeroed stats and empty order history.
+    Profiles without sales orders return zeroed stats and empty order history.
     """
     try:
         session_context = require_valid_session(request)
@@ -1754,8 +1754,29 @@ async def get_customer_detail(
         async with get_db_connection() as conn:
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             # --- Customer aggregate stats ---
+            parsed_date_from = parse_date(date_from)
+            parsed_date_to = parse_date(date_to)
+
+            aggregate_conditions = [
+                "o.tenant_id = $1",
+                ANALYTICS_SALES_FILTER_ALIAS_O,
+                "o.customer_id = $2",
+            ]
+            aggregate_params = [tenant_id, customer_id, timezone_name]
+            aggregate_param_count = 3
+            aggregate_param_count = _append_local_date_bounds(
+                aggregate_conditions,
+                aggregate_params,
+                aggregate_param_count,
+                "o.order_date",
+                parsed_date_from,
+                parsed_date_to,
+                timezone_name,
+            )
+            aggregate_where_clause = " AND ".join(aggregate_conditions)
+
             customer_row = await conn.fetchrow(
-                """
+                f"""
                 SELECT
                     o.customer_id,
                     COALESCE(p.name, 'Sin identificar') AS name,
@@ -1767,14 +1788,10 @@ async def get_customer_detail(
                     MAX(DATE(o.order_date AT TIME ZONE $3)) AS last_purchase
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
-                WHERE o.tenant_id = $1
-                  AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
-                  AND o.customer_id = $2
+                WHERE {aggregate_where_clause}
                 GROUP BY o.customer_id, p.name, p.phone_number, p.email
                 """,
-                tenant_id,
-                customer_id,
-                timezone_name,
+                *aggregate_params,
             )
 
             if not customer_row:
@@ -1811,14 +1828,12 @@ async def get_customer_detail(
             # --- Paginated order history ---
             where_conditions = [
                 "o.tenant_id = $1",
-                "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')",
+                ANALYTICS_SALES_FILTER_ALIAS_O,
                 "o.customer_id = $2",
             ]
             params = [tenant_id, customer_id]
             param_count = 2
 
-            parsed_date_from = parse_date(date_from)
-            parsed_date_to = parse_date(date_to)
             param_count = _append_local_date_bounds(
                 where_conditions,
                 params,
