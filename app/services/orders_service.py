@@ -107,6 +107,16 @@ POS_LIKE_FILTER_ALIAS_O = (
     "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL "
     "OR o.extra_attributes->>'source' = 'manual')"
 )
+ANALYTICS_SALES_FILTER = (
+    "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL "
+    "OR online_cart_id IS NOT NULL "
+    "OR extra_attributes->>'source' = 'manual')"
+)
+ANALYTICS_SALES_FILTER_ALIAS_O = (
+    "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL "
+    "OR o.online_cart_id IS NOT NULL "
+    "OR o.extra_attributes->>'source' = 'manual')"
+)
 
 
 async def _get_order_promo_summary(conn, order_id: UUID) -> Dict[str, Any]:
@@ -1968,7 +1978,7 @@ async def get_orders_metrics(
         async with get_db_connection() as conn:
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             # Build WHERE clause
-            where_conditions = ["tenant_id = $1", "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"]
+            where_conditions = ["tenant_id = $1", ANALYTICS_SALES_FILTER]
             params = [tenant_id]
             param_count = 1
 
@@ -2025,7 +2035,7 @@ async def get_orders_metrics(
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
                 # Rebuild WHERE without payment_method_id for tax query (order_items has no that filter)
                 tax_where = ["o.tenant_id = $1", "o.status = 'completed'",
-                             "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"]
+                             ANALYTICS_SALES_FILTER_ALIAS_O]
                 tax_params: List[Any] = [tenant_id]
                 tax_pc = 1
                 tax_pc = _append_local_date_bounds(
@@ -2166,7 +2176,7 @@ async def get_orders_dashboard(
                     ), 0) as year_sales
 
                 FROM orders
-                WHERE tenant_id = $1 AND (pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')
+                WHERE tenant_id = $1 AND {ANALYTICS_SALES_FILTER}
             """
 
             row = await conn.fetchrow(dashboard_query, *params)
@@ -2183,7 +2193,7 @@ async def get_orders_dashboard(
 
             # Payment breakdown — UNION ALL: order_payments (split) + legacy orders
             breakdown_rows = await conn.fetch(
-                """
+                f"""
                 -- Split orders: amounts from order_payments
                 SELECT
                     COALESCE(pmg.slug, op.payment_method)  AS group_slug,
@@ -2196,7 +2206,7 @@ async def get_orders_dashboard(
                 LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
                 WHERE o.tenant_id = $1
                   AND o.status = 'completed'
-                  AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
+                  AND {ANALYTICS_SALES_FILTER_ALIAS_O}
                 GROUP BY COALESCE(pmg.slug, op.payment_method), COALESCE(pmg.name, op.payment_method)
 
                 UNION ALL
@@ -2212,7 +2222,7 @@ async def get_orders_dashboard(
                 LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
                 WHERE o.tenant_id = $1
                   AND o.status = 'completed'
-                  AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')
+                  AND {ANALYTICS_SALES_FILTER_ALIAS_O}
                   AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = o.id)
                 GROUP BY COALESCE(pmg.slug, o.payment_method), COALESCE(pmg.name, o.payment_method)
                 """,
@@ -2245,7 +2255,7 @@ async def get_orders_dashboard(
             _year_std = 0.0
             _year_liq = 0.0
             _tax_label = "Impuesto"
-            _base_filter = "o.tenant_id = $1 AND o.status = 'completed' AND (o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL OR o.extra_attributes->>'source' = 'manual')"
+            _base_filter = f"o.tenant_id = $1 AND o.status = 'completed' AND {ANALYTICS_SALES_FILTER_ALIAS_O}"
             _tax_select = """
                 SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
                        COALESCE(SUM(oi.subtotal), 0) AS subtotal
@@ -3199,7 +3209,7 @@ async def get_sales_flow(
             group_by = 'hour' if days_diff <= 3 else 'day'
 
             # Build WHERE conditions
-            where_conditions = ["tenant_id = $1", "(pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')"]
+            where_conditions = ["tenant_id = $1", ANALYTICS_SALES_FILTER]
             params = [tenant_id]
             param_count = 1
 
