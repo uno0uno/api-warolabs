@@ -52,7 +52,19 @@ async def emit_invoice(
     # Verify order exists, belongs to tenant, and is completed
     async with get_db_connection(use_transaction=False) as conn:
         order = await conn.fetchrow(
-            "SELECT id, status FROM orders WHERE id = $1 AND tenant_id = $2",
+            """SELECT o.id,
+                      o.status,
+                      o.payment_method,
+                      o.payment_status,
+                      COALESCE((
+                          SELECT COUNT(*)
+                          FROM order_payments op
+                          WHERE op.order_id = o.id
+                            AND op.tenant_id = o.tenant_id
+                            AND op.voided_at IS NULL
+                      ), 0) AS active_payment_count
+               FROM orders o
+               WHERE o.id = $1 AND o.tenant_id = $2""",
             UUID(order_id), UUID(tenant_id),
         )
 
@@ -89,6 +101,18 @@ async def emit_invoice(
         if existing is not None:
             logger.info(f"Invoice already accepted for order {order_id}, short-circuiting emit")
             return existing
+
+    payment_method = (order['payment_method'] or '').lower()
+    payment_status = (order['payment_status'] or '').lower()
+    active_payment_count = int(order['active_payment_count'] or 0)
+    if payment_method == 'credit' and payment_status == 'credit' and active_payment_count == 0:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Las ventas con pago solo crédito no emiten factura electrónica desde este flujo. "
+                "Usa pago dividido si necesitas emitir la factura al momento de la venta."
+            ),
+        )
 
     if (
         latest
