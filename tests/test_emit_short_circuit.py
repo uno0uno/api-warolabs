@@ -54,8 +54,19 @@ def _patch_db(rows):
     )
 
 
-def _order_row(status: str = 'completed'):
-    return {'id': UUID(_ORDER_ID), 'status': status}
+def _order_row(
+    status: str = 'completed',
+    payment_method: str = 'cash',
+    payment_status: str = 'paid',
+    active_payment_count: int = 0,
+):
+    return {
+        'id': UUID(_ORDER_ID),
+        'status': status,
+        'payment_method': payment_method,
+        'payment_status': payment_status,
+        'active_payment_count': active_payment_count,
+    }
 
 
 def _latest_invoice_row(
@@ -189,3 +200,55 @@ async def test_accepted_short_circuits_to_existing_invoice():
 
     assert result == existing_payload
     fake_client.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_credit_only_order_does_not_reach_proxy():
+    """Pure credit orders are blocked before api-facturacion can return Matias 422."""
+    rows = [
+        _order_row(payment_method='credit', payment_status='credit', active_payment_count=0),
+        None,
+    ]
+
+    fake_client = MagicMock()
+    fake_client.post = AsyncMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+
+    with _patch_db(rows), patch(
+        'app.services.facturacion_service.httpx.AsyncClient',
+        return_value=fake_client,
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await facturacion_service.emit_invoice(_ORDER_ID, _TENANT_ID, 'pos')
+
+    assert exc_info.value.status_code == 422
+    assert 'solo crédito' in exc_info.value.detail
+    fake_client.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_split_credit_order_falls_through_to_proxy():
+    """Credit as part of split tender remains invoice-eligible."""
+    rows = [
+        _order_row(payment_method='credit', payment_status='paid', active_payment_count=1),
+        None,
+    ]
+
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.is_success = True
+    fake_resp.json = MagicMock(return_value={'status': 'accepted'})
+    fake_resp.text = '{"status":"accepted"}'
+    fake_client = MagicMock()
+    fake_client.post = AsyncMock(return_value=fake_resp)
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+
+    with _patch_db(rows), patch(
+        'app.services.facturacion_service.httpx.AsyncClient',
+        return_value=fake_client,
+    ):
+        await facturacion_service.emit_invoice(_ORDER_ID, _TENANT_ID, 'pos')
+
+    fake_client.post.assert_awaited_once()
