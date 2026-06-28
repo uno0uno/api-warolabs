@@ -16,6 +16,7 @@ from app.services.cierre_service import (
     _effective_period_bounds,
     _is_day_only_cierre_request,
     _open_shift_has_explicit_window,
+    _resolve_remaining_day_window_from_rows,
     _requires_open_shift,
     create_cierre,
 )
@@ -110,11 +111,68 @@ def test_open_shift_has_explicit_window_for_template_or_times():
     }) is False
 
 
+def test_remaining_day_window_without_existing_closes_returns_full_day():
+    window = _resolve_remaining_day_window_from_rows(
+        date(2026, 6, 29),
+        [],
+        timezone_name="Pacific/Kiritimati",
+    )
+
+    assert window.is_partial is False
+    assert window.resolved.period_start == date(2026, 6, 29)
+    assert window.resolved.period_end == date(2026, 6, 29)
+    assert window.resolved.period_start_time is None
+    assert window.resolved.period_end_time is None
+
+
+def test_remaining_day_window_after_partial_close_starts_at_latest_end():
+    kiritimati = ZoneInfo("Pacific/Kiritimati")
+    row = {
+        "period_start": date(2026, 6, 28),
+        "period_end": date(2026, 6, 29),
+        "period_start_time": datetime(2026, 6, 28, 18, 0, tzinfo=kiritimati),
+        "period_end_time": datetime(2026, 6, 29, 10, 0, tzinfo=kiritimati),
+    }
+
+    window = _resolve_remaining_day_window_from_rows(
+        date(2026, 6, 29),
+        [row],
+        timezone_name="Pacific/Kiritimati",
+    )
+
+    assert window.is_partial is True
+    assert window.resolved.period_start == date(2026, 6, 29)
+    assert window.resolved.period_end == date(2026, 6, 29)
+    assert window.resolved.period_start_time == datetime(2026, 6, 29, 10, 0, tzinfo=kiritimati)
+    assert window.resolved.period_end_time == datetime(2026, 6, 29, 23, 59, 59, tzinfo=kiritimati)
+
+
+def test_remaining_day_window_rejects_fully_covered_day():
+    kiritimati = ZoneInfo("Pacific/Kiritimati")
+    row = {
+        "period_start": date(2026, 6, 29),
+        "period_end": date(2026, 6, 29),
+        "period_start_time": datetime(2026, 6, 29, 0, 0, tzinfo=kiritimati),
+        "period_end_time": datetime(2026, 6, 29, 23, 59, 59, tzinfo=kiritimati),
+    }
+
+    with pytest.raises(APIError) as exc:
+        _resolve_remaining_day_window_from_rows(
+            date(2026, 6, 29),
+            [row],
+            timezone_name="Pacific/Kiritimati",
+        )
+
+    assert exc.value.status_code == 409
+    assert "completamente cubierto" in exc.value.message
+
+
 @pytest.mark.asyncio
 async def test_create_cierre_rejects_day_only_when_open_shift_overlaps():
     tenant_id = uuid4()
     shift_id = uuid4()
     conn = AsyncMock()
+    conn.fetch.return_value = []
 
     @asynccontextmanager
     async def db_ctx(**_kwargs):
@@ -165,6 +223,7 @@ async def test_create_cierre_rejects_day_only_when_open_shift_overlaps():
 async def test_create_cierre_rejects_rebel_rebel_open_table_before_writes():
     tenant_id = uuid4()
     conn = AsyncMock()
+    conn.fetch.return_value = []
 
     @asynccontextmanager
     async def db_ctx(**_kwargs):

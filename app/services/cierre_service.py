@@ -1812,6 +1812,12 @@ class ResolvedCierrePeriod:
     shift_template_id: Optional[UUID]
 
 
+@dataclass(frozen=True)
+class DayWindowResolution:
+    resolved: ResolvedCierrePeriod
+    is_partial: bool
+
+
 async def resolve_cierre_period_fields(
     conn,
     tenant_id: UUID,
@@ -1876,6 +1882,149 @@ async def resolve_cierre_period_fields(
     )
 
 
+def _resolve_remaining_day_window_from_rows(
+    day: date,
+    rows,
+    *,
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
+) -> DayWindowResolution:
+    day_start, day_end = _effective_period_bounds(day, day, None, None, timezone_name)
+    latest_covered_end = None
+    for row in rows:
+        row_start, row_end = _effective_period_bounds(
+            row["period_start"],
+            row["period_end"],
+            row["period_start_time"],
+            row["period_end_time"],
+            timezone_name,
+        )
+        if row_end <= day_start or row_start >= day_end:
+            continue
+        if row_end > day_start and (latest_covered_end is None or row_end > latest_covered_end):
+            latest_covered_end = row_end
+
+    if latest_covered_end is None:
+        return DayWindowResolution(
+            resolved=ResolvedCierrePeriod(day, day, None, None, None),
+            is_partial=False,
+        )
+
+    if latest_covered_end >= day_end:
+        raise APIError(
+            "Este día ya está completamente cubierto por cierres anteriores.",
+            status_code=409,
+        )
+
+    period_start = latest_covered_end.astimezone(get_zoneinfo(timezone_name)).date()
+    return DayWindowResolution(
+        resolved=ResolvedCierrePeriod(
+            period_start=period_start,
+            period_end=day,
+            period_start_time=latest_covered_end,
+            period_end_time=day_end,
+            shift_template_id=None,
+        ),
+        is_partial=True,
+    )
+
+
+async def _fetch_day_overlapping_periods(
+    conn,
+    tenant_id: UUID,
+    day: date,
+    *,
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
+):
+    day_start, day_end = _effective_period_bounds(day, day, None, None, timezone_name)
+    return await conn.fetch(
+        f"""
+        SELECT id, period_start, period_end, period_start_time, period_end_time
+        FROM accounting_period
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          {_period_window_overlap_sql("$4")}
+        ORDER BY COALESCE(
+            period_end_time,
+            (period_end::timestamp + INTERVAL '23:59:59') AT TIME ZONE $4
+        ) DESC
+        """,
+        tenant_id,
+        day_start,
+        day_end,
+        timezone_name,
+    )
+
+
+async def _resolve_day_only_period(
+    conn,
+    tenant_id: UUID,
+    resolved: ResolvedCierrePeriod,
+    *,
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
+) -> DayWindowResolution:
+    if not _is_day_only_cierre_request(
+        resolved.shift_template_id,
+        resolved.period_start_time,
+        resolved.period_end_time,
+    ):
+        return DayWindowResolution(resolved=resolved, is_partial=False)
+    if resolved.period_start != resolved.period_end:
+        return DayWindowResolution(resolved=resolved, is_partial=False)
+
+    rows = await _fetch_day_overlapping_periods(
+        conn,
+        tenant_id,
+        resolved.period_start,
+        timezone_name=timezone_name,
+    )
+    return _resolve_remaining_day_window_from_rows(
+        resolved.period_start,
+        rows,
+        timezone_name=timezone_name,
+    )
+
+
+def _day_window_to_dict(window: DayWindowResolution) -> dict:
+    resolved = window.resolved
+    return {
+        "periodStart": resolved.period_start.isoformat(),
+        "periodEnd": resolved.period_end.isoformat(),
+        "periodStartTime": (
+            resolved.period_start_time.isoformat() if resolved.period_start_time else None
+        ),
+        "periodEndTime": (
+            resolved.period_end_time.isoformat() if resolved.period_end_time else None
+        ),
+        "isPartial": window.is_partial,
+        "windowLabel": "Día restante" if window.is_partial else "Día completo",
+    }
+
+
+async def get_day_window(request: Request, anchor_date: date) -> dict:
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=False) as conn:
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+            base = ResolvedCierrePeriod(anchor_date, anchor_date, None, None, None)
+            window = await _resolve_day_only_period(
+                conn,
+                tenant_id,
+                base,
+                timezone_name=timezone_name,
+            )
+            return {"success": True, "data": _day_window_to_dict(window)}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in get_day_window: {exc}")
+        raise APIError(f"Error in get_day_window: {exc}", status_code=500)
+
+
 async def list_active_shift_templates(request: Request) -> dict:
     """Active shift templates for Finanzas arqueo UI (warocol.com#686)."""
     session_context = require_valid_session(request)
@@ -1929,6 +2078,14 @@ async def open_shift(request: Request, body: OpenShiftCreate) -> dict:
                 shift_template_id=body.shift_template_id,
                 timezone_name=timezone_name,
             )
+            resolved = (
+                await _resolve_day_only_period(
+                    conn,
+                    tenant_id,
+                    resolved,
+                    timezone_name=timezone_name,
+                )
+            ).resolved
             eff_start, eff_end = _effective_period_bounds(
                 resolved.period_start,
                 resolved.period_end,
@@ -2018,6 +2175,13 @@ async def get_shift_status(
                 shift_template_id=shift_template_id,
                 timezone_name=timezone_name,
             )
+            window = await _resolve_day_only_period(
+                conn,
+                tenant_id,
+                resolved,
+                timezone_name=timezone_name,
+            )
+            resolved = window.resolved
             eff_start, eff_end = _effective_period_bounds(
                 resolved.period_start,
                 resolved.period_end,
@@ -2038,10 +2202,13 @@ async def get_shift_status(
                     "data": {
                         "status": "none",
                         "suggestedOpeningCash": suggested,
+                        **_day_window_to_dict(window),
                     },
                 }
 
-            return {"success": True, "data": _open_shift_row_to_dict(row)}
+            data = _open_shift_row_to_dict(row)
+            data.update(_day_window_to_dict(window))
+            return {"success": True, "data": data}
 
     except (AuthenticationError, APIError):
         raise
@@ -2128,6 +2295,14 @@ async def get_cierre_preview(
                 shift_template_id=shift_template_id,
                 timezone_name=timezone_name,
             )
+            resolved = (
+                await _resolve_day_only_period(
+                    conn,
+                    tenant_id,
+                    resolved,
+                    timezone_name=timezone_name,
+                )
+            ).resolved
             eff_start, eff_end = _effective_period_bounds(
                 resolved.period_start,
                 resolved.period_end,
@@ -2190,6 +2365,14 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 shift_template_id=body.shift_template_id,
                 timezone_name=timezone_name,
             )
+            resolved = (
+                await _resolve_day_only_period(
+                    conn,
+                    tenant_id,
+                    resolved,
+                    timezone_name=timezone_name,
+                )
+            ).resolved
             period_start = resolved.period_start
             period_end = resolved.period_end
             period_start_time = resolved.period_start_time

@@ -55,6 +55,24 @@ async def create_cierre(request: Request, body: CierreCreate):
     return await cierre_service.create_cierre(request, body)
 
 
+@router.get("/day-window", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def get_cierre_day_window(
+    request: Request,
+    anchor_date: date = Query(..., alias="date", description="Tenant calendar day to resolve"),
+):
+    """Resolve full day vs remaining day after previous partial closes."""
+    return await cierre_service.get_day_window(request, anchor_date)
+
+
+@router.get("/day/window", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def get_cierre_day_window_safe(
+    request: Request,
+    anchor_date: date = Query(..., alias="date", description="Tenant calendar day to resolve"),
+):
+    """Resolve full day vs remaining day using a two-segment path that cannot match /{cierre_id}."""
+    return await cierre_service.get_day_window(request, anchor_date)
+
+
 @router.get("", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def list_cierres(
     request: Request,
