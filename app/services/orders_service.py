@@ -43,6 +43,14 @@ logger = logging.getLogger(__name__)
 _INVENTORY_QUANTITY_SCALE = Decimal("0.000001")
 
 
+def _date_iso(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    return value.isoformat()
+
+
 def _append_local_date_bounds(
     where_conditions: List[str],
     params: List[Any],
@@ -1638,6 +1646,10 @@ async def get_customers_list(
             join_type = "INNER" if require_order_match else "LEFT"
 
             param_count += 1
+            timezone_param = param_count
+            params.append(timezone_name)
+
+            param_count += 1
             limit_param = param_count
             param_count += 1
             offset_param = param_count
@@ -1659,7 +1671,7 @@ async def get_customers_list(
                         SUM(o.total_amount) AS total_spent,
                         COUNT(o.id)         AS order_count,
                         AVG(o.total_amount) AS avg_ticket,
-                        MAX(o.order_date)   AS last_order_date
+                        MAX(DATE(o.order_date AT TIME ZONE ${timezone_param})) AS last_order_date
                     FROM orders o
                     WHERE {order_where}
                     GROUP BY o.customer_id
@@ -1751,8 +1763,8 @@ async def get_customer_detail(
                     p.email                              AS email,
                     COUNT(o.id)                          AS total_orders,
                     SUM(o.total_amount)                  AS total_spent,
-                    MIN(o.order_date)                    AS first_purchase,
-                    MAX(o.order_date)                    AS last_purchase
+                    MIN(DATE(o.order_date AT TIME ZONE $3)) AS first_purchase,
+                    MAX(DATE(o.order_date AT TIME ZONE $3)) AS last_purchase
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
                 WHERE o.tenant_id = $1
@@ -1762,6 +1774,7 @@ async def get_customer_detail(
                 """,
                 tenant_id,
                 customer_id,
+                timezone_name,
             )
 
             if not customer_row:
@@ -1932,14 +1945,8 @@ async def get_customer_detail(
                     "email": customer_row['email'],
                     "total_orders": int(customer_row['total_orders']),
                     "total_spent": float(customer_row['total_spent']),
-                    "first_purchase": (
-                        customer_row['first_purchase'].date().isoformat()
-                        if customer_row['first_purchase'] else None
-                    ),
-                    "last_purchase": (
-                        customer_row['last_purchase'].date().isoformat()
-                        if customer_row['last_purchase'] else None
-                    ),
+                    "first_purchase": _date_iso(customer_row['first_purchase']),
+                    "last_purchase": _date_iso(customer_row['last_purchase']),
                 },
                 "orders": {
                     "items": orders,
