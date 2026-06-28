@@ -85,5 +85,6 @@ async def test_customers_list_includes_zero_order_customer():
   assert "tenant_customers tc" in query
   assert "tc.profile_id" in query
   assert "tc.is_active = true" in query
+  assert "o.online_cart_id IS NOT NULL" in query
   assert "tenant_members" not in query
   assert "role = 'customer'" not in query

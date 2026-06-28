@@ -1,5 +1,5 @@
 """Tests for GET /orders/customers/{customer_id} — profile without POS orders (#377)."""
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -114,3 +114,40 @@ async def test_get_customer_detail_with_orders_unchanged():
     assert result['customer']['total_spent'] == 50000.0
     assert result['customer']['first_purchase'] == '2026-01-10'
     assert result['customer']['last_purchase'] == '2026-05-01'
+    aggregate_query = _SeqConnCtx.latest_conn.fetchrow.await_args_list[0].args[0]
+    history_query = _SeqConnCtx.latest_conn.fetch.await_args_list[0].args[0]
+    assert "o.online_cart_id IS NOT NULL" in aggregate_query
+    assert "o.online_cart_id IS NOT NULL" in history_query
+
+
+@pytest.mark.asyncio
+async def test_get_customer_detail_aggregate_uses_tenant_local_date_filters():
+    """Customer header stats should use the same tenant-local range as history."""
+    order_agg = {
+        'customer_id': _CUSTOMER_ID,
+        'name': 'Filtered Customer',
+        'phone': '3009876543',
+        'email': 'buyer@example.com',
+        'total_orders': 1,
+        'total_spent': 25000.0,
+        'first_purchase': date(2026, 6, 29),
+        'last_purchase': date(2026, 6, 29),
+    }
+
+    with _patch_session(), _patch_conn([order_agg, None], [[], []]):
+        result = await orders_service.get_customer_detail(
+            Request({'type': 'http'}),
+            customer_id=_CUSTOMER_ID,
+            date_from='2026-06-29',
+            date_to='2026-06-29',
+        )
+
+    aggregate_call = _SeqConnCtx.latest_conn.fetchrow.await_args_list[0]
+    aggregate_query = aggregate_call.args[0]
+    aggregate_args = aggregate_call.args[1:]
+    assert "o.order_date >= ($4::timestamp AT TIME ZONE $5)" in aggregate_query
+    assert "o.order_date < (($6::timestamp + interval '1 day') AT TIME ZONE $7)" in aggregate_query
+    assert aggregate_args[3] == date(2026, 6, 29)
+    assert aggregate_args[5] == date(2026, 6, 29)
+    assert result['customer']['first_purchase'] == '2026-06-29'
+    assert result['customer']['last_purchase'] == '2026-06-29'
