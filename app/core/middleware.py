@@ -529,14 +529,13 @@ async def session_validation_middleware(request: Request, call_next):
                 logger.debug(f"⚠️ No session data returned for path: {path}")
                 request.state.session_context = SessionContext()
         except Exception as e:
-            # No valid session found
-            logger.warning(f"❌ Session validation error for path {path}: {e}")
+            logger.error("Unexpected session validation error for path %s: %s", path, e, exc_info=True)
             request.state.session_context = SessionContext()
 
         return await call_next(request)
 
     except Exception as e:
-        logger.error(f"Session validation error: {e}")
+        logger.error("Session validation middleware error: %s", e, exc_info=True)
         request.state.session_context = SessionContext()
         request.state.api_key_context = ApiKeyContext()
         return await call_next(request)
@@ -558,8 +557,8 @@ def require_valid_session(request: Request) -> SessionContext:
 
         tokens = collect_session_tokens(request)
         token_prefix = tokens[0][:8] if tokens else "none"
-        logger.warning(
-            "Valid session required: path=%s cookie_count=%d token_prefix=%s",
+        logger.info(
+            "Authentication required: path=%s cookie_count=%d token_prefix=%s",
             request.url.path,
             len(tokens),
             token_prefix,

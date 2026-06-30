@@ -119,7 +119,7 @@ async def get_session_token(request: Request) -> str:
             session_uuids,
         )
         if diag_rows:
-            logger.warning(
+            logger.info(
                 "No valid session tokens (candidates=%s)",
                 [
                     {
@@ -131,7 +131,7 @@ async def get_session_token(request: Request) -> str:
                 ],
             )
         else:
-            logger.warning(
+            logger.info(
                 "No valid session tokens found (count=%d, prefixes=%s) — not in DB",
                 len(session_tokens),
                 ", ".join(t[:8] for t in session_tokens[:3]),
@@ -324,8 +324,10 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
         # Get session token using improved parsing that handles duplicates
         try:
             session_token = await get_session_token(request)
-        except HTTPException:
-            return None
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                return None
+            raise
 
         if not session_token:
             return None
