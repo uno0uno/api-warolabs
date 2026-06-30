@@ -525,7 +525,7 @@ async def get_product_detail(slug: str, product_id: UUID) -> Dict[str, Any]:
 def is_currently_open(
     business_hours: Optional[Dict[str, Any]],
     is_manually_open: bool = True,
-    timezone_name: str | None = None,
+    timezone_name: Optional[str] = None,
 ) -> bool:
     """
     Calculate if restaurant is currently open based on business hours and manual toggle.

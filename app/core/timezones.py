@@ -5,12 +5,13 @@ boundaries. Fiscal/legal Colombia time should use a separate named helper.
 """
 from datetime import date, datetime, time, timedelta, timezone
 from inspect import isawaitable
+from typing import Optional, Tuple, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_TENANT_TIMEZONE = "America/Bogota"
 
 
-def validate_timezone(value: str | None) -> str:
+def validate_timezone(value: Optional[str]) -> str:
     """Return a normalized IANA timezone or raise ValueError for user input."""
     if value is None or not isinstance(value, str) or not value.strip():
         raise ValueError("timezone must be a valid IANA timezone")
@@ -23,7 +24,7 @@ def validate_timezone(value: str | None) -> str:
     return timezone_name
 
 
-def normalize_timezone(value: str | None) -> str:
+def normalize_timezone(value: Optional[str]) -> str:
     """Return a safe tenant timezone, falling back for legacy/invalid values."""
     try:
         return validate_timezone(value)
@@ -31,12 +32,12 @@ def normalize_timezone(value: str | None) -> str:
         return DEFAULT_TENANT_TIMEZONE
 
 
-def get_zoneinfo(value: str | None) -> ZoneInfo:
+def get_zoneinfo(value: Optional[str]) -> ZoneInfo:
     """Return ZoneInfo for a tenant timezone, using the safe default if needed."""
     return ZoneInfo(normalize_timezone(value))
 
 
-def local_date_for_tenant(value: datetime | date, timezone_name: str | None) -> date:
+def local_date_for_tenant(value: Union[datetime, date], timezone_name: Optional[str]) -> date:
     """Return a tenant-local date while preserving legacy naive date handling."""
     if isinstance(value, datetime):
         if value.tzinfo is not None:
@@ -55,7 +56,7 @@ async def resolve_tenant_timezone(conn, tenant_id) -> str:
     return normalize_timezone(value)
 
 
-def tenant_today(value: str | None, now: datetime | None = None) -> date:
+def tenant_today(value: Optional[str], now: Optional[datetime] = None) -> date:
     """Return today's local date in the tenant operational timezone."""
     zone = get_zoneinfo(value)
     instant = now or datetime.now(timezone.utc)
@@ -66,8 +67,8 @@ def tenant_today(value: str | None, now: datetime | None = None) -> date:
 
 def local_day_utc_range(
     day: date,
-    value: str | None,
-) -> tuple[datetime, datetime]:
+    value: Optional[str],
+) -> Tuple[datetime, datetime]:
     """Return [start, end) UTC datetimes for a tenant-local calendar day."""
     zone = get_zoneinfo(value)
     local_start = datetime.combine(day, time.min, tzinfo=zone)

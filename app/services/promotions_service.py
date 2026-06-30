@@ -92,7 +92,7 @@ def validate_promo_type_block_map(
     return normalized or dict(DEFAULT_PROMO_TYPE_BLOCK_MAP)
 
 
-def _evaluation_datetime(at: datetime, timezone_name: str | None) -> datetime:
+def _evaluation_datetime(at: datetime, timezone_name: Optional[str]) -> datetime:
     zone = get_zoneinfo(timezone_name)
     if at.tzinfo is None:
         return at.replace(tzinfo=zone)
@@ -101,7 +101,7 @@ def _evaluation_datetime(at: datetime, timezone_name: str | None) -> datetime:
 
 def day_bit_for_datetime(
     at: datetime,
-    timezone_name: str | None = DEFAULT_TENANT_TIMEZONE,
+    timezone_name: Optional[str] = DEFAULT_TENANT_TIMEZONE,
 ) -> int:
     """Monday=1<<0 … Sunday=1<<6 in the tenant operational timezone."""
     local = _evaluation_datetime(at, timezone_name)
@@ -115,7 +115,7 @@ def time_in_schedule_window(
     start_time: time,
     end_time: time,
     crosses_midnight: bool,
-    timezone_name: str | None = DEFAULT_TENANT_TIMEZONE,
+    timezone_name: Optional[str] = DEFAULT_TENANT_TIMEZONE,
 ) -> bool:
     local = _evaluation_datetime(at, timezone_name)
     current = local.time()
@@ -139,7 +139,7 @@ def is_active_at(
     starts_at: Optional[datetime],
     ends_at: Optional[datetime],
     schedules: Sequence[Dict[str, Any]],
-    timezone_name: str | None = DEFAULT_TENANT_TIMEZONE,
+    timezone_name: Optional[str] = DEFAULT_TENANT_TIMEZONE,
 ) -> bool:
     """Return whether a promotion rule is active at `at` in tenant local time."""
     if not is_active:
@@ -507,7 +507,7 @@ def _serialize_promotion(
     scope: Dict[str, Any],
     *,
     at: Optional[datetime] = None,
-    timezone_name: str | None = DEFAULT_TENANT_TIMEZONE,
+    timezone_name: Optional[str] = DEFAULT_TENANT_TIMEZONE,
 ) -> Dict[str, Any]:
     schedule_dicts = [_row_to_schedule(r) for r in schedules]
     category_ids = scope["category_ids"]
@@ -715,7 +715,7 @@ async def list_promotions(
     *,
     include_inactive: bool = False,
     at: Optional[datetime] = None,
-    timezone_name: str | None = None,
+    timezone_name: Optional[str] = None,
 ) -> dict:
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -1173,7 +1173,7 @@ async def list_active_promotions(
     return result
 
 
-def default_at_tenant(timezone_name: str | None = DEFAULT_TENANT_TIMEZONE) -> datetime:
+def default_at_tenant(timezone_name: Optional[str] = DEFAULT_TENANT_TIMEZONE) -> datetime:
     return datetime.now(tz=get_zoneinfo(timezone_name))
 
 
@@ -1654,7 +1654,7 @@ async def load_promotions_for_evaluation(
     tenant_id: UUID,
     at: datetime,
     *,
-    timezone_name: str | None = None,
+    timezone_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Load tenant promotions that are active at `at`, with scope for POS evaluation."""
     evaluation_timezone = timezone_name or await resolve_tenant_timezone(conn, tenant_id)
