@@ -9,7 +9,14 @@ from app.core.permissions import Module, require_module
 from typing import Optional
 from uuid import UUID
 from datetime import date, datetime
-from app.models.cierre import CierreCashSettingsUpdate, CierreCreate, MonthlyPeriodClose, OpenShiftCreate
+from app.models.cierre import (
+    CierreCashSettingsUpdate,
+    CierreCreate,
+    CierreReconciliationReportedUpdate,
+    CierreReconciliationResolve,
+    MonthlyPeriodClose,
+    OpenShiftCreate,
+)
 from app.services import cierre_service
 
 router = APIRouter(prefix="/cierre", tags=["cierre"])
@@ -220,6 +227,52 @@ async def get_cierre_shift_status(
         period_end_time=period_end_time,
         shift_template_id=shift_template_id,
     )
+
+
+@router.get("/reconciliations", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def list_cierre_reconciliations(
+    request: Request,
+    status: Optional[str] = Query(None),
+    group_slug: Optional[str] = Query(None, alias="groupSlug"),
+    date_from: Optional[date] = Query(None, alias="dateFrom"),
+    date_to: Optional[date] = Query(None, alias="dateTo"),
+    cierre_id: Optional[UUID] = Query(None, alias="cierreId"),
+):
+    """List non-cash payment method reconciliation rows for cierre."""
+    return await cierre_service.list_reconciliations(
+        request,
+        status=status,
+        group_slug=group_slug,
+        date_from=date_from,
+        date_to=date_to,
+        cierre_id=cierre_id,
+    )
+
+
+@router.get("/reconciliations/{reconciliation_id}", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def get_cierre_reconciliation(request: Request, reconciliation_id: UUID):
+    """Get a single payment method reconciliation row."""
+    return await cierre_service.get_reconciliation(request, reconciliation_id)
+
+
+@router.patch("/reconciliations/{reconciliation_id}/reported", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def update_cierre_reconciliation_reported(
+    request: Request,
+    reconciliation_id: UUID,
+    body: CierreReconciliationReportedUpdate,
+):
+    """Update the reported/provider amount for a reconciliation row."""
+    return await cierre_service.update_reconciliation_reported(request, reconciliation_id, body)
+
+
+@router.post("/reconciliations/{reconciliation_id}/resolve", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def resolve_cierre_reconciliation(
+    request: Request,
+    reconciliation_id: UUID,
+    body: CierreReconciliationResolve,
+):
+    """Resolve a reconciliation row and optionally create a draft PUC adjustment."""
+    return await cierre_service.resolve_reconciliation(request, reconciliation_id, body)
 
 
 @router.get("/{cierre_id}", dependencies=[Depends(require_module(Module.FINANZAS))])

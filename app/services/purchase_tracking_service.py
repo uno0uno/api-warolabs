@@ -6,11 +6,13 @@ Handles status transitions, attachments, and history for purchase orders
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 from datetime import datetime
+from decimal import Decimal
 from fastapi import Request, Response, HTTPException, UploadFile
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
 from app.services.aws_s3_service import AWSS3Service
+from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
 import logging
 
 logger = logging.getLogger(__name__)
@@ -41,7 +43,7 @@ STATE_TRANSITIONS = {
     'confirmed': ['preparing', 'paid', 'invoiced', 'cancelled'],  # Can pay before invoice (contado) or invoice first (credito)
     'preparing': ['paid', 'invoiced', 'cancelled'],  # Can pay before invoice (contado) or invoice first (credito)
     'paid': ['invoiced'],  # After payment, supplier can invoice (for contado flow)
-    'invoiced': ['shipped'],  # Ship after invoicing
+    'invoiced': ['shipped', 'paid'],  # Ship after invoicing or pay direct/supplier debt
     'shipped': ['received', 'partially_received', 'overdue'],
     'partially_received': ['received', 'overdue'],
     'received': ['paid'],  # Pay after reception with quality verification (credito flow)
@@ -53,6 +55,169 @@ def validate_state_transition(from_status: str, to_status: str) -> bool:
     """Validate if a state transition is allowed"""
     allowed_transitions = STATE_TRANSITIONS.get(from_status, [])
     return to_status in allowed_transitions
+
+
+async def _resolve_purchase_payment_account_code(
+    conn,
+    tenant_id: UUID,
+    payment_method: Optional[str],
+    payment_method_id: Optional[UUID],
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve stored method slug and GL credit account for supplier payments."""
+    method_slug = payment_method
+    credit_code = None
+
+    if payment_method_id:
+        row = await conn.fetchrow(
+            """SELECT pmg.slug, pm.gl_account_code AS method_code, pmg.gl_account_code AS group_code
+               FROM payment_methods pm
+               JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+               WHERE pm.id = $1
+                 AND pm.tenant_id = $2
+                 AND pm.is_active = true""",
+            payment_method_id,
+            tenant_id,
+        )
+        if row:
+            method_slug = row["slug"]
+            credit_code = row["method_code"] or row["group_code"]
+
+    if not credit_code and method_slug:
+        row = await conn.fetchrow(
+            """SELECT gl_account_code
+                 FROM payment_method_groups
+                WHERE slug = $1
+                  AND (tenant_id = $2 OR tenant_id IS NULL)
+                  AND is_active = TRUE
+                ORDER BY (tenant_id IS NULL) ASC
+                LIMIT 1""",
+            method_slug,
+            tenant_id,
+        )
+        if row:
+            credit_code = row["gl_account_code"]
+
+    if not credit_code:
+        credit_code = {
+            "cash": "1105",
+            "transfer": "1110",
+            "check": "1110",
+            "card": "1110",
+            "credit_card": "1110",
+            "debit_card": "1110",
+            "digital": "1110",
+        }.get(method_slug or "", "1105")
+
+    return method_slug, credit_code
+
+
+async def _post_supplier_payment_gl_entry(
+    conn,
+    tenant_id: UUID,
+    purchase_id: UUID,
+    amount: float,
+    payment_date: datetime,
+    description: str,
+    payment_method: Optional[str],
+    payment_method_id: Optional[UUID],
+) -> None:
+    """Post payment of supplier debt: Deb 2205 / Cred payment method account."""
+    amount_decimal = Decimal(str(amount))
+    if amount_decimal <= 0:
+        return
+
+    existing = await conn.fetchval(
+        """SELECT id
+             FROM tenant_journal_entries
+            WHERE tenant_id = $1
+              AND source_module = 'system'
+              AND source_id = $2
+              AND status = 'posted'
+              AND description LIKE 'Pago proveedor%'
+            LIMIT 1""",
+        tenant_id,
+        purchase_id,
+    )
+    if existing:
+        logger.info(f"[GL] Supplier payment GL already exists for purchase {purchase_id}")
+        return
+
+    timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+    entry_date = local_date_for_tenant(payment_date, timezone_name)
+    period_year = entry_date.year
+    period_month = entry_date.month
+
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id,
+        period_year,
+        period_month,
+    )
+    if closed:
+        logger.warning(
+            f"[GL] Period {period_year}-{period_month:02d} closed — skip supplier payment GL for {purchase_id}"
+        )
+        return
+
+    debit_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id,
+        "2205",
+    )
+    method_slug, credit_code = await _resolve_purchase_payment_account_code(
+        conn,
+        tenant_id,
+        payment_method,
+        payment_method_id,
+    )
+    credit_acct = await conn.fetchrow(
+        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
+        tenant_id,
+        credit_code,
+    )
+    if not debit_acct or not credit_acct:
+        logger.warning(
+            f"[GL] Supplier payment account missing (debit=2205, credit={credit_code}, method={method_slug})"
+        )
+        return
+
+    amount_value = float(amount_decimal)
+    entry_row = await conn.fetchrow(
+        """INSERT INTO tenant_journal_entries
+               (tenant_id, entry_date, period_year, period_month,
+                description, source_module, source_id, status,
+                total_debit, total_credit, posted_at)
+           VALUES ($1, $2, $3, $4, $5, 'system', $6, 'posted', $7, $8, NOW())
+           RETURNING id""",
+        tenant_id,
+        entry_date,
+        period_year,
+        period_month,
+        description,
+        purchase_id,
+        amount_value,
+        amount_value,
+    )
+    entry_id = entry_row["id"]
+    await conn.execute(
+        """INSERT INTO tenant_journal_lines
+               (journal_entry_id, account_id, debit, credit, description, line_order)
+           VALUES ($1, $2, $3, 0, $4, 0)""",
+        entry_id,
+        debit_acct["id"],
+        amount_value,
+        description,
+    )
+    await conn.execute(
+        """INSERT INTO tenant_journal_lines
+               (journal_entry_id, account_id, debit, credit, description, line_order)
+           VALUES ($1, $2, 0, $3, $4, 1)""",
+        entry_id,
+        credit_acct["id"],
+        amount_value,
+        description,
+    )
 
 # =============================================================================
 # ATTACHMENT UPLOAD HELPER
@@ -730,6 +895,7 @@ async def transition_to_shipped(
                 )
 
                 # Send email notification to supplier
+                purchase_info = None
                 try:
                     purchase_info = await conn.fetchrow("""
                         SELECT tp.purchase_number, ts.name as supplier_name, ts.email as supplier_email,
@@ -997,6 +1163,7 @@ async def transition_to_received(
                 )
 
                 # Send email notification to supplier
+                purchase_info = None
                 try:
                     purchase_info = await conn.fetchrow("""
                         SELECT tp.purchase_number, ts.name as supplier_name, ts.email as supplier_email,
@@ -1227,6 +1394,7 @@ async def transition_to_paid(
     response: Response,
     purchase_id: UUID,
     payment_method: str,
+    payment_method_id: Optional[UUID],
     payment_reference: str,
     payment_amount: float,
     payment_date: str,
@@ -1267,19 +1435,27 @@ async def transition_to_paid(
                         detail=f"Cannot transition from {purchase['status']} to paid"
                     )
 
+                payment_method, _credit_code = await _resolve_purchase_payment_account_code(
+                    conn,
+                    tenant_id,
+                    payment_method,
+                    payment_method_id,
+                )
+
                 # Update purchase
                 await conn.execute("""
                     UPDATE tenant_purchases
                     SET
                         status = 'paid',
                         payment_method = $1,
-                        payment_reference = $2,
-                        payment_amount = $3,
-                        payment_date = $4,
+                        payment_method_id = $2,
+                        payment_reference = $3,
+                        payment_amount = $4,
+                        payment_date = $5,
                         paid_at = NOW(),
                         updated_at = NOW()
-                    WHERE id = $5
-                """, payment_method, payment_reference, payment_amount, payment_dt, purchase_id)
+                    WHERE id = $6
+                """, payment_method, payment_method_id, payment_reference, payment_amount, payment_dt, purchase_id)
 
                 # Create history entry
                 await create_status_history_entry(
@@ -1287,6 +1463,7 @@ async def transition_to_paid(
                     purchase['status'], 'paid', user_id,
                     {
                         "payment_method": payment_method,
+                        "payment_method_id": str(payment_method_id) if payment_method_id else None,
                         "payment_amount": str(payment_amount),
                         "payment_date": payment_dt.isoformat()
                     },
@@ -1320,6 +1497,20 @@ async def transition_to_paid(
 
                 except Exception as query_error:
                     pass
+
+                try:
+                    await _post_supplier_payment_gl_entry(
+                        conn=conn,
+                        tenant_id=tenant_id,
+                        purchase_id=purchase_id,
+                        amount=payment_amount,
+                        payment_date=payment_dt,
+                        description=f"Pago proveedor {purchase_info['purchase_number'] if purchase_info else purchase_id}",
+                        payment_method=payment_method,
+                        payment_method_id=payment_method_id,
+                    )
+                except Exception as gl_error:
+                    logger.warning(f"[GL] supplier payment GL post failed for {purchase_id}: {gl_error}")
 
                 # Send Discord notification
                 if discord_purchase_actions_service and purchase_info:
@@ -1592,4 +1783,3 @@ async def upload_transition_attachments(
     except Exception as e:
         logger.error(f"Error uploading transition attachments: {e}")
         raise HTTPException(status_code=500, detail="Error uploading attachments")
-

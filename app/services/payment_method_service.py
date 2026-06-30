@@ -409,7 +409,7 @@ async def _list_payment_methods_by_tenant_id(
     async with get_db_connection(use_transaction=False) as conn:
         groups = await conn.fetch(
             """
-            SELECT id, name, slug, triggers_cartera
+            SELECT id, name, slug, triggers_cartera, gl_account_code
             FROM payment_method_groups
             WHERE (tenant_id IS NULL OR tenant_id = $1) AND is_active = true
             ORDER BY sort_order, name
@@ -419,7 +419,7 @@ async def _list_payment_methods_by_tenant_id(
 
         methods = await conn.fetch(
             """
-            SELECT id, group_id, name
+            SELECT id, group_id, name, gl_account_code
             FROM payment_methods
             WHERE tenant_id = $1 AND is_active = true
             ORDER BY sort_order, name
@@ -432,7 +432,11 @@ async def _list_payment_methods_by_tenant_id(
         gid = str(m["group_id"])
         if gid not in methods_by_group:
             methods_by_group[gid] = []
-        methods_by_group[gid].append({"id": str(m["id"]), "name": m["name"]})
+        methods_by_group[gid].append({
+            "id": str(m["id"]),
+            "name": m["name"],
+            "glAccountCode": m["gl_account_code"],
+        })
 
     data = [
         {
@@ -440,6 +444,7 @@ async def _list_payment_methods_by_tenant_id(
             "name": g["name"],
             "slug": g["slug"],
             "triggersCartera": g["triggers_cartera"],
+            "glAccountCode": g["gl_account_code"],
             "methods": methods_by_group.get(str(g["id"]), []),
         }
         for g in groups

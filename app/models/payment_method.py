@@ -36,6 +36,7 @@ class PaymentMethod(BaseModel):
     name: str
     isActive: bool
     sortOrder: int
+    glAccountCode: Optional[str] = None
 
 
 class PaymentMethodGroupWithMethods(PaymentMethodGroup):
@@ -47,6 +48,7 @@ class PaymentMethodGroupWithMethods(PaymentMethodGroup):
 class PosPaymentMethod(BaseModel):
     id: str
     name: str
+    glAccountCode: Optional[str] = None
 
 
 class PosPaymentMethodGroup(BaseModel):
@@ -54,6 +56,7 @@ class PosPaymentMethodGroup(BaseModel):
     name: str
     slug: str
     triggersCartera: bool
+    glAccountCode: Optional[str] = None
     methods: List[PosPaymentMethod] = []
 
 

@@ -21,7 +21,13 @@ from app.core.timezones import (
     resolve_tenant_timezone,
     tenant_today,
 )
-from app.models.cierre import CierreCashSettingsUpdate, CierreCreate, OpenShiftCreate
+from app.models.cierre import (
+    CierreCashSettingsUpdate,
+    CierreCreate,
+    CierreReconciliationReportedUpdate,
+    CierreReconciliationResolve,
+    OpenShiftCreate,
+)
 from app.services.tip_tax_service import tip_settlement_total
 
 logger = logging.getLogger(__name__)
@@ -44,6 +50,36 @@ _SLUG_DEBIT_CODE: Dict[str, str] = {
 INGRESOS_CODE   = "4175"   # Servicios de restaurante y similares
 COGS_CODE       = "6135"   # Costo de ventas
 INVENTARIO_CODE = "1435"   # Inventarios — materia prima y suministros
+NON_RECONCILABLE_PAYMENT_GROUPS = {"cash", "untracked"}
+RECONCILIATION_STATUSES = {"not_required", "pending", "matched", "needs_review", "resolved"}
+RECONCILIATION_REASONS = {
+    "commission",
+    "timing",
+    "missing_sale",
+    "duplicate",
+    "client_balance",
+    "method_misclassified",
+    "real_surplus",
+    "real_shortage",
+    "other",
+}
+
+
+def _initial_reconciliation_status(group_slug: str, total: float) -> str:
+    if group_slug in NON_RECONCILABLE_PAYMENT_GROUPS or float(total or 0) == 0:
+        return "not_required"
+    return "pending"
+
+
+def _status_from_reported(expected: Decimal, reported: Decimal) -> str:
+    return "matched" if reported == expected else "needs_review"
+
+
+def _normalize_reported_for_expected(expected: Decimal, reported: Decimal) -> Decimal:
+    """Treat a positive typed amount as an outflow when the conciliable net is negative."""
+    if expected < 0 and reported > 0:
+        return -reported
+    return reported
 
 
 def _tip_gl_amounts(
@@ -1048,6 +1084,35 @@ def _build_expense_filter(
     return sql, [period_start, period_end]
 
 
+def _build_purchase_payment_filter(
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime],
+    period_end_time: Optional[datetime],
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
+    param_offset: int = 2,
+):
+    """
+    Direct purchases use the cash/bank movement date for arqueo control.
+    Date-only windows compare in tenant-local date; shift windows compare the
+    actual timestamp so cross-midnight turns stay accurate.
+    """
+    movement_expr = "COALESCE(payment_date, paid_at, purchase_date)"
+    if period_start_time and period_end_time:
+        p2 = f"${param_offset}"
+        p3 = f"${param_offset + 1}"
+        sql = f"AND {movement_expr} >= {p2} AND {movement_expr} <= {p3}"
+        return sql, [period_start_time, period_end_time]
+    p_tz = f"${param_offset}"
+    p2 = f"${param_offset + 1}"
+    p3 = f"${param_offset + 2}"
+    sql = (
+        f"AND ({movement_expr} AT TIME ZONE {p_tz})::date >= {p2} "
+        f"AND ({movement_expr} AT TIME ZONE {p_tz})::date <= {p3}"
+    )
+    return sql, [timezone_name, period_start, period_end]
+
+
 def _build_open_tables_filter(
     period_start: date,
     period_end: date,
@@ -1294,6 +1359,7 @@ def _compute_cash_expected(
     cash_tips: float,
     total_sales: float,
     gastos_efectivo: float,
+    cash_purchases: float = 0.0,
 ) -> float:
     """Expected drawer cash: opening float + cash received − cash expenses.
 
@@ -1301,8 +1367,8 @@ def _compute_cash_expected(
     cash_tips again. Otherwise cash_tips is additive (split-pay / card tips).
     """
     if total_cash >= total_sales + cash_tips:
-        return opening_cash + total_cash - gastos_efectivo
-    return opening_cash + total_cash + cash_tips - gastos_efectivo
+        return opening_cash + total_cash - gastos_efectivo - cash_purchases
+    return opening_cash + total_cash + cash_tips - gastos_efectivo - cash_purchases
 
 
 def _sum_advance_bucket(bucket: Dict[str, float]) -> float:
@@ -1316,6 +1382,133 @@ def _advance_audit_totals(advance_totals: Dict[str, Dict[str, float]]) -> Dict[s
         "tableAdvanceApplications": _sum_advance_bucket(advance_totals.get("applications", {})),
         "tableAdvanceCover": float(advance_totals.get("cover", {}).get("total", 0.0)),
     }
+
+
+async def _compute_method_outflow_rows(
+    conn,
+    tenant_id: UUID,
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime] = None,
+    period_end_time: Optional[datetime] = None,
+    timezone_name: str = DEFAULT_TENANT_TIMEZONE,
+) -> List[Dict[str, Any]]:
+    expense_filter, expense_params = _build_expense_filter(
+        period_start, period_end, period_start_time, period_end_time
+    )
+    purchase_filter, purchase_params = _build_purchase_payment_filter(
+        period_start, period_end, period_start_time, period_end_time, timezone_name
+    )
+
+    expense_rows = await conn.fetch(
+        f"""
+        SELECT
+            COALESCE(pmg.slug, e.payment_method) AS group_slug,
+            COALESCE(pm.name, e.payment_method) AS method_name,
+            COALESCE(SUM(e.amount), 0) AS total
+        FROM tenant_expenses e
+        LEFT JOIN payment_methods pm ON pm.id = e.payment_method_id
+        LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+        WHERE e.tenant_id = $1
+          AND COALESCE(pmg.slug, e.payment_method) IS NOT NULL
+          {expense_filter}
+        GROUP BY COALESCE(pmg.slug, e.payment_method), COALESCE(pm.name, e.payment_method)
+        """,
+        tenant_id, *expense_params,
+    )
+
+    purchase_rows = await conn.fetch(
+        f"""
+        SELECT
+            COALESCE(pmg.slug, tp.payment_method) AS group_slug,
+            COALESCE(pm.name, tp.payment_method) AS method_name,
+            COALESCE(SUM(tp.payment_amount), 0) AS total
+        FROM tenant_purchases tp
+        LEFT JOIN payment_methods pm ON pm.id = tp.payment_method_id
+        LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+        WHERE tp.tenant_id = $1
+          AND tp.status = 'paid'
+          AND COALESCE(tp.payment_amount, 0) > 0
+          AND COALESCE(pmg.slug, tp.payment_method) IS NOT NULL
+          {purchase_filter}
+        GROUP BY COALESCE(pmg.slug, tp.payment_method), COALESCE(pm.name, tp.payment_method)
+        """,
+        tenant_id, *purchase_params,
+    )
+
+    aggregated: Dict[tuple, Dict[str, Any]] = {}
+    for row in expense_rows:
+        key = (row["group_slug"], row["method_name"])
+        aggregated.setdefault(key, {
+            "group_slug": row["group_slug"],
+            "method_name": row["method_name"],
+            "expense_outflows_amount": 0.0,
+            "purchase_outflows_amount": 0.0,
+        })
+        aggregated[key]["expense_outflows_amount"] += float(row["total"] or 0)
+
+    for row in purchase_rows:
+        key = (row["group_slug"], row["method_name"])
+        aggregated.setdefault(key, {
+            "group_slug": row["group_slug"],
+            "method_name": row["method_name"],
+            "expense_outflows_amount": 0.0,
+            "purchase_outflows_amount": 0.0,
+        })
+        aggregated[key]["purchase_outflows_amount"] += float(row["total"] or 0)
+
+    return [
+        row for row in aggregated.values()
+        if row["expense_outflows_amount"] or row["purchase_outflows_amount"]
+    ]
+
+
+def _merge_breakdown_with_outflows(
+    inflow_rows: List[Dict[str, Any]],
+    outflow_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    aggregated: Dict[tuple, Dict[str, Any]] = {}
+
+    for row in inflow_rows:
+        key = (row["group_slug"], row["method_name"])
+        aggregated[key] = {
+            "group_slug": row["group_slug"],
+            "method_name": row["method_name"],
+            "total": float(row.get("total") or 0),
+            "gross_inflows_amount": float(row.get("gross_inflows_amount", row.get("total", 0)) or 0),
+            "expense_outflows_amount": float(row.get("expense_outflows_amount") or 0),
+            "purchase_outflows_amount": float(row.get("purchase_outflows_amount") or 0),
+        }
+
+    for row in outflow_rows:
+        key = (row["group_slug"], row["method_name"])
+        if key not in aggregated:
+            aggregated[key] = {
+                "group_slug": row["group_slug"],
+                "method_name": row["method_name"],
+                "total": 0.0,
+                "gross_inflows_amount": 0.0,
+                "expense_outflows_amount": 0.0,
+                "purchase_outflows_amount": 0.0,
+            }
+        aggregated[key]["expense_outflows_amount"] += float(row.get("expense_outflows_amount") or 0)
+        aggregated[key]["purchase_outflows_amount"] += float(row.get("purchase_outflows_amount") or 0)
+
+    for row in aggregated.values():
+        row["expected_amount"] = (
+            float(row["gross_inflows_amount"])
+            - float(row["expense_outflows_amount"])
+            - float(row["purchase_outflows_amount"])
+        )
+
+    return [
+        row for row in aggregated.values()
+        if (
+            row["gross_inflows_amount"]
+            or row["expense_outflows_amount"]
+            or row["purchase_outflows_amount"]
+        )
+    ]
 
 
 def _apply_table_session_advances_to_methods(
@@ -1545,6 +1738,24 @@ async def _compute_preview(
         tenant_id, *expense_params,
     )
 
+    purchase_filter, purchase_params = _build_purchase_payment_filter(
+        period_start, period_end, period_start_time, period_end_time, timezone_name
+    )
+    cash_purchases_row = await conn.fetchrow(
+        f"""
+        SELECT COALESCE(SUM(tp.payment_amount), 0) AS cash_purchases
+        FROM tenant_purchases tp
+        LEFT JOIN payment_methods pm ON pm.id = tp.payment_method_id
+        LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+        WHERE tp.tenant_id = $1
+          AND tp.status = 'paid'
+          AND COALESCE(tp.payment_amount, 0) > 0
+          AND COALESCE(pmg.slug, tp.payment_method) = 'cash'
+          {purchase_filter}
+        """,
+        tenant_id, *purchase_params,
+    )
+
     open_tables_row = await conn.fetchrow(
         f"""
         SELECT COUNT(*) AS open_tables_count
@@ -1561,6 +1772,7 @@ async def _compute_preview(
 
     total_cash = method_totals.get("cash", 0.0)
     gastos_efectivo = float(gastos_row["gastos_efectivo"])
+    cash_purchases = float(cash_purchases_row["cash_purchases"])
     total_tips = float(tips_row["total_tips"])
     total_tip_tax = float(tips_row["total_tip_tax"])
     cash_tips = float(cash_tips_row["cash_tips"])
@@ -1573,6 +1785,7 @@ async def _compute_preview(
         cash_tips,
         float(sales_row["total_sales"]),
         gastos_efectivo,
+        cash_purchases,
     )
 
     return {
@@ -1590,6 +1803,7 @@ async def _compute_preview(
         "totalDigital":     method_totals.get("digital", 0.0),
         "totalCredit":      method_totals.get("credit", 0.0),
         "gastosEfectivo":   gastos_efectivo,
+        "cashPurchases":    cash_purchases,
         "cashExpected":     cash_expected,
         "openTablesCount":  int(open_tables_row["open_tables_count"]),
     }
@@ -2331,7 +2545,14 @@ async def get_cierre_preview(
                 period_end_time=resolved.period_end_time,
                 timezone_name=timezone_name,
             )
-            preview["breakdown"] = breakdown
+            outflows = await _compute_method_outflow_rows(
+                conn, tenant_id,
+                resolved.period_start, resolved.period_end,
+                period_start_time=resolved.period_start_time,
+                period_end_time=resolved.period_end_time,
+                timezone_name=timezone_name,
+            )
+            preview["breakdown"] = _merge_breakdown_with_outflows(breakdown, outflows)
 
         return {"success": True, "data": preview}
 
@@ -2468,15 +2689,15 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                     total_sales, items_sold,
                     total_tips, total_tip_tax, cash_tips,
                     total_cash, total_card, total_digital, total_credit,
-                    gastos_efectivo, opening_cash, cash_expected, cash_counted, cash_difference,
+                    gastos_efectivo, cash_purchases, opening_cash, cash_expected, cash_counted, cash_difference,
                     cash_left_in_drawer, notes
                 ) VALUES (
                     $1, $2,
                     $3, $4,
                     $5, $6, $7,
                     $8, $9, $10, $11,
-                    $12, $13, $14, $15, $16,
-                    $17, $18
+                    $12, $13, $14, $15, $16, $17,
+                    $18, $19
                 )
                 RETURNING id, created_at
                 """,
@@ -2485,7 +2706,8 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 preview["totalTips"], preview["totalTipTax"], preview["cashTips"],
                 preview["totalCash"], preview["totalCard"],
                 preview["totalDigital"], preview["totalCredit"],
-                preview["gastosEfectivo"], opening_cash, preview["cashExpected"],
+                preview["gastosEfectivo"], preview["cashPurchases"],
+                opening_cash, preview["cashExpected"],
                 body.cash_counted, cash_difference,
                 cash_left,
                 body.notes,
@@ -2511,16 +2733,68 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 period_end_time=period_end_time,
                 timezone_name=timezone_name,
             )
+            outflow_rows = await _compute_method_outflow_rows(
+                conn, tenant_id, period_start, period_end,
+                period_start_time=period_start_time,
+                period_end_time=period_end_time,
+                timezone_name=timezone_name,
+            )
+            breakdown_rows = _merge_breakdown_with_outflows(breakdown_rows, outflow_rows)
             if breakdown_rows:
+                reported_map = {}
+                for item in body.payment_breakdown_reported or []:
+                    group_slug = item.group_slug
+                    method_name = item.method_name
+                    if group_slug and method_name:
+                        reported_map[(group_slug, method_name)] = item.reported_amount
+                reported_amounts = []
+                differences = []
+                statuses = []
+                for r in breakdown_rows:
+                    expected = Decimal(str(r.get("expected_amount", r["total"]) or 0))
+                    reported_raw = reported_map.get((r["group_slug"], r["method_name"]))
+                    reported = Decimal(str(reported_raw)) if reported_raw is not None else None
+                    if reported is not None:
+                        reported = _normalize_reported_for_expected(expected, reported)
+                    reported_amounts.append(float(reported) if reported is not None else None)
+                    differences.append(float(reported - expected) if reported is not None else None)
+                    statuses.append(
+                        _status_from_reported(expected, reported)
+                        if reported is not None
+                        else _initial_reconciliation_status(r["group_slug"], float(expected))
+                    )
                 await conn.execute(
                     """
-                    INSERT INTO cierre_payment_breakdown (cierre_id, group_slug, method_name, total)
-                    SELECT $1, unnest($2::text[]), unnest($3::text[]), unnest($4::numeric[])
+                    INSERT INTO cierre_payment_breakdown (
+                        cierre_id, group_slug, method_name, total,
+                        gross_inflows_amount, expense_outflows_amount, purchase_outflows_amount,
+                        expected_amount, reported_amount, difference_amount,
+                        reconciliation_status
+                    )
+                    SELECT
+                        $1,
+                        unnest($2::text[]),
+                        unnest($3::text[]),
+                        unnest($4::numeric[]),
+                        unnest($5::numeric[]),
+                        unnest($6::numeric[]),
+                        unnest($7::numeric[]),
+                        unnest($8::numeric[]),
+                        unnest($9::numeric[]),
+                        unnest($10::numeric[]),
+                        unnest($11::text[])
                     """,
                     summary_row["id"],
                     [r["group_slug"] for r in breakdown_rows],
                     [r["method_name"] for r in breakdown_rows],
                     [r["total"] for r in breakdown_rows],
+                    [r["gross_inflows_amount"] for r in breakdown_rows],
+                    [r["expense_outflows_amount"] for r in breakdown_rows],
+                    [r["purchase_outflows_amount"] for r in breakdown_rows],
+                    [r["expected_amount"] for r in breakdown_rows],
+                    reported_amounts,
+                    differences,
+                    statuses,
                 )
 
             # GL posting for cierre is intentionally disabled.
@@ -2575,6 +2849,377 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Payment reconciliation
+# ---------------------------------------------------------------------------
+
+def _reconciliation_row_to_dict(row) -> dict:
+    expected = row["expected_amount"] if row["expected_amount"] is not None else row["total"]
+    return {
+        "id": str(row["id"]),
+        "cierreId": str(row["cierre_id"]),
+        "accountingPeriodId": str(row["accounting_period_id"]),
+        "periodStart": row["period_start"].isoformat(),
+        "periodEnd": row["period_end"].isoformat(),
+        "closedAt": row["closed_at"].isoformat() if row["closed_at"] else None,
+        "groupSlug": row["group_slug"],
+        "methodName": row["method_name"],
+        "total": float(row["total"]),
+        "grossInflowsAmount": float(row["gross_inflows_amount"] if row["gross_inflows_amount"] is not None else row["total"]),
+        "expenseOutflowsAmount": float(row["expense_outflows_amount"] or 0),
+        "purchaseOutflowsAmount": float(row["purchase_outflows_amount"] or 0),
+        "expectedAmount": float(expected or 0),
+        "reportedAmount": float(row["reported_amount"]) if row["reported_amount"] is not None else None,
+        "differenceAmount": float(row["difference_amount"]) if row["difference_amount"] is not None else None,
+        "reconciliationStatus": row["reconciliation_status"] or _initial_reconciliation_status(
+            row["group_slug"], float(expected or 0),
+        ),
+        "reconciliationReason": row["reconciliation_reason"],
+        "reconciliationNotes": row["reconciliation_notes"],
+        "journalEntryId": str(row["journal_entry_id"]) if row["journal_entry_id"] else None,
+        "resolvedBy": str(row["resolved_by"]) if row["resolved_by"] else None,
+        "resolvedAt": row["resolved_at"].isoformat() if row["resolved_at"] else None,
+    }
+
+
+_RECONCILIATION_SELECT = """
+    SELECT
+        cpb.id, cpb.cierre_id, cpb.group_slug, cpb.method_name, cpb.total,
+        cpb.gross_inflows_amount, cpb.expense_outflows_amount, cpb.purchase_outflows_amount,
+        cpb.expected_amount, cpb.reported_amount, cpb.difference_amount,
+        cpb.reconciliation_status, cpb.reconciliation_reason,
+        cpb.reconciliation_notes, cpb.journal_entry_id, cpb.resolved_by,
+        cpb.resolved_at,
+        cs.accounting_period_id,
+        ap.period_start, ap.period_end, ap.closed_at
+    FROM cierre_payment_breakdown cpb
+    JOIN closing_summary cs ON cs.id = cpb.cierre_id
+    JOIN accounting_period ap ON ap.id = cs.accounting_period_id
+"""
+
+
+async def _fetch_reconciliation_row(conn, tenant_id: UUID, reconciliation_id: UUID):
+    return await conn.fetchrow(
+        f"""
+        {_RECONCILIATION_SELECT}
+        WHERE cpb.id = $1
+          AND cs.tenant_id = $2
+          AND ap.deleted_at IS NULL
+          AND cpb.group_slug NOT IN ('cash', 'untracked')
+        """,
+        reconciliation_id, tenant_id,
+    )
+
+
+async def list_reconciliations(
+    request: Request,
+    status: Optional[str] = None,
+    group_slug: Optional[str] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    cierre_id: Optional[UUID] = None,
+) -> dict:
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        conditions = [
+            "cs.tenant_id = $1",
+            "ap.deleted_at IS NULL",
+            "cpb.group_slug NOT IN ('cash', 'untracked')",
+        ]
+        params: List[Any] = [tenant_id]
+        if status:
+            if status not in RECONCILIATION_STATUSES:
+                raise APIError("Estado de conciliación inválido", status_code=422)
+            params.append(status)
+            conditions.append(f"COALESCE(cpb.reconciliation_status, 'pending') = ${len(params)}")
+        if group_slug:
+            params.append(group_slug)
+            conditions.append(f"cpb.group_slug = ${len(params)}")
+        if date_from:
+            params.append(date_from)
+            conditions.append(f"ap.period_start >= ${len(params)}")
+        if date_to:
+            params.append(date_to)
+            conditions.append(f"ap.period_end <= ${len(params)}")
+        if cierre_id:
+            params.append(cierre_id)
+            conditions.append(f"cpb.cierre_id = ${len(params)}")
+
+        async with get_db_connection(use_transaction=False) as conn:
+            rows = await conn.fetch(
+                f"""
+                {_RECONCILIATION_SELECT}
+                WHERE {' AND '.join(conditions)}
+                ORDER BY ap.closed_at DESC, cpb.group_slug, cpb.method_name
+                """,
+                *params,
+            )
+
+        data = [_reconciliation_row_to_dict(row) for row in rows]
+        summary = {
+            "pending": sum(1 for r in data if r["reconciliationStatus"] in {"pending", "needs_review"}),
+            "withDifference": sum(1 for r in data if (r["differenceAmount"] or 0) != 0),
+            "totalExpected": sum(r["expectedAmount"] for r in data),
+            "totalDifference": sum(r["differenceAmount"] or 0 for r in data),
+        }
+        return {"success": True, "data": data, "summary": summary}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in list_reconciliations: {exc}")
+        raise APIError(f"Error in list_reconciliations: {exc}", status_code=500)
+
+
+async def get_reconciliation(request: Request, reconciliation_id: UUID) -> dict:
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=False) as conn:
+            row = await _fetch_reconciliation_row(conn, tenant_id, reconciliation_id)
+        if not row:
+            raise APIError("Conciliación no encontrada", status_code=404)
+        return {"success": True, "data": _reconciliation_row_to_dict(row)}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in get_reconciliation: {exc}")
+        raise APIError(f"Error in get_reconciliation: {exc}", status_code=500)
+
+
+async def update_reconciliation_reported(
+    request: Request,
+    reconciliation_id: UUID,
+    body: CierreReconciliationReportedUpdate,
+) -> dict:
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                row = await _fetch_reconciliation_row(conn, tenant_id, reconciliation_id)
+                if not row:
+                    raise APIError("Conciliación no encontrada", status_code=404)
+                if row["journal_entry_id"]:
+                    raise APIError(
+                        "Esta conciliación ya tiene un asiento enlazado. Anula o revisa el asiento antes de cambiar el monto.",
+                        status_code=409,
+                    )
+                expected = Decimal(str(row["expected_amount"] if row["expected_amount"] is not None else row["total"]))
+                reported = _normalize_reported_for_expected(expected, Decimal(str(body.reported_amount)))
+                status = _status_from_reported(expected, reported)
+                updated = await conn.fetchrow(
+                    """
+                    UPDATE cierre_payment_breakdown
+                    SET reported_amount = $2,
+                        difference_amount = $3,
+                        reconciliation_status = $4,
+                        reconciliation_notes = COALESCE($5, reconciliation_notes),
+                        reconciliation_reason = NULL,
+                        resolved_by = NULL,
+                        resolved_at = NULL
+                    WHERE id = $1
+                    RETURNING *
+                    """,
+                    reconciliation_id,
+                    float(reported),
+                    float(reported - expected),
+                    status,
+                    body.notes,
+                )
+                full = await _fetch_reconciliation_row(conn, tenant_id, updated["id"])
+
+        return {"success": True, "data": _reconciliation_row_to_dict(full)}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in update_reconciliation_reported: {exc}")
+        raise APIError(f"Error in update_reconciliation_reported: {exc}", status_code=500)
+
+
+async def _account_id_for_code(conn, tenant_id: UUID, code: str):
+    return await conn.fetchval(
+        """
+        SELECT id
+        FROM tenant_accounts
+        WHERE tenant_id = $1 AND code = $2 AND is_active = true
+        """,
+        tenant_id, code,
+    )
+
+
+async def _create_reconciliation_journal_entry(
+    conn,
+    tenant_id: UUID,
+    user_id: Optional[UUID],
+    row,
+    reason: str,
+    notes: Optional[str],
+):
+    diff = Decimal(str(row["difference_amount"] or 0))
+    if diff == 0:
+        return None
+
+    no_auto_entry_reasons = {"timing", "method_misclassified", "duplicate"}
+    if reason in no_auto_entry_reasons:
+        return None
+
+    amount = abs(diff)
+    payment_code = _SLUG_DEBIT_CODE.get(row["group_slug"], "1110")
+    payment_account_id = await _account_id_for_code(conn, tenant_id, payment_code)
+    if not payment_account_id:
+        logger.warning("[reconciliation] Missing payment account %s for tenant %s", payment_code, tenant_id)
+        return None
+
+    debit_code = None
+    credit_code = None
+    if reason == "commission":
+        debit_code = "5305"
+        credit_code = payment_code
+    elif reason == "missing_sale":
+        debit_code = payment_code
+        credit_code = INGRESOS_CODE
+    elif reason == "client_balance":
+        debit_code = payment_code
+        credit_code = "2810"
+    elif reason == "real_surplus":
+        debit_code = payment_code
+        credit_code = "4295"
+    elif reason == "real_shortage":
+        debit_code = "1305"
+        credit_code = payment_code
+    elif reason == "other":
+        if diff > 0:
+            debit_code = payment_code
+            credit_code = "4295"
+        else:
+            debit_code = "5305"
+            credit_code = payment_code
+    else:
+        return None
+
+    debit_account_id = await _account_id_for_code(conn, tenant_id, debit_code)
+    credit_account_id = await _account_id_for_code(conn, tenant_id, credit_code)
+    if not debit_account_id or not credit_account_id:
+        logger.warning(
+            "[reconciliation] Missing accounts debit=%s credit=%s tenant=%s",
+            debit_code, credit_code, tenant_id,
+        )
+        return None
+
+    entry_date = row["period_end"]
+    description = (
+        f"Conciliación {row['method_name']} — "
+        f"{row['period_start'].isoformat()} a {row['period_end'].isoformat()}"
+    )
+    if notes:
+        description = f"{description}: {notes[:180]}"
+
+    entry_row = await conn.fetchrow(
+        """
+        INSERT INTO tenant_journal_entries
+            (tenant_id, entry_date, period_year, period_month,
+             description, source_module, source_id, status,
+             total_debit, total_credit, created_by, pending_review)
+        VALUES ($1, $2, $3, $4, $5, 'arqueo', $6, 'draft', $7, $8, $9, true)
+        RETURNING id
+        """,
+        tenant_id,
+        entry_date,
+        entry_date.year,
+        entry_date.month,
+        description,
+        row["id"],
+        float(amount),
+        float(amount),
+        user_id,
+    )
+    entry_id = entry_row["id"]
+    await conn.execute(
+        """
+        INSERT INTO tenant_journal_lines
+            (journal_entry_id, account_id, debit, credit, description, line_order)
+        VALUES
+            ($1, $2, $3, 0, $5, 0),
+            ($1, $4, 0, $3, $5, 1)
+        """,
+        entry_id,
+        debit_account_id,
+        float(amount),
+        credit_account_id,
+        description,
+    )
+    return entry_id
+
+
+async def resolve_reconciliation(
+    request: Request,
+    reconciliation_id: UUID,
+    body: CierreReconciliationResolve,
+) -> dict:
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+        if body.reason not in RECONCILIATION_REASONS:
+            raise APIError("Motivo de conciliación inválido", status_code=422)
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                row = await _fetch_reconciliation_row(conn, tenant_id, reconciliation_id)
+                if not row:
+                    raise APIError("Conciliación no encontrada", status_code=404)
+                if row["reported_amount"] is None:
+                    raise APIError("Primero registra el monto reportado", status_code=422)
+
+                journal_entry_id = row["journal_entry_id"]
+                if body.create_journal_entry and not journal_entry_id:
+                    journal_entry_id = await _create_reconciliation_journal_entry(
+                        conn, tenant_id, user_id, row, body.reason, body.notes,
+                    )
+
+                await conn.execute(
+                    """
+                    UPDATE cierre_payment_breakdown
+                    SET reconciliation_status = 'resolved',
+                        reconciliation_reason = $2,
+                        reconciliation_notes = COALESCE($3, reconciliation_notes),
+                        journal_entry_id = COALESCE($4, journal_entry_id),
+                        resolved_by = $5,
+                        resolved_at = NOW()
+                    WHERE id = $1
+                    """,
+                    reconciliation_id,
+                    body.reason,
+                    body.notes,
+                    journal_entry_id,
+                    user_id,
+                )
+                updated = await _fetch_reconciliation_row(conn, tenant_id, reconciliation_id)
+
+        return {"success": True, "data": _reconciliation_row_to_dict(updated)}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in resolve_reconciliation: {exc}")
+        raise APIError(f"Error in resolve_reconciliation: {exc}", status_code=500)
+
+
+# ---------------------------------------------------------------------------
 # GET /cierre
 # ---------------------------------------------------------------------------
 
@@ -2586,8 +3231,23 @@ _CIERRE_SUMMARY_COLUMNS = """
     cs.total_sales, cs.items_sold,
     cs.total_tips, cs.total_tip_tax, cs.cash_tips,
     cs.total_cash, cs.total_card, cs.total_digital, cs.total_credit,
-    cs.gastos_efectivo, cs.opening_cash, cs.cash_expected, cs.cash_counted, cs.cash_difference,
-    cs.cash_left_in_drawer, cs.notes
+    cs.gastos_efectivo, COALESCE(cs.cash_purchases, 0) AS cash_purchases,
+    cs.opening_cash, cs.cash_expected, cs.cash_counted, cs.cash_difference,
+    cs.cash_left_in_drawer, cs.notes,
+    (
+        SELECT COUNT(*)
+        FROM cierre_payment_breakdown cpb
+        WHERE cpb.cierre_id = cs.id
+          AND cpb.group_slug NOT IN ('cash', 'untracked')
+          AND cpb.reconciliation_status IN ('pending', 'needs_review')
+    ) AS reconciliation_pending_count,
+    (
+        SELECT COALESCE(SUM(cpb.difference_amount), 0)
+        FROM cierre_payment_breakdown cpb
+        WHERE cpb.cierre_id = cs.id
+          AND cpb.group_slug NOT IN ('cash', 'untracked')
+          AND cpb.difference_amount IS NOT NULL
+    ) AS reconciliation_difference_total
 """
 
 _CIERRE_SUMMARY_FROM = """
@@ -2692,7 +3352,12 @@ async def get_cierre(request: Request, cierre_id: UUID) -> dict:
 
             breakdown_rows = await conn.fetch(
                 """
-                SELECT group_slug, method_name, total
+                SELECT
+                    id, group_slug, method_name, total, expected_amount,
+                    gross_inflows_amount, expense_outflows_amount, purchase_outflows_amount,
+                    reported_amount, difference_amount, reconciliation_status,
+                    reconciliation_reason, reconciliation_notes, journal_entry_id,
+                    resolved_by, resolved_at
                 FROM cierre_payment_breakdown
                 WHERE cierre_id = $1
                 ORDER BY group_slug, method_name
@@ -2701,9 +3366,22 @@ async def get_cierre(request: Request, cierre_id: UUID) -> dict:
             )
             breakdown = [
                 {
+                    "id":         str(r["id"]),
                     "groupSlug":  r["group_slug"],
                     "methodName": r["method_name"],
                     "total":      float(r["total"]),
+                    "grossInflowsAmount": float(r["gross_inflows_amount"] if r["gross_inflows_amount"] is not None else r["total"]),
+                    "expenseOutflowsAmount": float(r["expense_outflows_amount"] or 0),
+                    "purchaseOutflowsAmount": float(r["purchase_outflows_amount"] or 0),
+                    "expectedAmount": float(r["expected_amount"] if r["expected_amount"] is not None else r["total"]),
+                    "reportedAmount": float(r["reported_amount"]) if r["reported_amount"] is not None else None,
+                    "differenceAmount": float(r["difference_amount"]) if r["difference_amount"] is not None else None,
+                    "reconciliationStatus": r["reconciliation_status"],
+                    "reconciliationReason": r["reconciliation_reason"],
+                    "reconciliationNotes": r["reconciliation_notes"],
+                    "journalEntryId": str(r["journal_entry_id"]) if r["journal_entry_id"] else None,
+                    "resolvedBy": str(r["resolved_by"]) if r["resolved_by"] else None,
+                    "resolvedAt": r["resolved_at"].isoformat() if r["resolved_at"] else None,
                 }
                 for r in breakdown_rows
             ]
@@ -2849,6 +3527,7 @@ async def get_cierre_mensual(request: Request, year: int, month: int) -> dict:
             "totalDigital":   sum(r["totalDigital"]    for r in daily),
             "totalCredit":    sum(r["totalCredit"]     for r in daily),
             "gastosEfectivo": sum(r["gastosEfectivo"]  for r in daily),
+            "cashPurchases":   sum(r["cashPurchases"]   for r in daily),
             "cashExpected":   sum(r["cashExpected"]    for r in daily),
             "cashCounted":    sum(r["cashCounted"]     for r in daily),
             "cashDifference": sum(r["cashDifference"]  for r in daily),
@@ -2931,11 +3610,14 @@ def _row_to_dict(row) -> dict:
         "totalDigital":         float(row["total_digital"]),
         "totalCredit":          float(row["total_credit"]),
         "gastosEfectivo":       float(row["gastos_efectivo"]),
+        "cashPurchases":        float(row["cash_purchases"] or 0),
         "openingCash":          float(row["opening_cash"] or 0),
         "cashExpected":         float(row["cash_expected"]),
         "cashCounted":          float(row["cash_counted"]),
         "cashDifference":       float(row["cash_difference"]),
         "cashLeftInDrawer":     float(row["cash_left_in_drawer"]) if row["cash_left_in_drawer"] is not None else None,
+        "reconciliationPendingCount": int(row["reconciliation_pending_count"] or 0),
+        "reconciliationDifferenceTotal": float(row["reconciliation_difference_total"] or 0),
         "notes":                row["notes"],
         "closedAt":             row["closed_at"].isoformat(),
     }

@@ -21,6 +21,15 @@ class OpenShiftCreate(BaseModel):
         populate_by_name = True
 
 
+class CierrePaymentBreakdownReported(BaseModel):
+    group_slug: str = Field(alias='groupSlug', min_length=1)
+    method_name: str = Field(alias='methodName', min_length=1)
+    reported_amount: float = Field(alias='reportedAmount')
+
+    class Config:
+        populate_by_name = True
+
+
 class CierreCreate(BaseModel):
     period_start: date = Field(alias='periodStart')
     period_end: date = Field(alias='periodEnd')
@@ -31,7 +40,25 @@ class CierreCreate(BaseModel):
     shift_template_id: Optional[UUID] = Field(None, alias='shiftTemplateId')
     cash_counted: float = Field(alias='cashCounted')
     cash_left_in_drawer: Optional[float] = Field(None, alias='cashLeftInDrawer', ge=0)
+    payment_breakdown_reported: Optional[List[CierrePaymentBreakdownReported]] = Field(None, alias='paymentBreakdownReported')
     notes: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class CierreReconciliationReportedUpdate(BaseModel):
+    reported_amount: float = Field(alias='reportedAmount')
+    notes: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class CierreReconciliationResolve(BaseModel):
+    reason: str
+    notes: Optional[str] = None
+    create_journal_entry: bool = Field(False, alias='createJournalEntry')
 
     class Config:
         populate_by_name = True
@@ -52,6 +79,7 @@ class CierrePreviewData(BaseModel):
     total_digital: float = Field(alias='totalDigital')
     total_credit: float = Field(alias='totalCredit')
     gastos_efectivo: float = Field(alias='gastosEfectivo')
+    cash_purchases: float = Field(0, alias='cashPurchases')
     opening_cash: float = Field(0, alias='openingCash')
     cash_expected: float = Field(alias='cashExpected')
     open_tables_count: int = Field(alias='openTablesCount')
@@ -78,6 +106,7 @@ class ClosingSummaryOut(BaseModel):
     total_digital: float = Field(alias='totalDigital')
     total_credit: float = Field(alias='totalCredit')
     gastos_efectivo: float = Field(alias='gastosEfectivo')
+    cash_purchases: float = Field(0, alias='cashPurchases')
     opening_cash: float = Field(0, alias='openingCash')
     cash_left_in_drawer: Optional[float] = Field(None, alias='cashLeftInDrawer')
     cash_expected: float = Field(alias='cashExpected')

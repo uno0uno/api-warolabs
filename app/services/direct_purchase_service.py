@@ -185,6 +185,7 @@ async def _post_purchase_gl_entry(
     total_amount: float,
     purchase_date,            # datetime or date
     description: str,
+    payment_method: Optional[str],
     payment_method_id: Optional[UUID],
     timezone_name: str,
 ) -> None:
@@ -196,7 +197,8 @@ async def _post_purchase_gl_entry(
     Credit account resolution (two-level, migration 028):
         1. payment_methods.gl_account_code       (individual override)
         2. payment_method_groups.gl_account_code  (group default)
-        3. Hardcoded fallback: 2205 Proveedores   (no payment method set)
+        3. payment_method group slug default      (cash/card/digital without sub-method)
+        4. Hardcoded fallback: 2205 Proveedores   (no payment method set)
 
     Silently skips if: total_amount <= 0, account missing, period closed.
     Caller MUST wrap in try/except for graceful degrade.
@@ -243,6 +245,21 @@ async def _post_purchase_gl_entry(
         )
         if row:
             credit_code = row["method_code"] or row["group_code"]
+
+    if not credit_code and payment_method:
+        row = await conn.fetchrow(
+            """SELECT gl_account_code
+                 FROM payment_method_groups
+                WHERE slug = $1
+                  AND (tenant_id = $2 OR tenant_id IS NULL)
+                  AND is_active = TRUE
+                ORDER BY (tenant_id IS NULL) ASC
+                LIMIT 1""",
+            payment_method,
+            tenant_id,
+        )
+        if row:
+            credit_code = row["gl_account_code"]
 
     if not credit_code:
         credit_code = "2205"  # Fallback: Proveedores nacionales
@@ -713,6 +730,7 @@ async def create_direct_purchase(
                             total_amount,
                             purchase_row['purchase_date'],
                             purchase_number,
+                            payment_method,
                             UUID(payment_method_id) if payment_method_id else None,
                             timezone_name,
                         )
