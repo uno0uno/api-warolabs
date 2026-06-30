@@ -2,9 +2,9 @@ import logging
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from app.database import get_db_connection
-from app.core.security import get_session_token, clear_session_cookie, set_session_cookie, get_client_ip
+from app.core.security import collect_session_tokens, get_session_token, clear_session_cookie, set_session_cookie, get_client_ip
 from app.core.exceptions import AuthenticationError
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES, is_legacy_internal_team_role
 from app.core.middleware import require_valid_session
@@ -112,6 +112,13 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
             )
             
     except AuthenticationError:
+        raise
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            session_tokens = collect_session_tokens(request)
+            await clear_session_cookie(response, session_tokens[0] if session_tokens else None)
+            detail = exc.detail if isinstance(exc.detail, str) else "Session expired"
+            raise AuthenticationError(detail)
         raise
     except Exception as e:
         logger.error(f"Session check error: {e}", exc_info=True)
