@@ -20410,6 +20410,13 @@
           "nullable": false,
           "default": "false",
           "comment": "warocol.com#740 — default: include standard consumption tax on tips at checkout"
+        },
+        {
+          "name": "timezone",
+          "type": "text",
+          "nullable": false,
+          "default": "'America/Bogota'::text",
+          "comment": "IANA timezone for tenant operational dates, business hours, and report boundaries. Defaults to America/Bogota."
         }
       ],
       "indexes": [
@@ -20512,6 +20519,16 @@
           "referenced_table": "",
           "columns": [
             "slug"
+          ]
+        },
+        {
+          "name": "tenant_public_profiles_timezone_non_blank",
+          "type": "CHECK",
+          "def": "CHECK (btrim(timezone) <> '')",
+          "table": "public.tenant_public_profiles",
+          "referenced_table": "",
+          "columns": [
+            "timezone"
           ]
         }
       ]

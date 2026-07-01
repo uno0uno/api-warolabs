@@ -49,6 +49,7 @@ Perfiles públicos de restaurantes para mostrar menú y información
 | tip_preselect_index | integer |  | true |  |  | Index into tip_default_percentages to pre-select at checkout. NULL means nothing is pre-selected (recommended — Ley 1935/2018 voluntariness). |
 | table_qr_module_enabled | boolean | false | false |  |  | Table QR ordering module (warocol.com#710). When true, tenant can enable per-table static QR links for diner self-order with staff confirmation. Default false preserves current behaviour. |
 | tip_taxable_default | boolean | false | false |  |  | warocol.com#740 — default: include standard consumption tax on tips at checkout |
+| timezone | text | 'America/Bogota'::text | false |  |  | IANA timezone for tenant operational dates, business hours, and report boundaries. Defaults to America/Bogota. |
 
 ## Constraints
 
@@ -58,6 +59,7 @@ Perfiles públicos de restaurantes para mostrar menú y información
 | tenant_public_profiles_pkey | PRIMARY KEY | PRIMARY KEY (id) |
 | tenant_public_profiles_tenant_id_key | UNIQUE | UNIQUE (tenant_id) |
 | tenant_public_profiles_slug_key | UNIQUE | UNIQUE (slug) |
+| tenant_public_profiles_timezone_non_blank | CHECK | CHECK (btrim(timezone) <> '') |
 
 ## Indexes
 

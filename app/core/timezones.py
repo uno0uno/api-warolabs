@@ -5,10 +5,15 @@ boundaries. Fiscal/legal Colombia time should use a separate named helper.
 """
 from datetime import date, datetime, time, timedelta, timezone
 from inspect import isawaitable
+import logging
 from typing import Optional, Tuple, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import asyncpg
+
+
 DEFAULT_TENANT_TIMEZONE = "America/Bogota"
+logger = logging.getLogger(__name__)
 
 
 def validate_timezone(value: Optional[str]) -> str:
@@ -48,11 +53,18 @@ def local_date_for_tenant(value: Union[datetime, date], timezone_name: Optional[
 
 async def resolve_tenant_timezone(conn, tenant_id) -> str:
     """Resolve a tenant's operational timezone from profile config."""
-    result = conn.fetchval(
-        "SELECT timezone FROM tenant_public_profiles WHERE tenant_id = $1",
-        tenant_id,
-    )
-    value = await result if isawaitable(result) else result
+    try:
+        result = conn.fetchval(
+            "SELECT timezone FROM tenant_public_profiles WHERE tenant_id = $1",
+            tenant_id,
+        )
+        value = await result if isawaitable(result) else result
+    except asyncpg.UndefinedColumnError:
+        logger.warning(
+            "tenant_public_profiles.timezone missing; using default timezone. "
+            "Apply sql/20260626_tenant_timezone.sql."
+        )
+        return DEFAULT_TENANT_TIMEZONE
     return normalize_timezone(value)
 
 
