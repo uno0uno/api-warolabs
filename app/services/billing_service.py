@@ -17,12 +17,41 @@ from uuid import UUID
 from fastapi import HTTPException
 
 from app.config import settings
+from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 
 logger = logging.getLogger(__name__)
 
 ELECTRONIC_INVOICE_PLAN_SLUG = "facturacion-electronica"
 ELECTRONIC_INVOICE_PERIOD_LIMIT = 200
 ELECTRONIC_INVOICE_LIMIT_FEATURE = "electronic_invoice_limit"
+QUOTAS_FEATURE = "quotas"
+QUOTA_KEYS = (
+    "admin_users",
+    "active_sessions_per_admin_user",
+    "active_kitchens",
+    "active_tables_including_bar",
+    "active_qr_tables",
+    "completed_online_orders_per_month",
+    "electronic_invoices_per_period",
+)
+BASE_OPERATIONAL_QUOTAS = {
+    "admin_users": 6,
+    "active_sessions_per_admin_user": 1,
+    "active_kitchens": 2,
+    "active_tables_including_bar": 20,
+    "active_qr_tables": 20,
+    "completed_online_orders_per_month": 300,
+}
+PLAN_QUOTA_DEFAULTS = {
+    "pro": {
+        **BASE_OPERATIONAL_QUOTAS,
+        "electronic_invoices_per_period": 0,
+    },
+    ELECTRONIC_INVOICE_PLAN_SLUG: {
+        **BASE_OPERATIONAL_QUOTAS,
+        "electronic_invoices_per_period": ELECTRONIC_INVOICE_PERIOD_LIMIT,
+    },
+}
 
 
 async def check_scan_quota(tenant_id: UUID, conn) -> None:
@@ -284,6 +313,8 @@ async def list_tenant_billing_events(
 # ── Serialization helpers ─────────────────────────────────────────────────────
 
 def _serialize_plan(row) -> Dict[str, Any]:
+    features = _jsonb_to_dict(row["features"])
+    quotas = _normalize_plan_quotas(row["slug"], features)
     return {
         "id": str(row["id"]),
         "name": row["name"],
@@ -293,7 +324,8 @@ def _serialize_plan(row) -> Dict[str, Any]:
         "price_annual": str(row["price_annual"]),
         "scan_limit": row["scan_limit"],
         "is_active": row["is_active"],
-        "features": (json.loads(row["features"]) if isinstance(row["features"], str) else dict(row["features"])) if row["features"] else {},
+        "features": features,
+        "quotas": quotas,
         "created_at": row["created_at"].isoformat(),
         "updated_at": row["updated_at"].isoformat(),
     }
@@ -307,11 +339,43 @@ def _jsonb_to_dict(value: Any) -> Dict[str, Any]:
     return dict(value)
 
 
+def _coerce_quota_value(value: Any, default: int) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_plan_quotas(plan_slug: str, features: Any) -> Dict[str, int]:
+    plan_features = _jsonb_to_dict(features)
+    defaults = PLAN_QUOTA_DEFAULTS.get(plan_slug, {})
+    configured = plan_features.get(QUOTAS_FEATURE)
+    if not isinstance(configured, dict):
+        configured = {}
+
+    quotas: Dict[str, int] = {}
+    for key in QUOTA_KEYS:
+        default = defaults.get(key, 0)
+        quotas[key] = _coerce_quota_value(configured.get(key), default)
+
+    if plan_slug == ELECTRONIC_INVOICE_PLAN_SLUG and not configured.get("electronic_invoices_per_period"):
+        quotas["electronic_invoices_per_period"] = _electronic_invoice_limit_for_plan(
+            plan_slug,
+            plan_features,
+        )
+
+    return quotas
+
+
 def _electronic_invoice_limit_for_plan(plan_slug: str, features: Any) -> int:
     if plan_slug != ELECTRONIC_INVOICE_PLAN_SLUG:
         return 0
 
     plan_features = _jsonb_to_dict(features)
+    configured_quotas = plan_features.get(QUOTAS_FEATURE)
+    if isinstance(configured_quotas, dict) and "electronic_invoices_per_period" in configured_quotas:
+        return _coerce_quota_value(configured_quotas.get("electronic_invoices_per_period"), 0)
+
     configured_limit = plan_features.get(ELECTRONIC_INVOICE_LIMIT_FEATURE)
     if configured_limit is None:
         return ELECTRONIC_INVOICE_PERIOD_LIMIT
@@ -596,6 +660,7 @@ async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
             sp.name AS plan_name,
             sp.slug AS plan_slug,
             sp.scan_limit,
+            sp.features AS plan_features,
             ts.billing_cycle,
             ts.status,
             ts.current_period_start,
@@ -625,6 +690,7 @@ async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
         "plan_name": row["plan_name"],
         "plan_slug": row["plan_slug"],
         "scan_limit": row["scan_limit"],
+        "quotas": _normalize_plan_quotas(row["plan_slug"], row["plan_features"]),
         "billing_cycle": row["billing_cycle"],
         "status": row["status"],
         "current_period_start": row["current_period_start"].isoformat(),
@@ -690,6 +756,64 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
               AND COALESCE(emitted_at, created_at) < $3
         """, tenant_id, period_start, period_end) or 0)
 
+    quotas = _normalize_plan_quotas(row["plan_slug"], row["plan_features"])
+    quota_counts = await conn.fetchrow("""
+        SELECT
+            (
+                SELECT COUNT(DISTINCT tm.id)
+                FROM tenant_members tm
+                WHERE tm.tenant_id = $1
+                  AND tm.is_active
+                  AND tm.role = ANY($4::text[])
+            ) AS admin_users,
+            (
+                SELECT COALESCE(MAX(active_session_count), 0)
+                FROM (
+                    SELECT COUNT(DISTINCT s.id) AS active_session_count
+                    FROM tenant_members tm
+                    JOIN sessions s
+                      ON s.tenant_id = tm.tenant_id
+                     AND s.user_id = tm.user_id
+                    WHERE tm.tenant_id = $1
+                      AND tm.is_active
+                      AND tm.role = ANY($4::text[])
+                      AND s.is_active
+                      AND s.expires_at > now()
+                    GROUP BY tm.user_id
+                ) per_admin
+            ) AS active_sessions_per_admin_user,
+            (
+                SELECT COUNT(DISTINCT ks.id)
+                FROM kitchen_stations ks
+                WHERE ks.tenant_id = $1
+                  AND ks.is_active
+            ) AS active_kitchens,
+            (
+                SELECT COUNT(DISTINCT t.id)
+                FROM tables t
+                WHERE t.tenant_id = $1
+                  AND t.is_active
+                  AND t.deleted_at IS NULL
+            ) AS active_tables_including_bar,
+            (
+                SELECT COUNT(DISTINCT t.id)
+                FROM tables t
+                WHERE t.tenant_id = $1
+                  AND t.is_active
+                  AND t.deleted_at IS NULL
+                  AND t.qr_enabled
+            ) AS active_qr_tables,
+            (
+                SELECT COUNT(DISTINCT o.id)
+                FROM orders o
+                WHERE o.tenant_id = $1
+                  AND o.online_cart_id IS NOT NULL
+                  AND o.status = 'completed'
+                  AND o.order_date >= $2
+                  AND o.order_date < $3
+            ) AS completed_online_orders_per_month
+    """, tenant_id, period_start, period_end, list(LEGACY_INTERNAL_TEAM_ROLES))
+
     def metric(used: int, limit: int) -> Dict[str, Any]:
         return {
             "used": used,
@@ -704,6 +828,33 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
         "period_end": period_end_iso,
         "scan_usage": metric(scans_used, scans_limit),
         "electronic_invoice_usage": metric(invoice_used, invoice_limit),
+        "quota_usage": {
+            "admin_users": metric(int(quota_counts["admin_users"] or 0), quotas["admin_users"]),
+            "active_sessions_per_admin_user": metric(
+                int(quota_counts["active_sessions_per_admin_user"] or 0),
+                quotas["active_sessions_per_admin_user"],
+            ),
+            "active_kitchens": metric(
+                int(quota_counts["active_kitchens"] or 0),
+                quotas["active_kitchens"],
+            ),
+            "active_tables_including_bar": metric(
+                int(quota_counts["active_tables_including_bar"] or 0),
+                quotas["active_tables_including_bar"],
+            ),
+            "active_qr_tables": metric(
+                int(quota_counts["active_qr_tables"] or 0),
+                quotas["active_qr_tables"],
+            ),
+            "completed_online_orders_per_month": metric(
+                int(quota_counts["completed_online_orders_per_month"] or 0),
+                quotas["completed_online_orders_per_month"],
+            ),
+            "electronic_invoices_per_period": metric(
+                invoice_used,
+                quotas["electronic_invoices_per_period"],
+            ),
+        },
     }
 
 
