@@ -46,6 +46,7 @@ _CONTEXT_SQL = """
 _SUBMIT_LIMIT_PER_TOKEN = 10
 _SUBMIT_LIMIT_PER_IP = 30
 _SUBMIT_WINDOW_SECONDS = 300
+_DUPLICATE_PENDING_WINDOW_MINUTES = 3
 _submit_rate_buckets: Dict[str, List[float]] = defaultdict(list)
 
 
@@ -127,6 +128,48 @@ def _check_submit_rate_limit(*, token: str, client_ip: Optional[str]) -> None:
                 detail="Demasiadas solicitudes. Intenta de nuevo en unos minutos.",
             )
         bucket.append(now)
+
+
+async def _lock_table_qr_submit(conn, tenant_id: UUID, table_id: UUID) -> None:
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+        str(tenant_id),
+        str(table_id),
+    )
+
+
+async def _find_matching_pending_request(
+    conn,
+    tenant_id: UUID,
+    table_id: UUID,
+    items_json: str,
+    payment_method: Optional[str],
+    payment_method_id: Optional[UUID],
+    customer_notes: Optional[str],
+) -> Optional[dict]:
+    return await conn.fetchrow(
+        """
+        SELECT id, created_at
+        FROM table_qr_requests
+        WHERE tenant_id = $1
+          AND table_id = $2
+          AND status = 'pending'
+          AND items = $3::jsonb
+          AND payment_method IS NOT DISTINCT FROM $4
+          AND payment_method_id IS NOT DISTINCT FROM $5
+          AND customer_notes IS NOT DISTINCT FROM $6
+          AND created_at >= now() - ($7::text || ' minutes')::interval
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        tenant_id,
+        table_id,
+        items_json,
+        payment_method,
+        payment_method_id,
+        customer_notes,
+        _DUPLICATE_PENDING_WINDOW_MINUTES,
+    )
 
 
 async def get_menu_for_token(
@@ -463,39 +506,53 @@ async def submit_table_qr_request(
         async with conn.transaction():
             item_snapshots, total_amount = await _build_item_snapshots(conn, tenant_id, items)
             await _validate_payment_selection(conn, tenant_id, payment_method, payment_method_id)
+            items_json = json.dumps(item_snapshots, sort_keys=True)
 
-            row = await conn.fetchrow(
-                """
-                INSERT INTO table_qr_requests (
-                    tenant_id, table_id, status, items,
-                    payment_method, payment_method_id, customer_notes
-                )
-                VALUES ($1, $2, 'pending', $3::jsonb, $4, $5, $6)
-                RETURNING id, created_at
-                """,
+            await _lock_table_qr_submit(conn, tenant_id, table_id)
+            existing = await _find_matching_pending_request(
+                conn,
                 tenant_id,
                 table_id,
-                json.dumps(item_snapshots),
+                items_json,
                 payment_method,
                 payment_method_id,
                 customer_notes,
             )
-
-            request_id = row["id"]
-            payload = {
-                "type": "table_qr_request",
-                "request_id": str(request_id),
-                "table_id": str(table_id),
-                "table_name": ctx["table_name"],
-                "item_count": len(item_snapshots),
-                "total_amount": float(total_amount),
-            }
-            try:
-                await notifications_service.create_table_qr_notification(
-                    conn, tenant_id, request_id, payload
+            if existing:
+                request_id = existing["id"]
+            else:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO table_qr_requests (
+                        tenant_id, table_id, status, items,
+                        payment_method, payment_method_id, customer_notes
+                    )
+                    VALUES ($1, $2, 'pending', $3::jsonb, $4, $5, $6)
+                    RETURNING id, created_at
+                    """,
+                    tenant_id,
+                    table_id,
+                    items_json,
+                    payment_method,
+                    payment_method_id,
+                    customer_notes,
                 )
-            except Exception as err:
-                logger.warning("Table QR notification failed for %s: %s", request_id, err)
+
+                request_id = row["id"]
+                payload = {
+                    "type": "table_qr_request",
+                    "request_id": str(request_id),
+                    "table_id": str(table_id),
+                    "table_name": ctx["table_name"],
+                    "item_count": len(item_snapshots),
+                    "total_amount": float(total_amount),
+                }
+                try:
+                    await notifications_service.create_table_qr_notification(
+                        conn, tenant_id, request_id, payload
+                    )
+                except Exception as err:
+                    logger.warning("Table QR notification failed for %s: %s", request_id, err)
 
     return {
         "request_id": str(request_id),
