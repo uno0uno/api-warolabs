@@ -1,4 +1,5 @@
 """Tests for public Table QR menu and submit (api-warolabs#267)."""
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -90,6 +91,63 @@ async def test_submit_requires_open_restaurant():
                 customer_notes=None,
             )
         assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_submit_duplicate_pending_request_returns_existing_id():
+    ctx = _active_ctx()
+    request_id = uuid4()
+    snapshots = [{
+        "product_id": str(uuid4()),
+        "quantity": 1,
+        "unit_price": 10000.0,
+        "modifiers": [],
+        "notes": None,
+        "line_total": 10000.0,
+    }]
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={"id": request_id, "created_at": None})
+    conn.transaction = MagicMock()
+
+    @asynccontextmanager
+    async def _txn():
+        yield
+
+    conn.transaction.return_value = _txn()
+
+    with patch(
+        "app.services.public_table_qr_service.resolve_table_qr_context",
+        new_callable=AsyncMock,
+        return_value=ctx,
+    ), patch(
+        "app.services.public_table_qr_service.get_db_connection",
+    ) as mock_conn, patch(
+        "app.services.public_table_qr_service._build_item_snapshots",
+        new=AsyncMock(return_value=(snapshots, 10000)),
+    ), patch(
+        "app.services.public_table_qr_service._validate_payment_selection",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.public_table_qr_service.notifications_service.create_table_qr_notification",
+        new=AsyncMock(),
+    ) as notify:
+        mock_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
+        mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await public_table_qr_service.submit_table_qr_request(
+            MagicMock(client=MagicMock(host="127.0.0.1")),
+            "tok",
+            items=[{"product_id": snapshots[0]["product_id"], "quantity": 1, "modifiers": []}],
+            payment_method="cash",
+            payment_method_id=None,
+            customer_notes=None,
+        )
+
+    assert result["request_id"] == str(request_id)
+    assert result["status"] == "pending"
+    assert conn.fetchrow.await_count == 1
+    notify.assert_not_awaited()
 
 
 def test_menu_endpoint_success():

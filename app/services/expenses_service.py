@@ -78,6 +78,29 @@ def _raise_duplicate_expense_error(exc: asyncpg.UniqueViolationError) -> None:
     raise exc
 
 
+def _format_recurring_instance_response(instance_row) -> Dict[str, Any]:
+    return {
+        'success': True,
+        'data': {
+            'id': str(instance_row['id']),
+            'tenantId': str(instance_row['tenant_id']),
+            'expenseId': str(instance_row['expense_id']),
+            'periodMonth': instance_row['period_month'],
+            'scheduledDate': instance_row['scheduled_date'].isoformat(),
+            'amount': float(instance_row['amount']),
+            'status': instance_row['status'],
+            'paymentDate': instance_row['payment_date'].isoformat() if instance_row['payment_date'] else None,
+            'paymentMethod': instance_row['payment_method'],
+            'paymentReference': instance_row['payment_reference'],
+            'notes': instance_row['notes'],
+            'createdBy': str(instance_row['created_by']) if instance_row['created_by'] else None,
+            'createdAt': instance_row['created_at'].isoformat(),
+            'updatedAt': instance_row['updated_at'].isoformat(),
+            'attachments': []
+        }
+    }
+
+
 async def get_next_expense_number(conn, tenant_id: UUID) -> str:
     """Generate the next WR-GTO-YYYY-NNNN number for a tenant."""
     current_year = datetime.now().year
@@ -2348,7 +2371,8 @@ async def create_recurring_instance_json(
             # Use expense amount if not provided
             instance_amount = instance_data.amount if instance_data.amount is not None else float(expense['amount'])
 
-            # Insert instance
+            # Insert instance. Retrying the same recurring period returns the
+            # existing row instead of surfacing a duplicate-key failure.
             instance_id = await conn.fetchval("""
                 INSERT INTO recurring_expense_instances (
                     tenant_id,
@@ -2363,6 +2387,8 @@ async def create_recurring_instance_json(
                     notes,
                     created_by
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                ON CONFLICT (expense_id, period_month)
+                DO UPDATE SET period_month = EXCLUDED.period_month
                 RETURNING id
             """,
                 tenant_id,
@@ -2383,26 +2409,7 @@ async def create_recurring_instance_json(
                 SELECT * FROM recurring_expense_instances WHERE id = $1
             """, instance_id)
 
-            return {
-                'success': True,
-                'data': {
-                    'id': str(instance_row['id']),
-                    'tenantId': str(instance_row['tenant_id']),
-                    'expenseId': str(instance_row['expense_id']),
-                    'periodMonth': instance_row['period_month'],
-                    'scheduledDate': instance_row['scheduled_date'].isoformat(),
-                    'amount': float(instance_row['amount']),
-                    'status': instance_row['status'],
-                    'paymentDate': instance_row['payment_date'].isoformat() if instance_row['payment_date'] else None,
-                    'paymentMethod': instance_row['payment_method'],
-                    'paymentReference': instance_row['payment_reference'],
-                    'notes': instance_row['notes'],
-                    'createdBy': str(instance_row['created_by']) if instance_row['created_by'] else None,
-                    'createdAt': instance_row['created_at'].isoformat(),
-                    'updatedAt': instance_row['updated_at'].isoformat(),
-                    'attachments': []
-                }
-            }
+            return _format_recurring_instance_response(instance_row)
 
     except AuthenticationError:
         raise
