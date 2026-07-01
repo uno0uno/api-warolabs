@@ -71,6 +71,7 @@ async def notification_stream(request: Request):
 
     async def event_stream():
         try:
+            yield "retry: 5000\n\n"
             while True:
                 if await request.is_disconnected():
                     break
@@ -80,6 +81,8 @@ async def notification_stream(request: Request):
                 except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
         except asyncio.CancelledError:
+            pass
+        except (ConnectionResetError, BrokenPipeError, OSError):
             pass
         finally:
             _channel_listeners.get(channel, set()).discard(queue)
