@@ -7,9 +7,10 @@ from fastapi import Request, Response
 from app.database import get_db_connection
 from app.core.security import set_session_cookie, get_client_ip, get_current_user_id
 from app.core.middleware import require_valid_tenant, require_valid_session
-from app.core.exceptions import AuthenticationError, ValidationError, AuthorizationError
+from app.core.exceptions import APIError, AuthenticationError, ValidationError, AuthorizationError
 from app.core.email_utils import normalize_email
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
+from app.services.billing_service import check_plan_quota_growth
 from app.models.invitation import (
     SendInvitationRequest,
     SendInvitationResponse,
@@ -262,14 +263,6 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
 
             logger.info(f"✅ Valid invitation found for user: {invitation['user_id']}")
 
-            # Mark invitation as accepted
-            await conn.execute(
-                """UPDATE tenant_invitations
-                   SET status = 'accepted', accepted_at = NOW()
-                   WHERE id = $1""",
-                invitation['id']
-            )
-
             # Add or reactivate an internal team membership without touching customer state.
             team_member = await conn.fetchrow(
                 """
@@ -286,6 +279,7 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
             )
 
             if not team_member:
+                await check_plan_quota_growth(conn, invitation['tenant_id'], "admin_users")
                 await conn.execute(
                     """INSERT INTO tenant_members (id, user_id, tenant_id, role)
                        VALUES (gen_random_uuid(), $1, $2, $3)""",
@@ -295,6 +289,8 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
                 )
                 logger.info(f"👥 User added to tenant_members with role: {invitation['role']}")
             else:
+                if not team_member["is_active"]:
+                    await check_plan_quota_growth(conn, invitation['tenant_id'], "admin_users")
                 await conn.execute(
                     """
                     UPDATE tenant_members
@@ -307,6 +303,15 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
                     team_member['id'],
                 )
                 logger.info(f"🔄 Activated existing team member role to: {invitation['role']}")
+
+            # Mark invitation as accepted after membership succeeds, so quota
+            # blocks do not consume a still-actionable invitation.
+            await conn.execute(
+                """UPDATE tenant_invitations
+                   SET status = 'accepted', accepted_at = NOW()
+                   WHERE id = $1""",
+                invitation['id']
+            )
 
             # Create session (same as magic link flow)
             session_id = secrets.token_hex(16)
@@ -367,7 +372,7 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
                 )
             )
 
-    except AuthenticationError:
+    except (APIError, AuthenticationError):
         raise
     except Exception as e:
         logger.error(f"❌ Accept invitation error: {e}", exc_info=True)

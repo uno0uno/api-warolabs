@@ -11,6 +11,7 @@ from fastapi import Request, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
+from app.services.billing_service import check_plan_quota_growth
 import logging
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ async def create_station(request: Request, body) -> dict:
 
     try:
         async with get_db_connection() as conn:
+            await check_plan_quota_growth(conn, tenant_id, "active_kitchens")
             row = await conn.fetchrow(
                 """
                 INSERT INTO kitchen_stations (
@@ -227,6 +229,17 @@ async def toggle_station(request: Request, station_id: UUID, is_active: bool) ->
         raise AuthenticationError("Tenant ID is required")
 
     async with get_db_connection() as conn:
+        if is_active:
+            existing = await conn.fetchrow(
+                "SELECT id, is_active FROM kitchen_stations WHERE id = $1 AND tenant_id = $2",
+                station_id,
+                tenant_id,
+            )
+            if not existing:
+                raise HTTPException(status_code=404, detail="Station not found")
+            if not existing["is_active"]:
+                await check_plan_quota_growth(conn, tenant_id, "active_kitchens")
+
         if not is_active:
             active_count = await conn.fetchval(
                 """

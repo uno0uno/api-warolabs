@@ -124,6 +124,7 @@ async def test_accept_invitation_inserts_team_membership_without_updating_legacy
         patch("app.services.invitation_service.require_valid_tenant", return_value=_tenant_context(tenant_id)),
         patch("app.services.invitation_service.get_db_connection", side_effect=_db_context(conn)),
         patch("app.services.invitation_service.set_session_cookie", new=AsyncMock()),
+        patch("app.services.invitation_service.check_plan_quota_growth", new=AsyncMock()),
     ):
         response = await invitation_service.accept_invitation(_request(), MagicMock(), "token")
 
@@ -170,6 +171,7 @@ async def test_accept_invitation_reactivates_existing_team_membership_by_id():
         patch("app.services.invitation_service.require_valid_tenant", return_value=_tenant_context(tenant_id)),
         patch("app.services.invitation_service.get_db_connection", side_effect=_db_context(conn)),
         patch("app.services.invitation_service.set_session_cookie", new=AsyncMock()),
+        patch("app.services.invitation_service.check_plan_quota_growth", new=AsyncMock()),
     ):
         await invitation_service.accept_invitation(_request(), MagicMock(), "token")
 
