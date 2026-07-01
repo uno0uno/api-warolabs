@@ -40,6 +40,7 @@ from app.services.tip_tax_service import (
 from app.services.orders_service import _compute_tax_breakdown
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas
+from app.services.billing_service import check_plan_quota_growth
 from app.services.operation_events_service import DOMAIN_POS, record_operation_event
 from app.services.open_priced_service import (
     fetch_product_pricing_map,
@@ -477,6 +478,7 @@ async def create_table(
                 except ValueError as exc:
                     raise APIError(str(exc), status_code=400) from exc
 
+                await check_plan_quota_growth(conn, tenant_id, "active_tables_including_bar")
                 row = await conn.fetchrow(
                     """
                     INSERT INTO tables (tenant_id, name, capacity, code)
@@ -709,6 +711,7 @@ async def activate_table(request: Request, table_id: UUID) -> dict:
             if existing["is_active"]:
                 return {"success": True, "message": "Table already active"}
 
+            await check_plan_quota_growth(conn, tenant_id, "active_tables_including_bar")
             await conn.execute(
                 "UPDATE tables SET is_active = true WHERE id = $1 AND tenant_id = $2",
                 table_id,
@@ -4314,6 +4317,8 @@ async def set_table_qr_enabled(request: Request, table_id: UUID, enabled: bool) 
                 table = await _get_table_for_qr_management(conn, tenant_id, table_id)
                 token = table["qr_public_token"]
                 if enabled:
+                    if not table["qr_enabled"]:
+                        await check_plan_quota_growth(conn, tenant_id, "active_qr_tables")
                     if not token:
                         token = await _generate_unique_qr_token(conn)
                     row = await conn.fetchrow(
@@ -4361,7 +4366,9 @@ async def regenerate_table_qr_token(request: Request, table_id: UUID) -> dict:
         async with get_db_connection() as conn:
             async with conn.transaction():
                 await _require_table_qr_module(conn, tenant_id)
-                await _get_table_for_qr_management(conn, tenant_id, table_id)
+                table = await _get_table_for_qr_management(conn, tenant_id, table_id)
+                if not table["qr_enabled"]:
+                    await check_plan_quota_growth(conn, tenant_id, "active_qr_tables")
                 token = await _generate_unique_qr_token(conn)
                 row = await conn.fetchrow(
                     """

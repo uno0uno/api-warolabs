@@ -161,7 +161,8 @@ async def test_set_table_qr_enabled_generates_token():
 
     with patch("app.services.tables_service.require_valid_session", return_value=session), \
          patch("app.services.tables_service.get_db_connection") as mock_conn, \
-         patch("app.services.tables_service._generate_unique_qr_token", new_callable=AsyncMock, return_value=token):
+         patch("app.services.tables_service._generate_unique_qr_token", new_callable=AsyncMock, return_value=token), \
+         patch("app.services.tables_service.check_plan_quota_growth", new_callable=AsyncMock):
         mock_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
         mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
 

@@ -17,6 +17,7 @@ from uuid import UUID
 from fastapi import HTTPException
 
 from app.config import settings
+from app.core.exceptions import APIError
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,15 @@ PLAN_QUOTA_DEFAULTS = {
         **BASE_OPERATIONAL_QUOTAS,
         "electronic_invoices_per_period": ELECTRONIC_INVOICE_PERIOD_LIMIT,
     },
+}
+
+QUOTA_UPGRADE_URL = "/billing/planes"
+QUOTA_CONTACT_MESSAGE = "Actualiza tu plan o contacta a soporte para ampliar este límite."
+ENFORCEABLE_QUOTA_RESOURCES = {
+    "admin_users",
+    "active_kitchens",
+    "active_tables_including_bar",
+    "active_qr_tables",
 }
 
 
@@ -123,6 +133,106 @@ async def check_scan_quota(tenant_id: UUID, conn) -> None:
 
     # Log monthly usage
     await _upsert_monthly_log(tenant_id, conn)
+
+
+async def check_plan_quota_growth(conn, tenant_id: UUID, resource: str) -> None:
+    """
+    Block active resource growth once the tenant reaches the plan quota.
+
+    This is intentionally non-destructive: it never modifies existing rows and
+    should be called only before create/reactivate/enable transitions.
+    """
+    if resource not in ENFORCEABLE_QUOTA_RESOURCES:
+        raise ValueError(f"Unsupported quota resource: {resource}")
+
+    plan = await conn.fetchrow(
+        """
+        SELECT sp.slug AS plan_slug, sp.features AS plan_features
+        FROM tenant_subscriptions ts
+        JOIN subscription_plans sp ON sp.id = ts.plan_id
+        WHERE ts.tenant_id = $1
+          AND ts.status IN ('active', 'past_due')
+          AND ts.current_period_end > now()
+        ORDER BY ts.current_period_end DESC
+        LIMIT 1
+        """,
+        tenant_id,
+    )
+    if not plan:
+        return
+
+    quotas = _normalize_plan_quotas(plan["plan_slug"], plan["plan_features"])
+    limit = int(quotas.get(resource, 0))
+    used = await _count_quota_resource_usage(conn, tenant_id, resource)
+    if used < limit:
+        return
+
+    raise APIError(
+        "Límite del plan alcanzado",
+        status_code=429,
+        details={
+            "code": "quota_exceeded",
+            "error": "quota_exceeded",
+            "resource": resource,
+            "used": used,
+            "limit": limit,
+            "plan_slug": plan["plan_slug"],
+            "upgrade_url": QUOTA_UPGRADE_URL,
+            "message": QUOTA_CONTACT_MESSAGE,
+        },
+    )
+
+
+async def _count_quota_resource_usage(conn, tenant_id: UUID, resource: str) -> int:
+    if resource == "admin_users":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(DISTINCT tm.id)
+            FROM tenant_members tm
+            WHERE tm.tenant_id = $1
+              AND tm.is_active
+              AND tm.role = ANY($2::text[])
+            """,
+            tenant_id,
+            list(LEGACY_INTERNAL_TEAM_ROLES),
+        )
+    elif resource == "active_kitchens":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(DISTINCT ks.id)
+            FROM kitchen_stations ks
+            WHERE ks.tenant_id = $1
+              AND ks.is_active
+            """,
+            tenant_id,
+        )
+    elif resource == "active_tables_including_bar":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(DISTINCT t.id)
+            FROM tables t
+            WHERE t.tenant_id = $1
+              AND t.is_active
+              AND t.deleted_at IS NULL
+            """,
+            tenant_id,
+        )
+    elif resource == "active_qr_tables":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(DISTINCT t.id)
+            FROM tables t
+            WHERE t.tenant_id = $1
+              AND t.is_active
+              AND t.deleted_at IS NULL
+              AND t.qr_enabled
+            """,
+            tenant_id,
+        )
+    else:
+        raise ValueError(f"Unsupported quota resource: {resource}")
+
+    return int(value or 0)
 
 
 async def _create_period_usage(tenant_id: UUID, conn) -> None:
