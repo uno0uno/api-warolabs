@@ -9,6 +9,57 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _short_log_value(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    text = str(value).strip()
+    if not text:
+        return "unknown"
+    return text.replace(" ", "_")[:64]
+
+
+def classify_request_severity(status_code: int, path: str) -> str:
+    if status_code == 401:
+        return "auth_expected"
+    if 500 <= status_code:
+        return "server_error"
+    if 400 <= status_code:
+        return "client_error"
+    if path == "/notifications/stream":
+        return "sse_stream"
+    return "ok"
+
+
+def format_request_log(
+    *,
+    method: str,
+    path: str,
+    status_code: int,
+    duration_ms: float,
+    tenant: Any,
+    user_id: Any,
+) -> str:
+    severity = classify_request_severity(status_code, path)
+    return (
+        "request "
+        f"method={method} "
+        f"path={path} "
+        f"status_code={status_code} "
+        f"duration_ms={duration_ms:.2f} "
+        f"severity={severity} "
+        f"tenant={_short_log_value(tenant)} "
+        f"user={_short_log_value(user_id)}"
+    )
+
+
+def _request_log_context(request: Request) -> tuple[Any, Any]:
+    tenant_name = getattr(getattr(request.state, 'tenant_context', None), 'tenant_name', 'unknown')
+    session_context = getattr(request.state, 'session_context', None)
+    user_id = getattr(session_context, 'user_id', 'anonymous') if session_context else 'anonymous'
+    return tenant_name, user_id
+
+
 class SessionContext:
     """Session context object.
 
@@ -599,22 +650,37 @@ async def request_logging_middleware(request: Request, call_next):
     method = request.method
     path = request.url.path
     
-    # Get tenant and user info if available
-    tenant_name = getattr(getattr(request.state, 'tenant_context', None), 'tenant_name', 'unknown')
-    session_context = getattr(request.state, 'session_context', None)
-    user_id = getattr(session_context, 'user_id', 'anonymous') if session_context else 'anonymous'
-    
-    # Process request
-    response = await call_next(request)
-    
-    # Calculate duration
-    duration = round((time.time() - start_time) * 1000, 2)  # milliseconds
-    
-    # Log endpoint call
-    # Simple endpoint logging with timestamp
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    query = f"?{request.url.query}" if request.url.query else ""
-    logger.info(f"{timestamp} | {method} {path}{query}")
-    
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration = round((time.time() - start_time) * 1000, 2)
+        tenant_name, user_id = _request_log_context(request)
+        logger.error(
+            format_request_log(
+                method=method,
+                path=path,
+                status_code=500,
+                duration_ms=duration,
+                tenant=tenant_name,
+                user_id=user_id,
+            )
+        )
+        raise
+
+    duration = round((time.time() - start_time) * 1000, 2)
+    tenant_name, user_id = _request_log_context(request)
+    message = format_request_log(
+        method=method,
+        path=path,
+        status_code=response.status_code,
+        duration_ms=duration,
+        tenant=tenant_name,
+        user_id=user_id,
+    )
+    severity = classify_request_severity(response.status_code, path)
+    if severity == "server_error":
+        logger.error(message)
+    else:
+        logger.info(message)
+
     return response
