@@ -139,7 +139,7 @@
 | [public.recurring_expense_instances](public.recurring_expense_instances.md) | 14 | Individual payment instances for recurring expenses | BASE TABLE |
 | [public.salary_payment_change_history](public.salary_payment_change_history.md) | 12 | Audit log for tracking all changes to salary payments | BASE TABLE |
 | [public.salary_config_change_history](public.salary_config_change_history.md) | 12 | Audit log for tracking changes to employee salary configuration | BASE TABLE |
-| [public.tenant_public_profiles](public.tenant_public_profiles.md) | 41 | Perfiles públicos de restaurantes para mostrar menú y información | BASE TABLE |
+| [public.tenant_public_profiles](public.tenant_public_profiles.md) | 42 | Perfiles públicos de restaurantes para mostrar menú y información | BASE TABLE |
 | [public.promoter_codes](public.promoter_codes.md) | 8 |  | BASE TABLE |
 | [public.commission_configs](public.commission_configs.md) | 8 |  | BASE TABLE |
 | [public.order_commissions](public.order_commissions.md) | 20 |  | BASE TABLE |

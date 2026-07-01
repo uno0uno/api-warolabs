@@ -3,6 +3,7 @@ from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
+import asyncpg
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
@@ -87,6 +88,18 @@ async def test_resolve_tenant_timezone_falls_back_for_missing_or_legacy_value():
     assert await resolve_tenant_timezone(conn, uuid4()) == DEFAULT_TENANT_TIMEZONE
 
 
+@pytest.mark.asyncio
+async def test_resolve_tenant_timezone_falls_back_when_column_is_missing():
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(
+        side_effect=asyncpg.UndefinedColumnError(
+            'column "timezone" does not exist'
+        )
+    )
+
+    assert await resolve_tenant_timezone(conn, uuid4()) == DEFAULT_TENANT_TIMEZONE
+
+
 def _pos_context_row(timezone_name):
     return {
         "display_name": "Demo",
@@ -144,6 +157,32 @@ async def test_pos_context_exposes_normalized_timezone():
     async def _ctx(*_, **__):
         conn = MagicMock()
         conn.fetchrow = AsyncMock(return_value=_pos_context_row("Bad/Legacy"))
+        conn.fetch = AsyncMock(return_value=[])
+        yield conn
+
+    with patch("app.services.pos_context_service.get_db_connection", side_effect=_ctx), \
+         patch("app.services.pos_context_service.get_readiness", new=AsyncMock(return_value={"ready": False})), \
+         patch("app.services.pos_context_service.fetch_open_sale_product", new=AsyncMock(return_value=None)):
+        payload = await pos_context_service.get_restaurant_context(tenant_id)
+
+    assert payload["timezone"] == DEFAULT_TENANT_TIMEZONE
+
+
+@pytest.mark.asyncio
+async def test_pos_context_falls_back_when_timezone_column_is_missing():
+    tenant_id = UUID("93b3e582-34fa-44a6-8d0f-bf82a3608727")
+
+    @asynccontextmanager
+    async def _ctx(*_, **__):
+        conn = MagicMock()
+        conn.fetchrow = AsyncMock(
+            side_effect=[
+                asyncpg.UndefinedColumnError(
+                    'column tpp.timezone does not exist'
+                ),
+                _pos_context_row(None),
+            ]
+        )
         conn.fetch = AsyncMock(return_value=[])
         yield conn
 

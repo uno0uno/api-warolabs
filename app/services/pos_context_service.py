@@ -8,8 +8,11 @@ gated under Module.POS so cashiers reach it without needing MI_NEGOCIO
 
 Single query joins four tables; everything POS needs in one round-trip.
 """
+import logging
 from typing import Any, Dict, Optional
 from uuid import UUID
+
+import asyncpg
 
 from app.database import get_db_connection
 from app.core.timezones import normalize_timezone
@@ -19,6 +22,8 @@ from app.services.promotions_service import (
     DEFAULT_PROMO_CONFLICT_STRATEGY,
     normalize_promo_type_block_map,
 )
+
+logger = logging.getLogger(__name__)
 
 
 _CONTEXT_QUERY = """
@@ -74,6 +79,11 @@ LEFT JOIN tenant_tax_config       ttc ON ttc.tenant_id = t.id
 WHERE t.id = $1
 """
 
+_CONTEXT_QUERY_WITHOUT_TIMEZONE = _CONTEXT_QUERY.replace(
+    "    tpp.timezone,\n",
+    "    NULL AS timezone,\n",
+)
+
 
 _MEMBERS_QUERY = """
 SELECT tm.id, p.name, tm.role
@@ -100,7 +110,14 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
     Module.EQUIPO access (which gates /api/tenants/members).
     """
     async with get_db_connection(use_transaction=False) as conn:
-        row = await conn.fetchrow(_CONTEXT_QUERY, tenant_id)
+        try:
+            row = await conn.fetchrow(_CONTEXT_QUERY, tenant_id)
+        except asyncpg.UndefinedColumnError:
+            logger.warning(
+                "tenant_public_profiles.timezone missing in POS context query; "
+                "using default timezone. Apply sql/20260626_tenant_timezone.sql."
+            )
+            row = await conn.fetchrow(_CONTEXT_QUERY_WITHOUT_TIMEZONE, tenant_id)
         if row is None:
             return None
         members_rows = await conn.fetch(_MEMBERS_QUERY, tenant_id)
