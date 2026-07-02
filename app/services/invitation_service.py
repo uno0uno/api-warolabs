@@ -10,6 +10,7 @@ from app.core.middleware import require_valid_tenant, require_valid_session
 from app.core.exceptions import APIError, AuthenticationError, ValidationError, AuthorizationError
 from app.core.email_utils import normalize_email
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
+from app.services.auth_service import replace_active_admin_sessions
 from app.services.billing_service import check_plan_quota_growth
 from app.models.invitation import (
     SendInvitationRequest,
@@ -304,15 +305,6 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
                 )
                 logger.info(f"🔄 Activated existing team member role to: {invitation['role']}")
 
-            # Mark invitation as accepted after membership succeeds, so quota
-            # blocks do not consume a still-actionable invitation.
-            await conn.execute(
-                """UPDATE tenant_invitations
-                   SET status = 'accepted', accepted_at = NOW()
-                   WHERE id = $1""",
-                invitation['id']
-            )
-
             # Create session (same as magic link flow)
             session_id = secrets.token_hex(16)
             expires_at = datetime.utcnow() + timedelta(days=7)
@@ -336,7 +328,17 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
                 client_ip,
                 user_agent
             )
+            await replace_active_admin_sessions(conn, invitation['user_id'], session_id)
             logger.info(f"🎫 Session created: {session_id}")
+
+            # Mark invitation as accepted after membership and session creation succeed, so
+            # quota/session blocks do not consume a still-actionable invitation.
+            await conn.execute(
+                """UPDATE tenant_invitations
+                   SET status = 'accepted', accepted_at = NOW()
+                   WHERE id = $1""",
+                invitation['id']
+            )
 
             # Set session cookie
             await set_session_cookie(response, session_id, tenant_context.site)

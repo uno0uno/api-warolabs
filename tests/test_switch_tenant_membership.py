@@ -105,7 +105,7 @@ async def test_active_member_can_switch_tenant():
         },
     ]
 
-    db_ctx, _ = _build_db_mock(fetchrow_side_effect=fetchrow_responses)
+    db_ctx, conn = _build_db_mock(fetchrow_side_effect=fetchrow_responses)
 
     with patch("app.services.auth_service.get_db_connection", side_effect=db_ctx), \
          patch("app.services.auth_service.get_session_token", new=AsyncMock(return_value="tok")), \
@@ -116,6 +116,9 @@ async def test_active_member_can_switch_tenant():
 
     assert result.tenant.slug == "target-tenant"
     assert result.tenant.id == target_tenant_id
+    executed_sql = [call.args[0] for call in conn.execute.await_args_list]
+    assert any("end_reason = $1" in sql for sql in executed_sql)
+    assert any("replaced_by_new_login" in sql for sql in executed_sql)
 
 
 @pytest.mark.asyncio

@@ -142,6 +142,7 @@ async def test_accept_invitation_inserts_team_membership_without_updating_legacy
     assert len(tenant_member_writes) == 1
     assert "INSERT INTO tenant_members" in tenant_member_writes[0]
     assert "UPDATE tenant_members" not in tenant_member_writes[0]
+    assert any("replaced_by_new_login" in sql for sql in executed_sql)
 
 
 @pytest.mark.asyncio
@@ -182,6 +183,8 @@ async def test_accept_invitation_reactivates_existing_team_membership_by_id():
     assert len(tenant_member_writes) == 1
     assert "WHERE id = $2" in tenant_member_writes[0][0]
     assert tenant_member_writes[0][1:] == ("admin", member_id)
+    executed_sql = [call.args[0] for call in conn.execute.await_args_list]
+    assert any("replaced_by_new_login" in sql for sql in executed_sql)
 
 
 @pytest.mark.asyncio

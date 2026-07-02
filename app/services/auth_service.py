@@ -12,6 +12,28 @@ from app.models.auth import User, Session, Tenant, SessionResponse, SwitchTenant
 
 logger = logging.getLogger(__name__)
 
+
+async def replace_active_admin_sessions(conn, user_id, keep_session_id=None) -> int:
+    result = await conn.execute(
+        """
+        UPDATE sessions
+        SET is_active = false,
+            ended_at = NOW(),
+            end_reason = 'replaced_by_new_login'
+        WHERE user_id = $1
+          AND is_active = true
+          AND expires_at > NOW()
+          AND ($2::uuid IS NULL OR id <> $2::uuid)
+        """,
+        user_id,
+        keep_session_id,
+    )
+    count = int(result.split()[-1]) if result else 0
+    if count:
+        logger.info("Ended %s previous active admin sessions for user %s", count, user_id)
+    return count
+
+
 async def get_session_data(request: Request, response: Response) -> SessionResponse:
     """
     Port exact session validation logic from warolabs.com/server/api/auth/session.get.js
@@ -251,6 +273,7 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
                 current_user_agent or user_agent,  # Use current or fallback to previous
                 login_method
             )
+            await replace_active_admin_sessions(conn, user_id, new_session_id)
             
             # Clear stale cookie variants before issuing the new session (tenant switch).
             cookie_site = target_site or tenant_site

@@ -90,6 +90,52 @@ async def test_verify_token_denies_customer_only_membership_before_session_creat
 
 
 @pytest.mark.asyncio
+async def test_verify_token_replaces_previous_active_admin_sessions():
+    """A successful admin magic-link login leaves only the newly created DB session active."""
+    from app.services.magic_link_service import verify_token
+
+    tenant_id = uuid4()
+    user_id = uuid4()
+    session_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    response = MagicMock()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "email": "admin@example.com",
+                "name": "Admin User",
+                "user_created_at": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                "user_role": "admin",
+            },
+            {"name": "Tenant"},
+        ]
+    )
+    conn.fetch = AsyncMock(return_value=[])
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    @asynccontextmanager
+    async def db_ctx():
+        yield conn
+
+    with patch("app.services.magic_link_service.get_db_connection", side_effect=db_ctx), \
+         patch("app.services.magic_link_service.require_valid_tenant", return_value=_tenant_context(tenant_id)), \
+         patch("app.services.magic_link_service.secrets.token_hex", return_value=session_id), \
+         patch("app.services.magic_link_service.set_session_cookie", new=AsyncMock()), \
+         patch("app.services.discord_service.discord_session_service", None):
+        result = await verify_token(_request(), response, "admin@example.com", "token")
+
+    assert result.success is True
+    replacement_calls = [
+        call.args for call in conn.execute.await_args_list
+        if "replaced_by_new_login" in call.args[0]
+    ]
+    assert len(replacement_calls) == 1
+    assert replacement_calls[0][1:] == (user_id, session_id)
+
+
+@pytest.mark.asyncio
 async def test_auth_session_reports_internal_access_for_promotor():
     """Promotor is a valid internal role and gets an explicit allow flag."""
     from app.services.auth_service import get_session_data
@@ -170,3 +216,27 @@ async def test_session_resolver_invalidates_customer_internal_session():
     assert result is None
     conn.execute.assert_awaited_once()
     assert conn.execute.await_args.args[1] == session_token
+
+
+@pytest.mark.asyncio
+async def test_session_resolver_replaced_session_returns_invalid_without_overwriting_reason():
+    """A replaced token follows the normal invalid-session path and keeps its audit reason."""
+    from app.core.security import get_session_from_request
+
+    session_token = str(uuid4())
+    expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+    db_ctx, conn = _build_db_mock(fetchrow_side_effect=[
+        {
+            "id": session_token,
+            "expires_at": expires_at,
+            "is_active": False,
+            "ended_at": datetime.now(timezone.utc),
+        },
+    ])
+
+    with patch("app.database.get_db_connection", side_effect=db_ctx), \
+         patch("app.core.security.get_session_token", new=AsyncMock(return_value=session_token)):
+        result = await get_session_from_request(_request())
+
+    assert result is None
+    conn.execute.assert_not_awaited()
