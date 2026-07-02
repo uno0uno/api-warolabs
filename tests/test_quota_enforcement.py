@@ -71,8 +71,76 @@ async def test_check_plan_quota_growth_blocks_at_limit_with_stable_payload():
     assert exc.value.details["resource"] == "active_kitchens"
     assert exc.value.details["used"] == 2
     assert exc.value.details["limit"] == 2
+    assert exc.value.details["plan_limit"] == 2
+    assert exc.value.details["override"] is None
     assert exc.value.details["plan_slug"] == "pro"
     assert exc.value.details["upgrade_url"] == "/billing/planes"
+
+
+@pytest.mark.asyncio
+async def test_check_plan_quota_growth_uses_tenant_override_precedence():
+    tenant_id = uuid4()
+    override_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "plan_slug": "pro",
+        "plan_features": {"quotas": {"active_kitchens": 2}},
+        "override_id": override_id,
+        "limit_override": 3,
+        "override_disabled": False,
+        "override_reason": "Commercial exception",
+    })
+    conn.fetchval = AsyncMock(return_value=2)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "active_kitchens")
+
+    conn.fetchval.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_check_plan_quota_growth_blocks_at_override_limit_with_metadata():
+    tenant_id = uuid4()
+    override_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "plan_slug": "pro",
+        "plan_features": {"quotas": {"active_kitchens": 2}},
+        "override_id": override_id,
+        "limit_override": 3,
+        "override_disabled": False,
+        "override_reason": "Commercial exception",
+    })
+    conn.fetchval = AsyncMock(return_value=3)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(conn, tenant_id, "active_kitchens")
+
+    assert exc.value.details["limit"] == 3
+    assert exc.value.details["plan_limit"] == 2
+    assert exc.value.details["override"] == {
+        "id": str(override_id),
+        "disabled": False,
+        "reason": "Commercial exception",
+    }
+
+
+@pytest.mark.asyncio
+async def test_check_plan_quota_growth_disabled_override_is_unlimited():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "plan_slug": "pro",
+        "plan_features": {"quotas": {"active_kitchens": 2}},
+        "override_id": uuid4(),
+        "limit_override": None,
+        "override_disabled": True,
+        "override_reason": "Unlimited pilot",
+    })
+    conn.fetchval = AsyncMock()
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "active_kitchens")
+
+    conn.fetchval.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -285,11 +353,36 @@ async def test_completed_online_order_quota_blocks_at_limit_with_stable_payload(
     assert exc.value.details["resource"] == "completed_online_orders_per_month"
     assert exc.value.details["used"] == 300
     assert exc.value.details["limit"] == 300
+    assert exc.value.details["plan_limit"] == 300
+    assert exc.value.details["override"] is None
     assert exc.value.details["plan_slug"] == "pro"
     assert exc.value.details["period_start"] == period_start.isoformat()
     assert exc.value.details["period_end"] == period_end.isoformat()
     assert exc.value.details["tenant_message"]
     assert exc.value.details["customer_message"]
+
+
+@pytest.mark.asyncio
+async def test_completed_online_order_disabled_override_skips_count():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "plan_slug": "pro",
+        "plan_features": {"quotas": {"completed_online_orders_per_month": 300}},
+        "current_period_start": period_start,
+        "current_period_end": period_end,
+        "override_id": uuid4(),
+        "limit_override": None,
+        "override_disabled": True,
+        "override_reason": "Launch exception",
+    })
+    conn.fetchval = AsyncMock()
+
+    await billing_service.check_completed_online_order_quota(conn, tenant_id)
+
+    conn.fetchval.assert_not_awaited()
 
 
 @pytest.mark.asyncio

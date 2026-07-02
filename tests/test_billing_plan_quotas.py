@@ -106,6 +106,7 @@ async def test_remaining_usage_exposes_quota_usage_and_internal_roles_only():
         ]
     )
     conn.fetchval = AsyncMock(return_value=12)
+    conn.fetch = AsyncMock(return_value=[])
 
     usage = await billing_service.get_remaining_billing_usage(conn, tenant_id)
 
@@ -123,3 +124,106 @@ async def test_remaining_usage_exposes_quota_usage_and_internal_roles_only():
     quota_query_args = conn.fetchrow.await_args_list[1].args
     assert quota_query_args[4] == list(LEGACY_INTERNAL_TEAM_ROLES)
     assert "customer" not in quota_query_args[4]
+
+
+@pytest.mark.asyncio
+async def test_remaining_usage_exposes_effective_quota_override_state():
+    tenant_id = uuid4()
+    override_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "current_period_start": period_start,
+                "current_period_end": period_end,
+                "plan_slug": "pro",
+                "plan_features": {"quotas": {"active_kitchens": 2}},
+                "plan_scan_limit": 500,
+                "scans_used": 0,
+                "scans_limit": 500,
+            },
+            {
+                "admin_users": 4,
+                "active_sessions_per_admin_user": 1,
+                "active_kitchens": 3,
+                "active_tables_including_bar": 7,
+                "active_qr_tables": 6,
+                "completed_online_orders_per_month": 28,
+            },
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=0)
+    conn.fetch = AsyncMock(return_value=[{
+        "id": override_id,
+        "resource": "active_kitchens",
+        "limit_override": 4,
+        "disabled": False,
+        "reason": "Commercial exception",
+    }])
+
+    usage = await billing_service.get_remaining_billing_usage(conn, tenant_id)
+
+    assert usage["quota_usage"]["active_kitchens"] == {
+        "used": 3,
+        "limit": 4,
+        "remaining": 1,
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "plan_limit": 2,
+        "override": {
+            "id": str(override_id),
+            "disabled": False,
+            "reason": "Commercial exception",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_remaining_usage_exposes_disabled_override_as_unlimited():
+    tenant_id = uuid4()
+    override_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "current_period_start": period_start,
+                "current_period_end": period_end,
+                "plan_slug": "pro",
+                "plan_features": {"quotas": {"completed_online_orders_per_month": 300}},
+                "plan_scan_limit": 500,
+                "scans_used": 0,
+                "scans_limit": 500,
+            },
+            {
+                "admin_users": 4,
+                "active_sessions_per_admin_user": 1,
+                "active_kitchens": 2,
+                "active_tables_including_bar": 7,
+                "active_qr_tables": 6,
+                "completed_online_orders_per_month": 301,
+            },
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=0)
+    conn.fetch = AsyncMock(return_value=[{
+        "id": override_id,
+        "resource": "completed_online_orders_per_month",
+        "limit_override": None,
+        "disabled": True,
+        "reason": "Pilot",
+    }])
+
+    usage = await billing_service.get_remaining_billing_usage(conn, tenant_id)
+
+    assert usage["quota_usage"]["completed_online_orders_per_month"]["limit"] is None
+    assert usage["quota_usage"]["completed_online_orders_per_month"]["remaining"] is None
+    assert usage["quota_usage"]["completed_online_orders_per_month"]["plan_limit"] == 300
+    assert usage["quota_usage"]["completed_online_orders_per_month"]["override"] == {
+        "id": str(override_id),
+        "disabled": True,
+        "reason": "Pilot",
+    }
