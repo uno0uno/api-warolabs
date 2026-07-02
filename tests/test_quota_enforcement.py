@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
 from app.core.exceptions import APIError
 from app.services import billing_service, invitation_service, online_cart_service, stations_service, tables_service
@@ -433,6 +434,7 @@ async def test_checkout_online_order_quota_block_happens_before_cart_lock_and_or
                 "estimated_preparation_time": 20,
                 "is_manually_open": True,
                 "business_hours": {},
+                "timezone": "America/Bogota",
                 "accepts_online_orders": True,
                 "tip_enabled": False,
             }
@@ -463,3 +465,102 @@ async def test_checkout_online_order_quota_block_happens_before_cart_lock_and_or
     seen_queries = [call.args[0] for call in conn.fetchrow.await_args_list]
     assert not any("UPDATE online_carts SET status = 'checked_out'" in query for query in seen_queries)
     assert not any("INSERT INTO orders" in query for query in seen_queries)
+
+
+def test_checkout_open_status_uses_tenant_timezone():
+    import inspect
+
+    source = inspect.getsource(online_cart_service.checkout_cart)
+    assert "business_hours, timezone" in source
+    assert "is_currently_open(bh, profile['is_manually_open'], profile['timezone'])" in source
+
+
+@pytest.mark.asyncio
+async def test_checkout_checked_out_cart_returns_existing_order_payload():
+    tenant_id = uuid4()
+    cart_id = uuid4()
+    customer_id = uuid4()
+    order_id = uuid4()
+    conn = MagicMock()
+    conn.transaction.return_value = _tx()
+
+    async def fetchrow(query, *args):
+        if "FROM online_carts" in query and "WHERE id = $1" in query:
+            return {
+                "id": cart_id,
+                "tenant_id": tenant_id,
+                "customer_id": customer_id,
+                "order_type": "delivery",
+                "delivery_address_id": uuid4(),
+                "pickup_pin": None,
+                "is_verified": True,
+                "status": "checked_out",
+                "total_amount": Decimal("50000"),
+                "verified_email": "cliente@example.com",
+                "scheduled_time": None,
+                "delivery_instructions": None,
+            }
+        if "FROM orders o" in query and "o.online_cart_id = $1" in query:
+            return {
+                "id": order_id,
+                "order_number": 12345,
+                "total_amount": Decimal("50000"),
+                "tip_amount": Decimal("3000"),
+                "tip_source": "preset",
+                "order_type": "delivery",
+                "pickup_pin": None,
+                "estimated_preparation_time": 35,
+            }
+        return None
+
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+
+    with (
+        patch("app.services.online_cart_service.get_db_connection", side_effect=_db_context(conn)),
+        patch("app.services.online_cart_service.get_cart_items", new=AsyncMock()) as get_cart_items,
+        patch("app.services.online_cart_service.check_completed_online_order_quota", new=AsyncMock()) as quota_check,
+    ):
+        result = await online_cart_service.checkout_cart(cart_id)
+
+    assert result["success"] is True
+    assert result["data"]["order_id"] == str(order_id)
+    assert result["data"]["order_number"] == 12345
+    assert result["data"]["charged_amount"] == 53000.0
+    get_cart_items.assert_not_awaited()
+    quota_check.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_checkout_checked_out_cart_without_order_stays_conflict():
+    tenant_id = uuid4()
+    cart_id = uuid4()
+    conn = MagicMock()
+    conn.transaction.return_value = _tx()
+
+    async def fetchrow(query, *args):
+        if "FROM online_carts" in query and "WHERE id = $1" in query:
+            return {
+                "id": cart_id,
+                "tenant_id": tenant_id,
+                "customer_id": uuid4(),
+                "order_type": "delivery",
+                "delivery_address_id": uuid4(),
+                "pickup_pin": None,
+                "is_verified": True,
+                "status": "checked_out",
+                "total_amount": Decimal("50000"),
+                "verified_email": "cliente@example.com",
+                "scheduled_time": None,
+                "delivery_instructions": None,
+            }
+        if "FROM orders o" in query and "o.online_cart_id = $1" in query:
+            return None
+        return None
+
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+
+    with patch("app.services.online_cart_service.get_db_connection", side_effect=_db_context(conn)):
+        with pytest.raises(HTTPException) as exc:
+            await online_cart_service.checkout_cart(cart_id)
+
+    assert exc.value.status_code == 409

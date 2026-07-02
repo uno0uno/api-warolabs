@@ -35,6 +35,7 @@ _CONTEXT_SQL = """
         tpp.display_name,
         tpp.table_qr_module_enabled,
         tpp.is_active AS profile_active,
+        tpp.timezone,
         tpp.business_hours,
         tpp.is_manually_open
     FROM tables t
@@ -85,7 +86,11 @@ async def resolve_table_qr_context(token: str) -> Optional[Dict[str, Any]]:
         return None
 
     business_hours = _parse_business_hours(row["business_hours"])
-    is_open = is_currently_open(business_hours, bool(row["is_manually_open"]))
+    is_open = is_currently_open(
+        business_hours,
+        bool(row["is_manually_open"]),
+        row["timezone"],
+    )
     if not _is_context_active(row, is_open):
         return None
 
@@ -158,7 +163,7 @@ async def _find_matching_pending_request(
           AND payment_method IS NOT DISTINCT FROM $4
           AND payment_method_id IS NOT DISTINCT FROM $5
           AND customer_notes IS NOT DISTINCT FROM $6
-          AND created_at >= now() - ($7::text || ' minutes')::interval
+          AND created_at >= now() - ($7::int * interval '1 minute')
         ORDER BY created_at DESC
         LIMIT 1
         """,
