@@ -12,6 +12,7 @@ from app.core.exceptions import AuthenticationError, ValidationError
 from app.core.email_utils import normalize_email
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.models.auth import User, Tenant, MagicLinkResponse, VerifyCodeResponse, VerifyTokenResponse
+from app.services.auth_service import replace_active_admin_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -218,30 +219,6 @@ async def verify_code(request: Request, response: Response, email: str, code: st
             )
             logger.info("✅ Verification code marked as used")
 
-            # Limit active sessions to 5 per user (end oldest sessions if limit exceeded)
-            MAX_SESSIONS_PER_USER = 5
-            active_sessions_query = """
-                SELECT id, created_at
-                FROM sessions
-                WHERE user_id = $1 AND is_active = true
-                ORDER BY created_at DESC
-            """
-            active_sessions = await conn.fetch(active_sessions_query, token_data['user_id'])
-
-            if len(active_sessions) >= MAX_SESSIONS_PER_USER:
-                # End the oldest sessions to keep only (MAX_SESSIONS_PER_USER - 1) active
-                sessions_to_keep = MAX_SESSIONS_PER_USER - 1
-                sessions_to_end = active_sessions[sessions_to_keep:]
-
-                for session in sessions_to_end:
-                    await conn.execute(
-                        'UPDATE sessions SET is_active = false, ended_at = NOW(), end_reason = $1 WHERE id = $2',
-                        'session_limit_exceeded', session['id']
-                    )
-                logger.info(f"🧹 Ended {len(sessions_to_end)} old sessions for user: {token_data['user_id']} (limit: {MAX_SESSIONS_PER_USER})")
-            else:
-                logger.info(f"✅ User has {len(active_sessions)} active sessions (limit: {MAX_SESSIONS_PER_USER})")
-
             # Create session with user's tenant from token
             session_id = secrets.token_hex(16)
             expires_at = datetime.utcnow() + timedelta(days=7)  # 7 days (1 week)
@@ -264,6 +241,7 @@ async def verify_code(request: Request, response: Response, email: str, code: st
                 session_id, token_data['user_id'], user_tenant_id,
                 expires_at, client_ip, user_agent
             )
+            await replace_active_admin_sessions(conn, token_data['user_id'], session_id)
             logger.info(f"🎫 Session created: {session_id} for tenant: {user_tenant_id}")
             
             # Get tenant info for response
@@ -359,30 +337,6 @@ async def verify_token(request: Request, response: Response, email: str, token: 
             )
             logger.info("✅ Token marked as used")
 
-            # Limit active sessions to 5 per user (end oldest sessions if limit exceeded)
-            MAX_SESSIONS_PER_USER = 5
-            active_sessions_query = """
-                SELECT id, created_at
-                FROM sessions
-                WHERE user_id = $1 AND is_active = true
-                ORDER BY created_at DESC
-            """
-            active_sessions = await conn.fetch(active_sessions_query, token_data['user_id'])
-
-            if len(active_sessions) >= MAX_SESSIONS_PER_USER:
-                # End the oldest sessions to keep only (MAX_SESSIONS_PER_USER - 1) active
-                sessions_to_keep = MAX_SESSIONS_PER_USER - 1
-                sessions_to_end = active_sessions[sessions_to_keep:]
-
-                for session in sessions_to_end:
-                    await conn.execute(
-                        'UPDATE sessions SET is_active = false, ended_at = NOW(), end_reason = $1 WHERE id = $2',
-                        'session_limit_exceeded', session['id']
-                    )
-                logger.info(f"🧹 Ended {len(sessions_to_end)} old sessions for user: {token_data['user_id']} (limit: {MAX_SESSIONS_PER_USER})")
-            else:
-                logger.info(f"✅ User has {len(active_sessions)} active sessions (limit: {MAX_SESSIONS_PER_USER})")
-
             # Create session with user's tenant from token
             session_id = secrets.token_hex(16)
             expires_at = datetime.utcnow() + timedelta(days=7)  # 7 days (1 week)
@@ -405,6 +359,7 @@ async def verify_token(request: Request, response: Response, email: str, token: 
                 session_id, token_data['user_id'], user_tenant_id,
                 expires_at, client_ip, user_agent
             )
+            await replace_active_admin_sessions(conn, token_data['user_id'], session_id)
             logger.info(f"🎫 Session created: {session_id} for tenant: {user_tenant_id}")
             
             # Get tenant info for notification
