@@ -9,6 +9,7 @@ from app.services.cierre_service import (
     _build_expense_filter,
     _build_open_tables_filter,
     _build_order_date_filter,
+    _build_purchase_payment_filter,
 )
 
 BOG = ZoneInfo("America/Bogota")
@@ -18,8 +19,8 @@ def test_order_filter_date_only_uses_bogota_dates():
     sql, params = _build_order_date_filter(
         date(2026, 5, 18), date(2026, 5, 18), None, None
     )
-    assert "AT TIME ZONE 'America/Bogota'" in sql
-    assert params == [date(2026, 5, 18), date(2026, 5, 18)]
+    assert "AT TIME ZONE $2" in sql
+    assert params == ["America/Bogota", date(2026, 5, 18), date(2026, 5, 18)]
 
 
 def test_order_filter_shift_uses_timestamps():
@@ -53,13 +54,46 @@ def test_expense_filter_shift_uses_created_at():
     assert params == [start, end]
 
 
+def test_expense_filter_can_qualify_joined_expense_columns():
+    start = datetime(2026, 7, 1, 10, 0, tzinfo=BOG)
+    end = datetime(2026, 7, 2, 4, 1, tzinfo=BOG)
+    sql, params = _build_expense_filter(
+        date(2026, 7, 1),
+        date(2026, 7, 1),
+        start,
+        end,
+        table_alias="e",
+    )
+
+    assert "e.created_at >=" in sql
+    assert " e.created_at <=" in sql
+    assert "AND created_at" not in sql
+    assert params == [start, end]
+
+
+def test_purchase_payment_filter_can_qualify_joined_purchase_columns():
+    start = datetime(2026, 7, 1, 10, 0, tzinfo=BOG)
+    end = datetime(2026, 7, 2, 4, 1, tzinfo=BOG)
+    sql, params = _build_purchase_payment_filter(
+        date(2026, 7, 1),
+        date(2026, 7, 1),
+        start,
+        end,
+        table_alias="tp",
+    )
+
+    assert "COALESCE(tp.payment_date, tp.paid_at, tp.purchase_date)" in sql
+    assert "COALESCE(payment_date" not in sql
+    assert params == [start, end]
+
+
 def test_open_tables_filter_date_only_uses_bogota_dates():
     sql, params = _build_open_tables_filter(
         date(2026, 5, 18), date(2026, 5, 18), None, None
     )
-    assert "AT TIME ZONE 'America/Bogota'" in sql
+    assert "AT TIME ZONE $2" in sql
     assert "opened_at::date" not in sql
-    assert params == [date(2026, 5, 18), date(2026, 5, 18)]
+    assert params == ["America/Bogota", date(2026, 5, 18), date(2026, 5, 18)]
 
 
 def test_open_tables_filter_covers_rebel_rebel_night_opened_at():
@@ -72,9 +106,9 @@ def test_open_tables_filter_covers_rebel_rebel_night_opened_at():
         date(2026, 6, 6), date(2026, 6, 6), None, None
     )
 
-    assert "(ts.opened_at AT TIME ZONE 'America/Bogota')::date" in sql
+    assert "(ts.opened_at AT TIME ZONE $2)::date" in sql
     assert "opened_at::date" not in sql
-    assert params == [date(2026, 6, 6), date(2026, 6, 6)]
+    assert params == ["America/Bogota", date(2026, 6, 6), date(2026, 6, 6)]
 
 
 def test_open_tables_filter_shift_uses_opened_at_before_end():
@@ -106,6 +140,8 @@ class _PreviewConn:
             return {"cash_tips": 0}
         if "AS gastos_efectivo" in sql:
             return {"gastos_efectivo": 0}
+        if "AS cash_purchases" in sql:
+            return {"cash_purchases": 0}
         raise AssertionError(f"unexpected fetchrow SQL: {sql}")
 
     async def fetch(self, *_args):
@@ -133,4 +169,4 @@ async def test_preview_open_tables_count_excludes_permanent_bar_sessions(monkeyp
     assert preview["openTablesCount"] == 0
     assert "JOIN tables t ON t.id = ts.table_id" in conn.open_tables_sql
     assert "AND t.is_bar IS FALSE" in conn.open_tables_sql
-    assert conn.open_tables_args == ("tenant-id", date(2026, 6, 6), date(2026, 6, 6))
+    assert conn.open_tables_args == ("tenant-id", "America/Bogota", date(2026, 6, 6), date(2026, 6, 6))

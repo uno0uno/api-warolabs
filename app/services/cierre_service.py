@@ -1070,6 +1070,7 @@ def _build_expense_filter(
     period_start_time: Optional[datetime],
     period_end_time: Optional[datetime],
     param_offset: int = 2,
+    table_alias: Optional[str] = None,
 ):
     """
     Cash expenses: date-only arqueos use transaction_date (business day).
@@ -1077,10 +1078,11 @@ def _build_expense_filter(
     """
     p2 = f"${param_offset}"
     p3 = f"${param_offset + 1}"
+    prefix = f"{table_alias}." if table_alias else ""
     if period_start_time and period_end_time:
-        sql = f"AND created_at >= {p2} AND created_at <= {p3}"
+        sql = f"AND {prefix}created_at >= {p2} AND {prefix}created_at <= {p3}"
         return sql, [period_start_time, period_end_time]
-    sql = f"AND transaction_date >= {p2} AND transaction_date <= {p3}"
+    sql = f"AND {prefix}transaction_date >= {p2} AND {prefix}transaction_date <= {p3}"
     return sql, [period_start, period_end]
 
 
@@ -1091,13 +1093,15 @@ def _build_purchase_payment_filter(
     period_end_time: Optional[datetime],
     timezone_name: str = DEFAULT_TENANT_TIMEZONE,
     param_offset: int = 2,
+    table_alias: Optional[str] = None,
 ):
     """
     Direct purchases use the cash/bank movement date for arqueo control.
     Date-only windows compare in tenant-local date; shift windows compare the
     actual timestamp so cross-midnight turns stay accurate.
     """
-    movement_expr = "COALESCE(payment_date, paid_at, purchase_date)"
+    prefix = f"{table_alias}." if table_alias else ""
+    movement_expr = f"COALESCE({prefix}payment_date, {prefix}paid_at, {prefix}purchase_date)"
     if period_start_time and period_end_time:
         p2 = f"${param_offset}"
         p3 = f"${param_offset + 1}"
@@ -1394,10 +1398,10 @@ async def _compute_method_outflow_rows(
     timezone_name: str = DEFAULT_TENANT_TIMEZONE,
 ) -> List[Dict[str, Any]]:
     expense_filter, expense_params = _build_expense_filter(
-        period_start, period_end, period_start_time, period_end_time
+        period_start, period_end, period_start_time, period_end_time, table_alias="e"
     )
     purchase_filter, purchase_params = _build_purchase_payment_filter(
-        period_start, period_end, period_start_time, period_end_time, timezone_name
+        period_start, period_end, period_start_time, period_end_time, timezone_name, table_alias="tp"
     )
 
     expense_rows = await conn.fetch(
@@ -1739,7 +1743,7 @@ async def _compute_preview(
     )
 
     purchase_filter, purchase_params = _build_purchase_payment_filter(
-        period_start, period_end, period_start_time, period_end_time, timezone_name
+        period_start, period_end, period_start_time, period_end_time, timezone_name, table_alias="tp"
     )
     cash_purchases_row = await conn.fetchrow(
         f"""
@@ -3584,6 +3588,13 @@ async def get_ultimo_cierre(request: Request) -> dict:
 # Helper
 # ---------------------------------------------------------------------------
 
+def _row_value(row, key: str, default=None):
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
 def _row_to_dict(row) -> dict:
     return {
         "id":                   str(row["id"]),
@@ -3610,14 +3621,14 @@ def _row_to_dict(row) -> dict:
         "totalDigital":         float(row["total_digital"]),
         "totalCredit":          float(row["total_credit"]),
         "gastosEfectivo":       float(row["gastos_efectivo"]),
-        "cashPurchases":        float(row["cash_purchases"] or 0),
+        "cashPurchases":        float(_row_value(row, "cash_purchases", 0) or 0),
         "openingCash":          float(row["opening_cash"] or 0),
         "cashExpected":         float(row["cash_expected"]),
         "cashCounted":          float(row["cash_counted"]),
         "cashDifference":       float(row["cash_difference"]),
         "cashLeftInDrawer":     float(row["cash_left_in_drawer"]) if row["cash_left_in_drawer"] is not None else None,
-        "reconciliationPendingCount": int(row["reconciliation_pending_count"] or 0),
-        "reconciliationDifferenceTotal": float(row["reconciliation_difference_total"] or 0),
+        "reconciliationPendingCount": int(_row_value(row, "reconciliation_pending_count", 0) or 0),
+        "reconciliationDifferenceTotal": float(_row_value(row, "reconciliation_difference_total", 0) or 0),
         "notes":                row["notes"],
         "closedAt":             row["closed_at"].isoformat(),
     }
