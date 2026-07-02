@@ -37,6 +37,7 @@ async def test_resolve_table_qr_token_active():
         "display_name": "Café Demo",
         "table_qr_module_enabled": True,
         "profile_active": True,
+        "timezone": "America/Bogota",
     }
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=row)
@@ -45,12 +46,13 @@ async def test_resolve_table_qr_token_active():
     row["is_manually_open"] = True
 
     with patch("app.services.public_table_qr_service.get_db_connection") as mock_get_conn, \
-         patch("app.services.public_table_qr_service.is_currently_open", return_value=True):
+         patch("app.services.public_table_qr_service.is_currently_open", return_value=True) as is_open:
         mock_get_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
         mock_get_conn.return_value.__aexit__ = AsyncMock(return_value=False)
         result = await public_table_qr_service.resolve_table_qr_token("tok-abc")
         assert result["tenant_slug"] == "cafe-demo"
         assert result["table_name"] == "Mesa 1"
+        is_open.assert_called_once_with(None, True, "America/Bogota")
 
 
 @pytest.mark.asyncio
@@ -63,6 +65,7 @@ async def test_resolve_table_qr_token_disabled_module_returns_none():
         "display_name": "Café Demo",
         "table_qr_module_enabled": False,
         "profile_active": True,
+        "timezone": "America/Bogota",
     }
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=row)
@@ -75,6 +78,14 @@ async def test_resolve_table_qr_token_disabled_module_returns_none():
         mock_get_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
         mock_get_conn.return_value.__aexit__ = AsyncMock(return_value=False)
         assert await public_table_qr_service.resolve_table_qr_token("tok-abc") is None
+
+
+def test_table_qr_duplicate_window_uses_integer_interval():
+    import inspect
+
+    source = inspect.getsource(public_table_qr_service._find_matching_pending_request)
+    assert "$7::int * interval '1 minute'" in source
+    assert "$7::text" not in source
 
 
 def test_public_resolve_endpoint_404_when_inactive():

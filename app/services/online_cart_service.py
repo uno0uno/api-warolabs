@@ -628,12 +628,52 @@ async def checkout_cart(
                 if not cart:
                     raise HTTPException(status_code=404, detail="Carrito no encontrado")
 
+                if cart['status'] == 'checked_out':
+                    existing_order = await conn.fetchrow(
+                        """
+                        SELECT
+                            o.id,
+                            o.order_number,
+                            o.total_amount,
+                            o.tip_amount,
+                            o.tip_source,
+                            oc.order_type,
+                            oc.pickup_pin,
+                            tpp.estimated_preparation_time
+                        FROM orders o
+                        JOIN online_carts oc ON oc.id = o.online_cart_id
+                        LEFT JOIN tenant_public_profiles tpp ON tpp.tenant_id = o.tenant_id
+                        WHERE o.online_cart_id = $1
+                          AND o.tenant_id = $2
+                        ORDER BY o.created_at DESC
+                        LIMIT 1
+                        """,
+                        cart_id,
+                        cart['tenant_id'],
+                    )
+                    if existing_order:
+                        total_amount = float(existing_order['total_amount'] or 0)
+                        tip_amount_existing = float(existing_order['tip_amount'] or 0)
+                        return {
+                            "success": True,
+                            "data": {
+                                "order_id": str(existing_order['id']),
+                                "order_number": int(existing_order['order_number']),
+                                "total_amount": total_amount,
+                                "tip_amount": tip_amount_existing,
+                                "tip_source": existing_order['tip_source'] or 'none',
+                                "charged_amount": total_amount + tip_amount_existing,
+                                "order_type": existing_order['order_type'],
+                                "pickup_pin": existing_order['pickup_pin'],
+                                "estimated_preparation_time": existing_order['estimated_preparation_time'],
+                            },
+                        }
+
+                    raise HTTPException(status_code=409, detail="Este carrito ya fue procesado, pero no se encontró el pedido asociado.")
+
                 # 2. Validate state
                 if not cart['is_verified']:
                     raise HTTPException(status_code=400, detail="El carrito no ha sido verificado. Completa el proceso de verificación por OTP.")
-
-                if cart['status'] == 'checked_out':
-                    raise HTTPException(status_code=409, detail="Este carrito ya fue procesado. El pedido ya existe.")
 
                 if cart['status'] != 'active':
                     raise HTTPException(status_code=400, detail=f"El carrito no está activo (estado: {cart['status']})")
@@ -650,7 +690,7 @@ async def checkout_cart(
                 # 4. Validate online ordering gate, open status and minimum order amount from tenant profile
                 # warocol.com#637 — also read tip_enabled here to gate the optional tip fields
                 tenant_profile_query = """
-                    SELECT min_order_amount, estimated_preparation_time, is_manually_open, business_hours,
+                    SELECT min_order_amount, estimated_preparation_time, is_manually_open, business_hours, timezone,
                            accepts_online_orders, tip_enabled
                     FROM tenant_public_profiles
                     WHERE tenant_id = $1
@@ -671,7 +711,7 @@ async def checkout_cart(
                     bh = profile['business_hours']
                     if isinstance(bh, str):
                         bh = _json.loads(bh)
-                    if not is_currently_open(bh, profile['is_manually_open']):
+                    if not is_currently_open(bh, profile['is_manually_open'], profile['timezone']):
                         raise HTTPException(
                             status_code=409,
                             detail="El restaurante está cerrado en este momento. No se pueden procesar pedidos."
@@ -932,7 +972,7 @@ async def checkout_cart(
                     delivery_instructions=cart.get('delivery_instructions'),
                     pickup_pin=cart.get('pickup_pin'),
                     order_id=str(order_id),
-                    tenant_id=str(tenant_id),
+                    tenant_id=str(cart['tenant_id']),
                 )
             except Exception as email_err:
                 logger.error(f"Failed to send order confirmation email for order #{order_number}: {email_err}")
