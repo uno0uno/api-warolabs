@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException
 from app.database import get_db_connection
 from app.core.exceptions import APIError
+from app.services.billing_service import check_completed_online_order_quota
 from app.services.email_helpers import send_order_confirmation_email
 import logging
 import datetime as _dt
@@ -772,6 +773,8 @@ async def checkout_cart(
                         detail=f"Los siguientes productos ya no están disponibles para domicilios: {names}. Por favor actualiza tu carrito."
                     )
 
+                await check_completed_online_order_quota(conn, cart['tenant_id'])
+
                 # 7. Atomically lock cart — prevents double checkout
                 locked = await conn.fetchrow(
                     "UPDATE online_carts SET status = 'checked_out', completed_at = now(), updated_at = now() WHERE id = $1 AND status = 'active' RETURNING id",
@@ -937,6 +940,8 @@ async def checkout_cart(
         return order_result
 
     except HTTPException:
+        raise
+    except APIError:
         raise
     except Exception as e:
         logger.error(f"Error during checkout for cart {cart_id}: {str(e)}")

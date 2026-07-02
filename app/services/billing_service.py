@@ -56,6 +56,11 @@ PLAN_QUOTA_DEFAULTS = {
 
 QUOTA_UPGRADE_URL = "/billing/planes"
 QUOTA_CONTACT_MESSAGE = "Actualiza tu plan o contacta a soporte para ampliar este límite."
+ONLINE_ORDER_QUOTA_CUSTOMER_MESSAGE = (
+    "El restaurante no puede recibir más pedidos en línea por este periodo. "
+    "Intenta contactarlo directamente."
+)
+ONLINE_ORDER_QUOTA_RESOURCE = "completed_online_orders_per_month"
 ENFORCEABLE_QUOTA_RESOURCES = {
     "admin_users",
     "active_kitchens",
@@ -181,6 +186,118 @@ async def check_plan_quota_growth(conn, tenant_id: UUID, resource: str) -> None:
             "message": QUOTA_CONTACT_MESSAGE,
         },
     )
+
+
+async def check_completed_online_order_quota(conn, tenant_id: UUID) -> None:
+    """
+    Block final public checkout once the tenant reaches its online-order quota.
+
+    Unlike active-resource quotas, this is period-based: the usage window comes
+    from the current subscription period and counts only completed online orders.
+    """
+    plan = await conn.fetchrow(
+        """
+        SELECT
+            sp.slug AS plan_slug,
+            sp.features AS plan_features,
+            ts.current_period_start,
+            ts.current_period_end
+        FROM tenant_subscriptions ts
+        JOIN subscription_plans sp ON sp.id = ts.plan_id
+        WHERE ts.tenant_id = $1
+          AND ts.status IN ('active', 'past_due')
+          AND ts.current_period_end > now()
+        ORDER BY ts.current_period_end DESC
+        LIMIT 1
+        """,
+        tenant_id,
+    )
+    if not plan:
+        return
+
+    quotas = _normalize_plan_quotas(plan["plan_slug"], plan["plan_features"])
+    limit = int(quotas.get(ONLINE_ORDER_QUOTA_RESOURCE, 0))
+    if limit <= 0:
+        return
+
+    period_start = plan["current_period_start"]
+    period_end = plan["current_period_end"]
+    used = int(await conn.fetchval(
+        """
+        SELECT COUNT(DISTINCT o.id)
+        FROM orders o
+        WHERE o.tenant_id = $1
+          AND o.online_cart_id IS NOT NULL
+          AND o.status = 'completed'
+          AND o.order_date >= $2
+          AND o.order_date < $3
+        """,
+        tenant_id,
+        period_start,
+        period_end,
+    ) or 0)
+
+    _log_online_order_quota_usage(
+        tenant_id=tenant_id,
+        plan_slug=plan["plan_slug"],
+        used=used,
+        limit=limit,
+        period_start=period_start,
+        period_end=period_end,
+    )
+
+    if used < limit:
+        return
+
+    raise APIError(
+        "Límite mensual de pedidos en línea alcanzado",
+        status_code=429,
+        details={
+            "code": "online_order_quota_exceeded",
+            "error": "online_order_quota_exceeded",
+            "resource": ONLINE_ORDER_QUOTA_RESOURCE,
+            "used": used,
+            "limit": limit,
+            "plan_slug": plan["plan_slug"],
+            "period_start": period_start.isoformat(),
+            "period_end": period_end.isoformat(),
+            "upgrade_url": QUOTA_UPGRADE_URL,
+            "tenant_message": QUOTA_CONTACT_MESSAGE,
+            "customer_message": ONLINE_ORDER_QUOTA_CUSTOMER_MESSAGE,
+        },
+    )
+
+
+def _log_online_order_quota_usage(
+    *,
+    tenant_id: UUID,
+    plan_slug: str,
+    used: int,
+    limit: int,
+    period_start: datetime,
+    period_end: datetime,
+) -> None:
+    usage_ratio = used / limit if limit else 0
+    if usage_ratio >= 1:
+        logger.warning(
+            "online_order_quota_threshold tenant=%s plan=%s used=%d limit=%d threshold=100 period_start=%s period_end=%s",
+            tenant_id,
+            plan_slug,
+            used,
+            limit,
+            period_start.isoformat(),
+            period_end.isoformat(),
+        )
+    elif usage_ratio >= 0.8:
+        logger.info(
+            "online_order_quota_threshold tenant=%s plan=%s used=%d limit=%d threshold=80 period_start=%s period_end=%s",
+            tenant_id,
+            plan_slug,
+            used,
+            limit,
+            period_start.isoformat(),
+            period_end.isoformat(),
+        )
 
 
 async def _count_quota_resource_usage(conn, tenant_id: UUID, resource: str) -> int:
