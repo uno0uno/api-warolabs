@@ -69,6 +69,20 @@ ENFORCEABLE_QUOTA_RESOURCES = {
 }
 
 
+@dataclass(frozen=True)
+class EffectiveQuota:
+    resource: str
+    plan_limit: int
+    limit: Optional[int]
+    override_id: Optional[UUID] = None
+    override_disabled: bool = False
+    override_reason: Optional[str] = None
+
+    @property
+    def has_override(self) -> bool:
+        return self.override_id is not None
+
+
 async def check_scan_quota(tenant_id: UUID, conn) -> None:
     """
     Atomic scan quota check and increment.
@@ -152,9 +166,18 @@ async def check_plan_quota_growth(conn, tenant_id: UUID, resource: str) -> None:
 
     plan = await conn.fetchrow(
         """
-        SELECT sp.slug AS plan_slug, sp.features AS plan_features
+        SELECT
+            sp.slug AS plan_slug,
+            sp.features AS plan_features,
+            tq.id AS override_id,
+            tq.limit_override,
+            COALESCE(tq.disabled, false) AS override_disabled,
+            tq.reason AS override_reason
         FROM tenant_subscriptions ts
         JOIN subscription_plans sp ON sp.id = ts.plan_id
+        LEFT JOIN tenant_quota_overrides tq
+          ON tq.tenant_id = ts.tenant_id
+         AND tq.resource = $2
         WHERE ts.tenant_id = $1
           AND ts.status IN ('active', 'past_due')
           AND ts.current_period_end > now()
@@ -162,16 +185,27 @@ async def check_plan_quota_growth(conn, tenant_id: UUID, resource: str) -> None:
         LIMIT 1
         """,
         tenant_id,
+        resource,
     )
     if not plan:
         return
 
     quotas = _normalize_plan_quotas(plan["plan_slug"], plan["plan_features"])
-    limit = int(quotas.get(resource, 0))
-    used = await _count_quota_resource_usage(conn, tenant_id, resource)
-    if used < limit:
+    quota = _effective_quota_from_row(resource, quotas.get(resource, 0), plan)
+    if quota.limit is None:
         return
 
+    used = await _count_quota_resource_usage(conn, tenant_id, resource)
+    if used < quota.limit:
+        return
+
+    _log_quota_block(
+        tenant_id=tenant_id,
+        resource=resource,
+        used=used,
+        quota=quota,
+        plan_slug=plan["plan_slug"],
+    )
     raise APIError(
         "Límite del plan alcanzado",
         status_code=429,
@@ -180,8 +214,10 @@ async def check_plan_quota_growth(conn, tenant_id: UUID, resource: str) -> None:
             "error": "quota_exceeded",
             "resource": resource,
             "used": used,
-            "limit": limit,
+            "limit": quota.limit,
+            "plan_limit": quota.plan_limit,
             "plan_slug": plan["plan_slug"],
+            "override": _quota_override_payload(quota),
             "upgrade_url": QUOTA_UPGRADE_URL,
             "message": QUOTA_CONTACT_MESSAGE,
         },
@@ -201,9 +237,16 @@ async def check_completed_online_order_quota(conn, tenant_id: UUID) -> None:
             sp.slug AS plan_slug,
             sp.features AS plan_features,
             ts.current_period_start,
-            ts.current_period_end
+            ts.current_period_end,
+            tq.id AS override_id,
+            tq.limit_override,
+            COALESCE(tq.disabled, false) AS override_disabled,
+            tq.reason AS override_reason
         FROM tenant_subscriptions ts
         JOIN subscription_plans sp ON sp.id = ts.plan_id
+        LEFT JOIN tenant_quota_overrides tq
+          ON tq.tenant_id = ts.tenant_id
+         AND tq.resource = $2
         WHERE ts.tenant_id = $1
           AND ts.status IN ('active', 'past_due')
           AND ts.current_period_end > now()
@@ -211,13 +254,18 @@ async def check_completed_online_order_quota(conn, tenant_id: UUID) -> None:
         LIMIT 1
         """,
         tenant_id,
+        ONLINE_ORDER_QUOTA_RESOURCE,
     )
     if not plan:
         return
 
     quotas = _normalize_plan_quotas(plan["plan_slug"], plan["plan_features"])
-    limit = int(quotas.get(ONLINE_ORDER_QUOTA_RESOURCE, 0))
-    if limit <= 0:
+    quota = _effective_quota_from_row(
+        ONLINE_ORDER_QUOTA_RESOURCE,
+        quotas.get(ONLINE_ORDER_QUOTA_RESOURCE, 0),
+        plan,
+    )
+    if quota.limit is None or quota.limit <= 0:
         return
 
     period_start = plan["current_period_start"]
@@ -241,14 +289,21 @@ async def check_completed_online_order_quota(conn, tenant_id: UUID) -> None:
         tenant_id=tenant_id,
         plan_slug=plan["plan_slug"],
         used=used,
-        limit=limit,
+        limit=quota.limit,
         period_start=period_start,
         period_end=period_end,
     )
 
-    if used < limit:
+    if used < quota.limit:
         return
 
+    _log_quota_block(
+        tenant_id=tenant_id,
+        resource=ONLINE_ORDER_QUOTA_RESOURCE,
+        used=used,
+        quota=quota,
+        plan_slug=plan["plan_slug"],
+    )
     raise APIError(
         "Límite mensual de pedidos en línea alcanzado",
         status_code=429,
@@ -257,8 +312,10 @@ async def check_completed_online_order_quota(conn, tenant_id: UUID) -> None:
             "error": "online_order_quota_exceeded",
             "resource": ONLINE_ORDER_QUOTA_RESOURCE,
             "used": used,
-            "limit": limit,
+            "limit": quota.limit,
+            "plan_limit": quota.plan_limit,
             "plan_slug": plan["plan_slug"],
+            "override": _quota_override_payload(quota),
             "period_start": period_start.isoformat(),
             "period_end": period_end.isoformat(),
             "upgrade_url": QUOTA_UPGRADE_URL,
@@ -298,6 +355,113 @@ def _log_online_order_quota_usage(
             period_start.isoformat(),
             period_end.isoformat(),
         )
+
+
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def _effective_quota_from_row(resource: str, plan_limit: Any, row: Any) -> EffectiveQuota:
+    plan_limit_int = _coerce_quota_value(plan_limit, 0)
+    override_id = _row_value(row, "override_id")
+    if not override_id:
+        return EffectiveQuota(resource=resource, plan_limit=plan_limit_int, limit=plan_limit_int)
+
+    disabled = bool(_row_value(row, "override_disabled", False))
+    limit_override = _row_value(row, "limit_override")
+    effective_limit = None if disabled else _coerce_quota_value(limit_override, plan_limit_int)
+    return EffectiveQuota(
+        resource=resource,
+        plan_limit=plan_limit_int,
+        limit=effective_limit,
+        override_id=override_id,
+        override_disabled=disabled,
+        override_reason=_row_value(row, "override_reason"),
+    )
+
+
+def _quota_override_payload(quota: EffectiveQuota) -> Optional[Dict[str, Any]]:
+    if not quota.has_override:
+        return None
+    return {
+        "id": str(quota.override_id),
+        "disabled": quota.override_disabled,
+        "reason": quota.override_reason,
+    }
+
+
+def _log_quota_block(
+    *,
+    tenant_id: UUID,
+    resource: str,
+    used: int,
+    quota: EffectiveQuota,
+    plan_slug: str,
+) -> None:
+    logger.warning(
+        "quota_blocked tenant=%s resource=%s used=%d limit=%s plan_limit=%d plan=%s override=%s override_id=%s",
+        tenant_id,
+        resource,
+        used,
+        quota.limit,
+        quota.plan_limit,
+        plan_slug,
+        quota.has_override,
+        quota.override_id,
+    )
+
+
+async def _fetch_tenant_quota_overrides(conn, tenant_id: UUID) -> Dict[str, EffectiveQuota]:
+    rows = await conn.fetch(
+        """
+        SELECT id, resource, limit_override, disabled, reason
+        FROM tenant_quota_overrides
+        WHERE tenant_id = $1
+          AND resource = ANY($2::text[])
+        """,
+        tenant_id,
+        list(QUOTA_KEYS),
+    )
+    return {
+        row["resource"]: EffectiveQuota(
+            resource=row["resource"],
+            plan_limit=0,
+            limit=None if row["disabled"] else _coerce_quota_value(row["limit_override"], 0),
+            override_id=row["id"],
+            override_disabled=bool(row["disabled"]),
+            override_reason=row["reason"],
+        )
+        for row in rows
+    }
+
+
+def _apply_effective_quotas(
+    plan_quotas: Dict[str, int],
+    overrides: Dict[str, EffectiveQuota],
+) -> Dict[str, EffectiveQuota]:
+    effective: Dict[str, EffectiveQuota] = {}
+    for resource in QUOTA_KEYS:
+        plan_limit = _coerce_quota_value(plan_quotas.get(resource), 0)
+        override = overrides.get(resource)
+        if override:
+            effective[resource] = EffectiveQuota(
+                resource=resource,
+                plan_limit=plan_limit,
+                limit=None if override.override_disabled else override.limit,
+                override_id=override.override_id,
+                override_disabled=override.override_disabled,
+                override_reason=override.override_reason,
+            )
+        else:
+            effective[resource] = EffectiveQuota(
+                resource=resource,
+                plan_limit=plan_limit,
+                limit=plan_limit,
+            )
+    return effective
 
 
 async def _count_quota_resource_usage(conn, tenant_id: UUID, resource: str) -> int:
@@ -983,7 +1147,11 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
               AND COALESCE(emitted_at, created_at) < $3
         """, tenant_id, period_start, period_end) or 0)
 
-    quotas = _normalize_plan_quotas(row["plan_slug"], row["plan_features"])
+    plan_quotas = _normalize_plan_quotas(row["plan_slug"], row["plan_features"])
+    effective_quotas = _apply_effective_quotas(
+        plan_quotas,
+        await _fetch_tenant_quota_overrides(conn, tenant_id),
+    )
     quota_counts = await conn.fetchrow("""
         SELECT
             (
@@ -1041,45 +1209,64 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             ) AS completed_online_orders_per_month
     """, tenant_id, period_start, period_end, list(LEGACY_INTERNAL_TEAM_ROLES))
 
-    def metric(used: int, limit: int) -> Dict[str, Any]:
-        return {
+    def metric(used: int, quota: EffectiveQuota) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
             "used": used,
-            "limit": limit,
-            "remaining": max(limit - used, 0),
+            "limit": quota.limit,
+            "remaining": None if quota.limit is None else max(quota.limit - used, 0),
             "period_start": period_start_iso,
             "period_end": period_end_iso,
         }
+        if quota.has_override:
+            data["plan_limit"] = quota.plan_limit
+            data["override"] = _quota_override_payload(quota)
+        return data
 
     return {
         "period_start": period_start_iso,
         "period_end": period_end_iso,
-        "scan_usage": metric(scans_used, scans_limit),
-        "electronic_invoice_usage": metric(invoice_used, invoice_limit),
+        "scan_usage": {
+            "used": scans_used,
+            "limit": scans_limit,
+            "remaining": max(scans_limit - scans_used, 0),
+            "period_start": period_start_iso,
+            "period_end": period_end_iso,
+        },
+        "electronic_invoice_usage": {
+            "used": invoice_used,
+            "limit": invoice_limit,
+            "remaining": max(invoice_limit - invoice_used, 0),
+            "period_start": period_start_iso,
+            "period_end": period_end_iso,
+        },
         "quota_usage": {
-            "admin_users": metric(int(quota_counts["admin_users"] or 0), quotas["admin_users"]),
+            "admin_users": metric(
+                int(quota_counts["admin_users"] or 0),
+                effective_quotas["admin_users"],
+            ),
             "active_sessions_per_admin_user": metric(
                 int(quota_counts["active_sessions_per_admin_user"] or 0),
-                quotas["active_sessions_per_admin_user"],
+                effective_quotas["active_sessions_per_admin_user"],
             ),
             "active_kitchens": metric(
                 int(quota_counts["active_kitchens"] or 0),
-                quotas["active_kitchens"],
+                effective_quotas["active_kitchens"],
             ),
             "active_tables_including_bar": metric(
                 int(quota_counts["active_tables_including_bar"] or 0),
-                quotas["active_tables_including_bar"],
+                effective_quotas["active_tables_including_bar"],
             ),
             "active_qr_tables": metric(
                 int(quota_counts["active_qr_tables"] or 0),
-                quotas["active_qr_tables"],
+                effective_quotas["active_qr_tables"],
             ),
             "completed_online_orders_per_month": metric(
                 int(quota_counts["completed_online_orders_per_month"] or 0),
-                quotas["completed_online_orders_per_month"],
+                effective_quotas["completed_online_orders_per_month"],
             ),
             "electronic_invoices_per_period": metric(
                 invoice_used,
-                quotas["electronic_invoices_per_period"],
+                effective_quotas["electronic_invoices_per_period"],
             ),
         },
     }

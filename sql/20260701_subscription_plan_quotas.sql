@@ -38,9 +38,11 @@ SET features = jsonb_set(
     updated_at = now()
 WHERE slug = 'facturacion-electronica';
 
--- Manual PR validation: current tenant usage against proposed limits.
+-- Manual PR validation: current tenant usage against effective limits.
 -- Run read-only in production/staging and include the over-quota summary in
--- the PR. Customer/buyer memberships are intentionally excluded.
+-- the PR. Customer/buyer memberships are intentionally excluded. Tenant
+-- overrides from api-warolabs#578 win over plan quotas and can disable a
+-- selected resource limit.
 /*
 WITH quota_plans AS (
   SELECT id, slug, features->'quotas' AS quotas
@@ -97,19 +99,51 @@ WITH quota_plans AS (
   LEFT JOIN orders o ON o.tenant_id = s.tenant_id
   LEFT JOIN electronic_invoices ei ON ei.tenant_id = s.tenant_id
   GROUP BY s.tenant_id
+), resource_usage AS (
+  SELECT
+    s.tenant_id,
+    s.tenant_slug,
+    s.plan_slug,
+    resource.resource,
+    resource.used,
+    COALESCE((s.quotas->>resource.resource)::int, 0) AS plan_limit
+  FROM active_subs s
+  JOIN usage u ON u.tenant_id = s.tenant_id
+  CROSS JOIN LATERAL (
+    VALUES
+      ('admin_users', u.admin_users),
+      ('active_sessions_per_admin_user', u.active_sessions_per_admin_user),
+      ('active_kitchens', u.active_kitchens),
+      ('active_tables_including_bar', u.active_tables_including_bar),
+      ('active_qr_tables', u.active_qr_tables),
+      ('completed_online_orders_per_month', u.completed_online_orders_per_month),
+      ('electronic_invoices_per_period', u.electronic_invoices_per_period)
+  ) AS resource(resource, used)
 )
 SELECT
-  s.tenant_slug,
-  s.plan_slug,
-  u.*,
-  (u.admin_users > COALESCE((s.quotas->>'admin_users')::int, 0)) AS over_admin_users,
-  (u.active_sessions_per_admin_user > COALESCE((s.quotas->>'active_sessions_per_admin_user')::int, 0)) AS over_active_sessions_per_admin_user,
-  (u.active_kitchens > COALESCE((s.quotas->>'active_kitchens')::int, 0)) AS over_active_kitchens,
-  (u.active_tables_including_bar > COALESCE((s.quotas->>'active_tables_including_bar')::int, 0)) AS over_active_tables,
-  (u.active_qr_tables > COALESCE((s.quotas->>'active_qr_tables')::int, 0)) AS over_active_qr_tables,
-  (u.completed_online_orders_per_month > COALESCE((s.quotas->>'completed_online_orders_per_month')::int, 0)) AS over_online_orders,
-  (u.electronic_invoices_per_period > COALESCE((s.quotas->>'electronic_invoices_per_period')::int, 0)) AS over_electronic_invoices
-FROM active_subs s
-JOIN usage u ON u.tenant_id = s.tenant_id
-ORDER BY s.tenant_slug;
+  ru.tenant_slug,
+  ru.plan_slug,
+  ru.resource,
+  ru.used,
+  ru.plan_limit,
+  CASE
+    WHEN tq.disabled THEN NULL
+    ELSE COALESCE(tq.limit_override, ru.plan_limit)
+  END AS effective_limit,
+  CASE
+    WHEN tq.id IS NULL THEN 'plan'
+    WHEN tq.disabled THEN 'override_disabled_unlimited'
+    ELSE 'override_limit'
+  END AS override_state,
+  tq.reason AS override_reason,
+  (ru.used > ru.plan_limit) AS over_plan_limit,
+  CASE
+    WHEN tq.disabled THEN false
+    ELSE ru.used > COALESCE(tq.limit_override, ru.plan_limit)
+  END AS over_effective_limit
+FROM resource_usage ru
+LEFT JOIN tenant_quota_overrides tq
+  ON tq.tenant_id = ru.tenant_id
+ AND tq.resource = ru.resource
+ORDER BY ru.tenant_slug, ru.resource;
 */
