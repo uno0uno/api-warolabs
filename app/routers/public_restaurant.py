@@ -2,7 +2,7 @@
 Public restaurant router - public endpoints for restaurant profiles and menus
 No authentication required
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from typing import Optional, Dict, Any
 from uuid import UUID
 from app.core.exceptions import NotFoundError
@@ -15,8 +15,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _mark_dynamic_public_response(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+
+
 @router.get("/list")
 async def list_public_restaurants(
+    response: Response,
     city: Optional[str] = Query(
         default=None,
         description="Deprecated: filter by display-name city. Use city_slug instead."
@@ -44,6 +50,7 @@ async def list_public_restaurants(
         "🔍 [list_public_restaurants] Request city=%r city_slug=%r",
         city, city_slug,
     )
+    _mark_dynamic_public_response(response)
 
     restaurants = await public_restaurant_service.list_restaurants(
         city=city, city_slug=city_slug,
@@ -80,7 +87,7 @@ async def list_public_cities(
 
 
 @router.get("/{tenant_slug}/payment-methods")
-async def list_public_payment_methods(tenant_slug: str) -> Dict[str, Any]:
+async def list_public_payment_methods(response: Response, tenant_slug: str) -> Dict[str, Any]:
     """
     Active payment groups + nested methods that the customer can pick at
     online checkout. Public — no auth header required (warocol.com#610).
@@ -89,6 +96,7 @@ async def list_public_payment_methods(tenant_slug: str) -> Dict[str, Any]:
     but resolves the tenant by `tenant_slug` and excludes `triggersCartera=true`
     groups (anonymous customers cannot accrue cartera).
     """
+    _mark_dynamic_public_response(response)
     try:
         return await payment_method_service.list_public_methods_by_tenant_slug(
             tenant_slug
@@ -102,9 +110,11 @@ async def list_public_payment_methods(tenant_slug: str) -> Dict[str, Any]:
 
 @router.get("/{tenant_slug}")
 async def get_public_profile(
+    response: Response,
     tenant_slug: str
 ) -> Dict[str, Any]:
     logger.info(f"🔍 [get_public_profile] Request for slug: {tenant_slug}")
+    _mark_dynamic_public_response(response)
     """
     Get public restaurant profile by slug
 
@@ -140,6 +150,7 @@ async def get_public_profile(
 
 @router.get("/{tenant_slug}/menu")
 async def get_public_menu(
+    response: Response,
     tenant_slug: str,
     category_id: Optional[UUID] = Query(
         default=None,
@@ -147,6 +158,7 @@ async def get_public_menu(
     )
 ) -> Dict[str, Any]:
     logger.info(f"🔍 [get_public_menu] Request for slug: {tenant_slug}, category: {category_id}")
+    _mark_dynamic_public_response(response)
     """
     Get public menu for a restaurant
 
@@ -178,6 +190,7 @@ async def get_public_menu(
 
 @router.get("/{tenant_slug}/product/{product_id}")
 async def get_public_product_detail(
+    response: Response,
     tenant_slug: str,
     product_id: UUID
 ) -> Dict[str, Any]:
@@ -196,6 +209,7 @@ async def get_public_product_detail(
 
     Example: GET /api/public/restaurant/la-hamburgueseria/product/uuid-here
     """
+    _mark_dynamic_public_response(response)
     product = await public_restaurant_service.get_product_detail(
         tenant_slug,
         product_id

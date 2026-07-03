@@ -96,6 +96,7 @@ async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
                 profile.get('timezone'),
             )
             profile.update(await _public_online_order_availability(conn, profile))
+            _set_public_ordering_status(profile)
 
             return profile
 
@@ -248,6 +249,7 @@ async def get_profile_by_tenant_id(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                 profile.get('timezone'),
             )
             profile.update(await _public_online_order_availability(conn, profile))
+            _set_public_ordering_status(profile)
 
             return profile
 
@@ -277,6 +279,28 @@ async def _public_online_order_availability(conn, profile: Dict[str, Any]) -> Di
         "online_orders_unavailable_reason": None,
         "online_orders_unavailable_message": None,
     }
+
+
+def _set_public_ordering_status(profile: Dict[str, Any]) -> None:
+    """
+    Customer-facing availability status for public storefronts and directories.
+
+    This is intentionally explicit so clients do not infer "open" from stale or
+    partial payloads. Only the literal "open" status means customers can order.
+    """
+    if not profile.get("is_currently_open"):
+        status = "closed_hours"
+    elif profile.get("online_orders_available") is True:
+        status = "open"
+    elif profile.get("online_orders_unavailable_reason") == "online_order_quota_exceeded":
+        status = "closed_quota"
+    elif profile.get("online_orders_unavailable_reason") == "online_orders_disabled":
+        status = "closed_online_orders_disabled"
+    else:
+        status = "closed_unavailable"
+
+    profile["public_ordering_status"] = status
+    profile["public_ordering_label"] = "Abierto" if status == "open" else "Cerrado"
 
 
 async def get_menu_by_tenant_id(
@@ -740,6 +764,7 @@ async def list_restaurants(
                     "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None
                 }
                 restaurant.update(await _public_online_order_availability(conn, restaurant))
+                _set_public_ordering_status(restaurant)
                 restaurants.append(restaurant)
 
             return restaurants
