@@ -6,6 +6,10 @@ from typing import Optional, Dict, Any, List
 from uuid import UUID
 from datetime import datetime, time
 from fastapi import HTTPException
+from app.services.billing_service import (
+    ONLINE_ORDER_QUOTA_CUSTOMER_MESSAGE,
+    get_public_online_order_quota_availability,
+)
 from app.core.timezones import get_zoneinfo, normalize_timezone
 from app.database import get_db_connection
 import json
@@ -91,6 +95,7 @@ async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
                 profile.get('is_manually_open', True),
                 profile.get('timezone'),
             )
+            profile.update(await _public_online_order_availability(conn, profile))
 
             return profile
 
@@ -242,12 +247,36 @@ async def get_profile_by_tenant_id(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                 profile.get('is_manually_open', True),
                 profile.get('timezone'),
             )
+            profile.update(await _public_online_order_availability(conn, profile))
 
             return profile
 
     except Exception as e:
         logger.error(f"Error getting profile by tenant_id '{tenant_id}': {e}")
         raise HTTPException(status_code=500, detail="Error fetching restaurant profile")
+
+
+async def _public_online_order_availability(conn, profile: Dict[str, Any]) -> Dict[str, Any]:
+    if not profile.get('accepts_online_orders'):
+        return {
+            "online_orders_available": False,
+            "online_orders_unavailable_reason": "online_orders_disabled",
+            "online_orders_unavailable_message": "Este restaurante no recibe pedidos en línea actualmente.",
+        }
+
+    quota = await get_public_online_order_quota_availability(conn, profile['tenant_id'])
+    if not quota["available"]:
+        return {
+            "online_orders_available": False,
+            "online_orders_unavailable_reason": quota["reason"],
+            "online_orders_unavailable_message": quota["message"] or ONLINE_ORDER_QUOTA_CUSTOMER_MESSAGE,
+        }
+
+    return {
+        "online_orders_available": True,
+        "online_orders_unavailable_reason": None,
+        "online_orders_unavailable_message": None,
+    }
 
 
 async def get_menu_by_tenant_id(

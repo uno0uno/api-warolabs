@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.core.exceptions import APIError
-from app.services import billing_service, invitation_service, online_cart_service, stations_service, tables_service
+from app.services import billing_service, invitation_service, online_cart_service, public_restaurant_service, stations_service, tables_service
 
 
 def _db_context(conn):
@@ -395,6 +395,96 @@ async def test_completed_online_order_quota_without_active_subscription_is_noop(
     await billing_service.check_completed_online_order_quota(conn, uuid4())
 
     conn.fetchval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_public_online_order_quota_availability_hides_internal_payload_when_exhausted():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "plan_slug": "pro",
+        "plan_features": {"quotas": {"completed_online_orders_per_month": 300}},
+        "current_period_start": period_start,
+        "current_period_end": period_end,
+    })
+    conn.fetchval = AsyncMock(return_value=300)
+
+    result = await billing_service.get_public_online_order_quota_availability(conn, tenant_id)
+
+    assert result == {
+        "available": False,
+        "reason": "online_order_quota_exceeded",
+        "message": billing_service.ONLINE_ORDER_QUOTA_CUSTOMER_MESSAGE,
+    }
+    assert "used" not in result
+    assert "limit" not in result
+    assert "plan_slug" not in result
+    assert "override" not in result
+
+
+@pytest.mark.asyncio
+async def test_public_profile_exposes_safe_online_order_unavailable_signal_for_quota():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        {
+            "id": uuid4(),
+            "tenant_id": tenant_id,
+            "slug": "restaurante",
+            "is_active": True,
+            "display_name": "Restaurante",
+            "description": None,
+            "logo_url": None,
+            "banner_url": None,
+            "phone_number": None,
+            "email": None,
+            "address": None,
+            "city": None,
+            "neighborhood": None,
+            "latitude": None,
+            "longitude": None,
+            "timezone": "America/Bogota",
+            "business_hours": {},
+            "social_media": {},
+            "seo_title": None,
+            "seo_description": None,
+            "accepts_online_orders": True,
+            "min_order_amount": Decimal("0"),
+            "estimated_preparation_time": 20,
+            "is_manually_open": True,
+            "tip_enabled": False,
+            "tip_default_percentages": None,
+            "tip_preselect_index": None,
+            "created_at": None,
+            "updated_at": None,
+        },
+        {
+            "plan_slug": "pro",
+            "plan_features": {"quotas": {"completed_online_orders_per_month": 300}},
+            "current_period_start": period_start,
+            "current_period_end": period_end,
+        },
+    ])
+    conn.fetchval = AsyncMock(return_value=300)
+
+    with (
+        patch("app.services.public_restaurant_service.get_db_connection", side_effect=_db_context(conn)),
+        patch("app.services.public_restaurant_service.is_currently_open", return_value=True),
+    ):
+        profile = await public_restaurant_service.get_profile_by_slug("restaurante")
+
+    assert profile["is_currently_open"] is True
+    assert profile["online_orders_available"] is False
+    assert profile["online_orders_unavailable_reason"] == "online_order_quota_exceeded"
+    assert profile["online_orders_unavailable_message"] == billing_service.ONLINE_ORDER_QUOTA_CUSTOMER_MESSAGE
+    assert "used" not in profile
+    assert "limit" not in profile
+    assert "plan_slug" not in profile
+    assert "override" not in profile
 
 
 @pytest.mark.asyncio

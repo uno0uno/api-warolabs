@@ -83,6 +83,15 @@ class EffectiveQuota:
         return self.override_id is not None
 
 
+@dataclass(frozen=True)
+class OnlineOrderQuotaState:
+    plan_slug: str
+    quota: EffectiveQuota
+    period_start: datetime
+    period_end: datetime
+    used: int
+
+
 async def check_scan_quota(tenant_id: UUID, conn) -> None:
     """
     Atomic scan quota check and increment.
@@ -224,12 +233,12 @@ async def check_plan_quota_growth(conn, tenant_id: UUID, resource: str) -> None:
     )
 
 
-async def check_completed_online_order_quota(conn, tenant_id: UUID) -> None:
+async def _get_completed_online_order_quota_state(conn, tenant_id: UUID) -> Optional[OnlineOrderQuotaState]:
     """
-    Block final public checkout once the tenant reaches its online-order quota.
+    Read current online-order quota state.
 
-    Unlike active-resource quotas, this is period-based: the usage window comes
-    from the current subscription period and counts only completed online orders.
+    Returns None when no finite active quota applies, matching checkout's
+    fail-open behavior for tenants without an active paid period.
     """
     plan = await conn.fetchrow(
         """
@@ -257,7 +266,7 @@ async def check_completed_online_order_quota(conn, tenant_id: UUID) -> None:
         ONLINE_ORDER_QUOTA_RESOURCE,
     )
     if not plan:
-        return
+        return None
 
     quotas = _normalize_plan_quotas(plan["plan_slug"], plan["plan_features"])
     quota = _effective_quota_from_row(
@@ -266,7 +275,7 @@ async def check_completed_online_order_quota(conn, tenant_id: UUID) -> None:
         plan,
     )
     if quota.limit is None or quota.limit <= 0:
-        return
+        return None
 
     period_start = plan["current_period_start"]
     period_end = plan["current_period_end"]
@@ -285,24 +294,66 @@ async def check_completed_online_order_quota(conn, tenant_id: UUID) -> None:
         period_end,
     ) or 0)
 
-    _log_online_order_quota_usage(
-        tenant_id=tenant_id,
+    return OnlineOrderQuotaState(
         plan_slug=plan["plan_slug"],
-        used=used,
-        limit=quota.limit,
+        quota=quota,
         period_start=period_start,
         period_end=period_end,
+        used=used,
     )
 
-    if used < quota.limit:
+
+async def get_public_online_order_quota_availability(conn, tenant_id: UUID) -> Dict[str, Any]:
+    """
+    Public-safe availability for online-order quota.
+
+    This intentionally returns only a boolean, reason, and customer copy. It
+    does not expose usage, plan, period, or override metadata.
+    """
+    state = await _get_completed_online_order_quota_state(conn, tenant_id)
+    if state is None or state.used < state.quota.limit:
+        return {
+            "available": True,
+            "reason": None,
+            "message": None,
+        }
+
+    return {
+        "available": False,
+        "reason": "online_order_quota_exceeded",
+        "message": ONLINE_ORDER_QUOTA_CUSTOMER_MESSAGE,
+    }
+
+
+async def check_completed_online_order_quota(conn, tenant_id: UUID) -> None:
+    """
+    Block final public checkout once the tenant reaches its online-order quota.
+
+    Unlike active-resource quotas, this is period-based: the usage window comes
+    from the current subscription period and counts only completed online orders.
+    """
+    state = await _get_completed_online_order_quota_state(conn, tenant_id)
+    if state is None:
+        return
+
+    _log_online_order_quota_usage(
+        tenant_id=tenant_id,
+        plan_slug=state.plan_slug,
+        used=state.used,
+        limit=state.quota.limit,
+        period_start=state.period_start,
+        period_end=state.period_end,
+    )
+
+    if state.used < state.quota.limit:
         return
 
     _log_quota_block(
         tenant_id=tenant_id,
         resource=ONLINE_ORDER_QUOTA_RESOURCE,
-        used=used,
-        quota=quota,
-        plan_slug=plan["plan_slug"],
+        used=state.used,
+        quota=state.quota,
+        plan_slug=state.plan_slug,
     )
     raise APIError(
         "Límite mensual de pedidos en línea alcanzado",
@@ -311,13 +362,13 @@ async def check_completed_online_order_quota(conn, tenant_id: UUID) -> None:
             "code": "online_order_quota_exceeded",
             "error": "online_order_quota_exceeded",
             "resource": ONLINE_ORDER_QUOTA_RESOURCE,
-            "used": used,
-            "limit": quota.limit,
-            "plan_limit": quota.plan_limit,
-            "plan_slug": plan["plan_slug"],
-            "override": _quota_override_payload(quota),
-            "period_start": period_start.isoformat(),
-            "period_end": period_end.isoformat(),
+            "used": state.used,
+            "limit": state.quota.limit,
+            "plan_limit": state.quota.plan_limit,
+            "plan_slug": state.plan_slug,
+            "override": _quota_override_payload(state.quota),
+            "period_start": state.period_start.isoformat(),
+            "period_end": state.period_end.isoformat(),
             "upgrade_url": QUOTA_UPGRADE_URL,
             "tenant_message": QUOTA_CONTACT_MESSAGE,
             "customer_message": ONLINE_ORDER_QUOTA_CUSTOMER_MESSAGE,
