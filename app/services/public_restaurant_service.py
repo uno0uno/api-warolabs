@@ -675,6 +675,7 @@ async def list_restaurants(
                     tpp.city, tpp.city_slug, tpp.country, tpp.neighborhood,
                     tpp.timezone,
                     tpp.is_manually_open, tpp.business_hours,
+                    tpp.accepts_online_orders,
                     tpp.created_at, tpp.updated_at
                 FROM tenant_public_profiles tpp
                 JOIN tenant_subscriptions ts ON ts.tenant_id = tpp.tenant_id
@@ -712,7 +713,7 @@ async def list_restaurants(
 
                 timezone_name = normalize_timezone(row["timezone"])
 
-                restaurants.append({
+                restaurant = {
                     "id": str(row["id"]),
                     "tenant_id": str(row["tenant_id"]),
                     "slug": row["slug"],
@@ -729,6 +730,7 @@ async def list_restaurants(
                     "city_slug": row["city_slug"],
                     "neighborhood": row["neighborhood"],
                     "timezone": timezone_name,
+                    "accepts_online_orders": bool(row["accepts_online_orders"]),
                     "is_currently_open": is_currently_open(
                         business_hours,
                         row["is_manually_open"],
@@ -736,7 +738,9 @@ async def list_restaurants(
                     ),
                     "created_at": row["created_at"].isoformat() if row["created_at"] else None,
                     "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None
-                })
+                }
+                restaurant.update(await _public_online_order_availability(conn, restaurant))
+                restaurants.append(restaurant)
 
             return restaurants
 
