@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.core.exceptions import APIError
-from app.services import billing_service, invitation_service, online_cart_service, stations_service, tables_service
+from app.services import billing_service, invitation_service, online_cart_service, public_restaurant_service, stations_service, tables_service
 
 
 def _db_context(conn):
@@ -51,7 +51,52 @@ async def test_check_plan_quota_growth_allows_below_limit_and_excludes_customers
 
     count_args = conn.fetchval.await_args.args
     assert "role = ANY" in count_args[0]
+    assert "tenant_invitations" in count_args[0]
     assert "customer" not in count_args[2]
+
+
+@pytest.mark.asyncio
+async def test_admin_users_quota_counts_pending_invitations():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "plan_slug": "pro",
+        "plan_features": {"quotas": {"admin_users": 6}},
+    })
+    conn.fetchval = AsyncMock(return_value=6)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(conn, tenant_id, "admin_users")
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["resource"] == "admin_users"
+    assert exc.value.details["used"] == 6
+    count_args = conn.fetchval.await_args.args
+    assert "tenant_invitations" in count_args[0]
+    assert count_args[3] is None
+
+
+@pytest.mark.asyncio
+async def test_accept_invitation_excludes_current_pending_invitation_from_reserved_quota():
+    tenant_id = uuid4()
+    invitation_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "plan_slug": "pro",
+        "plan_features": {"quotas": {"admin_users": 6}},
+    })
+    conn.fetchval = AsyncMock(return_value=5)
+
+    await billing_service.check_plan_quota_growth(
+        conn,
+        tenant_id,
+        "admin_users",
+        exclude_pending_invitation_id=invitation_id,
+    )
+
+    count_args = conn.fetchval.await_args.args
+    assert "ti.id = $3" in count_args[0]
+    assert count_args[3] == invitation_id
 
 
 @pytest.mark.asyncio
@@ -395,6 +440,96 @@ async def test_completed_online_order_quota_without_active_subscription_is_noop(
     await billing_service.check_completed_online_order_quota(conn, uuid4())
 
     conn.fetchval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_public_online_order_quota_availability_hides_internal_payload_when_exhausted():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "plan_slug": "pro",
+        "plan_features": {"quotas": {"completed_online_orders_per_month": 300}},
+        "current_period_start": period_start,
+        "current_period_end": period_end,
+    })
+    conn.fetchval = AsyncMock(return_value=300)
+
+    result = await billing_service.get_public_online_order_quota_availability(conn, tenant_id)
+
+    assert result == {
+        "available": False,
+        "reason": "online_order_quota_exceeded",
+        "message": billing_service.ONLINE_ORDER_QUOTA_CUSTOMER_MESSAGE,
+    }
+    assert "used" not in result
+    assert "limit" not in result
+    assert "plan_slug" not in result
+    assert "override" not in result
+
+
+@pytest.mark.asyncio
+async def test_public_profile_exposes_safe_online_order_unavailable_signal_for_quota():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        {
+            "id": uuid4(),
+            "tenant_id": tenant_id,
+            "slug": "restaurante",
+            "is_active": True,
+            "display_name": "Restaurante",
+            "description": None,
+            "logo_url": None,
+            "banner_url": None,
+            "phone_number": None,
+            "email": None,
+            "address": None,
+            "city": None,
+            "neighborhood": None,
+            "latitude": None,
+            "longitude": None,
+            "timezone": "America/Bogota",
+            "business_hours": {},
+            "social_media": {},
+            "seo_title": None,
+            "seo_description": None,
+            "accepts_online_orders": True,
+            "min_order_amount": Decimal("0"),
+            "estimated_preparation_time": 20,
+            "is_manually_open": True,
+            "tip_enabled": False,
+            "tip_default_percentages": None,
+            "tip_preselect_index": None,
+            "created_at": None,
+            "updated_at": None,
+        },
+        {
+            "plan_slug": "pro",
+            "plan_features": {"quotas": {"completed_online_orders_per_month": 300}},
+            "current_period_start": period_start,
+            "current_period_end": period_end,
+        },
+    ])
+    conn.fetchval = AsyncMock(return_value=300)
+
+    with (
+        patch("app.services.public_restaurant_service.get_db_connection", side_effect=_db_context(conn)),
+        patch("app.services.public_restaurant_service.is_currently_open", return_value=True),
+    ):
+        profile = await public_restaurant_service.get_profile_by_slug("restaurante")
+
+    assert profile["is_currently_open"] is True
+    assert profile["online_orders_available"] is False
+    assert profile["online_orders_unavailable_reason"] == "online_order_quota_exceeded"
+    assert profile["online_orders_unavailable_message"] == billing_service.ONLINE_ORDER_QUOTA_CUSTOMER_MESSAGE
+    assert "used" not in profile
+    assert "limit" not in profile
+    assert "plan_slug" not in profile
+    assert "override" not in profile
 
 
 @pytest.mark.asyncio
