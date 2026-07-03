@@ -163,7 +163,13 @@ async def check_scan_quota(tenant_id: UUID, conn) -> None:
     await _upsert_monthly_log(tenant_id, conn)
 
 
-async def check_plan_quota_growth(conn, tenant_id: UUID, resource: str) -> None:
+async def check_plan_quota_growth(
+    conn,
+    tenant_id: UUID,
+    resource: str,
+    *,
+    exclude_pending_invitation_id: Optional[UUID] = None,
+) -> None:
     """
     Block active resource growth once the tenant reaches the plan quota.
 
@@ -204,7 +210,12 @@ async def check_plan_quota_growth(conn, tenant_id: UUID, resource: str) -> None:
     if quota.limit is None:
         return
 
-    used = await _count_quota_resource_usage(conn, tenant_id, resource)
+    used = await _count_quota_resource_usage(
+        conn,
+        tenant_id,
+        resource,
+        exclude_pending_invitation_id=exclude_pending_invitation_id,
+    )
     if used < quota.limit:
         return
 
@@ -515,18 +526,37 @@ def _apply_effective_quotas(
     return effective
 
 
-async def _count_quota_resource_usage(conn, tenant_id: UUID, resource: str) -> int:
+async def _count_quota_resource_usage(
+    conn,
+    tenant_id: UUID,
+    resource: str,
+    *,
+    exclude_pending_invitation_id: Optional[UUID] = None,
+) -> int:
     if resource == "admin_users":
         value = await conn.fetchval(
             """
-            SELECT COUNT(DISTINCT tm.id)
-            FROM tenant_members tm
-            WHERE tm.tenant_id = $1
-              AND tm.is_active
-              AND tm.role = ANY($2::text[])
+            SELECT
+                (
+                    SELECT COUNT(DISTINCT tm.id)
+                    FROM tenant_members tm
+                    WHERE tm.tenant_id = $1
+                      AND tm.is_active
+                      AND tm.role = ANY($2::text[])
+                )
+                +
+                (
+                    SELECT COUNT(DISTINCT ti.id)
+                    FROM tenant_invitations ti
+                    WHERE ti.tenant_id = $1
+                      AND ti.status = 'pending'
+                      AND ti.role = ANY($2::text[])
+                      AND NOT ($3::uuid IS NOT NULL AND ti.id = $3)
+                )
             """,
             tenant_id,
             list(LEGACY_INTERNAL_TEAM_ROLES),
+            exclude_pending_invitation_id,
         )
     elif resource == "active_kitchens":
         value = await conn.fetchval(
@@ -1206,11 +1236,22 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
     quota_counts = await conn.fetchrow("""
         SELECT
             (
-                SELECT COUNT(DISTINCT tm.id)
-                FROM tenant_members tm
-                WHERE tm.tenant_id = $1
-                  AND tm.is_active
-                  AND tm.role = ANY($4::text[])
+                SELECT
+                    (
+                        SELECT COUNT(DISTINCT tm.id)
+                        FROM tenant_members tm
+                        WHERE tm.tenant_id = $1
+                          AND tm.is_active
+                          AND tm.role = ANY($4::text[])
+                    )
+                    +
+                    (
+                        SELECT COUNT(DISTINCT ti.id)
+                        FROM tenant_invitations ti
+                        WHERE ti.tenant_id = $1
+                          AND ti.status = 'pending'
+                          AND ti.role = ANY($4::text[])
+                    )
             ) AS admin_users,
             (
                 SELECT COALESCE(MAX(active_session_count), 0)

@@ -83,6 +83,8 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
             if user_role not in ('admin', 'superuser'):
                 raise AuthorizationError("Only admin or superuser can send invitations")
 
+            quota_checked = False
+
             # Check if email already exists in profile
             existing_user = await conn.fetchrow(
                 "SELECT id, email FROM profile WHERE lower(trim(email)) = $1",
@@ -109,6 +111,9 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
                 user_id = existing_user['id']
                 logger.info(f"✅ Existing user found: {user_id}")
             else:
+                await check_plan_quota_growth(conn, session_tenant_id, "admin_users")
+                quota_checked = True
+
                 # Create new profile
                 create_profile_query = """
                     INSERT INTO profile (
@@ -139,6 +144,9 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
                     existing_invitation
                 )
                 logger.info(f"🔄 Cancelled old pending invitation: {existing_invitation}")
+
+            if not quota_checked:
+                await check_plan_quota_growth(conn, session_tenant_id, "admin_users")
 
             # Generate secure token
             token = secrets.token_hex(32)
@@ -280,7 +288,12 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
             )
 
             if not team_member:
-                await check_plan_quota_growth(conn, invitation['tenant_id'], "admin_users")
+                await check_plan_quota_growth(
+                    conn,
+                    invitation['tenant_id'],
+                    "admin_users",
+                    exclude_pending_invitation_id=invitation['id'],
+                )
                 await conn.execute(
                     """INSERT INTO tenant_members (id, user_id, tenant_id, role)
                        VALUES (gen_random_uuid(), $1, $2, $3)""",
@@ -291,7 +304,12 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
                 logger.info(f"👥 User added to tenant_members with role: {invitation['role']}")
             else:
                 if not team_member["is_active"]:
-                    await check_plan_quota_growth(conn, invitation['tenant_id'], "admin_users")
+                    await check_plan_quota_growth(
+                        conn,
+                        invitation['tenant_id'],
+                        "admin_users",
+                        exclude_pending_invitation_id=invitation['id'],
+                    )
                 await conn.execute(
                     """
                     UPDATE tenant_members

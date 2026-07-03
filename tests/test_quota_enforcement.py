@@ -51,7 +51,52 @@ async def test_check_plan_quota_growth_allows_below_limit_and_excludes_customers
 
     count_args = conn.fetchval.await_args.args
     assert "role = ANY" in count_args[0]
+    assert "tenant_invitations" in count_args[0]
     assert "customer" not in count_args[2]
+
+
+@pytest.mark.asyncio
+async def test_admin_users_quota_counts_pending_invitations():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "plan_slug": "pro",
+        "plan_features": {"quotas": {"admin_users": 6}},
+    })
+    conn.fetchval = AsyncMock(return_value=6)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(conn, tenant_id, "admin_users")
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["resource"] == "admin_users"
+    assert exc.value.details["used"] == 6
+    count_args = conn.fetchval.await_args.args
+    assert "tenant_invitations" in count_args[0]
+    assert count_args[3] is None
+
+
+@pytest.mark.asyncio
+async def test_accept_invitation_excludes_current_pending_invitation_from_reserved_quota():
+    tenant_id = uuid4()
+    invitation_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "plan_slug": "pro",
+        "plan_features": {"quotas": {"admin_users": 6}},
+    })
+    conn.fetchval = AsyncMock(return_value=5)
+
+    await billing_service.check_plan_quota_growth(
+        conn,
+        tenant_id,
+        "admin_users",
+        exclude_pending_invitation_id=invitation_id,
+    )
+
+    count_args = conn.fetchval.await_args.args
+    assert "ti.id = $3" in count_args[0]
+    assert count_args[3] == invitation_id
 
 
 @pytest.mark.asyncio
