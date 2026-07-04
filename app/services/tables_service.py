@@ -39,7 +39,7 @@ from app.services.tip_tax_service import (
 )
 from app.services.orders_service import _compute_tax_breakdown
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
-from app.services.comandas_service import fire_comandas
+from app.services.comandas_service import _parse_item_row, fire_comandas
 from app.services.billing_service import check_plan_quota_growth
 from app.services.operation_events_service import DOMAIN_POS, record_operation_event
 from app.services.open_priced_service import (
@@ -2654,6 +2654,155 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
     except Exception as e:
         logger.error(f"Error fetching current session for table {table_id}: {e}")
         raise APIError(f"Error fetching session: {e}", status_code=500)
+
+
+def _serialize_comanda_item(row: Any) -> Dict[str, Any]:
+    item = _parse_item_row(row)
+    return {
+        "id": str(item["id"]),
+        "order_item_id": str(item["order_item_id"]) if item.get("order_item_id") else None,
+        "kitchen_name": item["kitchen_name"],
+        "quantity": float(item["quantity"]),
+        "notes": item.get("notes"),
+        "modifiers_snapshot": item.get("modifiers_snapshot"),
+        "is_promo_free": bool(item.get("is_promo_free")),
+        "status": item["status"],
+        "ready_at": item["ready_at"].isoformat() if item.get("ready_at") else None,
+        "created_at": item["created_at"].isoformat() if item.get("created_at") else None,
+    }
+
+
+def _serialize_table_session_comanda(row: Any, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "comanda_number": int(row["comanda_number"]),
+        "comanda_index": int(row["comanda_index"]),
+        "status": row["status"],
+        "source_type": row["source_type"],
+        "table_display_name": row["table_display_name"],
+        "notes": row.get("notes"),
+        "station_id": str(row["station_id"]) if row.get("station_id") else None,
+        "station_name": row.get("station_name"),
+        "station_kitchen_name": row.get("station_kitchen_name"),
+        "station_color": row.get("station_color"),
+        "fired_at": row["fired_at"].isoformat() if row.get("fired_at") else None,
+        "preparing_at": row["preparing_at"].isoformat() if row.get("preparing_at") else None,
+        "ready_at": row["ready_at"].isoformat() if row.get("ready_at") else None,
+        "delivered_at": row["delivered_at"].isoformat() if row.get("delivered_at") else None,
+        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "items": items,
+    }
+
+
+async def get_table_session_comandas(request: Request, table_id: UUID) -> dict:
+    """
+    Get persisted printable comandas for the table's currently open session.
+    Includes delivered tickets for reprint and excludes cancelled rows by default.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection(use_transaction=False) as conn:
+            table_row = await conn.fetchrow(
+                "SELECT id, name, status FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true",
+                table_id,
+                tenant_id,
+            )
+            if not table_row:
+                raise NotFoundError("Table not found")
+
+            session_row = await conn.fetchrow(
+                """
+                SELECT id, opened_at
+                FROM table_sessions
+                WHERE table_id = $1
+                  AND tenant_id = $2
+                  AND closed_at IS NULL
+                """,
+                table_id,
+                tenant_id,
+            )
+            if not session_row:
+                raise NotFoundError("No open session for this table")
+
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id,
+                    c.comanda_number,
+                    c.comanda_index,
+                    c.status,
+                    c.source_type,
+                    c.table_display_name,
+                    c.notes,
+                    c.fired_at,
+                    c.preparing_at,
+                    c.ready_at,
+                    c.delivered_at,
+                    c.created_at,
+                    ks.id AS station_id,
+                    ks.name AS station_name,
+                    ks.kitchen_name AS station_kitchen_name,
+                    ks.color AS station_color
+                FROM table_sessions ts
+                JOIN orders o ON o.table_session_id = ts.id
+                JOIN comandas c ON c.order_id = o.id
+                JOIN kitchen_stations ks ON ks.id = c.station_id
+                WHERE ts.id = $1
+                  AND ts.table_id = $2
+                  AND ts.tenant_id = $3
+                  AND ts.closed_at IS NULL
+                  AND o.tenant_id = $3
+                  AND c.tenant_id = $3
+                  AND c.status IN ('pending', 'preparing', 'ready', 'delivered')
+                  AND (o.status IS NULL OR o.status != 'cancelled')
+                ORDER BY c.fired_at ASC, c.comanda_number ASC, c.comanda_index ASC, c.id ASC
+                """,
+                session_row["id"],
+                table_id,
+                tenant_id,
+            )
+
+            comandas: List[Dict[str, Any]] = []
+            for row in rows:
+                item_rows = await conn.fetch(
+                    """
+                    SELECT id, order_item_id, kitchen_name, quantity, notes,
+                           modifiers_snapshot, status, ready_at, created_at
+                    FROM comanda_items
+                    WHERE comanda_id = $1
+                      AND status != 'cancelled'
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    row["id"],
+                )
+                items = [_serialize_comanda_item(ir) for ir in item_rows]
+                comandas.append(_serialize_table_session_comanda(row, items))
+
+        return {
+            "success": True,
+            "data": {
+                "table": {
+                    "id": str(table_id),
+                    "name": table_row["name"],
+                    "status": table_row["status"],
+                },
+                "session": {
+                    "id": str(session_row["id"]),
+                    "opened_at": session_row["opened_at"].isoformat() if session_row.get("opened_at") else None,
+                },
+                "comandas": comandas,
+            },
+        }
+
+    except (AuthenticationError, NotFoundError):
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching table session comandas for table {table_id}: {e}")
+        raise APIError(f"Error fetching table comandas: {e}", status_code=500)
 
 
 async def _fetch_tab_operation_context(
