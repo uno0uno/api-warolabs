@@ -347,6 +347,15 @@ async def get_current_session(request: Request, table_id: UUID):
     return await tables_service.get_current_session(request, table_id)
 
 
+@router.get("/{table_id}/comandas", dependencies=[Depends(require_module(Module.POS))])
+async def get_table_session_comandas(request: Request, table_id: UUID):
+    """
+    Get persisted printable comandas for the table's currently open session.
+    Returns 404 if no open session exists.
+    """
+    return await tables_service.get_table_session_comandas(request, table_id)
+
+
 @router.post("/{table_id}/tab/add", dependencies=[Depends(require_module(Module.POS))])
 async def add_tab_items(request: Request, table_id: UUID, body: TabAddRequest):
     """
