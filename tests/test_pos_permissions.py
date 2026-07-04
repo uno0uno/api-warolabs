@@ -22,6 +22,7 @@ from app.core.permissions import Module
 from app.routers.tables import router as tables_router
 from app.routers.comandas import router as comandas_router
 from app.routers.pos_context import router as pos_context_router
+from app.routers.pos_products import router as pos_products_router
 
 
 # ─── Fixtures ─────────────────────────────────────────────────────────
@@ -170,3 +171,58 @@ def test_cashier_role_passes_pos_restaurant_context_under_enforce():
     assert response.status_code == 200
     assert response.json()["data"]["display_name"] == "Demo"
     assert response.json()["data"]["timezone"] == "America/Bogota"
+
+
+def test_cashier_role_passes_pos_products_under_enforce_without_menu():
+    """Cashier reaches GET /pos/products with POS access but no MENU module."""
+    session = _build_session(role="cashier")
+    app = FastAPI()
+    app.include_router(pos_products_router)
+
+    cashier_modules = frozenset({Module.POS})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=cashier_modules),
+         ), \
+         patch(
+             "app.routers.pos_products.get_products_list",
+             new=AsyncMock(return_value={"success": True, "data": [], "total": 0}),
+         ) as get_products:
+        client = TestClient(app)
+        response = client.get("/pos/products?is_available=true&limit=250&include_modifiers=true")
+
+    assert response.status_code == 200
+    get_products.assert_awaited_once()
+    assert get_products.await_args.args[7] is True
+    assert get_products.await_args.args[17] is True
+
+
+def test_kitchen_role_denied_pos_products_under_enforce():
+    """Kitchen role hits 403 on POS catalog endpoint because it lacks POS."""
+    session = _build_session(role="kitchen")
+    app = FastAPI()
+    app.include_router(pos_products_router)
+
+    kitchen_modules = frozenset({Module.DESPACHO})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=kitchen_modules),
+         ), \
+         patch(
+             "app.routers.pos_products.get_products_list",
+             new=AsyncMock(return_value={"success": True, "data": [], "total": 0}),
+         ) as get_products:
+        client = TestClient(app)
+        response = client.get("/pos/products")
+
+    assert response.status_code == 403
+    assert "pos" in response.json()["detail"].lower()
+    get_products.assert_not_awaited()
