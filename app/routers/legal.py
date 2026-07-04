@@ -2,10 +2,11 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.core.middleware import require_valid_session
+from app.core.permissions import Module, require_module
 from app.core.security import get_client_ip
 from app.database import get_db_connection
 from app.services import legal_service
@@ -24,6 +25,8 @@ def _require_session_tenant_id(session) -> UUID:
     return session.tenant_id
 
 
+# Global-auth exception: tenants must be able to read/accept current terms
+# before other module-gated flows are available.
 @router.get("/terms/current")
 async def get_current_terms(request: Request):
     session = require_valid_session(request)
@@ -39,7 +42,7 @@ async def get_terms_status(request: Request):
         return await legal_service.get_terms_status(conn, session.tenant_id)
 
 
-@router.get("/terms/audit")
+@router.get("/terms/audit", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def list_terms_acceptance_audit(
     request: Request,
     document_version_id: Optional[UUID] = None,
@@ -64,7 +67,7 @@ async def list_terms_acceptance_audit(
         )
 
 
-@router.get("/terms/audit/{acceptance_id}")
+@router.get("/terms/audit/{acceptance_id}", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def get_terms_acceptance_audit(acceptance_id: UUID, request: Request):
     session = require_valid_session(request)
     tenant_id = _require_session_tenant_id(session)
