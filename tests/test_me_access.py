@@ -2,7 +2,7 @@
 
 Sub-task E2.17 of Epic 2 (#200). Validates that:
 1. Owner role under enforce reaches the handler and gets ALL modules.
-2. Cashier role returns only ["pos", "ventas"] (sorted).
+2. Cashier role returns only ["pos"].
 3. Session with role=None short-circuits to empty modules without crashing.
 4. Tenant with enforcement_mode='disabled' is reported correctly.
 5. Tenant with enforcement_mode='enforce' is reported correctly.
@@ -89,13 +89,14 @@ def test_owner_returns_all_modules():
     assert body["features"]["kali_enabled"] is True
 
 
-def test_cashier_returns_pos_ventas_only():
-    """Cashier sees only [pos, ventas] per DEFAULT_ROLE_MODULES."""
-    session = _build_session(role="cashier")
+@pytest.mark.parametrize("role", ["cashier", "employee"])
+def test_cashier_and_legacy_employee_return_pos_only(role):
+    """Cashier and legacy employee see only [pos] per DEFAULT_ROLE_MODULES."""
+    session = _build_session(role=role)
     app = FastAPI()
     app.include_router(me_router, prefix="/me")
 
-    cashier_modules = frozenset({Module.POS, Module.VENTAS})
+    cashier_modules = frozenset({Module.POS})
 
     with patch("app.core.middleware.get_session_context", return_value=session), \
          patch("app.routers.me.require_valid_session", return_value=session), \
@@ -113,8 +114,8 @@ def test_cashier_returns_pos_ventas_only():
 
     assert response.status_code == 200
     body = response.json()
-    assert body["role"] == "cashier"
-    assert body["modules"] == ["pos", "ventas"]
+    assert body["role"] == role
+    assert body["modules"] == ["pos"]
     assert body["features"]["kali_enabled"] is False
 
 

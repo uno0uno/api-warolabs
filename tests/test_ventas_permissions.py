@@ -2,7 +2,7 @@
 
 Sub-task E2.4 of Epic 2 (#189). Validates that:
 1. Owner role under enforce reaches the handler.
-2. Kitchen role under enforce gets 403 (kitchen lacks VENTAS in default
+2. Cashier/kitchen roles under enforce get 403 (they lack VENTAS in default
    matrix — same matrix gap surfaced by E2.3 / POS).
 
 No KDS-passthrough test needed: VENTAS routers (customers, online_orders,
@@ -104,3 +104,25 @@ def test_kitchen_role_denied_ventas_endpoint_under_enforce():
 
     assert response.status_code == 403
     assert "ventas" in response.json()["detail"].lower()
+
+
+def test_cashier_role_denied_ventas_endpoint_under_enforce():
+    """Cashier role hits 403 on VENTAS — cashier defaults are POS-only."""
+    session = _build_session(role="cashier")
+    app = FastAPI()
+    app.include_router(orders_router)
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.routers.orders.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.routers.orders.orders_service.get_orders_dashboard",
+             new=AsyncMock(return_value={"data": []}),
+         ) as dashboard:
+        client = TestClient(app)
+        response = client.get("/orders/dashboard")
+
+    assert response.status_code == 403
+    assert "ventas" in response.json()["detail"].lower()
+    dashboard.assert_not_awaited()

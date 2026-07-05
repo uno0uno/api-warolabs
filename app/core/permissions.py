@@ -74,9 +74,9 @@ class Module(str, Enum):
 _ALL_MODULES: FrozenSet[Module] = frozenset(Module)
 
 
-# Permissive defaults that mirror today's effective access. Tightening happens
-# per-tenant via overrides + by flipping `tenants.permissions_enforcement_mode`
-# from 'disabled' to 'shadow'/'enforce' once a tenant has reviewed the matrix.
+# Default access floor for each role. Tenants can expand or reduce access with
+# `tenant_role_module_overrides`; `permissions_enforcement_mode` controls when
+# missing modules are observed or enforced.
 DEFAULT_ROLE_MODULES: Dict[Role, FrozenSet[Module]] = {
     Role.OWNER: _ALL_MODULES,
     Role.ADMIN: frozenset({
@@ -107,8 +107,6 @@ DEFAULT_ROLE_MODULES: Dict[Role, FrozenSet[Module]] = {
     }),
     Role.CASHIER: frozenset({
         Module.POS,
-        Module.VENTAS,
-        Module.MENU,  # Read access for POS catalog (products + categories)
     }),
     Role.KITCHEN: frozenset({
         Module.DESPACHO,

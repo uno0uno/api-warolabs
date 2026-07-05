@@ -143,7 +143,7 @@ def test_cashier_role_passes_pos_restaurant_context_under_enforce():
     app = FastAPI()
     app.include_router(pos_context_router)
 
-    cashier_modules = frozenset({Module.POS, Module.VENTAS})
+    cashier_modules = frozenset({Module.POS})
 
     with patch("app.core.middleware.get_session_context", return_value=session), \
          patch("app.routers.pos_context.require_valid_session", return_value=session), \
