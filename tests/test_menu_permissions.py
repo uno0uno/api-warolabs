@@ -1,8 +1,8 @@
 """End-to-end smoke tests for MENU group endpoints under require_module(MENU).
 
 Sub-task E2.6 of Epic 2 (#190). Validates that:
-1. Cashier role under enforce reaches a MENU handler — proves the matrix
-   update (added Module.MENU to CASHIER defaults) unblocks POS catalog reads.
+1. Cashier role under enforce gets 403 on MENU because POS catalog reads now
+   go through /pos/products instead of admin Menu endpoints.
 2. Kitchen role under enforce gets 403 on a MENU endpoint — kitchen lacks
    MENU (only has DESPACHO), so the gate denies as expected.
 
@@ -59,8 +59,8 @@ def _enforce_db_ctx():
 # ─── Tests ────────────────────────────────────────────────────────────
 
 
-def test_cashier_role_passes_menu_endpoint_under_enforce():
-    """Cashier reaches GET /menu/products under enforce — POS catalog unblocked."""
+def test_cashier_role_denied_menu_endpoint_under_enforce():
+    """Cashier hits 403 on MENU — cashier defaults are POS-only."""
     session = _build_session(role="cashier")
     app = FastAPI()
     app.include_router(products_router, prefix="/menu/products")
@@ -71,12 +71,13 @@ def test_cashier_role_passes_menu_endpoint_under_enforce():
          patch(
              "app.routers.products.get_products_list",
              new=AsyncMock(return_value={"data": [], "total": 0}),
-         ):
+         ) as get_products:
         client = TestClient(app)
         response = client.get("/menu/products")
 
-    # Handler reached → matrix update grants CASHIER access to MENU.
-    assert response.status_code == 200
+    assert response.status_code == 403
+    assert "menu" in response.json()["detail"].lower()
+    get_products.assert_not_awaited()
 
 
 def test_kitchen_role_denied_menu_endpoint_under_enforce():

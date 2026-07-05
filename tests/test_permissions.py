@@ -56,10 +56,8 @@ class TestDefaultRoleModules:
     def test_kitchen_only_has_despacho(self):
         assert DEFAULT_ROLE_MODULES[Role.KITCHEN] == frozenset({Module.DESPACHO})
 
-    def test_cashier_has_pos_ventas_and_menu(self):
-        assert DEFAULT_ROLE_MODULES[Role.CASHIER] == frozenset({
-            Module.POS, Module.VENTAS, Module.MENU,
-        })
+    def test_cashier_only_has_pos(self):
+        assert DEFAULT_ROLE_MODULES[Role.CASHIER] == frozenset({Module.POS})
 
     def test_admin_does_not_get_equipo(self):
         # EQUIPO (membership/role changes) is owner-only by default
