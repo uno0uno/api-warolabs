@@ -19,6 +19,7 @@ from app.database import get_db_connection
 from app.services.stations_service import get_effective_station
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError, ValidationError
+from app.core.timezones import local_day_utc_range, resolve_tenant_timezone, tenant_today
 from fastapi import Request
 
 logger = logging.getLogger(__name__)
@@ -584,11 +585,18 @@ async def get_comandas_for_kds(
             # No automatic date filtering — a comanda is visible as long as its status
             # matches the query. The status filter alone determines scope.
             if date:
+                tenant_timezone = await resolve_tenant_timezone(conn, tenant_id)
+                local_date = date_type.fromisoformat(date) if isinstance(date, str) else date
+                start_utc, end_utc = local_day_utc_range(local_date, tenant_timezone)
                 param_count += 1
+                start_param = param_count
+                params.append(start_utc)
+                param_count += 1
+                end_param = param_count
+                params.append(end_utc)
                 where_conditions.append(
-                    f"DATE(c.fired_at AT TIME ZONE 'UTC') = ${param_count}"
+                    f"c.fired_at >= ${start_param} AND c.fired_at < ${end_param}"
                 )
-                params.append(date_type.fromisoformat(date) if isinstance(date, str) else date)
 
             where_clause = " AND ".join(where_conditions)
 
@@ -1270,7 +1278,9 @@ async def get_daily_stats(
         async with get_db_connection() as conn:
             await _check_comandas_enabled(conn, tenant_id)
 
-            date_str = date if date else datetime.now(timezone.utc).date().isoformat()
+            tenant_timezone = await resolve_tenant_timezone(conn, tenant_id)
+            local_date = date_type.fromisoformat(date) if date else tenant_today(tenant_timezone)
+            start_utc, end_utc = local_day_utc_range(local_date, tenant_timezone)
 
             rows = await conn.fetch(
                 """
@@ -1304,18 +1314,19 @@ async def get_daily_stats(
                 FROM kitchen_stations ks
                 LEFT JOIN comandas c ON c.station_id = ks.id
                     AND c.tenant_id = $1
-                    AND DATE(c.fired_at) = $2::date
+                    AND c.fired_at >= $2
+                    AND c.fired_at < $3
                 WHERE ks.tenant_id = $1
                     AND ks.is_active = TRUE
-                    AND ($3::uuid IS NULL OR ks.id = $3)
+                    AND ($4::uuid IS NULL OR ks.id = $4)
                 GROUP BY ks.id, ks.name, ks.color, ks.kitchen_name, ks.alert_threshold_1_min, ks.alert_threshold_2_min
                 ORDER BY ks.display_order
                 """,
-                tenant_id, date_str, station_id,
+                tenant_id, start_utc, end_utc, station_id,
             )
 
             return {
-                "date": date_str,
+                "date": local_date.isoformat(),
                 "stations": [
                     {
                         "station": {
