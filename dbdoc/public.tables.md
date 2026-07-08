@@ -16,6 +16,7 @@
 | assigned_member_id | uuid |  | true |  | [public.tenant_members](public.tenant_members.md) | Default waiter assigned to this table (warocol.com#573). NULL = no default. Bars (is_bar = true) should never have this set (enforced in application code, not DB constraint). Full history with snapshots lives in table_member_assignments. |
 | qr_public_token | varchar(64) |  | true |  |  | Opaque public token for Table QR URL (api-warolabs#265). Generated via secrets.token_urlsafe(32) in #266 — not derivable from table_id. NULL until first enable/create. Globally unique when set. |
 | qr_enabled | boolean | false | false |  |  | Per-table QR toggle (api-warolabs#265). When false, public resolve rejects access even if token is set. Default false. |
+| display_order | integer |  | true |  |  | Optional manual display order for regular tenant tables in POS/Operaciones. NULL falls back to legacy name order; bar tables stay pinned by is_bar. |
 
 ## Constraints
 
@@ -34,6 +35,7 @@
 | idx_tables_is_bar | CREATE INDEX idx_tables_is_bar ON public.tables USING btree (tenant_id, is_bar) WHERE (is_bar IS TRUE) |
 | idx_tables_assigned_member | CREATE INDEX idx_tables_assigned_member ON public.tables USING btree (assigned_member_id) WHERE (assigned_member_id IS NOT NULL) |
 | idx_tables_qr_public_token | CREATE UNIQUE INDEX idx_tables_qr_public_token ON public.tables USING btree (qr_public_token) WHERE (qr_public_token IS NOT NULL) |
+| idx_tables_tenant_display_order | CREATE INDEX idx_tables_tenant_display_order ON public.tables USING btree (tenant_id, is_bar, is_active, display_order, name) WHERE (deleted_at IS NULL) |
 
 ## Relations
 

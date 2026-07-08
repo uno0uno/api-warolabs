@@ -327,6 +327,20 @@ async def _ensure_bar_table(conn, tenant_id) -> None:
         )
 
 
+async def _next_regular_table_display_order(conn, tenant_id) -> int:
+    value = await conn.fetchval(
+        """
+        SELECT COALESCE(MAX(display_order), 0) + 1
+        FROM tables
+        WHERE tenant_id = $1
+          AND deleted_at IS NULL
+          AND is_bar IS FALSE
+        """,
+        tenant_id,
+    )
+    return int(value or 1)
+
+
 async def list_tables(request: Request, include_inactive: bool = False) -> dict:
     """
     List tables for the tenant.
@@ -356,6 +370,7 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                     t.is_bar,
                     t.qr_enabled,
                     t.qr_public_token,
+                    t.display_order,
                     t.created_at,
                     t.assigned_member_id,
                     p_assigned.name AS assigned_member_name,
@@ -436,7 +451,7 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                 WHERE t.tenant_id = $1
                   AND t.deleted_at IS NULL
                   AND (t.is_active = true OR $2)
-                ORDER BY t.is_bar DESC, t.is_active DESC, t.name
+                ORDER BY t.is_bar DESC, t.is_active DESC, t.display_order NULLS LAST, t.name
                 """,
                 tenant_id,
                 include_inactive,
@@ -479,17 +494,19 @@ async def create_table(
                     raise APIError(str(exc), status_code=400) from exc
 
                 await check_plan_quota_growth(conn, tenant_id, "active_tables_including_bar")
+                display_order = await _next_regular_table_display_order(conn, tenant_id)
                 row = await conn.fetchrow(
                     """
-                    INSERT INTO tables (tenant_id, name, capacity, code)
-                    VALUES ($1, $2, $3, $4)
+                    INSERT INTO tables (tenant_id, name, capacity, code, display_order)
+                    VALUES ($1, $2, $3, $4, $5)
                     RETURNING id, name, code, capacity, status, is_active, is_bar,
-                              qr_enabled, qr_public_token, created_at
+                              qr_enabled, qr_public_token, display_order, created_at
                     """,
                     tenant_id,
                     name,
                     capacity,
                     resolved_code,
+                    display_order,
                 )
                 module_on = await conn.fetchval(
                     """
@@ -507,7 +524,7 @@ async def create_table(
                         SET qr_public_token = $1
                         WHERE id = $2 AND tenant_id = $3
                         RETURNING id, name, code, capacity, status, is_active, is_bar,
-                                  qr_enabled, qr_public_token, created_at
+                                  qr_enabled, qr_public_token, display_order, created_at
                         """,
                         token,
                         row["id"],
@@ -522,6 +539,90 @@ async def create_table(
     except Exception as e:
         logger.error(f"Error creating table: {e}")
         raise APIError(f"Error creating table: {e}", status_code=500)
+
+
+async def reorder_tables(request: Request, table_ids: List[UUID]) -> dict:
+    """
+    Persist manual display order for regular tables.
+    Submitted ids become the ordered set; omitted regular tables fall back by name.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        if not table_ids:
+            raise APIError("table_ids is required", status_code=400)
+
+        unique_ids = list(dict.fromkeys(table_ids))
+        if len(unique_ids) != len(table_ids):
+            raise APIError("table_ids contains duplicates", status_code=400)
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    """
+                    SELECT id, is_bar, deleted_at
+                    FROM tables
+                    WHERE tenant_id = $1
+                      AND id = ANY($2::uuid[])
+                    """,
+                    tenant_id,
+                    unique_ids,
+                )
+
+                rows_by_id = {row["id"]: row for row in rows}
+                missing_ids = [table_id for table_id in unique_ids if table_id not in rows_by_id]
+                if missing_ids:
+                    raise NotFoundError("One or more tables were not found")
+
+                for row in rows:
+                    if row["deleted_at"] is not None:
+                        raise NotFoundError("One or more tables were not found")
+                    if row["is_bar"]:
+                        raise APIError("La Barra no puede reordenarse", status_code=409)
+
+                await conn.execute(
+                    """
+                    UPDATE tables
+                    SET display_order = NULL
+                    WHERE tenant_id = $1
+                      AND deleted_at IS NULL
+                      AND is_bar IS FALSE
+                    """,
+                    tenant_id,
+                )
+                await conn.execute(
+                    """
+                    WITH ordered AS (
+                        SELECT id, ord::integer AS display_order
+                        FROM UNNEST($2::uuid[]) WITH ORDINALITY AS u(id, ord)
+                    )
+                    UPDATE tables t
+                    SET display_order = ordered.display_order
+                    FROM ordered
+                    WHERE t.tenant_id = $1
+                      AND t.id = ordered.id
+                      AND t.deleted_at IS NULL
+                      AND t.is_bar IS FALSE
+                    """,
+                    tenant_id,
+                    unique_ids,
+                )
+
+        return {
+            "success": True,
+            "data": {
+                "table_ids": [str(table_id) for table_id in unique_ids],
+            },
+        }
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error reordering tables: {e}")
+        raise APIError(f"Error reordering tables: {e}", status_code=500)
 
 
 async def update_table(
@@ -556,7 +657,7 @@ async def update_table(
                 row = await conn.fetchrow(
                     """
                     SELECT id, name, code, capacity, status, is_active, is_bar,
-                           qr_enabled, qr_public_token, created_at
+                           qr_enabled, qr_public_token, display_order, created_at
                     FROM tables WHERE id = $1 AND tenant_id = $2
                     """,
                     table_id,
@@ -620,7 +721,7 @@ async def update_table(
                 SET {", ".join(set_clauses)}
                 WHERE id = $1 AND tenant_id = $2
                 RETURNING id, name, code, capacity, status, is_active, is_bar,
-                          qr_enabled, qr_public_token, created_at
+                          qr_enabled, qr_public_token, display_order, created_at
                 """,
                 *params,
             )
@@ -4549,6 +4650,7 @@ def _format_table_row(row: dict) -> dict:
         "name": row["name"],
         "code": row.get("code"),
         "capacity": row["capacity"],
+        "display_order": row.get("display_order"),
         "status": row["status"],
         "is_active": row["is_active"],
         "is_bar": bool(row["is_bar"]) if row.get("is_bar") is not None else False,
@@ -4792,6 +4894,7 @@ def _format_table_simple(row: dict) -> dict:
         "name": row["name"],
         "code": row.get("code"),
         "capacity": row["capacity"],
+        "display_order": row.get("display_order"),
         "status": row["status"],
         "is_active": row["is_active"],
         "created_at": row["created_at"].isoformat(),

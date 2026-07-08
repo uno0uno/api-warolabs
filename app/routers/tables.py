@@ -87,6 +87,10 @@ class TableQrToggleRequest(BaseModel):
     enabled: bool
 
 
+class ReorderTablesRequest(BaseModel):
+    table_ids: List[UUID] = Field(..., min_length=1)
+
+
 @router.get("", dependencies=[Depends(require_module(Module.POS))])
 async def list_tables(request: Request, include_inactive: bool = Query(False)):
     """
@@ -103,6 +107,15 @@ async def create_table(request: Request, body: CreateTableRequest):
     Create a new table for the tenant.
     """
     return await tables_service.create_table(request, body.name, body.capacity, body.code)
+
+
+@router.patch("/reorder", dependencies=[Depends(require_module(Module.POS))])
+async def reorder_tables(request: Request, body: ReorderTablesRequest):
+    """
+    Persist manual display order for regular tenant tables.
+    Barra is fixed/protected and cannot be included.
+    """
+    return await tables_service.reorder_tables(request, body.table_ids)
 
 
 @router.put("/{table_id}", dependencies=[Depends(require_module(Module.POS))])
