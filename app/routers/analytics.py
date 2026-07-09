@@ -105,6 +105,26 @@ async def get_ingredient_analytics_history(
     )
 
 
+@router.get("/ingredients/{ingredient_id}/report", dependencies=[Depends(require_module(Module.ANALITICA))])
+async def get_ingredient_analytics_report(
+    ingredient_id: UUID,
+    request: Request,
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500)
+):
+    """
+    Get report-ready analytics for one ingredient.
+    """
+    return await analytics_service.get_ingredient_analytics_report(
+        request,
+        ingredient_id=ingredient_id,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit
+    )
+
+
 @router.get("/alerts", dependencies=[Depends(require_module(Module.ANALITICA))])
 async def get_alerts(
     request: Request,
