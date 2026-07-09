@@ -182,6 +182,129 @@ async def test_ingredient_history_returns_purchase_consumption_stock_and_product
 
 
 @pytest.mark.asyncio
+async def test_ingredient_report_returns_metrics_series_and_history():
+    ingredient_id = uuid4()
+    purchase_id = uuid4()
+    purchase_item_id = uuid4()
+    movement_id = uuid4()
+    product_id = uuid4()
+    rows = [
+        [{
+            "purchase_item_id": purchase_item_id,
+            "purchase_id": purchase_id,
+            "purchase_number": "CP-2",
+            "purchase_date": datetime(2026, 1, 5, 10, 0),
+            "base_quantity": Decimal("2000"),
+            "base_unit": "gr",
+            "purchase_quantity": Decimal("2"),
+            "purchase_unit": "kg",
+            "unit_cost": Decimal("6.5"),
+            "total_cost": Decimal("13000"),
+            "received_at": datetime(2026, 1, 5, 10, 15),
+        }],
+        [{
+            "id": movement_id,
+            "movement_type": "consumption",
+            "quantity_change": Decimal("-300"),
+            "unit": "gr",
+            "previous_stock": Decimal("1000"),
+            "new_stock": Decimal("700"),
+            "cost_per_unit": Decimal("6.7"),
+            "reference_table": "orders",
+            "reference_id": uuid4(),
+            "reason": "POS sale",
+            "notes": None,
+            "created_at": datetime(2026, 1, 6, 12, 0),
+        }],
+        [{
+            "product_id": product_id,
+            "product_name": "Hamburguesa",
+            "relation_type": "direct_recipe",
+            "quantity": Decimal("50"),
+            "unit": "gr",
+        }],
+        [{
+            "period": datetime(2026, 1, 6).date(),
+            "consumed_quantity": Decimal("300"),
+            "estimated_consumed_cost": Decimal("1950"),
+            "unit_cost": Decimal("6.5"),
+            "movement_count": 1,
+        }],
+        [{
+            "period": datetime(2026, 1, 1).date(),
+            "consumed_quantity": Decimal("300"),
+            "estimated_consumed_cost": Decimal("1950"),
+            "unit_cost": Decimal("6.5"),
+            "movement_count": 1,
+        }],
+    ]
+    conn, cm = _mock_db(
+        fetch_rows=rows,
+        fetchrow_rows=[
+            {"id": ingredient_id, "name": "Tomate", "category": "Verduras", "unit": "gr"},
+            {
+                "consumed_quantity": Decimal("300"),
+                "movement_count": 1,
+                "purchase_quantity": Decimal("2000"),
+                "weighted_avg_cost_per_unit": Decimal("6.5"),
+                "latest_cost_per_unit": Decimal("6.7"),
+                "latest_cost_at": datetime(2026, 1, 6, 12, 0),
+                "estimated_consumed_cost": Decimal("1950"),
+                "cost_basis": "weighted_avg_purchase_cost",
+                "first_unit_cost": Decimal("6.0"),
+                "latest_purchase_unit_cost": Decimal("6.5"),
+                "cost_variation": Decimal("0.5"),
+                "cost_variation_pct": Decimal("0.0833333333"),
+            },
+            {
+                "current_stock": Decimal("700"),
+                "minimum_stock": Decimal("100"),
+                "maximum_stock": Decimal("2000"),
+                "last_updated": datetime(2026, 1, 6, 12, 5),
+                "location": "Bodega",
+            },
+        ],
+    )
+
+    with patch("app.services.analytics_service.get_db_connection", return_value=cm):
+        result = await analytics_service._get_ingredient_analytics_report_for_tenant(
+            "tenant-1",
+            ingredient_id,
+            date_from="2026-01-01",
+            date_to="2026-01-31",
+            limit=10,
+        )
+
+    metrics_sql = conn.fetchrow.await_args_list[1].args[0]
+    purchase_sql = conn.fetch.await_args_list[0].args[0]
+    day_sql = conn.fetch.await_args_list[3].args[0]
+    month_sql = conn.fetch.await_args_list[4].args[0]
+    assert "tim.movement_type = 'consumption'" in metrics_sql
+    assert "DATE(tim.created_at AT TIME ZONE $5)" in metrics_sql
+    assert "tenant_purchase_items tpi" in purchase_sql
+    assert "DATE(tim.created_at AT TIME ZONE $5) AS period" in day_sql
+    assert "DATE_TRUNC('month', tim.created_at AT TIME ZONE $5)::date AS period" in month_sql
+    assert conn.fetchrow.await_args_list[1].args[5] == "America/Mexico_City"
+
+    data = result["data"]
+    assert data["ingredient"]["id"] == str(ingredient_id)
+    assert data["period"]["timezone"] == "America/Mexico_City"
+    assert data["metrics"]["consumed_quantity"] == 300.0
+    assert data["metrics"]["estimated_consumed_cost"] == 1950.0
+    assert data["metrics"]["weighted_avg_cost_per_unit"] == 6.5
+    assert data["metrics"]["latest_cost_per_unit"] == 6.7
+    assert data["metrics"]["cost_basis"] == "weighted_avg_purchase_cost"
+    assert data["metrics"]["cost_variation"] == 0.5
+    assert data["metrics"]["data_coverage"] == "recorded_movements"
+    assert data["series"]["day"][0]["period"] == "2026-01-06"
+    assert data["series"]["month"][0]["period"] == "2026-01-01"
+    assert data["purchases"][0]["purchase_id"] == str(purchase_id)
+    assert data["consumption_movements"][0]["consumed_quantity"] == 300.0
+    assert data["stock"]["current_stock"] == 700.0
+    assert data["related_products"][0]["product_id"] == str(product_id)
+
+
+@pytest.mark.asyncio
 async def test_ingredient_summary_wrapper_resolves_tenant_before_core():
     session = SimpleNamespace(tenant_id="tenant-wrapper")
 
@@ -207,4 +330,33 @@ async def test_ingredient_summary_wrapper_resolves_tenant_before_core():
         category=None,
         limit=5,
         sort="consumed_quantity_desc",
+    )
+
+
+@pytest.mark.asyncio
+async def test_ingredient_report_wrapper_resolves_tenant_before_core():
+    session = SimpleNamespace(tenant_id="tenant-wrapper")
+    ingredient_id = uuid4()
+
+    with patch("app.services.analytics_service.require_valid_session", return_value=session), \
+         patch(
+             "app.services.analytics_service._get_ingredient_analytics_report_for_tenant",
+             new_callable=AsyncMock,
+         ) as core:
+        core.return_value = {"success": True, "data": {"ingredient": {"id": str(ingredient_id)}}}
+        result = await analytics_service.get_ingredient_analytics_report(
+            object(),
+            ingredient_id,
+            date_from="2026-01-01",
+            date_to="2026-01-31",
+            limit=5,
+        )
+
+    assert result["success"] is True
+    core.assert_awaited_once_with(
+        "tenant-wrapper",
+        ingredient_id,
+        date_from="2026-01-01",
+        date_to="2026-01-31",
+        limit=5,
     )
