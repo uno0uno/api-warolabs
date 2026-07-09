@@ -70,11 +70,8 @@ async def _resolve_payment_method(
 
 
 def _raise_duplicate_expense_error(exc: asyncpg.UniqueViolationError) -> None:
-    if getattr(exc, "constraint_name", "") == "tenant_expenses_tenant_id_expense_category_id_month_year_de_key":
-        raise HTTPException(
-            status_code=409,
-            detail="Ya existe un gasto con la misma categoría, mes y descripción.",
-        ) from exc
+    # Expense descriptions are contact/accounting notes, not unique identity.
+    # Keep unknown unique violations protected by passing them through.
     raise exc
 
 
