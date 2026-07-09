@@ -23,6 +23,7 @@ class VerifyOTPRequest(BaseModel):
     email: EmailStr
     cart_id: Optional[UUID] = None
     otp_code: str
+    phone_number: Optional[str] = None
 
 
 class ResendOTPRequest(BaseModel):
@@ -76,7 +77,8 @@ async def verify_otp(payload: VerifyOTPRequest, response: Response):
     result = await otp_service.verify_otp_code(
         email=payload.email,
         cart_id=payload.cart_id,
-        otp_code=payload.otp_code
+        otp_code=payload.otp_code,
+        phone_number=payload.phone_number,
     )
     # Set long-lived customer session cookie for /mis-pedidos
     if result.get("success") and result.get("customer_id"):
