@@ -137,7 +137,8 @@ WARO Colombia
 async def verify_otp_code(
     email: str,
     cart_id: Optional[UUID],
-    otp_code: str
+    otp_code: str,
+    phone_number: Optional[str] = None,
 ) -> dict:
     """
     Verify OTP code for cart (PUBLIC)
@@ -217,7 +218,7 @@ async def verify_otp_code(
                 )
 
                 # Get or create customer
-                customer_id = await get_or_create_customer(conn, email)
+                customer_id = await get_or_create_customer(conn, email, phone_number)
 
                 pickup_pin = None
                 if cart_id is not None:
@@ -262,32 +263,117 @@ async def verify_otp_code(
         raise APIError(f"Error al verificar OTP: {str(e)}", status_code=500)
 
 
-async def get_or_create_customer(conn, email: str) -> UUID:
+def normalize_phone_number(phone_number: Optional[str]) -> Optional[str]:
+    """Normalize phone format used by customer search/create flows."""
+    if phone_number is None:
+        return None
+
+    normalized = phone_number.strip().replace(' ', '').replace('-', '')
+    return normalized or None
+
+
+def _profile_value_missing(value) -> bool:
+    return value is None or str(value).strip() == ""
+
+
+async def get_or_create_customer(
+    conn,
+    email: str,
+    phone_number: Optional[str] = None,
+) -> UUID:
     """
-    Search for existing customer by email or create new one
+    Search for an existing customer by email/phone or create a new one.
     Returns customer_id (UUID)
     """
     email = normalize_email(email)
-    # Search by email
-    customer_query = """
-        SELECT id FROM profile
+    phone_number = normalize_phone_number(phone_number)
+
+    email_query = """
+        SELECT id, email, phone_number FROM profile
         WHERE lower(trim(email)) = $1
         LIMIT 1
     """
-    customer_row = await conn.fetchrow(customer_query, email)
+    email_row = await conn.fetchrow(email_query, email)
 
-    if customer_row:
-        return customer_row['id']
+    if phone_number is None:
+        if email_row:
+            return email_row['id']
 
-    # Create new customer (phone_number is NOT NULL in schema, use empty string as placeholder)
+        create_customer_query = """
+            INSERT INTO profile (email, phone_number)
+            VALUES ($1, '')
+            RETURNING id
+        """
+        new_customer = await conn.fetchrow(create_customer_query, email)
+
+        logger.info(f"Created new customer with email {email}")
+        return new_customer['id']
+
+    phone_query = """
+        SELECT id, email, phone_number FROM profile
+        WHERE phone_number = $1
+        LIMIT 1
+    """
+    phone_row = await conn.fetchrow(phone_query, phone_number)
+
+    if email_row and phone_row and email_row['id'] != phone_row['id']:
+        raise HTTPException(
+            status_code=409,
+            detail="El correo y el teléfono pertenecen a clientes distintos."
+        )
+
+    if email_row:
+        existing_phone = normalize_phone_number(email_row['phone_number'])
+        if existing_phone is None:
+            await conn.execute(
+                """
+                UPDATE profile
+                SET phone_number = $2, updated_at = now()
+                WHERE id = $1
+                """,
+                email_row['id'],
+                phone_number,
+            )
+            return email_row['id']
+
+        if existing_phone == phone_number:
+            return email_row['id']
+
+        raise HTTPException(
+            status_code=409,
+            detail="El correo ya está asociado a otro teléfono."
+        )
+
+    if phone_row:
+        existing_email = phone_row['email']
+        if _profile_value_missing(existing_email):
+            await conn.execute(
+                """
+                UPDATE profile
+                SET email = $2, updated_at = now()
+                WHERE id = $1
+                """,
+                phone_row['id'],
+                email,
+            )
+            return phone_row['id']
+
+        if normalize_email(existing_email) == email:
+            return phone_row['id']
+
+        raise HTTPException(
+            status_code=409,
+            detail="El teléfono ya está asociado a otro correo."
+        )
+
     create_customer_query = """
         INSERT INTO profile (email, phone_number)
-        VALUES ($1, '')
+        VALUES ($1, $2)
         RETURNING id
     """
-    new_customer = await conn.fetchrow(create_customer_query, email)
+    new_customer = await conn.fetchrow(create_customer_query, email, phone_number)
 
-    logger.info(f"Created new customer with email {email}")
+    logger.info(f"Created new customer with email {email} and phone {phone_number}")
     return new_customer['id']
 
 
