@@ -169,6 +169,7 @@ async def test_reorder_tables_persists_submitted_regular_order():
     ):
         result = await tables_service.reorder_tables(object(), [first_id, second_id])
 
+    assert result["message"] == "Orden de mesas actualizado"
     assert result["data"]["table_ids"] == [str(first_id), str(second_id)]
     assert conn.execute.await_count == 2
     update_args = conn.execute.await_args_list[1].args
