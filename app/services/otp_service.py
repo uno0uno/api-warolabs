@@ -151,6 +151,13 @@ async def verify_otp_code(
     """
     try:
         email = normalize_email(email)
+        normalized_phone = normalize_phone_number(phone_number)
+        if cart_id is not None and normalized_phone is None:
+            raise HTTPException(
+                status_code=400,
+                detail="El teléfono es requerido para verificar pedidos en línea."
+            )
+
         async with get_db_connection() as conn:
             async with conn.transaction():
                 # Get latest OTP for this email + cart
@@ -218,7 +225,7 @@ async def verify_otp_code(
                 )
 
                 # Get or create customer
-                customer_id = await get_or_create_customer(conn, email, phone_number)
+                customer_id = await get_or_create_customer(conn, email, normalized_phone)
 
                 pickup_pin = None
                 if cart_id is not None:
@@ -228,11 +235,12 @@ async def verify_otp_code(
                         SET is_verified = true,
                             verified_email = $1,
                             customer_id = $2,
+                            customer_phone = $3,
                             updated_at = now()
-                        WHERE id = $3
+                        WHERE id = $4
                         RETURNING id, order_type
                     """
-                    cart_row = await conn.fetchrow(cart_update_query, email, customer_id, cart_id)
+                    cart_row = await conn.fetchrow(cart_update_query, email, customer_id, normalized_phone, cart_id)
 
                     if not cart_row:
                         raise HTTPException(status_code=404, detail="Carrito no encontrado")
@@ -282,7 +290,7 @@ async def get_or_create_customer(
     phone_number: Optional[str] = None,
 ) -> UUID:
     """
-    Search for an existing customer by email/phone or create a new one.
+    Search for an existing customer by email or create a new one.
     Returns customer_id (UUID)
     """
     email = normalize_email(email)
@@ -295,36 +303,9 @@ async def get_or_create_customer(
     """
     email_row = await conn.fetchrow(email_query, email)
 
-    if phone_number is None:
-        if email_row:
-            return email_row['id']
-
-        create_customer_query = """
-            INSERT INTO profile (email, phone_number)
-            VALUES ($1, '')
-            RETURNING id
-        """
-        new_customer = await conn.fetchrow(create_customer_query, email)
-
-        logger.info(f"Created new customer with email {email}")
-        return new_customer['id']
-
-    phone_query = """
-        SELECT id, email, phone_number FROM profile
-        WHERE phone_number = $1
-        LIMIT 1
-    """
-    phone_row = await conn.fetchrow(phone_query, phone_number)
-
-    if email_row and phone_row and email_row['id'] != phone_row['id']:
-        raise HTTPException(
-            status_code=409,
-            detail="El correo y el teléfono pertenecen a clientes distintos."
-        )
-
     if email_row:
         existing_phone = normalize_phone_number(email_row['phone_number'])
-        if existing_phone is None:
+        if phone_number is not None and existing_phone is None:
             await conn.execute(
                 """
                 UPDATE profile
@@ -334,44 +315,14 @@ async def get_or_create_customer(
                 email_row['id'],
                 phone_number,
             )
-            return email_row['id']
-
-        if existing_phone == phone_number:
-            return email_row['id']
-
-        raise HTTPException(
-            status_code=409,
-            detail="El correo ya está asociado a otro teléfono."
-        )
-
-    if phone_row:
-        existing_email = phone_row['email']
-        if _profile_value_missing(existing_email):
-            await conn.execute(
-                """
-                UPDATE profile
-                SET email = $2, updated_at = now()
-                WHERE id = $1
-                """,
-                phone_row['id'],
-                email,
-            )
-            return phone_row['id']
-
-        if normalize_email(existing_email) == email:
-            return phone_row['id']
-
-        raise HTTPException(
-            status_code=409,
-            detail="El teléfono ya está asociado a otro correo."
-        )
+        return email_row['id']
 
     create_customer_query = """
         INSERT INTO profile (email, phone_number)
         VALUES ($1, $2)
         RETURNING id
     """
-    new_customer = await conn.fetchrow(create_customer_query, email, phone_number)
+    new_customer = await conn.fetchrow(create_customer_query, email, phone_number or '')
 
     logger.info(f"Created new customer with email {email} and phone {phone_number}")
     return new_customer['id']

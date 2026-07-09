@@ -235,9 +235,11 @@ async def get_online_orders_list(
                     o.status,
                     oc.order_type,
                     oc.delivery_instructions,
-                    oc.verified_email
+                    oc.verified_email,
+                    COALESCE(NULLIF(oc.customer_phone, ''), NULLIF(p.phone_number, '')) AS customer_phone
                 FROM orders o
                 JOIN online_carts oc ON oc.id = o.online_cart_id
+                LEFT JOIN profile p ON p.id = o.customer_id
                 WHERE {where_clause}
                 ORDER BY {sort_col} {sort_dir}
                 LIMIT ${limit_param} OFFSET ${offset_param}
@@ -256,6 +258,7 @@ async def get_online_orders_list(
                         "order_type": r['order_type'],
                         "delivery_instructions": r['delivery_instructions'],
                         "verified_email": r['verified_email'],
+                        "customer_phone": r['customer_phone'],
                     }
                     for r in rows
                 ],
@@ -304,6 +307,7 @@ async def get_online_order_by_id(
                     oc.order_type,
                     oc.delivery_instructions,
                     oc.verified_email,
+                    COALESCE(NULLIF(oc.customer_phone, ''), NULLIF(p.phone_number, '')) AS customer_phone,
                     ap.address_line1,
                     ap.address_line2,
                     ap.city,
@@ -311,6 +315,7 @@ async def get_online_order_by_id(
                     ap.label AS address_label
                 FROM orders o
                 JOIN online_carts oc ON oc.id = o.online_cart_id
+                LEFT JOIN profile p ON p.id = o.customer_id
                 LEFT JOIN addresses_profile ap ON ap.id = oc.delivery_address_id
                 WHERE o.id = $1
                   AND o.tenant_id = $2
@@ -377,6 +382,7 @@ async def get_online_order_by_id(
                     "order_type": row['order_type'],
                     "delivery_instructions": row['delivery_instructions'],
                     "verified_email": row['verified_email'],
+                    "customer_phone": row['customer_phone'],
                     "delivery_address": delivery_address,
                     "items": [
                         {

@@ -141,6 +141,7 @@ class TestOnlineOrderItemNotesContract:
                     "order_type": "delivery",
                     "delivery_instructions": None,
                     "verified_email": "cliente@example.com",
+                    "customer_phone": "3001234567",
                     "address_line1": "Calle 1",
                     "address_line2": None,
                     "city": "Bogota",
@@ -182,6 +183,7 @@ class TestOnlineOrderItemNotesContract:
             )
 
         item = result["data"]["items"][0]
+        assert result["data"]["customer_phone"] == "3001234567"
         assert item["notes"] == "Sin cebolla"
         assert item["modifiers"][0]["name"] == "Queso"
 
