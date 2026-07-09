@@ -48,6 +48,24 @@ def _patch_customer_service_db(conn, tenant_id):
     )
 
 
+def test_customer_models_normalize_fiscal_id_for_invoicing():
+    created = CustomerSearchOrCreate(
+        phone_number="3001234567",
+        name="Buyer",
+        fiscal_id_type="NIT",
+        fiscal_id="900.123.456-7",
+        fiscal_business_name="ACME SAS",
+    )
+    updated = CustomerUpdate(
+        fiscal_id_type="CC",
+        fiscal_id=" 1.063-279-307 ",
+        fiscal_business_name="JUAN PEREZ",
+    )
+
+    assert created.fiscal_id == "9001234567"
+    assert updated.fiscal_id == "1063279307"
+
+
 @pytest.mark.asyncio
 async def test_search_or_create_customer_upserts_customer_relationship_without_touching_team_role():
     tenant_id = uuid4()
