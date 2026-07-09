@@ -320,8 +320,6 @@ async def _get_ingredient_analytics_history_for_tenant(
             FROM tenant_ingredient_movements tim
             WHERE tim.tenant_id = $1
                 AND tim.ingredient_id = $2
-                AND tim.movement_type = 'consumption'
-                AND tim.quantity_change < 0
                 AND DATE(tim.created_at AT TIME ZONE $4) >= $3
                 AND DATE(tim.created_at AT TIME ZONE $4) <= $5
             ORDER BY tim.created_at DESC
@@ -378,9 +376,10 @@ async def _get_ingredient_analytics_history_for_tenant(
                 "received_at": row["received_at"].isoformat() if row["received_at"] else None,
             })
 
+        stock_movements = []
         consumption_movements = []
         for row in movement_rows:
-            consumption_movements.append({
+            movement = {
                 "id": str(row["id"]),
                 "movement_type": row["movement_type"],
                 "quantity_change": _number_or_zero(row["quantity_change"]),
@@ -394,7 +393,10 @@ async def _get_ingredient_analytics_history_for_tenant(
                 "reason": row["reason"],
                 "notes": row["notes"],
                 "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-            })
+            }
+            stock_movements.append(movement)
+            if row["movement_type"] == "consumption" and _number_or_zero(row["quantity_change"]) < 0:
+                consumption_movements.append(movement)
 
         related_products = []
         for row in related_rows:
@@ -416,6 +418,7 @@ async def _get_ingredient_analytics_history_for_tenant(
                     "unit": ingredient["unit"] if ingredient else None,
                 },
                 "purchases": purchases,
+                "stock_movements": stock_movements,
                 "consumption_movements": consumption_movements,
                 "stock": {
                     "current_stock": _number_or_none(stock_row["current_stock"]) if stock_row else None,
