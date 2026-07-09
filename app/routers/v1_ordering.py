@@ -266,6 +266,7 @@ class V1VerifyOTPRequest(BaseModel):
     email: EmailStr
     cart_id: Optional[UUID] = None
     otp_code: str
+    phone_number: Optional[str] = None
 
 
 class V1ResendOTPRequest(BaseModel):
@@ -303,6 +304,7 @@ async def v1_verify_otp(request: Request, body: V1VerifyOTPRequest, response: Re
         email=body.email,
         cart_id=body.cart_id,
         otp_code=body.otp_code,
+        phone_number=body.phone_number,
     )
     if result.get("success") and result.get("customer_id"):
         jwt_token = create_customer_jwt(

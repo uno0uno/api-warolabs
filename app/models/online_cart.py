@@ -134,6 +134,7 @@ class OnlineOrderItem(BaseModel):
     order_type: str
     delivery_instructions: Optional[str]
     verified_email: Optional[str]
+    customer_phone: Optional[str]
 
 
 class OnlineOrdersResponse(BaseModel):
