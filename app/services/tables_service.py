@@ -613,6 +613,7 @@ async def reorder_tables(request: Request, table_ids: List[UUID]) -> dict:
 
         return {
             "success": True,
+            "message": "Orden de mesas actualizado",
             "data": {
                 "table_ids": [str(table_id) for table_id in unique_ids],
             },
