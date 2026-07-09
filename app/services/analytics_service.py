@@ -55,6 +55,414 @@ def parse_date(date_str: Optional[str]) -> Optional[date]:
         return None
 
 
+def _number_or_none(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _number_or_zero(value: Any) -> float:
+    return float(value or 0)
+
+
+def _ingredient_analytics_sort(sort: str) -> str:
+    sort_columns = {
+        "consumed_quantity_desc": "consumed_quantity DESC NULLS LAST, i.name ASC",
+        "consumed_quantity_asc": "consumed_quantity ASC NULLS LAST, i.name ASC",
+        "estimated_consumed_cost_desc": "estimated_consumed_cost DESC NULLS LAST, i.name ASC",
+        "estimated_consumed_cost_asc": "estimated_consumed_cost ASC NULLS LAST, i.name ASC",
+        "latest_cost_per_unit_desc": "lc.latest_cost_per_unit DESC NULLS LAST, i.name ASC",
+        "weighted_avg_cost_per_unit_desc": "p.weighted_avg_cost_per_unit DESC NULLS LAST, i.name ASC",
+        "ingredient_name_asc": "i.name ASC",
+        "ingredient_name_desc": "i.name DESC",
+    }
+    return sort_columns.get(sort, sort_columns["consumed_quantity_desc"])
+
+
+async def _ingredient_analytics_period(
+    conn,
+    tenant_id: str,
+    date_from: Optional[str],
+    date_to: Optional[str],
+) -> tuple[date, date, str]:
+    timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+    parsed_date_from = parse_date(date_from)
+    parsed_date_to = parse_date(date_to)
+    if not parsed_date_from or not parsed_date_to:
+        today = tenant_today(timezone_name)
+        parsed_date_to = today
+        parsed_date_from = today.replace(month=1, day=1)
+    return parsed_date_from, parsed_date_to, timezone_name
+
+
+async def _get_ingredient_analytics_summary_for_tenant(
+    tenant_id: str,
+    *,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    ingredient_id: Optional[UUID] = None,
+    category: Optional[str] = None,
+    limit: int = 100,
+    sort: str = "consumed_quantity_desc",
+) -> dict:
+    """Auth-agnostic ingredient consumption and purchase-cost summary."""
+    async with get_db_connection() as conn:
+        parsed_date_from, parsed_date_to, timezone_name = await _ingredient_analytics_period(
+            conn, tenant_id, date_from, date_to
+        )
+        order_by = _ingredient_analytics_sort(sort)
+
+        query = f"""
+            WITH consumption AS (
+                SELECT
+                    tim.ingredient_id,
+                    SUM(ABS(tim.quantity_change)) AS consumed_quantity,
+                    COUNT(*) AS movement_count
+                FROM tenant_ingredient_movements tim
+                WHERE tim.tenant_id = $1
+                    AND tim.movement_type = 'consumption'
+                    AND tim.quantity_change < 0
+                    AND DATE(tim.created_at AT TIME ZONE $4) >= $2
+                    AND DATE(tim.created_at AT TIME ZONE $4) <= $3
+                GROUP BY tim.ingredient_id
+            ),
+            purchases AS (
+                SELECT
+                    tpi.ingredient_id,
+                    SUM(tpi.quantity) AS purchase_quantity,
+                    SUM(tpi.quantity * tpi.unit_cost) / NULLIF(SUM(tpi.quantity), 0) AS weighted_avg_cost_per_unit
+                FROM tenant_purchase_items tpi
+                JOIN tenant_purchases tp ON tpi.purchase_id = tp.id
+                WHERE tp.tenant_id = $1
+                    AND tpi.unit_cost IS NOT NULL
+                    AND tpi.quantity > 0
+                    AND DATE(COALESCE(tpi.received_at, tp.purchase_date, tpi.created_at) AT TIME ZONE $4) >= $2
+                    AND DATE(COALESCE(tpi.received_at, tp.purchase_date, tpi.created_at) AT TIME ZONE $4) <= $3
+                GROUP BY tpi.ingredient_id
+            ),
+            latest_costs AS (
+                SELECT DISTINCT ON (tim.ingredient_id)
+                    tim.ingredient_id,
+                    tim.cost_per_unit AS latest_cost_per_unit,
+                    tim.created_at AS latest_cost_at
+                FROM tenant_ingredient_movements tim
+                WHERE tim.tenant_id = $1
+                    AND tim.cost_per_unit IS NOT NULL
+                    AND tim.cost_per_unit > 0
+                    AND DATE(tim.created_at AT TIME ZONE $4) <= $3
+                ORDER BY tim.ingredient_id, tim.created_at DESC
+            )
+            SELECT
+                i.id AS ingredient_id,
+                i.name AS ingredient_name,
+                i.category,
+                i.unit,
+                c.consumed_quantity,
+                p.purchase_quantity,
+                lc.latest_cost_per_unit,
+                lc.latest_cost_at,
+                p.weighted_avg_cost_per_unit,
+                COALESCE(c.consumed_quantity, 0) * COALESCE(p.weighted_avg_cost_per_unit, lc.latest_cost_per_unit, 0)
+                    AS estimated_consumed_cost,
+                COALESCE(c.movement_count, 0) AS movement_count,
+                CASE
+                    WHEN COALESCE(c.movement_count, 0) > 0 THEN 'recorded_movements'
+                    ELSE 'no_recorded_consumption'
+                END AS data_coverage
+            FROM ingredients i
+            LEFT JOIN consumption c ON c.ingredient_id = i.id
+            LEFT JOIN purchases p ON p.ingredient_id = i.id
+            LEFT JOIN latest_costs lc ON lc.ingredient_id = i.id
+            WHERE (c.ingredient_id IS NOT NULL OR p.ingredient_id IS NOT NULL)
+                AND ($5::uuid IS NULL OR i.id = $5::uuid)
+                AND ($6::text IS NULL OR i.category = $6::text)
+            ORDER BY {order_by}
+            LIMIT $7
+        """
+
+        rows = await conn.fetch(
+            query,
+            tenant_id,
+            parsed_date_from,
+            parsed_date_to,
+            timezone_name,
+            ingredient_id,
+            category,
+            limit,
+        )
+
+        items = []
+        for row in rows:
+            items.append({
+                "ingredient_id": str(row["ingredient_id"]),
+                "ingredient_name": row["ingredient_name"],
+                "category": row["category"],
+                "unit": row["unit"],
+                "consumed_quantity": _number_or_zero(row["consumed_quantity"]),
+                "purchase_quantity": _number_or_zero(row["purchase_quantity"]),
+                "latest_cost_per_unit": _number_or_none(row["latest_cost_per_unit"]),
+                "latest_cost_at": row["latest_cost_at"].isoformat() if row["latest_cost_at"] else None,
+                "weighted_avg_cost_per_unit": _number_or_none(row["weighted_avg_cost_per_unit"]),
+                "estimated_consumed_cost": _number_or_zero(row["estimated_consumed_cost"]),
+                "movement_count": row["movement_count"],
+                "data_coverage": row["data_coverage"],
+            })
+
+        return {
+            "success": True,
+            "data": {
+                "items": items,
+                "period": {
+                    "from": parsed_date_from.isoformat(),
+                    "to": parsed_date_to.isoformat(),
+                    "days": (parsed_date_to - parsed_date_from).days + 1,
+                },
+                "filters": {
+                    "ingredient_id": str(ingredient_id) if ingredient_id else None,
+                    "category": category,
+                    "sort": sort,
+                    "limit": limit,
+                },
+            },
+        }
+
+
+async def get_ingredient_analytics_summary(
+    request: Request,
+    *,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    ingredient_id: Optional[UUID] = None,
+    category: Optional[str] = None,
+    limit: int = 100,
+    sort: str = "consumed_quantity_desc",
+) -> dict:
+    """Session wrapper for ingredient analytics summary."""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+        return await _get_ingredient_analytics_summary_for_tenant(
+            tenant_id,
+            date_from=date_from,
+            date_to=date_to,
+            ingredient_id=ingredient_id,
+            category=category,
+            limit=limit,
+            sort=sort,
+        )
+    except AuthenticationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting ingredient analytics summary: {str(e)}")
+        raise APIError(f"Error getting ingredient analytics summary: {str(e)}", status_code=500)
+
+
+async def _get_ingredient_analytics_history_for_tenant(
+    tenant_id: str,
+    ingredient_id: UUID,
+    *,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 100,
+) -> dict:
+    """Auth-agnostic purchase/consumption history for one ingredient."""
+    async with get_db_connection() as conn:
+        parsed_date_from, parsed_date_to, timezone_name = await _ingredient_analytics_period(
+            conn, tenant_id, date_from, date_to
+        )
+
+        ingredient = await conn.fetchrow("""
+            SELECT id, name, category, unit
+            FROM ingredients
+            WHERE id = $1
+        """, ingredient_id)
+
+        purchase_rows = await conn.fetch("""
+            SELECT
+                tpi.id AS purchase_item_id,
+                tp.id AS purchase_id,
+                tp.purchase_number,
+                tp.purchase_date,
+                tpi.quantity AS base_quantity,
+                tpi.unit AS base_unit,
+                tpi.purchase_quantity,
+                tpi.purchase_unit,
+                tpi.unit_cost,
+                tpi.total_cost,
+                tpi.received_at
+            FROM tenant_purchase_items tpi
+            JOIN tenant_purchases tp ON tpi.purchase_id = tp.id
+            WHERE tp.tenant_id = $1
+                AND tpi.ingredient_id = $2
+                AND tpi.unit_cost IS NOT NULL
+                AND DATE(COALESCE(tpi.received_at, tp.purchase_date, tpi.created_at) AT TIME ZONE $4) >= $3
+                AND DATE(COALESCE(tpi.received_at, tp.purchase_date, tpi.created_at) AT TIME ZONE $4) <= $5
+            ORDER BY COALESCE(tpi.received_at, tp.purchase_date, tpi.created_at) DESC
+            LIMIT $6
+        """, tenant_id, ingredient_id, parsed_date_from, timezone_name, parsed_date_to, limit)
+
+        movement_rows = await conn.fetch("""
+            SELECT
+                tim.id,
+                tim.movement_type,
+                tim.quantity_change,
+                tim.unit,
+                tim.previous_stock,
+                tim.new_stock,
+                tim.cost_per_unit,
+                tim.reference_table,
+                tim.reference_id,
+                tim.reason,
+                tim.notes,
+                tim.created_at
+            FROM tenant_ingredient_movements tim
+            WHERE tim.tenant_id = $1
+                AND tim.ingredient_id = $2
+                AND tim.movement_type = 'consumption'
+                AND tim.quantity_change < 0
+                AND DATE(tim.created_at AT TIME ZONE $4) >= $3
+                AND DATE(tim.created_at AT TIME ZONE $4) <= $5
+            ORDER BY tim.created_at DESC
+            LIMIT $6
+        """, tenant_id, ingredient_id, parsed_date_from, timezone_name, parsed_date_to, limit)
+
+        stock_row = await conn.fetchrow("""
+            SELECT current_stock, minimum_stock, maximum_stock, last_updated, location
+            FROM tenant_inventory
+            WHERE tenant_id = $1 AND ingredient_id = $2
+        """, tenant_id, ingredient_id)
+
+        related_rows = await conn.fetch("""
+            SELECT DISTINCT
+                p.id AS product_id,
+                p.name AS product_name,
+                'direct_recipe' AS relation_type,
+                pr.quantity AS quantity,
+                pr.unit AS unit
+            FROM product_recipes pr
+            JOIN product p ON p.id = pr.product_id
+            WHERE pr.tenant_id = $1
+                AND pr.ingredient_id = $2
+            UNION ALL
+            SELECT DISTINCT
+                p.id AS product_id,
+                p.name AS product_name,
+                'base_recipe' AS relation_type,
+                (pbr.quantity * brt.base_quantity) AS quantity,
+                brt.unit AS unit
+            FROM product_base_recipes pbr
+            JOIN product p ON p.id = pbr.product_id
+            JOIN base_recipe_templates brt ON brt.product_base_type_id = pbr.product_base_type_id
+            WHERE pbr.tenant_id = $1
+                AND brt.ingredient_id = $2
+                AND (brt.tenant_id = $1 OR brt.tenant_id IS NULL)
+            ORDER BY product_name ASC
+            LIMIT $3
+        """, tenant_id, ingredient_id, limit)
+
+        purchases = []
+        for row in purchase_rows:
+            purchases.append({
+                "purchase_item_id": str(row["purchase_item_id"]),
+                "purchase_id": str(row["purchase_id"]),
+                "purchase_number": row["purchase_number"],
+                "purchase_date": row["purchase_date"].isoformat() if row["purchase_date"] else None,
+                "base_quantity": _number_or_zero(row["base_quantity"]),
+                "base_unit": row["base_unit"],
+                "purchase_quantity": _number_or_none(row["purchase_quantity"]),
+                "purchase_unit": row["purchase_unit"],
+                "unit_cost": _number_or_none(row["unit_cost"]),
+                "total_cost": _number_or_none(row["total_cost"]),
+                "received_at": row["received_at"].isoformat() if row["received_at"] else None,
+            })
+
+        consumption_movements = []
+        for row in movement_rows:
+            consumption_movements.append({
+                "id": str(row["id"]),
+                "movement_type": row["movement_type"],
+                "quantity_change": _number_or_zero(row["quantity_change"]),
+                "consumed_quantity": abs(_number_or_zero(row["quantity_change"])),
+                "unit": row["unit"],
+                "previous_stock": _number_or_none(row["previous_stock"]),
+                "new_stock": _number_or_none(row["new_stock"]),
+                "cost_per_unit": _number_or_none(row["cost_per_unit"]),
+                "reference_table": row["reference_table"],
+                "reference_id": str(row["reference_id"]) if row["reference_id"] else None,
+                "reason": row["reason"],
+                "notes": row["notes"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            })
+
+        related_products = []
+        for row in related_rows:
+            related_products.append({
+                "product_id": str(row["product_id"]),
+                "product_name": row["product_name"],
+                "relation_type": row["relation_type"],
+                "quantity": _number_or_none(row["quantity"]),
+                "unit": row["unit"],
+            })
+
+        return {
+            "success": True,
+            "data": {
+                "ingredient": {
+                    "id": str(ingredient["id"]) if ingredient else str(ingredient_id),
+                    "name": ingredient["name"] if ingredient else None,
+                    "category": ingredient["category"] if ingredient else None,
+                    "unit": ingredient["unit"] if ingredient else None,
+                },
+                "purchases": purchases,
+                "consumption_movements": consumption_movements,
+                "stock": {
+                    "current_stock": _number_or_none(stock_row["current_stock"]) if stock_row else None,
+                    "minimum_stock": _number_or_none(stock_row["minimum_stock"]) if stock_row else None,
+                    "maximum_stock": _number_or_none(stock_row["maximum_stock"]) if stock_row else None,
+                    "last_updated": stock_row["last_updated"].isoformat() if stock_row and stock_row["last_updated"] else None,
+                    "location": stock_row["location"] if stock_row else None,
+                },
+                "related_products": related_products,
+                "period": {
+                    "from": parsed_date_from.isoformat(),
+                    "to": parsed_date_to.isoformat(),
+                    "days": (parsed_date_to - parsed_date_from).days + 1,
+                },
+                "data_coverage": "recorded_movements" if consumption_movements else "no_recorded_consumption",
+            },
+        }
+
+
+async def get_ingredient_analytics_history(
+    request: Request,
+    ingredient_id: UUID,
+    *,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 100,
+) -> dict:
+    """Session wrapper for one ingredient analytics history."""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+        return await _get_ingredient_analytics_history_for_tenant(
+            tenant_id,
+            ingredient_id,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+        )
+    except AuthenticationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting ingredient analytics history: {str(e)}")
+        raise APIError(f"Error getting ingredient analytics history: {str(e)}", status_code=500)
+
+
 async def _get_menu_analysis_for_tenant(
     tenant_id: str,
     date_from: Optional[str] = None,

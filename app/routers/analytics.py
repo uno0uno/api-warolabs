@@ -61,6 +61,50 @@ async def get_food_cost(
     )
 
 
+@router.get("/ingredients/summary", dependencies=[Depends(require_module(Module.ANALITICA))])
+async def get_ingredient_analytics_summary(
+    request: Request,
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    ingredient_id: Optional[UUID] = Query(None),
+    category: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    sort: str = Query("consumed_quantity_desc")
+):
+    """
+    Get ingredient consumption and purchase-cost metrics for analytics.
+    """
+    return await analytics_service.get_ingredient_analytics_summary(
+        request,
+        date_from=date_from,
+        date_to=date_to,
+        ingredient_id=ingredient_id,
+        category=category,
+        limit=limit,
+        sort=sort
+    )
+
+
+@router.get("/ingredients/{ingredient_id}/history", dependencies=[Depends(require_module(Module.ANALITICA))])
+async def get_ingredient_analytics_history(
+    ingredient_id: UUID,
+    request: Request,
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500)
+):
+    """
+    Get purchase cost history and consumption movements for one ingredient.
+    """
+    return await analytics_service.get_ingredient_analytics_history(
+        request,
+        ingredient_id=ingredient_id,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit
+    )
+
+
 @router.get("/alerts", dependencies=[Depends(require_module(Module.ANALITICA))])
 async def get_alerts(
     request: Request,
