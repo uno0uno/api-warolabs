@@ -1433,6 +1433,93 @@ async def update_order_status(
         raise APIError(f"Error al actualizar estado: {str(e)}", status_code=500)
 
 
+async def associate_order_customer(
+    request: Request,
+    order_id: UUID,
+    customer_id: UUID,
+) -> dict:
+    """Associate an order with a tenant customer before electronic invoicing."""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            order_row = await conn.fetchrow(
+                """
+                SELECT id
+                FROM orders
+                WHERE id = $1
+                  AND tenant_id = $2
+                  AND (pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')
+                """,
+                order_id,
+                tenant_id,
+            )
+            if not order_row:
+                raise APIError("Order not found", status_code=404)
+
+            invoice_row = await conn.fetchrow(
+                """
+                SELECT id
+                FROM electronic_invoices
+                WHERE order_id = $1
+                  AND tenant_id = $2
+                LIMIT 1
+                """,
+                order_id,
+                tenant_id,
+            )
+            if invoice_row:
+                raise APIError(
+                    "No se puede cambiar el cliente porque la venta ya tiene factura electrónica.",
+                    status_code=409,
+                    details={"code": "invoice_exists"},
+                )
+
+            customer_row = await conn.fetchrow(
+                """
+                SELECT p.id
+                FROM profile p
+                JOIN tenant_customers tc ON tc.profile_id = p.id
+                WHERE p.id = $1
+                  AND tc.tenant_id = $2
+                  AND tc.is_active = true
+                LIMIT 1
+                """,
+                customer_id,
+                tenant_id,
+            )
+            if not customer_row:
+                raise APIError("Customer not found", status_code=404)
+
+            await conn.execute(
+                """
+                UPDATE orders
+                SET customer_id = $1
+                WHERE id = $2
+                  AND tenant_id = $3
+                """,
+                customer_id,
+                order_id,
+                tenant_id,
+            )
+
+        return {
+            "success": True,
+            "message": "Cliente asociado a la venta",
+            "customer_id": str(customer_id),
+        }
+
+    except (AuthenticationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error associating order customer: {str(e)}")
+        raise APIError(f"Error al asociar cliente: {str(e)}", status_code=500)
+
+
 async def _order_inventory_already_consumed_before_completion(
     conn,
     *,
