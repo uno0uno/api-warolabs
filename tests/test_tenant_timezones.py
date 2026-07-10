@@ -104,6 +104,8 @@ def _pos_context_row(timezone_name):
     return {
         "display_name": "Demo",
         "timezone": timezone_name,
+        "locale": None,
+        "currency_code": None,
         "kds_enabled": None,
         "comandas_enabled": None,
         "expediter_enabled": None,

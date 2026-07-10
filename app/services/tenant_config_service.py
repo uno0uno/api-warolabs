@@ -363,10 +363,25 @@ async def update_public_profile(
 
             if 'timezone' in data_dict:
                 data_dict['timezone'] = validate_timezone(data_dict['timezone'])
+            # Explicit null → Colombia defaults; invalid strings → 400 (not 500).
             if 'locale' in data_dict:
-                data_dict['locale'] = validate_locale(data_dict['locale'])
+                if data_dict['locale'] is None:
+                    data_dict['locale'] = DEFAULT_TENANT_LOCALE
+                else:
+                    try:
+                        data_dict['locale'] = validate_locale(data_dict['locale'])
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
             if 'currency_code' in data_dict:
-                data_dict['currency_code'] = validate_currency_code(data_dict['currency_code'])
+                if data_dict['currency_code'] is None:
+                    data_dict['currency_code'] = DEFAULT_CURRENCY_CODE
+                else:
+                    try:
+                        data_dict['currency_code'] = validate_currency_code(
+                            data_dict['currency_code']
+                        )
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
             _jsonb_fields = {'business_hours', 'social_media'}
             for field, value in data_dict.items():

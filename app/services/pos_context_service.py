@@ -139,9 +139,12 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
 
     return {
         'display_name': row['display_name'],
-        'timezone': normalize_timezone(row['timezone']),
-        'locale': normalize_locale(row['locale']),
-        'currency_code': normalize_currency_code(row['currency_code']),
+        'timezone': normalize_timezone(row['timezone'] if 'timezone' in row else None),
+        # Prefer .get-style access so unit mocks without prefs columns don't KeyError.
+        'locale': normalize_locale(row['locale'] if 'locale' in row else None),
+        'currency_code': normalize_currency_code(
+            row['currency_code'] if 'currency_code' in row else None
+        ),
         'kds_enabled': bool(row['kds_enabled']) if row['kds_enabled'] is not None else False,
         'comandas_enabled': bool(row['comandas_enabled']) if row['comandas_enabled'] is not None else False,
         'expediter_enabled': bool(row['expediter_enabled']) if row['expediter_enabled'] is not None else False,
