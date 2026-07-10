@@ -50,17 +50,31 @@ def _order_row(discount: float = 0.0):
         'order_date': datetime(2026, 5, 13, 20, 43, tzinfo=timezone.utc),
         'total_amount': 200.0,
         'payment_method': 'cash',
+        'payment_status': 'paid',
         'discount_amount': discount,
+        'customer_name': 'Restaurante Cliente SAS',
+        'customer_email': 'cliente@example.com',
+        'customer_fiscal_id_type': 'NIT',
+        'customer_fiscal_id': '900123456',
+        'customer_fiscal_business_name': 'Restaurante Cliente SAS',
+        'customer_fiscal_email': 'contabilidad@example.com',
     }
 
 
-def _invoice_row(status: str = 'accepted', r2_pdf_key: str = 'lzt/5462/test.pdf'):
+def _invoice_row(
+    status: str = 'accepted',
+    r2_pdf_key: str = 'lzt/5462/test.pdf',
+    r2_xml_key: str = 'lzt/5462/test.xml',
+):
     return {
         'prefix': 'LZT',
         'invoice_number': 5462,
         'cufe': 'TEST_CUFE',
         'status': status,
         'r2_pdf_key': r2_pdf_key,
+        'r2_xml_key': r2_xml_key,
+        'emitted_at': datetime(2026, 5, 13, 20, 44, tzinfo=timezone.utc),
+        'created_at': datetime(2026, 5, 13, 20, 43, tzinfo=timezone.utc),
     }
 
 
@@ -70,6 +84,23 @@ def _profile_row():
         'address': 'Calle 123 #45-67',
         'city': 'Bogotá',
         'phone_number': '+57 320 1234567',
+        'fiscal_business_name': 'Waro Colombia SAS',
+        'nit': '901234567',
+        'fiscal_address': 'Carrera 10 #20-30',
+        'fiscal_city': 'Bogotá',
+        'fiscal_phone': '+57 601 1234567',
+        'fiscal_email': 'facturacion@warocol.com',
+    }
+
+
+def _resolution_row():
+    return {
+        'resolution_number': '18760000001',
+        'prefix': 'LZT',
+        'date_from': datetime(2026, 1, 1, tzinfo=timezone.utc).date(),
+        'date_to': datetime(2026, 12, 31, tzinfo=timezone.utc).date(),
+        'from_number': 1,
+        'to_number': 9999,
     }
 
 
@@ -114,7 +145,7 @@ async def test_send_invoice_email_happy_path():
     """Owned order + accepted invoice + PDF → 200, helper called with full payload."""
     request = MagicMock()
 
-    fetchrow = [_order_row(), _invoice_row(), _waro_inferred_row(), _profile_row()]
+    fetchrow = [_order_row(), _invoice_row(), _waro_inferred_row(), _profile_row(), _resolution_row()]
     fetch = [
         [],  # tax items (empty → no tax)
         [],  # promo summary (no applied promos)
@@ -130,7 +161,12 @@ async def test_send_invoice_email_happy_path():
     ):
         result = await orders_service.send_invoice_email(request, _ORDER_ID, _RECIPIENT)
 
-    assert result == {'success': True, 'sent_to': _RECIPIENT}
+    assert result == {
+        'success': True,
+        'sent_to': _RECIPIENT,
+        'attachments': {'pdf': True, 'xml': True},
+        'attachment_warnings': [],
+    }
     helper_mock.assert_awaited_once()
     kwargs = helper_mock.await_args.kwargs
     assert kwargs['customer_email'] == _RECIPIENT
@@ -138,8 +174,13 @@ async def test_send_invoice_email_happy_path():
     assert kwargs['invoice_prefix'] == 'LZT'
     assert kwargs['invoice_number'] == 5462
     assert kwargs['invoice_cufe'] == 'TEST_CUFE'
+    assert kwargs['return_details'] is True
     assert kwargs['tenant_id'] == str(_TENANT_ID)
     assert kwargs['business_name'] == 'Waro Colombia'
+    assert kwargs['invoice_presentation']['issuer']['fiscal_id'] == '901234567'
+    assert kwargs['invoice_presentation']['acquirer']['fiscal_id'] == '900123456'
+    assert kwargs['invoice_presentation']['resolution']['number'] == '18760000001'
+    assert kwargs['invoice_presentation']['attachments'] == {'pdf': True, 'xml': True}
     # items shape: list of dicts with product.name + quantity + subtotal + modifiers
     assert len(kwargs['items']) == 1
     assert kwargs['items'][0]['product']['name'] == 'tomate barranca'
@@ -222,10 +263,20 @@ async def test_send_invoice_email_rejects_non_accepted():
 async def test_send_invoice_email_allows_missing_pdf():
     """Invoice accepted but r2_pdf_key is NULL → email still sends."""
     request = MagicMock()
-    helper_mock = AsyncMock(return_value=True)
+    helper_mock = AsyncMock(return_value={
+        'success': True,
+        'attachments': {'pdf': False, 'xml': True},
+        'attachment_warnings': ['invoice_pdf_missing'],
+    })
 
     with _patch_session(), _patch_db(
-        fetchrow=[_order_row(), _invoice_row(r2_pdf_key=None), _waro_inferred_row(), _profile_row()],
+        fetchrow=[
+            _order_row(),
+            _invoice_row(r2_pdf_key=None),
+            _waro_inferred_row(),
+            _profile_row(),
+            _resolution_row(),
+        ],
         fetch=[
             [],
             [],
@@ -239,7 +290,12 @@ async def test_send_invoice_email_allows_missing_pdf():
     ):
         result = await orders_service.send_invoice_email(request, _ORDER_ID, _RECIPIENT)
 
-    assert result == {'success': True, 'sent_to': _RECIPIENT}
+    assert result == {
+        'success': True,
+        'sent_to': _RECIPIENT,
+        'attachments': {'pdf': False, 'xml': True},
+        'attachment_warnings': ['invoice_pdf_missing'],
+    }
     helper_mock.assert_awaited_once()
     assert helper_mock.await_args.kwargs['invoice_prefix'] == 'LZT'
     assert helper_mock.await_args.kwargs['invoice_number'] == 5462
@@ -251,7 +307,13 @@ async def test_send_invoice_email_missing_pdf_still_surfaces_ses_failure():
     request = MagicMock()
 
     with _patch_session(), _patch_db(
-        fetchrow=[_order_row(), _invoice_row(r2_pdf_key=None), _waro_inferred_row(), _profile_row()],
+        fetchrow=[
+            _order_row(),
+            _invoice_row(r2_pdf_key=None),
+            _waro_inferred_row(),
+            _profile_row(),
+            _resolution_row(),
+        ],
         fetch=[
             [],
             [],
@@ -277,7 +339,7 @@ async def test_send_invoice_email_ses_failure_502():
     """send_pos_receipt_email returns False → 502."""
     request = MagicMock()
 
-    fetchrow = [_order_row(), _invoice_row(), _waro_inferred_row(), _profile_row()]
+    fetchrow = [_order_row(), _invoice_row(), _waro_inferred_row(), _profile_row(), _resolution_row()]
     fetch = [
         [],
         [],

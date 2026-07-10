@@ -30,6 +30,33 @@ from app.services.aws_s3_service import AWSS3Service
 logger = logging.getLogger(__name__)
 
 
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    if not row:
+        return default
+    if hasattr(row, "get"):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
+def _date_iso(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    return value.isoformat()
+
+
+def _datetime_iso(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
 async def emit_invoice(
     order_id: str,
     tenant_id: str,
@@ -423,11 +450,39 @@ async def get_order_invoice(
     """
     async with get_db_connection(use_transaction=False) as conn:
         row = await conn.fetchrow(
-            """SELECT id, invoice_number, prefix, cufe, status,
-                      r2_pdf_key, error_message, emitted_at, created_at
-               FROM electronic_invoices
-               WHERE order_id = $1 AND tenant_id = $2
-               ORDER BY created_at DESC
+            """SELECT ei.id, ei.invoice_number, ei.prefix, ei.cufe, ei.status,
+                      ei.r2_pdf_key, ei.r2_xml_key, ei.error_message, ei.emitted_at, ei.created_at,
+                      o.payment_method, o.payment_status,
+                      c.name AS customer_name,
+                      c.email AS customer_email,
+                      c.fiscal_id_type AS customer_fiscal_id_type,
+                      c.fiscal_id AS customer_fiscal_id,
+                      c.fiscal_business_name AS customer_fiscal_business_name,
+                      c.fiscal_email AS customer_fiscal_email,
+                      COALESCE(tpp.display_name, t.name) AS display_name,
+                      tpp.address, tpp.city, tpp.phone_number,
+                      fd.business_name AS fiscal_business_name,
+                      fd.nit, fd.fiscal_address, fd.city AS fiscal_city,
+                      fd.phone AS fiscal_phone, fd.email AS fiscal_email,
+                      dr.resolution_number, dr.date_from, dr.date_to,
+                      dr.from_number, dr.to_number
+               FROM electronic_invoices ei
+               LEFT JOIN orders o ON o.id = ei.order_id AND o.tenant_id = ei.tenant_id
+               LEFT JOIN profile c ON c.id = o.customer_id
+               LEFT JOIN tenants t ON t.id = ei.tenant_id
+               LEFT JOIN tenant_public_profiles tpp ON tpp.tenant_id = ei.tenant_id
+               LEFT JOIN tenant_fiscal_data fd ON fd.tenant_id = ei.tenant_id
+               LEFT JOIN LATERAL (
+                   SELECT resolution_number, date_from, date_to, from_number, to_number
+                   FROM dian_resolutions
+                   WHERE tenant_id = ei.tenant_id
+                     AND prefix = ei.prefix
+                     AND is_active = true
+                   ORDER BY created_at DESC
+                   LIMIT 1
+               ) dr ON true
+               WHERE ei.order_id = $1 AND ei.tenant_id = $2
+               ORDER BY ei.created_at DESC
                LIMIT 1""",
             UUID(order_id), UUID(tenant_id),
         )
@@ -454,4 +509,53 @@ async def get_order_invoice(
         'error_message': row['error_message'],
         'emitted_at': row['emitted_at'].isoformat() if row['emitted_at'] else None,
         'created_at': row['created_at'].isoformat() if row['created_at'] else None,
+        'dian_url': (
+            f"https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey={row['cufe']}"
+            if row['cufe']
+            else None
+        ),
+        'attachments': {
+            'pdf': bool(row['r2_pdf_key']),
+            'xml': bool(row['r2_xml_key']),
+        },
+        'presentation': {
+            'number': f"{row['prefix']}-{row['invoice_number']}",
+            'status': row['status'],
+            'emitted_at': _datetime_iso(row['emitted_at']),
+            'issuer': {
+                'name': _row_get(row, 'fiscal_business_name') or _row_get(row, 'display_name'),
+                'fiscal_id_type': 'NIT' if _row_get(row, 'nit') else None,
+                'fiscal_id': _row_get(row, 'nit'),
+                'address': _row_get(row, 'fiscal_address') or _row_get(row, 'address'),
+                'city': _row_get(row, 'fiscal_city') or _row_get(row, 'city'),
+                'phone': _row_get(row, 'fiscal_phone') or _row_get(row, 'phone_number'),
+                'email': _row_get(row, 'fiscal_email'),
+            },
+            'acquirer': {
+                'name': (
+                    _row_get(row, 'customer_fiscal_business_name')
+                    or _row_get(row, 'customer_name')
+                    or 'Consumidor final'
+                ),
+                'fiscal_id_type': _row_get(row, 'customer_fiscal_id_type'),
+                'fiscal_id': _row_get(row, 'customer_fiscal_id'),
+                'email': _row_get(row, 'customer_fiscal_email') or _row_get(row, 'customer_email'),
+            },
+            'payment': {
+                'method': _row_get(row, 'payment_method'),
+                'status': _row_get(row, 'payment_status'),
+            },
+            'resolution': (
+                {
+                    'number': _row_get(row, 'resolution_number'),
+                    'prefix': row['prefix'],
+                    'from_number': _row_get(row, 'from_number'),
+                    'to_number': _row_get(row, 'to_number'),
+                    'date_from': _date_iso(_row_get(row, 'date_from')),
+                    'date_to': _date_iso(_row_get(row, 'date_to')),
+                }
+                if _row_get(row, 'resolution_number')
+                else None
+            ),
+        },
     }

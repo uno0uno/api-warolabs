@@ -289,6 +289,111 @@ def _compute_tax_breakdown(
     return float(standard_tax), float(liquor_tax), standard_tax_label
 
 
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    if not row:
+        return default
+    if hasattr(row, "get"):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
+def _iso_datetime(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _invoice_attachment_flags(invoice_row: Any) -> Dict[str, bool]:
+    return {
+        "pdf": bool(_row_get(invoice_row, "r2_pdf_key")),
+        "xml": bool(_row_get(invoice_row, "r2_xml_key")),
+    }
+
+
+def _tax_detail_rows(
+    items_rows: List[Any],
+    standard_tax: float,
+    liquor_tax: float,
+    standard_tax_label: str,
+) -> List[Dict[str, Any]]:
+    std_base = sum(float(r["subtotal"]) for r in items_rows if r["tax_category"] == "standard")
+    liq_base = sum(float(r["subtotal"]) for r in items_rows if r["tax_category"] == "liquor")
+    rows: List[Dict[str, Any]] = []
+    if standard_tax > 0:
+        rows.append({"label": standard_tax_label, "base": std_base, "amount": standard_tax})
+    if liquor_tax > 0:
+        rows.append({"label": "IVA licores 5%", "base": liq_base, "amount": liquor_tax})
+    return rows
+
+
+def _build_invoice_presentation(
+    invoice_row: Any,
+    order_row: Any,
+    profile_row: Any,
+    resolution_row: Any,
+    tax_details: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    cufe = _row_get(invoice_row, "cufe")
+    invoice_prefix = _row_get(invoice_row, "prefix")
+    invoice_number = _row_get(invoice_row, "invoice_number")
+    return {
+        "number": f"{invoice_prefix}-{invoice_number}",
+        "prefix": invoice_prefix,
+        "invoice_number": invoice_number,
+        "cufe": cufe,
+        "status": _row_get(invoice_row, "status"),
+        "emitted_at": _row_get(invoice_row, "emitted_at"),
+        "created_at": _row_get(invoice_row, "created_at"),
+        "dian_url": (
+            f"https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey={cufe}"
+            if cufe
+            else None
+        ),
+        "issuer": {
+            "name": _row_get(profile_row, "fiscal_business_name") or _row_get(profile_row, "display_name"),
+            "fiscal_id_type": "NIT" if _row_get(profile_row, "nit") else None,
+            "fiscal_id": _row_get(profile_row, "nit"),
+            "address": _row_get(profile_row, "fiscal_address") or _row_get(profile_row, "address"),
+            "city": _row_get(profile_row, "fiscal_city") or _row_get(profile_row, "city"),
+            "phone": _row_get(profile_row, "fiscal_phone") or _row_get(profile_row, "phone_number"),
+            "email": _row_get(profile_row, "fiscal_email"),
+        },
+        "acquirer": {
+            "name": (
+                _row_get(order_row, "customer_fiscal_business_name")
+                or _row_get(order_row, "customer_name")
+                or "Consumidor final"
+            ),
+            "fiscal_id_type": _row_get(order_row, "customer_fiscal_id_type"),
+            "fiscal_id": _row_get(order_row, "customer_fiscal_id"),
+            "email": _row_get(order_row, "customer_fiscal_email") or _row_get(order_row, "customer_email"),
+        },
+        "payment": {
+            "method": _row_get(order_row, "payment_method"),
+            "status": _row_get(order_row, "payment_status"),
+        },
+        "resolution": (
+            {
+                "number": _row_get(resolution_row, "resolution_number"),
+                "prefix": _row_get(resolution_row, "prefix"),
+                "from_number": _row_get(resolution_row, "from_number"),
+                "to_number": _row_get(resolution_row, "to_number"),
+                "date_from": _date_iso(_row_get(resolution_row, "date_from")),
+                "date_to": _date_iso(_row_get(resolution_row, "date_to")),
+            }
+            if resolution_row
+            else None
+        ),
+        "tax_details": tax_details,
+        "attachments": _invoice_attachment_flags(invoice_row),
+    }
+
+
 async def get_orders_list(
     request: Request,
     limit: int = 50,
@@ -4028,10 +4133,17 @@ async def send_invoice_email(
     async with get_db_connection() as conn:
         # 1. Order header (also enforces tenant ownership).
         order_row = await conn.fetchrow(
-            """SELECT id, order_number, order_date, total_amount, payment_method,
-                      discount_amount
-               FROM orders
-               WHERE id = $1 AND tenant_id = $2""",
+            """SELECT o.id, o.order_number, o.order_date, o.total_amount, o.payment_method,
+                      o.payment_status, o.discount_amount,
+                      c.name AS customer_name,
+                      c.email AS customer_email,
+                      c.fiscal_id_type AS customer_fiscal_id_type,
+                      c.fiscal_id AS customer_fiscal_id,
+                      c.fiscal_business_name AS customer_fiscal_business_name,
+                      c.fiscal_email AS customer_fiscal_email
+               FROM orders o
+               LEFT JOIN profile c ON c.id = o.customer_id
+               WHERE o.id = $1 AND o.tenant_id = $2""",
             order_id, tenant_id,
         )
         if not order_row:
@@ -4040,7 +4152,8 @@ async def send_invoice_email(
         # 2. Invoice header — must exist and be accepted. PDF attachment is optional:
         # accepted Matias invoices may exist before the local R2 PDF key is stored.
         invoice_row = await conn.fetchrow(
-            """SELECT prefix, invoice_number, cufe, status, r2_pdf_key
+            """SELECT prefix, invoice_number, cufe, status, r2_pdf_key, r2_xml_key,
+                      emitted_at, created_at
                FROM electronic_invoices
                WHERE order_id = $1 AND tenant_id = $2
                ORDER BY created_at DESC
@@ -4102,11 +4215,27 @@ async def send_invoice_email(
         # 5. Business profile for the email header.
         profile_row = await conn.fetchrow(
             """SELECT COALESCE(p.display_name, t.name) AS display_name,
-                      p.address, p.city, p.phone_number
+                      p.address, p.city, p.phone_number,
+                      fd.business_name AS fiscal_business_name,
+                      fd.nit, fd.fiscal_address, fd.city AS fiscal_city,
+                      fd.phone AS fiscal_phone, fd.email AS fiscal_email
                FROM tenants t
                LEFT JOIN tenant_public_profiles p ON p.tenant_id = t.id
+               LEFT JOIN tenant_fiscal_data fd ON fd.tenant_id = t.id
                WHERE t.id = $1""",
             tenant_id,
+        )
+
+        resolution_row = await conn.fetchrow(
+            """SELECT resolution_number, prefix, date_from, date_to,
+                      from_number, to_number
+               FROM dian_resolutions
+               WHERE tenant_id = $1
+                 AND prefix = $2
+                 AND is_active = true
+               ORDER BY created_at DESC
+               LIMIT 1""",
+            tenant_id, invoice_row['prefix'],
         )
 
     discount_amount = float(order_row['discount_amount']) if order_row['discount_amount'] is not None else 0.0
@@ -4120,7 +4249,16 @@ async def send_invoice_email(
         else 0.0
     )
 
-    success = await send_pos_receipt_email(
+    tax_details = _tax_detail_rows(items_for_tax, std_tax, liq_tax, tax_label)
+    invoice_presentation = _build_invoice_presentation(
+        invoice_row,
+        order_row,
+        profile_row,
+        resolution_row,
+        tax_details,
+    )
+
+    send_result = await send_pos_receipt_email(
         customer_email=recipient_email,
         order_number=int(order_row['order_number']),
         total_amount=float(order_row['total_amount']),
@@ -4143,7 +4281,17 @@ async def send_invoice_email(
         invoice_prefix=invoice_row['prefix'],
         invoice_number=int(invoice_row['invoice_number']),
         invoice_cufe=invoice_row['cufe'],
+        invoice_presentation=invoice_presentation,
+        return_details=True,
     )
+    if isinstance(send_result, dict):
+        success = bool(send_result.get("success"))
+        attachment_status = send_result.get("attachments") or _invoice_attachment_flags(invoice_row)
+        attachment_warnings = send_result.get("attachment_warnings") or []
+    else:
+        success = bool(send_result)
+        attachment_status = _invoice_attachment_flags(invoice_row)
+        attachment_warnings = []
 
     if not success:
         raise HTTPException(
@@ -4151,4 +4299,9 @@ async def send_invoice_email(
             detail="No se pudo enviar el correo. Intentá nuevamente en unos segundos.",
         )
 
-    return {'success': True, 'sent_to': recipient_email}
+    return {
+        'success': True,
+        'sent_to': recipient_email,
+        'attachments': attachment_status,
+        'attachment_warnings': attachment_warnings,
+    }
