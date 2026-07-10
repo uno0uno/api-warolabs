@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     # (api-facturacion#21) can recover the order.
     dian_short_circuit_grace_minutes: int = Field(default=5, alias='DIAN_SHORT_CIRCUIT_GRACE_MINUTES')
 
+    # When false (default): POS/Ventas do not expect/attach Matias PDF.
+    # Mirror of api_facturacion INVOICE_PDF_ENABLED. Email sends text+XML only.
+    invoice_pdf_enabled: bool = Field(default=False, alias='INVOICE_PDF_ENABLED')
+
     # ── Platform legal identity for receipt/print footers (source of truth) ──
     # WARO = POS software / technology platform (not the tenant FE issuer).
     # Empty env → empty print fields (no PII hardcode in repo for production).
