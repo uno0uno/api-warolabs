@@ -116,6 +116,9 @@ async def _get_ingredient_analytics_summary_for_tenant(
     date_to: Optional[str] = None,
     ingredient_id: Optional[UUID] = None,
     category: Optional[str] = None,
+    unit: Optional[str] = None,
+    quantity_min: Optional[float] = None,
+    quantity_max: Optional[float] = None,
     limit: int = 100,
     sort: str = "consumed_quantity_desc",
 ) -> dict:
@@ -190,8 +193,11 @@ async def _get_ingredient_analytics_summary_for_tenant(
             WHERE (c.ingredient_id IS NOT NULL OR p.ingredient_id IS NOT NULL)
                 AND ($5::uuid IS NULL OR i.id = $5::uuid)
                 AND ($6::text IS NULL OR i.category = $6::text)
+                AND ($7::text IS NULL OR i.unit = $7::text)
+                AND ($8::numeric IS NULL OR COALESCE(c.consumed_quantity, 0) >= $8::numeric)
+                AND ($9::numeric IS NULL OR COALESCE(c.consumed_quantity, 0) <= $9::numeric)
             ORDER BY {order_by}
-            LIMIT $7
+            LIMIT $10
         """
 
         rows = await conn.fetch(
@@ -202,6 +208,9 @@ async def _get_ingredient_analytics_summary_for_tenant(
             timezone_name,
             ingredient_id,
             category,
+            unit,
+            quantity_min,
+            quantity_max,
             limit,
         )
 
@@ -234,6 +243,9 @@ async def _get_ingredient_analytics_summary_for_tenant(
                 "filters": {
                     "ingredient_id": str(ingredient_id) if ingredient_id else None,
                     "category": category,
+                    "unit": unit,
+                    "quantity_min": quantity_min,
+                    "quantity_max": quantity_max,
                     "sort": sort,
                     "limit": limit,
                 },
@@ -248,6 +260,9 @@ async def get_ingredient_analytics_summary(
     date_to: Optional[str] = None,
     ingredient_id: Optional[UUID] = None,
     category: Optional[str] = None,
+    unit: Optional[str] = None,
+    quantity_min: Optional[float] = None,
+    quantity_max: Optional[float] = None,
     limit: int = 100,
     sort: str = "consumed_quantity_desc",
 ) -> dict:
@@ -263,6 +278,9 @@ async def get_ingredient_analytics_summary(
             date_to=date_to,
             ingredient_id=ingredient_id,
             category=category,
+            unit=unit,
+            quantity_min=quantity_min,
+            quantity_max=quantity_max,
             limit=limit,
             sort=sort,
         )
@@ -298,6 +316,7 @@ async def _get_ingredient_analytics_history_for_tenant(
                 tpi.id AS purchase_item_id,
                 tp.id AS purchase_id,
                 tp.purchase_number,
+                tp.is_direct_entry,
                 tp.purchase_date,
                 tpi.quantity AS base_quantity,
                 tpi.unit AS base_unit,
@@ -328,10 +347,15 @@ async def _get_ingredient_analytics_history_for_tenant(
                 tim.cost_per_unit,
                 tim.reference_table,
                 tim.reference_id,
+                o.order_number AS reference_order_number,
                 tim.reason,
                 tim.notes,
                 tim.created_at
             FROM tenant_ingredient_movements tim
+            LEFT JOIN orders o
+                ON tim.reference_table = 'orders'
+                AND tim.reference_id = o.id
+                AND o.tenant_id = tim.tenant_id
             WHERE tim.tenant_id = $1
                 AND tim.ingredient_id = $2
                 AND tim.movement_type = 'consumption'
@@ -374,7 +398,7 @@ async def _get_ingredient_analytics_history_for_tenant(
                 AND (brt.tenant_id = $1 OR brt.tenant_id IS NULL)
             ORDER BY product_name ASC
             LIMIT $3
-        """, tenant_id, ingredient_id, limit)
+        """, tenant_id, ingredient_id, 100)
 
         purchases = []
         for row in purchase_rows:
@@ -382,6 +406,7 @@ async def _get_ingredient_analytics_history_for_tenant(
                 "purchase_item_id": str(row["purchase_item_id"]),
                 "purchase_id": str(row["purchase_id"]),
                 "purchase_number": row["purchase_number"],
+                "is_direct_entry": bool(row["is_direct_entry"]) if row["is_direct_entry"] is not None else None,
                 "purchase_date": row["purchase_date"].isoformat() if row["purchase_date"] else None,
                 "base_quantity": _number_or_zero(row["base_quantity"]),
                 "base_unit": row["base_unit"],
@@ -405,6 +430,7 @@ async def _get_ingredient_analytics_history_for_tenant(
                 "cost_per_unit": _number_or_none(row["cost_per_unit"]),
                 "reference_table": row["reference_table"],
                 "reference_id": str(row["reference_id"]) if row["reference_id"] else None,
+                "reference_order_number": int(row["reference_order_number"]) if row["reference_order_number"] else None,
                 "reason": row["reason"],
                 "notes": row["notes"],
                 "created_at": row["created_at"].isoformat() if row["created_at"] else None,
@@ -456,6 +482,12 @@ async def _get_ingredient_analytics_report_for_tenant(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     limit: int = 100,
+    offset: int = 0,
+    history_type: Optional[str] = None,
+    record_kind: Optional[str] = None,
+    unit: Optional[str] = None,
+    quantity_min: Optional[float] = None,
+    quantity_max: Optional[float] = None,
 ) -> dict:
     """Auth-agnostic report-ready analytics for one ingredient."""
     async with get_db_connection() as conn:
@@ -567,52 +599,173 @@ async def _get_ingredient_analytics_report_for_tenant(
             LEFT JOIN latest_costs lc ON lc.ingredient_id = $2
         """, tenant_id, ingredient_id, parsed_date_from, parsed_date_to, timezone_name)
 
-        purchase_rows = await conn.fetch("""
-            SELECT
-                tpi.id AS purchase_item_id,
-                tp.id AS purchase_id,
-                tp.purchase_number,
-                tp.purchase_date,
-                tpi.quantity AS base_quantity,
-                tpi.unit AS base_unit,
-                tpi.purchase_quantity,
-                tpi.purchase_unit,
-                tpi.unit_cost,
-                tpi.total_cost,
-                tpi.received_at
-            FROM tenant_purchase_items tpi
-            JOIN tenant_purchases tp ON tpi.purchase_id = tp.id
-            WHERE tp.tenant_id = $1
-                AND tpi.ingredient_id = $2
-                AND tpi.unit_cost IS NOT NULL
-                AND DATE(COALESCE(tpi.received_at, tp.purchase_date, tpi.created_at) AT TIME ZONE $4) >= $3
-                AND DATE(COALESCE(tpi.received_at, tp.purchase_date, tpi.created_at) AT TIME ZONE $4) <= $5
-            ORDER BY COALESCE(tpi.received_at, tp.purchase_date, tpi.created_at) DESC
-            LIMIT $6
-        """, tenant_id, ingredient_id, parsed_date_from, timezone_name, parsed_date_to, limit)
+        history_type_filter = history_type if history_type in {
+            "purchase",
+            "consumption",
+            "entry",
+            "adjustment",
+            "loss",
+            "movement",
+        } else None
+        record_kind_filter = record_kind if record_kind in {"purchase", "order", "none"} else None
 
-        movement_rows = await conn.fetch("""
-            SELECT
-                tim.id,
-                tim.movement_type,
-                tim.quantity_change,
-                tim.unit,
-                tim.previous_stock,
-                tim.new_stock,
-                tim.cost_per_unit,
-                tim.reference_table,
-                tim.reference_id,
-                tim.reason,
-                tim.notes,
-                tim.created_at
-            FROM tenant_ingredient_movements tim
-            WHERE tim.tenant_id = $1
-                AND tim.ingredient_id = $2
-                AND DATE(tim.created_at AT TIME ZONE $4) >= $3
-                AND DATE(tim.created_at AT TIME ZONE $4) <= $5
-            ORDER BY tim.created_at DESC
-            LIMIT $6
-        """, tenant_id, ingredient_id, parsed_date_from, timezone_name, parsed_date_to, limit)
+        history_count_row = await conn.fetchrow("""
+            WITH history AS (
+                SELECT
+                    'purchase' AS history_type,
+                    NULL::text AS movement_type,
+                    COALESCE(tpi.purchase_quantity, tpi.quantity) AS quantity_value,
+                    COALESCE(tpi.purchase_unit, tpi.unit) AS history_unit,
+                    'purchase' AS record_kind
+                FROM tenant_purchase_items tpi
+                JOIN tenant_purchases tp ON tpi.purchase_id = tp.id
+                WHERE tp.tenant_id = $1
+                    AND tpi.ingredient_id = $2
+                    AND tpi.unit_cost IS NOT NULL
+                    AND DATE(COALESCE(tpi.received_at, tp.purchase_date, tpi.created_at) AT TIME ZONE $4) >= $3
+                    AND DATE(COALESCE(tpi.received_at, tp.purchase_date, tpi.created_at) AT TIME ZONE $4) <= $5
+                UNION ALL
+                SELECT
+                    'movement' AS history_type,
+                    tim.movement_type,
+                    CASE
+                        WHEN tim.movement_type = 'consumption' AND tim.quantity_change < 0 THEN ABS(tim.quantity_change)
+                        ELSE tim.quantity_change
+                    END AS quantity_value,
+                    tim.unit AS history_unit,
+                    CASE
+                        WHEN tim.reference_table = 'orders' AND tim.reference_id IS NOT NULL THEN 'order'
+                        ELSE 'none'
+                    END AS record_kind
+                FROM tenant_ingredient_movements tim
+                WHERE tim.tenant_id = $1
+                    AND tim.ingredient_id = $2
+                    AND DATE(tim.created_at AT TIME ZONE $4) >= $3
+                    AND DATE(tim.created_at AT TIME ZONE $4) <= $5
+            )
+            SELECT COUNT(*) AS total_count
+            FROM history
+            WHERE (
+                $6::text IS NULL
+                OR ($6 = 'purchase' AND history_type = 'purchase')
+                OR ($6 = 'consumption' AND history_type = 'movement' AND movement_type = 'consumption')
+                OR ($6 = 'entry' AND history_type = 'movement' AND movement_type = 'purchase')
+                OR ($6 = 'adjustment' AND history_type = 'movement' AND movement_type = 'adjustment')
+                OR ($6 = 'loss' AND history_type = 'movement' AND movement_type = 'loss')
+                OR ($6 = 'movement' AND history_type = 'movement' AND COALESCE(movement_type, '') NOT IN ('consumption', 'purchase', 'adjustment', 'loss'))
+            )
+            AND ($7::text IS NULL OR record_kind = $7)
+            AND ($8::text IS NULL OR history_unit = $8::text)
+            AND ($9::numeric IS NULL OR quantity_value >= $9::numeric)
+            AND ($10::numeric IS NULL OR quantity_value <= $10::numeric)
+        """, tenant_id, ingredient_id, parsed_date_from, timezone_name, parsed_date_to, history_type_filter, record_kind_filter, unit, quantity_min, quantity_max)
+
+        history_rows = await conn.fetch("""
+            WITH history AS (
+                SELECT
+                    'purchase' AS history_type,
+                    COALESCE(tpi.received_at, tp.purchase_date, tpi.created_at) AS event_at,
+                    tpi.id AS purchase_item_id,
+                    tp.id AS purchase_id,
+                    tp.purchase_number,
+                    tp.is_direct_entry,
+                    tp.purchase_date,
+                    tpi.quantity AS base_quantity,
+                    tpi.unit AS base_unit,
+                    tpi.purchase_quantity,
+                    tpi.purchase_unit,
+                    COALESCE(tpi.purchase_quantity, tpi.quantity) AS quantity_value,
+                    COALESCE(tpi.purchase_unit, tpi.unit) AS history_unit,
+                    tpi.unit_cost,
+                    tpi.total_cost,
+                    tpi.received_at,
+                    NULL::uuid AS movement_id,
+                    NULL::text AS movement_type,
+                    NULL::numeric AS quantity_change,
+                    NULL::text AS movement_unit,
+                    NULL::numeric AS previous_stock,
+                    NULL::numeric AS new_stock,
+                    NULL::numeric AS movement_cost_per_unit,
+                    NULL::text AS reference_table,
+                    NULL::uuid AS reference_id,
+                    NULL::integer AS reference_order_number,
+                    NULL::text AS reason,
+                    NULL::text AS notes,
+                    NULL::timestamptz AS movement_created_at
+                FROM tenant_purchase_items tpi
+                JOIN tenant_purchases tp ON tpi.purchase_id = tp.id
+                WHERE tp.tenant_id = $1
+                    AND tpi.ingredient_id = $2
+                    AND tpi.unit_cost IS NOT NULL
+                    AND DATE(COALESCE(tpi.received_at, tp.purchase_date, tpi.created_at) AT TIME ZONE $4) >= $3
+                    AND DATE(COALESCE(tpi.received_at, tp.purchase_date, tpi.created_at) AT TIME ZONE $4) <= $5
+                UNION ALL
+                SELECT
+                    'movement' AS history_type,
+                    tim.created_at AS event_at,
+                    NULL::uuid AS purchase_item_id,
+                    NULL::uuid AS purchase_id,
+                    NULL::text AS purchase_number,
+                    NULL::boolean AS is_direct_entry,
+                    NULL::timestamptz AS purchase_date,
+                    NULL::numeric AS base_quantity,
+                    NULL::text AS base_unit,
+                    NULL::numeric AS purchase_quantity,
+                    NULL::text AS purchase_unit,
+                    CASE
+                        WHEN tim.movement_type = 'consumption' AND tim.quantity_change < 0 THEN ABS(tim.quantity_change)
+                        ELSE tim.quantity_change
+                    END AS quantity_value,
+                    tim.unit AS history_unit,
+                    NULL::numeric AS unit_cost,
+                    NULL::numeric AS total_cost,
+                    NULL::timestamptz AS received_at,
+                    tim.id AS movement_id,
+                    tim.movement_type,
+                    tim.quantity_change,
+                    tim.unit AS movement_unit,
+                    tim.previous_stock,
+                    tim.new_stock,
+                    tim.cost_per_unit AS movement_cost_per_unit,
+                    tim.reference_table,
+                    tim.reference_id,
+                    o.order_number AS reference_order_number,
+                    tim.reason,
+                    tim.notes,
+                    tim.created_at AS movement_created_at
+                FROM tenant_ingredient_movements tim
+                LEFT JOIN orders o
+                    ON tim.reference_table = 'orders'
+                    AND tim.reference_id = o.id
+                    AND o.tenant_id = tim.tenant_id
+                WHERE tim.tenant_id = $1
+                    AND tim.ingredient_id = $2
+                    AND DATE(tim.created_at AT TIME ZONE $4) >= $3
+                    AND DATE(tim.created_at AT TIME ZONE $4) <= $5
+            )
+            SELECT *
+            FROM history
+            WHERE (
+                $6::text IS NULL
+                OR ($6 = 'purchase' AND history_type = 'purchase')
+                OR ($6 = 'consumption' AND history_type = 'movement' AND movement_type = 'consumption')
+                OR ($6 = 'entry' AND history_type = 'movement' AND movement_type = 'purchase')
+                OR ($6 = 'adjustment' AND history_type = 'movement' AND movement_type = 'adjustment')
+                OR ($6 = 'loss' AND history_type = 'movement' AND movement_type = 'loss')
+                OR ($6 = 'movement' AND history_type = 'movement' AND COALESCE(movement_type, '') NOT IN ('consumption', 'purchase', 'adjustment', 'loss'))
+            )
+            AND (
+                $7::text IS NULL
+                OR ($7 = 'purchase' AND history_type = 'purchase')
+                OR ($7 = 'order' AND history_type = 'movement' AND reference_table = 'orders' AND reference_id IS NOT NULL)
+                OR ($7 = 'none' AND history_type = 'movement' AND (reference_table IS NULL OR reference_table <> 'orders' OR reference_id IS NULL))
+            )
+            AND ($8::text IS NULL OR history_unit = $8::text)
+            AND ($9::numeric IS NULL OR quantity_value >= $9::numeric)
+            AND ($10::numeric IS NULL OR quantity_value <= $10::numeric)
+            ORDER BY event_at DESC NULLS LAST
+            LIMIT $11 OFFSET $12
+        """, tenant_id, ingredient_id, parsed_date_from, timezone_name, parsed_date_to, history_type_filter, record_kind_filter, unit, quantity_min, quantity_max, limit, offset)
 
         stock_row = await conn.fetchrow("""
             SELECT current_stock, minimum_stock, maximum_stock, last_updated, location
@@ -755,38 +908,41 @@ async def _get_ingredient_analytics_report_for_tenant(
         """, tenant_id, ingredient_id, parsed_date_from, parsed_date_to, timezone_name)
 
         purchases = []
-        for row in purchase_rows:
-            purchases.append({
-                "purchase_item_id": str(row["purchase_item_id"]),
-                "purchase_id": str(row["purchase_id"]),
-                "purchase_number": row["purchase_number"],
-                "purchase_date": row["purchase_date"].isoformat() if row["purchase_date"] else None,
-                "base_quantity": _number_or_zero(row["base_quantity"]),
-                "base_unit": row["base_unit"],
-                "purchase_quantity": _number_or_none(row["purchase_quantity"]),
-                "purchase_unit": row["purchase_unit"],
-                "unit_cost": _number_or_none(row["unit_cost"]),
-                "total_cost": _number_or_none(row["total_cost"]),
-                "received_at": row["received_at"].isoformat() if row["received_at"] else None,
-            })
-
         stock_movements = []
         consumption_movements = []
-        for row in movement_rows:
+        for row in history_rows:
+            if row["history_type"] == "purchase":
+                purchases.append({
+                    "purchase_item_id": str(row["purchase_item_id"]),
+                    "purchase_id": str(row["purchase_id"]),
+                    "purchase_number": row["purchase_number"],
+                    "is_direct_entry": bool(row["is_direct_entry"]) if row["is_direct_entry"] is not None else None,
+                    "purchase_date": row["purchase_date"].isoformat() if row["purchase_date"] else None,
+                    "base_quantity": _number_or_zero(row["base_quantity"]),
+                    "base_unit": row["base_unit"],
+                    "purchase_quantity": _number_or_none(row["purchase_quantity"]),
+                    "purchase_unit": row["purchase_unit"],
+                    "unit_cost": _number_or_none(row["unit_cost"]),
+                    "total_cost": _number_or_none(row["total_cost"]),
+                    "received_at": row["received_at"].isoformat() if row["received_at"] else None,
+                })
+                continue
+
             movement = {
-                "id": str(row["id"]),
+                "id": str(row["movement_id"]),
                 "movement_type": row["movement_type"],
                 "quantity_change": _number_or_zero(row["quantity_change"]),
                 "consumed_quantity": abs(_number_or_zero(row["quantity_change"])),
-                "unit": row["unit"],
+                "unit": row["movement_unit"],
                 "previous_stock": _number_or_none(row["previous_stock"]),
                 "new_stock": _number_or_none(row["new_stock"]),
-                "cost_per_unit": _number_or_none(row["cost_per_unit"]),
+                "cost_per_unit": _number_or_none(row["movement_cost_per_unit"]),
                 "reference_table": row["reference_table"],
                 "reference_id": str(row["reference_id"]) if row["reference_id"] else None,
+                "reference_order_number": int(row["reference_order_number"]) if row["reference_order_number"] else None,
                 "reason": row["reason"],
                 "notes": row["notes"],
-                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "created_at": row["movement_created_at"].isoformat() if row["movement_created_at"] else None,
             }
             stock_movements.append(movement)
             if row["movement_type"] == "consumption" and _number_or_zero(row["quantity_change"]) < 0:
@@ -849,6 +1005,17 @@ async def _get_ingredient_analytics_report_for_tenant(
                     "location": stock_row["location"] if stock_row else None,
                 },
                 "related_products": related_products,
+                "history_pagination": {
+                    "limit": limit,
+                    "offset": offset,
+                    "total": int(history_count_row["total_count"]) if history_count_row else 0,
+                    "has_more": (offset + limit) < (int(history_count_row["total_count"]) if history_count_row else 0),
+                    "history_type": history_type_filter,
+                    "record_kind": record_kind_filter,
+                    "unit": unit,
+                    "quantity_min": quantity_min,
+                    "quantity_max": quantity_max,
+                },
                 "data_coverage": data_coverage,
             },
         }
@@ -861,6 +1028,12 @@ async def get_ingredient_analytics_report(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     limit: int = 100,
+    offset: int = 0,
+    history_type: Optional[str] = None,
+    record_kind: Optional[str] = None,
+    unit: Optional[str] = None,
+    quantity_min: Optional[float] = None,
+    quantity_max: Optional[float] = None,
 ) -> dict:
     """Session wrapper for one ingredient analytics report."""
     try:
@@ -874,6 +1047,12 @@ async def get_ingredient_analytics_report(
             date_from=date_from,
             date_to=date_to,
             limit=limit,
+            offset=offset,
+            history_type=history_type,
+            record_kind=record_kind,
+            unit=unit,
+            quantity_min=quantity_min,
+            quantity_max=quantity_max,
         )
     except AuthenticationError as e:
         raise e
