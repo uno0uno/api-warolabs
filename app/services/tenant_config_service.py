@@ -10,6 +10,14 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
 from app.core.timezones import DEFAULT_TENANT_TIMEZONE, normalize_timezone, validate_timezone
+from app.core.tenant_prefs import (
+    DEFAULT_CURRENCY_CODE,
+    DEFAULT_TENANT_LOCALE,
+    normalize_currency_code,
+    normalize_locale,
+    validate_currency_code,
+    validate_locale,
+)
 from app.models.tenant_public_profile import (
     TenantPublicProfile,
     TenantPublicProfileCreate,
@@ -37,6 +45,8 @@ def _profile_from_row(row) -> TenantPublicProfile:
         except Exception:
             profile_data['social_media'] = None
     profile_data['timezone'] = normalize_timezone(profile_data.get('timezone'))
+    profile_data['locale'] = normalize_locale(profile_data.get('locale'))
+    profile_data['currency_code'] = normalize_currency_code(profile_data.get('currency_code'))
     return TenantPublicProfile(**profile_data)
 
 
@@ -82,6 +92,7 @@ async def upsert_public_profile(
                         display_name, description, logo_url, banner_url,
                         phone_number, email, address,
                         city, neighborhood, latitude, longitude, timezone,
+                        locale, currency_code,
                         business_hours, social_media,
                         seo_title, seo_description,
                         accepts_online_orders, min_order_amount, online_order_max_amount, estimated_preparation_time,
@@ -92,7 +103,7 @@ async def upsert_public_profile(
                         minimum_consumption_enabled, minimum_consumption_amount, minimum_consumption_restrictive,
                         updated_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, CURRENT_TIMESTAMP)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, CURRENT_TIMESTAMP)
                     ON CONFLICT (tenant_id)
                     DO UPDATE SET
                         slug = EXCLUDED.slug,
@@ -109,6 +120,8 @@ async def upsert_public_profile(
                         latitude = EXCLUDED.latitude,
                         longitude = EXCLUDED.longitude,
                         timezone = EXCLUDED.timezone,
+                        locale = EXCLUDED.locale,
+                        currency_code = EXCLUDED.currency_code,
                         business_hours = EXCLUDED.business_hours,
                         social_media = EXCLUDED.social_media,
                         seo_title = EXCLUDED.seo_title,
@@ -146,6 +159,8 @@ async def upsert_public_profile(
                     profile_data.latitude,
                     profile_data.longitude,
                     profile_data.timezone,
+                    profile_data.locale,
+                    profile_data.currency_code,
                     json.dumps(profile_data.business_hours) if profile_data.business_hours is not None else None,
                     json.dumps(profile_data.social_media) if profile_data.social_media is not None else None,
                     profile_data.seo_title,
@@ -239,13 +254,14 @@ async def update_public_profile(
                         phone_number, email, address,
                         country, city, city_slug, neighborhood,
                         business_hours, social_media, timezone,
+                        locale, currency_code,
                         accepts_online_orders, min_order_amount, online_order_max_amount, estimated_preparation_time,
                         is_manually_open,
                         comandas_enabled, kds_enabled,
                         auto_select_generic_enabled,
                         expediter_enabled,
                         minimum_consumption_enabled, minimum_consumption_amount, minimum_consumption_restrictive
-                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
+                    ) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
                     RETURNING *
                 """
                 result = await conn.fetchrow(
@@ -266,6 +282,8 @@ async def update_public_profile(
                     json.dumps(data_dict['business_hours']) if data_dict.get('business_hours') is not None else None,
                     json.dumps(data_dict['social_media']) if data_dict.get('social_media') is not None else None,
                     data_dict.get('timezone', DEFAULT_TENANT_TIMEZONE),
+                    data_dict.get('locale', DEFAULT_TENANT_LOCALE),
+                    data_dict.get('currency_code', DEFAULT_CURRENCY_CODE),
                     # Default True so new tenants are immediately able to
                     # receive online orders — the platform's core value
                     # prop (warocol.com#626). Operators can still toggle
@@ -345,6 +363,10 @@ async def update_public_profile(
 
             if 'timezone' in data_dict:
                 data_dict['timezone'] = validate_timezone(data_dict['timezone'])
+            if 'locale' in data_dict:
+                data_dict['locale'] = validate_locale(data_dict['locale'])
+            if 'currency_code' in data_dict:
+                data_dict['currency_code'] = validate_currency_code(data_dict['currency_code'])
 
             _jsonb_fields = {'business_hours', 'social_media'}
             for field, value in data_dict.items():
