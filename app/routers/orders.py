@@ -356,6 +356,10 @@ class UpdateOrderStatusRequest(BaseModel):
     customer_id: Optional[str] = Field(None, description="UUID of customer to associate when required by payment method")
 
 
+class AssociateOrderCustomerRequest(BaseModel):
+    customer_id: UUID = Field(..., description="UUID of customer to associate before electronic invoicing")
+
+
 class BulkUpdateStatusRequest(BaseModel):
     order_ids: List[str] = Field(..., min_length=1)
     status: str = Field(..., description="completed | cancelled | pending")
@@ -395,6 +399,22 @@ async def update_order_status(
         body.status,
         body.payment_method,
         body.payment_method_id,
+        body.customer_id,
+    )
+
+
+@router.patch("/{order_id}/customer", dependencies=[Depends(require_module(Module.VENTAS))])
+async def associate_order_customer(
+    request: Request,
+    order_id: UUID,
+    body: AssociateOrderCustomerRequest,
+):
+    """
+    Associate or change the customer before an electronic invoice exists.
+    """
+    return await orders_service.associate_order_customer(
+        request,
+        order_id,
         body.customer_id,
     )
 
