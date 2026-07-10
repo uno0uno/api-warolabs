@@ -489,12 +489,14 @@ async def send_pos_receipt_email(
     invoice_prefix: Optional[str] = None,
     invoice_number: Optional[int] = None,
     invoice_cufe: Optional[str] = None,
+    invoice_presentation: Optional[Dict[str, Any]] = None,
     tip_amount: float = 0.0,
     tip_label: Optional[str] = None,
     promo_savings: float = 0.0,
     promo_breakdown: Optional[List[Dict[str, Any]]] = None,
     waro_redemption_summary: Optional[Dict[str, Any]] = None,
-) -> bool:
+    return_details: bool = False,
+) -> Any:
     """
     Send a POS receipt email to the customer after a point-of-sale order completes.
 
@@ -511,6 +513,12 @@ async def send_pos_receipt_email(
         logger.warning(
             f"Receipt email skipped: invalid customer_email={customer_email!r} for order #{order_number}"
         )
+        if return_details:
+            return {
+                "success": False,
+                "attachments": {"pdf": False, "xml": False},
+                "attachment_warnings": ["invalid_email"],
+            }
         return False
 
     resolved_tip_label = (tip_label or "Propina").strip()[:40] or "Propina"
@@ -527,34 +535,10 @@ async def send_pos_receipt_email(
             logger.warning(f"Could not fetch receipt tip label for tenant {tenant_id}: {_tip_err}")
 
     try:
-        text_body = get_pos_receipt_text(
-            order_number=order_number,
-            total_amount=total_amount,
-            payment_method=payment_method,
-            items=items,
-            order_date=order_date,
-            business_name=business_name,
-            business_address=business_address,
-            business_city=business_city,
-            business_phone=business_phone,
-            discount_amount=discount_amount,
-            subtotal=subtotal,
-            standard_tax=standard_tax,
-            liquor_tax=liquor_tax,
-            standard_tax_label=standard_tax_label,
-            invoice_prefix=invoice_prefix,
-            invoice_number=invoice_number,
-            invoice_cufe=invoice_cufe,
-            tip_amount=tip_amount,
-            tip_label=resolved_tip_label,
-            promo_savings=promo_savings,
-            promo_breakdown=promo_breakdown,
-            waro_redemption_summary=waro_redemption_summary,
-        )
-        subject = get_pos_receipt_subject(order_number, business_name=business_name)
-
         ses_service = AWSSESService()
         attachments: List[dict] = []
+        attachment_status = {"pdf": False, "xml": False}
+        attachment_warnings: List[str] = []
 
         # Attach DIAN document (PDF/XML) when we have invoice identifiers and tenant context.
         # Tenant context is required to avoid leaking invoice files.
@@ -583,27 +567,76 @@ async def send_pos_receipt_email(
                     if inv_row.get("r2_pdf_key"):
                         pdf_bytes = await s3.get_object_bytes(inv_row["r2_pdf_key"])
                         if pdf_bytes:
+                            attachment_status["pdf"] = True
                             attachments.append({
                                 "data": pdf_bytes,
                                 "filename": f"{invoice_prefix}-{invoice_number}.pdf",
                                 "content_type": "application/pdf",
                             })
+                        else:
+                            attachment_warnings.append("invoice_pdf_unavailable")
+                    else:
+                        attachment_warnings.append("invoice_pdf_missing")
 
                     if inv_row.get("r2_xml_key"):
                         xml_bytes = await s3.get_object_bytes(inv_row["r2_xml_key"])
                         if xml_bytes:
+                            attachment_status["xml"] = True
                             attachments.append({
                                 "data": xml_bytes,
                                 "filename": f"{invoice_prefix}-{invoice_number}.xml",
                                 "content_type": "application/xml",
                             })
+                        else:
+                            attachment_warnings.append("invoice_xml_unavailable")
+                    else:
+                        attachment_warnings.append("invoice_xml_missing")
 
                     if not attachments:
                         logger.info(
                             f"Receipt email: invoice exists but has no files yet (track_id={track_id})"
                         )
+                else:
+                    attachment_warnings.append("invoice_record_not_found")
             except Exception as _att_err:
+                attachment_warnings.append("invoice_attachments_unavailable")
                 logger.warning(f"Could not attach invoice files to receipt email: {_att_err}")
+
+        presentation = dict(invoice_presentation or {})
+        if invoice_prefix and invoice_number:
+            presentation["attachments"] = attachment_status
+
+        text_body = get_pos_receipt_text(
+            order_number=order_number,
+            total_amount=total_amount,
+            payment_method=payment_method,
+            items=items,
+            order_date=order_date,
+            business_name=business_name,
+            business_address=business_address,
+            business_city=business_city,
+            business_phone=business_phone,
+            discount_amount=discount_amount,
+            subtotal=subtotal,
+            standard_tax=standard_tax,
+            liquor_tax=liquor_tax,
+            standard_tax_label=standard_tax_label,
+            invoice_prefix=invoice_prefix,
+            invoice_number=invoice_number,
+            invoice_cufe=invoice_cufe,
+            invoice_presentation=presentation,
+            tip_amount=tip_amount,
+            tip_label=resolved_tip_label,
+            promo_savings=promo_savings,
+            promo_breakdown=promo_breakdown,
+            waro_redemption_summary=waro_redemption_summary,
+        )
+        subject = get_pos_receipt_subject(
+            order_number,
+            business_name=business_name,
+            invoice_prefix=invoice_prefix,
+            invoice_number=invoice_number,
+        )
 
         if attachments:
             success = await ses_service.send_email_with_attachments(
@@ -629,8 +662,20 @@ async def send_pos_receipt_email(
         else:
             logger.warning(f"SES returned failure for POS receipt email #{order_number}")
 
+        if return_details:
+            return {
+                "success": success,
+                "attachments": attachment_status,
+                "attachment_warnings": attachment_warnings,
+            }
         return success
 
     except Exception as e:
         logger.error(f"Error sending POS receipt email for order #{order_number}: {e}")
+        if return_details:
+            return {
+                "success": False,
+                "attachments": {"pdf": False, "xml": False},
+                "attachment_warnings": ["email_send_error"],
+            }
         return False

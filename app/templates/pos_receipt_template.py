@@ -48,8 +48,45 @@ def _format_bogota_date(dt: datetime) -> str:
     return f"{local.day} de {month} de {local.year}, {hour}:{local.minute:02d} {ampm}"
 
 
-def get_pos_receipt_subject(order_number: int, business_name: Optional[str] = None) -> str:
+def _clean(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _append_party(lines: List[str], title: str, party: Optional[Dict[str, Any]]) -> None:
+    if not party:
+        return
+    name = _clean(party.get("name"))
+    fiscal_id = _clean(party.get("fiscal_id"))
+    if not name and not fiscal_id:
+        return
+    lines.append(title)
+    if name:
+        lines.append(f"  {name}")
+    if fiscal_id:
+        id_type = _clean(party.get("fiscal_id_type"))
+        label = f"{id_type}: {fiscal_id}" if id_type else f"ID: {fiscal_id}"
+        lines.append(f"  {label}")
+    address = _clean(party.get("address"))
+    city = _clean(party.get("city"))
+    if address:
+        lines.append(f"  {address}{', ' + city if city else ''}")
+    email = _clean(party.get("email"))
+    if email:
+        lines.append(f"  Email: {email}")
+
+
+def get_pos_receipt_subject(
+    order_number: int,
+    business_name: Optional[str] = None,
+    invoice_prefix: Optional[str] = None,
+    invoice_number: Optional[int] = None,
+) -> str:
     name = business_name or "WARO"
+    if invoice_prefix and invoice_number:
+        return f"Factura electrónica {invoice_prefix}-{invoice_number} — {name}"
     return f"Recibo de compra #{order_number} — {name}"
 
 
@@ -71,6 +108,7 @@ def get_pos_receipt_text(
     invoice_prefix: Optional[str] = None,
     invoice_number: Optional[int] = None,
     invoice_cufe: Optional[str] = None,
+    invoice_presentation: Optional[Dict[str, Any]] = None,
     tip_amount: float = 0.0,
     tip_label: str = "Propina",
     promo_savings: float = 0.0,
@@ -159,14 +197,73 @@ def get_pos_receipt_text(
     # DIAN invoice section (optional)
     invoice_block = ""
     if invoice_prefix and invoice_number and invoice_cufe:
-        dian_url = f"https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey={invoice_cufe}"
-        invoice_block = f"""
-================================
-FACTURA ELECTRÓNICA
-{invoice_prefix}-{invoice_number}
-CUFE: {invoice_cufe}
-Verificar: {dian_url}
-================================"""
+        presentation = invoice_presentation or {}
+        dian_url = (
+            _clean(presentation.get("dian_url"))
+            or f"https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey={invoice_cufe}"
+        )
+        invoice_lines = [
+            "================================",
+            "FACTURA ELECTRÓNICA DE VENTA",
+            "Representación gráfica para verificación contable.",
+            f"Número: {invoice_prefix}-{invoice_number}",
+        ]
+        status = _clean(presentation.get("status"))
+        if status:
+            invoice_lines.append(f"Estado DIAN: {status}")
+        emitted_at = presentation.get("emitted_at")
+        if isinstance(emitted_at, datetime):
+            invoice_lines.append(f"Emisión: {_format_bogota_date(emitted_at)}")
+        elif _clean(emitted_at):
+            invoice_lines.append(f"Emisión: {_clean(emitted_at)}")
+
+        _append_party(invoice_lines, "Emisor:", presentation.get("issuer"))
+        _append_party(invoice_lines, "Adquirente:", presentation.get("acquirer"))
+
+        resolution = presentation.get("resolution") or {}
+        if resolution:
+            res_lines = []
+            number = _clean(resolution.get("number"))
+            prefix = _clean(resolution.get("prefix"))
+            from_number = resolution.get("from_number")
+            to_number = resolution.get("to_number")
+            date_from = _clean(resolution.get("date_from"))
+            date_to = _clean(resolution.get("date_to"))
+            if number:
+                res_lines.append(f"Resolución DIAN: {number}")
+            if prefix or from_number or to_number:
+                res_lines.append(f"Rango: {prefix or invoice_prefix} {from_number or ''}-{to_number or ''}".strip())
+            if date_from or date_to:
+                res_lines.append(f"Vigencia: {date_from or 'N/D'} a {date_to or 'N/D'}")
+            invoice_lines.extend(res_lines)
+
+        tax_details = presentation.get("tax_details") or []
+        if tax_details:
+            invoice_lines.append("Impuestos:")
+            for tax in tax_details:
+                label = _clean(tax.get("label")) or "Impuesto"
+                amount = float(tax.get("amount") or 0)
+                base = tax.get("base")
+                base_text = f" base {_format_cop(float(base))}" if base is not None else ""
+                invoice_lines.append(f"  {label}{base_text}: {_format_cop(amount)}")
+
+        attachment_status = presentation.get("attachments") or {}
+        attachment_lines = []
+        if attachment_status.get("pdf"):
+            attachment_lines.append("PDF adjunto")
+        if attachment_status.get("xml"):
+            attachment_lines.append("XML adjunto")
+        if attachment_lines:
+            invoice_lines.append("Archivos: " + ", ".join(attachment_lines))
+        elif attachment_status:
+            invoice_lines.append("Archivos: PDF/XML aún no disponibles en el repositorio fiscal.")
+
+        invoice_lines.extend([
+            f"CUFE: {invoice_cufe}",
+            f"Verificar en DIAN: {dian_url}",
+            "================================",
+        ])
+        invoice_block = "\n" + "\n".join(invoice_lines)
 
     return f"""\
 {header_block}

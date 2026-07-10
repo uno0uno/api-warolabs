@@ -115,3 +115,60 @@ def test_pos_receipt_keeps_checkout_discount_stack_separate():
     assert "IVA: $3.000" in text
     assert "Propina: $7.000" in text
     assert "TOTAL COBRADO: $90.000" in text
+
+
+def test_pos_receipt_renders_fiscal_invoice_presentation():
+    text = get_pos_receipt_text(
+        order_number=47,
+        total_amount=120000,
+        payment_method="cash",
+        items=[{"quantity": 1, "subtotal": 120000, "product": {"name": "Cena"}}],
+        order_date=datetime(2026, 7, 1, 18, 0, tzinfo=timezone.utc),
+        invoice_prefix="LZT",
+        invoice_number=5462,
+        invoice_cufe="CUFE123",
+        invoice_presentation={
+            "status": "accepted",
+            "emitted_at": datetime(2026, 7, 1, 18, 5, tzinfo=timezone.utc),
+            "dian_url": "https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey=CUFE123",
+            "issuer": {
+                "name": "Waro Colombia SAS",
+                "fiscal_id_type": "NIT",
+                "fiscal_id": "901234567",
+                "address": "Carrera 10 #20-30",
+                "city": "Bogotá",
+                "email": "facturacion@warocol.com",
+            },
+            "acquirer": {
+                "name": "Restaurante Cliente SAS",
+                "fiscal_id_type": "NIT",
+                "fiscal_id": "900123456",
+                "email": "contabilidad@example.com",
+            },
+            "resolution": {
+                "number": "18760000001",
+                "prefix": "LZT",
+                "from_number": 1,
+                "to_number": 9999,
+                "date_from": "2026-01-01",
+                "date_to": "2026-12-31",
+            },
+            "tax_details": [
+                {"label": "IVA 19%", "base": 100000, "amount": 19000},
+            ],
+            "attachments": {"pdf": True, "xml": True},
+        },
+    )
+
+    assert "FACTURA ELECTRÓNICA DE VENTA" in text
+    assert "Representación gráfica para verificación contable." in text
+    assert "Número: LZT-5462" in text
+    assert "Estado DIAN: accepted" in text
+    assert "Emisor:" in text
+    assert "Waro Colombia SAS" in text
+    assert "Adquirente:" in text
+    assert "Restaurante Cliente SAS" in text
+    assert "Resolución DIAN: 18760000001" in text
+    assert "IVA 19% base $100.000: $19.000" in text
+    assert "Archivos: PDF adjunto, XML adjunto" in text
+    assert "Verificar en DIAN: https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey=CUFE123" in text

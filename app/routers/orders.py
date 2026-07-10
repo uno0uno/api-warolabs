@@ -474,7 +474,8 @@ async def emit_order_invoice(
     Returns 403 if the tenant is not ready for electronic invoicing
     (issue #130: missing dev flag, fiscal data, or active resolution).
 
-    Returns: { order_id, invoice_number, prefix, cufe, status, pdf_presigned_url }
+    Returns invoice identifiers, status, PDF URL when available, and optional
+    fiscal presentation fields for receipt/email rendering.
     """
     session_context = require_valid_session(request)
     return await facturacion_service.emit_invoice(
@@ -492,7 +493,8 @@ async def get_order_invoice(
     """
     Get the current electronic invoice for an order.
 
-    Returns invoice status, CUFE, and a fresh presigned PDF URL (1h TTL).
+    Returns invoice status, CUFE, a fresh presigned PDF URL (1h TTL), safe
+    attachment flags, and optional fiscal presentation fields.
     Returns 404 if no invoice has been emitted for this order yet.
     """
     session_context = require_valid_session(request)
@@ -540,5 +542,5 @@ async def send_order_invoice_email(
     order_id: UUID,
     body: SendInvoiceEmailBody,
 ):
-    """Send the WARO-branded receipt email for this order's accepted invoice (warocol.com#603)."""
+    """Send the fiscal receipt email for this order's accepted invoice."""
     return await orders_service.send_invoice_email(request, order_id, body.email)
