@@ -68,6 +68,9 @@ async def get_ingredient_analytics_summary(
     date_to: Optional[str] = Query(None),
     ingredient_id: Optional[UUID] = Query(None),
     category: Optional[str] = Query(None),
+    unit: Optional[str] = Query(None),
+    quantity_min: Optional[float] = Query(None),
+    quantity_max: Optional[float] = Query(None),
     limit: int = Query(100, ge=1, le=500),
     sort: str = Query("consumed_quantity_desc")
 ):
@@ -80,6 +83,9 @@ async def get_ingredient_analytics_summary(
         date_to=date_to,
         ingredient_id=ingredient_id,
         category=category,
+        unit=unit,
+        quantity_min=quantity_min,
+        quantity_max=quantity_max,
         limit=limit,
         sort=sort
     )
@@ -111,7 +117,13 @@ async def get_ingredient_analytics_report(
     request: Request,
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
-    limit: int = Query(100, ge=1, le=500)
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    history_type: Optional[str] = Query(None),
+    record_kind: Optional[str] = Query(None),
+    unit: Optional[str] = Query(None),
+    quantity_min: Optional[float] = Query(None),
+    quantity_max: Optional[float] = Query(None),
 ):
     """
     Get report-ready analytics for one ingredient.
@@ -121,7 +133,13 @@ async def get_ingredient_analytics_report(
         ingredient_id=ingredient_id,
         date_from=date_from,
         date_to=date_to,
-        limit=limit
+        limit=limit,
+        offset=offset,
+        history_type=history_type,
+        record_kind=record_kind,
+        unit=unit,
+        quantity_min=quantity_min,
+        quantity_max=quantity_max,
     )
 
 
