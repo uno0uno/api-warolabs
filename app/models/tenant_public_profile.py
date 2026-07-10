@@ -5,6 +5,12 @@ from uuid import UUID
 from datetime import datetime
 from decimal import Decimal
 from app.core.timezones import DEFAULT_TENANT_TIMEZONE, validate_timezone
+from app.core.tenant_prefs import (
+    DEFAULT_CURRENCY_CODE,
+    DEFAULT_TENANT_LOCALE,
+    validate_currency_code,
+    validate_locale,
+)
 
 class BusinessHours(BaseModel):
     """Business hours for a single day"""
@@ -50,6 +56,14 @@ class TenantPublicProfileBase(BaseModel):
     timezone: str = Field(
         DEFAULT_TENANT_TIMEZONE,
         description="IANA timezone for tenant operational dates and business hours",
+    )
+    locale: str = Field(
+        DEFAULT_TENANT_LOCALE,
+        description="UI/number language preference: es | en. Defaults to es.",
+    )
+    currency_code: str = Field(
+        DEFAULT_CURRENCY_CODE,
+        description="ISO 4217 display currency code. Defaults to COP. Display-only; no FX.",
     )
 
     # Business hours (JSONB)
@@ -190,6 +204,16 @@ class TenantPublicProfileBase(BaseModel):
     def _validate_timezone(cls, v):
         return validate_timezone(v)
 
+    @field_validator('locale')
+    @classmethod
+    def _validate_locale(cls, v):
+        return validate_locale(v)
+
+    @field_validator('currency_code')
+    @classmethod
+    def _validate_currency_code(cls, v):
+        return validate_currency_code(v)
+
     @field_validator('tip_default_percentages')
     @classmethod
     def _validate_tip_presets(cls, v):
@@ -249,6 +273,8 @@ class TenantPublicProfileUpdate(BaseModel):
     latitude: Optional[Decimal] = None
     longitude: Optional[Decimal] = None
     timezone: Optional[str] = None
+    locale: Optional[str] = None
+    currency_code: Optional[str] = None
 
     business_hours: Optional[Dict[str, Any]] = None
     social_media: Optional[Dict[str, str]] = None
@@ -289,6 +315,20 @@ class TenantPublicProfileUpdate(BaseModel):
         if v is None:
             return v
         return validate_timezone(v)
+
+    @field_validator('locale')
+    @classmethod
+    def _validate_locale_update(cls, v):
+        if v is None:
+            return v
+        return validate_locale(v)
+
+    @field_validator('currency_code')
+    @classmethod
+    def _validate_currency_code_update(cls, v):
+        if v is None:
+            return v
+        return validate_currency_code(v)
 
     @field_validator('tip_default_percentages')
     @classmethod
