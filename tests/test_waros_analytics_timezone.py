@@ -53,8 +53,8 @@ async def test_waros_day_analytics_uses_resolved_tenant_timezone_in_sql():
     sql, args = fetch_calls[0]
     assert "America/Bogota" not in sql
     assert "AT TIME ZONE $" in sql
-    assert "America/Mexico_City" in args
     assert args[0] == tenant_id
+    assert args[1] == "America/Mexico_City"
 
 
 @pytest.mark.asyncio
@@ -97,6 +97,9 @@ async def test_waros_week_analytics_binds_tenant_timezone_after_date_filters():
     assert result["groups"][0]["period"] == date(2026, 7, 6).isoformat()
     sql, args = fetch_calls[0]
     assert "date_trunc('week'" in sql
-    assert args[-1] == "America/New_York"
+    assert "DATE(created_at AT TIME ZONE $2)" in sql
+    assert "date_trunc('week', created_at AT TIME ZONE $2)" in sql.replace("\n", " ")
+    assert args[0] == tenant_id
+    assert args[1] == "America/New_York"
     assert date(2026, 7, 1) in args
     assert date(2026, 7, 10) in args
