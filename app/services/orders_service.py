@@ -21,6 +21,10 @@ from app.services.cierre_service import (
 )
 from app.services.email_helpers import send_pos_receipt_email
 from app.services.email_sender import resolve_sender_email_for_tenant
+from app.services.invoicing_presentation import (
+    build_invoice_presentation,
+    commercial_header_name,
+)
 from fastapi import HTTPException
 from datetime import datetime, date
 import csv
@@ -337,61 +341,26 @@ def _build_invoice_presentation(
     profile_row: Any,
     resolution_row: Any,
     tax_details: List[Dict[str, Any]],
+    *,
+    serialize_datetimes: bool = False,
+    provider: str = "matias",
 ) -> Dict[str, Any]:
-    cufe = _row_get(invoice_row, "cufe")
-    invoice_prefix = _row_get(invoice_row, "prefix")
-    invoice_number = _row_get(invoice_row, "invoice_number")
-    return {
-        "number": f"{invoice_prefix}-{invoice_number}",
-        "prefix": invoice_prefix,
-        "invoice_number": invoice_number,
-        "cufe": cufe,
-        "status": _row_get(invoice_row, "status"),
-        "emitted_at": _row_get(invoice_row, "emitted_at"),
-        "created_at": _row_get(invoice_row, "created_at"),
-        "dian_url": (
-            f"https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey={cufe}"
-            if cufe
-            else None
-        ),
-        "issuer": {
-            "name": _row_get(profile_row, "fiscal_business_name") or _row_get(profile_row, "display_name"),
-            "fiscal_id_type": "NIT" if _row_get(profile_row, "nit") else None,
-            "fiscal_id": _row_get(profile_row, "nit"),
-            "address": _row_get(profile_row, "fiscal_address") or _row_get(profile_row, "address"),
-            "city": _row_get(profile_row, "fiscal_city") or _row_get(profile_row, "city"),
-            "phone": _row_get(profile_row, "fiscal_phone") or _row_get(profile_row, "phone_number"),
-            "email": _row_get(profile_row, "fiscal_email"),
-        },
-        "acquirer": {
-            "name": (
-                _row_get(order_row, "customer_fiscal_business_name")
-                or _row_get(order_row, "customer_name")
-                or "Consumidor final"
-            ),
-            "fiscal_id_type": _row_get(order_row, "customer_fiscal_id_type"),
-            "fiscal_id": _row_get(order_row, "customer_fiscal_id"),
-            "email": _row_get(order_row, "customer_fiscal_email") or _row_get(order_row, "customer_email"),
-        },
-        "payment": {
-            "method": _row_get(order_row, "payment_method"),
-            "status": _row_get(order_row, "payment_status"),
-        },
-        "resolution": (
-            {
-                "number": _row_get(resolution_row, "resolution_number"),
-                "prefix": _row_get(resolution_row, "prefix"),
-                "from_number": _row_get(resolution_row, "from_number"),
-                "to_number": _row_get(resolution_row, "to_number"),
-                "date_from": _date_iso(_row_get(resolution_row, "date_from")),
-                "date_to": _date_iso(_row_get(resolution_row, "date_to")),
-            }
-            if resolution_row
-            else None
-        ),
-        "tax_details": tax_details,
-        "attachments": _invoice_attachment_flags(invoice_row),
-    }
+    """
+    FE presentation for email/print/API.
+
+    Emisor = tenant fiscal only (never product brand / display_name as issuer).
+    Facturador path defaults to Matias Casa de Software.
+    """
+    return build_invoice_presentation(
+        invoice_row=invoice_row,
+        order_row=order_row,
+        fiscal_row=profile_row,
+        public_profile=profile_row,
+        resolution_row=resolution_row,
+        tax_details=tax_details,
+        provider=provider,
+        serialize_datetimes=serialize_datetimes,
+    )
 
 
 async def get_orders_list(
@@ -4212,13 +4181,15 @@ async def send_invoice_email(
                 ],
             })
 
-        # 5. Business profile for the email header.
+        # 5. Business profile + fiscal issuer (tenant is DIAN emisor; not WARO brand).
         profile_row = await conn.fetchrow(
             """SELECT COALESCE(p.display_name, t.name) AS display_name,
                       p.address, p.city, p.phone_number,
                       fd.business_name AS fiscal_business_name,
+                      fd.business_name AS business_name,
                       fd.nit, fd.fiscal_address, fd.city AS fiscal_city,
-                      fd.phone AS fiscal_phone, fd.email AS fiscal_email
+                      fd.phone AS fiscal_phone, fd.email AS fiscal_email,
+                      fd.matias_company_id
                FROM tenants t
                LEFT JOIN tenant_public_profiles p ON p.tenant_id = t.id
                LEFT JOIN tenant_fiscal_data fd ON fd.tenant_id = t.id
@@ -4256,6 +4227,28 @@ async def send_invoice_email(
         profile_row,
         resolution_row,
         tax_details,
+        serialize_datetimes=False,
+        provider="matias",
+    )
+
+    # FE email: subject/header prefer tenant fiscal name (emisor), not product brand.
+    issuer_name = (invoice_presentation.get("issuer") or {}).get("name")
+    email_business_name = commercial_header_name(
+        fiscal_row=profile_row,
+        public_profile=profile_row,
+        prefer_fiscal=True,
+    ) or issuer_name
+    email_address = (
+        (invoice_presentation.get("issuer") or {}).get("address")
+        or (_row_get(profile_row, "address") if profile_row else None)
+    )
+    email_city = (
+        (invoice_presentation.get("issuer") or {}).get("city")
+        or (_row_get(profile_row, "city") if profile_row else None)
+    )
+    email_phone = (
+        (invoice_presentation.get("issuer") or {}).get("phone")
+        or (_row_get(profile_row, "phone_number") if profile_row else None)
     )
 
     send_result = await send_pos_receipt_email(
@@ -4266,10 +4259,10 @@ async def send_invoice_email(
         items=items,
         order_date=order_row['order_date'],
         tenant_id=str(tenant_id),
-        business_name=profile_row['display_name'] if profile_row else None,
-        business_address=profile_row['address'] if profile_row else None,
-        business_city=profile_row['city'] if profile_row else None,
-        business_phone=profile_row['phone_number'] if profile_row else None,
+        business_name=email_business_name,
+        business_address=email_address,
+        business_city=email_city,
+        business_phone=email_phone,
         discount_amount=discount_amount,
         subtotal=subtotal_for_email,
         standard_tax=std_tax,
