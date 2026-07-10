@@ -502,8 +502,10 @@ async def get_order_invoice(
         order_id=str(order_id),
         tenant_id=str(session_context.tenant_id),
     )
+    # Return 200 + null when no FE yet so browsers don't log a console 404 on
+    # every sales detail open (still "no invoice"; front treats null the same).
     if result is None:
-        raise HTTPException(status_code=404, detail="No invoice found for this order")
+        return None
     return result
 
 
