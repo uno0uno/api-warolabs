@@ -11,6 +11,7 @@ from uuid import UUID
 from fastapi import HTTPException, Request
 
 from app.core.middleware import require_valid_session
+from app.core.timezones import resolve_tenant_timezone
 from app.database import get_db_connection
 
 logger = logging.getLogger(__name__)
@@ -1768,10 +1769,15 @@ async def _get_waros_analytics_for_tenant(
 
         elif group_by in ("day", "week"):
             trunc = "day" if group_by == "day" else "week"
+            # Operational tenant TZ for report buckets (not fiscal Colombia time).
+            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+            period_params = list(date_params)
+            period_params.append(timezone_name)
+            tz_param = len(period_params)
             rows = await conn.fetch(
                 f"""
                 SELECT
-                    date_trunc('{trunc}', created_at AT TIME ZONE 'America/Bogota') AS period,
+                    date_trunc('{trunc}', created_at AT TIME ZONE ${tz_param}) AS period,
                     COALESCE(SUM(CASE WHEN transaction_type IN ('earned', 'manual') AND waros_amount > 0
                                    THEN waros_amount ELSE 0 END), 0) AS total_earned,
                     COALESCE(SUM(CASE WHEN transaction_type = 'redeemed'
@@ -1783,7 +1789,7 @@ async def _get_waros_analytics_for_tenant(
                 GROUP BY period
                 ORDER BY period DESC
                 """,
-                *date_params,
+                *period_params,
             )
             groups = [
                 {

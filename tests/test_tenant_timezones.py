@@ -16,7 +16,7 @@ from app.core.timezones import (
     tenant_today,
 )
 from app.models.tenant_public_profile import TenantPublicProfileUpdate
-from app.services import pos_context_service, tenant_config_service
+from app.services import pos_cart_service, pos_context_service, tenant_config_service
 
 
 def test_normalize_timezone_falls_back_for_missing_or_invalid_values():
@@ -192,3 +192,66 @@ async def test_pos_context_falls_back_when_timezone_column_is_missing():
         payload = await pos_context_service.get_restaurant_context(tenant_id)
 
     assert payload["timezone"] == DEFAULT_TENANT_TIMEZONE
+
+
+@pytest.mark.asyncio
+async def test_promo_lock_uses_resolved_tenant_timezone_for_locked_at():
+    """POS promo lock is operational TZ (tenant), not hard-coded Bogota."""
+    tenant_id = uuid4()
+    cart_id = uuid4()
+    item_id = uuid4()
+    product_id = uuid4()
+    promo_id = uuid4()
+
+    item = {
+        "id": str(item_id),
+        "product_id": str(product_id),
+        "product": {"id": str(product_id)},
+        "category_id": None,
+        "quantity": 1,
+        "subtotal": 10000,
+        "tax_category": "standard",
+        "promo_opt_out": False,
+        "locked_promotion_id": None,
+    }
+
+    conn = AsyncMock()
+    conn.execute = AsyncMock()
+    captured_at: list[datetime] = []
+
+    async def _evaluate(conn_arg, tenant_arg, lines, *, at=None):
+        captured_at.append(at)
+        return {
+            "lines": [
+                {
+                    "id": str(item_id),
+                    "promotion_id": str(promo_id),
+                    "promotion_name": "Happy hour",
+                    "promo_type": "percent_off",
+                    "promo_savings": 1000,
+                }
+            ]
+        }
+
+    with patch(
+        "app.services.pos_cart_service.get_cart_items",
+        new=AsyncMock(return_value=[item]),
+    ), patch(
+        "app.services.pos_cart_service.resolve_tenant_timezone",
+        new=AsyncMock(return_value="America/Mexico_City"),
+    ), patch(
+        "app.services.promotions_service.evaluate_checkout_promotions",
+        new=AsyncMock(side_effect=_evaluate),
+    ):
+        await pos_cart_service._refresh_cart_item_promotion_lock(
+            conn, tenant_id, cart_id, item_id
+        )
+
+    assert len(captured_at) == 1
+    locked_at = captured_at[0]
+    assert locked_at is not None
+    assert locked_at.tzinfo is not None
+    assert locked_at.tzinfo.key == "America/Mexico_City"
+    # Stored lock timestamp matches the evaluate `at` argument.
+    lock_write = conn.execute.await_args_list[-1]
+    assert lock_write.args[2] is locked_at
