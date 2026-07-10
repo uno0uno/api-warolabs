@@ -7,13 +7,11 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional, Sequence
 from uuid import UUID
 from datetime import date, datetime
-from zoneinfo import ZoneInfo
 from fastapi import Request
-_BOG = ZoneInfo("America/Bogota")
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
-from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
+from app.core.timezones import get_zoneinfo, local_date_for_tenant, resolve_tenant_timezone
 from app.services.waros_service import evaluate_and_award
 from app.services.orders_service import _get_order_waro_redemption_summary
 from app.services.email_helpers import send_pos_receipt_email
@@ -170,7 +168,9 @@ async def _refresh_cart_item_promotion_lock(
 
     from app.services.promotions_service import evaluate_checkout_promotions
 
-    locked_at = datetime.now(_BOG)
+    # Operational tenant TZ (explicit → profile → America/Bogota); not fiscal CO time.
+    tenant_timezone = await resolve_tenant_timezone(conn, tenant_id)
+    locked_at = datetime.now(get_zoneinfo(tenant_timezone))
     promo_lines = _cart_items_to_promo_lines(items)
     checkout_eval = await evaluate_checkout_promotions(
         conn,

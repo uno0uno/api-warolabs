@@ -11,6 +11,7 @@ from uuid import UUID
 from fastapi import HTTPException, Request
 
 from app.core.middleware import require_valid_session
+from app.core.timezones import resolve_tenant_timezone
 from app.database import get_db_connection
 
 logger = logging.getLogger(__name__)
@@ -1686,22 +1687,34 @@ async def _get_waros_analytics_for_tenant(
     parsed_from = _parse_date(date_from) if date_from else None
     parsed_to = _parse_date(date_to) if date_to else None
 
-    # Build date filter
-    date_conditions: List[str] = []
-    date_params: List[Any] = [tenant_id]
-
-    if parsed_from:
-        date_params.append(parsed_from)
-        date_conditions.append(f"AND created_at >= ${len(date_params)}")
-    if parsed_to:
-        date_params.append(parsed_to)
-        date_conditions.append(f"AND created_at < (${len(date_params)}::date + INTERVAL '1 day')")
-
-    date_filter = " ".join(date_conditions)
-    # Qualified version for queries that JOIN with other tables having created_at
-    date_filter_wt = date_filter.replace("created_at", "wt.created_at")
-
     async with get_db_connection(use_transaction=False) as conn:
+        # Operational tenant TZ for filters + day/week buckets (not fiscal Colombia time).
+        timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+
+        # $1 = tenant. When date range is set, bind timezone next so filters use
+        # DATE(created_at AT TIME ZONE $tz) (tenant-local calendar, not session TZ).
+        date_params: List[Any] = [tenant_id]
+        date_conditions: List[str] = []
+        filter_tz_param: Optional[int] = None
+
+        if parsed_from or parsed_to:
+            date_params.append(timezone_name)
+            filter_tz_param = len(date_params)
+            if parsed_from:
+                date_params.append(parsed_from)
+                date_conditions.append(
+                    f"AND DATE(created_at AT TIME ZONE ${filter_tz_param}) >= ${len(date_params)}"
+                )
+            if parsed_to:
+                date_params.append(parsed_to)
+                date_conditions.append(
+                    f"AND DATE(created_at AT TIME ZONE ${filter_tz_param}) <= ${len(date_params)}"
+                )
+
+        date_filter = " ".join(date_conditions)
+        # Qualified version for queries that JOIN with other tables having created_at
+        date_filter_wt = date_filter.replace("created_at", "wt.created_at")
+
         # Summary row: totals across all transaction types
         summary_row = await conn.fetchrow(
             f"""
@@ -1768,10 +1781,17 @@ async def _get_waros_analytics_for_tenant(
 
         elif group_by in ("day", "week"):
             trunc = "day" if group_by == "day" else "week"
+            # Buckets share the filter timezone bind when present; else append $2.
+            if filter_tz_param is not None:
+                bucket_params = list(date_params)
+                bucket_tz_param = filter_tz_param
+            else:
+                bucket_params = [tenant_id, timezone_name]
+                bucket_tz_param = 2
             rows = await conn.fetch(
                 f"""
                 SELECT
-                    date_trunc('{trunc}', created_at AT TIME ZONE 'America/Bogota') AS period,
+                    date_trunc('{trunc}', created_at AT TIME ZONE ${bucket_tz_param}) AS period,
                     COALESCE(SUM(CASE WHEN transaction_type IN ('earned', 'manual') AND waros_amount > 0
                                    THEN waros_amount ELSE 0 END), 0) AS total_earned,
                     COALESCE(SUM(CASE WHEN transaction_type = 'redeemed'
@@ -1783,7 +1803,7 @@ async def _get_waros_analytics_for_tenant(
                 GROUP BY period
                 ORDER BY period DESC
                 """,
-                *date_params,
+                *bucket_params,
             )
             groups = [
                 {
