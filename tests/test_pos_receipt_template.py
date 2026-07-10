@@ -1,10 +1,27 @@
 """Tests for POS receipt template tip label (warocol.com#977)."""
 from datetime import datetime, timezone
 
+import pytest
+
 from app.templates.pos_receipt_template import get_pos_receipt_text
 
 
-def test_pos_receipt_uses_custom_tip_label():
+@pytest.fixture
+def platform_print_env(monkeypatch):
+    monkeypatch.setenv("WARO_LEGAL_COMMERCIAL_NAME", "WARO COLOMBIA")
+    monkeypatch.setenv("WARO_LEGAL_LEGAL_NAME", "AREVALO TEST")
+    monkeypatch.setenv("WARO_LEGAL_NIT", "700128766-3")
+    monkeypatch.setenv("WARO_LEGAL_IVA_LABEL", "No responsable de IVA")
+    monkeypatch.setenv("FACTURADOR_LEGAL_BRAND_NAME", "Matias API")
+    monkeypatch.setenv("FACTURADOR_LEGAL_LEGAL_NAME", "LOPEZSOFT S.A.S.")
+    monkeypatch.setenv("FACTURADOR_LEGAL_NIT", "901.091.403-2")
+    from app import config as config_mod
+    config_mod.settings = config_mod.Settings()
+    yield
+    config_mod.settings = config_mod.Settings()
+
+
+def test_pos_receipt_uses_custom_tip_label(platform_print_env):
     text = get_pos_receipt_text(
         order_number=42,
         total_amount=100000,
@@ -13,9 +30,18 @@ def test_pos_receipt_uses_custom_tip_label():
         order_date=datetime(2026, 5, 29, 12, 0, tzinfo=timezone.utc),
         tip_amount=10000,
         tip_label="Servicio",
+        business_name="Mi Restaurante SAS",
     )
     assert "Servicio: $10.000" in text
     assert "Propina:" not in text
+    # Sin FE: comprobante + pie WARO (tecnología, no emisor)
+    assert "COMPROBANTE DE VENTA" in text
+    assert "No es factura electrónica DIAN" in text
+    assert "WARO COLOMBIA" in text
+    assert "700128766-3" in text
+    assert "No es el emisor de esta venta" in text
+    # Sin FE no se exige bloquear Matias en el pie comercial
+    assert "LOPEZSOFT" not in text
 
 
 def test_pos_receipt_tip_label_defaults_to_propina():
@@ -117,7 +143,7 @@ def test_pos_receipt_keeps_checkout_discount_stack_separate():
     assert "TOTAL COBRADO: $90.000" in text
 
 
-def test_pos_receipt_renders_fiscal_invoice_presentation():
+def test_pos_receipt_renders_fiscal_invoice_presentation(platform_print_env):
     text = get_pos_receipt_text(
         order_number=47,
         total_amount=120000,
@@ -172,3 +198,7 @@ def test_pos_receipt_renders_fiscal_invoice_presentation():
     assert "IVA 19% base $100.000: $19.000" in text
     assert "Archivos: PDF adjunto, XML adjunto" in text
     assert "Verificar en DIAN: https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey=CUFE123" in text
+    # Pie software WARO + note Matias (tecnología ≠ emisor)
+    assert "700128766-3" in text
+    assert "No es el emisor de esta venta" in text
+    assert "Matias API" in text

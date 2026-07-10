@@ -118,6 +118,45 @@ class Settings(BaseSettings):
     # (api-facturacion#21) can recover the order.
     dian_short_circuit_grace_minutes: int = Field(default=5, alias='DIAN_SHORT_CIRCUIT_GRACE_MINUTES')
 
+    # ── Platform legal identity for receipt/print footers (source of truth) ──
+    # WARO = POS software / technology platform (not the tenant FE issuer).
+    # Empty env → empty print fields (no PII hardcode in repo for production).
+    waro_legal_commercial_name: str = Field(default='', alias='WARO_LEGAL_COMMERCIAL_NAME')
+    waro_legal_legal_name: str = Field(default='', alias='WARO_LEGAL_LEGAL_NAME')
+    waro_legal_nit: str = Field(default='', alias='WARO_LEGAL_NIT')
+    waro_legal_document_type: str = Field(default='', alias='WARO_LEGAL_DOCUMENT_TYPE')
+    waro_legal_document_number: str = Field(default='', alias='WARO_LEGAL_DOCUMENT_NUMBER')
+    waro_legal_address: str = Field(default='', alias='WARO_LEGAL_ADDRESS')
+    waro_legal_city: str = Field(default='', alias='WARO_LEGAL_CITY')
+    waro_legal_email: str = Field(default='', alias='WARO_LEGAL_EMAIL')
+    waro_legal_phone_1: str = Field(default='', alias='WARO_LEGAL_PHONE_1')
+    waro_legal_phone_2: str = Field(default='', alias='WARO_LEGAL_PHONE_2')
+    waro_legal_iva_label: str = Field(default='', alias='WARO_LEGAL_IVA_LABEL')
+    waro_legal_role_label: str = Field(
+        default='Proveedor tecnológico / software',
+        alias='WARO_LEGAL_ROLE_LABEL',
+    )
+    waro_legal_not_issuer_disclaimer: str = Field(
+        default='No es el emisor de esta venta',
+        alias='WARO_LEGAL_NOT_ISSUER_DISCLAIMER',
+    )
+
+    # Facturador técnico (Matias API / LOPEZSOFT S.A.S.) — print label only.
+    # Public company data from matias-api.com/terminos (not Matias PAT secrets).
+    facturador_legal_brand_name: str = Field(default='', alias='FACTURADOR_LEGAL_BRAND_NAME')
+    facturador_legal_legal_name: str = Field(default='', alias='FACTURADOR_LEGAL_LEGAL_NAME')
+    facturador_legal_nit: str = Field(default='', alias='FACTURADOR_LEGAL_NIT')
+    facturador_legal_role_label: str = Field(
+        default='Facturador técnico DIAN',
+        alias='FACTURADOR_LEGAL_ROLE_LABEL',
+    )
+    facturador_legal_not_issuer_disclaimer: str = Field(
+        default='No es el emisor de esta venta',
+        alias='FACTURADOR_LEGAL_NOT_ISSUER_DISCLAIMER',
+    )
+    facturador_legal_city: str = Field(default='', alias='FACTURADOR_LEGAL_CITY')
+    facturador_legal_support_email: str = Field(default='', alias='FACTURADOR_LEGAL_SUPPORT_EMAIL')
+
     class Config:
         env_file = ".env"
         extra = "ignore"  # Ignore extra environment variables

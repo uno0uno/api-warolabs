@@ -26,6 +26,7 @@ from fastapi import HTTPException
 from app.config import settings
 from app.database import get_db_connection
 from app.services.aws_s3_service import AWSS3Service
+from app.services.invoicing_presentation import build_invoice_presentation
 
 logger = logging.getLogger(__name__)
 
@@ -462,8 +463,10 @@ async def get_order_invoice(
                       COALESCE(tpp.display_name, t.name) AS display_name,
                       tpp.address, tpp.city, tpp.phone_number,
                       fd.business_name AS fiscal_business_name,
+                      fd.business_name AS business_name,
                       fd.nit, fd.fiscal_address, fd.city AS fiscal_city,
                       fd.phone AS fiscal_phone, fd.email AS fiscal_email,
+                      fd.matias_company_id,
                       dr.resolution_number, dr.date_from, dr.date_to,
                       dr.from_number, dr.to_number
                FROM electronic_invoices ei
@@ -498,6 +501,18 @@ async def get_order_invoice(
         except Exception as exc:
             logger.warning(f"Could not generate presigned URL for invoice {row['id']}: {exc}")
 
+    # Single joined row carries invoice + order parties + fiscal issuer + resolution.
+    presentation = build_invoice_presentation(
+        invoice_row=row,
+        order_row=row,
+        fiscal_row=row,
+        public_profile=row,
+        resolution_row=row if _row_get(row, "resolution_number") else None,
+        tax_details=[],
+        provider="matias",
+        serialize_datetimes=True,
+    )
+
     return {
         'id': str(row['id']),
         'order_id': order_id,
@@ -509,53 +524,10 @@ async def get_order_invoice(
         'error_message': row['error_message'],
         'emitted_at': row['emitted_at'].isoformat() if row['emitted_at'] else None,
         'created_at': row['created_at'].isoformat() if row['created_at'] else None,
-        'dian_url': (
-            f"https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey={row['cufe']}"
-            if row['cufe']
-            else None
-        ),
-        'attachments': {
+        'dian_url': presentation.get('dian_url'),
+        'attachments': presentation.get('attachments') or {
             'pdf': bool(row['r2_pdf_key']),
             'xml': bool(row['r2_xml_key']),
         },
-        'presentation': {
-            'number': f"{row['prefix']}-{row['invoice_number']}",
-            'status': row['status'],
-            'emitted_at': _datetime_iso(row['emitted_at']),
-            'issuer': {
-                'name': _row_get(row, 'fiscal_business_name') or _row_get(row, 'display_name'),
-                'fiscal_id_type': 'NIT' if _row_get(row, 'nit') else None,
-                'fiscal_id': _row_get(row, 'nit'),
-                'address': _row_get(row, 'fiscal_address') or _row_get(row, 'address'),
-                'city': _row_get(row, 'fiscal_city') or _row_get(row, 'city'),
-                'phone': _row_get(row, 'fiscal_phone') or _row_get(row, 'phone_number'),
-                'email': _row_get(row, 'fiscal_email'),
-            },
-            'acquirer': {
-                'name': (
-                    _row_get(row, 'customer_fiscal_business_name')
-                    or _row_get(row, 'customer_name')
-                    or 'Consumidor final'
-                ),
-                'fiscal_id_type': _row_get(row, 'customer_fiscal_id_type'),
-                'fiscal_id': _row_get(row, 'customer_fiscal_id'),
-                'email': _row_get(row, 'customer_fiscal_email') or _row_get(row, 'customer_email'),
-            },
-            'payment': {
-                'method': _row_get(row, 'payment_method'),
-                'status': _row_get(row, 'payment_status'),
-            },
-            'resolution': (
-                {
-                    'number': _row_get(row, 'resolution_number'),
-                    'prefix': row['prefix'],
-                    'from_number': _row_get(row, 'from_number'),
-                    'to_number': _row_get(row, 'to_number'),
-                    'date_from': _date_iso(_row_get(row, 'date_from')),
-                    'date_to': _date_iso(_row_get(row, 'date_to')),
-                }
-                if _row_get(row, 'resolution_number')
-                else None
-            ),
-        },
+        'presentation': presentation,
     }

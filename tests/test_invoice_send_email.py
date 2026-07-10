@@ -84,12 +84,15 @@ def _profile_row():
         'address': 'Calle 123 #45-67',
         'city': 'Bogotá',
         'phone_number': '+57 320 1234567',
+        # Fiscal = tenant emisor DIAN (not product brand). Aliases used by helper.
         'fiscal_business_name': 'Waro Colombia SAS',
+        'business_name': 'Waro Colombia SAS',
         'nit': '901234567',
         'fiscal_address': 'Carrera 10 #20-30',
         'fiscal_city': 'Bogotá',
         'fiscal_phone': '+57 601 1234567',
         'fiscal_email': 'facturacion@warocol.com',
+        'matias_company_id': '8a54e54e-6f5a-4c00-8000-000000000001',
     }
 
 
@@ -176,8 +179,13 @@ async def test_send_invoice_email_happy_path():
     assert kwargs['invoice_cufe'] == 'TEST_CUFE'
     assert kwargs['return_details'] is True
     assert kwargs['tenant_id'] == str(_TENANT_ID)
-    assert kwargs['business_name'] == 'Waro Colombia'
+    # FE email prefers tenant fiscal name (emisor), not marketing display_name
+    assert kwargs['business_name'] == 'Waro Colombia SAS'
+    assert kwargs['invoice_presentation']['issuer']['name'] == 'Waro Colombia SAS'
     assert kwargs['invoice_presentation']['issuer']['fiscal_id'] == '901234567'
+    assert kwargs['invoice_presentation']['issuer']['name'] != 'Waro Colombia'
+    assert kwargs['invoice_presentation']['provider_meta']['facturador'] == 'matias'
+    assert kwargs['invoice_presentation']['provider_meta']['technology_platform'] == 'waro'
     assert kwargs['invoice_presentation']['acquirer']['fiscal_id'] == '900123456'
     assert kwargs['invoice_presentation']['resolution']['number'] == '18760000001'
     assert kwargs['invoice_presentation']['attachments'] == {'pdf': True, 'xml': True}

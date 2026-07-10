@@ -7,6 +7,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import List, Dict, Any, Optional
 
+from app.core.platform_legal import waro_platform_footer_text
+
 BOGOTA_TZ = ZoneInfo("America/Bogota")
 
 _MONTHS_ES = [
@@ -265,6 +267,20 @@ def get_pos_receipt_text(
         ])
         invoice_block = "\n" + "\n".join(invoice_lines)
 
+    has_fe = bool(invoice_prefix and invoice_number and invoice_cufe)
+    if not has_fe:
+        sale_notice = (
+            "\n--------------------------------\n"
+            "COMPROBANTE DE VENTA\n"
+            "No es factura electrónica DIAN\n"
+        )
+        if business_name:
+            sale_notice += f"Vendedor: {business_name}\n"
+    else:
+        sale_notice = ""
+
+    platform_footer = waro_platform_footer_text(with_fe_note=has_fe)
+
     return f"""\
 {header_block}
 ================================
@@ -279,4 +295,5 @@ PRODUCTOS
 ================================
 
 Gracias por tu compra.
-{invoice_block}"""
+{sale_notice}{invoice_block}
+{platform_footer}"""
