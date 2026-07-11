@@ -10,7 +10,13 @@ from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
-from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone, tenant_today
+from app.core.timezones import get_zoneinfo, local_date_for_tenant, resolve_tenant_timezone, tenant_today
+from app.core.localization import (
+    format_datetime as format_localized_datetime,
+    format_money,
+    get_translator,
+    resolve_tenant_locale_settings,
+)
 from app.services.aws_ses_service import ses_service
 from app.services.waros_service import evaluate_and_award
 from app.services.cierre_service import (
@@ -26,7 +32,7 @@ from app.services.invoicing_presentation import (
     commercial_header_name,
 )
 from fastapi import HTTPException
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 import csv
 
 
@@ -45,6 +51,10 @@ def parse_date(date_str: Optional[str]) -> Optional[date]:
 
 logger = logging.getLogger(__name__)
 _INVENTORY_QUANTITY_SCALE = Decimal("0.000001")
+
+
+def _tr(_, message: str, **kwargs: Any) -> str:
+    return _(message).format(**kwargs)
 
 
 def _date_iso(value: Any) -> Optional[str]:
@@ -2537,6 +2547,8 @@ async def export_orders_to_email(
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
         user_email = session_context.email
+        tenant_context = getattr(request.state, "tenant_context", None)
+        tenant_name = getattr(tenant_context, "tenant_name", None) or "Waro Colombia"
         user_name = session_context.name or "Usuario"
 
         if not tenant_id:
@@ -2546,7 +2558,11 @@ async def export_orders_to_email(
             raise APIError("No se encontró el correo del usuario", status_code=400)
 
         async with get_db_connection() as conn:
-            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+            locale_settings = await resolve_tenant_locale_settings(conn, tenant_id)
+            locale = locale_settings.locale
+            currency_code = locale_settings.currency_code
+            timezone_name = locale_settings.timezone
+            _ = get_translator(locale)
             # Build WHERE clause (same as get_orders_list but without pagination).
             # warocol.com#640 — tips-only mode swaps the orders-list base predicate
             # for tip_amount > 0 (all tips, regardless of channel).
@@ -2695,8 +2711,8 @@ async def export_orders_to_email(
             orders_rows = await conn.fetch(orders_query, *params)
 
             if not orders_rows:
-                noun = "propinas" if tips_only else "ventas"
-                raise APIError(f"No hay {noun} para exportar con los filtros seleccionados", status_code=404)
+                noun = _("tips") if tips_only else _("sales")
+                raise APIError(_tr(_, "There are no {noun} to export with the selected filters", noun=noun), status_code=404)
 
             # Status labels
             status_labels = {
@@ -2706,7 +2722,8 @@ async def export_orders_to_email(
             }
 
             # Generate CSV with Excel-friendly formatting
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
+            local_now = now.astimezone(get_zoneinfo(timezone_name))
             output = io.StringIO()
             writer = csv.writer(output, delimiter=';')  # Use semicolon for better Excel compatibility
 
@@ -2794,47 +2811,54 @@ async def export_orders_to_email(
             # Build filter description for email
             filter_desc = []
             if date_from and date_to:
-                filter_desc.append(f"Período: {date_from} al {date_to}")
+                filter_desc.append(_tr(_, "Period: {date_from} to {date_to}", date_from=date_from, date_to=date_to))
             elif date_from:
-                filter_desc.append(f"Desde: {date_from}")
+                filter_desc.append(_tr(_, "From: {date_from}", date_from=date_from))
             elif date_to:
-                filter_desc.append(f"Hasta: {date_to}")
+                filter_desc.append(_tr(_, "To: {date_to}", date_to=date_to))
             if status:
-                filter_desc.append(f"Estado: {status_labels.get(status, status)}")
+                filter_desc.append(_tr(_, "Status: {status}", status=_(status_labels.get(status, status))))
             if payment_method:
-                filter_desc.append(f"Método de pago: {payment_method}")
+                filter_desc.append(_tr(_, "Payment method: {payment_method}", payment_method=payment_method))
             if search:
-                filter_desc.append(f"Búsqueda: {search}")
+                filter_desc.append(_tr(_, "Search: {search}", search=search))
 
-            filter_text = "\n".join(filter_desc) if filter_desc else "Sin filtros aplicados"
+            filter_text = "\n".join(filter_desc) if filter_desc else _("No filters applied")
 
-            date_str = now.strftime('%Y-%m-%d_%H%M')
+            date_str = local_now.strftime('%Y-%m-%d_%H%M')
 
             if tips_only:
                 # warocol.com#640 — tip-specific email copy + filename + subject
-                email_body = f"""¡Hola {user_name}!
+                email_body = _tr(_, """Hello {user_name}!
 
-Aquí está tu reporte de propinas solicitado.
+Here is the tips report you requested.
 
-RESUMEN
+SUMMARY
 -------
-Total de propinas exportadas: {len(orders_rows)}
-Suma total de propinas: ${total_sum:,.0f}
-Fecha de generación: {now.strftime('%d/%m/%Y %H:%M')}
+Total tips exported: {count}
+Total tips amount: {total}
+Generated on: {generated_at}
 
-FILTROS APLICADOS
+APPLIED FILTERS
 -----------------
 {filter_text}
 
-Adjunto encontrarás el archivo CSV con el detalle de las propinas.
-Puedes abrirlo con Excel o Google Sheets.
+The CSV file with the tips detail is attached.
+You can open it with Excel or Google Sheets.
 
 ---
-Saifer 101 de Waro Colombia
-Tecnología colombiana para el mundo.
-"""
+{user_name} from {tenant_name}
+Colombian technology for the world.
+""",
+                    user_name=user_name,
+                    count=len(orders_rows),
+                    total=format_money(total_sum, locale, currency_code),
+                    generated_at=format_localized_datetime(now, locale, timezone_name),
+                    filter_text=filter_text,
+                    tenant_name=tenant_name,
+                )
                 filename = f"propinas_{date_str}.csv"
-                subject = f"Reporte de Propinas - {date_str}"
+                subject = _tr(_, "Tips report - {date}", date=date_str)
             else:
                 email_body = f"""¡Hola {user_name}!
 
@@ -2879,7 +2903,7 @@ Tecnología colombiana para el mundo.
 
             return {
                 "success": True,
-                "message": f"Reporte enviado a {user_email}",
+                "message": _tr(_, "Report sent to {email}", email=user_email),
                 "data": {
                     "email": user_email,
                     "orders_count": len(orders_rows),
