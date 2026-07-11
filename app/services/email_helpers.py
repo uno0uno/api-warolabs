@@ -8,6 +8,13 @@ from app.services.aws_ses_service import AWSSESService
 from app.database import get_db_connection
 from app.services.email_sender import resolve_sender_email_for_tenant
 from app.services.aws_s3_service import AWSS3Service
+from app.core.localization import (
+    TenantLocaleSettings,
+    normalize_currency,
+    normalize_locale,
+    resolve_tenant_locale_settings,
+)
+from app.core.timezones import normalize_timezone
 from app.templates.order_confirmation_template import (
     get_order_confirmation_text,
     get_order_confirmation_subject,
@@ -496,6 +503,9 @@ async def send_pos_receipt_email(
     promo_savings: float = 0.0,
     promo_breakdown: Optional[List[Dict[str, Any]]] = None,
     waro_redemption_summary: Optional[Dict[str, Any]] = None,
+    locale: Optional[str] = None,
+    currency_code: Optional[str] = None,
+    timezone: Optional[str] = None,
     return_details: bool = False,
 ) -> Any:
     """
@@ -522,18 +532,24 @@ async def send_pos_receipt_email(
             }
         return False
 
-    resolved_tip_label = (tip_label or "Propina").strip()[:40] or "Propina"
-    if tenant_id and tip_label is None:
+    locale_settings = TenantLocaleSettings(
+        locale=normalize_locale(locale),
+        currency_code=normalize_currency(currency_code),
+        timezone=normalize_timezone(timezone),
+    )
+    resolved_tip_label = tip_label.strip()[:40] if tip_label else None
+    if tenant_id:
         try:
             async with get_db_connection(use_transaction=False) as conn:
+                locale_settings = await resolve_tenant_locale_settings(conn, tenant_id)
                 tip_row = await conn.fetchrow(
                     "SELECT receipt_tip_label FROM tenant_fiscal_data WHERE tenant_id = $1",
                     tenant_id,
                 )
-                if tip_row and tip_row.get("receipt_tip_label"):
-                    resolved_tip_label = str(tip_row["receipt_tip_label"]).strip()[:40] or "Propina"
-        except Exception as _tip_err:
-            logger.warning(f"Could not fetch receipt tip label for tenant {tenant_id}: {_tip_err}")
+                if tip_label is None and tip_row and tip_row.get("receipt_tip_label"):
+                    resolved_tip_label = str(tip_row["receipt_tip_label"]).strip()[:40] or None
+        except Exception as _settings_err:
+            logger.warning(f"Could not fetch receipt locale/tip settings for tenant {tenant_id}: {_settings_err}")
 
     try:
         ses_service = AWSSESService()
@@ -636,12 +652,16 @@ async def send_pos_receipt_email(
             promo_savings=promo_savings,
             promo_breakdown=promo_breakdown,
             waro_redemption_summary=waro_redemption_summary,
+            locale=locale_settings.locale,
+            currency_code=locale_settings.currency_code,
+            timezone=locale_settings.timezone,
         )
         subject = get_pos_receipt_subject(
             order_number,
             business_name=business_name,
             invoice_prefix=invoice_prefix,
             invoice_number=invoice_number,
+            locale=locale_settings.locale,
         )
 
         if attachments:

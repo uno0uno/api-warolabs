@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.templates.pos_receipt_template import get_pos_receipt_text
+from app.templates.pos_receipt_template import get_pos_receipt_subject, get_pos_receipt_text
 
 
 @pytest.fixture
@@ -202,3 +202,111 @@ def test_pos_receipt_renders_fiscal_invoice_presentation(platform_print_env):
     assert "700128766-3" in text
     assert "No es el emisor de esta venta" in text
     assert "Matias API" in text
+
+
+def test_pos_receipt_subject_and_body_render_in_english(platform_print_env):
+    subject = get_pos_receipt_subject(
+        16387,
+        business_name="Waro Colombia",
+        locale="en",
+    )
+    text = get_pos_receipt_text(
+        order_number=16387,
+        total_amount=311000,
+        payment_method="card",
+        items=[
+            {"quantity": 5, "subtotal": 225000, "product": {"name": "poker 330 und"}},
+            {
+                "quantity": 2,
+                "subtotal": 86000,
+                "product": {"name": "Santa inquisición"},
+                "modifiers": [{"name": "TOMATE DE PRUEBA"}, {"name": "Papas Fritas"}],
+            },
+        ],
+        order_date=datetime(2026, 7, 12, 1, 51, tzinfo=timezone.utc),
+        business_name="Waro Colombia",
+        business_address="Calle 123 #45-67",
+        business_city="Bogotá",
+        business_phone="+57 320 1234567",
+        tip_amount=62200,
+        locale="en",
+        currency_code="COP",
+        timezone="America/Bogota",
+    )
+
+    assert subject == "Purchase receipt #16387 — Waro Colombia"
+    assert "Date: July 11, 2026, 8:51 PM" in text
+    assert "PRODUCTS" in text
+    assert "poker 330 und" in text
+    assert "Santa inquisición" in text
+    assert "+ TOMATE DE PRUEBA, Papas Fritas" in text
+    assert "TOTAL: COP 311,000" in text
+    assert "Tip: COP 62,200" in text
+    assert "TOTAL CHARGED: COP 373,200" in text
+    assert "Payment method: Card" in text
+    assert "SALE RECEIPT" in text
+    assert "Not a DIAN electronic invoice" in text
+    assert "Thank you for your purchase." in text
+    assert "Technology provider / software" in text
+    assert "Método de pago" not in text
+    assert "Gracias por tu compra" not in text
+
+
+def test_pos_receipt_english_defaults_but_keeps_custom_payment_method():
+    text = get_pos_receipt_text(
+        order_number=48,
+        total_amount=42000,
+        payment_method="Nequi",
+        items=[{"quantity": 1, "subtotal": 42000, "product": {"name": "Arepa"}}],
+        order_date=datetime(2026, 7, 1, 18, 0, tzinfo=timezone.utc),
+        locale="en",
+        currency_code="COP",
+    )
+    assert "Payment method: Nequi" in text
+
+    wallet_text = get_pos_receipt_text(
+        order_number=49,
+        total_amount=42000,
+        payment_method="customer_wallet",
+        items=[{"quantity": 1, "subtotal": 42000, "product": {"name": "Arepa"}}],
+        order_date=datetime(2026, 7, 1, 18, 0, tzinfo=timezone.utc),
+        locale="en",
+        currency_code="COP",
+    )
+    assert "Payment method: Customer wallet" in wallet_text
+
+
+def test_pos_receipt_fiscal_invoice_labels_render_in_english(platform_print_env):
+    text = get_pos_receipt_text(
+        order_number=50,
+        total_amount=120000,
+        payment_method="cash",
+        items=[{"quantity": 1, "subtotal": 120000, "product": {"name": "Cena"}}],
+        order_date=datetime(2026, 7, 1, 18, 0, tzinfo=timezone.utc),
+        invoice_prefix="LZT",
+        invoice_number=5462,
+        invoice_cufe="CUFE123",
+        locale="en",
+        currency_code="COP",
+        invoice_presentation={
+            "status": "accepted",
+            "emitted_at": datetime(2026, 7, 1, 18, 5, tzinfo=timezone.utc),
+            "issuer": {"name": "Waro Colombia SAS", "fiscal_id_type": "NIT", "fiscal_id": "901234567"},
+            "acquirer": {"name": "Restaurante Cliente SAS", "fiscal_id_type": "NIT", "fiscal_id": "900123456"},
+            "resolution": {"number": "18760000001", "prefix": "LZT", "from_number": 1, "to_number": 9999},
+            "tax_details": [{"label": "IVA 19%", "base": 100000, "amount": 19000}],
+            "attachments": {"pdf": True, "xml": True},
+        },
+    )
+
+    assert "ELECTRONIC SALES INVOICE" in text
+    assert "Number: LZT-5462" in text
+    assert "DIAN status: accepted" in text
+    assert "Issuer:" in text
+    assert "Buyer:" in text
+    assert "DIAN resolution: 18760000001" in text
+    assert "IVA 19% base COP 100,000: COP 19,000" in text
+    assert "Files: PDF attached, XML attached" in text
+    assert "Verify in DIAN:" in text
+    assert "CUFE: CUFE123" in text
+    assert "Technical DIAN biller: Matias API" in text

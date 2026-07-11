@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from app.config import settings
+from app.core.localization import get_translator, normalize_locale
 
 
 def _s(value: Optional[str]) -> str:
@@ -90,14 +91,29 @@ def get_platform_legal_for_print() -> Dict[str, Any]:
     }
 
 
-def waro_platform_footer_lines(*, with_fe_note: bool = False) -> List[str]:
+def _localized_env_label(value: str, default_es: str, msgid: str, locale: str) -> str:
+    """Translate built-in Spanish defaults, but preserve true custom env labels."""
+    _ = get_translator(locale)
+    if not value or value == default_es:
+        return _(msgid)
+    return value
+
+
+def waro_platform_footer_lines(*, with_fe_note: bool = False, locale: str = "es") -> List[str]:
     """Compact footer lines for email/text receipts."""
+    locale = normalize_locale(locale)
+    _ = get_translator(locale)
     waro = get_waro_legal_entity()
     facturador = get_facturador_legal_entity()
     lines: List[str] = ["--------------------------------"]
 
     if waro["commercial_name"] or waro["nit"]:
-        lines.append(waro["role_label"])
+        lines.append(_localized_env_label(
+            waro["role_label"],
+            "Proveedor tecnológico / software",
+            "Technology provider / software",
+            locale,
+        ))
         if waro["commercial_name"] and waro["nit"]:
             lines.append(f"{waro['commercial_name']} — NIT {waro['nit']}")
         elif waro["commercial_name"]:
@@ -107,29 +123,50 @@ def waro_platform_footer_lines(*, with_fe_note: bool = False) -> List[str]:
         if waro["legal_name"]:
             lines.append(waro["legal_name"])
         if waro["iva_responsibility_label"]:
-            lines.append(waro["iva_responsibility_label"])
-        lines.append(waro["not_issuer_disclaimer"])
+            lines.append(_localized_env_label(
+                waro["iva_responsibility_label"],
+                "No responsable de IVA",
+                "Not responsible for VAT",
+                locale,
+            ))
+        lines.append(_localized_env_label(
+            waro["not_issuer_disclaimer"],
+            "No es el emisor de esta venta",
+            "Not the issuer of this sale",
+            locale,
+        ))
 
     if with_fe_note:
         brand = facturador["brand_name"] or "Matias API"
+        facturador_role = _localized_env_label(
+            facturador["role_label"],
+            "Facturador técnico DIAN",
+            "Technical DIAN biller",
+            locale,
+        )
         if facturador["nit"]:
             lines.append(
-                f"{facturador['role_label']}: {brand} — NIT {facturador['nit']}"
+                f"{facturador_role}: {brand} — NIT {facturador['nit']}"
             )
         else:
-            lines.append(f"{facturador['role_label']}: {brand}")
+            lines.append(f"{facturador_role}: {brand}")
         if facturador["legal_name"]:
             lines.append(facturador["legal_name"])
-        lines.append(facturador["not_issuer_disclaimer"])
-        lines.append("Emisor DIAN: establecimiento (tenant)")
+        lines.append(_localized_env_label(
+            facturador["not_issuer_disclaimer"],
+            "No es el emisor de esta venta",
+            "Not the issuer of this sale",
+            locale,
+        ))
+        lines.append(_("DIAN issuer: establishment (tenant)"))
     else:
-        lines.append("Comprobante del establecimiento (software WARO)")
+        lines.append(_("Establishment receipt (WARO software)"))
 
     return lines
 
 
-def waro_platform_footer_text(*, with_fe_note: bool = False) -> str:
-    return "\n".join(waro_platform_footer_lines(with_fe_note=with_fe_note))
+def waro_platform_footer_text(*, with_fe_note: bool = False, locale: str = "es") -> str:
+    return "\n".join(waro_platform_footer_lines(with_fe_note=with_fe_note, locale=locale))
 
 
 # Back-compat alias for existing imports
