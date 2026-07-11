@@ -2860,36 +2860,45 @@ Colombian technology for the world.
                 filename = f"propinas_{date_str}.csv"
                 subject = _tr(_, "Tips report - {date}", date=date_str)
             else:
-                email_body = f"""¡Hola {user_name}!
+                email_body = _tr(_, """Hello {user_name}!
 
-Aquí está tu reporte de ventas solicitado.
+Here is the sales report you requested.
 
-RESUMEN
+SUMMARY
 -------
-Total de ventas exportadas: {len(orders_rows)}
-Ventas completadas: {completed_count}
-Ventas canceladas: {cancelled_count}
-Monto total (completadas): ${total_sum:,.0f}
-Fecha de generación: {now.strftime('%d/%m/%Y %H:%M')}
+Total sales exported: {count}
+Completed sales: {completed_count}
+Cancelled sales: {cancelled_count}
+Total amount (completed): {total}
+Generated on: {generated_at}
 
-FILTROS APLICADOS
+APPLIED FILTERS
 -----------------
 {filter_text}
 
-Adjunto encontrarás el archivo CSV con el detalle de las ventas.
-Puedes abrirlo con Excel o Google Sheets.
+The CSV file with the sales detail is attached.
+You can open it with Excel or Google Sheets.
 
 ---
-Saifer 101 de Waro Colombia
-Tecnología colombiana para el mundo.
-"""
+{user_name} from {tenant_name}
+Colombian technology for the world.
+""",
+                    user_name=user_name,
+                    count=len(orders_rows),
+                    completed_count=completed_count,
+                    cancelled_count=cancelled_count,
+                    total=format_money(total_sum, locale, currency_code),
+                    generated_at=format_localized_datetime(now, locale, timezone_name),
+                    filter_text=filter_text,
+                    tenant_name=tenant_name,
+                )
                 filename = f"ventas_{date_str}.csv"
-                subject = f"Reporte de Ventas - {date_str}"
+                subject = _tr(_, "Sales report - {date}", date=date_str)
 
             # Send email with CSV attachment
             success = await ses_service.send_email_with_attachment(
                 from_email=await resolve_sender_email_for_tenant(tenant_id),
-                from_name="Waro Colombia - Reportes",
+                from_name=_("Waro Colombia - Reports"),
                 to_emails=[user_email],
                 subject=subject,
                 text_body=email_body,
@@ -2899,7 +2908,7 @@ Tecnología colombiana para el mundo.
             )
 
             if not success:
-                raise APIError("Error al enviar el correo. Intenta de nuevo.", status_code=500)
+                raise APIError(_("Could not send the email. Please try again."), status_code=500)
 
             return {
                 "success": True,
