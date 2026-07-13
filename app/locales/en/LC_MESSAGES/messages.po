@@ -1,0 +1,312 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: WARO backend receipts 1.0\n"
+"Language: en\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Purchase receipt #{order_number} — {business_name}"
+msgstr "Purchase receipt #{order_number} — {business_name}"
+
+msgid "Electronic invoice {invoice_prefix}-{invoice_number} — {business_name}"
+msgstr "Electronic invoice {invoice_prefix}-{invoice_number} — {business_name}"
+
+msgid "Order #{order_number}"
+msgstr "Order #{order_number}"
+
+msgid "Date: {date}"
+msgstr "Date: {date}"
+
+msgid "Phone: {phone}"
+msgstr "Phone: {phone}"
+
+msgid "PRODUCTS"
+msgstr "PRODUCTS"
+
+msgid "Product"
+msgstr "Product"
+
+msgid "Subtotal"
+msgstr "Subtotal"
+
+msgid "Promotion"
+msgstr "Promotion"
+
+msgid "Manual discount"
+msgstr "Manual discount"
+
+msgid "WaRo redemption"
+msgstr "WaRo redemption"
+
+msgid "WaRo redemption (points)"
+msgstr "WaRo redemption (points)"
+
+msgid "WaRo redemption (free product)"
+msgstr "WaRo redemption (free product)"
+
+msgid "WaRo redemption ({reward_name})"
+msgstr "WaRo redemption ({reward_name})"
+
+msgid "Tax"
+msgstr "Tax"
+
+msgid "Liquor VAT 5%"
+msgstr "Liquor VAT 5%"
+
+msgid "Tip"
+msgstr "Tip"
+
+msgid "TOTAL"
+msgstr "TOTAL"
+
+msgid "TOTAL CHARGED"
+msgstr "TOTAL CHARGED"
+
+msgid "Payment method: {payment_label}"
+msgstr "Payment method: {payment_label}"
+
+msgid "Cash"
+msgstr "Cash"
+
+msgid "Card"
+msgstr "Card"
+
+msgid "Digital payment"
+msgstr "Digital payment"
+
+msgid "Credit"
+msgstr "Credit"
+
+msgid "Customer wallet"
+msgstr "Customer wallet"
+
+msgid "Thank you for your purchase."
+msgstr "Thank you for your purchase."
+
+msgid "SALE RECEIPT"
+msgstr "SALE RECEIPT"
+
+msgid "Not a DIAN electronic invoice"
+msgstr "Not a DIAN electronic invoice"
+
+msgid "Seller: {business_name}"
+msgstr "Seller: {business_name}"
+
+msgid "ELECTRONIC SALES INVOICE"
+msgstr "ELECTRONIC SALES INVOICE"
+
+msgid "Graphic representation for accounting verification."
+msgstr "Graphic representation for accounting verification."
+
+msgid "Number: {invoice_id}"
+msgstr "Number: {invoice_id}"
+
+msgid "DIAN status: {status}"
+msgstr "DIAN status: {status}"
+
+msgid "Issued: {date}"
+msgstr "Issued: {date}"
+
+msgid "Issuer:"
+msgstr "Issuer:"
+
+msgid "Buyer:"
+msgstr "Buyer:"
+
+msgid "Email: {email}"
+msgstr "Email: {email}"
+
+msgid "DIAN resolution: {number}"
+msgstr "DIAN resolution: {number}"
+
+msgid "Range: {range}"
+msgstr "Range: {range}"
+
+msgid "Valid from {date_from} to {date_to}"
+msgstr "Valid from {date_from} to {date_to}"
+
+msgid "N/A"
+msgstr "N/A"
+
+msgid "Taxes:"
+msgstr "Taxes:"
+
+msgid " base {base}"
+msgstr " base {base}"
+
+msgid "Files: {files}"
+msgstr "Files: {files}"
+
+msgid "PDF attached"
+msgstr "PDF attached"
+
+msgid "XML attached"
+msgstr "XML attached"
+
+msgid "Files: fiscal XML when available; graphic PDF is not sent."
+msgstr "Files: fiscal XML when available; graphic PDF is not sent."
+
+msgid "Verify in DIAN: {url}"
+msgstr "Verify in DIAN: {url}"
+
+msgid "Technology provider / software"
+msgstr "Technology provider / software"
+
+msgid "Not responsible for VAT"
+msgstr "Not responsible for VAT"
+
+msgid "Not the issuer of this sale"
+msgstr "Not the issuer of this sale"
+
+msgid "Technical DIAN biller"
+msgstr "Technical DIAN biller"
+
+msgid "DIAN issuer: establishment (tenant)"
+msgstr "DIAN issuer: establishment (tenant)"
+
+msgid "Establishment receipt (WARO software)"
+msgstr "Establishment receipt (WARO software)"
+
+msgid "tips"
+msgstr "tips"
+
+msgid "sales"
+msgstr "sales"
+
+msgid "There are no {noun} to export with the selected filters"
+msgstr "There are no {noun} to export with the selected filters"
+
+msgid "Period: {date_from} to {date_to}"
+msgstr "Period: {date_from} to {date_to}"
+
+msgid "From: {date_from}"
+msgstr "From: {date_from}"
+
+msgid "To: {date_to}"
+msgstr "To: {date_to}"
+
+msgid "Status: {status}"
+msgstr "Status: {status}"
+
+msgid "Completada"
+msgstr "Completed"
+
+msgid "Cancelada"
+msgstr "Cancelled"
+
+msgid "Pendiente"
+msgstr "Pending"
+
+msgid "Payment method: {payment_method}"
+msgstr "Payment method: {payment_method}"
+
+msgid "Search: {search}"
+msgstr "Search: {search}"
+
+msgid "No filters applied"
+msgstr "No filters applied"
+
+msgid ""
+"Hello {user_name}!\n"
+"\n"
+"Here is the tips report you requested.\n"
+"\n"
+"SUMMARY\n"
+"-------\n"
+"Total tips exported: {count}\n"
+"Total tips amount: {total}\n"
+"Generated on: {generated_at}\n"
+"\n"
+"APPLIED FILTERS\n"
+"-----------------\n"
+"{filter_text}\n"
+"\n"
+"The CSV file with the tips detail is attached.\n"
+"You can open it with Excel or Google Sheets.\n"
+"\n"
+"---\n"
+"{user_name} from {tenant_name}\n"
+"Colombian technology for the world.\n"
+msgstr ""
+"Hello {user_name}!\n"
+"\n"
+"Here is the tips report you requested.\n"
+"\n"
+"SUMMARY\n"
+"-------\n"
+"Total tips exported: {count}\n"
+"Total tips amount: {total}\n"
+"Generated on: {generated_at}\n"
+"\n"
+"APPLIED FILTERS\n"
+"-----------------\n"
+"{filter_text}\n"
+"\n"
+"The CSV file with the tips detail is attached.\n"
+"You can open it with Excel or Google Sheets.\n"
+"\n"
+"---\n"
+"{user_name} from {tenant_name}\n"
+"Colombian technology for the world.\n"
+
+msgid "Tips report - {date}"
+msgstr "Tips report - {date}"
+
+msgid ""
+"Hello {user_name}!\n"
+"\n"
+"Here is the sales report you requested.\n"
+"\n"
+"SUMMARY\n"
+"-------\n"
+"Total sales exported: {count}\n"
+"Completed sales: {completed_count}\n"
+"Cancelled sales: {cancelled_count}\n"
+"Total amount (completed): {total}\n"
+"Generated on: {generated_at}\n"
+"\n"
+"APPLIED FILTERS\n"
+"-----------------\n"
+"{filter_text}\n"
+"\n"
+"The CSV file with the sales detail is attached.\n"
+"You can open it with Excel or Google Sheets.\n"
+"\n"
+"---\n"
+"{user_name} from {tenant_name}\n"
+"Colombian technology for the world.\n"
+msgstr ""
+"Hello {user_name}!\n"
+"\n"
+"Here is the sales report you requested.\n"
+"\n"
+"SUMMARY\n"
+"-------\n"
+"Total sales exported: {count}\n"
+"Completed sales: {completed_count}\n"
+"Cancelled sales: {cancelled_count}\n"
+"Total amount (completed): {total}\n"
+"Generated on: {generated_at}\n"
+"\n"
+"APPLIED FILTERS\n"
+"-----------------\n"
+"{filter_text}\n"
+"\n"
+"The CSV file with the sales detail is attached.\n"
+"You can open it with Excel or Google Sheets.\n"
+"\n"
+"---\n"
+"{user_name} from {tenant_name}\n"
+"Colombian technology for the world.\n"
+
+msgid "Sales report - {date}"
+msgstr "Sales report - {date}"
+
+msgid "Waro Colombia - Reports"
+msgstr "Waro Colombia - Reports"
+
+msgid "Could not send the email. Please try again."
+msgstr "Could not send the email. Please try again."
+
+msgid "Report sent to {email}"
+msgstr "Report sent to {email}"

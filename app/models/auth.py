@@ -1,9 +1,12 @@
 from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Literal, Optional, Dict, Any
 from uuid import UUID
 
 from app.core.email_utils import normalize_email
+
+PreferredLocale = Literal['es', 'en', 'pt', 'fr', 'de', 'ar', 'hi', 'zh']
+
 
 class User(BaseModel):
     id: UUID
@@ -14,6 +17,14 @@ class User(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+class ProfileUser(User):
+    user_name: Optional[str] = None
+    description: Optional[str] = None
+    logo_avatar: Optional[str] = None
+    preferred_locale: Optional[PreferredLocale] = None
+
 
 class Session(BaseModel):
     expires_at: datetime = Field(alias='expiresAt')
@@ -29,10 +40,11 @@ class Tenant(BaseModel):
     id: UUID
     name: str
     slug: str
+    ui_locale: str = "es"
 
 class SessionResponse(BaseModel):
     success: bool = True
-    user: User
+    user: ProfileUser
     session: Session
     has_internal_access: bool = False
     current_tenant: Optional[Tenant] = Field(alias='currentTenant', default=None)
@@ -99,13 +111,39 @@ class SwitchTenantResponse(BaseModel):
 
 
 class UpdateProfileRequest(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=120)
     user_name: Optional[str] = None
     phone_number: Optional[str] = None
     city: Optional[str] = None
+    description: Optional[str] = Field(default=None, max_length=500)
+    preferred_locale: Optional[PreferredLocale] = None
+
+    @field_validator('name', mode='before')
+    @classmethod
+    def _normalize_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError('Name cannot be empty')
+        return normalized
+
+    @field_validator('description', mode='before')
+    @classmethod
+    def _normalize_description(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 class UpdateProfileResponse(BaseModel):
     success: bool = True
     message: str = "Profile updated successfully"
-    user: User
+    user: ProfileUser
+
+
+class ProfileAvatarResponse(BaseModel):
+    success: bool = True
+    url: str
+    logo_avatar: str

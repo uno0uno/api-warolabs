@@ -1,8 +1,8 @@
 """
 Customer Models - Pydantic schemas for customer management
 """
-from pydantic import BaseModel, Field, model_validator
-from typing import Optional, List, Literal
+from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Any, Optional, List, Literal
 from uuid import UUID
 from datetime import datetime
 
@@ -12,12 +12,25 @@ from datetime import datetime
 FiscalIdType = Literal['CC', 'CE', 'NIT', 'PA', 'TI']
 
 
+def normalize_fiscal_id(value: Any) -> Optional[str]:
+    """Keep only Matias/DIAN-safe alphanumeric document characters."""
+    if value is None:
+        return None
+    normalized = ''.join(ch for ch in str(value).strip().upper() if ch.isalnum())
+    return normalized or None
+
+
 class FiscalDataMixin(BaseModel):
     """Optional fiscal fields used when emitting an identified electronic invoice."""
     fiscal_id_type: Optional[FiscalIdType] = Field(None, description="DIAN doc type: CC, CE, NIT, PA, TI")
     fiscal_id: Optional[str] = Field(None, max_length=30, description="Document number (NIT without DV)")
     fiscal_business_name: Optional[str] = Field(None, max_length=255, description="Razón social or legal name")
     fiscal_email: Optional[str] = Field(None, description="Email used for the invoice (overrides general email)")
+
+    @field_validator('fiscal_id', mode='before')
+    @classmethod
+    def normalize_fiscal_id_field(cls, value):
+        return normalize_fiscal_id(value)
 
     @model_validator(mode='after')
     def validate_fiscal_triplet(self):

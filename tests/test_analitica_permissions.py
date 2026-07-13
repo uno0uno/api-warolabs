@@ -102,3 +102,52 @@ def test_kitchen_role_denied_analitica_endpoint_under_enforce():
 
     assert response.status_code == 403
     assert "analitica" in response.json()["detail"].lower()
+
+
+def test_owner_role_passes_ingredient_report_endpoint_under_enforce():
+    """Owner reaches GET /analytics/ingredients/{id}/report under enforce."""
+    session = _build_session(role="owner")
+    ingredient_id = uuid4()
+    app = FastAPI()
+    app.include_router(analytics_router)
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.routers.analytics.analytics_service.get_ingredient_analytics_report",
+             new=AsyncMock(return_value={"success": True, "data": {"ingredient": {"id": str(ingredient_id)}}}),
+         ) as report:
+        client = TestClient(app)
+        response = client.get(f"/analytics/ingredients/{ingredient_id}/report")
+
+    assert response.status_code == 200
+    report.assert_awaited_once()
+
+
+def test_kitchen_role_denied_ingredient_report_endpoint_under_enforce():
+    """Kitchen role hits 403 on ingredient report because it lacks ANALITICA."""
+    session = _build_session(role="kitchen")
+    ingredient_id = uuid4()
+    app = FastAPI()
+    app.include_router(analytics_router)
+
+    kitchen_modules = frozenset({Module.DESPACHO})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=kitchen_modules),
+         ), \
+         patch(
+             "app.routers.analytics.analytics_service.get_ingredient_analytics_report",
+             new=AsyncMock(return_value={"success": True}),
+         ) as report:
+        client = TestClient(app)
+        response = client.get(f"/analytics/ingredients/{ingredient_id}/report")
+
+    assert response.status_code == 403
+    assert "analitica" in response.json()["detail"].lower()
+    report.assert_not_awaited()

@@ -18,7 +18,8 @@ from app.models.customer import (
     CustomerUpdateResponse,
     TopProduct,
     CustomerInsights,
-    CustomerInsightsResponse
+    CustomerInsightsResponse,
+    normalize_fiscal_id,
 )
 from uuid import UUID
 import json
@@ -169,7 +170,7 @@ async def search_or_create_customer(
                         """,
                         existing_customer['id'],
                         customer_data.fiscal_id_type,
-                        customer_data.fiscal_id,
+                        normalize_fiscal_id(customer_data.fiscal_id),
                         customer_data.fiscal_business_name,
                         customer_data.fiscal_email,
                     )
@@ -242,7 +243,7 @@ async def search_or_create_customer(
                     customer_data.name,
                     email,
                     customer_data.fiscal_id_type,
-                    customer_data.fiscal_id,
+                    normalize_fiscal_id(customer_data.fiscal_id),
                     customer_data.fiscal_business_name,
                     customer_data.fiscal_email,
                 )
@@ -576,7 +577,7 @@ async def update_customer(
             if update_data.fiscal_id_type is not None:
                 fields['fiscal_id_type'] = update_data.fiscal_id_type
             if update_data.fiscal_id is not None:
-                fields['fiscal_id'] = update_data.fiscal_id.strip() or None
+                fields['fiscal_id'] = normalize_fiscal_id(update_data.fiscal_id)
             if update_data.fiscal_business_name is not None:
                 fields['fiscal_business_name'] = update_data.fiscal_business_name.strip() or None
             if update_data.fiscal_email is not None:

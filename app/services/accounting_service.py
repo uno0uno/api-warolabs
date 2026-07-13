@@ -1131,12 +1131,12 @@ async def _compute_pl_for_period(
     Prov base= SUM(latest employee_salaries.total_salary) for active employees
     """
     month_str = f"{year}-{month:02d}"
-    month_start = f"{year}-{month:02d}-01"
-    # Last day: first day of next month - 1
+    month_start = date(year, month, 1)
+    # Exclusive upper bound: first day of next month.
     if month == 12:
-        month_end = f"{year + 1}-01-01"
+        month_end = date(year + 1, 1, 1)
     else:
-        month_end = f"{year}-{month + 1:02d}-01"
+        month_end = date(year, month + 1, 1)
 
     # --- Revenue ---
     rev_row = await conn.fetchrow(
@@ -1145,8 +1145,8 @@ async def _compute_pl_for_period(
         FROM closing_summary cs
         JOIN accounting_period ap ON ap.id = cs.accounting_period_id
         WHERE ap.tenant_id = $1
-          AND ap.period_start >= $2::date
-          AND ap.period_start <  $3::date
+          AND ap.period_start >= $2
+          AND ap.period_start <  $3
           AND ap.deleted_at IS NULL
         """,
         tenant_id, month_start, month_end,
@@ -1172,8 +1172,8 @@ async def _compute_pl_for_period(
         SELECT COALESCE(SUM(tp.total_amount), 0) AS total
         FROM tenant_purchases tp
         WHERE tp.tenant_id = $1
-          AND tp.received_at >= $2::timestamptz
-          AND tp.received_at <  $3::timestamptz
+          AND tp.received_at >= $2::date::timestamptz
+          AND tp.received_at <  $3::date::timestamptz
           AND tp.status IN ('received', 'verified', 'invoiced', 'paid')
         """,
         tenant_id, month_start, month_end,

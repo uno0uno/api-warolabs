@@ -10,7 +10,13 @@ from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
-from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone, tenant_today
+from app.core.timezones import get_zoneinfo, local_date_for_tenant, resolve_tenant_timezone, tenant_today
+from app.core.localization import (
+    format_datetime as format_localized_datetime,
+    format_money,
+    get_translator,
+    resolve_tenant_locale_settings,
+)
 from app.services.aws_ses_service import ses_service
 from app.services.waros_service import evaluate_and_award
 from app.services.cierre_service import (
@@ -21,8 +27,12 @@ from app.services.cierre_service import (
 )
 from app.services.email_helpers import send_pos_receipt_email
 from app.services.email_sender import resolve_sender_email_for_tenant
+from app.services.invoicing_presentation import (
+    build_invoice_presentation,
+    commercial_header_name,
+)
 from fastapi import HTTPException
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 import csv
 
 
@@ -41,6 +51,10 @@ def parse_date(date_str: Optional[str]) -> Optional[date]:
 
 logger = logging.getLogger(__name__)
 _INVENTORY_QUANTITY_SCALE = Decimal("0.000001")
+
+
+def _tr(_, message: str, **kwargs: Any) -> str:
+    return _(message).format(**kwargs)
 
 
 def _date_iso(value: Any) -> Optional[str]:
@@ -287,6 +301,76 @@ def _compute_tax_breakdown(
         liquor_tax = round(liq_subtotal * liq_rate)
 
     return float(standard_tax), float(liquor_tax), standard_tax_label
+
+
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    if not row:
+        return default
+    if hasattr(row, "get"):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
+def _iso_datetime(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _invoice_attachment_flags(invoice_row: Any) -> Dict[str, bool]:
+    return {
+        "pdf": bool(_row_get(invoice_row, "r2_pdf_key")),
+        "xml": bool(_row_get(invoice_row, "r2_xml_key")),
+    }
+
+
+def _tax_detail_rows(
+    items_rows: List[Any],
+    standard_tax: float,
+    liquor_tax: float,
+    standard_tax_label: str,
+) -> List[Dict[str, Any]]:
+    std_base = sum(float(r["subtotal"]) for r in items_rows if r["tax_category"] == "standard")
+    liq_base = sum(float(r["subtotal"]) for r in items_rows if r["tax_category"] == "liquor")
+    rows: List[Dict[str, Any]] = []
+    if standard_tax > 0:
+        rows.append({"label": standard_tax_label, "base": std_base, "amount": standard_tax})
+    if liquor_tax > 0:
+        rows.append({"label": "IVA licores 5%", "base": liq_base, "amount": liquor_tax})
+    return rows
+
+
+def _build_invoice_presentation(
+    invoice_row: Any,
+    order_row: Any,
+    profile_row: Any,
+    resolution_row: Any,
+    tax_details: List[Dict[str, Any]],
+    *,
+    serialize_datetimes: bool = False,
+    provider: str = "matias",
+) -> Dict[str, Any]:
+    """
+    FE presentation for email/print/API.
+
+    Emisor = tenant fiscal only (never product brand / display_name as issuer).
+    Facturador path defaults to Matias Casa de Software.
+    """
+    return build_invoice_presentation(
+        invoice_row=invoice_row,
+        order_row=order_row,
+        fiscal_row=profile_row,
+        public_profile=profile_row,
+        resolution_row=resolution_row,
+        tax_details=tax_details,
+        provider=provider,
+        serialize_datetimes=serialize_datetimes,
+    )
 
 
 async def get_orders_list(
@@ -1433,6 +1517,93 @@ async def update_order_status(
         raise APIError(f"Error al actualizar estado: {str(e)}", status_code=500)
 
 
+async def associate_order_customer(
+    request: Request,
+    order_id: UUID,
+    customer_id: UUID,
+) -> dict:
+    """Associate an order with a tenant customer before electronic invoicing."""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            order_row = await conn.fetchrow(
+                """
+                SELECT id
+                FROM orders
+                WHERE id = $1
+                  AND tenant_id = $2
+                  AND (pos_cart_id IS NOT NULL OR table_session_id IS NOT NULL OR extra_attributes->>'source' = 'manual')
+                """,
+                order_id,
+                tenant_id,
+            )
+            if not order_row:
+                raise APIError("Order not found", status_code=404)
+
+            invoice_row = await conn.fetchrow(
+                """
+                SELECT id
+                FROM electronic_invoices
+                WHERE order_id = $1
+                  AND tenant_id = $2
+                LIMIT 1
+                """,
+                order_id,
+                tenant_id,
+            )
+            if invoice_row:
+                raise APIError(
+                    "No se puede cambiar el cliente porque la venta ya tiene factura electrónica.",
+                    status_code=409,
+                    details={"code": "invoice_exists"},
+                )
+
+            customer_row = await conn.fetchrow(
+                """
+                SELECT p.id
+                FROM profile p
+                JOIN tenant_customers tc ON tc.profile_id = p.id
+                WHERE p.id = $1
+                  AND tc.tenant_id = $2
+                  AND tc.is_active = true
+                LIMIT 1
+                """,
+                customer_id,
+                tenant_id,
+            )
+            if not customer_row:
+                raise APIError("Customer not found", status_code=404)
+
+            await conn.execute(
+                """
+                UPDATE orders
+                SET customer_id = $1
+                WHERE id = $2
+                  AND tenant_id = $3
+                """,
+                customer_id,
+                order_id,
+                tenant_id,
+            )
+
+        return {
+            "success": True,
+            "message": "Cliente asociado a la venta",
+            "customer_id": str(customer_id),
+        }
+
+    except (AuthenticationError, APIError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error associating order customer: {str(e)}")
+        raise APIError(f"Error al asociar cliente: {str(e)}", status_code=500)
+
+
 async def _order_inventory_already_consumed_before_completion(
     conn,
     *,
@@ -2376,6 +2547,8 @@ async def export_orders_to_email(
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
         user_email = session_context.email
+        tenant_context = getattr(request.state, "tenant_context", None)
+        tenant_name = getattr(tenant_context, "tenant_name", None) or "Waro Colombia"
         user_name = session_context.name or "Usuario"
 
         if not tenant_id:
@@ -2385,7 +2558,11 @@ async def export_orders_to_email(
             raise APIError("No se encontró el correo del usuario", status_code=400)
 
         async with get_db_connection() as conn:
-            timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+            locale_settings = await resolve_tenant_locale_settings(conn, tenant_id)
+            locale = locale_settings.locale
+            currency_code = locale_settings.currency_code
+            timezone_name = locale_settings.timezone
+            _ = get_translator(locale)
             # Build WHERE clause (same as get_orders_list but without pagination).
             # warocol.com#640 — tips-only mode swaps the orders-list base predicate
             # for tip_amount > 0 (all tips, regardless of channel).
@@ -2534,8 +2711,8 @@ async def export_orders_to_email(
             orders_rows = await conn.fetch(orders_query, *params)
 
             if not orders_rows:
-                noun = "propinas" if tips_only else "ventas"
-                raise APIError(f"No hay {noun} para exportar con los filtros seleccionados", status_code=404)
+                noun = _("tips") if tips_only else _("sales")
+                raise APIError(_tr(_, "There are no {noun} to export with the selected filters", noun=noun), status_code=404)
 
             # Status labels
             status_labels = {
@@ -2545,7 +2722,8 @@ async def export_orders_to_email(
             }
 
             # Generate CSV with Excel-friendly formatting
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
+            local_now = now.astimezone(get_zoneinfo(timezone_name))
             output = io.StringIO()
             writer = csv.writer(output, delimiter=';')  # Use semicolon for better Excel compatibility
 
@@ -2633,78 +2811,94 @@ async def export_orders_to_email(
             # Build filter description for email
             filter_desc = []
             if date_from and date_to:
-                filter_desc.append(f"Período: {date_from} al {date_to}")
+                filter_desc.append(_tr(_, "Period: {date_from} to {date_to}", date_from=date_from, date_to=date_to))
             elif date_from:
-                filter_desc.append(f"Desde: {date_from}")
+                filter_desc.append(_tr(_, "From: {date_from}", date_from=date_from))
             elif date_to:
-                filter_desc.append(f"Hasta: {date_to}")
+                filter_desc.append(_tr(_, "To: {date_to}", date_to=date_to))
             if status:
-                filter_desc.append(f"Estado: {status_labels.get(status, status)}")
+                filter_desc.append(_tr(_, "Status: {status}", status=_(status_labels.get(status, status))))
             if payment_method:
-                filter_desc.append(f"Método de pago: {payment_method}")
+                filter_desc.append(_tr(_, "Payment method: {payment_method}", payment_method=payment_method))
             if search:
-                filter_desc.append(f"Búsqueda: {search}")
+                filter_desc.append(_tr(_, "Search: {search}", search=search))
 
-            filter_text = "\n".join(filter_desc) if filter_desc else "Sin filtros aplicados"
+            filter_text = "\n".join(filter_desc) if filter_desc else _("No filters applied")
 
-            date_str = now.strftime('%Y-%m-%d_%H%M')
+            date_str = local_now.strftime('%Y-%m-%d_%H%M')
 
             if tips_only:
                 # warocol.com#640 — tip-specific email copy + filename + subject
-                email_body = f"""¡Hola {user_name}!
+                email_body = _tr(_, """Hello {user_name}!
 
-Aquí está tu reporte de propinas solicitado.
+Here is the tips report you requested.
 
-RESUMEN
+SUMMARY
 -------
-Total de propinas exportadas: {len(orders_rows)}
-Suma total de propinas: ${total_sum:,.0f}
-Fecha de generación: {now.strftime('%d/%m/%Y %H:%M')}
+Total tips exported: {count}
+Total tips amount: {total}
+Generated on: {generated_at}
 
-FILTROS APLICADOS
+APPLIED FILTERS
 -----------------
 {filter_text}
 
-Adjunto encontrarás el archivo CSV con el detalle de las propinas.
-Puedes abrirlo con Excel o Google Sheets.
+The CSV file with the tips detail is attached.
+You can open it with Excel or Google Sheets.
 
 ---
-Saifer 101 de Waro Colombia
-Tecnología colombiana para el mundo.
-"""
+{user_name} from {tenant_name}
+Colombian technology for the world.
+""",
+                    user_name=user_name,
+                    count=len(orders_rows),
+                    total=format_money(total_sum, locale, currency_code),
+                    generated_at=format_localized_datetime(now, locale, timezone_name),
+                    filter_text=filter_text,
+                    tenant_name=tenant_name,
+                )
                 filename = f"propinas_{date_str}.csv"
-                subject = f"Reporte de Propinas - {date_str}"
+                subject = _tr(_, "Tips report - {date}", date=date_str)
             else:
-                email_body = f"""¡Hola {user_name}!
+                email_body = _tr(_, """Hello {user_name}!
 
-Aquí está tu reporte de ventas solicitado.
+Here is the sales report you requested.
 
-RESUMEN
+SUMMARY
 -------
-Total de ventas exportadas: {len(orders_rows)}
-Ventas completadas: {completed_count}
-Ventas canceladas: {cancelled_count}
-Monto total (completadas): ${total_sum:,.0f}
-Fecha de generación: {now.strftime('%d/%m/%Y %H:%M')}
+Total sales exported: {count}
+Completed sales: {completed_count}
+Cancelled sales: {cancelled_count}
+Total amount (completed): {total}
+Generated on: {generated_at}
 
-FILTROS APLICADOS
+APPLIED FILTERS
 -----------------
 {filter_text}
 
-Adjunto encontrarás el archivo CSV con el detalle de las ventas.
-Puedes abrirlo con Excel o Google Sheets.
+The CSV file with the sales detail is attached.
+You can open it with Excel or Google Sheets.
 
 ---
-Saifer 101 de Waro Colombia
-Tecnología colombiana para el mundo.
-"""
+{user_name} from {tenant_name}
+Colombian technology for the world.
+""",
+                    user_name=user_name,
+                    count=len(orders_rows),
+                    completed_count=completed_count,
+                    cancelled_count=cancelled_count,
+                    total=format_money(total_sum, locale, currency_code),
+                    generated_at=format_localized_datetime(now, locale, timezone_name),
+                    filter_text=filter_text,
+                    tenant_name=tenant_name,
+                )
                 filename = f"ventas_{date_str}.csv"
-                subject = f"Reporte de Ventas - {date_str}"
+                subject = _tr(_, "Sales report - {date}", date=date_str)
 
             # Send email with CSV attachment
             success = await ses_service.send_email_with_attachment(
                 from_email=await resolve_sender_email_for_tenant(tenant_id),
-                from_name="Waro Colombia - Reportes",
+                from_name=_("Waro Colombia - Reports"),
                 to_emails=[user_email],
                 subject=subject,
                 text_body=email_body,
@@ -2714,11 +2908,11 @@ Tecnología colombiana para el mundo.
             )
 
             if not success:
-                raise APIError("Error al enviar el correo. Intenta de nuevo.", status_code=500)
+                raise APIError(_("Could not send the email. Please try again."), status_code=500)
 
             return {
                 "success": True,
-                "message": f"Reporte enviado a {user_email}",
+                "message": _tr(_, "Report sent to {email}", email=user_email),
                 "data": {
                     "email": user_email,
                     "orders_count": len(orders_rows),
@@ -3458,6 +3652,16 @@ async def create_manual_order(
         customer_uuid = UUID(customer_id) if customer_id else None
         payment_method_uuid = UUID(payment_method_id) if payment_method_id else None
         split_payments = payments or []
+        uses_credit = payment_method == "credit" or any(
+            payment.get("payment_method") == "credit"
+            for payment in split_payments
+        )
+
+        if uses_credit and not customer_uuid:
+            raise APIError(
+                "El pago a crédito requiere un cliente identificado",
+                status_code=400,
+            )
 
         if payment_method == "customer_wallet":
             if not customer_uuid:
@@ -3486,6 +3690,20 @@ async def create_manual_order(
             async with conn.transaction():
                 # Guard: block creation if order_date falls in a closed monthly accounting period (#362)
                 await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_datetime)
+
+                if uses_credit and customer_uuid:
+                    customer_check = await conn.fetchrow(
+                        "SELECT phone_number FROM profile WHERE id = $1",
+                        customer_uuid,
+                    )
+                    if (
+                        not customer_check
+                        or customer_check["phone_number"] == "0000000000"
+                    ):
+                        raise APIError(
+                            "El pago a crédito requiere un cliente identificado (no anónimo)",
+                            status_code=400,
+                        )
 
                 if payment_method == "customer_wallet" and customer_uuid:
                     from app.services.customer_wallet_service import assert_wallet_customer_identified
@@ -3537,14 +3755,20 @@ async def create_manual_order(
                             status_code=400,
                         )
 
+                payment_status = (
+                    "paid"
+                    if split_payments
+                    else ("credit" if payment_method == "credit" else "paid")
+                )
+
                 order_row = await conn.fetchrow(
                     """
                     INSERT INTO orders (
                         tenant_id, customer_id, payment_method, payment_method_id,
-                        order_date, total_amount, status,
+                        order_date, total_amount, status, payment_status,
                         discount_type, discount_value, discount_amount, extra_attributes
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8, $9, $10)
+                    VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8, $9, $10, $11)
                     RETURNING id, order_number, order_date, created_at
                     """,
                     tenant_id,
@@ -3553,6 +3777,7 @@ async def create_manual_order(
                     payment_method_uuid,
                     order_datetime,
                     total_amount,
+                    payment_status,
                     normalized_discount_type,
                     normalized_discount_value,
                     discount_amount or None,
@@ -3787,6 +4012,7 @@ async def create_manual_order(
                 "status": "completed",
                 "payment_method": payment_method,
                 "payment_method_id": str(payment_method_uuid) if payment_method_uuid else None,
+                "payment_status": payment_status,
                 "discount_type": normalized_discount_type,
                 "discount_value": normalized_discount_value,
                 "discount_amount": float(discount_amount),
@@ -3941,10 +4167,17 @@ async def send_invoice_email(
     async with get_db_connection() as conn:
         # 1. Order header (also enforces tenant ownership).
         order_row = await conn.fetchrow(
-            """SELECT id, order_number, order_date, total_amount, payment_method,
-                      discount_amount
-               FROM orders
-               WHERE id = $1 AND tenant_id = $2""",
+            """SELECT o.id, o.order_number, o.order_date, o.total_amount, o.payment_method,
+                      o.payment_status, o.discount_amount,
+                      c.name AS customer_name,
+                      c.email AS customer_email,
+                      c.fiscal_id_type AS customer_fiscal_id_type,
+                      c.fiscal_id AS customer_fiscal_id,
+                      c.fiscal_business_name AS customer_fiscal_business_name,
+                      c.fiscal_email AS customer_fiscal_email
+               FROM orders o
+               LEFT JOIN profile c ON c.id = o.customer_id
+               WHERE o.id = $1 AND o.tenant_id = $2""",
             order_id, tenant_id,
         )
         if not order_row:
@@ -3953,7 +4186,8 @@ async def send_invoice_email(
         # 2. Invoice header — must exist and be accepted. PDF attachment is optional:
         # accepted Matias invoices may exist before the local R2 PDF key is stored.
         invoice_row = await conn.fetchrow(
-            """SELECT prefix, invoice_number, cufe, status, r2_pdf_key
+            """SELECT prefix, invoice_number, cufe, status, r2_pdf_key, r2_xml_key,
+                      emitted_at, created_at
                FROM electronic_invoices
                WHERE order_id = $1 AND tenant_id = $2
                ORDER BY created_at DESC
@@ -4012,14 +4246,32 @@ async def send_invoice_email(
                 ],
             })
 
-        # 5. Business profile for the email header.
+        # 5. Business profile + fiscal issuer (tenant is DIAN emisor; not WARO brand).
         profile_row = await conn.fetchrow(
             """SELECT COALESCE(p.display_name, t.name) AS display_name,
-                      p.address, p.city, p.phone_number
+                      p.address, p.city, p.phone_number,
+                      fd.business_name AS fiscal_business_name,
+                      fd.business_name AS business_name,
+                      fd.nit, fd.fiscal_address, fd.city AS fiscal_city,
+                      fd.phone AS fiscal_phone, fd.email AS fiscal_email,
+                      fd.matias_company_id
                FROM tenants t
                LEFT JOIN tenant_public_profiles p ON p.tenant_id = t.id
+               LEFT JOIN tenant_fiscal_data fd ON fd.tenant_id = t.id
                WHERE t.id = $1""",
             tenant_id,
+        )
+
+        resolution_row = await conn.fetchrow(
+            """SELECT resolution_number, prefix, date_from, date_to,
+                      from_number, to_number
+               FROM dian_resolutions
+               WHERE tenant_id = $1
+                 AND prefix = $2
+                 AND is_active = true
+               ORDER BY created_at DESC
+               LIMIT 1""",
+            tenant_id, invoice_row['prefix'],
         )
 
     discount_amount = float(order_row['discount_amount']) if order_row['discount_amount'] is not None else 0.0
@@ -4033,7 +4285,38 @@ async def send_invoice_email(
         else 0.0
     )
 
-    success = await send_pos_receipt_email(
+    tax_details = _tax_detail_rows(items_for_tax, std_tax, liq_tax, tax_label)
+    invoice_presentation = _build_invoice_presentation(
+        invoice_row,
+        order_row,
+        profile_row,
+        resolution_row,
+        tax_details,
+        serialize_datetimes=False,
+        provider="matias",
+    )
+
+    # FE email: subject/header prefer tenant fiscal name (emisor), not product brand.
+    issuer_name = (invoice_presentation.get("issuer") or {}).get("name")
+    email_business_name = commercial_header_name(
+        fiscal_row=profile_row,
+        public_profile=profile_row,
+        prefer_fiscal=True,
+    ) or issuer_name
+    email_address = (
+        (invoice_presentation.get("issuer") or {}).get("address")
+        or (_row_get(profile_row, "address") if profile_row else None)
+    )
+    email_city = (
+        (invoice_presentation.get("issuer") or {}).get("city")
+        or (_row_get(profile_row, "city") if profile_row else None)
+    )
+    email_phone = (
+        (invoice_presentation.get("issuer") or {}).get("phone")
+        or (_row_get(profile_row, "phone_number") if profile_row else None)
+    )
+
+    send_result = await send_pos_receipt_email(
         customer_email=recipient_email,
         order_number=int(order_row['order_number']),
         total_amount=float(order_row['total_amount']),
@@ -4041,10 +4324,10 @@ async def send_invoice_email(
         items=items,
         order_date=order_row['order_date'],
         tenant_id=str(tenant_id),
-        business_name=profile_row['display_name'] if profile_row else None,
-        business_address=profile_row['address'] if profile_row else None,
-        business_city=profile_row['city'] if profile_row else None,
-        business_phone=profile_row['phone_number'] if profile_row else None,
+        business_name=email_business_name,
+        business_address=email_address,
+        business_city=email_city,
+        business_phone=email_phone,
         discount_amount=discount_amount,
         subtotal=subtotal_for_email,
         standard_tax=std_tax,
@@ -4056,7 +4339,17 @@ async def send_invoice_email(
         invoice_prefix=invoice_row['prefix'],
         invoice_number=int(invoice_row['invoice_number']),
         invoice_cufe=invoice_row['cufe'],
+        invoice_presentation=invoice_presentation,
+        return_details=True,
     )
+    if isinstance(send_result, dict):
+        success = bool(send_result.get("success"))
+        attachment_status = send_result.get("attachments") or _invoice_attachment_flags(invoice_row)
+        attachment_warnings = send_result.get("attachment_warnings") or []
+    else:
+        success = bool(send_result)
+        attachment_status = _invoice_attachment_flags(invoice_row)
+        attachment_warnings = []
 
     if not success:
         raise HTTPException(
@@ -4064,4 +4357,9 @@ async def send_invoice_email(
             detail="No se pudo enviar el correo. Intentá nuevamente en unos segundos.",
         )
 
-    return {'success': True, 'sent_to': recipient_email}
+    return {
+        'success': True,
+        'sent_to': recipient_email,
+        'attachments': attachment_status,
+        'attachment_warnings': attachment_warnings,
+    }

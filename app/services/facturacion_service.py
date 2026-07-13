@@ -26,8 +26,36 @@ from fastapi import HTTPException
 from app.config import settings
 from app.database import get_db_connection
 from app.services.aws_s3_service import AWSS3Service
+from app.services.invoicing_presentation import build_invoice_presentation
 
 logger = logging.getLogger(__name__)
+
+
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    if not row:
+        return default
+    if hasattr(row, "get"):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
+def _date_iso(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    return value.isoformat()
+
+
+def _datetime_iso(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
 
 
 async def emit_invoice(
@@ -423,11 +451,41 @@ async def get_order_invoice(
     """
     async with get_db_connection(use_transaction=False) as conn:
         row = await conn.fetchrow(
-            """SELECT id, invoice_number, prefix, cufe, status,
-                      r2_pdf_key, error_message, emitted_at, created_at
-               FROM electronic_invoices
-               WHERE order_id = $1 AND tenant_id = $2
-               ORDER BY created_at DESC
+            """SELECT ei.id, ei.invoice_number, ei.prefix, ei.cufe, ei.status,
+                      ei.r2_pdf_key, ei.r2_xml_key, ei.error_message, ei.emitted_at, ei.created_at,
+                      o.payment_method, o.payment_status,
+                      c.name AS customer_name,
+                      c.email AS customer_email,
+                      c.fiscal_id_type AS customer_fiscal_id_type,
+                      c.fiscal_id AS customer_fiscal_id,
+                      c.fiscal_business_name AS customer_fiscal_business_name,
+                      c.fiscal_email AS customer_fiscal_email,
+                      COALESCE(tpp.display_name, t.name) AS display_name,
+                      tpp.address, tpp.city, tpp.phone_number,
+                      fd.business_name AS fiscal_business_name,
+                      fd.business_name AS business_name,
+                      fd.nit, fd.fiscal_address, fd.city AS fiscal_city,
+                      fd.phone AS fiscal_phone, fd.email AS fiscal_email,
+                      fd.matias_company_id,
+                      dr.resolution_number, dr.date_from, dr.date_to,
+                      dr.from_number, dr.to_number
+               FROM electronic_invoices ei
+               LEFT JOIN orders o ON o.id = ei.order_id AND o.tenant_id = ei.tenant_id
+               LEFT JOIN profile c ON c.id = o.customer_id
+               LEFT JOIN tenants t ON t.id = ei.tenant_id
+               LEFT JOIN tenant_public_profiles tpp ON tpp.tenant_id = ei.tenant_id
+               LEFT JOIN tenant_fiscal_data fd ON fd.tenant_id = ei.tenant_id
+               LEFT JOIN LATERAL (
+                   SELECT resolution_number, date_from, date_to, from_number, to_number
+                   FROM dian_resolutions
+                   WHERE tenant_id = ei.tenant_id
+                     AND prefix = ei.prefix
+                     AND is_active = true
+                   ORDER BY created_at DESC
+                   LIMIT 1
+               ) dr ON true
+               WHERE ei.order_id = $1 AND ei.tenant_id = $2
+               ORDER BY ei.created_at DESC
                LIMIT 1""",
             UUID(order_id), UUID(tenant_id),
         )
@@ -436,12 +494,44 @@ async def get_order_invoice(
         return None
 
     pdf_presigned_url: Optional[str] = None
-    if row['status'] == 'accepted' and row['r2_pdf_key']:
+    if (
+        settings.invoice_pdf_enabled
+        and row['status'] == 'accepted'
+        and row['r2_pdf_key']
+    ):
         try:
             s3 = AWSS3Service()
             pdf_presigned_url = await s3.get_presigned_url(row['r2_pdf_key'], expiration=3600)
         except Exception as exc:
             logger.warning(f"Could not generate presigned URL for invoice {row['id']}: {exc}")
+
+    # Single joined row carries invoice + order parties + fiscal issuer + resolution.
+    presentation = build_invoice_presentation(
+        invoice_row=row,
+        order_row=row,
+        fiscal_row=row,
+        public_profile=row,
+        resolution_row=row if _row_get(row, "resolution_number") else None,
+        tax_details=[],
+        provider="matias",
+        serialize_datetimes=True,
+    )
+    attachments = presentation.get('attachments') or {
+        'pdf': bool(row['r2_pdf_key']),
+        'xml': bool(row['r2_xml_key']),
+    }
+    if not settings.invoice_pdf_enabled:
+        attachments = {**attachments, 'pdf': False}
+
+    # Hide Matias "missing PDF" noise when PDF is intentionally disabled
+    error_message = row['error_message']
+    if (
+        not settings.invoice_pdf_enabled
+        and error_message
+        and 'did not return PDF' in str(error_message)
+        and 'XML' not in str(error_message)
+    ):
+        error_message = None
 
     return {
         'id': str(row['id']),
@@ -451,7 +541,11 @@ async def get_order_invoice(
         'cufe': row['cufe'],
         'status': row['status'],
         'pdf_presigned_url': pdf_presigned_url,
-        'error_message': row['error_message'],
+        'pdf_enabled': bool(settings.invoice_pdf_enabled),
+        'error_message': error_message,
         'emitted_at': row['emitted_at'].isoformat() if row['emitted_at'] else None,
         'created_at': row['created_at'].isoformat() if row['created_at'] else None,
+        'dian_url': presentation.get('dian_url'),
+        'attachments': attachments,
+        'presentation': presentation,
     }

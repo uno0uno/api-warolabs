@@ -356,6 +356,10 @@ class UpdateOrderStatusRequest(BaseModel):
     customer_id: Optional[str] = Field(None, description="UUID of customer to associate when required by payment method")
 
 
+class AssociateOrderCustomerRequest(BaseModel):
+    customer_id: UUID = Field(..., description="UUID of customer to associate before electronic invoicing")
+
+
 class BulkUpdateStatusRequest(BaseModel):
     order_ids: List[str] = Field(..., min_length=1)
     status: str = Field(..., description="completed | cancelled | pending")
@@ -395,6 +399,22 @@ async def update_order_status(
         body.status,
         body.payment_method,
         body.payment_method_id,
+        body.customer_id,
+    )
+
+
+@router.patch("/{order_id}/customer", dependencies=[Depends(require_module(Module.VENTAS))])
+async def associate_order_customer(
+    request: Request,
+    order_id: UUID,
+    body: AssociateOrderCustomerRequest,
+):
+    """
+    Associate or change the customer before an electronic invoice exists.
+    """
+    return await orders_service.associate_order_customer(
+        request,
+        order_id,
         body.customer_id,
     )
 
@@ -454,7 +474,8 @@ async def emit_order_invoice(
     Returns 403 if the tenant is not ready for electronic invoicing
     (issue #130: missing dev flag, fiscal data, or active resolution).
 
-    Returns: { order_id, invoice_number, prefix, cufe, status, pdf_presigned_url }
+    Returns invoice identifiers, status, PDF URL when available, and optional
+    fiscal presentation fields for receipt/email rendering.
     """
     session_context = require_valid_session(request)
     return await facturacion_service.emit_invoice(
@@ -472,7 +493,8 @@ async def get_order_invoice(
     """
     Get the current electronic invoice for an order.
 
-    Returns invoice status, CUFE, and a fresh presigned PDF URL (1h TTL).
+    Returns invoice status, CUFE, a fresh presigned PDF URL (1h TTL), safe
+    attachment flags, and optional fiscal presentation fields.
     Returns 404 if no invoice has been emitted for this order yet.
     """
     session_context = require_valid_session(request)
@@ -480,8 +502,10 @@ async def get_order_invoice(
         order_id=str(order_id),
         tenant_id=str(session_context.tenant_id),
     )
+    # Return 200 + null when no FE yet so browsers don't log a console 404 on
+    # every sales detail open (still "no invoice"; front treats null the same).
     if result is None:
-        raise HTTPException(status_code=404, detail="No invoice found for this order")
+        return None
     return result
 
 
@@ -520,5 +544,5 @@ async def send_order_invoice_email(
     order_id: UUID,
     body: SendInvoiceEmailBody,
 ):
-    """Send the WARO-branded receipt email for this order's accepted invoice (warocol.com#603)."""
+    """Send the fiscal receipt email for this order's accepted invoice."""
     return await orders_service.send_invoice_email(request, order_id, body.email)

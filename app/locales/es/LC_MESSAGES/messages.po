@@ -1,0 +1,312 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: WARO backend receipts 1.0\n"
+"Language: es\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Purchase receipt #{order_number} — {business_name}"
+msgstr "Recibo de compra #{order_number} — {business_name}"
+
+msgid "Electronic invoice {invoice_prefix}-{invoice_number} — {business_name}"
+msgstr "Factura electrónica {invoice_prefix}-{invoice_number} — {business_name}"
+
+msgid "Order #{order_number}"
+msgstr "Orden #{order_number}"
+
+msgid "Date: {date}"
+msgstr "Fecha: {date}"
+
+msgid "Phone: {phone}"
+msgstr "Tel: {phone}"
+
+msgid "PRODUCTS"
+msgstr "PRODUCTOS"
+
+msgid "Product"
+msgstr "Producto"
+
+msgid "Subtotal"
+msgstr "Subtotal"
+
+msgid "Promotion"
+msgstr "Promoción"
+
+msgid "Manual discount"
+msgstr "Descuento manual"
+
+msgid "WaRo redemption"
+msgstr "Canje WaRo"
+
+msgid "WaRo redemption (points)"
+msgstr "Canje WaRo (puntos)"
+
+msgid "WaRo redemption (free product)"
+msgstr "Canje WaRo (producto gratis)"
+
+msgid "WaRo redemption ({reward_name})"
+msgstr "Canje WaRo ({reward_name})"
+
+msgid "Tax"
+msgstr "Impuesto"
+
+msgid "Liquor VAT 5%"
+msgstr "IVA licores 5%"
+
+msgid "Tip"
+msgstr "Propina"
+
+msgid "TOTAL"
+msgstr "TOTAL"
+
+msgid "TOTAL CHARGED"
+msgstr "TOTAL COBRADO"
+
+msgid "Payment method: {payment_label}"
+msgstr "Método de pago: {payment_label}"
+
+msgid "Cash"
+msgstr "Efectivo"
+
+msgid "Card"
+msgstr "Tarjeta"
+
+msgid "Digital payment"
+msgstr "Pago digital"
+
+msgid "Credit"
+msgstr "Crédito"
+
+msgid "Customer wallet"
+msgstr "Billetera cliente"
+
+msgid "Thank you for your purchase."
+msgstr "Gracias por tu compra."
+
+msgid "SALE RECEIPT"
+msgstr "COMPROBANTE DE VENTA"
+
+msgid "Not a DIAN electronic invoice"
+msgstr "No es factura electrónica DIAN"
+
+msgid "Seller: {business_name}"
+msgstr "Vendedor: {business_name}"
+
+msgid "ELECTRONIC SALES INVOICE"
+msgstr "FACTURA ELECTRÓNICA DE VENTA"
+
+msgid "Graphic representation for accounting verification."
+msgstr "Representación gráfica para verificación contable."
+
+msgid "Number: {invoice_id}"
+msgstr "Número: {invoice_id}"
+
+msgid "DIAN status: {status}"
+msgstr "Estado DIAN: {status}"
+
+msgid "Issued: {date}"
+msgstr "Emisión: {date}"
+
+msgid "Issuer:"
+msgstr "Emisor:"
+
+msgid "Buyer:"
+msgstr "Adquirente:"
+
+msgid "Email: {email}"
+msgstr "Email: {email}"
+
+msgid "DIAN resolution: {number}"
+msgstr "Resolución DIAN: {number}"
+
+msgid "Range: {range}"
+msgstr "Rango: {range}"
+
+msgid "Valid from {date_from} to {date_to}"
+msgstr "Vigencia: {date_from} a {date_to}"
+
+msgid "N/A"
+msgstr "N/D"
+
+msgid "Taxes:"
+msgstr "Impuestos:"
+
+msgid " base {base}"
+msgstr " base {base}"
+
+msgid "Files: {files}"
+msgstr "Archivos: {files}"
+
+msgid "PDF attached"
+msgstr "PDF adjunto"
+
+msgid "XML attached"
+msgstr "XML adjunto"
+
+msgid "Files: fiscal XML when available; graphic PDF is not sent."
+msgstr "Archivos: XML fiscal cuando esté disponible; PDF gráfico no se envía."
+
+msgid "Verify in DIAN: {url}"
+msgstr "Verificar en DIAN: {url}"
+
+msgid "Technology provider / software"
+msgstr "Proveedor tecnológico / software"
+
+msgid "Not responsible for VAT"
+msgstr "No responsable de IVA"
+
+msgid "Not the issuer of this sale"
+msgstr "No es el emisor de esta venta"
+
+msgid "Technical DIAN biller"
+msgstr "Facturador técnico DIAN"
+
+msgid "DIAN issuer: establishment (tenant)"
+msgstr "Emisor DIAN: establecimiento (tenant)"
+
+msgid "Establishment receipt (WARO software)"
+msgstr "Comprobante del establecimiento (software WARO)"
+
+msgid "tips"
+msgstr "propinas"
+
+msgid "sales"
+msgstr "ventas"
+
+msgid "There are no {noun} to export with the selected filters"
+msgstr "No hay {noun} para exportar con los filtros seleccionados"
+
+msgid "Period: {date_from} to {date_to}"
+msgstr "Período: {date_from} al {date_to}"
+
+msgid "From: {date_from}"
+msgstr "Desde: {date_from}"
+
+msgid "To: {date_to}"
+msgstr "Hasta: {date_to}"
+
+msgid "Status: {status}"
+msgstr "Estado: {status}"
+
+msgid "Completada"
+msgstr "Completada"
+
+msgid "Cancelada"
+msgstr "Cancelada"
+
+msgid "Pendiente"
+msgstr "Pendiente"
+
+msgid "Payment method: {payment_method}"
+msgstr "Método de pago: {payment_method}"
+
+msgid "Search: {search}"
+msgstr "Búsqueda: {search}"
+
+msgid "No filters applied"
+msgstr "Sin filtros aplicados"
+
+msgid ""
+"Hello {user_name}!\n"
+"\n"
+"Here is the tips report you requested.\n"
+"\n"
+"SUMMARY\n"
+"-------\n"
+"Total tips exported: {count}\n"
+"Total tips amount: {total}\n"
+"Generated on: {generated_at}\n"
+"\n"
+"APPLIED FILTERS\n"
+"-----------------\n"
+"{filter_text}\n"
+"\n"
+"The CSV file with the tips detail is attached.\n"
+"You can open it with Excel or Google Sheets.\n"
+"\n"
+"---\n"
+"{user_name} from {tenant_name}\n"
+"Colombian technology for the world.\n"
+msgstr ""
+"¡Hola {user_name}!\n"
+"\n"
+"Aquí está tu reporte de propinas solicitado.\n"
+"\n"
+"RESUMEN\n"
+"-------\n"
+"Total de propinas exportadas: {count}\n"
+"Suma total de propinas: {total}\n"
+"Fecha de generación: {generated_at}\n"
+"\n"
+"FILTROS APLICADOS\n"
+"-----------------\n"
+"{filter_text}\n"
+"\n"
+"Adjunto encontrarás el archivo CSV con el detalle de las propinas.\n"
+"Puedes abrirlo con Excel o Google Sheets.\n"
+"\n"
+"---\n"
+"{user_name} de {tenant_name}\n"
+"Tecnología colombiana para el mundo.\n"
+
+msgid "Tips report - {date}"
+msgstr "Reporte de Propinas - {date}"
+
+msgid ""
+"Hello {user_name}!\n"
+"\n"
+"Here is the sales report you requested.\n"
+"\n"
+"SUMMARY\n"
+"-------\n"
+"Total sales exported: {count}\n"
+"Completed sales: {completed_count}\n"
+"Cancelled sales: {cancelled_count}\n"
+"Total amount (completed): {total}\n"
+"Generated on: {generated_at}\n"
+"\n"
+"APPLIED FILTERS\n"
+"-----------------\n"
+"{filter_text}\n"
+"\n"
+"The CSV file with the sales detail is attached.\n"
+"You can open it with Excel or Google Sheets.\n"
+"\n"
+"---\n"
+"{user_name} from {tenant_name}\n"
+"Colombian technology for the world.\n"
+msgstr ""
+"¡Hola {user_name}!\n"
+"\n"
+"Aquí está tu reporte de ventas solicitado.\n"
+"\n"
+"RESUMEN\n"
+"-------\n"
+"Total de ventas exportadas: {count}\n"
+"Ventas completadas: {completed_count}\n"
+"Ventas canceladas: {cancelled_count}\n"
+"Monto total (completadas): {total}\n"
+"Fecha de generación: {generated_at}\n"
+"\n"
+"FILTROS APLICADOS\n"
+"-----------------\n"
+"{filter_text}\n"
+"\n"
+"Adjunto encontrarás el archivo CSV con el detalle de las ventas.\n"
+"Puedes abrirlo con Excel o Google Sheets.\n"
+"\n"
+"---\n"
+"{user_name} de {tenant_name}\n"
+"Tecnología colombiana para el mundo.\n"
+
+msgid "Sales report - {date}"
+msgstr "Reporte de Ventas - {date}"
+
+msgid "Waro Colombia - Reports"
+msgstr "Waro Colombia - Reportes"
+
+msgid "Could not send the email. Please try again."
+msgstr "Error al enviar el correo. Intenta de nuevo."
+
+msgid "Report sent to {email}"
+msgstr "Reporte enviado a {email}"
