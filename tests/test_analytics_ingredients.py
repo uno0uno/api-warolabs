@@ -126,21 +126,38 @@ async def test_ingredient_history_returns_purchase_consumption_stock_and_product
             "total_cost": Decimal("8900"),
             "received_at": datetime(2026, 1, 5, 10, 15),
         }],
-        [{
-            "id": movement_id,
-            "movement_type": "consumption",
-            "quantity_change": Decimal("-250"),
-            "unit": "gr",
-            "previous_stock": Decimal("1000"),
-            "new_stock": Decimal("750"),
-            "cost_per_unit": Decimal("6.6171"),
-            "reference_table": "orders",
-            "reference_id": uuid4(),
-            "reference_order_number": 16208,
-            "reason": "POS sale",
-            "notes": None,
-            "created_at": datetime(2026, 1, 6, 12, 0),
-        }],
+        [
+            {
+                "id": movement_id,
+                "movement_type": "consumption",
+                "quantity_change": Decimal("-250"),
+                "unit": "gr",
+                "previous_stock": Decimal("1000"),
+                "new_stock": Decimal("750"),
+                "cost_per_unit": Decimal("6.6171"),
+                "reference_table": "orders",
+                "reference_id": uuid4(),
+                "reference_order_number": 16208,
+                "reason": "POS sale",
+                "notes": None,
+                "created_at": datetime(2026, 1, 6, 12, 0),
+            },
+            {
+                "id": uuid4(),
+                "movement_type": "adjustment",
+                "quantity_change": Decimal("-25"),
+                "unit": "gr",
+                "previous_stock": Decimal("750"),
+                "new_stock": Decimal("725"),
+                "cost_per_unit": Decimal("6.6171"),
+                "reference_table": "inventory_adjustments",
+                "reference_id": uuid4(),
+                "reference_order_number": None,
+                "reason": "Merma",
+                "notes": "Ajuste por perdida",
+                "created_at": datetime(2026, 1, 7, 9, 0),
+            },
+        ],
         [{
             "product_id": product_id,
             "product_name": "Hamburguesa",
@@ -177,7 +194,7 @@ async def test_ingredient_history_returns_purchase_consumption_stock_and_product
     related_sql = conn.fetch.await_args_list[2].args[0]
     assert "tenant_purchase_items tpi" in purchase_sql
     assert "tp.is_direct_entry" in purchase_sql
-    assert "tim.movement_type = 'consumption'" in movement_sql
+    assert "tim.movement_type = 'consumption'" not in movement_sql
     assert "LEFT JOIN orders o" in movement_sql
     assert "o.order_number AS reference_order_number" in movement_sql
     assert "product_recipes pr" in related_sql
@@ -187,8 +204,11 @@ async def test_ingredient_history_returns_purchase_consumption_stock_and_product
     assert data["ingredient"]["id"] == str(ingredient_id)
     assert data["purchases"][0]["unit_cost"] == 6.6171
     assert data["purchases"][0]["is_direct_entry"] is True
+    assert len(data["stock_movements"]) == 2
+    assert data["stock_movements"][1]["movement_type"] == "adjustment"
     assert data["consumption_movements"][0]["consumed_quantity"] == 250.0
     assert data["consumption_movements"][0]["reference_order_number"] == 16208
+    assert len(data["consumption_movements"]) == 1
     assert data["stock"]["current_stock"] == 750.0
     assert data["related_products"][0]["product_id"] == str(product_id)
     assert data["data_coverage"] == "recorded_movements"
