@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -879,6 +880,13 @@ async def test_create_manual_order_captures_snapshots_and_posts_gl_cogs():
         )
 
     assert result["success"] is True
+    order_insert = next(
+        call.args
+        for call in conn.fetchrow.await_args_list
+        if "INSERT INTO orders" in call.args[0]
+    )
+    assert order_insert[7] == "paid"
+    assert result["data"]["payment_status"] == "paid"
     capture_snapshot.assert_awaited_once_with(
         conn,
         order_item_id,
@@ -898,6 +906,173 @@ async def test_create_manual_order_captures_snapshots_and_posts_gl_cogs():
         order_date=date(2026, 6, 7),
         order_number=14798,
     )
+
+
+@pytest.mark.asyncio
+async def test_create_manual_credit_persists_credit_status_for_identified_customer():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    customer_id = uuid4()
+    order_id = uuid4()
+    order_item_id = uuid4()
+    product_id = uuid4()
+    order_date = datetime(2026, 7, 13, 18, 42, tzinfo=timezone.utc)
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"phone_number": "3001234567"},
+            {
+                "id": order_id,
+                "order_number": 16484,
+                "order_date": order_date,
+                "created_at": order_date,
+            },
+            {"id": order_item_id},
+        ]
+    )
+    conn.fetch = AsyncMock(return_value=[])
+    conn.fetchval = AsyncMock(return_value="America/Bogota")
+    conn.execute = AsyncMock()
+    conn.transaction = MagicMock(return_value=_AsyncContext())
+
+    with patch(
+        "app.services.orders_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=user_id),
+    ), patch(
+        "app.services.orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.orders_service.assert_order_not_in_closed_monthly_period",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.orders_service._pos_modifier_inventory_helpers",
+        return_value=(AsyncMock(), None, None),
+    ), patch(
+        "app.services.orders_service._pos_order_item_ingredient_snapshot_helper",
+        return_value=AsyncMock(),
+    ), patch(
+        "app.services.orders_service._get_tenant_tax_config",
+        new=AsyncMock(return_value={"inc_enabled": True}),
+    ), patch(
+        "app.services.orders_service._post_order_gl_entry",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.orders_service._post_order_cogs_gl_entry",
+        new=AsyncMock(),
+    ):
+        result = await orders_service.create_manual_order(
+            Request({"type": "http"}),
+            order_date="2026-07-13T18:42:00+00:00",
+            payment_method="credit",
+            customer_id=str(customer_id),
+            items=[
+                {
+                    "product_id": str(product_id),
+                    "quantity": 1,
+                    "unit_price": 270000,
+                    "modifiers": [],
+                }
+            ],
+        )
+
+    order_insert = next(
+        call.args
+        for call in conn.fetchrow.await_args_list
+        if "INSERT INTO orders" in call.args[0]
+    )
+    assert order_insert[7] == "credit"
+    assert result["data"]["payment_status"] == "credit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payment_method", "payments"),
+    [
+        ("credit", None),
+        (
+            "cash",
+            [
+                {
+                    "amount": 1000,
+                    "payment_method": "credit",
+                    "payment_method_id": None,
+                }
+            ],
+        ),
+    ],
+)
+async def test_create_manual_credit_tender_requires_customer(
+    payment_method,
+    payments,
+):
+    tenant_id = uuid4()
+    get_connection = MagicMock()
+
+    with patch(
+        "app.services.orders_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=uuid4()),
+    ), patch(
+        "app.services.orders_service.get_db_connection",
+        get_connection,
+    ):
+        with pytest.raises(APIError) as exc:
+            await orders_service.create_manual_order(
+                Request({"type": "http"}),
+                order_date="2026-07-13T18:42:00+00:00",
+                payment_method=payment_method,
+                payments=payments,
+                items=[
+                    {
+                        "product_id": str(uuid4()),
+                        "quantity": 1,
+                        "unit_price": 1000,
+                        "modifiers": [],
+                    }
+                ],
+            )
+
+    assert exc.value.status_code == 400
+    assert "cliente identificado" in str(exc.value)
+    get_connection.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_manual_credit_rejects_anonymous_customer():
+    tenant_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value="America/Bogota")
+    conn.fetchrow = AsyncMock(return_value={"phone_number": "0000000000"})
+    conn.transaction = MagicMock(return_value=_AsyncContext())
+
+    with patch(
+        "app.services.orders_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=uuid4()),
+    ), patch(
+        "app.services.orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.orders_service.assert_order_not_in_closed_monthly_period",
+        new=AsyncMock(),
+    ):
+        with pytest.raises(APIError) as exc:
+            await orders_service.create_manual_order(
+                Request({"type": "http"}),
+                order_date="2026-07-13T18:42:00+00:00",
+                payment_method="credit",
+                customer_id=str(uuid4()),
+                items=[
+                    {
+                        "product_id": str(uuid4()),
+                        "quantity": 1,
+                        "unit_price": 1000,
+                        "modifiers": [],
+                    }
+                ],
+            )
+
+    assert exc.value.status_code == 400
+    assert "no anónimo" in str(exc.value)
 
 
 @pytest.mark.asyncio
@@ -990,6 +1165,13 @@ async def test_create_manual_order_persists_split_payments_for_gl():
         if "INSERT INTO order_payments" in call.args[0]
     ]
     assert result["success"] is True
+    order_insert = next(
+        call.args
+        for call in conn.fetchrow.await_args_list
+        if "INSERT INTO orders" in call.args[0]
+    )
+    assert order_insert[7] == "paid"
+    assert result["data"]["payment_status"] == "paid"
     assert len(payment_inserts) == 2
     assert payment_inserts[0][3] == 42000
     assert payment_inserts[0][4] == "digital"
@@ -999,6 +1181,23 @@ async def test_create_manual_order_persists_split_payments_for_gl():
     assert payment_inserts[1][5] == str(card_method_id)
     assert post_gl.await_args.kwargs["payment_splits"][0]["amount"] == 42000
     assert post_gl.await_args.kwargs["payment_splits"][1]["payment_method"] == "card"
+
+
+def test_manual_order_payment_status_backfill_is_scoped_and_non_destructive():
+    sql = Path("migrations/102_backfill_manual_order_payment_status.sql").read_text()
+    normalized = " ".join(sql.lower().split())
+
+    assert "set payment_status = 'credit'" in normalized
+    assert "set payment_status = 'paid'" in normalized
+    assert normalized.count("payment_status is null") == 2
+    assert "extra_attributes->>'source' = 'manual'" in normalized
+    assert "o.status = 'completed'" in normalized
+    assert "o.credit_paid_amount = 0" in normalized
+    assert "op.voided_at is null" in normalized
+    assert "select sum(op.amount)" in normalized
+    assert "insert into order_payments" not in normalized
+    assert "update credit_payments" not in normalized
+    assert "tenant_journal_entries" not in normalized
 
 
 @pytest.mark.asyncio
