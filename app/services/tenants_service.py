@@ -48,7 +48,7 @@ async def get_user_tenants(request: Request) -> UserTenantsResponse:
         user_id = session_context.user_id
         
         
-        async with get_db_connection() as conn:
+        async with get_db_connection(use_transaction=False) as conn:
             # Get tenants where the user has an ACTIVE membership (#201).
             # Terminated members keep their row with the old role; without the
             # is_active filter, the sidebar tenant switcher shows tenants the

@@ -89,7 +89,13 @@ LEFT JOIN tenant_tax_config       ttc ON ttc.tenant_id = t.id
 WHERE t.id = $1
 """
 
-# Fallback when additive prefs columns are not migrated yet.
+# Preserve existing preferences when only migration 100 (ui_locale) is pending.
+_CONTEXT_QUERY_WITHOUT_UI_LOCALE = _CONTEXT_QUERY.replace(
+    "    tpp.ui_locale,\n",
+    "    NULL AS ui_locale,\n",
+)
+
+# Legacy fallback when older preference migrations are also pending.
 _CONTEXT_QUERY_WITHOUT_PREFS = (
     _CONTEXT_QUERY
     .replace("    tpp.timezone,\n", "    NULL AS timezone,\n")
@@ -130,11 +136,20 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             row = await conn.fetchrow(_CONTEXT_QUERY, tenant_id)
         except asyncpg.UndefinedColumnError:
             logger.warning(
-                "tenant_public_profiles UI/locale/currency/timezone prefs missing in POS "
-                "context query; using defaults. Apply sql/20260626_tenant_timezone.sql "
-                "and migrations 099/100 for locale preferences."
+                "tenant_public_profiles.ui_locale missing in POS context; "
+                "preserving existing tenant preferences until migration 100."
             )
-            row = await conn.fetchrow(_CONTEXT_QUERY_WITHOUT_PREFS, tenant_id)
+            try:
+                row = await conn.fetchrow(
+                    _CONTEXT_QUERY_WITHOUT_UI_LOCALE,
+                    tenant_id,
+                )
+            except asyncpg.UndefinedColumnError:
+                logger.warning(
+                    "Older tenant preference columns also missing in POS context; "
+                    "using safe defaults until migrations 095/099 are applied."
+                )
+                row = await conn.fetchrow(_CONTEXT_QUERY_WITHOUT_PREFS, tenant_id)
         if row is None:
             return None
         members_rows = await conn.fetch(_MEMBERS_QUERY, tenant_id)
