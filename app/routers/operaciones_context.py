@@ -29,6 +29,7 @@ from app.services.operaciones_context_service import (
     update_tables_label,
     update_tip_config,
     update_toggle,
+    update_ui_locale,
 )
 from app.services.promotions_service import (
     DEFAULT_PROMO_CONFLICT_STRATEGY,
@@ -41,6 +42,17 @@ router = APIRouter(prefix="/operaciones", tags=["Operaciones Context"])
 
 class ToggleRequest(BaseModel):
     enabled: bool
+
+
+class UiLocaleRequest(BaseModel):
+    locale: str
+
+    @field_validator("locale")
+    @classmethod
+    def _validate_locale(cls, value: str) -> str:
+        from app.core.tenant_prefs import validate_ui_locale
+
+        return validate_ui_locale(value)
 
 
 class TablesLabelRequest(BaseModel):
@@ -148,6 +160,16 @@ async def get_operaciones_restaurant_context(request: Request):
     if payload is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return {"success": True, "data": payload}
+
+
+@router.patch(
+    "/ui-locale",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def patch_ui_locale(request: Request, body: UiLocaleRequest):
+    """Persist the frontend language shared by every member of the tenant."""
+    session = require_valid_session(request)
+    return await update_ui_locale(session.tenant_id, body.locale)
 
 
 @router.patch(

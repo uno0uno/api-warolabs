@@ -21,6 +21,7 @@ from uuid import UUID
 from fastapi import HTTPException
 
 from app.database import get_db_connection
+from app.core.tenant_prefs import validate_ui_locale
 from app.services.promotions_service import (
     ALLOWED_PROMO_CONFLICT_STRATEGIES,
     validate_promo_type_block_map,
@@ -100,6 +101,35 @@ async def update_toggle(
         await conn.execute(query, tenant_id, enabled)
 
     return {"success": True, "data": {column_name: enabled}}
+
+
+async def update_ui_locale(
+    tenant_id: UUID,
+    locale: str,
+) -> Dict[str, Any]:
+    """Persist the tenant-wide frontend locale without touching receipt locale."""
+    try:
+        normalized = validate_ui_locale(locale)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    query = """
+        INSERT INTO tenant_public_profiles (tenant_id, slug, display_name, ui_locale)
+        SELECT t.id, t.slug, t.name, $2
+        FROM tenants t
+        WHERE t.id = $1
+        ON CONFLICT (tenant_id) DO UPDATE
+            SET ui_locale = EXCLUDED.ui_locale,
+                updated_at = now()
+        RETURNING ui_locale
+    """
+
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(query, tenant_id, normalized)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {"success": True, "data": {"ui_locale": row["ui_locale"]}}
 
 
 async def set_open_sale_enabled(

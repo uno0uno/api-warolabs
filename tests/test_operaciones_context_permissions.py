@@ -221,6 +221,73 @@ def test_supervisor_passes_toggle_open_sale_under_enforce():
     assert args[1] is True
 
 
+def test_supervisor_updates_tenant_ui_locale_under_enforce():
+    """OPERACIONES members can update the locale shared by the tenant."""
+    session = _build_session(role="supervisor")
+    app = FastAPI()
+    app.include_router(operaciones_context_router)
+    modules = frozenset({Module.POS, Module.VENTAS, Module.OPERACIONES})
+    locale_stub = AsyncMock(
+        return_value={"success": True, "data": {"ui_locale": "en"}}
+    )
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.operaciones_context.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=modules),
+         ), \
+         patch(
+             "app.routers.operaciones_context.update_ui_locale",
+             new=locale_stub,
+         ):
+        client = TestClient(app)
+        response = client.patch("/operaciones/ui-locale", json={"locale": "EN"})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["ui_locale"] == "en"
+    args, _ = locale_stub.call_args
+    assert args == (session.tenant_id, "en")
+
+
+def test_ui_locale_rejects_unknown_code_before_service():
+    session = _build_session(role="supervisor")
+    app = FastAPI()
+    app.include_router(operaciones_context_router)
+    modules = frozenset({Module.OPERACIONES})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.operaciones_context.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=modules),
+         ):
+        client = TestClient(app)
+        response = client.patch("/operaciones/ui-locale", json={"locale": "xx"})
+
+    assert response.status_code == 422
+
+
+def test_cashier_cannot_update_tenant_ui_locale():
+    session = _build_session(role="cashier")
+    app = FastAPI()
+    app.include_router(operaciones_context_router)
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.operaciones_context.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=frozenset({Module.POS})),
+         ):
+        client = TestClient(app)
+        response = client.patch("/operaciones/ui-locale", json={"locale": "en"})
+
+    assert response.status_code == 403
+
+
 @pytest.mark.asyncio
 async def test_update_toggle_rejects_unknown_column():
     """Whitelist guard: unknown column name raises 422 before any SQL."""

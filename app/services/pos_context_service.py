@@ -18,7 +18,11 @@ from app.config import settings
 from app.database import get_db_connection
 from app.core.platform_legal import get_platform_legal_for_print
 from app.core.timezones import normalize_timezone
-from app.core.tenant_prefs import normalize_currency_code, normalize_locale
+from app.core.tenant_prefs import (
+    normalize_currency_code,
+    normalize_locale,
+    normalize_ui_locale,
+)
 from app.services.invoicing_readiness_service import get_readiness
 from app.services.open_priced_service import fetch_open_sale_product
 from app.services.promotions_service import (
@@ -34,6 +38,7 @@ SELECT
     tpp.display_name,
     tpp.timezone,
     tpp.locale,
+    tpp.ui_locale,
     tpp.currency_code,
     tpp.kds_enabled,
     tpp.comandas_enabled,
@@ -84,11 +89,18 @@ LEFT JOIN tenant_tax_config       ttc ON ttc.tenant_id = t.id
 WHERE t.id = $1
 """
 
-# Fallback when additive prefs columns are not migrated yet (timezone, locale, currency_code).
+# Preserve existing preferences when only migration 100 (ui_locale) is pending.
+_CONTEXT_QUERY_WITHOUT_UI_LOCALE = _CONTEXT_QUERY.replace(
+    "    tpp.ui_locale,\n",
+    "    NULL AS ui_locale,\n",
+)
+
+# Legacy fallback when older preference migrations are also pending.
 _CONTEXT_QUERY_WITHOUT_PREFS = (
     _CONTEXT_QUERY
     .replace("    tpp.timezone,\n", "    NULL AS timezone,\n")
     .replace("    tpp.locale,\n", "    NULL AS locale,\n")
+    .replace("    tpp.ui_locale,\n", "    NULL AS ui_locale,\n")
     .replace("    tpp.currency_code,\n", "    NULL AS currency_code,\n")
 )
 # Backward-compatible alias used by older call sites / greps.
@@ -124,11 +136,20 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             row = await conn.fetchrow(_CONTEXT_QUERY, tenant_id)
         except asyncpg.UndefinedColumnError:
             logger.warning(
-                "tenant_public_profiles locale/currency/timezone prefs missing in POS "
-                "context query; using defaults. Apply sql/20260626_tenant_timezone.sql "
-                "and sql/20260710_tenant_locale_currency.sql."
+                "tenant_public_profiles.ui_locale missing in POS context; "
+                "preserving existing tenant preferences until migration 100."
             )
-            row = await conn.fetchrow(_CONTEXT_QUERY_WITHOUT_PREFS, tenant_id)
+            try:
+                row = await conn.fetchrow(
+                    _CONTEXT_QUERY_WITHOUT_UI_LOCALE,
+                    tenant_id,
+                )
+            except asyncpg.UndefinedColumnError:
+                logger.warning(
+                    "Older tenant preference columns also missing in POS context; "
+                    "using safe defaults until migrations 095/099 are applied."
+                )
+                row = await conn.fetchrow(_CONTEXT_QUERY_WITHOUT_PREFS, tenant_id)
         if row is None:
             return None
         members_rows = await conn.fetch(_MEMBERS_QUERY, tenant_id)
@@ -142,6 +163,9 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         'timezone': normalize_timezone(row['timezone'] if 'timezone' in row else None),
         # Prefer .get-style access so unit mocks without prefs columns don't KeyError.
         'locale': normalize_locale(row['locale'] if 'locale' in row else None),
+        'ui_locale': normalize_ui_locale(
+            row['ui_locale'] if 'ui_locale' in row else None
+        ),
         'currency_code': normalize_currency_code(
             row['currency_code'] if 'currency_code' in row else None
         ),

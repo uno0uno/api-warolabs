@@ -1,4 +1,5 @@
 import logging
+import asyncpg
 from datetime import datetime
 from fastapi import Request
 from app.database import get_db_connection
@@ -10,8 +11,32 @@ from app.models.tenant import (
     TenantMembersResponse, TenantMemberDetail, TenantMemberProfile,
     DeleteMemberResponse, UpdateMemberRoleResponse, PendingInvitation,
 )
+from app.core.tenant_prefs import normalize_ui_locale
 
 logger = logging.getLogger(__name__)
+
+_USER_TENANTS_QUERY = """
+    SELECT DISTINCT
+      t.id,
+      t.name,
+      t.slug,
+      tpp.ui_locale
+    FROM tenants t
+    INNER JOIN tenant_members tm ON t.id = tm.tenant_id
+    LEFT JOIN tenant_public_profiles tpp ON tpp.tenant_id = t.id
+    WHERE tm.user_id = $1
+      AND tm.is_active = true
+      AND tm.role = ANY($2::text[])
+    ORDER BY t.name
+"""
+
+_USER_TENANTS_QUERY_WITHOUT_UI_LOCALE = _USER_TENANTS_QUERY.replace(
+    "      tpp.ui_locale\n",
+    "      NULL AS ui_locale\n",
+).replace(
+    "    LEFT JOIN tenant_public_profiles tpp ON tpp.tenant_id = t.id\n",
+    "",
+)
 
 async def get_user_tenants(request: Request) -> UserTenantsResponse:
     """
@@ -23,25 +48,26 @@ async def get_user_tenants(request: Request) -> UserTenantsResponse:
         user_id = session_context.user_id
         
         
-        async with get_db_connection() as conn:
+        async with get_db_connection(use_transaction=False) as conn:
             # Get tenants where the user has an ACTIVE membership (#201).
             # Terminated members keep their row with the old role; without the
             # is_active filter, the sidebar tenant switcher shows tenants the
             # user can't actually access. See docs/permissions-router-mapping.md §9.
-            query = """
-                SELECT DISTINCT
-                  t.id,
-                  t.name,
-                  t.slug
-                FROM tenants t
-                INNER JOIN tenant_members tm ON t.id = tm.tenant_id
-                WHERE tm.user_id = $1
-                  AND tm.is_active = true
-                  AND tm.role = ANY($2::text[])
-                ORDER BY t.name
-            """
-
-            tenant_rows = await conn.fetch(query, user_id, list(LEGACY_INTERNAL_TEAM_ROLES))
+            try:
+                tenant_rows = await conn.fetch(
+                    _USER_TENANTS_QUERY,
+                    user_id,
+                    list(LEGACY_INTERNAL_TEAM_ROLES),
+                )
+            except asyncpg.UndefinedColumnError:
+                logger.warning(
+                    "tenant_public_profiles.ui_locale missing; returning es until migration 100"
+                )
+                tenant_rows = await conn.fetch(
+                    _USER_TENANTS_QUERY_WITHOUT_UI_LOCALE,
+                    user_id,
+                    list(LEGACY_INTERNAL_TEAM_ROLES),
+                )
             
             
             # Convert to Tenant models
@@ -50,7 +76,10 @@ async def get_user_tenants(request: Request) -> UserTenantsResponse:
                 tenant = Tenant(
                     id=row['id'],
                     name=row['name'],
-                    slug=row['slug']
+                    slug=row['slug'],
+                    ui_locale=normalize_ui_locale(
+                        row['ui_locale'] if 'ui_locale' in row else None
+                    ),
                 )
                 tenants.append(tenant)
             

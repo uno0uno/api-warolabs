@@ -29,6 +29,7 @@ class Tenant(BaseModel):
     id: UUID
     name: str
     slug: str
+    ui_locale: str = "es"
 
 class SessionResponse(BaseModel):
     success: bool = True
