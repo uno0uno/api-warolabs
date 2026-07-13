@@ -1,6 +1,6 @@
 import logging
-from fastapi import APIRouter, Request, Response
-from app.services.auth_service import get_session_data, switch_tenant, update_profile
+from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
+from app.services.auth_service import get_session_data, switch_tenant, update_profile, upload_profile_avatar
 from app.services.magic_link_service import send_magic_link, verify_code, verify_token
 from app.models.auth import (
     SessionResponse,
@@ -12,12 +12,30 @@ from app.models.auth import (
     VerifyTokenResponse,
     SwitchTenantRequest,
     SwitchTenantResponse,
+    ProfileAvatarResponse,
     UpdateProfileRequest,
     UpdateProfileResponse
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+ALLOWED_AVATAR_TYPES = {'image/jpeg', 'image/png', 'image/webp'}
+MAX_AVATAR_SIZE = 5 * 1024 * 1024
+
+
+def _matches_avatar_signature(file_bytes: bytes, content_type: str) -> bool:
+    if content_type == 'image/jpeg':
+        return file_bytes.startswith(b'\xff\xd8\xff')
+    if content_type == 'image/png':
+        return file_bytes.startswith(b'\x89PNG\r\n\x1a\n')
+    if content_type == 'image/webp':
+        return (
+            len(file_bytes) >= 12
+            and file_bytes.startswith(b'RIFF')
+            and file_bytes[8:12] == b'WEBP'
+        )
+    return False
 
 @router.get("/session", response_model=SessionResponse)
 async def get_session(request: Request, response: Response):
@@ -101,5 +119,34 @@ async def update_profile_endpoint(request: Request, payload: UpdateProfileReques
         name=payload.name,
         user_name=payload.user_name,
         phone_number=payload.phone_number,
-        city=payload.city
+        city=payload.city,
+        description=payload.description,
+        preferred_locale=payload.preferred_locale,
+        fields_set=payload.model_fields_set,
+    )
+
+
+@router.post('/profile/avatar', response_model=ProfileAvatarResponse)
+async def upload_profile_avatar_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+):
+    """Upload an avatar for the authenticated user without tenant permissions."""
+    content_type = file.content_type or 'application/octet-stream'
+    if content_type not in ALLOWED_AVATAR_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail='File type not allowed. Use JPEG, PNG, or WebP.',
+        )
+
+    file_bytes = await file.read(MAX_AVATAR_SIZE + 1)
+    if len(file_bytes) > MAX_AVATAR_SIZE:
+        raise HTTPException(status_code=400, detail='File too large. Maximum size is 5MB.')
+    if not file_bytes or not _matches_avatar_signature(file_bytes, content_type):
+        raise HTTPException(status_code=400, detail='File content does not match its image type.')
+
+    return await upload_profile_avatar(
+        request=request,
+        file_bytes=file_bytes,
+        content_type=content_type,
     )
