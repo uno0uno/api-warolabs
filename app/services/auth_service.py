@@ -1,14 +1,24 @@
 import logging
 import secrets
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Set
 from fastapi import HTTPException, Request, Response
+from app.config import settings
 from app.database import get_db_connection
 from app.core.security import collect_session_tokens, get_session_token, clear_session_cookie, set_session_cookie, get_client_ip
 from app.core.exceptions import AuthenticationError
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES, is_legacy_internal_team_role
 from app.core.middleware import require_valid_session
-from app.models.auth import User, Session, Tenant, SessionResponse, SwitchTenantResponse, UpdateProfileResponse
+from app.models.auth import (
+    ProfileAvatarResponse,
+    ProfileUser,
+    Session,
+    SessionResponse,
+    SwitchTenantResponse,
+    Tenant,
+    UpdateProfileResponse,
+)
+from app.services.aws_s3_service import AWSS3Service
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +55,9 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
         async with get_db_connection() as conn:
             # Find valid session with analytics tracking (exact query from warolabs.com)
             session_query = """
-                SELECT s.*, p.id as user_id, p.email, p.name, p.created_at as user_created_at
+                SELECT s.*, p.id as user_id, p.email, p.name, p.user_name,
+                       p.description, p.logo_avatar, p.preferred_locale,
+                       p.created_at as user_created_at
                 FROM sessions s
                 JOIN profile p ON s.user_id = p.id
                 WHERE s.id = $1 
@@ -110,10 +122,14 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                         raise AuthenticationError("Access denied")
 
             # Build response models
-            user = User(
+            user = ProfileUser(
                 id=session_result['user_id'],
                 email=session_result['email'],
                 name=session_result['name'],
+                user_name=session_result['user_name'],
+                description=session_result['description'],
+                logo_avatar=session_result['logo_avatar'],
+                preferred_locale=session_result['preferred_locale'],
                 createdAt=session_result['user_created_at'],
                 role=user_role
             )
@@ -301,8 +317,16 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
         raise AuthenticationError("Tenant switch failed")
 
 
-async def update_profile(request: Request, name: Optional[str] = None, user_name: Optional[str] = None,
-                         phone_number: Optional[str] = None, city: Optional[str] = None) -> UpdateProfileResponse:
+async def update_profile(
+    request: Request,
+    name: Optional[str] = None,
+    user_name: Optional[str] = None,
+    phone_number: Optional[str] = None,
+    city: Optional[str] = None,
+    description: Optional[str] = None,
+    preferred_locale: Optional[str] = None,
+    fields_set: Optional[Set[str]] = None,
+) -> UpdateProfileResponse:
     """
     Update the current user's profile information
     """
@@ -317,24 +341,47 @@ async def update_profile(request: Request, name: Optional[str] = None, user_name
             values = []
             param_idx = 1
 
-            if name is not None:
+            provided_fields = fields_set or {
+                field_name
+                for field_name, field_value in {
+                    'name': name,
+                    'user_name': user_name,
+                    'phone_number': phone_number,
+                    'city': city,
+                    'description': description,
+                    'preferred_locale': preferred_locale,
+                }.items()
+                if field_value is not None
+            }
+
+            if 'name' in provided_fields and name is not None:
                 updates.append(f"name = ${param_idx}")
                 values.append(name)
                 param_idx += 1
 
-            if user_name is not None:
+            if 'user_name' in provided_fields and user_name is not None:
                 updates.append(f"user_name = ${param_idx}")
                 values.append(user_name)
                 param_idx += 1
 
-            if phone_number is not None:
+            if 'phone_number' in provided_fields and phone_number is not None:
                 updates.append(f"phone_number = ${param_idx}")
                 values.append(phone_number)
                 param_idx += 1
 
-            if city is not None:
+            if 'city' in provided_fields and city is not None:
                 updates.append(f"city = ${param_idx}")
                 values.append(city)
+                param_idx += 1
+
+            if 'description' in provided_fields:
+                updates.append(f"description = ${param_idx}")
+                values.append(description)
+                param_idx += 1
+
+            if 'preferred_locale' in provided_fields:
+                updates.append(f"preferred_locale = ${param_idx}")
+                values.append(preferred_locale)
                 param_idx += 1
 
             if not updates:
@@ -350,7 +397,8 @@ async def update_profile(request: Request, name: Optional[str] = None, user_name
                 UPDATE profile
                 SET {', '.join(updates)}
                 WHERE id = ${param_idx}
-                RETURNING id, email, name, created_at
+                RETURNING id, email, name, user_name, description, logo_avatar,
+                          preferred_locale, created_at
             """
 
             result = await conn.fetchrow(update_query, *values)
@@ -358,10 +406,14 @@ async def update_profile(request: Request, name: Optional[str] = None, user_name
             if not result:
                 raise AuthenticationError("User not found")
 
-            user = User(
+            user = ProfileUser(
                 id=result['id'],
                 email=result['email'],
                 name=result['name'],
+                user_name=result['user_name'],
+                description=result['description'],
+                logo_avatar=result['logo_avatar'],
+                preferred_locale=result['preferred_locale'],
                 createdAt=result['created_at']
             )
 
@@ -377,3 +429,47 @@ async def update_profile(request: Request, name: Optional[str] = None, user_name
     except Exception as e:
         logger.error(f"❌ Profile update error: {e}", exc_info=True)
         raise AuthenticationError("Error al actualizar perfil")
+
+
+async def upload_profile_avatar(
+    request: Request,
+    file_bytes: bytes,
+    content_type: str,
+) -> ProfileAvatarResponse:
+    """Upload and persist an avatar owned by the authenticated user."""
+    session_context = require_valid_session(request)
+    user_id = session_context.user_id
+
+    s3_service = AWSS3Service()
+    public_url = await s3_service.upload_user_avatar(
+        file_bytes=file_bytes,
+        user_id=str(user_id),
+        content_type=content_type,
+    )
+
+    if public_url is None:
+        if not settings.r2_public_url:
+            raise HTTPException(status_code=503, detail="Public image storage is not configured")
+        raise HTTPException(status_code=500, detail="Failed to upload avatar")
+
+    try:
+        async with get_db_connection() as conn:
+            result = await conn.fetchrow(
+                """
+                UPDATE profile
+                SET logo_avatar = $1, updated_at = NOW()
+                WHERE id = $2
+                RETURNING id
+                """,
+                public_url,
+                user_id,
+            )
+    except Exception as exc:
+        logger.error("Failed to persist avatar for user %s", user_id, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update avatar") from exc
+
+    if not result:
+        raise AuthenticationError("User not found")
+
+    logger.info("Profile avatar updated for user %s", user_id)
+    return ProfileAvatarResponse(url=public_url, logo_avatar=public_url)

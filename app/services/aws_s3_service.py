@@ -15,6 +15,12 @@ import re
 
 logger = logging.getLogger(__name__)
 
+USER_AVATAR_EXTENSIONS = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+}
+
 class AWSS3Service:
     def __init__(self):
         """Initialize S3 client (Cloudflare R2 compatible)"""
@@ -335,6 +341,25 @@ class AWSS3Service:
             logger.error(f"Unexpected error uploading public asset {normalized_key}: {str(e)}")
             logger.exception(e)
             return None
+
+    async def upload_user_avatar(
+        self,
+        file_bytes: bytes,
+        user_id: str,
+        content_type: str,
+    ) -> Optional[str]:
+        """Upload a personal avatar under a server-generated user namespace."""
+        extension = USER_AVATAR_EXTENSIONS.get(content_type)
+        if extension is None:
+            raise ValueError(f"Unsupported avatar content type: {content_type}")
+
+        s3_key = f"user-profiles/{user_id}/avatar/{uuid.uuid4()}.{extension}"
+        return await self.upload_public_asset(
+            file_bytes=file_bytes,
+            s3_key=s3_key,
+            content_type=content_type,
+            metadata={'user_id': user_id, 'asset_type': 'avatar'},
+        )
 
     async def get_file_metadata(self, s3_key: str) -> Optional[dict]:
         """
