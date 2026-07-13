@@ -3652,6 +3652,16 @@ async def create_manual_order(
         customer_uuid = UUID(customer_id) if customer_id else None
         payment_method_uuid = UUID(payment_method_id) if payment_method_id else None
         split_payments = payments or []
+        uses_credit = payment_method == "credit" or any(
+            payment.get("payment_method") == "credit"
+            for payment in split_payments
+        )
+
+        if uses_credit and not customer_uuid:
+            raise APIError(
+                "El pago a crédito requiere un cliente identificado",
+                status_code=400,
+            )
 
         if payment_method == "customer_wallet":
             if not customer_uuid:
@@ -3680,6 +3690,20 @@ async def create_manual_order(
             async with conn.transaction():
                 # Guard: block creation if order_date falls in a closed monthly accounting period (#362)
                 await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_datetime)
+
+                if uses_credit and customer_uuid:
+                    customer_check = await conn.fetchrow(
+                        "SELECT phone_number FROM profile WHERE id = $1",
+                        customer_uuid,
+                    )
+                    if (
+                        not customer_check
+                        or customer_check["phone_number"] == "0000000000"
+                    ):
+                        raise APIError(
+                            "El pago a crédito requiere un cliente identificado (no anónimo)",
+                            status_code=400,
+                        )
 
                 if payment_method == "customer_wallet" and customer_uuid:
                     from app.services.customer_wallet_service import assert_wallet_customer_identified
@@ -3731,14 +3755,20 @@ async def create_manual_order(
                             status_code=400,
                         )
 
+                payment_status = (
+                    "paid"
+                    if split_payments
+                    else ("credit" if payment_method == "credit" else "paid")
+                )
+
                 order_row = await conn.fetchrow(
                     """
                     INSERT INTO orders (
                         tenant_id, customer_id, payment_method, payment_method_id,
-                        order_date, total_amount, status,
+                        order_date, total_amount, status, payment_status,
                         discount_type, discount_value, discount_amount, extra_attributes
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8, $9, $10)
+                    VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8, $9, $10, $11)
                     RETURNING id, order_number, order_date, created_at
                     """,
                     tenant_id,
@@ -3747,6 +3777,7 @@ async def create_manual_order(
                     payment_method_uuid,
                     order_datetime,
                     total_amount,
+                    payment_status,
                     normalized_discount_type,
                     normalized_discount_value,
                     discount_amount or None,
@@ -3981,6 +4012,7 @@ async def create_manual_order(
                 "status": "completed",
                 "payment_method": payment_method,
                 "payment_method_id": str(payment_method_uuid) if payment_method_uuid else None,
+                "payment_status": payment_status,
                 "discount_type": normalized_discount_type,
                 "discount_value": normalized_discount_value,
                 "discount_amount": float(discount_amount),
