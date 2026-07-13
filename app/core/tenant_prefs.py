@@ -11,6 +11,8 @@ from typing import Optional
 DEFAULT_TENANT_LOCALE = "es"
 DEFAULT_CURRENCY_CODE = "COP"
 ALLOWED_LOCALES = frozenset({"es", "en"})
+DEFAULT_TENANT_UI_LOCALE = "es"
+ALLOWED_UI_LOCALES = frozenset({"es", "en", "pt", "fr", "de", "hi", "zh", "ar"})
 
 
 def validate_locale(value: Optional[str]) -> str:
@@ -29,6 +31,28 @@ def normalize_locale(value: Optional[str]) -> str:
         return validate_locale(value)
     except ValueError:
         return DEFAULT_TENANT_LOCALE
+
+
+def validate_ui_locale(value: Optional[str]) -> str:
+    """Validate the tenant-wide frontend locale without changing receipt locale."""
+    if value is None or not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            "ui_locale must be one of: es, en, pt, fr, de, hi, zh, ar"
+        )
+    locale = value.strip().lower()
+    if locale not in ALLOWED_UI_LOCALES:
+        raise ValueError(
+            "ui_locale must be one of: es, en, pt, fr, de, hi, zh, ar"
+        )
+    return locale
+
+
+def normalize_ui_locale(value: Optional[str]) -> str:
+    """Return a safe frontend locale, falling back to Spanish."""
+    try:
+        return validate_ui_locale(value)
+    except ValueError:
+        return DEFAULT_TENANT_UI_LOCALE
 
 
 def validate_currency_code(value: Optional[str]) -> str:
