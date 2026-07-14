@@ -6,13 +6,15 @@ from uuid import UUID
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
-from app.core.exceptions import AuthenticationError, AuthorizationError, ValidationError
+from app.core.exceptions import APIError, AuthenticationError, AuthorizationError, ValidationError
 from app.models.accounting import (
     TenantAccount,
     TenantAccountCreate,
     TenantAccountUpdate,
     TenantAccountResponse,
     TenantAccountsListResponse,
+    AccountRoleBinding,
+    AccountRoleBindingsResponse,
     JournalEntryCreate,
     JournalEntry,
     JournalEntryWithLines,
@@ -31,6 +33,14 @@ from app.models.accounting import (
     ProvisionsBreakdown,
     ProvisionsPreviewResponse,
     ProvisionsPostResponse,
+)
+from app.services.account_role_service import (
+    AccountRole,
+    delete_role_override,
+    ensure_colombia_payroll,
+    list_role_bindings,
+    resolve_account,
+    set_role_override,
 )
 
 logger = logging.getLogger(__name__)
@@ -137,6 +147,48 @@ async def get_accounts(
         raise ValidationError("Error al obtener cuentas")
 
 
+async def get_account_role_bindings(request: Request) -> AccountRoleBindingsResponse:
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("No hay un tenant seleccionado")
+    async with get_db_connection() as conn:
+        rows = await list_role_bindings(conn, tenant_id)
+    return AccountRoleBindingsResponse(
+        data=[AccountRoleBinding(**row) for row in rows]
+    )
+
+
+async def update_account_role_binding(
+    request: Request, role: str, account_id: UUID
+) -> AccountRoleBindingsResponse:
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("No hay un tenant seleccionado")
+    async with get_db_connection() as conn:
+        await set_role_override(conn, tenant_id, role.upper(), account_id)
+        rows = await list_role_bindings(conn, tenant_id)
+    return AccountRoleBindingsResponse(
+        data=[AccountRoleBinding(**row) for row in rows]
+    )
+
+
+async def remove_account_role_binding(
+    request: Request, role: str
+) -> AccountRoleBindingsResponse:
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("No hay un tenant seleccionado")
+    async with get_db_connection() as conn:
+        await delete_role_override(conn, tenant_id, role.upper())
+        rows = await list_role_bindings(conn, tenant_id)
+    return AccountRoleBindingsResponse(
+        data=[AccountRoleBinding(**row) for row in rows]
+    )
+
+
 async def create_account(request: Request, body: TenantAccountCreate) -> TenantAccountResponse:
     """
     Create a custom account for the tenant.
@@ -158,9 +210,15 @@ async def create_account(request: Request, body: TenantAccountCreate) -> TenantA
         if not code:
             raise ValidationError("El código de la cuenta es requerido")
 
-        level = _derive_level(code)
-
         async with get_db_connection() as conn:
+            localization = await conn.fetchval(
+                "SELECT accounting_localization FROM tenant_financial_profiles WHERE tenant_id = $1",
+                tenant_id,
+            )
+            level = _derive_level(code) if localization == "WARO_CO_PUC_V1" else body.level
+            if level not in (1, 2, 4, 6, 8):
+                raise ValidationError("Nivel contable invalido")
+
             # Ensure code is unique within tenant
             existing = await conn.fetchval(
                 "SELECT 1 FROM tenant_accounts WHERE tenant_id = $1 AND code = $2",
@@ -219,7 +277,7 @@ async def create_account(request: Request, body: TenantAccountCreate) -> TenantA
         logger.info(f"✅ Account created: {code} for tenant {tenant_id}")
         return TenantAccountResponse(data=account)
 
-    except (AuthenticationError, AuthorizationError, ValidationError):
+    except (APIError, AuthenticationError, AuthorizationError, ValidationError):
         raise
     except Exception as e:
         logger.error(f"❌ Error creating account: {e}", exc_info=True)
@@ -1118,6 +1176,7 @@ async def _compute_pl_for_period(
     tenant_id: UUID,
     year: int,
     month: int,
+    include_colombia_payroll: bool = True,
 ) -> PLPeriodData:
     """
     Compute the full P&L for a single calendar month.
@@ -1202,37 +1261,39 @@ async def _compute_pl_for_period(
         bucket = _OPEX_CATEGORY_MAP.get(row['category_code'], 'other')
         opex_buckets[bucket] += Decimal(str(row['total']))
 
-    # --- Payroll ---
-    payroll_row = await conn.fetchrow(
-        """
-        SELECT COALESCE(SUM(sp.payment_amount), 0) AS total
-        FROM salary_payments sp
-        JOIN tenant_members tm ON tm.id = sp.tenant_member_id
-        WHERE tm.tenant_id = $1
-          AND sp.period_month = $2
-          AND sp.status = 'paid'
-        """,
-        tenant_id, month_str,
-    )
-    payroll = Decimal(str(payroll_row['total']))
+    payroll = Decimal('0')
+    prov_base = Decimal('0')
+    if include_colombia_payroll:
+        payroll_row = await conn.fetchrow(
+            """
+            SELECT COALESCE(SUM(sp.payment_amount), 0) AS total
+            FROM salary_payments sp
+            JOIN tenant_members tm ON tm.id = sp.tenant_member_id
+            WHERE tm.tenant_id = $1
+              AND sp.period_month = $2
+              AND sp.status = 'paid'
+            """,
+            tenant_id, month_str,
+        )
+        payroll = Decimal(str(payroll_row['total']))
 
-    # --- Provisions base: latest salary config per employee ≤ target month ---
-    prov_base_row = await conn.fetchrow(
-        """
-        SELECT COALESCE(SUM(es.total_salary), 0) AS total
-        FROM employee_salaries es
-        JOIN tenant_members tm ON tm.id = es.tenant_member_id
-        WHERE tm.tenant_id = $1
-          AND es.period_month = (
-              SELECT MAX(es2.period_month)
-              FROM employee_salaries es2
-              WHERE es2.tenant_member_id = es.tenant_member_id
-                AND es2.period_month <= $2
-          )
-        """,
-        tenant_id, month_str,
-    )
-    prov_base = Decimal(str(prov_base_row['total']))
+        # Latest configured salary per employee at or before the target month.
+        prov_base_row = await conn.fetchrow(
+            """
+            SELECT COALESCE(SUM(es.total_salary), 0) AS total
+            FROM employee_salaries es
+            JOIN tenant_members tm ON tm.id = es.tenant_member_id
+            WHERE tm.tenant_id = $1
+              AND es.period_month = (
+                  SELECT MAX(es2.period_month)
+                  FROM employee_salaries es2
+                  WHERE es2.tenant_member_id = es.tenant_member_id
+                    AND es2.period_month <= $2
+              )
+            """,
+            tenant_id, month_str,
+        )
+        prov_base = Decimal(str(prov_base_row['total']))
 
     # --- Calculations ---
     cesantias     = (prov_base * _CESANTIAS_RATE).quantize(Decimal('1'))
@@ -1319,19 +1380,41 @@ async def get_pl_statement(
             raise ValidationError("El mes debe estar entre 1 y 12")
 
         async with get_db_connection() as conn:
-            current = await _compute_pl_for_period(conn, tenant_id, year, month)
+            profile = await conn.fetchrow(
+                """
+                SELECT country_code, base_currency_code, accounting_localization
+                FROM tenant_financial_profiles WHERE tenant_id = $1
+                """,
+                tenant_id,
+            )
+            if not profile:
+                raise ValidationError("Perfil financiero no configurado")
+            include_colombia_payroll = (
+                profile['country_code'] == 'CO'
+                and profile['accounting_localization'] == 'WARO_CO_PUC_V1'
+            )
+            current = await _compute_pl_for_period(
+                conn, tenant_id, year, month, include_colombia_payroll
+            )
 
             previous = None
             if compare_previous:
                 prev_month = month - 1 if month > 1 else 12
                 prev_year  = year if month > 1 else year - 1
-                previous = await _compute_pl_for_period(conn, tenant_id, prev_year, prev_month)
+                previous = await _compute_pl_for_period(
+                    conn, tenant_id, prev_year, prev_month, include_colombia_payroll
+                )
 
         logger.info(
             f"📊 P&L statement computed for tenant {tenant_id}: "
             f"{year}-{month:02d}, compare_previous={compare_previous}"
         )
-        return PLStatementResponse(current=current, previous=previous)
+        return PLStatementResponse(**{
+            'baseCurrencyCode': profile['base_currency_code'],
+            'accountingLocalization': profile['accounting_localization'],
+            'current': current,
+            'previous': previous,
+        })
 
     except (AuthenticationError, AuthorizationError, ValidationError):
         raise
@@ -1352,16 +1435,6 @@ _PROV_CESANTIAS   = Decimal('0.0833')
 _PROV_INTERESES   = Decimal('0.0100')
 _PROV_PRIMA       = Decimal('0.0833')
 _PROV_VACACIONES  = Decimal('0.0417')
-
-# PUC account codes for provisions
-_PROV_DEBIT_CODE  = '5105'  # Gastos de personal — sueldos
-_PROV_CREDIT_CODES = {
-    'cesantias':  '2610',
-    'intereses':  '2615',
-    'prima':      '2620',
-    'vacaciones': '2625',
-}
-
 
 async def _calculate_provisions(conn, tenant_id: UUID, year: int, month: int) -> dict:
     """
@@ -1442,6 +1515,7 @@ async def preview_provisions(
             raise ValidationError("El mes debe estar entre 1 y 12")
 
         async with get_db_connection() as conn:
+            await ensure_colombia_payroll(conn, tenant_id)
             p = await _calculate_provisions(conn, tenant_id, year, month)
 
         return ProvisionsPreviewResponse(**{
@@ -1459,7 +1533,7 @@ async def preview_provisions(
             }),
         })
 
-    except (AuthenticationError, AuthorizationError, ValidationError):
+    except (APIError, AuthenticationError, AuthorizationError, ValidationError):
         raise
     except Exception as e:
         logger.error(f"❌ Error previewing provisions: {e}", exc_info=True)
@@ -1489,109 +1563,76 @@ async def post_provisions(
         desc_prefix = f"Provisiones nómina {month_str}"
 
         async with get_db_connection() as conn:
-            # 1. Void any previously posted provision entries for this period
-            voided = await conn.fetchval(
-                """
-                UPDATE tenant_journal_entries
-                SET status = 'voided', voided_at = NOW()
-                WHERE tenant_id = $1
-                  AND source_module = 'nomina'
-                  AND description LIKE $2
-                  AND status = 'posted'
-                RETURNING id
-                """,
-                tenant_id, f"{desc_prefix}%",
-            )
-            voided_count = 1 if voided else 0
-            # Count all voided in this batch
-            voided_rows = await conn.fetch(
-                """
-                SELECT id FROM tenant_journal_entries
-                WHERE tenant_id = $1
-                  AND source_module = 'nomina'
-                  AND description LIKE $2
-                  AND status = 'voided'
-                  AND voided_at >= NOW() - INTERVAL '5 seconds'
-                """,
-                tenant_id, f"{desc_prefix}%",
-            )
-            voided_count = len(voided_rows)
-
-            # 2. Calculate provision amounts
+            await ensure_colombia_payroll(conn, tenant_id)
             p = await _calculate_provisions(conn, tenant_id, year, month)
-
-            # 3. Resolve debit account (5105)
-            debit_acct = await conn.fetchrow(
-                "SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code=$2 AND is_active=TRUE",
-                tenant_id, _PROV_DEBIT_CODE,
+            debit_acct = await resolve_account(
+                conn, tenant_id, AccountRole.PAYROLL_EXPENSE, source="accounting_provisions"
             )
-            if not debit_acct:
-                raise ValidationError(
-                    f"Cuenta {_PROV_DEBIT_CODE} no encontrada — configure el PUC del tenant"
-                )
-
-            # 4. Post one GL entry per provision type
-            provision_items = [
-                ('cesantias',  p['cesantias'],  '2610', f"{desc_prefix} — Cesantías"),
-                ('intereses',  p['intereses'],  '2615', f"{desc_prefix} — Intereses cesantías"),
-                ('prima',      p['prima'],      '2620', f"{desc_prefix} — Prima de servicios"),
-                ('vacaciones', p['vacaciones'], '2625', f"{desc_prefix} — Vacaciones"),
+            provision_specs = [
+                ('cesantias', p['cesantias'], AccountRole.CESANTIAS_PAYABLE, f"{desc_prefix} — Cesantías"),
+                ('intereses', p['intereses'], AccountRole.CESANTIAS_INTEREST_PAYABLE, f"{desc_prefix} — Intereses cesantías"),
+                ('prima', p['prima'], AccountRole.PRIMA_PAYABLE, f"{desc_prefix} — Prima de servicios"),
+                ('vacaciones', p['vacaciones'], AccountRole.VACATION_PAYABLE, f"{desc_prefix} — Vacaciones"),
             ]
+            provision_items = []
+            for key, amount, role, description in provision_specs:
+                if amount == 0:
+                    continue
+                credit_acct = await resolve_account(
+                    conn, tenant_id, role, source="accounting_provisions"
+                )
+                provision_items.append((key, amount, credit_acct, description))
 
             entry_ids: List[str] = []
             entry_date = f"{year}-{month:02d}-01"
-
-            for _key, amount, credit_code, description in provision_items:
-                if amount == 0:
-                    continue  # skip zero-amount entries
-
-                credit_acct = await conn.fetchrow(
-                    "SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code=$2 AND is_active=TRUE",
-                    tenant_id, credit_code,
-                )
-                if not credit_acct:
-                    logger.warning(
-                        f"[GL] Cuenta {credit_code} no encontrada para tenant {tenant_id} — "
-                        f"saltando provisión {_key}"
-                    )
-                    continue
-
-                amount_f = float(amount)
-
-                entry_row = await conn.fetchrow(
+            async with conn.transaction():
+                voided_rows = await conn.fetch(
                     """
-                    INSERT INTO tenant_journal_entries
+                    UPDATE tenant_journal_entries
+                    SET status = 'voided', voided_at = NOW()
+                    WHERE tenant_id = $1
+                      AND source_module = 'nomina'
+                      AND description LIKE $2
+                      AND status = 'posted'
+                    RETURNING id
+                    """,
+                    tenant_id,
+                    f"{desc_prefix}%",
+                )
+                voided_count = len(voided_rows)
+
+                for _key, amount, credit_acct, description in provision_items:
+                    amount_f = float(amount)
+                    entry_row = await conn.fetchrow(
+                        """
+                        INSERT INTO tenant_journal_entries
                         (tenant_id, entry_date, period_year, period_month,
                          description, source_module, status,
                          total_debit, total_credit)
                     VALUES ($1, $2, $3, $4, $5, 'nomina', 'posted', $6, $6)
                     RETURNING id
                     """,
-                    tenant_id, entry_date, year, month,
-                    description, amount_f,
-                )
-                entry_id = entry_row['id']
-
-                # Debit 5105
-                await conn.execute(
-                    """
-                    INSERT INTO tenant_journal_lines
+                        tenant_id, entry_date, year, month,
+                        description, amount_f,
+                    )
+                    entry_id = entry_row['id']
+                    await conn.execute(
+                        """
+                        INSERT INTO tenant_journal_lines
                         (journal_entry_id, account_id, debit, credit, description, line_order)
                     VALUES ($1, $2, $3, 0, $4, 1)
                     """,
-                    entry_id, debit_acct['id'], amount_f, description,
-                )
-                # Credit 261X
-                await conn.execute(
-                    """
-                    INSERT INTO tenant_journal_lines
+                        entry_id, debit_acct.id, amount_f, description,
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO tenant_journal_lines
                         (journal_entry_id, account_id, debit, credit, description, line_order)
                     VALUES ($1, $2, 0, $3, $4, 2)
                     """,
-                    entry_id, credit_acct['id'], amount_f, description,
-                )
-
-                entry_ids.append(str(entry_id))
+                        entry_id, credit_acct.id, amount_f, description,
+                    )
+                    entry_ids.append(str(entry_id))
 
         logger.info(
             f"📋 Provisions posted for tenant {tenant_id}: {month_str} — "
@@ -1611,7 +1652,7 @@ async def post_provisions(
             'voidedCount':     voided_count,
         })
 
-    except (AuthenticationError, AuthorizationError, ValidationError):
+    except (APIError, AuthenticationError, AuthorizationError, ValidationError):
         raise
     except Exception as e:
         logger.error(f"❌ Error posting provisions: {e}", exc_info=True)

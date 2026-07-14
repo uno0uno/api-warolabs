@@ -13,6 +13,12 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import ValidationError, NotFoundError
 from app.services.aws_s3_service import AWSS3Service
+from app.services.account_role_service import (
+    AccountRole,
+    MissingAccountRoleError,
+    resolve_account,
+    resolve_payment_account,
+)
 import asyncpg
 from app.models.salary import (
     EmployeesWithSalaryResponse,
@@ -49,26 +55,6 @@ logger = logging.getLogger(__name__)
 
 # SMMLV 2026 - Should be fetched from database
 DEFAULT_SMMLV = Decimal('1423500')
-
-# GL account codes for salary/payroll — debit side (expense)
-_SALARY_DEBIT_CODE = {
-    "employee":   "5105",  # Sueldos de personal
-    "contractor": "5199",  # Otros gastos y honorarios
-    "daily":      "5105",  # Sueldos de personal (jornalero)
-}
-
-# Slug fallback for credit side (cash/bank) — used when payment_method is not a UUID
-# or when payment_methods.gl_account_code is null in DB
-_SALARY_CREDIT_SLUG_FALLBACK = {
-    "cash":     "1105",  # Caja general
-    "transfer": "1110",  # Bancos
-    "check":    "1110",  # Bancos
-    "other":    "1110",  # Bancos
-    "card":     "1110",  # Bancos (datáfono)
-    "digital":  "1110",  # Bancos (Nequi, Daviplata, PSE)
-    "credit":   "1305",  # Clientes (fiado)
-}
-
 
 def get_color_for_name(name: str) -> str:
     """Generate a consistent color based on name"""
@@ -117,38 +103,35 @@ async def get_current_smmlv(conn, tenant_id: UUID) -> Decimal:
     return Decimal(str(result)) if result else DEFAULT_SMMLV
 
 
-async def _resolve_salary_credit_gl_code(conn, payment_method: Optional[str]) -> str:
-    """
-    Resolve the GL account code for the credit side of a salary payment.
-    Mirrors the same cascade used by _post_order_gl_entry in cierre_service.py:
-      1. If payment_method is a UUID → query payment_methods JOIN payment_method_groups
-         for COALESCE(pm.gl_account_code, pmg.gl_account_code)
-      2. Fall back to slug-based dict (_SALARY_CREDIT_SLUG_FALLBACK)
-      3. Ultimate fallback: "1110" (Bancos)
-    """
+async def _resolve_salary_credit_account(conn, tenant_id: UUID, payment_method: Optional[str]):
+    """Resolve a salary settlement account by explicit method or semantic role."""
     if payment_method:
         try:
-            UUID(payment_method)
-            is_uuid = True
+            method_id = UUID(payment_method)
         except (ValueError, AttributeError):
-            is_uuid = False
-
-        if is_uuid:
-            row = await conn.fetchrow(
-                """SELECT COALESCE(pm.gl_account_code, pmg.gl_account_code) AS code
-                   FROM payment_methods pm
-                   JOIN payment_method_groups pmg ON pm.group_id = pmg.id
-                   WHERE pm.id = $1""",
-                UUID(payment_method),
+            method_id = None
+        if method_id:
+            return await resolve_payment_account(
+                conn,
+                tenant_id,
+                "transfer",
+                payment_method_id=method_id,
+                source="salary",
             )
-            if row and row["code"]:
-                return row["code"]
+        return await resolve_payment_account(
+            conn, tenant_id, payment_method, source="salary"
+        )
+    return await resolve_account(conn, tenant_id, AccountRole.BANK, source="salary")
 
-        slug_code = _SALARY_CREDIT_SLUG_FALLBACK.get(payment_method)
-        if slug_code:
-            return slug_code
 
-    return "1110"
+async def _resolve_salary_disbursement_accounts(
+    conn, tenant_id: UUID, debit_role: str, payment_method: Optional[str], source: str
+):
+    debit_account = await resolve_account(conn, tenant_id, debit_role, source=source)
+    credit_account = await _resolve_salary_credit_account(
+        conn, tenant_id, payment_method
+    )
+    return debit_account, credit_account
 
 
 async def _post_salary_gl_entry(
@@ -169,19 +152,19 @@ async def _post_salary_gl_entry(
 
     Without withholding or SS (2 lines):
       DR: 5105 (employee/daily) or 5199 (contractor)  — gross
-      CR: 1105/1110 (cash/bank)                        — gross
+      CR: settlement account role                      — gross
 
     With withholding (3 lines, contractors only):
       DR: 5199 Honorarios                              — gross
-      CR: 1110 Bancos                                  — net (gross − withholding)
+      CR: settlement account role                      — net (gross − withholding)
       CR: 2367 Retención en la fuente por pagar        — withholding
 
     With SS deductions (3 lines, employees/daily):
       DR: 5105 Sueldos                                 — gross
-      CR: 1110 Bancos                                  — net_pay (gross − employee_ss)
+      CR: settlement account role                      — net_pay (gross − employee_ss)
       CR: 237005 Aportes SS empleado (EPS + AFP)       — employee_ss
 
-    Silently skips if accounts missing, period closed, or already posted.
+    Skips closed/already-posted periods; missing roles fail explicitly.
     Caller MUST wrap in try/except.
     """
     if payment_amount <= 0:
@@ -208,25 +191,15 @@ async def _post_salary_gl_entry(
         logger.warning(f"[GL] Period {entry_date.year}-{entry_date.month:02d} closed — skip GL for salary payment {payment_id}")
         return
 
-    # Resolve debit account (expense)
-    debit_code = _SALARY_DEBIT_CODE.get(employment_type or "employee", "5105")
-    debit_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, debit_code,
+    debit_role = (
+        AccountRole.CONTRACTOR_EXPENSE
+        if employment_type == "contractor"
+        else AccountRole.PAYROLL_EXPENSE
     )
-    if not debit_acct:
-        logger.warning(f"[GL] Debit account {debit_code} not found for tenant {tenant_id} — skip salary GL")
-        return
-
-    # Resolve credit account (cash/bank) — dynamic UUID-aware lookup
-    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
-    credit_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, credit_code,
+    debit_acct = await resolve_account(
+        conn, tenant_id, debit_role, source="salary"
     )
-    if not credit_acct:
-        logger.warning(f"[GL] Credit account {credit_code} not found for tenant {tenant_id} — skip salary GL")
-        return
+    credit_acct = await _resolve_salary_credit_account(conn, tenant_id, payment_method)
 
     gross_amt = float(payment_amount)
     use_withholding = withholding_amount and withholding_amount > 0
@@ -236,23 +209,14 @@ async def _post_salary_gl_entry(
         wh_amt = float(withholding_amount or 0)
         net_amt = gross_amt - wh_amt
 
-        # Resolve account 2367 — Retención en la fuente por pagar
-        wh_acct = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2367' AND is_active = true",
-            tenant_id,
+        wh_acct = await resolve_account(
+            conn, tenant_id, AccountRole.WITHHOLDING_PAYABLE, source="salary"
         )
-        if not wh_acct:
-            logger.warning(f"[GL] Withholding account 2367 not found for tenant {tenant_id} — posting without withholding split")
-            use_withholding = False
 
     if use_ss:
-        ss_acct = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '237005' AND is_active = true",
-            tenant_id,
+        ss_acct = await resolve_account(
+            conn, tenant_id, AccountRole.EMPLOYEE_SS_PAYABLE, source="salary"
         )
-        if not ss_acct:
-            logger.warning(f"[GL] SS account 237005 not found for tenant {tenant_id} — posting gross without SS split")
-            use_ss = False
 
     async with conn.transaction():
         entry_row = await conn.fetchrow(
@@ -272,7 +236,7 @@ async def _post_salary_gl_entry(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, $3, 0, $4, 0)""",
-            entry_id, debit_acct["id"], gross_amt, description,
+            entry_id, debit_acct.id, gross_amt, description,
         )
 
         if use_withholding:
@@ -281,16 +245,16 @@ async def _post_salary_gl_entry(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, 0, $3, $4, 1)""",
-                entry_id, credit_acct["id"], net_amt, description,
+                entry_id, credit_acct.id, net_amt, description,
             )
             # Credit line 2 — 2367 Retención en la fuente por pagar
             await conn.execute(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, 0, $3, $4, 2)""",
-                entry_id, wh_acct["id"], wh_amt, f"Retefuente — {description}",
+                entry_id, wh_acct.id, wh_amt, f"Retefuente — {description}",
             )
-            logger.info(f"[GL] Posted salary entry {entry_id} for payment {payment_id} (gross={gross_amt}, net={net_amt}, wh={wh_amt}, debit={debit_code}, credit={credit_code}, wh_acct=2367)")
+            logger.info(f"[GL] Posted salary entry {entry_id} for payment {payment_id} (gross={gross_amt}, net={net_amt}, wh={wh_amt}, debit={debit_acct.code}, credit={credit_acct.code})")
         elif use_ss:
             net_amt_ss = float(net_pay)
             ss_emp_amt = float(employee_ss)
@@ -299,25 +263,25 @@ async def _post_salary_gl_entry(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, 0, $3, $4, 1)""",
-                entry_id, credit_acct["id"], net_amt_ss, description,
+                entry_id, credit_acct.id, net_amt_ss, description,
             )
             # Credit line 2 — 2370 employee SS deduction
             await conn.execute(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, 0, $3, $4, 2)""",
-                entry_id, ss_acct["id"], ss_emp_amt, f"SS empleado — {description}",
+                entry_id, ss_acct.id, ss_emp_amt, f"SS empleado — {description}",
             )
-            logger.info(f"[GL] Posted salary entry {entry_id} for payment {payment_id} (gross={gross_amt}, net={net_amt_ss}, ss_emp={ss_emp_amt}, debit={debit_code}, credit={credit_code})")
+            logger.info(f"[GL] Posted salary entry {entry_id} for payment {payment_id} (gross={gross_amt}, net={net_amt_ss}, ss_emp={ss_emp_amt}, debit={debit_acct.code}, credit={credit_acct.code})")
         else:
             # Credit line — cash/bank (full amount)
             await conn.execute(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, 0, $3, $4, 1)""",
-                entry_id, credit_acct["id"], gross_amt, description,
+                entry_id, credit_acct.id, gross_amt, description,
             )
-            logger.info(f"[GL] Posted salary entry {entry_id} for payment {payment_id} (amount={gross_amt}, debit={debit_code}, credit={credit_code})")
+            logger.info(f"[GL] Posted salary entry {entry_id} for payment {payment_id} (amount={gross_amt}, debit={debit_acct.code}, credit={credit_acct.code})")
 
 
 async def _post_provision_gl_entries(
@@ -331,14 +295,9 @@ async def _post_provision_gl_entries(
     """
     Post monthly social benefit provision GL entries after a salary payment.
 
-    DR 5106 Gasto prima de servicios         CR 2620 Prima de servicios
-    DR 5107 Gasto cesantías                  CR 2610 Cesantías consolidadas
-    DR 5108 Gasto intereses sobre cesantías  CR 2615 Intereses sobre cesantías
-    DR 5109 Gasto vacaciones                 CR 2625 Vacaciones consolidadas
-
-    Graceful degrade — never raises, never blocks the payment flow.
+    Debit and credit accounts are resolved from the four benefit role pairs.
+    A missing required role fails before any journal row is inserted.
     Skips for 'contractor' employment type.
-    Caller MUST wrap in try/except.
     """
     if employment_type == "contractor":
         return
@@ -373,7 +332,44 @@ async def _post_provision_gl_entries(
         Decimal("0.01"), rounding=ROUND_HALF_UP
     )
 
-    # Upsert salary_provisions row (persists even if GL fails)
+    # Check accounting period is open
+    today = date.today()
+    closed = await conn.fetchval(
+        """SELECT 1 FROM tenant_monthly_periods
+           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+        tenant_id, today.year, today.month,
+    )
+    if closed:
+        logger.warning(
+            f"[provision_gl] Period {today.year}-{today.month:02d} closed — skip GL for provision on payment {payment_id}"
+        )
+        return
+
+    # Resolve the complete journal before inserting its header.
+    provision_pairs = [
+        (AccountRole.PRIMA_EXPENSE, AccountRole.PRIMA_PAYABLE, prima, "Provisión prima de servicios"),
+        (AccountRole.CESANTIAS_EXPENSE, AccountRole.CESANTIAS_PAYABLE, cesantias, "Provisión cesantías"),
+        (AccountRole.CESANTIAS_INTEREST_EXPENSE, AccountRole.CESANTIAS_INTEREST_PAYABLE, int_cesantias, "Provisión intereses sobre cesantías"),
+        (AccountRole.VACATION_EXPENSE, AccountRole.VACATION_PAYABLE, vacaciones, "Provisión vacaciones"),
+    ]
+
+    lines = []
+    for debit_role, credit_role, amount, description in provision_pairs:
+        if amount <= 0:
+            continue
+        dr_acct = await resolve_account(
+            conn, tenant_id, debit_role, source="salary_provision"
+        )
+        cr_acct = await resolve_account(
+            conn, tenant_id, credit_role, source="salary_provision"
+        )
+        lines.append((dr_acct, cr_acct, float(amount), description))
+
+    if not lines:
+        return
+
+    total_debit = sum(line[2] for line in lines)
+
     existing_prov = await conn.fetchval(
         "SELECT 1 FROM salary_provisions WHERE payment_id = $1",
         payment_id,
@@ -389,52 +385,6 @@ async def _post_provision_gl_entries(
             employment_type or "employee",
             gross_salary, prima, cesantias, int_cesantias, vacaciones,
         )
-
-    # Check accounting period is open
-    today = date.today()
-    closed = await conn.fetchval(
-        """SELECT 1 FROM tenant_monthly_periods
-           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
-        tenant_id, today.year, today.month,
-    )
-    if closed:
-        logger.warning(
-            f"[provision_gl] Period {today.year}-{today.month:02d} closed — skip GL for provision on payment {payment_id}"
-        )
-        return
-
-    # Resolve GL accounts — expense (DR) and provision (CR)
-    # pairs: (dr_code, cr_code, amount, description)
-    provision_pairs = [
-        ("5106", "2620", prima,         "Provisión prima de servicios"),
-        ("5107", "2610", cesantias,     "Provisión cesantías"),
-        ("5108", "2615", int_cesantias, "Provisión intereses sobre cesantías"),
-        ("5109", "2625", vacaciones,    "Provisión vacaciones"),
-    ]
-
-    lines = []
-    for dr_code, cr_code, amount, description in provision_pairs:
-        if amount <= 0:
-            continue
-        dr_acct = await conn.fetchval(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-            tenant_id, dr_code,
-        )
-        cr_acct = await conn.fetchval(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-            tenant_id, cr_code,
-        )
-        if not dr_acct or not cr_acct:
-            logger.warning(
-                f"[provision_gl] Missing account {dr_code} or {cr_code} for tenant {tenant_id} — skip {description}"
-            )
-            continue
-        lines.append((dr_acct, cr_acct, float(amount), description))
-
-    if not lines:
-        return
-
-    total_debit = sum(l[2] for l in lines)
 
     async with conn.transaction():
         entry_row = await conn.fetchrow(
@@ -456,14 +406,14 @@ async def _post_provision_gl_entries(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, $3, 0, $4, $5)""",
-                entry_id, dr_acct, amount, description, line_order,
+                entry_id, dr_acct.id, amount, description, line_order,
             )
             line_order += 1
             await conn.execute(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, 0, $3, $4, $5)""",
-                entry_id, cr_acct, amount, description, line_order,
+                entry_id, cr_acct.id, amount, description, line_order,
             )
             line_order += 1
 
@@ -523,18 +473,12 @@ async def _post_ss_gl_entry(
         logger.warning(f"[ss_gl] Period closed — skip SS GL for payment {payment_id}")
         return
 
-    # Resolve accounts
-    debit_acct = await conn.fetchval(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '5120' AND is_active = true",
-        tenant_id,
+    debit_acct = await resolve_account(
+        conn, tenant_id, AccountRole.EMPLOYER_SS_EXPENSE, source="salary_ss"
     )
-    credit_acct = await conn.fetchval(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '237010' AND is_active = true",
-        tenant_id,
+    credit_acct = await resolve_account(
+        conn, tenant_id, AccountRole.EMPLOYER_SS_PAYABLE, source="salary_ss"
     )
-    if not debit_acct or not credit_acct:
-        logger.warning(f"[ss_gl] Missing account 5120 or 237010 for tenant {tenant_id} — skip SS GL")
-        return
 
     emp_total = float(employer_total)
     ss_description = f"Aportes SS empleador — {description}"
@@ -556,13 +500,13 @@ async def _post_ss_gl_entry(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, $3, 0, $4, 0)""",
-            entry_id, debit_acct, emp_total, ss_description,
+            entry_id, debit_acct.id, emp_total, ss_description,
         )
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, 1)""",
-            entry_id, credit_acct, emp_total, ss_description,
+            entry_id, credit_acct.id, emp_total, ss_description,
         )
 
     logger.info(
@@ -1051,6 +995,8 @@ async def record_salary_payment_json(
                 net_pay=net_pay,
                 employee_ss=employee_ss,
             )
+        except MissingAccountRoleError:
+            raise
         except Exception as gl_err:
             logger.warning(f"[GL] Salary GL posting failed for payment {payment_id}: {gl_err}")
 
@@ -1064,6 +1010,8 @@ async def record_salary_payment_json(
                 employment_type=employment_type,
                 gross_salary=payment_amount,
             )
+        except MissingAccountRoleError:
+            raise
         except Exception as prov_err:
             logger.warning(f"[provision_gl] Provision GL posting failed for payment {payment_id}: {prov_err}")
 
@@ -1095,6 +1043,8 @@ async def record_salary_payment_json(
                     employer_arl, employer_caja, net_pay,
                     payment_id,
                 )
+            except MissingAccountRoleError:
+                raise
             except Exception as ss_err:
                 logger.warning(f"[ss_gl] SS GL posting failed for payment {payment_id}: {ss_err}")
 
@@ -1285,6 +1235,8 @@ async def record_salary_payment(
                 description=mp_gl_description,
                 withholding_amount=mp_withholding_amount,
             )
+        except MissingAccountRoleError:
+            raise
         except Exception as gl_err:
             logger.warning(f"[GL] Salary GL posting failed for payment {payment_id}: {gl_err}")
 
@@ -1298,6 +1250,8 @@ async def record_salary_payment(
                 employment_type=mp_employment_type,
                 gross_salary=actual_payment_amount,
             )
+        except MissingAccountRoleError:
+            raise
         except Exception as prov_err:
             logger.warning(f"[provision_gl] Provision GL posting failed for payment {payment_id}: {prov_err}")
 
@@ -1942,26 +1896,9 @@ async def _post_prima_payment_gl_entry(
         )
         return
 
-    # Resolve DR account: 2620 (Provisión prima de servicios) — debit liquidates liability
-    dr_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2620' AND is_active = true",
-        tenant_id,
+    dr_acct, cr_acct = await _resolve_salary_disbursement_accounts(
+        conn, tenant_id, AccountRole.PRIMA_PAYABLE, payment_method, "prima_payment"
     )
-    if not dr_acct:
-        logger.warning(f"[prima_gl] DR account 2620 not found for tenant {tenant_id} — skip prima GL")
-        return
-
-    # Resolve CR account: bank/cash (dynamic, same as salary credit resolution)
-    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
-    cr_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, credit_code,
-    )
-    if not cr_acct:
-        logger.warning(
-            f"[prima_gl] CR account {credit_code} not found for tenant {tenant_id} — skip prima GL"
-        )
-        return
 
     amount_float = float(prima_amount)
 
@@ -1984,19 +1921,19 @@ async def _post_prima_payment_gl_entry(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, $3, 0, $4, 0)""",
-            entry_id, dr_acct["id"], amount_float, f"Prima de servicios {semestre}",
+            entry_id, dr_acct.id, amount_float, f"Prima de servicios {semestre}",
         )
         # CR line — bank/cash
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, 1)""",
-            entry_id, cr_acct["id"], amount_float, f"Prima de servicios {semestre}",
+            entry_id, cr_acct.id, amount_float, f"Prima de servicios {semestre}",
         )
 
     logger.info(
         f"[prima_gl] Posted prima entry {entry_id} for payment {prima_payment_id} "
-        f"(amount={amount_float}, DR=2620, CR={credit_code}, semestre={semestre})"
+        f"(amount={amount_float}, DR={dr_acct.code}, CR={cr_acct.code}, semestre={semestre})"
     )
 
 
@@ -2075,6 +2012,8 @@ async def record_prima_payment(
                 payment_date=payment_date,
                 semestre=data.semestre,
             )
+        except MissingAccountRoleError:
+            raise
         except Exception as gl_err:
             logger.warning(f"[prima_gl] GL post failed for prima payment {payment_id}: {gl_err}")
 
@@ -2225,26 +2164,9 @@ async def _post_cesantias_payment_gl_entry(
         )
         return
 
-    # Resolve DR account: 2610 (Cesantías consolidadas) — debit liquidates liability
-    dr_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2610' AND is_active = true",
-        tenant_id,
+    dr_acct, cr_acct = await _resolve_salary_disbursement_accounts(
+        conn, tenant_id, AccountRole.CESANTIAS_PAYABLE, payment_method, "cesantias_payment"
     )
-    if not dr_acct:
-        logger.warning(f"[cesantias_gl] DR account 2610 not found for tenant {tenant_id} — skip cesantias GL")
-        return
-
-    # Resolve CR account: bank/cash
-    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
-    cr_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, credit_code,
-    )
-    if not cr_acct:
-        logger.warning(
-            f"[cesantias_gl] CR account {credit_code} not found for tenant {tenant_id} — skip cesantias GL"
-        )
-        return
 
     amount_float = float(cesantias_amount)
 
@@ -2267,19 +2189,19 @@ async def _post_cesantias_payment_gl_entry(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, $3, 0, $4, 0)""",
-            entry_id, dr_acct["id"], amount_float, (f"Cesantías {anio} — {fondo_name}" if fondo_name else f"Cesantías {anio}"),
+            entry_id, dr_acct.id, amount_float, (f"Cesantías {anio} — {fondo_name}" if fondo_name else f"Cesantías {anio}"),
         )
         # CR line — bank/cash
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, 1)""",
-            entry_id, cr_acct["id"], amount_float, (f"Cesantías {anio} — {fondo_name}" if fondo_name else f"Cesantías {anio}"),
+            entry_id, cr_acct.id, amount_float, (f"Cesantías {anio} — {fondo_name}" if fondo_name else f"Cesantías {anio}"),
         )
 
     logger.info(
         f"[cesantias_gl] Posted cesantias entry {entry_id} for payment {cesantias_payment_id} "
-        f"(amount={amount_float}, DR=2610, CR={credit_code}, anio={anio})"
+        f"(amount={amount_float}, DR={dr_acct.code}, CR={cr_acct.code}, anio={anio})"
     )
 
 
@@ -2331,26 +2253,13 @@ async def _post_int_cesantias_payment_gl_entry(
         )
         return
 
-    # Resolve DR account: 2615 (Intereses sobre cesantías) — debit liquidates liability
-    dr_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2615' AND is_active = true",
+    dr_acct, cr_acct = await _resolve_salary_disbursement_accounts(
+        conn,
         tenant_id,
+        AccountRole.CESANTIAS_INTEREST_PAYABLE,
+        payment_method,
+        "cesantias_interest_payment",
     )
-    if not dr_acct:
-        logger.warning(f"[int_cesantias_gl] DR account 2615 not found for tenant {tenant_id} — skip int_cesantias GL")
-        return
-
-    # Resolve CR account: bank/cash
-    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
-    cr_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, credit_code,
-    )
-    if not cr_acct:
-        logger.warning(
-            f"[int_cesantias_gl] CR account {credit_code} not found for tenant {tenant_id} — skip int_cesantias GL"
-        )
-        return
 
     amount_float = float(int_cesantias_amount)
 
@@ -2373,19 +2282,19 @@ async def _post_int_cesantias_payment_gl_entry(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, $3, 0, $4, 0)""",
-            entry_id, dr_acct["id"], amount_float, f"Intereses sobre cesantías {anio}",
+            entry_id, dr_acct.id, amount_float, f"Intereses sobre cesantías {anio}",
         )
         # CR line — bank/cash
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, 1)""",
-            entry_id, cr_acct["id"], amount_float, f"Intereses sobre cesantías {anio}",
+            entry_id, cr_acct.id, amount_float, f"Intereses sobre cesantías {anio}",
         )
 
     logger.info(
         f"[int_cesantias_gl] Posted int_cesantias entry {entry_id} for payment {int_cesantias_payment_id} "
-        f"(amount={amount_float}, DR=2615, CR={credit_code}, anio={anio})"
+        f"(amount={amount_float}, DR={dr_acct.code}, CR={cr_acct.code}, anio={anio})"
     )
 
 
@@ -2467,6 +2376,8 @@ async def record_cesantias_payment(
                 anio=data.anio,
                 fondo_name=data.fondo_name,
             )
+        except MissingAccountRoleError:
+            raise
         except Exception as gl_err:
             logger.warning(f"[cesantias_gl] GL post failed for cesantias payment {payment_id}: {gl_err}")
 
@@ -2611,6 +2522,8 @@ async def record_int_cesantias_payment(
                 payment_date=payment_date,
                 anio=data.anio,
             )
+        except MissingAccountRoleError:
+            raise
         except Exception as gl_err:
             logger.warning(f"[int_cesantias_gl] GL post failed for int_cesantias payment {payment_id}: {gl_err}")
 
@@ -2718,26 +2631,9 @@ async def _post_vacaciones_payment_gl_entry(
         )
         return
 
-    # Resolve DR account: 2625 (Vacaciones consolidadas) — debit liquidates liability
-    dr_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '2625' AND is_active = true",
-        tenant_id,
+    dr_acct, cr_acct = await _resolve_salary_disbursement_accounts(
+        conn, tenant_id, AccountRole.VACATION_PAYABLE, payment_method, "vacation_payment"
     )
-    if not dr_acct:
-        logger.warning(f"[vacaciones_gl] DR account 2625 not found for tenant {tenant_id} — skip GL")
-        return
-
-    # Resolve CR account: bank/cash
-    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
-    cr_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, credit_code,
-    )
-    if not cr_acct:
-        logger.warning(
-            f"[vacaciones_gl] CR account {credit_code} not found for tenant {tenant_id} — skip GL"
-        )
-        return
 
     amount_float = float(vacaciones_amount)
 
@@ -2760,19 +2656,19 @@ async def _post_vacaciones_payment_gl_entry(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, $3, 0, $4, 0)""",
-            entry_id, dr_acct["id"], amount_float, f"Vacaciones {anio}",
+            entry_id, dr_acct.id, amount_float, f"Vacaciones {anio}",
         )
         # CR line — bank/cash
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, 1)""",
-            entry_id, cr_acct["id"], amount_float, f"Vacaciones {anio}",
+            entry_id, cr_acct.id, amount_float, f"Vacaciones {anio}",
         )
 
     logger.info(
         f"[vacaciones_gl] Posted entry {entry_id} for payment {vacaciones_payment_id} "
-        f"(amount={amount_float}, DR=2625, CR={credit_code}, anio={anio})"
+        f"(amount={amount_float}, DR={dr_acct.code}, CR={cr_acct.code}, anio={anio})"
     )
 
 
@@ -2851,6 +2747,8 @@ async def record_vacaciones_payment(
                 payment_date=payment_date,
                 anio=data.anio,
             )
+        except MissingAccountRoleError:
+            raise
         except Exception as e:
             logger.error(f"[vacaciones_gl] GL post failed for payment {payment_id}: {e}")
 
@@ -2957,26 +2855,9 @@ async def _post_dotacion_gl_entry(
         )
         return
 
-    # Resolve DR account: 5115 (Dotación al personal)
-    dr_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '5115' AND is_active = true",
-        tenant_id,
+    dr_acct, cr_acct = await _resolve_salary_disbursement_accounts(
+        conn, tenant_id, AccountRole.DOTACION_EXPENSE, payment_method, "dotacion_payment"
     )
-    if not dr_acct:
-        logger.warning(f"[dotacion_gl] DR account 5115 not found for tenant {tenant_id} — skip dotacion GL")
-        return
-
-    # Resolve CR account: bank/cash
-    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
-    cr_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, credit_code,
-    )
-    if not cr_acct:
-        logger.warning(
-            f"[dotacion_gl] CR account {credit_code} not found for tenant {tenant_id} — skip dotacion GL"
-        )
-        return
 
     amount_float = float(total_amount)
     period_label = {'APR': 'Apr', 'AUG': 'Ago', 'DEC': 'Dic'}.get(period, period)
@@ -3000,19 +2881,19 @@ async def _post_dotacion_gl_entry(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, $3, 0, $4, 0)""",
-            entry_id, dr_acct["id"], amount_float, f"Dotación {period_label} {year}",
+            entry_id, dr_acct.id, amount_float, f"Dotación {period_label} {year}",
         )
         # CR line — bank/cash
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, 1)""",
-            entry_id, cr_acct["id"], amount_float, f"Dotación {period_label} {year}",
+            entry_id, cr_acct.id, amount_float, f"Dotación {period_label} {year}",
         )
 
     logger.info(
         f"[dotacion_gl] Posted dotacion entry {entry_id} for payment {dotacion_payment_id} "
-        f"(amount={amount_float}, DR=5115, CR={credit_code}, {period} {year})"
+        f"(amount={amount_float}, DR={dr_acct.code}, CR={cr_acct.code}, {period} {year})"
     )
 
 
@@ -3091,6 +2972,8 @@ async def record_dotacion_payment(
                 period=data.period,
                 year=data.year,
             )
+        except MissingAccountRoleError:
+            raise
         except Exception as e:
             logger.error(f"[dotacion_gl] GL post failed for payment {payment_id}: {e}")
 
@@ -3200,28 +3083,13 @@ async def _post_pila_gl_entry(
         )
         return
 
-    # Resolve DR accounts: 237005 (employee SS) and 237010 (employer SS)
-    dr_237005 = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '237005' AND is_active = true",
-        tenant_id,
+    dr_employee = await resolve_account(
+        conn, tenant_id, AccountRole.EMPLOYEE_SS_PAYABLE, source="pila_payment"
     )
-    dr_237010 = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '237010' AND is_active = true",
-        tenant_id,
+    dr_employer = await resolve_account(
+        conn, tenant_id, AccountRole.EMPLOYER_SS_PAYABLE, source="pila_payment"
     )
-    if not dr_237005 or not dr_237010:
-        logger.warning(f"[pila_gl] DR accounts 237005/237010 not found for tenant {tenant_id} — skip PILA GL")
-        return
-
-    # Resolve CR account: bank/cash
-    credit_code = await _resolve_salary_credit_gl_code(conn, payment_method)
-    cr_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, credit_code,
-    )
-    if not cr_acct:
-        logger.warning(f"[pila_gl] CR account {credit_code} not found for tenant {tenant_id} — skip PILA GL")
-        return
+    cr_acct = await _resolve_salary_credit_account(conn, tenant_id, payment_method)
 
     emp_float = float(employee_ss_amount)
     emp_er_float = float(employer_ss_amount)
@@ -3247,7 +3115,7 @@ async def _post_pila_gl_entry(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, $3, 0, $4, 0)""",
-                entry_id, dr_237005["id"], emp_float, f"PILA empleado {period_month}",
+                entry_id, dr_employee.id, emp_float, f"PILA empleado {period_month}",
             )
 
         # DR line 2 — 237010 Aportes SS empleador (clears liability)
@@ -3256,7 +3124,7 @@ async def _post_pila_gl_entry(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, $3, 0, $4, 1)""",
-                entry_id, dr_237010["id"], emp_er_float, f"PILA empleador {period_month}",
+                entry_id, dr_employer.id, emp_er_float, f"PILA empleador {period_month}",
             )
 
         # CR line — bank/cash
@@ -3264,12 +3132,12 @@ async def _post_pila_gl_entry(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, 2)""",
-            entry_id, cr_acct["id"], total_float, f"PILA {period_month}",
+            entry_id, cr_acct.id, total_float, f"PILA {period_month}",
         )
 
     logger.info(
         f"[pila_gl] Posted PILA entry {entry_id} for payment {pila_payment_id} "
-        f"(total={total_float}, DR237005={emp_float}, DR237010={emp_er_float}, CR={credit_code}, {period_month})"
+        f"(total={total_float}, employee={emp_float}, employer={emp_er_float}, CR={cr_acct.code}, {period_month})"
     )
 
 
@@ -3311,6 +3179,8 @@ async def record_pila_payment(
                 payment_date=payment_date,
                 period_month=data.period_month,
             )
+        except MissingAccountRoleError:
+            raise
         except Exception as e:
             logger.error(f"[pila_gl] GL post failed for PILA payment {payment_id}: {e}")
 
@@ -3380,39 +3250,48 @@ async def get_pila_pending(
     tenant_id = session.tenant_id
 
     async with get_db_connection() as conn:
+        employee_account = await resolve_account(
+            conn, tenant_id, AccountRole.EMPLOYEE_SS_PAYABLE, source="pila_pending"
+        )
+        employer_account = await resolve_account(
+            conn, tenant_id, AccountRole.EMPLOYER_SS_PAYABLE, source="pila_pending"
+        )
         rows = await conn.fetch(
             """SELECT
                  LPAD(tje.period_year::text, 4, '0') || '-' ||
                  LPAD(tje.period_month::text, 2, '0') AS period_month,
-                 ta.code,
+                 tjl.account_id,
                  SUM(tjl.credit) - COALESCE(SUM(tjl.debit), 0) AS net_liability
                FROM tenant_journal_lines tjl
                JOIN tenant_journal_entries tje ON tje.id = tjl.journal_entry_id
-               JOIN tenant_accounts ta ON ta.id = tjl.account_id
-               WHERE ta.tenant_id = $1
-                 AND ta.code IN ('237005', '237010')
-               GROUP BY tje.period_year, tje.period_month, ta.code
+               WHERE tje.tenant_id = $1
+                 AND tjl.account_id IN ($2, $3)
+               GROUP BY tje.period_year, tje.period_month, tjl.account_id
                HAVING SUM(tjl.credit) - COALESCE(SUM(tjl.debit), 0) > 0
-               ORDER BY tje.period_year, tje.period_month, ta.code""",
+               ORDER BY tje.period_year, tje.period_month, tjl.account_id""",
             tenant_id,
+            employee_account.id,
+            employer_account.id,
         )
 
         # Pivot: group by period_month, split by code
         period_map: Dict[str, Dict[str, Decimal]] = {}
         for r in rows:
             pm = r["period_month"]
-            code = r["code"]
+            account_key = (
+                "employee" if r["account_id"] == employee_account.id else "employer"
+            )
             net = Decimal(str(r["net_liability"]))
             if pm not in period_map:
-                period_map[pm] = {"237005": Decimal("0"), "237010": Decimal("0")}
-            period_map[pm][code] = net
+                period_map[pm] = {"employee": Decimal("0"), "employer": Decimal("0")}
+            period_map[pm][account_key] = net
 
         pending: List[PilaPendingByPeriod] = [
             PilaPendingByPeriod(
                 period_month=pm,
-                employee_ss_pending=vals["237005"],
-                employer_ss_pending=vals["237010"],
-                total_pending=vals["237005"] + vals["237010"],
+                employee_ss_pending=vals["employee"],
+                employer_ss_pending=vals["employer"],
+                total_pending=vals["employee"] + vals["employer"],
             )
             for pm, vals in sorted(period_map.items())
         ]
@@ -3463,82 +3342,45 @@ async def _post_overtime_gl_entry(
             )
             return
 
-        # Resolve DR account: 5110 (Gastos de personal — horas extras)
-        dr_account_id = await conn.fetchval(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '5110' AND is_active = true",
-            tenant_id,
+        debit_account, credit_account = await _resolve_salary_disbursement_accounts(
+            conn, tenant_id, AccountRole.OVERTIME_EXPENSE, payment_method, "overtime_payment"
         )
-        if not dr_account_id:
-            logger.warning(f"[overtime_gl] DR account 5110 not found for tenant {tenant_id} — skip overtime GL")
-            return
-
-        # Resolve CR account (bank) — same pattern as dotación
-        cr_account_id = None
-        credit_code = "1110"
-        if payment_method:
-            pm_row = await conn.fetchrow(
-                """SELECT gl_account_id FROM payment_method_gl_accounts
-                   WHERE tenant_id = $1 AND (payment_method_id::text = $2 OR slug = $2)
-                   LIMIT 1""",
-                tenant_id, str(payment_method),
-            )
-            if pm_row and pm_row['gl_account_id']:
-                cr_account_id = pm_row['gl_account_id']
-                acc_code = await conn.fetchval(
-                    "SELECT code FROM tenant_accounts WHERE id = $1", cr_account_id
-                )
-                if acc_code:
-                    credit_code = acc_code
-
-        if not cr_account_id:
-            cr_account_id = await conn.fetchval(
-                "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = '1110' AND is_active = true",
-                tenant_id,
-            )
-        if not cr_account_id:
-            logger.warning(f"[overtime_gl] CR account not found for tenant {tenant_id} — skip overtime GL")
-            return
 
         amount_float = float(total_amount)
 
-        # Create journal entry
-        entry_id = await conn.fetchval(
-            """INSERT INTO tenant_journal_entries
-               (tenant_id, entry_date, description, total_debit, total_credit,
-                source_module, source_id, status, created_by, created_at)
-               VALUES ($1, $2, $3, $4, $5, 'nomina_horas_extras', $6, 'posted', NULL, NOW())
-               RETURNING id""",
-            tenant_id,
-            entry_date,
-            f"Horas extras — {entry_date.strftime('%Y-%m')}",
-            amount_float,
-            amount_float,
-            overtime_payment_id,
-        )
-
-        # DR line — 5110 Gastos de personal — horas extras
-        await conn.execute(
-            """INSERT INTO tenant_journal_entry_lines
-               (entry_id, account_id, debit, credit, description)
-               VALUES ($1, $2, $3, 0, 'Gasto horas extras')""",
-            entry_id, dr_account_id, amount_float,
-        )
-
-        # CR line — bank account
-        await conn.execute(
-            """INSERT INTO tenant_journal_entry_lines
-               (entry_id, account_id, debit, credit, description)
-               VALUES ($1, $2, 0, $3, 'Pago horas extras')""",
-            entry_id, cr_account_id, amount_float,
-        )
+        async with conn.transaction():
+            entry_id = await conn.fetchval(
+                """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month, description,
+                    total_debit, total_credit, source_module, source_id, status, posted_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $6,
+                           'nomina_horas_extras', $7, 'posted', NOW())
+                   RETURNING id""",
+                tenant_id, entry_date, entry_date.year, entry_date.month,
+                f"Horas extras — {entry_date.strftime('%Y-%m')}",
+                amount_float, overtime_payment_id,
+            )
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, $3, 0, 'Gasto horas extras', 0)""",
+                entry_id, debit_account.id, amount_float,
+            )
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                   (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, 0, $3, 'Pago horas extras', 1)""",
+                entry_id, credit_account.id, amount_float,
+            )
 
         logger.info(
             f"[overtime_gl] Posted entry {entry_id} for payment {overtime_payment_id} "
-            f"(amount={amount_float}, DR=5110, CR={credit_code})"
+            f"(amount={amount_float}, DR={debit_account.code}, CR={credit_account.code})"
         )
 
     except Exception as exc:
         logger.error(f"[overtime_gl] GL entry failed for payment {overtime_payment_id}: {exc}", exc_info=True)
+        raise
 
 
 async def record_overtime_payment(request: Request, member_id: UUID, data) -> 'OvertimePaymentResponse':
@@ -3752,31 +3594,34 @@ async def _post_liquidacion_gl_entry(
     DR 2625 Vacaciones consolidadas    (vacaciones_amount)
     DR 2615 Intereses sobre cesantías  (int_cesantias_amount)
     DR 5198 Indemnizaciones al personal (indemnizacion_amount, if > 0)
-    CR 1110 Banco / Caja               (total_amount)
+    CR settlement account role         (total_amount)
     """
     try:
         entry_date = payment_date.date() if hasattr(payment_date, 'date') else payment_date
         description = f"Liquidación contrato — {member_name}"
         total_debit = float(breakdown['total_amount'])
 
-        # Resolve account IDs
-        acct_2610 = await conn.fetchrow("SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code='2610'", tenant_id)
-        acct_2620 = await conn.fetchrow("SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code='2620'", tenant_id)
-        acct_2625 = await conn.fetchrow("SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code='2625'", tenant_id)
-        acct_2615 = await conn.fetchrow("SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code='2615'", tenant_id)
-        acct_5198 = await conn.fetchrow("SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code='5198'", tenant_id)
-
-        # Resolve bank account from payment_method (same logic as other GL helpers)
-        bank_codes = ['1110', '1120', '1105']
-        credit_acct = None
-        for code in bank_codes:
-            credit_acct = await conn.fetchrow("SELECT id FROM tenant_accounts WHERE tenant_id=$1 AND code=$2", tenant_id, code)
-            if credit_acct:
-                break
-
-        if not credit_acct:
-            logger.error(f"[GL] No bank account found for liquidación {liquidacion_id}")
-            return
+        role_amounts = [
+            (AccountRole.CESANTIAS_PAYABLE, breakdown['cesantias_amount'], 'Cesantías liquidación'),
+            (AccountRole.PRIMA_PAYABLE, breakdown['prima_amount'], 'Prima liquidación'),
+            (AccountRole.VACATION_PAYABLE, breakdown['vacaciones_amount'], 'Vacaciones liquidación'),
+            (AccountRole.CESANTIAS_INTEREST_PAYABLE, breakdown['int_cesantias_amount'], 'Intereses cesantías liquidación'),
+        ]
+        if breakdown['indemnizacion_amount'] > 0:
+            role_amounts.append(
+                (AccountRole.TERMINATION_EXPENSE, breakdown['indemnizacion_amount'], 'Indemnización sin justa causa')
+            )
+        debit_lines = []
+        for role, amount, line_description in role_amounts:
+            if float(amount) <= 0:
+                continue
+            account = await resolve_account(
+                conn, tenant_id, role, source="termination_payment"
+            )
+            debit_lines.append((account, amount, line_description))
+        credit_acct = await _resolve_salary_credit_account(
+            conn, tenant_id, payment_method
+        )
 
         idempotency_check = await conn.fetchrow(
             "SELECT id FROM tenant_journal_entries WHERE tenant_id=$1 AND source_module='nomina_liquidacion' AND source_id=$2",
@@ -3800,38 +3645,28 @@ async def _post_liquidacion_gl_entry(
             entry_id = entry_row['id']
             line_order = 0
 
-            # DR lines for liability settlements
-            dr_lines = [
-                (acct_2610, breakdown['cesantias_amount'], 'Cesantías liquidación'),
-                (acct_2620, breakdown['prima_amount'], 'Prima liquidación'),
-                (acct_2625, breakdown['vacaciones_amount'], 'Vacaciones liquidación'),
-                (acct_2615, breakdown['int_cesantias_amount'], 'Intereses cesantías liquidación'),
-            ]
-            if breakdown['indemnizacion_amount'] > 0 and acct_5198:
-                dr_lines.append((acct_5198, breakdown['indemnizacion_amount'], 'Indemnización sin justa causa'))
-
-            for acct, amount, desc in dr_lines:
-                if acct and float(amount) > 0:
-                    await conn.execute(
-                        """INSERT INTO tenant_journal_lines
-                               (journal_entry_id, account_id, debit, credit, description, line_order)
-                           VALUES ($1, $2, $3, 0, $4, $5)""",
-                        entry_id, acct['id'], float(amount), desc, line_order,
-                    )
-                    line_order += 1
+            for acct, amount, desc in debit_lines:
+                await conn.execute(
+                    """INSERT INTO tenant_journal_lines
+                           (journal_entry_id, account_id, debit, credit, description, line_order)
+                       VALUES ($1, $2, $3, 0, $4, $5)""",
+                    entry_id, acct.id, float(amount), desc, line_order,
+                )
+                line_order += 1
 
             # CR line — bank
             await conn.execute(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, 0, $3, $4, $5)""",
-                entry_id, credit_acct['id'], total_debit, description, line_order,
+                entry_id, credit_acct.id, total_debit, description, line_order,
             )
 
         logger.info(f"[GL] Posted liquidación entry {entry_id} for liquidacion_id={liquidacion_id}, total={total_debit}")
 
     except Exception as exc:
         logger.error(f"[GL] Failed to post liquidación entry for {liquidacion_id}: {exc}")
+        raise
 
 
 async def record_liquidacion(request: Request, member_id: UUID, data) -> 'LiquidacionResponse':

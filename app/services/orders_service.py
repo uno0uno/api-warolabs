@@ -25,6 +25,11 @@ from app.services.cierre_service import (
     _post_order_cogs_gl_entry,
     _post_order_gl_entry,
 )
+from app.services.account_role_service import (
+    AccountRole,
+    MissingAccountRoleError,
+    resolve_account,
+)
 from app.services.email_helpers import send_pos_receipt_email
 from app.services.email_sender import resolve_sender_email_for_tenant
 from app.services.invoicing_presentation import (
@@ -902,23 +907,32 @@ async def get_order_by_id(
 
             _promo_summary = await _get_order_promo_summary(conn, order_id)
             _waro_summary = await _get_order_waro_redemption_summary(conn, order_id)
-            advance_gl_row = await conn.fetchrow(
-                """
-                SELECT COALESCE(SUM(jl.debit), 0) AS advance_applied
-                FROM tenant_journal_entries je
-                JOIN tenant_journal_lines jl ON jl.journal_entry_id = je.id
-                JOIN tenant_accounts ta ON ta.id = jl.account_id
-                WHERE je.tenant_id = $1
-                  AND je.source_module = 'orden'
-                  AND je.source_id = $2
-                  AND je.status = 'posted'
-                  AND ta.code = '2810'
-                  AND jl.debit > 0
-                  AND jl.description ILIKE '%anticipo mesa%'
-                """,
+            advance_account = await resolve_account(
+                conn,
                 tenant_id,
-                order_id,
+                AccountRole.CUSTOMER_ADVANCES,
+                required=False,
+                source="order_detail",
             )
+            advance_gl_row = None
+            if advance_account:
+                advance_gl_row = await conn.fetchrow(
+                    """
+                    SELECT COALESCE(SUM(jl.debit), 0) AS advance_applied
+                    FROM tenant_journal_entries je
+                    JOIN tenant_journal_lines jl ON jl.journal_entry_id = je.id
+                    WHERE je.tenant_id = $1
+                      AND je.source_module = 'orden'
+                      AND je.source_id = $2
+                      AND je.status = 'posted'
+                      AND jl.account_id = $3
+                      AND jl.debit > 0
+                      AND jl.description ILIKE '%anticipo mesa%'
+                    """,
+                    tenant_id,
+                    order_id,
+                    advance_account.id,
+                )
             _tip_amount = float(order_row['tip_amount']) if order_row['tip_amount'] is not None else 0.0
             _tip_tax_amount = float(order_row['tip_tax_amount']) if order_row['tip_tax_amount'] is not None else 0.0
             _settlement_amount = float(order_row['total_amount']) + _tip_amount + _tip_tax_amount
@@ -1241,6 +1255,8 @@ async def bulk_update_order_status(
                             order_date=gl_order_date,
                             order_number=int(ord_row["order_number"]),
                         )
+                except MissingAccountRoleError:
+                    raise
                 except Exception as gl_exc:
                     logger.error(f"GL entries failed for bulk status update: {gl_exc}")
 
@@ -1461,6 +1477,8 @@ async def update_order_status(
                                 order_date=gl_order_date,
                                 order_number=int(completed_order["order_number"]),
                             )
+                    except MissingAccountRoleError:
+                        raise
                     except Exception as gl_exc:
                         logger.error(f"GL entries failed for order status update: {gl_exc}")
                 elif old_status == 'completed' and status in ('cancelled', 'pending'):
@@ -3979,6 +3997,8 @@ async def create_manual_order(
                         order_number=int(order_row["order_number"]),
                         payment_splits=split_payments or None,
                     )
+                except MissingAccountRoleError:
+                    raise
                 except Exception as e:
                     logger.error(f"GL entry failed for manual order {order_id}: {e}")
 
@@ -3990,6 +4010,8 @@ async def create_manual_order(
                         order_date=gl_order_date,
                         order_number=int(order_row["order_number"]),
                     )
+                except MissingAccountRoleError:
+                    raise
                 except Exception as e:
                     logger.error(f"COGS GL entry failed for manual order {order_id}: {e}")
 
