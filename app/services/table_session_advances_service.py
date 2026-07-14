@@ -17,11 +17,15 @@ from app.core.exceptions import APIError, AuthenticationError, NotFoundError
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
 from app.services.customer_wallet_service import (
-    DEFAULT_LIABILITY_CODE,
     WALLET_PAYMENT_SLUG,
     _post_two_line_gl,
-    _resolve_account_id,
-    _resolve_payment_debit_code,
+    _resolve_liability_account,
+    _resolve_payment_debit_account,
+)
+from app.services.account_role_service import (
+    AccountRole,
+    resolve_account,
+    resolve_tax_account,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,7 +35,6 @@ TABLE_SESSION_ADVANCE_PAYMENT_SLUG = "table_session_advance"
 ADVANCE_RECEIVE_SOURCE = "table_session_advance_receive"
 ADVANCE_VOID_SOURCE = "table_session_advance_void"
 ADVANCE_COVER_SOURCE = "table_session_advance_cover"
-INGRESOS_CODE = "4175"
 
 
 def _amount_decimal(amount: Decimal | float | int | str) -> Decimal:
@@ -314,18 +317,18 @@ async def apply_session_advances_for_close(
 def _standard_cover_gl_amounts(amount: Decimal, tax_config: Dict[str, Any]) -> tuple:
     settlement = Decimal(str(amount or 0)).quantize(Decimal("0.01"))
     tax_amount = Decimal("0")
-    tax_code = None
+    tax_kind = None
     if settlement <= 0:
-        return settlement, settlement, tax_amount, tax_code
+        return settlement, settlement, tax_amount, tax_kind
     if tax_config.get("inc_applicable"):
         rate = Decimal(str(tax_config["inc_rate"]))
-        tax_code = str(tax_config["inc_gl_account_code"])
+        tax_kind = "inc"
         tax_amount = settlement - (settlement / (1 + rate))
     elif tax_config.get("iva_applicable"):
         rate = Decimal(str(tax_config["iva_rate"]))
-        tax_code = str(tax_config["iva_gl_account_code"])
+        tax_kind = "iva"
         tax_amount = settlement - (settlement / (1 + rate))
-    return settlement, settlement - tax_amount, tax_amount, tax_code
+    return settlement, settlement - tax_amount, tax_amount, tax_kind
 
 
 async def recognize_unconsumed_advance_cover_for_close(
@@ -359,6 +362,19 @@ async def recognize_unconsumed_advance_cover_for_close(
         logger.info("[table advance GL] Cover for session %s already posted", table_session_id)
         return Decimal("0")
 
+    liability_acct = await _resolve_liability_account(conn, tenant_id)
+    revenue_acct = await resolve_account(
+        conn, tenant_id, AccountRole.SALES_REVENUE, source="table_advance_cover"
+    )
+    _, _, preview_tax_amount, tax_kind = _standard_cover_gl_amounts(
+        cover_to_apply, tax_config
+    )
+    tax_acct = None
+    if tax_kind and preview_tax_amount > 0:
+        tax_acct = await resolve_tax_account(
+            conn, tenant_id, tax_config, tax_kind, required=True
+        )
+
     applied = await apply_session_advances_for_close(
         conn,
         tenant_id,
@@ -369,18 +385,7 @@ async def recognize_unconsumed_advance_cover_for_close(
     if applied <= 0:
         return Decimal("0")
 
-    settlement, net_revenue, tax_amount, tax_code = _standard_cover_gl_amounts(applied, tax_config)
-    liability_acct = await _resolve_account_id(conn, tenant_id, DEFAULT_LIABILITY_CODE)
-    revenue_acct = await _resolve_account_id(conn, tenant_id, INGRESOS_CODE)
-    tax_acct = await _resolve_account_id(conn, tenant_id, tax_code) if tax_code and tax_amount > 0 else None
-    if not liability_acct or not revenue_acct:
-        logger.warning(
-            "[table advance GL] Missing cover accounts liability=%s revenue=%s tenant=%s",
-            DEFAULT_LIABILITY_CODE,
-            INGRESOS_CODE,
-            tenant_id,
-        )
-        return applied
+    settlement, net_revenue, tax_amount, _ = _standard_cover_gl_amounts(applied, tax_config)
 
     async with conn.transaction():
         entry_row = await conn.fetchrow(
@@ -412,9 +417,9 @@ async def recognize_unconsumed_advance_cover_for_close(
             VALUES ($1, $2, $3, 0, $4, 0)
             """,
             entry_id,
-            liability_acct,
+            liability_acct.id,
             float(settlement),
-            "Dr 2810 - aplicación sobrante consumo mínimo",
+            f"Dr {liability_acct.code} - aplicación sobrante consumo mínimo",
         )
         await conn.execute(
             """
@@ -423,9 +428,9 @@ async def recognize_unconsumed_advance_cover_for_close(
             VALUES ($1, $2, 0, $3, $4, 1)
             """,
             entry_id,
-            revenue_acct,
+            revenue_acct.id,
             float(net_revenue),
-            "Cr 4175 - ingreso cover consumo mínimo",
+            f"Cr {revenue_acct.code} - ingreso cover consumo mínimo",
         )
         if tax_amount > 0 and tax_acct:
             await conn.execute(
@@ -435,7 +440,7 @@ async def recognize_unconsumed_advance_cover_for_close(
                 VALUES ($1, $2, 0, $3, $4, 2)
                 """,
                 entry_id,
-                tax_acct,
+                tax_acct.id,
                 float(tax_amount),
                 "Cr impuesto - cover consumo mínimo",
             )
@@ -572,17 +577,10 @@ async def _post_receive_gl(
     entry_date: date,
     created_by: Optional[UUID],
 ) -> Optional[UUID]:
-    debit_code = await _resolve_payment_debit_code(conn, payment_method, payment_method_id)
-    debit_acct = await _resolve_account_id(conn, tenant_id, debit_code)
-    credit_acct = await _resolve_account_id(conn, tenant_id, DEFAULT_LIABILITY_CODE)
-    if not debit_acct or not credit_acct:
-        logger.warning(
-            "[table advance GL] Missing accounts debit=%s credit=%s tenant=%s",
-            debit_code,
-            DEFAULT_LIABILITY_CODE,
-            tenant_id,
-        )
-        return None
+    debit_acct = await _resolve_payment_debit_account(
+        conn, tenant_id, payment_method, payment_method_id
+    )
+    credit_acct = await _resolve_liability_account(conn, tenant_id)
     return await _post_two_line_gl(
         conn,
         tenant_id,
@@ -591,11 +589,11 @@ async def _post_receive_gl(
         f"table-session-advance-{advance_id}",
         ADVANCE_RECEIVE_SOURCE,
         advance_id,
-        debit_acct,
-        credit_acct,
+        debit_acct.id,
+        credit_acct.id,
         amount,
-        f"Dr {debit_code} — anticipo mesa",
-        f"Cr {DEFAULT_LIABILITY_CODE} — anticipos recibidos",
+        f"Dr {debit_acct.code} — anticipo mesa",
+        f"Cr {credit_acct.code} — anticipos recibidos",
         created_by,
     )
 
@@ -610,17 +608,10 @@ async def _post_void_gl(
     entry_date: date,
     created_by: Optional[UUID],
 ) -> Optional[UUID]:
-    credit_code = await _resolve_payment_debit_code(conn, payment_method, payment_method_id)
-    debit_acct = await _resolve_account_id(conn, tenant_id, DEFAULT_LIABILITY_CODE)
-    credit_acct = await _resolve_account_id(conn, tenant_id, credit_code)
-    if not debit_acct or not credit_acct:
-        logger.warning(
-            "[table advance GL] Missing void accounts debit=%s credit=%s tenant=%s",
-            DEFAULT_LIABILITY_CODE,
-            credit_code,
-            tenant_id,
-        )
-        return None
+    debit_acct = await _resolve_liability_account(conn, tenant_id)
+    credit_acct = await _resolve_payment_debit_account(
+        conn, tenant_id, payment_method, payment_method_id
+    )
     return await _post_two_line_gl(
         conn,
         tenant_id,
@@ -629,11 +620,11 @@ async def _post_void_gl(
         f"table-session-advance-void-{advance_id}",
         ADVANCE_VOID_SOURCE,
         advance_id,
-        debit_acct,
-        credit_acct,
+        debit_acct.id,
+        credit_acct.id,
         amount,
-        f"Dr {DEFAULT_LIABILITY_CODE} — reverso anticipo mesa",
-        f"Cr {credit_code} — devolución anticipo mesa",
+        f"Dr {debit_acct.code} — reverso anticipo mesa",
+        f"Cr {credit_acct.code} — devolución anticipo mesa",
         created_by,
     )
 

@@ -13,6 +13,12 @@ from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
 from app.services.aws_s3_service import AWSS3Service
 from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
+from app.services.account_role_service import (
+    AccountRole,
+    MissingAccountRoleError,
+    resolve_account,
+    resolve_payment_account,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -57,19 +63,17 @@ def validate_state_transition(from_status: str, to_status: str) -> bool:
     return to_status in allowed_transitions
 
 
-async def _resolve_purchase_payment_account_code(
+async def _resolve_purchase_payment_account(
     conn,
     tenant_id: UUID,
     payment_method: Optional[str],
     payment_method_id: Optional[UUID],
-) -> tuple[Optional[str], Optional[str]]:
-    """Resolve stored method slug and GL credit account for supplier payments."""
+) -> tuple:
+    """Resolve stored method slug and semantic GL account for supplier payments."""
     method_slug = payment_method
-    credit_code = None
-
     if payment_method_id:
         row = await conn.fetchrow(
-            """SELECT pmg.slug, pm.gl_account_code AS method_code, pmg.gl_account_code AS group_code
+            """SELECT pmg.slug
                FROM payment_methods pm
                JOIN payment_method_groups pmg ON pmg.id = pm.group_id
                WHERE pm.id = $1
@@ -80,35 +84,14 @@ async def _resolve_purchase_payment_account_code(
         )
         if row:
             method_slug = row["slug"]
-            credit_code = row["method_code"] or row["group_code"]
-
-    if not credit_code and method_slug:
-        row = await conn.fetchrow(
-            """SELECT gl_account_code
-                 FROM payment_method_groups
-                WHERE slug = $1
-                  AND (tenant_id = $2 OR tenant_id IS NULL)
-                  AND is_active = TRUE
-                ORDER BY (tenant_id IS NULL) ASC
-                LIMIT 1""",
-            method_slug,
-            tenant_id,
-        )
-        if row:
-            credit_code = row["gl_account_code"]
-
-    if not credit_code:
-        credit_code = {
-            "cash": "1105",
-            "transfer": "1110",
-            "check": "1110",
-            "card": "1110",
-            "credit_card": "1110",
-            "debit_card": "1110",
-            "digital": "1110",
-        }.get(method_slug or "", "1105")
-
-    return method_slug, credit_code
+    account = await resolve_payment_account(
+        conn,
+        tenant_id,
+        method_slug,
+        payment_method_id=payment_method_id,
+        source="supplier_payment",
+    )
+    return method_slug, account
 
 
 async def _post_supplier_payment_gl_entry(
@@ -121,7 +104,7 @@ async def _post_supplier_payment_gl_entry(
     payment_method: Optional[str],
     payment_method_id: Optional[UUID],
 ) -> None:
-    """Post payment of supplier debt: Deb 2205 / Cred payment method account."""
+    """Post supplier payment: debit ACCOUNTS_PAYABLE, credit settlement role."""
     amount_decimal = Decimal(str(amount))
     if amount_decimal <= 0:
         return
@@ -160,64 +143,52 @@ async def _post_supplier_payment_gl_entry(
         )
         return
 
-    debit_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id,
-        "2205",
+    debit_acct = await resolve_account(
+        conn, tenant_id, AccountRole.ACCOUNTS_PAYABLE, source="supplier_payment"
     )
-    method_slug, credit_code = await _resolve_purchase_payment_account_code(
+    method_slug, credit_acct = await _resolve_purchase_payment_account(
         conn,
         tenant_id,
         payment_method,
         payment_method_id,
     )
-    credit_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id,
-        credit_code,
-    )
-    if not debit_acct or not credit_acct:
-        logger.warning(
-            f"[GL] Supplier payment account missing (debit=2205, credit={credit_code}, method={method_slug})"
-        )
-        return
-
     amount_value = float(amount_decimal)
-    entry_row = await conn.fetchrow(
-        """INSERT INTO tenant_journal_entries
+    async with conn.transaction():
+        entry_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
                (tenant_id, entry_date, period_year, period_month,
                 description, source_module, source_id, status,
                 total_debit, total_credit, posted_at)
            VALUES ($1, $2, $3, $4, $5, 'system', $6, 'posted', $7, $8, NOW())
            RETURNING id""",
-        tenant_id,
-        entry_date,
-        period_year,
-        period_month,
-        description,
-        purchase_id,
-        amount_value,
-        amount_value,
-    )
-    entry_id = entry_row["id"]
-    await conn.execute(
-        """INSERT INTO tenant_journal_lines
+            tenant_id,
+            entry_date,
+            period_year,
+            period_month,
+            description,
+            purchase_id,
+            amount_value,
+            amount_value,
+        )
+        entry_id = entry_row["id"]
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
                (journal_entry_id, account_id, debit, credit, description, line_order)
            VALUES ($1, $2, $3, 0, $4, 0)""",
-        entry_id,
-        debit_acct["id"],
-        amount_value,
-        description,
-    )
-    await conn.execute(
-        """INSERT INTO tenant_journal_lines
+            entry_id,
+            debit_acct.id,
+            amount_value,
+            description,
+        )
+        await conn.execute(
+            """INSERT INTO tenant_journal_lines
                (journal_entry_id, account_id, debit, credit, description, line_order)
            VALUES ($1, $2, 0, $3, $4, 1)""",
-        entry_id,
-        credit_acct["id"],
-        amount_value,
-        description,
-    )
+            entry_id,
+            credit_acct.id,
+            amount_value,
+            description,
+        )
 
 # =============================================================================
 # ATTACHMENT UPLOAD HELPER
@@ -361,6 +332,8 @@ async def get_purchase_status_history(
 
             return StatusHistoryResponse(data=history)
 
+    except MissingAccountRoleError:
+        raise
     except AuthenticationError:
         raise
     except HTTPException:
@@ -514,6 +487,8 @@ async def get_transition_detail(
             }
         }
 
+    except MissingAccountRoleError:
+        raise
     except AuthenticationError:
         raise
     except HTTPException:
@@ -1194,24 +1169,30 @@ async def transition_to_received(
                     except Exception as discord_error:
                         logger.error(f"Failed to send Discord notification for purchase reception: {discord_error}")
 
-                # GL auto-post — Déb 1435 / Cré <payment account> (#106)
+                # GL auto-post — Déb INVENTORY / Cré <payment account> (#106)
                 # SAVEPOINT: GL failure never rolls back the purchase transition.
                 try:
                     from app.services.direct_purchase_service import _post_purchase_gl_entry
                     gl_row = await conn.fetchrow(
-                        """SELECT total_amount, purchase_date, purchase_number, payment_method_id
+                        """SELECT total_amount, purchase_date, purchase_number,
+                                  payment_method, payment_method_id
                            FROM tenant_purchases WHERE id = $1""",
                         purchase_id,
                     )
                     if gl_row and gl_row["total_amount"]:
+                        timezone_name = await resolve_tenant_timezone(conn, tenant_id)
                         async with conn.transaction():
                             await _post_purchase_gl_entry(
                                 conn, tenant_id, purchase_id,
                                 float(gl_row["total_amount"]),
                                 gl_row["purchase_date"],
                                 f"Compra recibida {gl_row['purchase_number'] or purchase_id}",
+                                gl_row["payment_method"],
                                 gl_row["payment_method_id"],
+                                timezone_name,
                             )
+                except MissingAccountRoleError:
+                    raise
                 except Exception as _gl_err:
                     logger.warning(
                         f"[GL] purchase GL post failed for {purchase_id}: {_gl_err}"
@@ -1219,6 +1200,8 @@ async def transition_to_received(
 
                 return {"success": True, "message": f"Purchase {target_status}"}
 
+    except MissingAccountRoleError:
+        raise
     except AuthenticationError:
         raise
     except HTTPException:
@@ -1435,7 +1418,7 @@ async def transition_to_paid(
                         detail=f"Cannot transition from {purchase['status']} to paid"
                     )
 
-                payment_method, _credit_code = await _resolve_purchase_payment_account_code(
+                payment_method, _credit_account = await _resolve_purchase_payment_account(
                     conn,
                     tenant_id,
                     payment_method,
@@ -1509,6 +1492,8 @@ async def transition_to_paid(
                         payment_method=payment_method,
                         payment_method_id=payment_method_id,
                     )
+                except MissingAccountRoleError:
+                    raise
                 except Exception as gl_error:
                     logger.warning(f"[GL] supplier payment GL post failed for {purchase_id}: {gl_error}")
 
@@ -1531,6 +1516,8 @@ async def transition_to_paid(
 
                 return {"success": True, "message": "Payment registered successfully"}
 
+    except MissingAccountRoleError:
+        raise
     except AuthenticationError:
         raise
     except HTTPException:

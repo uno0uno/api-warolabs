@@ -154,7 +154,7 @@ class TestAdvanceValidation:
         assert settlement == Decimal("108000.00")
         assert net.quantize(Decimal("0.01")) == Decimal("100000.00")
         assert tax.quantize(Decimal("0.01")) == Decimal("8000.00")
-        assert tax_code == "2495"
+        assert tax_code == "inc"
 
 
 class TestCreateSessionAdvance:

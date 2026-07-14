@@ -5,6 +5,7 @@ Handles employee salary configuration and payment registration
 import logging
 from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException, Depends
 from app.core.permissions import Module, require_module
+from app.services.account_role_service import require_colombia_payroll_capability
 from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
@@ -77,7 +78,7 @@ from app.models.salary import (
 )
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_colombia_payroll_capability)])
 
 
 # =============================================================================

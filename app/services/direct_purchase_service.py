@@ -131,6 +131,12 @@ from app.services.purchase_tracking_service import (
     create_status_history_entry,
     upload_purchase_attachments
 )
+from app.services.account_role_service import (
+    AccountRole,
+    MissingAccountRoleError,
+    resolve_account,
+    resolve_payment_account,
+)
 import logging
 import json
 from uuid import uuid4
@@ -191,17 +197,16 @@ async def _post_purchase_gl_entry(
 ) -> None:
     """
     Post GL entry for a received purchase:
-        Déb 1435 Inventarios   ←  total_amount
+        Déb INVENTORY          ←  total_amount
         Cré <payment account>  →  total_amount
 
     Credit account resolution (two-level, migration 028):
         1. payment_methods.gl_account_code       (individual override)
         2. payment_method_groups.gl_account_code  (group default)
         3. payment_method group slug default      (cash/card/digital without sub-method)
-        4. Hardcoded fallback: 2205 Proveedores   (no payment method set)
+        4. ACCOUNTS_PAYABLE role when no payment method is set
 
-    Silently skips if: total_amount <= 0, account missing, period closed.
-    Caller MUST wrap in try/except for graceful degrade.
+    Skips zero amounts and closed periods. Missing roles fail explicitly.
     """
     amount = Decimal(str(total_amount))
     if amount <= 0:
@@ -224,55 +229,21 @@ async def _post_purchase_gl_entry(
         )
         return
 
-    debit_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, "1435",
+    debit_acct = await resolve_account(
+        conn, tenant_id, AccountRole.INVENTORY, source="direct_purchase"
     )
-    if not debit_acct:
-        logger.warning(f"[GL] Account 1435 not found for tenant {tenant_id} — skip GL post")
-        return
-
-    # Two-level credit account lookup (migration 028)
-    credit_code = None
-    if payment_method_id:
-        row = await conn.fetchrow(
-            """SELECT pm.gl_account_code AS method_code,
-                      pmg.gl_account_code AS group_code
-               FROM payment_methods pm
-               JOIN payment_method_groups pmg ON pmg.id = pm.group_id
-               WHERE pm.id = $1""",
-            payment_method_id,
-        )
-        if row:
-            credit_code = row["method_code"] or row["group_code"]
-
-    if not credit_code and payment_method:
-        row = await conn.fetchrow(
-            """SELECT gl_account_code
-                 FROM payment_method_groups
-                WHERE slug = $1
-                  AND (tenant_id = $2 OR tenant_id IS NULL)
-                  AND is_active = TRUE
-                ORDER BY (tenant_id IS NULL) ASC
-                LIMIT 1""",
-            payment_method,
+    if payment_method or payment_method_id:
+        credit_acct = await resolve_payment_account(
+            conn,
             tenant_id,
+            payment_method,
+            payment_method_id=payment_method_id,
+            source="direct_purchase",
         )
-        if row:
-            credit_code = row["gl_account_code"]
-
-    if not credit_code:
-        credit_code = "2205"  # Fallback: Proveedores nacionales
-
-    credit_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, credit_code,
-    )
-    if not credit_acct:
-        logger.warning(
-            f"[GL] Credit account {credit_code} not found for tenant {tenant_id} — skip GL post"
+    else:
+        credit_acct = await resolve_account(
+            conn, tenant_id, AccountRole.ACCOUNTS_PAYABLE, source="direct_purchase"
         )
-        return
 
     amt = float(amount)
     async with conn.transaction():
@@ -291,18 +262,18 @@ async def _post_purchase_gl_entry(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, $3, 0, $4, 0)""",
-            entry_id, debit_acct["id"], amt, description,
+            entry_id, debit_acct.id, amt, description,
         )
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, 1)""",
-            entry_id, credit_acct["id"], amt, description,
+            entry_id, credit_acct.id, amt, description,
         )
 
     logger.info(
         f"[GL] ✅ Posted purchase entry {entry_id} for purchase {purchase_id} "
-        f"(debit=1435, credit={credit_code}, amount={amt})"
+        f"(debit={debit_acct.code}, credit={credit_acct.code}, amount={amt})"
     )
 
 
@@ -721,7 +692,7 @@ async def create_direct_purchase(
                         None
                     )
 
-                # 6. GL auto-post — Déb 1435 / Cré <payment account> (#106)
+                # 6. GL auto-post — Déb INVENTORY / Cré <payment account> (#106)
                 #    SAVEPOINT: GL failure never rolls back the purchase save.
                 try:
                     async with conn.transaction():
@@ -734,6 +705,8 @@ async def create_direct_purchase(
                             UUID(payment_method_id) if payment_method_id else None,
                             timezone_name,
                         )
+                except MissingAccountRoleError:
+                    raise
                 except Exception as _gl_err:
                     logger.warning(
                         f"[GL] purchase GL post failed for {purchase_id}: {_gl_err}"
@@ -755,6 +728,8 @@ async def create_direct_purchase(
                     }
                 }
 
+    except MissingAccountRoleError:
+        raise
     except AuthenticationError:
         raise
     except HTTPException:

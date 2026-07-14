@@ -4,6 +4,9 @@ from fastapi import Depends, APIRouter, Request, Query
 from app.core.permissions import Module, require_module
 from app.services.accounting_service import (
     get_accounts,
+    get_account_role_bindings,
+    update_account_role_binding,
+    remove_account_role_binding,
     create_account,
     update_account,
     delete_account,
@@ -22,6 +25,8 @@ from app.models.accounting import (
     TenantAccountUpdate,
     TenantAccountResponse,
     TenantAccountsListResponse,
+    AccountRoleBindingsResponse,
+    AccountRoleOverrideUpdate,
     JournalEntryCreate,
     JournalEntryResponse,
     JournalEntriesListResponse,
@@ -44,10 +49,30 @@ async def list_accounts_endpoint(
 ):
     """
     Get the full chart of accounts for the authenticated tenant.
-    Optional query filters: class (PUC class digit), type, active.
+    Optional query filters: semantic account class, type, active.
     Requires valid session cookie with selected tenant.
     """
     return await get_accounts(request, account_class=account_class, account_type=account_type, active=active)
+
+
+@router.get("/account-roles", response_model=AccountRoleBindingsResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
+async def list_account_roles_endpoint(request: Request):
+    """List effective semantic account bindings for the tenant localization."""
+    return await get_account_role_bindings(request)
+
+
+@router.put("/account-roles/{role}", response_model=AccountRoleBindingsResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
+async def update_account_role_endpoint(
+    request: Request, role: str, body: AccountRoleOverrideUpdate
+):
+    """Override a role with an active account owned by this tenant."""
+    return await update_account_role_binding(request, role, body.account_id)
+
+
+@router.delete("/account-roles/{role}", response_model=AccountRoleBindingsResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
+async def delete_account_role_endpoint(request: Request, role: str):
+    """Remove a tenant override and return to the localization default."""
+    return await remove_account_role_binding(request, role)
 
 
 @router.post("/accounts", response_model=TenantAccountResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
@@ -196,10 +221,10 @@ async def get_pl_statement_endpoint(
     COGS     = expenses with expense_type='cogs' + received purchases in the month.
     Opex     = expenses by category (RENT, UTILITIES, MAINTENANCE, other).
     Payroll  = confirmed salary_payments for the period.
-    Provisions = Colombian law rates applied to latest employee salary configs.
+    Provisions = Colombian law rates only when the tenant capability enables them.
 
     If comparePrevious=true, also returns the prior calendar month data.
-    All values in COP (Colombian pesos). Returns zeros for periods with no activity.
+    Values use baseCurrencyCode from the response. Returns zeros for empty periods.
     """
     return await get_pl_statement(
         request,
@@ -235,7 +260,7 @@ async def post_provisions_endpoint(
 ):
     """
     Calculate and post 4 GL entries for nómina provisions (one per provision type).
-    Debit: 5105 Gastos de personal. Credit: 2610/2615/2620/2625.
+    Accounts are resolved from semantic payroll expense/payable roles.
     If provision entries for this period were already posted, they are voided first.
     source_module = 'nomina'. Safe to re-run.
     """

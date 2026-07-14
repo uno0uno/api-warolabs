@@ -1,12 +1,13 @@
 """Sale edit + COGS paths for composite modifier options (#1124)."""
 from datetime import date
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
 from app.services import pos_cart_service
 from app.services.cierre_service import _post_order_cogs_gl_entry
+from app.services.account_role_service import AccountRef
 
 ORDER_ITEM_ID = uuid4()
 MODIFIER_ID = uuid4()
@@ -100,17 +101,32 @@ async def test_return_modifier_inventory_reverses_composite_lines():
 
 @pytest.mark.asyncio
 async def test_cogs_gl_query_sums_order_item_ingredients():
+    class _Transaction:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
     mock_conn = AsyncMock()
     mock_conn.fetchval = AsyncMock(side_effect=[None, 2500.0])
-    mock_conn.fetchrow = AsyncMock(return_value=None)
+    mock_conn.fetchrow = AsyncMock(return_value={"id": uuid4()})
+    mock_conn.transaction = MagicMock(return_value=_Transaction())
 
-    await _post_order_cogs_gl_entry(
-        mock_conn,
-        TENANT_ID,
-        ORDER_ID,
-        date(2026, 6, 2),
-        order_number=99,
-    )
+    async def resolve_role(_conn, _tenant_id, role, **_kwargs):
+        return AccountRef(uuid4(), role, role, role, "localization_default")
+
+    with patch(
+        "app.services.cierre_service.resolve_account",
+        new=AsyncMock(side_effect=resolve_role),
+    ):
+        await _post_order_cogs_gl_entry(
+            mock_conn,
+            TENANT_ID,
+            ORDER_ID,
+            date(2026, 6, 2),
+            order_number=99,
+        )
 
     cogs_query = mock_conn.fetchval.await_args_list[1].args[0]
     assert "order_item_ingredients" in cogs_query

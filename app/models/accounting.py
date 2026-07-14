@@ -53,6 +53,33 @@ class TenantAccountUpdate(BaseModel):
         populate_by_name = True
 
 
+class AccountRoleOverrideUpdate(BaseModel):
+    account_id: UUID = Field(alias='accountId')
+
+    class Config:
+        populate_by_name = True
+
+
+class AccountRoleBinding(BaseModel):
+    role: str
+    colombia_only: bool = Field(alias='colombiaOnly')
+    account_id: Optional[UUID] = Field(None, alias='accountId')
+    code: Optional[str] = None
+    name: Optional[str] = None
+    source: str
+
+    class Config:
+        populate_by_name = True
+
+
+class AccountRoleBindingsResponse(BaseModel):
+    success: bool = True
+    data: List[AccountRoleBinding]
+
+    class Config:
+        populate_by_name = True
+
+
 class TenantAccount(TenantAccountBase):
     id: UUID
     tenant_id: UUID = Field(alias='tenantId')
@@ -284,6 +311,8 @@ class PLPeriodData(BaseModel):
 
 class PLStatementResponse(BaseModel):
     success: bool = True
+    base_currency_code: str = Field(alias='baseCurrencyCode')
+    accounting_localization: str = Field(alias='accountingLocalization')
     current: PLPeriodData
     previous: Optional[PLPeriodData] = None
 

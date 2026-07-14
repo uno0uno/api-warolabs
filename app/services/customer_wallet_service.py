@@ -16,61 +16,39 @@ from fastapi import Request
 from app.core.exceptions import APIError, AuthenticationError
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
-from app.services.cierre_service import _SLUG_DEBIT_CODE
+from app.services.account_role_service import (
+    AccountRole,
+    resolve_account,
+    resolve_payment_account,
+)
 from app.services.customer_relationship_service import is_tenant_customer
 
 logger = logging.getLogger(__name__)
 
 WALLET_PAYMENT_SLUG = "customer_wallet"
 ANONYMOUS_PHONE = "0000000000"
-DEFAULT_LIABILITY_CODE = "2810"
 RECENT_MOVEMENTS_DEFAULT = 20
 
 
-async def _resolve_liability_code(conn, tenant_id: UUID) -> str:
-    row = await conn.fetchrow(
-        """
-        SELECT customer_wallet_liability_gl_code
-        FROM tenant_public_profiles
-        WHERE tenant_id = $1
-        """,
-        tenant_id,
+async def _resolve_liability_account(conn, tenant_id: UUID):
+    return await resolve_account(
+        conn, tenant_id, AccountRole.CUSTOMER_ADVANCES, source="customer_wallet"
     )
-    if row and row["customer_wallet_liability_gl_code"]:
-        return str(row["customer_wallet_liability_gl_code"])
-    return DEFAULT_LIABILITY_CODE
 
 
-async def _resolve_account_id(conn, tenant_id: UUID, code: str) -> Optional[UUID]:
-    row = await conn.fetchrow(
-        """
-        SELECT id FROM tenant_accounts
-        WHERE tenant_id = $1 AND code = $2 AND is_active = true
-        """,
-        tenant_id,
-        code,
-    )
-    return row["id"] if row else None
-
-
-async def _resolve_payment_debit_code(
+async def _resolve_payment_debit_account(
     conn,
+    tenant_id: UUID,
     payment_method: str,
     payment_method_id: Optional[UUID],
-) -> str:
-    if payment_method_id:
-        pm_row = await conn.fetchrow(
-            """
-            SELECT COALESCE(pm.gl_account_code, pmg.gl_account_code) AS code
-            FROM payment_methods pm
-            JOIN payment_method_groups pmg ON pm.group_id = pmg.id
-            WHERE pm.id = $1
-            """,
-            payment_method_id,
-        )
-        if pm_row and pm_row["code"]:
-            return str(pm_row["code"])
-    return _SLUG_DEBIT_CODE.get(payment_method or "", "1105")
+):
+    return await resolve_payment_account(
+        conn,
+        tenant_id,
+        payment_method,
+        payment_method_id=payment_method_id,
+        source="customer_wallet",
+    )
 
 
 async def assert_wallet_customer_identified(conn, profile_id: UUID) -> None:
@@ -292,18 +270,10 @@ async def _post_recharge_gl(
     entry_date: date,
     created_by: Optional[UUID],
 ) -> Optional[UUID]:
-    liability_code = await _resolve_liability_code(conn, tenant_id)
-    debit_code = await _resolve_payment_debit_code(conn, payment_method, payment_method_id)
-    debit_acct = await _resolve_account_id(conn, tenant_id, debit_code)
-    credit_acct = await _resolve_account_id(conn, tenant_id, liability_code)
-    if not debit_acct or not credit_acct:
-        logger.warning(
-            "[wallet GL] Missing accounts debit=%s credit=%s tenant=%s — skip",
-            debit_code,
-            liability_code,
-            tenant_id,
-        )
-        return None
+    credit_acct = await _resolve_liability_account(conn, tenant_id)
+    debit_acct = await _resolve_payment_debit_account(
+        conn, tenant_id, payment_method, payment_method_id
+    )
     return await _post_two_line_gl(
         conn,
         tenant_id,
@@ -312,11 +282,11 @@ async def _post_recharge_gl(
         f"wallet-recharge-{movement_id}",
         "customer_wallet_recharge",
         movement_id,
-        debit_acct,
-        credit_acct,
+        debit_acct.id,
+        credit_acct.id,
         amount,
-        f"Dr {debit_code} — recarga billetera",
-        f"Cr {liability_code} — anticipo cliente",
+        f"Dr {debit_acct.code} — recarga billetera",
+        f"Cr {credit_acct.code} — anticipo cliente",
         created_by,
     )
 
@@ -331,16 +301,10 @@ async def _post_refund_gl(
     entry_date: date,
     created_by: Optional[UUID],
 ) -> Optional[UUID]:
-    liability_code = await _resolve_liability_code(conn, tenant_id)
-    credit_code = await _resolve_payment_debit_code(conn, payment_method, payment_method_id)
-    debit_acct = await _resolve_account_id(conn, tenant_id, liability_code)
-    credit_acct = await _resolve_account_id(conn, tenant_id, credit_code)
-    if not debit_acct or not credit_acct:
-        logger.warning(
-            "[wallet GL] Missing accounts for refund tenant=%s — skip",
-            tenant_id,
-        )
-        return None
+    debit_acct = await _resolve_liability_account(conn, tenant_id)
+    credit_acct = await _resolve_payment_debit_account(
+        conn, tenant_id, payment_method, payment_method_id
+    )
     return await _post_two_line_gl(
         conn,
         tenant_id,
@@ -349,11 +313,11 @@ async def _post_refund_gl(
         f"wallet-refund-{movement_id}",
         "customer_wallet_refund",
         movement_id,
-        debit_acct,
-        credit_acct,
+        debit_acct.id,
+        credit_acct.id,
         amount,
-        f"Dr {liability_code} — devolución anticipo",
-        f"Cr {credit_code} — salida de caja/banco",
+        f"Dr {debit_acct.code} — devolución anticipo",
+        f"Cr {credit_acct.code} — salida de caja/banco",
         created_by,
     )
 

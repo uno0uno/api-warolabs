@@ -5,6 +5,7 @@ Issue: https://github.com/uno0uno/warocol.com/issues/331
 """
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, List
+from uuid import UUID
 
 
 # ── Response models ────────────────────────────────────────────────────────────
@@ -20,6 +21,7 @@ class PaymentMethodGroup(BaseModel):
     isActive: bool
     sortOrder: int
     glAccountCode: Optional[str] = None
+    glAccountId: Optional[str] = None
 
 
 class PaymentMethodGroupWithCount(PaymentMethodGroup):
@@ -37,6 +39,7 @@ class PaymentMethod(BaseModel):
     isActive: bool
     sortOrder: int
     glAccountCode: Optional[str] = None
+    glAccountId: Optional[str] = None
 
 
 class PaymentMethodGroupWithMethods(PaymentMethodGroup):
@@ -49,6 +52,7 @@ class PosPaymentMethod(BaseModel):
     id: str
     name: str
     glAccountCode: Optional[str] = None
+    glAccountId: Optional[str] = None
 
 
 class PosPaymentMethodGroup(BaseModel):
@@ -57,6 +61,7 @@ class PosPaymentMethodGroup(BaseModel):
     slug: str
     triggersCartera: bool
     glAccountCode: Optional[str] = None
+    glAccountId: Optional[str] = None
     methods: List[PosPaymentMethod] = []
 
 
@@ -75,6 +80,7 @@ class PatchGroupRequest(BaseModel):
     sortOrder: Optional[int] = None
     triggersCartera: Optional[bool] = None
     glAccountCode: Optional[str] = None
+    glAccountId: Optional[UUID] = None
 
 
 class CreateMethodRequest(BaseModel):
@@ -85,6 +91,7 @@ class CreateMethodRequest(BaseModel):
     # in /finanzas/metodos-pago/{groupId} creates the sub-account first and
     # passes its code in here so the method is linked in one round-trip.
     glAccountCode: Optional[str] = None
+    glAccountId: Optional[UUID] = None
 
 
 class PatchMethodRequest(BaseModel):
@@ -93,3 +100,4 @@ class PatchMethodRequest(BaseModel):
     isActive: Optional[bool] = None
     sortOrder: Optional[int] = None
     glAccountCode: Optional[str] = None
+    glAccountId: Optional[UUID] = None

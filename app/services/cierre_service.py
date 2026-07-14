@@ -29,6 +29,12 @@ from app.models.cierre import (
     OpenShiftCreate,
 )
 from app.services.tip_tax_service import tip_settlement_total
+from app.services.account_role_service import (
+    AccountRole,
+    resolve_account,
+    resolve_payment_account,
+    resolve_tax_account,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,19 +43,6 @@ logger = logging.getLogger(__name__)
 # GL helpers — Auto-posting ventas/arqueo → GL (#378)
 # ---------------------------------------------------------------------------
 
-# Payment slug → PUC debit account code
-_SLUG_DEBIT_CODE: Dict[str, str] = {
-    "cash":    "1105",   # Caja general
-    "digital": "1110",   # Bancos (Nequi, Daviplata)
-    "card":    "1110",   # Bancos
-    "credit":  "1305",   # Clientes (fiado — accounts receivable)
-    "customer_wallet": "2810",  # Anticipos clientes (api#369; tenant override in _post_order_gl_entry)
-    "table_session_advance": "2810",  # Anticipos recibidos aplicados a consumo minimo de mesa
-}
-
-INGRESOS_CODE   = "4175"   # Servicios de restaurante y similares
-COGS_CODE       = "6135"   # Costo de ventas
-INVENTARIO_CODE = "1435"   # Inventarios — materia prima y suministros
 NON_RECONCILABLE_PAYMENT_GROUPS = {"cash", "untracked"}
 RECONCILIATION_STATUSES = {"not_required", "pending", "matched", "needs_review", "resolved"}
 RECONCILIATION_REASONS = {
@@ -118,18 +111,17 @@ async def _resolve_standard_tax_account_id(
     tax_config: Dict[str, Any],
 ) -> Optional[UUID]:
     """Resolve INC/IVA credit account for standard (non-liquor) tax, including tip tax."""
-    tax_code = None
+    tax_kind = None
     if tax_config.get("inc_applicable"):
-        tax_code = str(tax_config["inc_gl_account_code"])
+        tax_kind = "inc"
     elif tax_config.get("iva_applicable"):
-        tax_code = str(tax_config["iva_gl_account_code"])
-    if not tax_code:
+        tax_kind = "iva"
+    if not tax_kind:
         return None
-    tax_row = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, tax_code,
+    account = await resolve_tax_account(
+        conn, tenant_id, tax_config, tax_kind, required=True
     )
-    return tax_row["id"] if tax_row else None
+    return account.id if account else None
 
 
 async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
@@ -138,10 +130,11 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
     if no row exists (safe for tenants created before migration 027).
     """
     row = await conn.fetchrow(
-        """SELECT inc_applicable, inc_rate,   inc_gl_account_code,
+        """SELECT inc_applicable, inc_rate, inc_gl_account_code, inc_gl_account_id,
                   inc_included_in_price,
-                  liquor_tax_applicable, liquor_tax_rate, liquor_tax_gl_account_code,
-                  iva_applicable, iva_rate, iva_gl_account_code,
+                  liquor_tax_applicable, liquor_tax_rate,
+                  liquor_tax_gl_account_code, liquor_tax_gl_account_id,
+                  iva_applicable, iva_rate, iva_gl_account_code, iva_gl_account_id,
                   iva_included_in_price
            FROM tenant_tax_config WHERE tenant_id = $1""",
         tenant_id,
@@ -151,14 +144,17 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
     return {
         "inc_applicable":             False,
         "inc_rate":                   Decimal("0.0800"),
-        "inc_gl_account_code":        "2495",
+        "inc_gl_account_code":        None,
+        "inc_gl_account_id":          None,
         "inc_included_in_price":      True,
         "liquor_tax_applicable":      False,
         "liquor_tax_rate":            Decimal("0.0000"),
-        "liquor_tax_gl_account_code": "2408",
+        "liquor_tax_gl_account_code": None,
+        "liquor_tax_gl_account_id":   None,
         "iva_applicable":             False,
         "iva_rate":                   Decimal("0.1900"),
-        "iva_gl_account_code":        "2408",
+        "iva_gl_account_code":        None,
+        "iva_gl_account_id":          None,
         "iva_included_in_price":      False,
     }
 
@@ -209,36 +205,21 @@ async def _post_cierre_gl_entry(
         )
         return
 
-    # Resolve debit account UUIDs
+    # Resolve every account before creating the journal.
     debit_accounts: Dict[str, Any] = {}
     for slug, amount in slug_totals.items():
-        code = _SLUG_DEBIT_CODE.get(slug)
-        if not code:
-            logger.warning(f"[GL] Unknown payment slug '{slug}' — skip debit line")
-            continue
-        acct = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-            tenant_id, code,
+        account = await resolve_payment_account(
+            conn, tenant_id, slug, source="cierre"
         )
-        if not acct:
-            logger.warning(
-                f"[GL] Debit account {code} not found for tenant {tenant_id} — "
-                f"skip GL post for cierre {summary_id}"
-            )
-            return
-        debit_accounts[slug] = {"id": acct["id"], "code": code, "amount": amount}
+        debit_accounts[slug] = {
+            "id": account.id,
+            "code": account.code,
+            "amount": amount,
+        }
 
-    # Resolve credit account(s)
-    ingresos_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, INGRESOS_CODE,
+    revenue_account = await resolve_account(
+        conn, tenant_id, AccountRole.SALES_REVENUE, source="cierre"
     )
-    if not ingresos_acct:
-        logger.warning(
-            f"[GL] Ingresos account {INGRESOS_CODE} not found for tenant {tenant_id} — "
-            f"skip GL post for cierre {summary_id}"
-        )
-        return
 
     # Determine tax split
     tax_amount = Decimal("0")
@@ -246,23 +227,13 @@ async def _post_cierre_gl_entry(
     if tax_config.get("inc_applicable"):
         rate = Decimal(str(tax_config["inc_rate"]))
         tax_amount = total_sales - (total_sales / (1 + rate))
-        tax_code = str(tax_config["inc_gl_account_code"])
-        tax_row = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-            tenant_id, tax_code,
-        )
-        if tax_row:
-            tax_acct_id = tax_row["id"]
+        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "inc")
+        tax_acct_id = tax_account.id if tax_account else None
     elif tax_config.get("iva_applicable"):
         rate = Decimal(str(tax_config["iva_rate"]))
         tax_amount = total_sales - (total_sales / (1 + rate))
-        tax_code = str(tax_config["iva_gl_account_code"])
-        tax_row = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-            tenant_id, tax_code,
-        )
-        if tax_row:
-            tax_acct_id = tax_row["id"]
+        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "iva")
+        tax_acct_id = tax_account.id if tax_account else None
 
     net_income = total_sales - tax_amount
     ts = float(total_sales)
@@ -299,7 +270,7 @@ async def _post_cierre_gl_entry(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, $5)""",
-            entry_id, ingresos_acct["id"], float(net_income),
+            entry_id, revenue_account.id, float(net_income),
             f"{description} — ingreso neto", line_order,
         )
         line_order += 1
@@ -341,8 +312,8 @@ async def _post_order_gl_entry(
     source_module = 'orden' (distinguishable from cierre 'ventas' entries)
     source_id     = order_id
 
-    DR  [payment account]    debit_total   (1105 Caja / 1110 Bancos / 1305 Clientes)
-    CR  4175 Ingresos        product net + dedicated tip line when tip > 0
+    DR  [payment account]    debit_total
+    CR  SALES_REVENUE        product net + dedicated tip line when tip > 0
     CR  2495/2408 Impuesto   tax_amount    (product + tip tax when applicable)
 
     Tax modes (per tenant_tax_config):
@@ -369,49 +340,13 @@ async def _post_order_gl_entry(
         logger.info(f"[GL] Order {order_id}: zero amount — skip GL post")
         return
 
-    async def resolve_debit_code(method: str, method_id: Optional[UUID]) -> str:
-        debit_code = None
-        if method_id:
-            pm_row = await conn.fetchrow(
-                """SELECT COALESCE(pm.gl_account_code, pmg.gl_account_code) AS code
-                   FROM payment_methods pm
-                   JOIN payment_method_groups pmg ON pm.group_id = pmg.id
-                   WHERE pm.id = $1""",
-                method_id,
-            )
-            if pm_row and pm_row["code"]:
-                debit_code = pm_row["code"]
-        if not debit_code:
-            debit_code = _SLUG_DEBIT_CODE.get(method or "", "1105")
-        if method == "customer_wallet":
-            liability_row = await conn.fetchrow(
-                """
-                SELECT customer_wallet_liability_gl_code
-                FROM tenant_public_profiles
-                WHERE tenant_id = $1
-                """,
-                tenant_id,
-            )
-            if liability_row and liability_row["customer_wallet_liability_gl_code"]:
-                debit_code = str(liability_row["customer_wallet_liability_gl_code"])
-        return str(debit_code)
-
-    async def resolve_debit_account(code: str):
-        debit_acct = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-            tenant_id,
-            code,
-        )
-        if not debit_acct:
-            logger.warning(
-                f"[GL] Debit account {code} not found for tenant {tenant_id} — "
-                f"skip GL post for order {order_id}"
-            )
-            return None
-        return debit_acct
-
-    # ── Resolve debit account: specific method → group → slug fallback ────
-    debit_code = await resolve_debit_code(payment_method, payment_method_id)
+    debit_account = await resolve_payment_account(
+        conn,
+        tenant_id,
+        payment_method,
+        payment_method_id=payment_method_id,
+        source="order",
+    )
     split_debits: List[Dict[str, Any]] = []
     if payment_splits:
         split_total = sum(Decimal(str(split.get("amount") or 0)) for split in payment_splits)
@@ -424,24 +359,19 @@ async def _post_order_gl_entry(
                     {
                         "amount": Decimal(str(split.get("amount") or 0)),
                         "payment_method": split.get("payment_method") or "",
-                        "code": await resolve_debit_code(
+                        "account": await resolve_payment_account(
+                            conn,
+                            tenant_id,
                             split.get("payment_method") or "",
-                            split_method_id,
+                            payment_method_id=split_method_id,
+                            source="order_split",
                         ),
                     }
                 )
 
-    # ── Resolve 4135 Ingresos ──────────────────────────────────────────────
-    ingresos_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, INGRESOS_CODE,
+    revenue_account = await resolve_account(
+        conn, tenant_id, AccountRole.SALES_REVENUE, source="order"
     )
-    if not ingresos_acct:
-        logger.warning(
-            f"[GL] Ingresos account {INGRESOS_CODE} not found for tenant {tenant_id} — "
-            f"skip GL post for order {order_id}"
-        )
-        return
 
     # ── Fetch order items with per-product tax_category ──────────────────
     # Use net_total (post-discount) when available, falling back to subtotal.
@@ -485,7 +415,6 @@ async def _post_order_gl_entry(
 
     if tax_config.get("inc_applicable") and standard_subtotal > 0:
         rate = Decimal(str(tax_config["inc_rate"]))
-        tax_code = str(tax_config["inc_gl_account_code"])
         if tax_config.get("inc_included_in_price", True):
             # Extractive: price already includes INC
             standard_tax = standard_subtotal - (standard_subtotal / (1 + rate))
@@ -493,38 +422,24 @@ async def _post_order_gl_entry(
             # Additive: INC charged on top of base price
             standard_tax = standard_subtotal * rate
             standard_is_additive = True
-        tax_row = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-            tenant_id, tax_code,
-        )
-        if tax_row:
-            standard_acct_id = tax_row["id"]
+        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "inc")
+        standard_acct_id = tax_account.id if tax_account else None
 
     elif tax_config.get("iva_applicable") and standard_subtotal > 0:
         rate = Decimal(str(tax_config["iva_rate"]))
-        tax_code = str(tax_config["iva_gl_account_code"])
         if tax_config.get("iva_included_in_price", False):
             standard_tax = standard_subtotal - (standard_subtotal / (1 + rate))
         else:
             standard_tax = standard_subtotal * rate
             standard_is_additive = True
-        tax_row = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-            tenant_id, tax_code,
-        )
-        if tax_row:
-            standard_acct_id = tax_row["id"]
+        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "iva")
+        standard_acct_id = tax_account.id if tax_account else None
 
     if tax_config.get("liquor_tax_applicable") and liquor_subtotal > 0:
         rate = Decimal(str(tax_config["liquor_tax_rate"]))
-        tax_code = str(tax_config["liquor_tax_gl_account_code"])
         liquor_tax = liquor_subtotal * rate  # IVA licores — always additive (external VAT)
-        tax_row = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-            tenant_id, tax_code,
-        )
-        if tax_row:
-            liquor_acct_id = tax_row["id"]
+        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "liquor")
+        liquor_acct_id = tax_account.id if tax_account else None
 
     # ── Compute debit_total and net_revenue ───────────────────────────────
     # Additive taxes (non-included INC/IVA, liquor) increase what the customer pays.
@@ -565,32 +480,21 @@ async def _post_order_gl_entry(
                     remaining_debit -= debit_amount
                 if debit_amount <= 0:
                     continue
-                split_acct = await resolve_debit_account(split["code"])
-                if not split_acct:
-                    return
+                split_acct = split["account"]
                 split_debit_lines.append(
                     {
-                        "account_id": split_acct["id"],
+                        "account_id": split_acct.id,
                         "amount": debit_amount,
                         "payment_method": split["payment_method"],
                     }
                 )
         else:
-            debit_acct = await resolve_debit_account(debit_code)
-            if not debit_acct:
-                return
+            debit_acct = debit_account
     advance_acct = None
     if advance_debit > 0:
-        advance_acct = await conn.fetchrow(
-            "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-            tenant_id, _SLUG_DEBIT_CODE["table_session_advance"],
+        advance_acct = await resolve_account(
+            conn, tenant_id, AccountRole.CUSTOMER_ADVANCES, source="order_advance"
         )
-        if not advance_acct:
-            logger.warning(
-                f"[GL] Advance account 2810 not found for tenant {tenant_id} — "
-                f"skip GL post for order {order_id}"
-            )
-            return
 
     dt = float(debit_total)
     description = f"#{order_number}" if order_number else f"Venta {order_date.isoformat()} — orden {order_id}"
@@ -617,7 +521,7 @@ async def _post_order_gl_entry(
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, $3, 0, $4, $5)""",
                 entry_id,
-                advance_acct["id"],
+                advance_acct.id,
                 float(advance_debit),
                 f"{description} — aplicación anticipo mesa",
                 line_order,
@@ -642,19 +546,19 @@ async def _post_order_gl_entry(
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, $3, 0, $4, $5)""",
                 entry_id,
-                debit_acct["id"],
+                debit_acct.id,
                 float(payment_debit),
                 description,
                 line_order,
             )
             line_order += 1
 
-        # Credit line — product net revenue to 4175
+        # Credit line — product net revenue
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, $5)""",
-            entry_id, ingresos_acct["id"], float(product_net_revenue),
+            entry_id, revenue_account.id, float(product_net_revenue),
             f"{description} — ingreso neto",
             line_order,
         )
@@ -686,7 +590,7 @@ async def _post_order_gl_entry(
                 """INSERT INTO tenant_journal_lines
                        (journal_entry_id, account_id, debit, credit, description, line_order)
                    VALUES ($1, $2, 0, $3, $4, $5)""",
-                entry_id, ingresos_acct["id"], float(tip_net_revenue),
+                entry_id, revenue_account.id, float(tip_net_revenue),
                 tip_description,
                 line_order,
             )
@@ -761,33 +665,16 @@ async def _post_deferred_order_tip_gl(
         )
         return
 
-    debit_code = None
-    if payment_method_id:
-        pm_row = await conn.fetchrow(
-            """SELECT COALESCE(pm.gl_account_code, pmg.gl_account_code) AS code
-               FROM payment_methods pm
-               JOIN payment_method_groups pmg ON pm.group_id = pmg.id
-               WHERE pm.id = $1""",
-            payment_method_id,
-        )
-        if pm_row and pm_row["code"]:
-            debit_code = pm_row["code"]
-    if not debit_code:
-        debit_code = _SLUG_DEBIT_CODE.get(payment_method or "", "1105")
-
-    debit_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, debit_code,
+    debit_acct = await resolve_payment_account(
+        conn,
+        tenant_id,
+        payment_method,
+        payment_method_id=payment_method_id,
+        source="deferred_tip",
     )
-    ingresos_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, INGRESOS_CODE,
+    revenue_account = await resolve_account(
+        conn, tenant_id, AccountRole.SALES_REVENUE, source="deferred_tip"
     )
-    if not debit_acct or not ingresos_acct:
-        logger.warning(
-            f"[GL] Deferred tip for order {order_id}: missing debit/ingresos account — skip"
-        )
-        return
 
     tip_tax_acct_id = None
     if tip_tax_credit > 0:
@@ -819,14 +706,14 @@ async def _post_deferred_order_tip_gl(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, $3, 0, $4, $5)""",
-            entry_id, debit_acct["id"], settlement_f, tip_description, line_order,
+            entry_id, debit_acct.id, settlement_f, tip_description, line_order,
         )
         line_order += 1
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, $5)""",
-            entry_id, ingresos_acct["id"], float(tip_net_revenue),
+            entry_id, revenue_account.id, float(tip_net_revenue),
             f"{tip_description} — ingreso neto", line_order,
         )
         if tip_tax_credit > 0 and tip_tax_acct_id:
@@ -855,8 +742,8 @@ async def _post_order_cogs_gl_entry(
     """
     Post a COGS GL journal entry for a completed order.
 
-    DR  6135 Costo de ventas      total_ingredient_cost
-    CR  1435 Inventarios          total_ingredient_cost
+    DR  COGS                       total_ingredient_cost
+    CR  INVENTORY                  total_ingredient_cost
 
     Cost basis: sum of order_item_ingredients.total_cost (captured at sale time
     using last purchase unit_cost × quantity consumed).
@@ -864,8 +751,8 @@ async def _post_order_cogs_gl_entry(
     Rules:
     - Only posts if total ingredient cost > 0 (skip if no purchase history)
     - Idempotent: skips if source_module='orden_cogs' entry already exists
-    - Missing 6135 or 1435 account → warning logged, no exception raised
-    - Failure must never block order completion — caller wraps in try/except
+    - Missing COGS or INVENTORY role fails explicitly before journal insertion
+    - The caller decides whether non-configuration failures block completion
     """
     # ── Idempotency guard ──────────────────────────────────────────────────
     existing = await conn.fetchval(
@@ -891,29 +778,12 @@ async def _post_order_cogs_gl_entry(
         logger.info(f"[GL] Order {order_id}: no ingredient cost data — skip COGS entry")
         return
 
-    # ── Resolve 6135 Costo de ventas ───────────────────────────────────────
-    cogs_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, COGS_CODE,
+    cogs_acct = await resolve_account(
+        conn, tenant_id, AccountRole.COGS, source="order_cogs"
     )
-    if not cogs_acct:
-        logger.warning(
-            f"[GL] COGS account {COGS_CODE} not found for tenant {tenant_id} — "
-            f"skip COGS entry for order {order_id}"
-        )
-        return
-
-    # ── Resolve 1435 Inventarios ───────────────────────────────────────────
-    inv_acct = await conn.fetchrow(
-        "SELECT id FROM tenant_accounts WHERE tenant_id = $1 AND code = $2 AND is_active = true",
-        tenant_id, INVENTARIO_CODE,
+    inv_acct = await resolve_account(
+        conn, tenant_id, AccountRole.INVENTORY, source="order_cogs"
     )
-    if not inv_acct:
-        logger.warning(
-            f"[GL] Inventory account {INVENTARIO_CODE} not found for tenant {tenant_id} — "
-            f"skip COGS entry for order {order_id}"
-        )
-        return
 
     # ── Insert entry + 2 lines ─────────────────────────────────────────────
     amount = float(total_cogs)
@@ -932,20 +802,20 @@ async def _post_order_cogs_gl_entry(
         )
         entry_id = entry_row["id"]
 
-        # Debit — 6135 Costo de ventas
+        # Debit — cost of goods sold
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, $3, 0, $4, 0)""",
-            entry_id, cogs_acct["id"], amount, description,
+            entry_id, cogs_acct.id, amount, description,
         )
 
-        # Credit — 1435 Inventarios
+        # Credit — inventory
         await conn.execute(
             """INSERT INTO tenant_journal_lines
                    (journal_entry_id, account_id, debit, credit, description, line_order)
                VALUES ($1, $2, 0, $3, $4, 1)""",
-            entry_id, inv_acct["id"], amount, description,
+            entry_id, inv_acct.id, amount, description,
         )
 
     logger.info(
@@ -2805,7 +2675,7 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             # Revenue is already recorded per-order via _post_order_gl_entry()
             # (source_module='orden') when each POS/table/online order completes.
             # Posting again here (source_module='ventas') would double-count
-            # income in account 4175. The cierre serves as a cash reconciliation
+            # income in the SALES_REVENUE role. The cierre is a cash reconciliation
             # report, not as the GL trigger for revenue recognition.
 
         return {
@@ -3052,17 +2922,6 @@ async def update_reconciliation_reported(
         raise APIError(f"Error in update_reconciliation_reported: {exc}", status_code=500)
 
 
-async def _account_id_for_code(conn, tenant_id: UUID, code: str):
-    return await conn.fetchval(
-        """
-        SELECT id
-        FROM tenant_accounts
-        WHERE tenant_id = $1 AND code = $2 AND is_active = true
-        """,
-        tenant_id, code,
-    )
-
-
 async def _create_reconciliation_journal_entry(
     conn,
     tenant_id: UUID,
@@ -3080,46 +2939,48 @@ async def _create_reconciliation_journal_entry(
         return None
 
     amount = abs(diff)
-    payment_code = _SLUG_DEBIT_CODE.get(row["group_slug"], "1110")
-    payment_account_id = await _account_id_for_code(conn, tenant_id, payment_code)
-    if not payment_account_id:
-        logger.warning("[reconciliation] Missing payment account %s for tenant %s", payment_code, tenant_id)
-        return None
-
-    debit_code = None
-    credit_code = None
+    payment_account = await resolve_payment_account(
+        conn, tenant_id, row["group_slug"], source="reconciliation"
+    )
+    debit_account = None
+    credit_account = None
     if reason == "commission":
-        debit_code = "5305"
-        credit_code = payment_code
+        debit_account = await resolve_account(
+            conn, tenant_id, AccountRole.BANK_FEES_EXPENSE, source="reconciliation"
+        )
+        credit_account = payment_account
     elif reason == "missing_sale":
-        debit_code = payment_code
-        credit_code = INGRESOS_CODE
+        debit_account = payment_account
+        credit_account = await resolve_account(
+            conn, tenant_id, AccountRole.SALES_REVENUE, source="reconciliation"
+        )
     elif reason == "client_balance":
-        debit_code = payment_code
-        credit_code = "2810"
+        debit_account = payment_account
+        credit_account = await resolve_account(
+            conn, tenant_id, AccountRole.CUSTOMER_ADVANCES, source="reconciliation"
+        )
     elif reason == "real_surplus":
-        debit_code = payment_code
-        credit_code = "4295"
+        debit_account = payment_account
+        credit_account = await resolve_account(
+            conn, tenant_id, AccountRole.OTHER_INCOME, source="reconciliation"
+        )
     elif reason == "real_shortage":
-        debit_code = "1305"
-        credit_code = payment_code
+        debit_account = await resolve_account(
+            conn, tenant_id, AccountRole.ACCOUNTS_RECEIVABLE, source="reconciliation"
+        )
+        credit_account = payment_account
     elif reason == "other":
         if diff > 0:
-            debit_code = payment_code
-            credit_code = "4295"
+            debit_account = payment_account
+            credit_account = await resolve_account(
+                conn, tenant_id, AccountRole.OTHER_INCOME, source="reconciliation"
+            )
         else:
-            debit_code = "5305"
-            credit_code = payment_code
+            debit_account = await resolve_account(
+                conn, tenant_id, AccountRole.BANK_FEES_EXPENSE, source="reconciliation"
+            )
+            credit_account = payment_account
     else:
-        return None
-
-    debit_account_id = await _account_id_for_code(conn, tenant_id, debit_code)
-    credit_account_id = await _account_id_for_code(conn, tenant_id, credit_code)
-    if not debit_account_id or not credit_account_id:
-        logger.warning(
-            "[reconciliation] Missing accounts debit=%s credit=%s tenant=%s",
-            debit_code, credit_code, tenant_id,
-        )
         return None
 
     entry_date = row["period_end"]
@@ -3159,9 +3020,9 @@ async def _create_reconciliation_journal_entry(
             ($1, $4, 0, $3, $5, 1)
         """,
         entry_id,
-        debit_account_id,
+        debit_account.id,
         float(amount),
-        credit_account_id,
+        credit_account.id,
         description,
     )
     return entry_id

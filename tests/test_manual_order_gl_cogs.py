@@ -11,6 +11,7 @@ from fastapi import Request
 from app.core.exceptions import APIError
 from app.routers.orders import ManualOrderModifier
 from app.services import cierre_service, orders_service
+from app.services.account_role_service import AccountRef, AccountRole
 
 
 class _AsyncContext:
@@ -675,26 +676,29 @@ async def test_post_order_gl_entry_uses_selected_method_account_before_slug_fall
     conn.execute = AsyncMock()
     conn.transaction = MagicMock(return_value=_AsyncContext())
 
-    await cierre_service._post_order_gl_entry(
-        conn=conn,
-        tenant_id=tenant_id,
-        order_id=order_id,
-        order_date=date(2026, 6, 16),
-        total_amount=Decimal("42000"),
-        payment_method="cash",
-        payment_method_id=method_id,
-        tax_config={},
-        order_number=8521,
-    )
+    payment_resolver = AsyncMock(return_value=AccountRef(
+        debit_account_id, "BANK-CARD", "Selected bank", AccountRole.BANK, "explicit_account_id"
+    ))
+    role_resolver = AsyncMock(return_value=AccountRef(
+        ingresos_account_id, "REVENUE", "Revenue", AccountRole.SALES_REVENUE, "localization_default"
+    ))
+    with patch("app.services.cierre_service.resolve_payment_account", new=payment_resolver), patch(
+        "app.services.cierre_service.resolve_account", new=role_resolver
+    ):
+        await cierre_service._post_order_gl_entry(
+            conn=conn,
+            tenant_id=tenant_id,
+            order_id=order_id,
+            order_date=date(2026, 6, 16),
+            total_amount=Decimal("42000"),
+            payment_method="cash",
+            payment_method_id=method_id,
+            tax_config={},
+            order_number=8521,
+        )
 
-    method_lookup_args = conn.fetchrow.await_args_list[0].args
-    debit_lookup_args = next(
-        call.args for call in conn.fetchrow.await_args_list
-        if len(call.args) >= 3 and call.args[1:] == (tenant_id, "1120")
-    )
     debit_line_args = conn.execute.await_args_list[0].args
-    assert method_lookup_args[1] == method_id
-    assert debit_lookup_args[1:] == (tenant_id, "1120")
+    assert payment_resolver.await_args.kwargs["payment_method_id"] == method_id
     assert debit_line_args[2] == debit_account_id
 
 
@@ -723,25 +727,32 @@ async def test_post_order_gl_entry_splits_table_advance_to_2810():
     conn.execute = AsyncMock()
     conn.transaction = MagicMock(return_value=_AsyncContext())
 
-    await cierre_service._post_order_gl_entry(
-        conn=conn,
-        tenant_id=tenant_id,
-        order_id=order_id,
-        order_date=date(2026, 6, 16),
-        total_amount=Decimal("70000"),
-        payment_method="table_session_advance",
-        payment_method_id=None,
-        tax_config={},
-        order_number=8522,
-        advance_amount=Decimal("70000"),
+    advance_ref = AccountRef(
+        advance_account_id, "ADVANCE", "Customer advances", AccountRole.CUSTOMER_ADVANCES, "localization_default"
     )
+    revenue_ref = AccountRef(
+        ingresos_account_id, "REVENUE", "Revenue", AccountRole.SALES_REVENUE, "localization_default"
+    )
+    async def resolve_role(_conn, _tenant_id, role, **_kwargs):
+        return advance_ref if role == AccountRole.CUSTOMER_ADVANCES else revenue_ref
 
-    advance_lookup_args = next(
-        call.args for call in conn.fetchrow.await_args_list
-        if len(call.args) >= 3 and call.args[1:] == (tenant_id, "2810")
-    )
+    with patch("app.services.cierre_service.resolve_payment_account", new=AsyncMock(return_value=advance_ref)), patch(
+        "app.services.cierre_service.resolve_account", new=AsyncMock(side_effect=resolve_role)
+    ):
+        await cierre_service._post_order_gl_entry(
+            conn=conn,
+            tenant_id=tenant_id,
+            order_id=order_id,
+            order_date=date(2026, 6, 16),
+            total_amount=Decimal("70000"),
+            payment_method="table_session_advance",
+            payment_method_id=None,
+            tax_config={},
+            order_number=8522,
+            advance_amount=Decimal("70000"),
+        )
+
     advance_line_args = conn.execute.await_args_list[0].args
-    assert advance_lookup_args[1:] == (tenant_id, "2810")
     assert advance_line_args[2] == advance_account_id
     assert advance_line_args[3] == 70000.0
     assert "aplicación anticipo mesa" in advance_line_args[4]
@@ -781,29 +792,29 @@ async def test_post_order_gl_entry_splits_debits_by_payment_puc():
     conn.execute = AsyncMock()
     conn.transaction = MagicMock(return_value=_AsyncContext())
 
-    await cierre_service._post_order_gl_entry(
-        conn=conn,
-        tenant_id=tenant_id,
-        order_id=order_id,
-        order_date=date(2026, 6, 19),
-        total_amount=Decimal("45000"),
-        payment_method="card",
-        payment_method_id=card_method_id,
-        tax_config={},
-        order_number=15342,
-        payment_splits=[
-            {
-                "amount": Decimal("42000"),
-                "payment_method": "digital",
-                "payment_method_id": digital_method_id,
-            },
-            {
-                "amount": Decimal("3000"),
-                "payment_method": "card",
-                "payment_method_id": card_method_id,
-            },
-        ],
-    )
+    async def resolve_payment(_conn, _tenant_id, _slug, payment_method_id=None, **_kwargs):
+        account_id = digital_account_id if payment_method_id == digital_method_id else card_account_id
+        return AccountRef(account_id, "BANK", "Bank", AccountRole.BANK, "explicit_account_id")
+
+    with patch("app.services.cierre_service.resolve_payment_account", new=AsyncMock(side_effect=resolve_payment)), patch(
+        "app.services.cierre_service.resolve_account",
+        new=AsyncMock(return_value=AccountRef(ingresos_account_id, "REVENUE", "Revenue", AccountRole.SALES_REVENUE, "localization_default")),
+    ):
+        await cierre_service._post_order_gl_entry(
+            conn=conn,
+            tenant_id=tenant_id,
+            order_id=order_id,
+            order_date=date(2026, 6, 19),
+            total_amount=Decimal("45000"),
+            payment_method="card",
+            payment_method_id=card_method_id,
+            tax_config={},
+            order_number=15342,
+            payment_splits=[
+                {"amount": Decimal("42000"), "payment_method": "digital", "payment_method_id": digital_method_id},
+                {"amount": Decimal("3000"), "payment_method": "card", "payment_method_id": card_method_id},
+            ],
+        )
 
     debit_lines = [
         call.args for call in conn.execute.await_args_list

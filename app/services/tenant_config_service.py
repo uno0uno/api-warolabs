@@ -673,15 +673,19 @@ async def update_tax_config(request: Request, data) -> dict:
                     tenant_id,
                     inc_applicable, inc_included_in_price,
                     iva_applicable, iva_included_in_price,
-                    liquor_tax_applicable
+                    liquor_tax_applicable,
+                    inc_gl_account_id, iva_gl_account_id, liquor_tax_gl_account_id
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 ON CONFLICT (tenant_id) DO UPDATE SET
                     inc_applicable        = EXCLUDED.inc_applicable,
                     inc_included_in_price = EXCLUDED.inc_included_in_price,
                     iva_applicable        = EXCLUDED.iva_applicable,
                     iva_included_in_price = EXCLUDED.iva_included_in_price,
                     liquor_tax_applicable = EXCLUDED.liquor_tax_applicable,
+                    inc_gl_account_id = COALESCE(EXCLUDED.inc_gl_account_id, tenant_tax_config.inc_gl_account_id),
+                    iva_gl_account_id = COALESCE(EXCLUDED.iva_gl_account_id, tenant_tax_config.iva_gl_account_id),
+                    liquor_tax_gl_account_id = COALESCE(EXCLUDED.liquor_tax_gl_account_id, tenant_tax_config.liquor_tax_gl_account_id),
                     updated_at            = NOW()
                 RETURNING *
                 """,
@@ -691,6 +695,9 @@ async def update_tax_config(request: Request, data) -> dict:
                 data.iva_applicable,
                 data.iva_included_in_price,
                 data.liquor_tax_applicable,
+                data.inc_gl_account_id,
+                data.iva_gl_account_id,
+                data.liquor_tax_gl_account_id,
             )
 
             return {"success": True, "data": dict(row)}

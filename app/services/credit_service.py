@@ -12,70 +12,30 @@ from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
+from app.services.account_role_service import (
+    AccountRole,
+    resolve_account,
+    resolve_payment_account,
+)
 import logging
 
 logger = logging.getLogger(__name__)
 
-_PAYMENT_DEBIT_FALLBACKS = {
-    "cash": "1105",
-    "digital": "1110",
-    "card": "1110",
-    "credit": "1305",
-}
-_CARTERA_RECEIVABLE_CODE = "1305"
-
-
-async def _resolve_account_id(conn, tenant_id: UUID, code: str) -> Optional[UUID]:
-    return await conn.fetchval(
-        """
-        SELECT id
-        FROM tenant_accounts
-        WHERE tenant_id = $1 AND code = $2 AND is_active = true
-        """,
-        tenant_id,
-        code,
-    )
-
-
-async def _resolve_credit_payment_debit_code(
+async def _resolve_credit_payment_debit_account(
     conn,
     tenant_id: UUID,
     payment_method: str,
     group_id: UUID,
     payment_method_id: Optional[UUID],
-) -> str:
-    if payment_method_id:
-        method_code = await conn.fetchval(
-            """
-            SELECT COALESCE(pm.gl_account_code, pmg.gl_account_code)
-            FROM payment_methods pm
-            JOIN payment_method_groups pmg ON pm.group_id = pmg.id
-            WHERE pm.id = $1
-              AND pm.tenant_id = $2
-              AND pm.group_id = $3
-            """,
-            payment_method_id,
-            tenant_id,
-            group_id,
-        )
-        if method_code:
-            return str(method_code)
-
-    group_code = await conn.fetchval(
-        """
-        SELECT gl_account_code
-        FROM payment_method_groups
-        WHERE id = $1
-          AND is_active = true
-          AND (tenant_id IS NULL OR tenant_id = $2)
-        """,
-        group_id,
+):
+    return await resolve_payment_account(
+        conn,
         tenant_id,
+        payment_method,
+        payment_method_id=payment_method_id,
+        payment_group_id=group_id,
+        source="credit_payment",
     )
-    if group_code:
-        return str(group_code)
-
-    return _PAYMENT_DEBIT_FALLBACKS.get(payment_method or "", "1105")
 
 
 async def _post_credit_payment_gl(
@@ -105,29 +65,19 @@ async def _post_credit_payment_gl(
         logger.info("[credit GL] Payment %s already posted as journal %s", payment_id, existing)
         return existing
 
-    debit_code = await _resolve_credit_payment_debit_code(
+    debit_account = await _resolve_credit_payment_debit_account(
         conn,
         tenant_id,
         payment_method,
         group_id,
         payment_method_id,
     )
-    credit_code = _CARTERA_RECEIVABLE_CODE
-    debit_account_id = await _resolve_account_id(conn, tenant_id, debit_code)
-    credit_account_id = await _resolve_account_id(conn, tenant_id, credit_code)
-    if not debit_account_id or not credit_account_id:
-        logger.warning(
-            "[credit GL] Missing accounts debit=%s credit=%s tenant=%s payment=%s",
-            debit_code,
-            credit_code,
-            tenant_id,
-            payment_id,
-        )
-        raise APIError(
-            "No se pudo registrar el asiento contable del abono de cartera.",
-            status_code=500,
-            details={"code": "credit_payment_gl_account_missing"},
-        )
+    receivable_account = await resolve_account(
+        conn,
+        tenant_id,
+        AccountRole.ACCOUNTS_RECEIVABLE,
+        source="credit_payment",
+    )
 
     entry_date = (
         payment_date_value.date()
@@ -164,9 +114,9 @@ async def _post_credit_payment_gl(
         VALUES ($1, $2, $3, 0, $4, 0)
         """,
         entry_id,
-        debit_account_id,
+        debit_account.id,
         amt,
-        f"Dr {debit_code} - abono cartera",
+        f"Dr {debit_account.code} - abono cartera",
     )
     await conn.execute(
         """
@@ -175,9 +125,9 @@ async def _post_credit_payment_gl(
         VALUES ($1, $2, 0, $3, $4, 1)
         """,
         entry_id,
-        credit_account_id,
+        receivable_account.id,
         amt,
-        f"Cr {credit_code} - clientes por cobrar",
+        f"Cr {receivable_account.code} - clientes por cobrar",
     )
     return entry_id
 

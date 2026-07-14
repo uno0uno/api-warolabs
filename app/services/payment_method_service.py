@@ -43,6 +43,7 @@ async def list_groups(request: Request) -> dict:
                 pmg.is_active,
                 pmg.sort_order,
                 pmg.gl_account_code,
+                pmg.gl_account_id,
                 COUNT(pm.id) FILTER (
                     WHERE pm.is_active = true AND pm.tenant_id = $1
                 ) AS method_count
@@ -65,6 +66,7 @@ async def list_groups(request: Request) -> dict:
             "isActive": row["is_active"],
             "sortOrder": row["sort_order"],
             "glAccountCode": row["gl_account_code"],
+            "glAccountId": str(row["gl_account_id"]) if row["gl_account_id"] else None,
             "methodCount": row["method_count"],
         }
         for row in rows
@@ -155,12 +157,16 @@ async def patch_group(request: Request, group_id: UUID, body: PatchGroupRequest)
             updates.append(f"gl_account_code = ${idx}")
             params.append(body.glAccountCode if body.glAccountCode != "" else None)
             idx += 1
+        if body.glAccountId is not None:
+            updates.append(f"gl_account_id = ${idx}")
+            params.append(body.glAccountId)
+            idx += 1
 
         if not updates:
             # Nothing to update — return current state
             row = await conn.fetchrow(
                 """
-                SELECT id, tenant_id, name, slug, triggers_cartera, is_active, sort_order, gl_account_code
+                SELECT id, tenant_id, name, slug, triggers_cartera, is_active, sort_order, gl_account_code, gl_account_id
                 FROM payment_method_groups WHERE id = $1
                 """,
                 group_id,
@@ -172,7 +178,7 @@ async def patch_group(request: Request, group_id: UUID, body: PatchGroupRequest)
                 UPDATE payment_method_groups
                 SET {', '.join(updates)}
                 WHERE id = ${idx}
-                RETURNING id, tenant_id, name, slug, triggers_cartera, is_active, sort_order, gl_account_code
+                RETURNING id, tenant_id, name, slug, triggers_cartera, is_active, sort_order, gl_account_code, gl_account_id
                 """,
                 *params,
             )
@@ -188,6 +194,7 @@ async def patch_group(request: Request, group_id: UUID, body: PatchGroupRequest)
             "isActive": row["is_active"],
             "sortOrder": row["sort_order"],
             "glAccountCode": row["gl_account_code"],
+            "glAccountId": str(row["gl_account_id"]) if row["gl_account_id"] else None,
         },
     }
 
@@ -202,7 +209,7 @@ async def list_methods(request: Request) -> dict:
     async with get_db_connection(use_transaction=False) as conn:
         rows = await conn.fetch(
             """
-            SELECT pm.id, pm.tenant_id, pm.group_id, pm.name, pm.is_active, pm.sort_order, pm.gl_account_code
+            SELECT pm.id, pm.tenant_id, pm.group_id, pm.name, pm.is_active, pm.sort_order, pm.gl_account_code, pm.gl_account_id
             FROM payment_methods pm
             WHERE pm.tenant_id = $1
             ORDER BY pm.sort_order, pm.name
@@ -219,6 +226,7 @@ async def list_methods(request: Request) -> dict:
             "isActive": row["is_active"],
             "sortOrder": row["sort_order"],
             "glAccountCode": row["gl_account_code"],
+            "glAccountId": str(row["gl_account_id"]) if row["gl_account_id"] else None,
         }
         for row in rows
     ]
@@ -257,15 +265,16 @@ async def create_method(request: Request, body: CreateMethodRequest) -> dict:
             # to its sub-account in a single round-trip (instead of POST + PATCH).
             row = await conn.fetchrow(
                 """
-                INSERT INTO payment_methods (tenant_id, group_id, name, sort_order, gl_account_code)
-                VALUES ($1, $2, $3, $4, $5)
-                RETURNING id, tenant_id, group_id, name, is_active, sort_order, gl_account_code
+                INSERT INTO payment_methods (tenant_id, group_id, name, sort_order, gl_account_code, gl_account_id)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING id, tenant_id, group_id, name, is_active, sort_order, gl_account_code, gl_account_id
                 """,
                 tenant_id,
                 group_id,
                 body.name,
                 body.sortOrder,
                 body.glAccountCode if body.glAccountCode else None,
+                body.glAccountId,
             )
         except UniqueViolationError:
             raise ValidationError(
@@ -282,6 +291,7 @@ async def create_method(request: Request, body: CreateMethodRequest) -> dict:
             "isActive": row["is_active"],
             "sortOrder": row["sort_order"],
             "glAccountCode": row["gl_account_code"],
+            "glAccountId": str(row["gl_account_id"]) if row["gl_account_id"] else None,
         },
     }
 
@@ -336,10 +346,14 @@ async def patch_method(request: Request, method_id: UUID, body: PatchMethodReque
             updates.append(f"gl_account_code = ${idx}")
             params.append(body.glAccountCode if body.glAccountCode != "" else None)
             idx += 1
+        if body.glAccountId is not None:
+            updates.append(f"gl_account_id = ${idx}")
+            params.append(body.glAccountId)
+            idx += 1
 
         if not updates:
             row = await conn.fetchrow(
-                "SELECT id, tenant_id, group_id, name, is_active, sort_order, gl_account_code FROM payment_methods WHERE id = $1",
+                "SELECT id, tenant_id, group_id, name, is_active, sort_order, gl_account_code, gl_account_id FROM payment_methods WHERE id = $1",
                 method_id,
             )
         else:
@@ -349,7 +363,7 @@ async def patch_method(request: Request, method_id: UUID, body: PatchMethodReque
                 UPDATE payment_methods
                 SET {', '.join(updates)}
                 WHERE id = ${idx}
-                RETURNING id, tenant_id, group_id, name, is_active, sort_order, gl_account_code
+                RETURNING id, tenant_id, group_id, name, is_active, sort_order, gl_account_code, gl_account_id
                 """,
                 *params,
             )
@@ -364,6 +378,7 @@ async def patch_method(request: Request, method_id: UUID, body: PatchMethodReque
             "isActive": row["is_active"],
             "sortOrder": row["sort_order"],
             "glAccountCode": row["gl_account_code"],
+            "glAccountId": str(row["gl_account_id"]) if row["gl_account_id"] else None,
         },
     }
 
@@ -409,7 +424,7 @@ async def _list_payment_methods_by_tenant_id(
     async with get_db_connection(use_transaction=False) as conn:
         groups = await conn.fetch(
             """
-            SELECT id, name, slug, triggers_cartera, gl_account_code
+            SELECT id, name, slug, triggers_cartera, gl_account_code, gl_account_id
             FROM payment_method_groups
             WHERE (tenant_id IS NULL OR tenant_id = $1) AND is_active = true
             ORDER BY sort_order, name
@@ -419,7 +434,7 @@ async def _list_payment_methods_by_tenant_id(
 
         methods = await conn.fetch(
             """
-            SELECT id, group_id, name, gl_account_code
+            SELECT id, group_id, name, gl_account_code, gl_account_id
             FROM payment_methods
             WHERE tenant_id = $1 AND is_active = true
             ORDER BY sort_order, name
@@ -436,6 +451,7 @@ async def _list_payment_methods_by_tenant_id(
             "id": str(m["id"]),
             "name": m["name"],
             "glAccountCode": m["gl_account_code"],
+            "glAccountId": str(m["gl_account_id"]) if m["gl_account_id"] else None,
         })
 
     data = [
@@ -445,6 +461,7 @@ async def _list_payment_methods_by_tenant_id(
             "slug": g["slug"],
             "triggersCartera": g["triggers_cartera"],
             "glAccountCode": g["gl_account_code"],
+            "glAccountId": str(g["gl_account_id"]) if g["gl_account_id"] else None,
             "methods": methods_by_group.get(str(g["id"]), []),
         }
         for g in groups

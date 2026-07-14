@@ -8,6 +8,7 @@ import pytest
 
 from app.core.exceptions import APIError
 from app.services import credit_service
+from app.services.account_role_service import AccountRef, AccountRole
 
 
 class _AsyncContext:
@@ -41,24 +42,29 @@ def _credit_order(tenant_id, customer_id):
 
 
 @pytest.mark.asyncio
-async def test_credit_payment_debit_code_uses_group_puc_when_method_has_no_puc():
+async def test_credit_payment_debit_account_uses_semantic_payment_resolver():
     tenant_id = uuid4()
     group_id = uuid4()
     method_id = uuid4()
-    conn = MagicMock()
-    conn.fetchval = AsyncMock(side_effect=["112010"])
+    expected = AccountRef(uuid4(), "BANK-01", "Settlement", AccountRole.BANK, "tenant_override")
 
-    code = await credit_service._resolve_credit_payment_debit_code(
-        conn,
+    with patch(
+        "app.services.credit_service.resolve_payment_account",
+        new=AsyncMock(return_value=expected),
+    ) as resolver:
+        account = await credit_service._resolve_credit_payment_debit_account(
+            MagicMock(), tenant_id, "digital", group_id, method_id
+        )
+
+    assert account == expected
+    resolver.assert_awaited_once_with(
+        resolver.await_args.args[0],
         tenant_id,
         "digital",
-        group_id,
-        method_id,
+        payment_method_id=method_id,
+        payment_group_id=group_id,
+        source="credit_payment",
     )
-
-    assert code == "112010"
-    lookup_args = conn.fetchval.await_args.args
-    assert lookup_args[1:] == (method_id, tenant_id, group_id)
 
 
 @pytest.mark.asyncio
@@ -88,6 +94,12 @@ async def test_register_credit_payment_base_method_persists_null_method_id():
     ), patch(
         "app.services.credit_service.get_db_connection",
         return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.credit_service.resolve_payment_account",
+        new=AsyncMock(return_value=AccountRef(uuid4(), "CASH", "Cash", AccountRole.CASH, "localization_default")),
+    ), patch(
+        "app.services.credit_service.resolve_account",
+        new=AsyncMock(return_value=AccountRef(uuid4(), "AR", "Receivable", AccountRole.ACCOUNTS_RECEIVABLE, "localization_default")),
     ):
         result = await credit_service.register_credit_payment(
             _request(),
@@ -133,6 +145,12 @@ async def test_register_credit_payment_custom_method_validates_and_persists_id()
     ), patch(
         "app.services.credit_service.get_db_connection",
         return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.credit_service.resolve_payment_account",
+        new=AsyncMock(return_value=AccountRef(uuid4(), "BANK", "Bank", AccountRole.BANK, "tenant_override")),
+    ), patch(
+        "app.services.credit_service.resolve_account",
+        new=AsyncMock(return_value=AccountRef(uuid4(), "AR", "Receivable", AccountRole.ACCOUNTS_RECEIVABLE, "localization_default")),
     ):
         result = await credit_service.register_credit_payment(
             _request(),
@@ -188,6 +206,12 @@ async def test_register_credit_payment_posts_gl_with_custom_method_puc():
     ), patch(
         "app.services.credit_service.get_db_connection",
         return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.credit_service.resolve_payment_account",
+        new=AsyncMock(return_value=AccountRef(debit_account_id, "112005", "Bank", AccountRole.BANK, "tenant_override")),
+    ), patch(
+        "app.services.credit_service.resolve_account",
+        new=AsyncMock(return_value=AccountRef(credit_account_id, "1305", "Receivable", AccountRole.ACCOUNTS_RECEIVABLE, "localization_default")),
     ):
         result = await credit_service.register_credit_payment(
             _request(),
@@ -253,6 +277,12 @@ async def test_register_credit_payment_gl_uses_slug_fallback_without_puc():
     ), patch(
         "app.services.credit_service.get_db_connection",
         return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.credit_service.resolve_payment_account",
+        new=AsyncMock(return_value=AccountRef(debit_account_id, "BANK", "Bank", AccountRole.BANK, "localization_default")),
+    ), patch(
+        "app.services.credit_service.resolve_account",
+        new=AsyncMock(return_value=AccountRef(credit_account_id, "AR", "Receivable", AccountRole.ACCOUNTS_RECEIVABLE, "localization_default")),
     ):
         await credit_service.register_credit_payment(
             _request(),
@@ -261,12 +291,10 @@ async def test_register_credit_payment_gl_uses_slug_fallback_without_puc():
             "digital",
         )
 
-    debit_account_lookup_args = conn.fetchval.await_args_list[2].args
-    credit_account_lookup_args = conn.fetchval.await_args_list[3].args
-    assert debit_account_lookup_args[1:] == (tenant_id, "1110")
-    assert credit_account_lookup_args[1:] == (tenant_id, "1305")
     debit_args = conn.execute.await_args_list[1].args
     credit_args = conn.execute.await_args_list[2].args
+    assert debit_args[2] == debit_account_id
+    assert credit_args[2] == credit_account_id
     assert debit_args[3] == 20.0
     assert credit_args[3] == 20.0
 
