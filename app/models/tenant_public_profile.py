@@ -11,6 +11,7 @@ from app.core.tenant_prefs import (
     validate_currency_code,
     validate_locale,
 )
+from app.models.tenant_financial_profile import TenantFinancialProfileResponse
 
 class BusinessHours(BaseModel):
     """Business hours for a single day"""
@@ -254,6 +255,14 @@ class TenantPublicProfileCreate(TenantPublicProfileBase):
     tenant_id: UUID = Field(..., description="Tenant ID")
     is_active: bool = Field(False, description="Whether the public profile is active")
 
+    @model_validator(mode='after')
+    def _financial_fields_are_not_mutable_here(self):
+        if self.currency_code != DEFAULT_CURRENCY_CODE or self.country not in (None, 'Colombia'):
+            raise ValueError(
+                "country and currency_code are read-only here; use /financial-profile"
+            )
+        return self
+
 class TenantPublicProfileUpdate(BaseModel):
     """Update tenant public profile (all fields optional)"""
     slug: Optional[str] = Field(None, min_length=1, max_length=255)
@@ -364,6 +373,14 @@ class TenantPublicProfileUpdate(BaseModel):
                 )
         return self
 
+    @model_validator(mode='after')
+    def _financial_fields_are_not_mutable_here(self):
+        if self.country is not None or self.currency_code is not None:
+            raise ValueError(
+                "country and currency_code are read-only here; use /financial-profile"
+            )
+        return self
+
 class TenantPublicProfile(TenantPublicProfileBase):
     """Complete tenant public profile with all fields"""
     id: UUID
@@ -374,6 +391,12 @@ class TenantPublicProfile(TenantPublicProfileBase):
 
     # Calculated fields
     is_currently_open: Optional[bool] = Field(None, description="Calculated: is restaurant currently open")
+    country_code: Optional[str] = Field(
+        None, description="Authoritative ISO country code from the financial profile"
+    )
+    base_currency_code: Optional[str] = Field(
+        None, description="Authoritative tenant base currency"
+    )
 
     class Config:
         from_attributes = True
@@ -382,6 +405,7 @@ class TenantPublicProfileResponse(BaseModel):
     """Single tenant public profile response"""
     success: bool = True
     data: TenantPublicProfile
+    financial: Optional[TenantFinancialProfileResponse] = None
 
 class TenantPublicProfilesListResponse(BaseModel):
     """List of tenant public profiles response"""

@@ -26,6 +26,7 @@ from app.models.tenant_public_profile import (
     ToggleProfileResponse
 )
 from app.services import public_restaurant_service
+from app.services import tenant_financial_profile_service
 from app.services.aws_s3_service import AWSS3Service
 import logging
 
@@ -535,6 +536,14 @@ async def get_own_public_profile(request: Request) -> Optional[TenantPublicProfi
                 return None
 
             profile = _profile_from_row(result)
+            financial = await tenant_financial_profile_service.build_financial_response(
+                conn, tenant_id
+            )
+            # Keep the legacy display field aligned on reads without making
+            # tenant_public_profiles a second financial source of truth.
+            profile.currency_code = financial.profile.base_currency_code
+            profile.country_code = financial.profile.country_code
+            profile.base_currency_code = financial.profile.base_currency_code
             profile.is_currently_open = public_restaurant_service.is_currently_open(
                 profile.business_hours,
                 profile.is_manually_open,
@@ -543,7 +552,8 @@ async def get_own_public_profile(request: Request) -> Optional[TenantPublicProfi
 
             return TenantPublicProfileResponse(
                 success=True,
-                data=profile
+                data=profile,
+                financial=financial,
             )
 
     except AuthenticationError:

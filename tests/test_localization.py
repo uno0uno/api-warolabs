@@ -8,6 +8,7 @@ from app.core.localization import (
     DEFAULT_LOCALE,
     format_datetime,
     format_money,
+    get_currency_minor_units,
     normalize_currency,
     normalize_locale,
     resolve_tenant_locale_settings,
@@ -30,7 +31,10 @@ def test_normalize_locale_and_currency_fallbacks():
     assert normalize_locale("es_CO") == "es"
     assert normalize_locale("fr") == DEFAULT_LOCALE
     assert normalize_currency("cop") == "COP"
-    assert normalize_currency("USD") == DEFAULT_CURRENCY
+    assert normalize_currency("USD") == "USD"
+    assert normalize_currency("ZZZ") == DEFAULT_CURRENCY
+    assert get_currency_minor_units("CLP") == 0
+    assert get_currency_minor_units("USD") == 2
 
 
 @pytest.mark.asyncio
@@ -47,7 +51,7 @@ async def test_resolve_tenant_locale_settings_uses_profile_values():
 @pytest.mark.asyncio
 async def test_resolve_tenant_locale_settings_falls_back_for_invalid_or_missing_columns():
     settings = await resolve_tenant_locale_settings(
-        FakeConn({"locale": "legacy", "currency_code": "USD", "timezone": "Bad/Zone"}),
+        FakeConn({"locale": "legacy", "currency_code": "ZZZ", "timezone": "Bad/Zone"}),
         "tenant-1",
     )
     assert settings.locale == "es"

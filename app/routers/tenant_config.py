@@ -16,11 +16,41 @@ from app.models.tenant_public_profile import (
     ToggleProfileRequest,
     ToggleProfileResponse
 )
+from app.models.tenant_financial_profile import (
+    TenantFinancialProfileResponse,
+    TenantFinancialProfileUpdate,
+)
+from app.services import tenant_financial_profile_service
 from app.models.tax_config import TaxConfigUpdate
 from app.core.exceptions import AuthenticationError
 from typing import Optional
 
 router = APIRouter()
+
+
+@router.get(
+    "/financial-profile",
+    response_model=TenantFinancialProfileResponse,
+    dependencies=[Depends(require_module(Module.MI_NEGOCIO))],
+)
+async def get_financial_profile_endpoint(request: Request):
+    """Return authoritative base currency, capabilities and safe lock state."""
+    return await tenant_financial_profile_service.get_financial_profile(request)
+
+
+@router.put(
+    "/financial-profile",
+    response_model=TenantFinancialProfileResponse,
+    dependencies=[Depends(require_module(Module.MI_NEGOCIO))],
+)
+async def update_financial_profile_endpoint(
+    request: Request,
+    profile_data: TenantFinancialProfileUpdate = Body(...),
+):
+    """Atomically change country/base currency when tenant activity allows it."""
+    return await tenant_financial_profile_service.update_financial_profile(
+        request, profile_data
+    )
 
 
 @router.get("/public-profile", response_model=Optional[TenantPublicProfileResponse], dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
