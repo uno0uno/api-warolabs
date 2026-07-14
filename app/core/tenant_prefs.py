@@ -1,4 +1,4 @@
-"""Tenant localization prefs helpers (locale + display currency).
+"""Tenant localization and financial country/currency helpers.
 
 Operational defaults preserve the Colombia product:
 - locale: es
@@ -6,6 +6,7 @@ Operational defaults preserve the Colombia product:
 
 Separate from fiscal/legal Colombia constraints (api-facturacion).
 """
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 DEFAULT_TENANT_LOCALE = "es"
@@ -13,6 +14,42 @@ DEFAULT_CURRENCY_CODE = "COP"
 ALLOWED_LOCALES = frozenset({"es", "en"})
 DEFAULT_TENANT_UI_LOCALE = "es"
 ALLOWED_UI_LOCALES = frozenset({"es", "en", "pt", "fr", "de", "hi", "zh", "ar"})
+
+# Financial country/currency catalog. Panama is the only supported country with
+# more than one possible base currency. Keep this server-side so clients cannot
+# invent combinations that change the meaning of historical amounts.
+COUNTRY_CURRENCY_PAIRS = {
+    "US": ("USD",),
+    "CA": ("CAD",),
+    "GB": ("GBP",),
+    "AU": ("AUD",),
+    "NZ": ("NZD",),
+    "BR": ("BRL",),
+    "DE": ("EUR",),
+    "FR": ("EUR",),
+    "NL": ("EUR",),
+    "SG": ("SGD",),
+    "AE": ("AED",),
+    "IN": ("INR",),
+    "CN": ("CNY",),
+    "MX": ("MXN",),
+    "ES": ("EUR",),
+    "CO": ("COP",),
+    "CR": ("CRC",),
+    "UY": ("UYU",),
+    "CL": ("CLP",),
+    "PE": ("PEN",),
+    "AR": ("ARS",),
+    "DO": ("DOP",),
+    "PA": ("USD", "PAB"),
+}
+SUPPORTED_CURRENCY_MINOR_UNITS = {
+    code: (0 if code == "CLP" else 2)
+    for codes in COUNTRY_CURRENCY_PAIRS.values()
+    for code in codes
+}
+SUPPORTED_COUNTRY_CODES = frozenset(COUNTRY_CURRENCY_PAIRS)
+SUPPORTED_CURRENCY_CODES = frozenset(SUPPORTED_CURRENCY_MINOR_UNITS)
 
 
 def validate_locale(value: Optional[str]) -> str:
@@ -56,12 +93,13 @@ def normalize_ui_locale(value: Optional[str]) -> str:
 
 
 def validate_currency_code(value: Optional[str]) -> str:
-    """Return a normalized ISO 4217-ish currency code or raise ValueError."""
+    """Return a supported normalized ISO 4217 currency code."""
     if value is None or not isinstance(value, str) or not value.strip():
         raise ValueError("currency_code must be a 3-letter ISO code")
     code = value.strip().upper()
-    if len(code) != 3 or not code.isalpha():
-        raise ValueError("currency_code must be a 3-letter ISO code")
+    if len(code) != 3 or not code.isalpha() or code not in SUPPORTED_CURRENCY_CODES:
+        supported = ", ".join(sorted(SUPPORTED_CURRENCY_CODES))
+        raise ValueError(f"currency_code must be one of: {supported}")
     return code
 
 
@@ -71,3 +109,43 @@ def normalize_currency_code(value: Optional[str]) -> str:
         return validate_currency_code(value)
     except ValueError:
         return DEFAULT_CURRENCY_CODE
+
+
+def validate_country_code(value: Optional[str]) -> str:
+    """Return a supported normalized ISO 3166-1 alpha-2 country code."""
+    if value is None or not isinstance(value, str) or not value.strip():
+        raise ValueError("country_code is required")
+    code = value.strip().upper()
+    if code not in SUPPORTED_COUNTRY_CODES:
+        supported = ", ".join(sorted(SUPPORTED_COUNTRY_CODES))
+        raise ValueError(f"country_code must be one of: {supported}")
+    return code
+
+
+def validate_country_currency_pair(country: Optional[str], currency: Optional[str]) -> tuple[str, str]:
+    """Validate and normalize an allowed financial country/base-currency pair."""
+    country_code = validate_country_code(country)
+    currency_code = validate_currency_code(currency)
+    if currency_code not in COUNTRY_CURRENCY_PAIRS[country_code]:
+        allowed = ", ".join(COUNTRY_CURRENCY_PAIRS[country_code])
+        raise ValueError(f"base_currency_code for {country_code} must be one of: {allowed}")
+    return country_code, currency_code
+
+
+def currency_minor_units(currency: Optional[str]) -> int:
+    """Return ISO minor units for a supported currency, defaulting safely to COP."""
+    code = normalize_currency_code(currency)
+    return SUPPORTED_CURRENCY_MINOR_UNITS[code]
+
+
+def validate_currency_amount(value, currency: Optional[str]) -> Decimal:
+    """Reject amounts with more fractional digits than the base currency allows."""
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("amount must be a decimal value") from exc
+    units = currency_minor_units(currency)
+    quantum = Decimal(1).scaleb(-units)
+    if amount != amount.quantize(quantum):
+        raise ValueError(f"{normalize_currency_code(currency)} supports {units} decimal places")
+    return amount

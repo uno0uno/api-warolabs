@@ -14,6 +14,10 @@ import asyncpg
 from babel.dates import format_datetime as babel_format_datetime
 from babel.numbers import format_decimal
 
+from app.core.tenant_prefs import (
+    SUPPORTED_CURRENCY_CODES,
+    currency_minor_units,
+)
 from app.core.timezones import DEFAULT_TENANT_TIMEZONE, get_zoneinfo, normalize_timezone
 
 logger = logging.getLogger(__name__)
@@ -21,7 +25,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOCALE = "es"
 DEFAULT_CURRENCY = "COP"
 SUPPORTED_LOCALES = {"es", "en"}
-SUPPORTED_CURRENCIES = {"COP"}
+SUPPORTED_CURRENCIES = SUPPORTED_CURRENCY_CODES
 LOCALES_DIR = Path(__file__).resolve().parents[1] / "locales"
 
 
@@ -41,7 +45,7 @@ def normalize_locale(value: Optional[str]) -> str:
 
 
 def normalize_currency(value: Optional[str]) -> str:
-    """Return a supported currency code. Initial rollout supports COP only."""
+    """Return a supported base-currency code."""
     if not isinstance(value, str):
         return DEFAULT_CURRENCY
     normalized = value.strip().upper()
@@ -64,23 +68,28 @@ def get_translator(locale: Optional[str]):
 
 
 async def resolve_tenant_locale_settings(conn, tenant_id: Any) -> TenantLocaleSettings:
-    """Resolve locale, currency and timezone from tenant_public_profiles."""
+    """Resolve locale/timezone plus authoritative tenant base currency."""
     if not tenant_id:
         return TenantLocaleSettings()
     try:
         result = conn.fetchrow(
             """
-            SELECT locale, currency_code, timezone
-            FROM tenant_public_profiles
-            WHERE tenant_id = $1
+            SELECT
+                tpp.locale,
+                COALESCE(tfp.base_currency_code, tpp.currency_code, 'COP') AS currency_code,
+                tpp.timezone
+            FROM tenants t
+            LEFT JOIN tenant_public_profiles tpp ON tpp.tenant_id = t.id
+            LEFT JOIN tenant_financial_profiles tfp ON tfp.tenant_id = t.id
+            WHERE t.id = $1
             """,
             tenant_id,
         )
         row = await result if isawaitable(result) else result
-    except asyncpg.UndefinedColumnError:
+    except (asyncpg.UndefinedColumnError, asyncpg.UndefinedTableError):
         logger.warning(
-            "tenant_public_profiles locale/currency columns missing; using defaults. "
-            "Apply migrations/099_tenant_locale_currency.sql."
+            "Tenant locale/financial profile schema missing; using CO/COP defaults. "
+            "Apply migrations 099 and 103."
         )
         return TenantLocaleSettings()
     except Exception as exc:
@@ -110,6 +119,11 @@ def format_money(amount: Any, locale: Optional[str] = None, currency: Optional[s
     if code == "COP":
         return f"${number}"
     return f"{code} {number}"
+
+
+def get_currency_minor_units(currency: Optional[str]) -> int:
+    """Expose supported ISO minor units to localization consumers."""
+    return currency_minor_units(currency)
 
 
 def format_datetime(value: datetime, locale: Optional[str] = None, timezone_name: Optional[str] = None) -> str:
