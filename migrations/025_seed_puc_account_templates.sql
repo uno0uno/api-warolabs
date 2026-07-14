@@ -7,7 +7,7 @@
 --   Part C: Account rows    (level=4, parent_code=group code) — 31 rows
 --   Total: 52 rows in account_templates
 --
--- All inserts use ON CONFLICT (code) DO NOTHING — safe to re-run.
+-- All inserts are scoped to WARO_CO_PUC_V1 and safe to re-run.
 -- Note: inventory uses code 1435 (official Decreto 2650), not 1430.
 
 -- ─────────────────────────────────────────────
@@ -21,7 +21,7 @@ VALUES
   ('4', 'Ingresos',                                 '4', 'income',    'credit', 1, NULL, false, 'grupo2', true),
   ('5', 'Gastos operacionales de administración',   '5', 'expense',   'debit',  1, NULL, false, 'grupo2', true),
   ('6', 'Costos de ventas',                         '6', 'cogs',      'debit',  1, NULL, false, 'grupo2', true)
-ON CONFLICT (code) DO NOTHING;
+ON CONFLICT (localization_id, code) DO NOTHING;
 
 -- ─────────────────────────────────────────────
 -- PART B: Groups (level=2)
@@ -49,7 +49,7 @@ VALUES
   -- Class 6 — Costos
   ('61', 'Costo de materia prima y suministros',            '6', 'cogs',      'debit',  2, '6', false, 'grupo2', true),
   ('62', 'Costo de mano de obra',                           '6', 'cogs',      'debit',  2, '6', false, 'grupo2', true)
-ON CONFLICT (code) DO NOTHING;
+ON CONFLICT (localization_id, code) DO NOTHING;
 
 -- ─────────────────────────────────────────────
 -- PART C: Accounts (level=4, is_detail=true)
@@ -101,11 +101,22 @@ VALUES
   -- Class 6 — Costos de ventas
   ('6135', 'Costos de materia prima (food cost)',             '6', 'cogs',      'debit',  4, '61', true, 'grupo2', true),
   ('6205', 'Costos de mano de obra directa',                  '6', 'cogs',      'debit',  4, '62', true, 'grupo2', true)
-ON CONFLICT (code) DO NOTHING;
+ON CONFLICT (localization_id, code) DO NOTHING;
+
+-- Populate the UUID hierarchy available in the final bootstrap schema.
+UPDATE account_templates child
+SET parent_template_id = parent.id
+FROM account_templates parent
+WHERE child.localization_id = 'WARO_CO_PUC_V1'
+  AND parent.localization_id = child.localization_id
+  AND parent.code = child.parent_code
+  AND child.parent_code IS NOT NULL
+  AND child.parent_template_id IS DISTINCT FROM parent.id;
 
 -- ─────────────────────────────────────────────
 -- PART D: Function seed_tenant_accounts(p_tenant_id)
--- Copies all active account_templates into tenant_accounts for a given tenant.
+-- Copies the CO templates into tenant_accounts for a given tenant. Migration
+-- 104 replaces this bootstrap function with localization-aware overloads.
 -- Called here for existing tenants; call from API on new company creation.
 -- Safe to call multiple times — ON CONFLICT (tenant_id, code) DO NOTHING.
 -- ─────────────────────────────────────────────
@@ -131,22 +142,22 @@ BEGIN
     true,   -- is_system: seeded rows cannot be deleted via API
     true    -- is_active
   FROM account_templates at
-  WHERE at.is_active = true
+  WHERE at.localization_id = 'WARO_CO_PUC_V1'
+    AND at.is_active = true
   ON CONFLICT (tenant_id, code) DO NOTHING;
 
-  -- Step 2: Resolve parent_id (UUID FK) by joining through parent_code string
-  -- Each child template has a parent_code; find the corresponding tenant_account row.
+  -- Step 2: Resolve parent_id through localized template UUIDs.
   UPDATE tenant_accounts child_ta
   SET parent_id = parent_ta.id
   FROM account_templates child_at
-  JOIN account_templates parent_at ON parent_at.code = child_at.parent_code
   JOIN tenant_accounts parent_ta
     ON parent_ta.tenant_id = p_tenant_id
-   AND parent_ta.code = parent_at.code
+   AND parent_ta.template_id = child_at.parent_template_id
   WHERE child_ta.tenant_id = p_tenant_id
     AND child_ta.template_id = child_at.id
     AND child_ta.parent_id IS NULL
-    AND child_at.parent_code IS NOT NULL;
+    AND child_at.localization_id = 'WARO_CO_PUC_V1'
+    AND child_at.parent_template_id IS NOT NULL;
 END;
 $$ LANGUAGE plpgsql;
 

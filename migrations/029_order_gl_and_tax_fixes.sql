@@ -43,7 +43,8 @@ ALTER TABLE tenant_journal_entries
 -- ─────────────────────────────────────────────
 UPDATE account_templates
     SET standard_name = 'Impuesto de industria y comercio retenido'
-    WHERE code = '2368';
+    WHERE localization_id = 'WARO_CO_PUC_V1'
+      AND code = '2368';
 
 UPDATE tenant_accounts
     SET name = 'Impuesto de industria y comercio retenido'
@@ -60,7 +61,7 @@ INSERT INTO account_templates (
 ) VALUES (
     '24', 'Impuestos, gravámenes y tasas',
     '2', 'liability', 'credit', 2, '2', false, 'grupo2', true
-) ON CONFLICT (code) DO NOTHING;
+) ON CONFLICT (localization_id, code) DO NOTHING;
 
 -- ─────────────────────────────────────────────
 -- 4. Add 2495 "Impoconsumo por pagar (INC)"
@@ -75,7 +76,7 @@ INSERT INTO account_templates (
 ) VALUES (
     '2495', 'Impoconsumo por pagar (INC)',
     '2', 'liability', 'credit', 4, '24', true, 'grupo2', true
-) ON CONFLICT (code) DO NOTHING;
+) ON CONFLICT (localization_id, code) DO NOTHING;
 
 -- ─────────────────────────────────────────────
 -- 5. Add 2408 "IVA por pagar"
@@ -89,7 +90,7 @@ INSERT INTO account_templates (
 ) VALUES (
     '2408', 'Impuesto sobre las ventas por pagar (IVA)',
     '2', 'liability', 'credit', 4, '24', true, 'grupo2', true
-) ON CONFLICT (code) DO NOTHING;
+) ON CONFLICT (localization_id, code) DO NOTHING;
 
 -- ─────────────────────────────────────────────
 -- 6. Re-seed all existing tenants
