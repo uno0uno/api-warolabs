@@ -191,3 +191,15 @@ def test_migration_is_idempotent_and_does_not_rewrite_history():
 def test_blocker_query_is_tenant_scoped_and_ignores_null_legacy_rows():
     assert service._BLOCKERS_QUERY.count("tenant_id = $1") == 9
     assert "tenant_id IS NULL" not in service._BLOCKERS_QUERY
+
+
+def test_financial_profile_read_is_not_owner_module_gated():
+    from app.routers.tenant_config import router
+
+    routes = {
+        (next(iter(route.methods)), route.path): route
+        for route in router.routes
+        if getattr(route, "methods", None) and route.path == "/financial-profile"
+    }
+    assert routes[("GET", "/financial-profile")].dependant.dependencies == []
+    assert len(routes[("PUT", "/financial-profile")].dependant.dependencies) == 1

@@ -32,6 +32,9 @@ def _row(
     tax_level_id: int = 5,
     inc_applicable: bool = False,
     iva_applicable: bool = True,
+    country_code: str = 'CO',
+    document_mode: str = 'fiscal_integrated',
+    fiscal_provider='matias',
 ):
     return {
         'dev_flag_enabled':  dev_flag_enabled,
@@ -48,6 +51,9 @@ def _row(
         'active_resolution': active_resolution,
         'inc_applicable':    inc_applicable,
         'iva_applicable':    iva_applicable,
+        'country_code':      country_code,
+        'document_mode':     document_mode,
+        'fiscal_provider':   fiscal_provider,
     }
 
 
@@ -89,8 +95,36 @@ class TestReadinessService:
             'taxes_configured':     True,
             'tax_requirement_satisfied': True,
             'matias_company_id_configured': True,
+            'country_is_colombia': True,
+            'document_mode_fiscal_integrated': True,
+            'fiscal_provider_matias': True,
         }
+        assert payload['reason_codes'] == []
         assert payload['missing'] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('field', 'value', 'check', 'reason_code'),
+        (
+            ('country_code', 'US', 'country_is_colombia', 'tenant_country_not_colombia'),
+            (
+                'document_mode',
+                'waro_commercial',
+                'document_mode_fiscal_integrated',
+                'document_mode_not_fiscal_integrated',
+            ),
+            ('fiscal_provider', None, 'fiscal_provider_matias', 'fiscal_provider_not_matias'),
+        ),
+    )
+    async def test_authoritative_financial_profile_blocks_matias(
+        self, field, value, check, reason_code
+    ):
+        with _patch_db(_row(**{field: value})):
+            payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
+
+        assert payload['ready'] is False
+        assert payload['checks'][check] is False
+        assert reason_code in payload['reason_codes']
 
     @pytest.mark.asyncio
     async def test_customer_request_is_required_before_internal_enablement_can_be_ready(self):

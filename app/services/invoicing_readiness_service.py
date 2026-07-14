@@ -2,7 +2,7 @@
 Invoicing readiness service — issue #130
 
 Single source of truth for "can this tenant emit electronic invoices right now?"
-Six predicates must all be true:
+Nine predicates must all be true:
 
   1. customer_requested     — tenant_fiscal_data.electronic_invoicing_requested
                               = true (customer intent from /facturacion)
@@ -21,6 +21,10 @@ Six predicates must all be true:
                             — Matias Casa de Software emissions have
                               tenant_fiscal_data.matias_company_id configured
                               for the outbound Matias client_uuid.
+  7. country_is_colombia    — authoritative financial profile uses CO
+  8. document_mode_fiscal_integrated
+                            — authoritative document mode is fiscal_integrated
+  9. fiscal_provider_matias — authoritative fiscal provider is Matias
 
 About the no-responsable bypass that was here briefly:
 
@@ -47,7 +51,11 @@ and microservice gate uno0uno/api-facturacion#17 must consume the same JSON):
         "taxes_configured":     bool,  # compatibility: INC or IVA active
         "tax_requirement_satisfied": bool,
         "matias_company_id_configured": bool,
+        "country_is_colombia": bool,
+        "document_mode_fiscal_integrated": bool,
+        "fiscal_provider_matias": bool,
       },
+      "reason_codes": [str, ...],
       "missing": [str, ...],   # human-readable Spanish reasons
     }
 """
@@ -71,6 +79,9 @@ SELECT
     fd.type_organization_id         AS type_organization_id,
     fd.tax_regime_id                AS tax_regime_id,
     fd.tax_level_id                 AS tax_level_id,
+    tfp.country_code                AS country_code,
+    tfp.document_mode               AS document_mode,
+    tfp.fiscal_provider             AS fiscal_provider,
     COALESCE(ttc.inc_applicable, false) AS inc_applicable,
     COALESCE(ttc.iva_applicable, false) AS iva_applicable,
     EXISTS (
@@ -85,6 +96,7 @@ SELECT
 FROM tenants t
 LEFT JOIN tenant_fiscal_data fd ON fd.tenant_id = t.id
 LEFT JOIN tenant_tax_config  ttc ON ttc.tenant_id = t.id
+LEFT JOIN tenant_financial_profiles tfp ON tfp.tenant_id = t.id
 WHERE t.id = $1
 """
 
@@ -116,6 +128,9 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
     matias_company_id_configured = bool(
         matias_company_id and str(matias_company_id).strip()
     )
+    country_is_colombia = row['country_code'] == 'CO'
+    document_mode_fiscal_integrated = row['document_mode'] == 'fiscal_integrated'
+    fiscal_provider_matias = row['fiscal_provider'] == 'matias'
 
     missing_fiscal_fields: List[str] = []
     if row['nit'] is None:
@@ -147,6 +162,39 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         missing.append(
             'Falta UUID cliente Matias (client_uuid) para emitir con Matias'
         )
+    if not country_is_colombia:
+        missing.append('El tenant no tiene localización fiscal colombiana')
+    if not document_mode_fiscal_integrated:
+        missing.append('El tenant no está configurado en modo fiscal_integrated')
+    if not fiscal_provider_matias:
+        missing.append('El proveedor fiscal del tenant no es Matias')
+
+    checks = {
+        'customer_requested': customer_requested,
+        'dev_flag_enabled': dev_flag_enabled,
+        'fiscal_data_complete': fiscal_data_complete,
+        'active_resolution': active_resolution,
+        'taxes_configured': taxes_configured,
+        'tax_requirement_satisfied': tax_requirement_satisfied,
+        'matias_company_id_configured': matias_company_id_configured,
+        'country_is_colombia': country_is_colombia,
+        'document_mode_fiscal_integrated': document_mode_fiscal_integrated,
+        'fiscal_provider_matias': fiscal_provider_matias,
+    }
+    reason_code_by_check = (
+        ('customer_requested', 'electronic_invoicing_not_requested'),
+        ('dev_flag_enabled', 'electronic_invoicing_disabled'),
+        ('fiscal_data_complete', 'fiscal_data_incomplete'),
+        ('active_resolution', 'dian_resolution_unavailable'),
+        ('tax_requirement_satisfied', 'tax_configuration_invalid'),
+        ('matias_company_id_configured', 'matias_company_id_missing'),
+        ('country_is_colombia', 'tenant_country_not_colombia'),
+        ('document_mode_fiscal_integrated', 'document_mode_not_fiscal_integrated'),
+        ('fiscal_provider_matias', 'fiscal_provider_not_matias'),
+    )
+    reason_codes = [
+        code for check, code in reason_code_by_check if not checks[check]
+    ]
 
     return {
         'ready': (
@@ -156,15 +204,11 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             and active_resolution
             and tax_requirement_satisfied
             and matias_company_id_configured
+            and country_is_colombia
+            and document_mode_fiscal_integrated
+            and fiscal_provider_matias
         ),
-        'checks': {
-            'customer_requested':   customer_requested,
-            'dev_flag_enabled':     dev_flag_enabled,
-            'fiscal_data_complete': fiscal_data_complete,
-            'active_resolution':    active_resolution,
-            'taxes_configured':     taxes_configured,
-            'tax_requirement_satisfied': tax_requirement_satisfied,
-            'matias_company_id_configured': matias_company_id_configured,
-        },
+        'checks': checks,
+        'reason_codes': reason_codes,
         'missing': missing,
     }
