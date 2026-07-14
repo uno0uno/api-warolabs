@@ -1,5 +1,5 @@
 """Authoritative tenant financial profile and safe country/currency mutation."""
-from typing import Any
+from typing import Any, Optional, Tuple
 
 from fastapi import HTTPException, Request
 
@@ -71,7 +71,7 @@ _BLOCKERS_QUERY = """
 """
 
 
-def _financial_mode(country_code: str) -> tuple[str, str, str | None]:
+def _financial_mode(country_code: str) -> Tuple[str, str, Optional[str]]:
     if country_code == "CO":
         return "WARO_CO_PUC_V1", "fiscal_integrated", "matias"
     return "WARO_HOSPITALITY_GLOBAL_V1", "waro_commercial", None

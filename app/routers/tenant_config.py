@@ -31,10 +31,9 @@ router = APIRouter()
 @router.get(
     "/financial-profile",
     response_model=TenantFinancialProfileResponse,
-    dependencies=[Depends(require_module(Module.MI_NEGOCIO))],
 )
 async def get_financial_profile_endpoint(request: Request):
-    """Return authoritative base currency, capabilities and safe lock state."""
+    """Return tenant financial capabilities to any authenticated tenant member."""
     return await tenant_financial_profile_service.get_financial_profile(request)
 
 

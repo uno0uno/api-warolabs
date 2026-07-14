@@ -1,6 +1,6 @@
 from typing import Any, Dict
 
-from fastapi import Depends, Request, HTTPException
+from fastapi import Request, HTTPException
 from app.core.tenant import detect_and_validate_tenant
 from app.core.security import get_session_token
 # from app.services.auth_service import get_session_data  # Will implement in Day 3
@@ -44,6 +44,7 @@ async def require_invoicing_ready(request: Request) -> Dict[str, Any]:
             detail={
                 'error':   'tenant_not_ready_for_invoicing',
                 'checks':  payload['checks'],
+                'reason_codes': payload.get('reason_codes', []),
                 'missing': payload['missing'],
             },
         )
