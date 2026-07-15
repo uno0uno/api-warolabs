@@ -163,6 +163,32 @@ async def store_registration_challenge(
     return True
 
 
+async def get_resumable_registration_draft(conn, email: str) -> Optional[dict[str, Any]]:
+    """Return the latest consented pre-verification draft without exposing secrets."""
+    row = await conn.fetchrow(
+        """
+        SELECT phone_country_code, phone_number,
+               business_name, country_code, base_currency_code,
+               first_source, first_content, first_campaign, first_variant,
+               last_source, last_content, last_campaign, last_variant
+        FROM onboarding_email_challenges
+        WHERE normalized_email = $1
+          AND purpose = 'registration'
+          AND consumed_at IS NULL
+          AND completed_user_id IS NULL
+          AND completed_tenant_id IS NULL
+          AND consent_at IS NOT NULL
+          AND created_at > NOW() - INTERVAL '24 hours'
+          AND failed_attempts < $2
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        email,
+        MAX_VERIFY_ATTEMPTS,
+    )
+    return dict(row) if row else None
+
+
 async def _identity_for_tenant(conn, user_id: UUID, tenant_id: UUID) -> Optional[dict[str, Any]]:
     row = await conn.fetchrow(
         """
@@ -770,31 +796,6 @@ async def accept_onboarding_terms(
         """,
         tenant_id,
     )
-    owner_update = await conn.execute(
-        """
-        UPDATE tenant_members tm
-        SET is_active = true
-        FROM tenant_onboarding o
-        WHERE o.tenant_id = $1
-          AND tm.tenant_id = o.tenant_id
-          AND tm.user_id = o.owner_user_id
-          AND tm.role = 'owner'
-        """,
-        tenant_id,
-    )
-    tenant_update = await conn.execute(
-        """
-        UPDATE tenants
-        SET lifecycle_status = 'active'
-        WHERE id = $1 AND lifecycle_status = 'pending'
-        """,
-        tenant_id,
-    )
-    if owner_update != "UPDATE 1" or tenant_update not in {"UPDATE 0", "UPDATE 1"}:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "ONBOARDING_PROVISIONING_CONFLICT"},
-        )
     result["data"]["onboarding"] = {
         "state": state_row["state"],
         "nextStep": next_step_for_state(state_row["state"]),
@@ -868,7 +869,11 @@ async def activate_paid_onboarding_identity(conn, tenant_id: UUID) -> Optional[d
         return None
 
     owner_update = await conn.execute(
-        "UPDATE tenant_members SET is_active = true WHERE id = $1",
+        """
+        UPDATE tenant_members
+        SET is_active = true, role = 'admin'
+        WHERE id = $1 AND role = 'owner'
+        """,
         context["owner_member_id"],
     )
     onboarding_update = await conn.execute(

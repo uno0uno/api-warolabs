@@ -25,7 +25,11 @@ from app.models.auth import (
 )
 from app.models.onboarding import OnboardingStatus
 from app.services.auth_service import replace_active_admin_sessions
-from app.services.onboarding_service import complete_registration, store_registration_challenge
+from app.services.onboarding_service import (
+    complete_registration,
+    get_resumable_registration_draft,
+    store_registration_challenge,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +128,47 @@ async def _deliver_magic_link(
         logger.error("Magic link email delivery failed")
 
 
+async def _issue_registration_challenge(
+    request: Request,
+    tenant_context,
+    *,
+    email: str,
+    draft: dict[str, Any],
+) -> None:
+    """Replace a registration challenge while preserving its consented draft."""
+    token = secrets.token_hex(32)
+    verification_code = str(random.randint(100000, 999999))
+    async with get_db_connection() as conn:
+        await store_registration_challenge(
+            conn,
+            email=email,
+            token=token,
+            code=verification_code,
+            request_ip=get_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            phone_country_code=draft.get("phone_country_code"),
+            phone_number=draft.get("phone_number"),
+            consent=True,
+            business_name=draft.get("business_name"),
+            country_code=draft.get("country_code"),
+            base_currency_code=draft.get("base_currency_code"),
+            source=draft.get("last_source") or draft.get("first_source"),
+            content=draft.get("last_content") or draft.get("first_content"),
+            campaign=draft.get("last_campaign") or draft.get("first_campaign"),
+            variant=draft.get("last_variant") or draft.get("first_variant"),
+        )
+
+    query = {"token": token, "purpose": "registration"}
+    await _deliver_magic_link(
+        email=email,
+        magic_link_url=f"{_magic_link_base_url(request, tenant_context)}/auth/verify?{urlencode(query)}",
+        verification_code=verification_code,
+        brand_name=tenant_context.brand_name or "WARO",
+        tenant_name=tenant_context.tenant_name or "WARO",
+        tenant_email=tenant_context.tenant_email,
+    )
+
+
 async def _complete_registration_login(
     conn,
     *,
@@ -197,7 +242,7 @@ async def _complete_registration_login(
     return user, tenant, onboarding
 
 async def send_magic_link(request: Request, email: str, redirect: Optional[str] = None) -> MagicLinkResponse:
-    """Send a login-only magic link for an existing identity."""
+    """Send access for an existing identity or a consented pending registration."""
     try:
         email = normalize_email(email)
         tenant_context = require_valid_tenant(request)
@@ -205,35 +250,56 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
         async with get_db_connection() as conn:
             user_result = await _lookup_internal_team_member(conn, email)
             if not user_result:
+                registration_draft = await get_resumable_registration_draft(conn, email)
+            else:
+                registration_draft = None
+
+            if not user_result and not registration_draft:
                 return MagicLinkResponse()
 
-            token = secrets.token_hex(32)
-            verification_code = str(random.randint(100000, 999999))
-            expires_at = datetime.utcnow() + timedelta(minutes=15)
-            user_id = user_result["user_id"]
-            user_tenant_id = user_result["tenant_id"]
-            await conn.execute(
-                """
-                UPDATE magic_tokens SET used = true, used_at = NOW()
-                WHERE user_id = $1 AND used = false AND purpose = 'login'
-                """,
-                user_id,
-            )
-            await conn.execute(
-                """
-                INSERT INTO magic_tokens (
-                    user_id, token, verification_code, expires_at, tenant_id,
-                    used, created_at, used_at, purpose
+            if not registration_draft:
+                token = secrets.token_hex(32)
+                verification_code = str(random.randint(100000, 999999))
+                expires_at = datetime.utcnow() + timedelta(minutes=15)
+                user_id = user_result["user_id"]
+                user_tenant_id = user_result["tenant_id"]
+                await conn.execute(
+                    """
+                    UPDATE magic_tokens SET used = true, used_at = NOW()
+                    WHERE user_id = $1 AND used = false AND purpose = 'login'
+                    """,
+                    user_id,
                 )
-                VALUES ($1, $2, $3, $4, $5, false, NOW(), NULL, 'login')
-                """,
-                user_id,
-                token,
-                verification_code,
-                expires_at,
-                user_tenant_id,
-            )
-            branding = await _tenant_email_branding(conn, user_tenant_id)
+                await conn.execute(
+                    """
+                    INSERT INTO magic_tokens (
+                        user_id, token, verification_code, expires_at, tenant_id,
+                        used, created_at, used_at, purpose
+                    )
+                    VALUES ($1, $2, $3, $4, $5, false, NOW(), NULL, 'login')
+                    """,
+                    user_id,
+                    token,
+                    verification_code,
+                    expires_at,
+                    user_tenant_id,
+                )
+                branding = await _tenant_email_branding(conn, user_tenant_id)
+
+        if registration_draft:
+            # The public response stays generic. A fresh opaque registration
+            # challenge is issued only when consented draft data still exists.
+            try:
+                await _issue_registration_challenge(
+                    request,
+                    tenant_context,
+                    email=email,
+                    draft=registration_draft,
+                )
+            except HTTPException as exc:
+                if exc.status_code != 429:
+                    raise
+            return MagicLinkResponse()
 
         query = {"token": token, "email": email}
         if redirect:
@@ -268,36 +334,21 @@ async def send_registration_magic_link(
         if existing:
             return await send_magic_link(request, email)
 
-        token = secrets.token_hex(32)
-        verification_code = str(random.randint(100000, 999999))
-        async with get_db_connection() as conn:
-            await store_registration_challenge(
-                conn,
-                email=email,
-                token=token,
-                code=verification_code,
-                request_ip=get_client_ip(request),
-                user_agent=request.headers.get("user-agent"),
-                phone_country_code=payload.phone_country_code,
-                phone_number=payload.phone_number,
-                consent=payload.consent,
-                business_name=payload.business_name,
-                country_code=payload.country_code,
-                base_currency_code=payload.base_currency_code,
-                source=payload.source,
-                content=payload.content,
-                campaign=payload.campaign,
-                variant=payload.variant,
-            )
-
-        query = {"token": token, "purpose": "registration"}
-        await _deliver_magic_link(
+        await _issue_registration_challenge(
+            request,
+            tenant_context,
             email=email,
-            magic_link_url=f"{_magic_link_base_url(request, tenant_context)}/auth/verify?{urlencode(query)}",
-            verification_code=verification_code,
-            brand_name=tenant_context.brand_name or "WARO",
-            tenant_name=tenant_context.tenant_name or "WARO",
-            tenant_email=tenant_context.tenant_email,
+            draft={
+                "phone_country_code": payload.phone_country_code,
+                "phone_number": payload.phone_number,
+                "business_name": payload.business_name,
+                "country_code": payload.country_code,
+                "base_currency_code": payload.base_currency_code,
+                "last_source": payload.source,
+                "last_content": payload.content,
+                "last_campaign": payload.campaign,
+                "last_variant": payload.variant,
+            },
         )
         return MagicLinkResponse()
     except (ValidationError, AuthenticationError, HTTPException):
