@@ -4,6 +4,7 @@ from typing import Literal, Optional, Dict, Any
 from uuid import UUID
 
 from app.core.email_utils import normalize_email
+from app.models.onboarding import OnboardingStatus, OnboardingState, TenantLifecycle
 
 PreferredLocale = Literal['es', 'en', 'pt', 'fr', 'de', 'ar', 'hi', 'zh']
 
@@ -48,6 +49,9 @@ class SessionResponse(BaseModel):
     session: Session
     has_internal_access: bool = False
     current_tenant: Optional[Tenant] = Field(alias='currentTenant', default=None)
+    lifecycle_status: TenantLifecycle = Field(alias='lifecycleStatus', default='active')
+    onboarding_state: Optional[OnboardingState] = Field(alias='onboardingState', default=None)
+    next_step: Optional[str] = Field(alias='nextStep', default=None)
     
     class Config:
         populate_by_name = True
@@ -89,11 +93,14 @@ class VerifyCodeResponse(BaseModel):
     message: str = "Verification successful"
     user: User
     tenant: Tenant
+    onboarding: Optional[OnboardingStatus] = None
 
 class VerifyTokenResponse(BaseModel):
     success: bool = True
     message: str = "Login successful"
     user: User
+    tenant: Optional[Tenant] = None
+    onboarding: Optional[OnboardingStatus] = None
 
 class UserTenantsResponse(BaseModel):
     success: bool = True

@@ -54,18 +54,22 @@ def _session_row(session_token, tenant_id, user_id, expires_at, role_email):
 
 
 @pytest.mark.asyncio
-async def test_send_magic_link_denies_customer_only_membership():
-    """A customer-only row is filtered out before an internal magic token is created."""
+async def test_send_magic_link_routes_customer_only_email_to_verified_onboarding():
+    """A customer row cannot log in internally but may start a separate verified onboarding."""
     from app.services.magic_link_service import send_magic_link
 
     tenant_id = uuid4()
     db_ctx, conn = _build_db_mock(fetchrow_side_effect=[None])
 
+    registration_store = AsyncMock(return_value=False)
     with patch("app.services.magic_link_service.get_db_connection", side_effect=db_ctx), \
-         patch("app.services.magic_link_service.require_valid_tenant", return_value=_tenant_context(tenant_id)):
-        with pytest.raises(AuthenticationError):
-            await send_magic_link(_request(), "customer@example.com")
+         patch("app.services.magic_link_service.require_valid_tenant", return_value=_tenant_context(tenant_id)), \
+         patch("app.services.magic_link_service.store_registration_challenge", new=registration_store):
+        result = await send_magic_link(_request(), "customer@example.com")
 
+    assert result.success is True
+    registration_store.assert_awaited_once()
+    assert registration_store.await_args.kwargs["email"] == "customer@example.com"
     conn.execute.assert_not_awaited()
     assert conn.fetchrow.await_args.args[1] == "customer@example.com"
     assert conn.fetchrow.await_args.args[2] == ["superuser", "admin", "employee", "member", "promotor"]
@@ -81,7 +85,8 @@ async def test_verify_token_denies_customer_only_membership_before_session_creat
     db_ctx, conn = _build_db_mock(fetchrow_side_effect=[None])
 
     with patch("app.services.magic_link_service.get_db_connection", side_effect=db_ctx), \
-         patch("app.services.magic_link_service.require_valid_tenant", return_value=_tenant_context(tenant_id)):
+         patch("app.services.magic_link_service.require_valid_tenant", return_value=_tenant_context(tenant_id)), \
+         patch("app.services.magic_link_service._complete_registration_login", new=AsyncMock(return_value=None)):
         with pytest.raises(AuthenticationError):
             await verify_token(_request(), response, "customer@example.com", "token")
 

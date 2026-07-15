@@ -6,6 +6,7 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from app.database import get_db_connection
 from app.config import settings
+from app.core.onboarding_access import is_pending_session_route_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,9 @@ class SessionContext:
             self.expires_at = session_data['expires_at']
             self.is_active = session_data['is_active']
             self.role: Optional[str] = session_data.get('role')
+            self.lifecycle_status = session_data.get('lifecycle_status') or 'active'
+            self.onboarding_state = session_data.get('onboarding_state')
+            self.next_step = session_data.get('next_step')
             self.is_valid = True
         else:
             self.user_id = None
@@ -88,6 +92,9 @@ class SessionContext:
             self.expires_at = None
             self.is_active = False
             self.role: Optional[str] = None
+            self.lifecycle_status = 'active'
+            self.onboarding_state = None
+            self.next_step = None
             self.is_valid = False
 
     def to_dict(self) -> Dict[str, Any]:
@@ -99,6 +106,9 @@ class SessionContext:
             'expires_at': self.expires_at,
             'is_active': self.is_active,
             'role': self.role,
+            'lifecycle_status': self.lifecycle_status,
+            'onboarding_state': self.onboarding_state,
+            'next_step': self.next_step,
             'is_valid': self.is_valid
         }
 
@@ -582,6 +592,32 @@ async def session_validation_middleware(request: Request, call_next):
         except Exception as e:
             logger.error("Unexpected session validation error for path %s: %s", path, e, exc_info=True)
             request.state.session_context = SessionContext()
+
+        session_context = request.state.session_context
+        if (
+            session_context.is_valid
+            and session_context.lifecycle_status == 'pending'
+            and not is_pending_session_route_allowed(request.method, path)
+        ):
+            logger.warning(
+                "Denied pending tenant session: method=%s path=%s tenant=%s user=%s",
+                request.method,
+                path,
+                session_context.tenant_id,
+                session_context.user_id,
+            )
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": True,
+                    "message": "Tenant onboarding is not active",
+                    "details": {
+                        "lifecycleStatus": session_context.lifecycle_status,
+                        "onboardingState": session_context.onboarding_state,
+                        "nextStep": session_context.next_step,
+                    },
+                },
+            )
 
         return await call_next(request)
 

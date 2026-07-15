@@ -4,7 +4,7 @@ import random
 from datetime import datetime, timedelta
 from typing import Any, Optional
 from uuid import UUID
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from app.database import get_db_connection
 from app.core.security import set_session_cookie, get_client_ip
 from app.core.middleware import require_valid_tenant
@@ -12,7 +12,9 @@ from app.core.exceptions import AuthenticationError, ValidationError
 from app.core.email_utils import normalize_email
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.models.auth import User, Tenant, MagicLinkResponse, VerifyCodeResponse, VerifyTokenResponse
+from app.models.onboarding import OnboardingStatus
 from app.services.auth_service import replace_active_admin_sessions
+from app.services.onboarding_service import complete_registration, store_registration_challenge
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,70 @@ async def _tenant_email_branding(conn, tenant_id: UUID) -> dict[str, str]:
         return {"tenant_name": "WARO", "tenant_email": "", "brand_name": "WARO"}
     return dict(row)
 
+
+async def _complete_registration_login(
+    conn,
+    *,
+    request: Request,
+    response: Response,
+    tenant_context,
+    email: str,
+    credential: str,
+    kind: str,
+    login_method: str,
+) -> Optional[tuple[User, Tenant, Optional[OnboardingStatus]]]:
+    identity = await complete_registration(
+        conn,
+        email=email,
+        credential=credential,
+        kind=kind,
+    )
+    if not identity:
+        return None
+
+    session_id = secrets.token_hex(16)
+    expires_at = datetime.utcnow() + timedelta(days=7)
+    await conn.execute(
+        """
+        INSERT INTO sessions (
+          id, user_id, tenant_id, expires_at, created_at,
+          ip_address, user_agent, login_method, is_active
+        )
+        VALUES ($1, $2, $3, $4, NOW(), $5, $6, $7, true)
+        """,
+        session_id,
+        identity["user_id"],
+        identity["tenant_id"],
+        expires_at,
+        get_client_ip(request),
+        request.headers.get("user-agent"),
+        login_method,
+    )
+    await replace_active_admin_sessions(conn, identity["user_id"], session_id)
+    await set_session_cookie(response, session_id, tenant_context.site)
+
+    user = User(
+        id=identity["user_id"],
+        email=identity["email"],
+        name=identity.get("name"),
+        createdAt=identity.get("user_created_at") or datetime.utcnow(),
+    )
+    tenant = Tenant(
+        id=identity["tenant_id"],
+        name=identity["tenant_name"],
+        slug=identity["tenant_slug"],
+    )
+    onboarding = None
+    if identity.get("onboarding_state"):
+        onboarding = OnboardingStatus(
+            tenantId=identity["tenant_id"],
+            lifecycleStatus=identity["lifecycle_status"],
+            state=identity["onboarding_state"],
+            nextStep=identity.get("next_step"),
+            emailVerifiedAt=identity.get("email_verified_at"),
+        )
+    return user, tenant, onboarding
+
 async def send_magic_link(request: Request, email: str, redirect: Optional[str] = None) -> MagicLinkResponse:
     """
     Send magic link using tenant context from middleware
@@ -76,32 +142,40 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
 
             user_result = await _lookup_internal_team_member(conn, email)
 
-            if not user_result:
-                logger.warning(
-                    "❌ User %s is not an active internal team member",
-                    email,
+            is_registration = user_result is None
+            if is_registration:
+                should_send = await store_registration_challenge(
+                    conn,
+                    email=email,
+                    token=token,
+                    code=verification_code,
+                    request_ip=get_client_ip(request),
+                    user_agent=request.headers.get("user-agent"),
                 )
-                raise AuthenticationError("User not found. Please contact an administrator.")
+                if not should_send:
+                    return MagicLinkResponse()
+                user_tenant_id = tenant_context.tenant_id
+                logger.info("Pre-registration verification challenge created")
+            else:
+                user_id = user_result['user_id']
+                user_tenant_id = user_result['tenant_id']
+                logger.info(f"✅ User found with ID: {user_id}, role: {user_result['role']}, tenant: {user_tenant_id}")
 
-            user_id = user_result['user_id']
-            user_tenant_id = user_result['tenant_id']
-            logger.info(f"✅ User found with ID: {user_id}, role: {user_result['role']}, tenant: {user_tenant_id}")
-            
-            # Mark old unused magic tokens as expired for this user
-            await conn.execute(
-                'UPDATE magic_tokens SET used = true, used_at = NOW() WHERE user_id = $1 AND used = false', 
-                user_id
-            )
-            
-            # Save new magic token to database with user's tenant_id
-            insert_token_query = """
-                INSERT INTO magic_tokens (user_id, token, verification_code, expires_at, tenant_id, used, created_at, used_at)
-                VALUES ($1, $2, $3, $4, $5, false, NOW(), NULL)
-            """
-            await conn.execute(insert_token_query,
-                user_id, token, verification_code, expires_at, user_tenant_id
-            )
-            logger.info(f"🔑 Magic token saved for user: {user_id}, tenant: {user_tenant_id}")
+                # Mark old unused magic tokens as expired for this user
+                await conn.execute(
+                    'UPDATE magic_tokens SET used = true, used_at = NOW() WHERE user_id = $1 AND used = false',
+                    user_id
+                )
+
+                # Save new magic token to database with user's tenant_id
+                insert_token_query = """
+                    INSERT INTO magic_tokens (user_id, token, verification_code, expires_at, tenant_id, used, created_at, used_at)
+                    VALUES ($1, $2, $3, $4, $5, false, NOW(), NULL)
+                """
+                await conn.execute(insert_token_query,
+                    user_id, token, verification_code, expires_at, user_tenant_id
+                )
+                logger.info(f"🔑 Magic token saved for user: {user_id}, tenant: {user_tenant_id}")
             
             # Send magic link email using AWS SES
             from app.services.aws_ses_service import ses_service
@@ -124,10 +198,15 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             if redirect:
                 magic_link_url += f"&redirect={redirect}"
             
-            member_branding = await _tenant_email_branding(conn, user_tenant_id)
-            brand_name = member_branding["brand_name"]
-            tenant_name = member_branding["tenant_name"]
-            tenant_email = member_branding["tenant_email"] or tenant_context.tenant_email
+            if is_registration:
+                brand_name = tenant_context.brand_name or "WARO"
+                tenant_name = tenant_context.tenant_name or "WARO"
+                tenant_email = tenant_context.tenant_email
+            else:
+                member_branding = await _tenant_email_branding(conn, user_tenant_id)
+                brand_name = member_branding["brand_name"]
+                tenant_name = member_branding["tenant_name"]
+                tenant_email = member_branding["tenant_email"] or tenant_context.tenant_email
 
             # Prepare tenant context for template (use the member's restaurant, not the site tenant)
             template_context = {
@@ -166,7 +245,7 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             
             return MagicLinkResponse()
             
-    except (ValidationError, AuthenticationError):
+    except (ValidationError, AuthenticationError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"❌ Magic link handler error: {e}", exc_info=True)
@@ -207,8 +286,21 @@ async def verify_code(request: Request, response: Response, email: str, code: st
             )
             
             if not token_data:
-                logger.warning(f"❌ Invalid verification code for {email} on {tenant_context.site}")
-                raise AuthenticationError("Invalid or expired verification code")
+                registration = await _complete_registration_login(
+                    conn,
+                    request=request,
+                    response=response,
+                    tenant_context=tenant_context,
+                    email=email,
+                    credential=code,
+                    kind="code",
+                    login_method="onboarding_code",
+                )
+                if not registration:
+                    logger.warning(f"❌ Invalid verification code for {email} on {tenant_context.site}")
+                    raise AuthenticationError("Invalid or expired verification code")
+                user, tenant, onboarding = registration
+                return VerifyCodeResponse(user=user, tenant=tenant, onboarding=onboarding)
             
             logger.info(f"✅ Valid verification code for user: {token_data['user_id']}")
             
@@ -284,7 +376,7 @@ async def verify_code(request: Request, response: Response, email: str, code: st
 
             return VerifyCodeResponse(user=user, tenant=tenant)
             
-    except (ValidationError, AuthenticationError):
+    except (ValidationError, AuthenticationError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"❌ Verification code handler error: {e}", exc_info=True)
@@ -325,8 +417,21 @@ async def verify_token(request: Request, response: Response, email: str, token: 
             )
             
             if not token_data:
-                logger.warning(f"❌ Invalid or expired token for {email} on {tenant_context.site}")
-                raise AuthenticationError("Invalid or expired token")
+                registration = await _complete_registration_login(
+                    conn,
+                    request=request,
+                    response=response,
+                    tenant_context=tenant_context,
+                    email=email,
+                    credential=token,
+                    kind="token",
+                    login_method="onboarding_magic_link",
+                )
+                if not registration:
+                    logger.warning(f"❌ Invalid or expired token for {email} on {tenant_context.site}")
+                    raise AuthenticationError("Invalid or expired token")
+                user, tenant, onboarding = registration
+                return VerifyTokenResponse(user=user, tenant=tenant, onboarding=onboarding)
             
             logger.info(f"✅ Valid token found for user: {token_data['user_id']}")
             
@@ -397,7 +502,7 @@ async def verify_token(request: Request, response: Response, email: str, token: 
             
             return VerifyTokenResponse(user=user)
             
-    except (ValidationError, AuthenticationError):
+    except (ValidationError, AuthenticationError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"❌ Token verification handler error: {e}", exc_info=True)
