@@ -94,6 +94,7 @@ def test_subscribe_requires_current_terms_before_wompi_link():
          patch("app.routers.billing.require_valid_session", return_value=session), \
          patch("app.core.permissions.get_db_connection", side_effect=_enforce_db), \
          patch("app.routers.billing.get_db_connection", side_effect=_billing_db), \
+         patch("app.routers.billing.billing_service.tenant_has_trial_subscription", new=AsyncMock(return_value=False)), \
          patch("app.routers.billing.billing_service.get_plan_for_subscribe", new=AsyncMock(return_value={
              "id": str(plan_id),
              "name": "Plan Pro",

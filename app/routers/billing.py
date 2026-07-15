@@ -17,7 +17,7 @@ import logging
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.config import settings
@@ -95,6 +95,8 @@ async def subscribe(body: SubscribeBody, request: Request):
     async with get_db_connection() as conn:
         if is_pending_onboarding:
             await onboarding_service.ensure_onboarding_payment_ready(conn, session)
+        preserves_trial = await billing_service.tenant_has_trial_subscription(conn, tenant_id)
+        uses_payment_attempt = is_pending_onboarding or preserves_trial
         plan = await billing_service.get_plan_for_subscribe(conn, body.plan_id)
         if not is_pending_onboarding:
             await legal_service.ensure_current_terms_accepted(conn, tenant_id)
@@ -110,7 +112,7 @@ async def subscribe(body: SubscribeBody, request: Request):
         frontend_host = f"{parsed.scheme}://{parsed.netloc}"
         redirect_url = f"{frontend_host}/billing/confirmacion"
 
-        if is_pending_onboarding:
+        if uses_payment_attempt:
             attempt_id = await billing_service.create_onboarding_payment_attempt(
                 conn,
                 tenant_id=tenant_id,
@@ -333,6 +335,8 @@ async def get_access_status(request: Request):
             "subscription_status": access.subscription_status,
             "next_payment_date": access.next_payment_date,
             "message": access.message,
+            "trial_ends_at": access.trial_ends_at,
+            "trial_days_remaining": access.trial_days_remaining,
         }
 
 
@@ -365,3 +369,28 @@ async def send_grace_reminders(
         result["sent"], result["skipped"], result["error"],
     )
     return result
+
+
+# NOTE: Authenticated by X-Cron-Secret, not session/RBAC. This endpoint owns
+# trial warning/expiry semantics so the external scheduler remains a trigger.
+@tenant_router.post("/process-trial-lifecycle", status_code=200)
+async def process_trial_lifecycle(
+    x_cron_secret: Optional[str] = Header(None, alias="x-cron-secret"),
+):
+    if not settings.cron_secret:
+        raise HTTPException(status_code=503, detail="Trial lifecycle cron is not configured")
+    if x_cron_secret != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="Invalid cron secret")
+
+    async with get_db_connection() as conn:
+        expired = await billing_service.expire_due_trials(conn)
+        warnings = await billing_email_service.process_trial_warnings(conn)
+
+    logger.info(
+        "process_trial_lifecycle cron: expired=%d sent=%d skipped=%d error=%d",
+        expired,
+        warnings["sent"],
+        warnings["skipped"],
+        warnings["error"],
+    )
+    return {"expired": expired, **warnings}

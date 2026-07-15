@@ -239,6 +239,47 @@ async def test_duplicate_approved_webhook_does_not_extend_or_emit_event():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("trial_status", ["trialing", "trial_expired"])
+async def test_approved_attempt_converts_trial_in_place_once(trial_status):
+    attempt = _attempt_row()
+    subscription_id = uuid4()
+    period_end = SimpleNamespace(isoformat=lambda: "2027-07-14T12:00:00+00:00")
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        attempt,
+        {
+            "id": subscription_id,
+            "status": trial_status,
+            "tenant_name": "Restaurante",
+            "tenant_email": "owner@example.com",
+        },
+        {"id": subscription_id, "current_period_end": period_end},
+    ])
+    conn.fetchval = AsyncMock(return_value=None)
+
+    with patch.object(
+        billing_service.onboarding_service,
+        "activate_paid_onboarding_identity",
+        new=AsyncMock(),
+    ) as activate_identity:
+        result = await billing_service.process_onboarding_payment_transaction(
+            conn, _approved_transaction(attempt)
+        )
+
+    activate_identity.assert_not_awaited()
+    assert result["handled"] is True
+    assert result["tenant_info"]["subscription_id"] == str(subscription_id)
+    subscription_sql = " ".join(conn.fetchrow.await_args_list[2].args[0].split())
+    assert "status IN ('pending', 'trialing', 'trial_expired')" in subscription_sql
+    event_calls = [
+        call for call in conn.execute.await_args_list
+        if "INSERT INTO billing_events" in call.args[0]
+    ]
+    assert len(event_calls) == 1
+    assert "payment_approved" in event_calls[0].args[0]
+
+
+@pytest.mark.asyncio
 async def test_transaction_id_cannot_be_reused_by_another_attempt():
     attempt = _attempt_row()
     conn = AsyncMock()

@@ -15,8 +15,11 @@ from app.services.email_sender import resolve_sender_email_value
 from app.services.billing_service import (
     GRACE_PERIOD_DAYS,
     get_past_due_tenants,
+    get_trial_warning_candidates,
     record_reminder_sent,
+    record_trial_warning_sent,
     reminder_already_sent,
+    trial_warning_already_sent,
 )
 
 logger = logging.getLogger(__name__)
@@ -241,6 +244,85 @@ async def process_grace_reminders(conn) -> Dict[str, Any]:
         "error": error_count,
         "details": details,
     }
+
+
+def _trial_warning_subject(days_remaining: int) -> str:
+    if days_remaining == 1:
+        return "WARO — Tu prueba vence mañana"
+    return f"WARO — Tu prueba vence en {days_remaining} días"
+
+
+async def send_trial_warning(trial: Dict[str, Any]) -> bool:
+    """Send a trial reminder without persisting or logging recipient PII."""
+    email = trial.get("tenant_email")
+    if not email:
+        logger.info("trial_warning: tenant=%s has no email", trial["tenant_id"])
+        return False
+
+    days_remaining = trial["days_remaining"]
+    tenant_name = trial.get("tenant_name") or "Cliente"
+    trial_end = trial["trial_ends_at"].date().isoformat()
+    text = (
+        f"Hola {tenant_name},\n\n"
+        f"Tu prueba de WARO vence en {days_remaining} día(s), el {trial_end}.\n"
+        "El aviso no cambia tu acceso. Puedes activar tu suscripción desde:\n"
+        f"{BILLING_URL}\n\n"
+        "Si ya realizaste el pago, puedes ignorar este mensaje."
+    )
+    sent = await _ses.send_email(
+        from_email=resolve_sender_email_value(),
+        from_name="WARO Colombia",
+        to_emails=[email],
+        subject=_trial_warning_subject(days_remaining),
+        text_body=text,
+    )
+    if sent:
+        logger.info(
+            "trial_warning: sent day-%d tenant=%s",
+            days_remaining,
+            trial["tenant_id"],
+        )
+    else:
+        logger.warning("trial_warning: SES failed tenant=%s", trial["tenant_id"])
+    return sent
+
+
+async def process_trial_warnings(conn) -> Dict[str, int]:
+    """Send and durably deduplicate 7/3/1-day trial warnings."""
+    candidates = await get_trial_warning_candidates(conn)
+    sent = 0
+    skipped = 0
+    error = 0
+
+    for trial in candidates:
+        already_sent = await trial_warning_already_sent(
+            conn,
+            trial["subscription_id"],
+            trial["days_remaining"],
+        )
+        if already_sent:
+            skipped += 1
+            continue
+        if not await send_trial_warning(trial):
+            error += 1
+            continue
+        await record_trial_warning_sent(
+            conn,
+            tenant_id=trial["tenant_id"],
+            subscription_id=trial["subscription_id"],
+            days_remaining=trial["days_remaining"],
+            trial_ends_at=trial["trial_ends_at"],
+        )
+        sent += 1
+
+    logger.info(
+        "process_trial_warnings: sent=%d skipped=%d error=%d total=%d",
+        sent,
+        skipped,
+        error,
+        len(candidates),
+    )
+    return {"sent": sent, "skipped": skipped, "error": error}
 
 
 # ── Payment event emails — issue #63 ─────────────────────────────────────────
