@@ -247,6 +247,8 @@ def test_registration_payload_rejects_missing_consent_and_pii_attribution():
         _payload(source="https://example.com/?email=user@example.com")
     with pytest.raises(ValidationError):
         _payload(country_code="PA", base_currency_code="COP")
+    with pytest.raises(ValidationError):
+        _payload(phone_country_code=999)
 
 
 @pytest.mark.asyncio
@@ -254,6 +256,11 @@ async def test_registration_options_are_public_and_server_owned():
     result = await registration_options()
     colombia = next(item for item in result["catalog"] if item["country_code"] == "CO")
     assert colombia["currency_codes"] == ["COP"]
+    colombia_phone = next(
+        item for item in result["phone_countries"] if item["country_code"] == "CO"
+    )
+    assert colombia_phone["calling_code"] == 57
+    assert len(result["phone_countries"]) == len(result["catalog"])
 
 
 @pytest.mark.asyncio

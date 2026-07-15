@@ -43,6 +43,35 @@ COUNTRY_CURRENCY_PAIRS = {
     "DO": ("DOP",),
     "PA": ("USD", "PAB"),
 }
+
+# Public registration phone options. Keep this aligned with the countries that
+# WARO can provision so clients do not maintain a separate dialing-code list.
+COUNTRY_CALLING_CODES = {
+    "US": 1,
+    "CA": 1,
+    "GB": 44,
+    "AU": 61,
+    "NZ": 64,
+    "BR": 55,
+    "DE": 49,
+    "FR": 33,
+    "NL": 31,
+    "SG": 65,
+    "AE": 971,
+    "IN": 91,
+    "CN": 86,
+    "MX": 52,
+    "ES": 34,
+    "CO": 57,
+    "CR": 506,
+    "UY": 598,
+    "CL": 56,
+    "PE": 51,
+    "AR": 54,
+    "DO": 1,
+    "PA": 507,
+}
+SUPPORTED_PHONE_COUNTRY_CODES = frozenset(COUNTRY_CALLING_CODES.values())
 SUPPORTED_CURRENCY_MINOR_UNITS = {
     code: (0 if code == "CLP" else 2)
     for codes in COUNTRY_CURRENCY_PAIRS.values()

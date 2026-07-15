@@ -6,7 +6,10 @@ from typing import Literal, Optional, Dict, Any
 from uuid import UUID
 
 from app.core.email_utils import normalize_email
-from app.core.tenant_prefs import validate_country_currency_pair
+from app.core.tenant_prefs import (
+    SUPPORTED_PHONE_COUNTRY_CODES,
+    validate_country_currency_pair,
+)
 from app.models.onboarding import OnboardingStatus, OnboardingState, TenantLifecycle
 from app.models.tenant_financial_profile import CountryCurrencyOption
 
@@ -106,6 +109,13 @@ class RegistrationMagicLinkRequest(BaseModel):
             raise ValueError("Phone number must contain 7 to 15 digits")
         return digits
 
+    @field_validator("phone_country_code")
+    @classmethod
+    def _validate_phone_country_code(cls, value: int) -> int:
+        if value not in SUPPORTED_PHONE_COUNTRY_CODES:
+            raise ValueError("Unsupported phone country calling code")
+        return value
+
     @field_validator("business_name", mode="before")
     @classmethod
     def _normalize_business_name(cls, value: str) -> str:
@@ -138,8 +148,14 @@ class RegistrationVerifyTokenRequest(BaseModel):
     token: str = Field(min_length=32, max_length=128, pattern=r"^[A-Fa-f0-9]+$")
 
 
+class PhoneCountryOption(BaseModel):
+    country_code: str
+    calling_code: int
+
+
 class RegistrationOptionsResponse(BaseModel):
     catalog: list[CountryCurrencyOption]
+    phone_countries: list[PhoneCountryOption]
 
 
 class RegistrationVerifyCodeRequest(BaseModel):

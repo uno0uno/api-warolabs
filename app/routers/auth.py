@@ -1,7 +1,7 @@
 import logging
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
 from app.services.auth_service import get_session_data, switch_tenant, update_profile, upload_profile_avatar
-from app.core.tenant_prefs import COUNTRY_CURRENCY_PAIRS
+from app.core.tenant_prefs import COUNTRY_CALLING_CODES, COUNTRY_CURRENCY_PAIRS
 from app.services.magic_link_service import (
     send_magic_link,
     send_registration_magic_link,
@@ -78,7 +78,11 @@ async def registration_options():
         "catalog": [
             {"country_code": country, "currency_codes": list(currencies)}
             for country, currencies in COUNTRY_CURRENCY_PAIRS.items()
-        ]
+        ],
+        "phone_countries": [
+            {"country_code": country, "calling_code": calling_code}
+            for country, calling_code in COUNTRY_CALLING_CODES.items()
+        ],
     }
 
 @router.post("/verify-code", response_model=VerifyCodeResponse)
