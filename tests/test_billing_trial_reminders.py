@@ -29,8 +29,8 @@ async def test_successful_trial_warning_records_event_once_without_pii_arguments
         new=AsyncMock(return_value=[trial]),
     ), patch.object(
         billing_email_service,
-        "trial_warning_already_sent",
-        new=AsyncMock(return_value=False),
+        "claim_trial_warning_delivery",
+        new=AsyncMock(return_value=True),
     ), patch.object(
         billing_email_service,
         "send_trial_warning",
@@ -63,8 +63,8 @@ async def test_failed_trial_warning_does_not_record_sent_event():
         new=AsyncMock(return_value=[trial]),
     ), patch.object(
         billing_email_service,
-        "trial_warning_already_sent",
-        new=AsyncMock(return_value=False),
+        "claim_trial_warning_delivery",
+        new=AsyncMock(return_value=True),
     ), patch.object(
         billing_email_service,
         "send_trial_warning",
@@ -73,11 +73,16 @@ async def test_failed_trial_warning_does_not_record_sent_event():
         billing_email_service,
         "record_trial_warning_sent",
         new=AsyncMock(),
-    ) as record:
+    ) as record, patch.object(
+        billing_email_service,
+        "release_trial_warning_delivery",
+        new=AsyncMock(),
+    ) as release:
         result = await billing_email_service.process_trial_warnings(conn)
 
     assert result == {"sent": 0, "skipped": 0, "error": 1}
     record.assert_not_awaited()
+    release.assert_awaited_once_with(conn, trial["subscription_id"], 7)
 
 
 @pytest.mark.asyncio
@@ -91,8 +96,8 @@ async def test_duplicate_trial_warning_is_skipped_before_ses():
         new=AsyncMock(return_value=[trial]),
     ), patch.object(
         billing_email_service,
-        "trial_warning_already_sent",
-        new=AsyncMock(return_value=True),
+        "claim_trial_warning_delivery",
+        new=AsyncMock(return_value=False),
     ), patch.object(
         billing_email_service,
         "send_trial_warning",

@@ -113,6 +113,31 @@ async def test_record_trial_warning_metadata_has_no_recipient_pii():
 
 
 @pytest.mark.asyncio
+async def test_trial_warning_claim_is_atomic_and_contains_no_recipient_pii():
+    conn = AsyncMock()
+    conn.fetchval.return_value = 1
+    tenant_id = uuid4()
+    subscription_id = uuid4()
+    trial_end = datetime(2026, 7, 22, tzinfo=timezone.utc)
+
+    claimed = await billing_service.claim_trial_warning_delivery(
+        conn,
+        tenant_id=tenant_id,
+        subscription_id=subscription_id,
+        days_remaining=7,
+        trial_ends_at=trial_end,
+    )
+
+    assert claimed is True
+    query, *arguments = conn.fetchval.await_args.args
+    assert "ON CONFLICT (subscription_id, days_remaining)" in query
+    assert "RETURNING 1" in query
+    assert arguments == [subscription_id, tenant_id, 7, trial_end]
+    assert "email" not in query.lower()
+    assert "phone" not in query.lower()
+
+
+@pytest.mark.asyncio
 async def test_trial_checkout_uses_immutable_payment_attempt_not_legacy_pending_row():
     tenant_id = uuid4()
     plan_id = uuid4()
@@ -175,10 +200,15 @@ async def test_trial_cron_fails_closed_without_secret():
 
 @pytest.mark.asyncio
 async def test_trial_cron_expires_then_sends_warnings():
-    conn = AsyncMock()
+    expiry_conn = AsyncMock()
+    warning_conn = AsyncMock()
+    connections = iter([expiry_conn, warning_conn])
 
     @asynccontextmanager
-    async def db_context():
+    async def db_context(*, use_transaction=True):
+        conn = next(connections)
+        if conn is warning_conn:
+            assert use_transaction is False
         yield conn
 
     with patch.object(billing.settings, "cron_secret", "secret"), patch.object(
@@ -192,6 +222,6 @@ async def test_trial_cron_expires_then_sends_warnings():
     ) as warnings:
         result = await billing.process_trial_lifecycle(x_cron_secret="secret")
 
-    expire.assert_awaited_once_with(conn)
-    warnings.assert_awaited_once_with(conn)
+    expire.assert_awaited_once_with(expiry_conn)
+    warnings.assert_awaited_once_with(warning_conn)
     assert result == {"expired": 2, "sent": 1, "skipped": 1, "error": 0}

@@ -2124,6 +2124,65 @@ async def trial_warning_already_sent(
     ))
 
 
+async def claim_trial_warning_delivery(
+    conn,
+    *,
+    tenant_id: UUID,
+    subscription_id: UUID,
+    days_remaining: int,
+    trial_ends_at: datetime,
+) -> bool:
+    """Claim one warning before SES; the unique key serializes concurrent crons."""
+    if days_remaining not in TRIAL_WARNING_DAYS:
+        return False
+    return bool(await conn.fetchval(
+        """
+        INSERT INTO trial_warning_deliveries (
+            subscription_id, tenant_id, days_remaining, trial_ends_at,
+            status, attempt_count, claimed_at
+        )
+        SELECT $1, $2, $3, $4, 'sending', 1, NOW()
+        WHERE NOT EXISTS (
+            SELECT 1 FROM billing_events
+            WHERE subscription_id = $1
+              AND event_type = 'trial_warning_day_' || $3::text
+        )
+        ON CONFLICT (subscription_id, days_remaining) DO UPDATE
+        SET status = 'sending',
+            attempt_count = trial_warning_deliveries.attempt_count + 1,
+            claimed_at = NOW(),
+            updated_at = NOW()
+        WHERE trial_warning_deliveries.status = 'pending'
+           OR (
+                trial_warning_deliveries.status = 'sending'
+                AND trial_warning_deliveries.claimed_at < NOW() - INTERVAL '30 minutes'
+           )
+        RETURNING 1
+        """,
+        subscription_id,
+        tenant_id,
+        days_remaining,
+        trial_ends_at,
+    ))
+
+
+async def release_trial_warning_delivery(
+    conn, subscription_id: UUID, days_remaining: int
+) -> None:
+    """Release a failed SES attempt so a controlled retry can claim it."""
+    await conn.execute(
+        """
+        UPDATE trial_warning_deliveries
+        SET status = 'pending', claimed_at = NULL, updated_at = NOW()
+        WHERE subscription_id = $1
+          AND days_remaining = $2
+          AND status = 'sending'
+        """,
+        subscription_id,
+        days_remaining,
+    )
+
+
 async def record_trial_warning_sent(
     conn,
     *,
@@ -2136,8 +2195,17 @@ async def record_trial_warning_sent(
         raise ValueError("Unsupported trial warning bucket")
     await conn.execute(
         """
+        WITH marked AS (
+            UPDATE trial_warning_deliveries
+            SET status = 'sent', sent_at = NOW(), updated_at = NOW()
+            WHERE subscription_id = $2
+              AND days_remaining = $5
+              AND status = 'sending'
+            RETURNING tenant_id, subscription_id
+        )
         INSERT INTO billing_events (tenant_id, subscription_id, event_type, metadata)
-        VALUES ($1, $2, $3, $4)
+        SELECT marked.tenant_id, marked.subscription_id, $3, $4
+        FROM marked
         ON CONFLICT (subscription_id, event_type)
         WHERE event_type IN (
             'trial_started', 'trial_warning_day_7', 'trial_warning_day_3',
@@ -2151,6 +2219,7 @@ async def record_trial_warning_sent(
             "days_remaining": days_remaining,
             "trial_ends_at": trial_ends_at.isoformat(),
         }),
+        days_remaining,
     )
 
 

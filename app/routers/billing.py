@@ -384,6 +384,10 @@ async def process_trial_lifecycle(
 
     async with get_db_connection() as conn:
         expired = await billing_service.expire_due_trials(conn)
+
+    # Warning claims must commit before SES so concurrent cron requests cannot
+    # both deliver the same milestone. Expiry remains independent of email.
+    async with get_db_connection(use_transaction=False) as conn:
         warnings = await billing_email_service.process_trial_warnings(conn)
 
     logger.info(
