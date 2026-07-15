@@ -43,6 +43,7 @@ def _acceptance_row(tenant_id, version_id):
         "accepted_at": now,
         "client_ip": "203.0.113.10",
         "user_agent": "pytest-agent",
+        "country_code_snapshot": "CO",
         "tenant_name_snapshot": "Waro Colombia",
         "legal_name_snapshot": "Waro Colombia SAS",
         "document_type_snapshot": "NIT",
@@ -137,6 +138,7 @@ async def test_accept_current_terms_captures_evidence_snapshot():
     snapshot = {
         "tenant_name": "Waro Colombia",
         "tenant_email": "tenant@warocol.com",
+        "country_code": "CO",
         "legal_name": "Waro Colombia SAS",
         "document_number": "900123456",
         "email": "legal@warocol.com",
@@ -156,11 +158,13 @@ async def test_accept_current_terms_captures_evidence_snapshot():
     assert result["data"]["already_accepted"] is False
     assert result["data"]["acceptance"]["client_ip"] == "203.0.113.10"
     assert result["data"]["acceptance"]["document_number"] == "900123456"
+    assert result["data"]["acceptance"]["country_code"] == "CO"
     insert_args = conn.fetchrow.await_args_list[-1].args
     assert insert_args[4] == "billing_checkout"
     assert insert_args[5] == "203.0.113.10"
     assert insert_args[6] == "pytest-agent"
     assert insert_args[9] == "900123456"
+    assert insert_args[18] == "CO"
 
 
 @pytest.mark.asyncio

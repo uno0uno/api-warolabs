@@ -9,7 +9,7 @@ from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
 from app.core.security import get_client_ip
 from app.database import get_db_connection
-from app.services import legal_service
+from app.services import legal_service, onboarding_service
 
 
 router = APIRouter(prefix="/legal", tags=["legal"])
@@ -79,6 +79,13 @@ async def get_terms_acceptance_audit(acceptance_id: UUID, request: Request):
 async def accept_terms(body: AcceptTermsBody, request: Request):
     session = require_valid_session(request)
     async with get_db_connection() as conn:
+        if session.lifecycle_status == "pending":
+            return await onboarding_service.accept_onboarding_terms(
+                conn,
+                session,
+                client_ip=get_client_ip(request),
+                user_agent=request.headers.get("user-agent"),
+            )
         return await legal_service.accept_current_terms(
             conn,
             session,

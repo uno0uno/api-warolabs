@@ -149,7 +149,7 @@ async def build_financial_response(
         """
         SELECT tenant_id, country_code, base_currency_code,
                accounting_localization, document_mode, fiscal_provider,
-               created_at, updated_at
+               selection_revision, created_at, updated_at
         FROM tenant_financial_profiles
         WHERE tenant_id = $1
         """ + suffix,
@@ -209,11 +209,12 @@ async def update_financial_profile(
                     accounting_localization = $4,
                     document_mode = $5,
                     fiscal_provider = $6,
+                    selection_revision = selection_revision + 1,
                     updated_at = NOW()
                 WHERE tenant_id = $1
                 RETURNING tenant_id, country_code, base_currency_code,
                           accounting_localization, document_mode, fiscal_provider,
-                          created_at, updated_at
+                          selection_revision, created_at, updated_at
                 """,
                 tenant_id,
                 country_code,

@@ -8,11 +8,25 @@ from fastapi import HTTPException
 from app.config import settings
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.core.onboarding_access import next_step_for_state
-from app.models.onboarding import OnboardingStatus, OnboardingStatusResponse
+from app.models.onboarding import (
+    OnboardingBusinessProfileUpdate,
+    OnboardingFinancialData,
+    OnboardingFinancialResponse,
+    OnboardingStatus,
+    OnboardingStatusResponse,
+)
+from app.models.tenant_financial_profile import TenantFinancialProfile
+from app.services import legal_service
+from app.services import tenant_financial_profile_service as financial_service
 
 MAX_EMAIL_REQUESTS = 5
 MAX_IP_REQUESTS = 20
 MAX_VERIFY_ATTEMPTS = 5
+PRE_PAYMENT_FINANCIAL_STATES = frozenset({
+    "business_profile_pending",
+    "terms_pending",
+    "payment_pending",
+})
 
 
 def _credential_hash(email: str, kind: str, value: str) -> str:
@@ -287,25 +301,355 @@ async def complete_registration(
     return identity
 
 
-async def get_status_for_tenant(conn, tenant_id: UUID) -> OnboardingStatusResponse:
+def _require_tenant_id(tenant_id: Optional[UUID]) -> UUID:
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant ID is required")
+    return tenant_id
+
+
+def _profile_from_row(row: Any) -> Optional[TenantFinancialProfile]:
+    if not row or not row.get("profile_tenant_id"):
+        return None
+    return TenantFinancialProfile(
+        tenant_id=row["profile_tenant_id"],
+        country_code=row["country_code"],
+        base_currency_code=row["base_currency_code"],
+        accounting_localization=row["accounting_localization"],
+        document_mode=row["document_mode"],
+        fiscal_provider=row["fiscal_provider"],
+        selection_revision=row.get("selection_revision") or 1,
+        created_at=row.get("profile_created_at"),
+        updated_at=row.get("profile_updated_at"),
+    )
+
+
+def _ensure_pending_financial_state(row: Any) -> None:
+    if not row:
+        raise HTTPException(status_code=404, detail="Onboarding not found")
+    if row["lifecycle_status"] != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ONBOARDING_NOT_PENDING"},
+        )
+    if row["state"] not in PRE_PAYMENT_FINANCIAL_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "ONBOARDING_FINANCIAL_PROFILE_LOCKED",
+                "state": row["state"],
+            },
+        )
+
+
+def _financial_response(row: Any) -> OnboardingFinancialResponse:
+    state = row["state"]
+    return OnboardingFinancialResponse(
+        data=OnboardingFinancialData(
+            businessName=row["business_name"],
+            profile=_profile_from_row(row),
+            catalog=financial_service._catalog(),
+            currencies=financial_service._currencies(),
+            state=state,
+            nextStep=next_step_for_state(state),
+        )
+    )
+
+
+async def get_onboarding_financial_profile(
+    conn, tenant_id: Optional[UUID]
+) -> OnboardingFinancialResponse:
+    tenant_id = _require_tenant_id(tenant_id)
     row = await conn.fetchrow(
         """
-        SELECT t.id AS tenant_id, t.lifecycle_status,
-               o.state, o.email_verified_at
+        SELECT t.lifecycle_status, t.name AS business_name, o.state,
+               fp.tenant_id AS profile_tenant_id,
+               fp.country_code, fp.base_currency_code,
+               fp.accounting_localization, fp.document_mode, fp.fiscal_provider,
+               fp.selection_revision,
+               fp.created_at AS profile_created_at,
+               fp.updated_at AS profile_updated_at
+        FROM tenants t
+        JOIN tenant_onboarding o ON o.tenant_id = t.id
+        LEFT JOIN tenant_financial_profiles fp ON fp.tenant_id = t.id
+        WHERE t.id = $1
+        """,
+        tenant_id,
+    )
+    _ensure_pending_financial_state(row)
+    return _financial_response(row)
+
+
+async def update_onboarding_financial_profile(
+    conn,
+    tenant_id: Optional[UUID],
+    data: OnboardingBusinessProfileUpdate,
+) -> OnboardingFinancialResponse:
+    tenant_id = _require_tenant_id(tenant_id)
+    context = await conn.fetchrow(
+        """
+        SELECT t.lifecycle_status, t.name AS business_name, o.state
+        FROM tenants t
+        JOIN tenant_onboarding o ON o.tenant_id = t.id
+        WHERE t.id = $1
+        FOR UPDATE OF t, o
+        """,
+        tenant_id,
+    )
+    _ensure_pending_financial_state(context)
+
+    country_code, currency_code = financial_service.validate_country_currency_pair(
+        data.country_code, data.base_currency_code
+    )
+    if context["state"] == "payment_pending":
+        profile = await conn.fetchrow(
+            """
+            SELECT tenant_id AS profile_tenant_id,
+                   country_code, base_currency_code,
+                   accounting_localization, document_mode, fiscal_provider,
+                   selection_revision,
+                   created_at AS profile_created_at,
+                   updated_at AS profile_updated_at
+            FROM tenant_financial_profiles
+            WHERE tenant_id = $1
+            FOR UPDATE
+            """,
+            tenant_id,
+        )
+        if (
+            not profile
+            or context["business_name"] != data.business_name
+            or profile["country_code"] != country_code
+            or profile["base_currency_code"] != currency_code
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ONBOARDING_FINANCIAL_PROFILE_LOCKED",
+                    "state": context["state"],
+                },
+            )
+        result = dict(profile)
+        result["business_name"] = context["business_name"]
+        result["lifecycle_status"] = context["lifecycle_status"]
+        result["state"] = context["state"]
+        return _financial_response(result)
+
+    await conn.execute(
+        """
+        UPDATE tenants
+        SET name = $2
+        WHERE id = $1
+          AND name IS DISTINCT FROM $2
+        """,
+        tenant_id,
+        data.business_name,
+    )
+    accounting_localization, document_mode, fiscal_provider = (
+        financial_service._financial_mode(country_code)
+    )
+    profile = await conn.fetchrow(
+        """
+        INSERT INTO tenant_financial_profiles (
+            tenant_id, country_code, base_currency_code,
+            accounting_localization, document_mode, fiscal_provider,
+            selection_revision
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 1)
+        ON CONFLICT (tenant_id) DO UPDATE
+        SET selection_revision = CASE
+                WHEN tenant_financial_profiles.country_code IS DISTINCT FROM EXCLUDED.country_code
+                  OR tenant_financial_profiles.base_currency_code IS DISTINCT FROM EXCLUDED.base_currency_code
+                THEN tenant_financial_profiles.selection_revision + 1
+                ELSE tenant_financial_profiles.selection_revision
+            END,
+            country_code = EXCLUDED.country_code,
+            base_currency_code = EXCLUDED.base_currency_code,
+            accounting_localization = EXCLUDED.accounting_localization,
+            document_mode = EXCLUDED.document_mode,
+            fiscal_provider = EXCLUDED.fiscal_provider,
+            updated_at = CASE
+                WHEN tenant_financial_profiles.country_code IS DISTINCT FROM EXCLUDED.country_code
+                  OR tenant_financial_profiles.base_currency_code IS DISTINCT FROM EXCLUDED.base_currency_code
+                THEN NOW()
+                ELSE tenant_financial_profiles.updated_at
+            END
+        RETURNING tenant_id AS profile_tenant_id,
+                  country_code, base_currency_code,
+                  accounting_localization, document_mode, fiscal_provider,
+                  selection_revision,
+                  created_at AS profile_created_at,
+                  updated_at AS profile_updated_at
+        """,
+        tenant_id,
+        country_code,
+        currency_code,
+        accounting_localization,
+        document_mode,
+        fiscal_provider,
+    )
+    state_row = await conn.fetchrow(
+        """
+        UPDATE tenant_onboarding
+        SET state = CASE
+                WHEN state = 'business_profile_pending' THEN 'terms_pending'
+                ELSE state
+            END,
+            updated_at = CASE
+                WHEN state = 'business_profile_pending' THEN NOW()
+                ELSE updated_at
+            END
+        WHERE tenant_id = $1
+        RETURNING state
+        """,
+        tenant_id,
+    )
+    result = dict(profile)
+    result["business_name"] = data.business_name
+    result["lifecycle_status"] = "pending"
+    result["state"] = state_row["state"]
+    return _financial_response(result)
+
+
+async def accept_onboarding_terms(
+    conn,
+    session,
+    *,
+    client_ip: Optional[str],
+    user_agent: Optional[str],
+) -> dict[str, Any]:
+    tenant_id = _require_tenant_id(session.tenant_id)
+    context = await conn.fetchrow(
+        """
+        SELECT t.lifecycle_status, o.state, fp.country_code
+        FROM tenants t
+        JOIN tenant_onboarding o ON o.tenant_id = t.id
+        LEFT JOIN tenant_financial_profiles fp ON fp.tenant_id = t.id
+        WHERE t.id = $1
+        FOR UPDATE OF t, o
+        """,
+        tenant_id,
+    )
+    if not context or context["lifecycle_status"] != "pending":
+        raise HTTPException(status_code=409, detail={"code": "ONBOARDING_NOT_PENDING"})
+    if not context.get("country_code"):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ONBOARDING_FINANCIAL_PROFILE_REQUIRED"},
+        )
+    if context["state"] not in {"terms_pending", "payment_pending"}:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ONBOARDING_TERMS_NOT_AVAILABLE", "state": context["state"]},
+        )
+
+    result = await legal_service.accept_current_terms(
+        conn,
+        session,
+        client_ip=client_ip,
+        user_agent=user_agent,
+        source="onboarding",
+    )
+    state_row = await conn.fetchrow(
+        """
+        UPDATE tenant_onboarding
+        SET state = CASE
+                WHEN state = 'terms_pending' THEN 'payment_pending'
+                ELSE state
+            END,
+            updated_at = CASE
+                WHEN state = 'terms_pending' THEN NOW()
+                ELSE updated_at
+            END
+        WHERE tenant_id = $1
+        RETURNING state
+        """,
+        tenant_id,
+    )
+    result["data"]["onboarding"] = {
+        "state": state_row["state"],
+        "nextStep": next_step_for_state(state_row["state"]),
+    }
+    return result
+
+
+async def ensure_onboarding_payment_ready(conn, session) -> None:
+    """Fail closed unless a pending tenant completed profile and current terms."""
+    tenant_id = _require_tenant_id(session.tenant_id)
+    context = await conn.fetchrow(
+        """
+        SELECT t.lifecycle_status, o.state,
+               fp.tenant_id AS profile_tenant_id
+        FROM tenants t
+        JOIN tenant_onboarding o ON o.tenant_id = t.id
+        LEFT JOIN tenant_financial_profiles fp ON fp.tenant_id = t.id
+        WHERE t.id = $1
+        """,
+        tenant_id,
+    )
+    if (
+        not context
+        or context["lifecycle_status"] != "pending"
+        or context["state"] != "payment_pending"
+        or not context.get("profile_tenant_id")
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ONBOARDING_PAYMENT_NOT_READY"},
+        )
+
+    current = await legal_service.get_current_terms(conn, tenant_id)
+    if not current:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ONBOARDING_CURRENT_TERMS_REQUIRED"},
+        )
+    acceptance = await legal_service.get_acceptance_for_version(
+        conn, tenant_id, UUID(current["version_id"])
+    )
+    if not acceptance:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ONBOARDING_CURRENT_TERMS_REQUIRED"},
+        )
+
+
+async def get_status_for_tenant(conn, tenant_id: UUID) -> OnboardingStatusResponse:
+    tenant_id = _require_tenant_id(tenant_id)
+    row = await conn.fetchrow(
+        """
+        SELECT t.id AS tenant_id, t.name AS business_name, t.lifecycle_status,
+               o.state, o.email_verified_at,
+               fp.tenant_id AS profile_tenant_id,
+               fp.country_code, fp.base_currency_code,
+               fp.accounting_localization, fp.document_mode, fp.fiscal_provider,
+               fp.selection_revision,
+               fp.created_at AS profile_created_at,
+               fp.updated_at AS profile_updated_at
         FROM tenants t
         LEFT JOIN tenant_onboarding o ON o.tenant_id = t.id
+        LEFT JOIN tenant_financial_profiles fp ON fp.tenant_id = t.id
         WHERE t.id = $1
         """,
         tenant_id,
     )
     if not row:
         raise HTTPException(status_code=404, detail="Onboarding not found")
+    current = await legal_service.get_current_terms(conn, tenant_id)
+    acceptance = None
+    if current:
+        acceptance = await legal_service.get_acceptance_for_version(
+            conn, tenant_id, UUID(current["version_id"])
+        )
     return OnboardingStatusResponse(
         data=OnboardingStatus(
             tenantId=row["tenant_id"],
             lifecycleStatus=row["lifecycle_status"],
+            businessName=row["business_name"],
             state=row.get("state"),
             nextStep=next_step_for_state(row.get("state")),
             emailVerifiedAt=row.get("email_verified_at"),
+            financialProfile=_profile_from_row(row),
+            termsAccepted=acceptance is not None,
+            termsVersion=current["version"] if current else None,
         )
     )

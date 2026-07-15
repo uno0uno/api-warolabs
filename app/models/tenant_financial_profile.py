@@ -32,6 +32,7 @@ class TenantFinancialProfile(BaseModel):
     accounting_localization: str
     document_mode: str
     fiscal_provider: Optional[str] = None
+    selection_revision: int = 1
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

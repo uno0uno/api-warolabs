@@ -116,6 +116,7 @@ async def _complete_registration_login(
         onboarding = OnboardingStatus(
             tenantId=identity["tenant_id"],
             lifecycleStatus=identity["lifecycle_status"],
+            businessName=identity["tenant_name"],
             state=identity["onboarding_state"],
             nextStep=identity.get("next_step"),
             emailVerifiedAt=identity.get("email_verified_at"),
