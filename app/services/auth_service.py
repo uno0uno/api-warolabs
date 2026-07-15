@@ -8,6 +8,7 @@ from app.database import get_db_connection
 from app.core.security import collect_session_tokens, get_session_token, clear_session_cookie, set_session_cookie, get_client_ip
 from app.core.exceptions import AuthenticationError
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES, is_legacy_internal_team_role
+from app.core.onboarding_access import next_step_for_state
 from app.core.middleware import require_valid_session
 from app.models.auth import (
     ProfileAvatarResponse,
@@ -75,15 +76,31 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
             # Get tenant info if tenant_id exists (exact logic from warolabs.com)
             current_tenant = None
             user_role = None
+            lifecycle_status = 'active'
+            onboarding_state = None
             if session_result['tenant_id']:
-                tenant_query = "SELECT id, name, slug FROM tenants WHERE id = $1"
-                tenant_result = await conn.fetchrow(tenant_query, session_result['tenant_id'])
+                tenant_query = """
+                    SELECT t.id, t.name, t.slug, t.lifecycle_status,
+                           o.state AS onboarding_state
+                    FROM tenants t
+                    LEFT JOIN tenant_onboarding o
+                      ON o.tenant_id = t.id
+                     AND o.owner_user_id = $2
+                    WHERE t.id = $1
+                """
+                tenant_result = await conn.fetchrow(
+                    tenant_query,
+                    session_result['tenant_id'],
+                    session_result['user_id'],
+                )
                 if tenant_result:
                     current_tenant = Tenant(
                         id=tenant_result['id'],
                         name=tenant_result['name'],
                         slug=tenant_result['slug']
                     )
+                    lifecycle_status = tenant_result.get('lifecycle_status') or 'active'
+                    onboarding_state = tenant_result.get('onboarding_state')
                 # Only read role from ACTIVE memberships (#201). Customer rows
                 # are active memberships, but they are not internal team access.
                 role_result = await conn.fetchrow(
@@ -125,12 +142,12 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
             user = ProfileUser(
                 id=session_result['user_id'],
                 email=session_result['email'],
-                name=session_result['name'],
-                user_name=session_result['user_name'],
-                description=session_result['description'],
-                logo_avatar=session_result['logo_avatar'],
-                preferred_locale=session_result['preferred_locale'],
-                createdAt=session_result['user_created_at'],
+                name=session_result.get('name'),
+                user_name=session_result.get('user_name'),
+                description=session_result.get('description'),
+                logo_avatar=session_result.get('logo_avatar'),
+                preferred_locale=session_result.get('preferred_locale'),
+                createdAt=session_result.get('user_created_at') or datetime.utcnow(),
                 role=user_role
             )
             
@@ -146,7 +163,10 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                 user=user,
                 session=session,
                 has_internal_access=is_legacy_internal_team_role(user_role),
-                currentTenant=current_tenant
+                currentTenant=current_tenant,
+                lifecycleStatus=lifecycle_status,
+                onboardingState=onboarding_state,
+                nextStep=next_step_for_state(onboarding_state),
             )
             
     except AuthenticationError:

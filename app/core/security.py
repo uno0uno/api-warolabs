@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import Request, HTTPException, Response
 from app.config import settings
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES, is_legacy_internal_team_role
+from app.core.onboarding_access import next_step_for_state
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -374,9 +375,15 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
             session_query = """
                 SELECT s.user_id, s.tenant_id, s.expires_at, s.is_active,
                        p.email, p.name,
-                       tm.role AS role
+                       tm.role AS role,
+                       COALESCE(t.lifecycle_status, 'active') AS lifecycle_status,
+                       o.state AS onboarding_state
                 FROM sessions s
                 JOIN profile p ON s.user_id = p.id
+                LEFT JOIN tenants t ON t.id = s.tenant_id
+                LEFT JOIN tenant_onboarding o
+                  ON o.tenant_id = s.tenant_id
+                 AND o.owner_user_id = s.user_id
                 LEFT JOIN LATERAL (
                     SELECT role
                     FROM tenant_members tm
@@ -424,6 +431,9 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
                 'expires_at': session_result['expires_at'],
                 'is_active': session_result['is_active'],
                 'role': resolved_role,
+                'lifecycle_status': session_result.get('lifecycle_status') or 'active',
+                'onboarding_state': session_result.get('onboarding_state'),
+                'next_step': next_step_for_state(session_result.get('onboarding_state')),
             }
 
     except Exception as e:
