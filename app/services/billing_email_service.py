@@ -14,13 +14,12 @@ from app.services.aws_ses_service import AWSSESService
 from app.services.email_sender import resolve_sender_email_value
 from app.services.billing_service import (
     GRACE_PERIOD_DAYS,
-    claim_trial_warning_delivery,
     get_past_due_tenants,
     get_trial_warning_candidates,
     record_reminder_sent,
     record_trial_warning_sent,
-    release_trial_warning_delivery,
     reminder_already_sent,
+    trial_warning_already_sent,
 )
 
 logger = logging.getLogger(__name__)
@@ -296,22 +295,15 @@ async def process_trial_warnings(conn) -> Dict[str, int]:
     error = 0
 
     for trial in candidates:
-        claimed = await claim_trial_warning_delivery(
+        already_sent = await trial_warning_already_sent(
             conn,
-            tenant_id=trial["tenant_id"],
-            subscription_id=trial["subscription_id"],
-            days_remaining=trial["days_remaining"],
-            trial_ends_at=trial["trial_ends_at"],
+            trial["subscription_id"],
+            trial["days_remaining"],
         )
-        if not claimed:
+        if already_sent:
             skipped += 1
             continue
         if not await send_trial_warning(trial):
-            await release_trial_warning_delivery(
-                conn,
-                trial["subscription_id"],
-                trial["days_remaining"],
-            )
             error += 1
             continue
         await record_trial_warning_sent(

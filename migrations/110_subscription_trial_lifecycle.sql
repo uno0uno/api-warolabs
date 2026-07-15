@@ -60,31 +60,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS billing_events_trial_once
         'trial_expired'
     );
 
-CREATE TABLE IF NOT EXISTS trial_warning_deliveries (
-    subscription_id UUID NOT NULL REFERENCES tenant_subscriptions(id) ON DELETE CASCADE,
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    days_remaining SMALLINT NOT NULL CHECK (days_remaining IN (7, 3, 1)),
-    trial_ends_at TIMESTAMPTZ NOT NULL,
-    status TEXT NOT NULL DEFAULT 'sending'
-        CHECK (status IN ('sending', 'pending', 'sent')),
-    attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count > 0),
-    claimed_at TIMESTAMPTZ,
-    sent_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (subscription_id, days_remaining)
-);
-
-COMMENT ON TABLE trial_warning_deliveries IS
-    'PII-free durable delivery claims for trial warning email idempotency.';
-
 COMMENT ON COLUMN tenant_subscriptions.trial_started_at IS
     'Database-authoritative start of the tenant self-service trial.';
 COMMENT ON COLUMN tenant_subscriptions.trial_ends_at IS
     'Exact trial access boundary: trial_started_at plus 15 days.';
 
 -- Rollback (safe only after confirming no trialing/trial_expired rows exist):
--- DROP TABLE IF EXISTS trial_warning_deliveries;
 -- DROP INDEX IF EXISTS billing_events_trial_once;
 -- DROP INDEX IF EXISTS idx_tenant_subscriptions_trial_due;
 -- ALTER TABLE tenant_subscriptions DROP CONSTRAINT IF EXISTS tenant_subscriptions_trial_state_check;
