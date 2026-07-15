@@ -1,6 +1,7 @@
 import logging
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
 from app.services.auth_service import get_session_data, switch_tenant, update_profile, upload_profile_avatar
+from app.core.tenant_prefs import COUNTRY_CURRENCY_PAIRS
 from app.services.magic_link_service import (
     send_magic_link,
     send_registration_magic_link,
@@ -14,6 +15,7 @@ from app.models.auth import (
     MagicLinkRequest,
     MagicLinkResponse,
     RegistrationMagicLinkRequest,
+    RegistrationOptionsResponse,
     RegistrationVerifyCodeRequest,
     RegistrationVerifyTokenRequest,
     VerifyCodeRequest,
@@ -67,6 +69,17 @@ async def sign_in_magic_link(request: Request, payload: MagicLinkRequest):
 async def register_magic_link(request: Request, payload: RegistrationMagicLinkRequest):
     """Start an explicit self-service registration without provisioning identity."""
     return await send_registration_magic_link(request, payload)
+
+
+@router.get("/registration/options", response_model=RegistrationOptionsResponse)
+async def registration_options():
+    """Public server-owned country/currency options for pre-verification data."""
+    return {
+        "catalog": [
+            {"country_code": country, "currency_codes": list(currencies)}
+            for country, currencies in COUNTRY_CURRENCY_PAIRS.items()
+        ]
+    }
 
 @router.post("/verify-code", response_model=VerifyCodeResponse)
 async def verify_magic_code(request: Request, response: Response, payload: VerifyCodeRequest):

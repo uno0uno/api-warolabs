@@ -16,6 +16,7 @@ from app.services.magic_link_service import (
     verify_registration_token,
 )
 from app.services.onboarding_service import complete_registration, store_registration_challenge
+from app.routers.auth import registration_options
 
 
 def _request():
@@ -42,6 +43,9 @@ def _payload(**overrides):
         "phone_country_code": 57,
         "phone_number": "300 123 4567",
         "consent": True,
+        "business_name": "Restaurante Prueba",
+        "country_code": "CO",
+        "base_currency_code": "COP",
         "source": "home",
         "content": "hero",
         "campaign": "trial-launch",
@@ -210,6 +214,15 @@ def test_registration_payload_rejects_missing_consent_and_pii_attribution():
         _payload(consent=False)
     with pytest.raises(ValidationError):
         _payload(source="https://example.com/?email=user@example.com")
+    with pytest.raises(ValidationError):
+        _payload(country_code="PA", base_currency_code="COP")
+
+
+@pytest.mark.asyncio
+async def test_registration_options_are_public_and_server_owned():
+    result = await registration_options()
+    colombia = next(item for item in result["catalog"] if item["country_code"] == "CO")
+    assert colombia["currency_codes"] == ["COP"]
 
 
 @pytest.mark.asyncio
