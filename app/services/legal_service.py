@@ -21,6 +21,12 @@ def _iso(value: Any) -> Optional[str]:
     return value.isoformat() if value else None
 
 
+def _document_metadata(value: Any) -> Dict[str, Any]:
+    metadata = dict(_json_value(value, {}))
+    metadata.setdefault("applicability", {"scope_type": "global"})
+    return metadata
+
+
 def _serialize_annex(row: Any) -> Dict[str, Any]:
     return {
         "id": str(row["id"]),
@@ -48,7 +54,7 @@ def _serialize_version(row: Any, annexes: list) -> Dict[str, Any]:
         "published_at": _iso(row["published_at"]),
         "content_url": row["content_url"],
         "content_sha256": row["content_sha256"],
-        "metadata": _json_value(row["metadata"], {}),
+        "metadata": _document_metadata(row["metadata"]),
         "annexes": annexes,
     }
 
@@ -63,6 +69,7 @@ def _serialize_acceptance(row: Any) -> Dict[str, Any]:
         "accepted_at": _iso(row["accepted_at"]),
         "client_ip": row["client_ip"],
         "user_agent": row["user_agent"],
+        "country_code": row.get("country_code_snapshot"),
         "tenant_name": row["tenant_name_snapshot"],
         "legal_name": row["legal_name_snapshot"],
         "document_type": row["document_type_snapshot"],
@@ -119,7 +126,18 @@ async def get_current_terms(conn, tenant_id: Optional[UUID] = None) -> Optional[
         FROM legal_document_annexes
         WHERE document_version_id = $1
           AND is_active = true
-          AND (tenant_id IS NULL OR tenant_id = $2)
+          AND (
+              scope_type = 'global'
+              OR (scope_type = 'tenant' AND tenant_id = $2)
+              OR (
+                  scope_type = 'country'
+                  AND country = (
+                      SELECT country_code::text
+                      FROM tenant_financial_profiles
+                      WHERE tenant_id = $2
+                  )
+              )
+          )
         ORDER BY sort_order ASC, code ASC
         """,
         row["version_id"],
@@ -213,7 +231,7 @@ async def publish_terms_version(
         effective_at,
         content_url,
         content_sha256,
-        json.dumps(metadata),
+        json.dumps(_document_metadata(metadata)),
     )
 
     # RETURNING cannot reference legal_documents columns directly in the upsert.
@@ -369,10 +387,12 @@ async def _snapshot_tenant(conn, tenant_id: UUID, fallback_email: Optional[str])
         SELECT
             t.name AS tenant_name,
             t.email AS tenant_email,
+            fp.country_code,
             COALESCE(tfd.business_name, li.legal_name, t.name) AS legal_name,
             COALESCE(tfd.nit, li.nit) AS document_number,
             COALESCE(tfd.email, li.email, t.email, $2) AS email
         FROM tenants t
+        LEFT JOIN tenant_financial_profiles fp ON fp.tenant_id = t.id
         LEFT JOIN tenant_fiscal_data tfd ON tfd.tenant_id = t.id
         LEFT JOIN legal_info li ON li.tenant_id = t.id
         WHERE t.id = $1
@@ -421,6 +441,7 @@ async def accept_current_terms(
             source,
             client_ip,
             user_agent,
+            country_code_snapshot,
             tenant_name_snapshot,
             legal_name_snapshot,
             document_type_snapshot,
@@ -435,7 +456,7 @@ async def accept_current_terms(
             evidence
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, 'NIT', $9, $10, $11, $12, $13, $14, $15,
+            $1, $2, $3, $4, $5, $6, $18, $7, $8, 'NIT', $9, $10, $11, $12, $13, $14, $15,
             $16::jsonb,
             jsonb_build_object('retention_years', $17::int, 'server_time_source', 'database_now')
         )
@@ -459,6 +480,7 @@ async def accept_current_terms(
         current["version"],
         json.dumps(annexes),
         current["retention_years"],
+        snapshot.get("country_code"),
     )
     if not row:
         acceptance = await get_acceptance_for_version(conn, tenant_id, UUID(current["version_id"]))

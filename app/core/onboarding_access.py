@@ -19,6 +19,8 @@ PENDING_SESSION_ROUTE_ALLOWLIST: FrozenSet[Tuple[str, str]] = frozenset({
     ("GET", "/auth/session"),
     ("POST", "/auth/signout"),
     ("GET", "/onboarding/status"),
+    ("GET", "/onboarding/financial-profile"),
+    ("PUT", "/onboarding/financial-profile"),
     ("GET", "/legal/terms/current"),
     ("GET", "/legal/terms/status"),
     ("POST", "/legal/terms/accept"),

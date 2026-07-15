@@ -29,6 +29,7 @@ from app.services import (
     billing_email_service,
     billing_webhook_service,
     legal_service,
+    onboarding_service,
     wompi_service,
     wompi_colombia_webhook_service,
 )
@@ -57,8 +58,10 @@ class SubscribeBody(BaseModel):
 )
 async def tenant_list_plans(request: Request):
     """List active subscription plans (tenant-facing, read-only)."""
-    require_valid_session(request)
+    session = require_valid_session(request)
     async with get_db_connection(use_transaction=False) as conn:
+        if session.lifecycle_status == "pending":
+            await onboarding_service.ensure_onboarding_payment_ready(conn, session)
         plans = await billing_service.list_plans(conn)
         return [p for p in plans if p["is_active"]]
 
@@ -90,8 +93,11 @@ async def subscribe(body: SubscribeBody, request: Request):
     tenant_id = session.tenant_id
 
     async with get_db_connection() as conn:
+        if session.lifecycle_status == "pending":
+            await onboarding_service.ensure_onboarding_payment_ready(conn, session)
         plan = await billing_service.get_plan_for_subscribe(conn, body.plan_id)
-        await legal_service.ensure_current_terms_accepted(conn, tenant_id)
+        if session.lifecycle_status != "pending":
+            await legal_service.ensure_current_terms_accepted(conn, tenant_id)
 
         amount = plan["price_annual"]
 
