@@ -147,12 +147,21 @@ class VerifyTokenRequest(BaseModel):
     def _normalize_email(cls, v: str) -> str:
         return normalize_email(v)
 
+
+class RegistrationAttribution(BaseModel):
+    source: Optional[str] = None
+    content: Optional[str] = None
+    campaign: Optional[str] = None
+    variant: Optional[str] = None
+
+
 class VerifyCodeResponse(BaseModel):
     success: bool = True
     message: str = "Verification successful"
     user: User
     tenant: Tenant
     onboarding: Optional[OnboardingStatus] = None
+    registration_attribution: Optional[RegistrationAttribution] = None
 
 class VerifyTokenResponse(BaseModel):
     success: bool = True
@@ -160,6 +169,7 @@ class VerifyTokenResponse(BaseModel):
     user: User
     tenant: Optional[Tenant] = None
     onboarding: Optional[OnboardingStatus] = None
+    registration_attribution: Optional[RegistrationAttribution] = None
 
 class UserTenantsResponse(BaseModel):
     success: bool = True

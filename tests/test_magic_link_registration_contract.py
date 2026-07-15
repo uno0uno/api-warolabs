@@ -194,6 +194,12 @@ async def test_registration_verifier_uses_token_only_and_dispatches_once_after_d
         result = await verify_registration_token(request, MagicMock(), "a" * 64)
 
     assert result.tenant.id == tenant.id
+    assert result.registration_attribution.model_dump() == {
+        "source": "home",
+        "content": "hero",
+        "campaign": "trial",
+        "variant": "a",
+    }
     notification.assert_called_once()
     create_task.assert_called_once()
     assert request.state.registration_notification is None
