@@ -54,7 +54,12 @@ async def _gateway_reference_exists(gateway_reference: str) -> bool:
     async with get_db_connection(use_transaction=False) as conn:
         row = await conn.fetchrow(
             """
-            SELECT 1 FROM tenant_subscriptions
+            SELECT 1
+            FROM billing_payment_attempts
+            WHERE provider = 'wompi' AND provider_reference = $1
+            UNION ALL
+            SELECT 1
+            FROM tenant_subscriptions
             WHERE gateway_reference = $1
             LIMIT 1
             """,

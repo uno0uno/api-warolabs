@@ -11,14 +11,15 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
 
-from app.config import settings
 from app.core.exceptions import APIError
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
+from app.services import onboarding_service
 
 logger = logging.getLogger(__name__)
 
@@ -880,19 +881,171 @@ async def get_plan_for_subscribe(conn, plan_id: UUID) -> Dict[str, Any]:
     Raises 404 if plan not found or is inactive.
     """
     row = await conn.fetchrow("""
-        SELECT id, name, price_monthly, price_annual, scan_limit
+        SELECT id, name, slug, description, price_monthly, price_annual,
+               scan_limit, features
         FROM subscription_plans
         WHERE id = $1 AND is_active = true
     """, plan_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Plan no encontrado o inactivo")
+    amount_in_cents = annual_price_in_cents(row["price_annual"])
     return {
         "id": str(row["id"]),
         "name": row["name"],
-        "price_monthly": float(row["price_monthly"]),
-        "price_annual": float(row["price_annual"]),
+        "slug": row["slug"],
+        "description": row["description"],
+        "price_monthly": row["price_monthly"],
+        "price_annual": row["price_annual"],
+        "amount_in_cents": amount_in_cents,
         "scan_limit": row["scan_limit"],
+        "features": _jsonb_to_dict(row["features"]),
     }
+
+
+def annual_price_in_cents(value: Any) -> int:
+    """Convert a server-owned COP annual price to exact minor units."""
+    try:
+        price = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="El plan no tiene precio anual válido") from exc
+    if not price.is_finite() or price <= 0:
+        raise HTTPException(status_code=422, detail="El plan no tiene precio anual cobrable")
+    cents = price * Decimal("100")
+    if cents != cents.to_integral_value():
+        raise HTTPException(
+            status_code=422,
+            detail="El precio anual contiene una fracción menor a un centavo",
+        )
+    return int(cents)
+
+
+async def list_onboarding_plans(conn) -> List[Dict[str, Any]]:
+    """Return every active annual COP plan from the server-owned catalog."""
+    rows = await conn.fetch("""
+        SELECT id, name, slug, description, price_annual, features
+        FROM subscription_plans
+        WHERE is_active = true
+        ORDER BY price_annual ASC, name ASC
+    """)
+    plans: List[Dict[str, Any]] = []
+    for row in rows:
+        annual_price_in_cents(row["price_annual"])
+        plans.append({
+            "id": row["id"],
+            "name": row["name"],
+            "slug": row["slug"],
+            "description": row["description"],
+            "priceAnnual": row["price_annual"],
+            "currency": "COP",
+            "billingCycle": "annual",
+            "features": _jsonb_to_dict(row["features"]),
+        })
+    return plans
+
+
+async def create_onboarding_payment_attempt(
+    conn,
+    *,
+    tenant_id: UUID,
+    plan_id: UUID,
+    amount_in_cents: int,
+) -> UUID:
+    """Create immutable attempt evidence before requesting a Wompi link."""
+    row = await conn.fetchrow("""
+        INSERT INTO billing_payment_attempts (
+            tenant_id, plan_id, expected_amount_in_cents,
+            currency, billing_cycle, status
+        )
+        VALUES ($1, $2, $3, 'COP', 'annual', 'created')
+        RETURNING id
+    """, tenant_id, plan_id, amount_in_cents)
+    return row["id"]
+
+
+async def attach_onboarding_payment_link(
+    conn,
+    *,
+    attempt_id: UUID,
+    tenant_id: UUID,
+    provider_reference: str,
+    checkout_url: str,
+) -> None:
+    """Attach the provider link once without replacing earlier attempt evidence."""
+    row = await conn.fetchrow("""
+        UPDATE billing_payment_attempts
+        SET provider_reference = $3,
+            checkout_url = $4,
+            status = 'pending',
+            updated_at = now()
+        WHERE id = $1
+          AND tenant_id = $2
+          AND status = 'created'
+          AND provider_reference IS NULL
+        RETURNING id
+    """, attempt_id, tenant_id, provider_reference, checkout_url)
+    if row is None:
+        raise HTTPException(status_code=409, detail="El intento de pago ya no está disponible")
+
+
+async def get_onboarding_payment_attempt(
+    conn,
+    *,
+    tenant_id: UUID,
+    attempt_id: Optional[UUID] = None,
+) -> Dict[str, Any]:
+    if attempt_id is None:
+        row = await conn.fetchrow(
+            """
+            SELECT id, plan_id, provider_reference, provider_transaction_id,
+                   expected_amount_in_cents, currency, status
+            FROM billing_payment_attempts
+            WHERE tenant_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            tenant_id,
+        )
+    else:
+        row = await conn.fetchrow(
+            """
+            SELECT id, plan_id, provider_reference, provider_transaction_id,
+                   expected_amount_in_cents, currency, status
+            FROM billing_payment_attempts
+            WHERE id = $1 AND tenant_id = $2
+            """,
+            attempt_id,
+            tenant_id,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Intento de pago no encontrado")
+    return {
+        "attempt_id": row["id"],
+        "plan_id": row["plan_id"],
+        "provider_reference": row["provider_reference"],
+        "provider_transaction_id": row["provider_transaction_id"],
+        "amount_in_cents": row["expected_amount_in_cents"],
+        "currency": row["currency"].strip(),
+        "status": row["status"],
+    }
+
+
+async def payment_reference_belongs_to_tenant(
+    conn,
+    *,
+    tenant_id: UUID,
+    provider_reference: str,
+) -> bool:
+    row = await conn.fetchval("""
+        SELECT 1
+        FROM billing_payment_attempts
+        WHERE tenant_id = $1 AND provider_reference = $2
+        UNION ALL
+        SELECT 1
+        FROM tenant_subscriptions
+        WHERE tenant_id = $1 AND gateway_reference = $2
+        LIMIT 1
+    """, tenant_id, provider_reference)
+    return row is not None
 
 
 async def subscribe_tenant(
@@ -1396,6 +1549,242 @@ async def cancel_tenant_subscription(conn, tenant_id: UUID) -> str:
     logger.info("subscription_cancelled: tenant=%s preapproval=%s", tenant_id, gateway_reference)
 
     return gateway_reference or ""
+
+
+def _webhook_amount_in_cents(value: Any) -> int:
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail="Wompi amount mismatch") from exc
+    if not amount.is_finite() or amount != amount.to_integral_value() or amount <= 0:
+        raise HTTPException(status_code=409, detail="Wompi amount mismatch")
+    return int(amount)
+
+
+async def process_onboarding_payment_transaction(
+    conn,
+    transaction: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Resolve an onboarding attempt and activate access only for a valid webhook."""
+    provider_reference = str(transaction.get("payment_link_id") or "").strip()
+    if not provider_reference:
+        return {"handled": False, "tenant_info": None}
+
+    attempt = await conn.fetchrow(
+        """
+        SELECT a.id, a.tenant_id, a.plan_id, a.provider_reference,
+               a.expected_amount_in_cents, a.currency, a.status,
+               a.provider_transaction_id,
+               p.name AS plan_name, p.price_annual, p.is_active AS plan_is_active
+        FROM billing_payment_attempts a
+        JOIN subscription_plans p ON p.id = a.plan_id
+        WHERE a.provider = 'wompi' AND a.provider_reference = $1
+        FOR UPDATE OF a
+        """,
+        provider_reference,
+    )
+    if attempt is None:
+        return {"handled": False, "tenant_info": None}
+
+    wompi_status = str(transaction.get("status") or "").upper()
+    transaction_id = str(transaction.get("id") or "").strip()
+    if not transaction_id:
+        raise HTTPException(status_code=409, detail="Wompi transaction ID mismatch")
+
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", transaction_id)
+    duplicate_attempt_id = await conn.fetchval(
+        """
+        SELECT id
+        FROM billing_payment_attempts
+        WHERE provider_transaction_id = $1 AND id <> $2
+        LIMIT 1
+        """,
+        transaction_id,
+        attempt["id"],
+    )
+    if duplicate_attempt_id is not None:
+        raise HTTPException(status_code=409, detail="Wompi transaction ID mismatch")
+
+    if wompi_status == "PENDING":
+        if attempt["status"] != "approved":
+            await conn.execute(
+                """
+                UPDATE billing_payment_attempts
+                SET status = 'pending', provider_transaction_id = $2, updated_at = now()
+                WHERE id = $1
+                """,
+                attempt["id"],
+                transaction_id,
+            )
+        return {"handled": True, "tenant_info": None}
+
+    if wompi_status in ("DECLINED", "VOIDED", "ERROR"):
+        if attempt["status"] != "approved":
+            failed_status = "error" if wompi_status == "ERROR" else "declined"
+            await conn.execute(
+                """
+                UPDATE billing_payment_attempts
+                SET status = $2, provider_transaction_id = $3,
+                    resolved_at = now(), updated_at = now()
+                WHERE id = $1
+                """,
+                attempt["id"],
+                failed_status,
+                transaction_id,
+            )
+        return {"handled": True, "tenant_info": None}
+
+    if wompi_status != "APPROVED":
+        return {"handled": True, "tenant_info": None}
+
+    amount_in_cents = _webhook_amount_in_cents(transaction.get("amount_in_cents"))
+    currency = str(transaction.get("currency") or "").strip().upper()
+    sku = str(transaction.get("sku") or "").strip()
+    expected_currency = str(attempt["currency"]).strip().upper()
+    expected_amount = int(attempt["expected_amount_in_cents"])
+    catalog_amount = annual_price_in_cents(attempt["price_annual"])
+    if (
+        provider_reference != attempt["provider_reference"]
+        or sku != str(attempt["id"])
+        or currency != expected_currency
+        or expected_currency != "COP"
+        or amount_in_cents != expected_amount
+        or catalog_amount != expected_amount
+        or not attempt["plan_is_active"]
+    ):
+        raise HTTPException(status_code=409, detail="Wompi payment evidence mismatch")
+
+    if attempt["status"] == "approved":
+        if attempt["provider_transaction_id"] != transaction_id:
+            raise HTTPException(status_code=409, detail="Wompi transaction ID mismatch")
+        return {"handled": True, "tenant_info": None}
+
+    existing_subscription = await conn.fetchrow(
+        """
+        SELECT id, status
+        FROM tenant_subscriptions
+        WHERE tenant_id = $1
+        FOR UPDATE
+        """,
+        attempt["tenant_id"],
+    )
+    identity = await onboarding_service.activate_paid_onboarding_identity(
+        conn, attempt["tenant_id"]
+    )
+    if identity is None:
+        reconciliation_metadata = {
+            "reason": "onboarding_already_activated",
+            "payment_attempt_id": str(attempt["id"]),
+            "wompi_transaction_id": transaction_id,
+            "gateway_reference": provider_reference,
+            "requested_plan_id": str(attempt["plan_id"]),
+            "subscription_status": (
+                existing_subscription["status"] if existing_subscription else None
+            ),
+        }
+        await conn.execute(
+            """
+            INSERT INTO billing_events (
+                tenant_id, subscription_id, event_type, amount, currency, metadata
+            )
+            VALUES ($1, $2, 'payment_reconciliation_required', $3, 'COP', $4)
+            """,
+            attempt["tenant_id"],
+            existing_subscription["id"] if existing_subscription else None,
+            Decimal(amount_in_cents) / Decimal("100"),
+            json.dumps(reconciliation_metadata),
+        )
+        await conn.execute(
+            """
+            UPDATE billing_payment_attempts
+            SET status = 'approved', provider_transaction_id = $2,
+                resolved_at = now(), updated_at = now()
+            WHERE id = $1
+            """,
+            attempt["id"],
+            transaction_id,
+        )
+        logger.error(
+            "Onboarding payment requires reconciliation: tenant=%s attempt=%s "
+            "transaction=%s subscription_status=%s",
+            attempt["tenant_id"],
+            attempt["id"],
+            transaction_id,
+            existing_subscription["status"] if existing_subscription else None,
+        )
+        return {"handled": True, "tenant_info": None}
+
+    if existing_subscription is not None and existing_subscription["status"] != "pending":
+        raise HTTPException(status_code=409, detail="Tenant subscription activation conflict")
+
+    period_anchor = parse_wompi_period_anchor(transaction)
+    subscription = await conn.fetchrow(
+        """
+        INSERT INTO tenant_subscriptions (
+            tenant_id, plan_id, billing_cycle, status, gateway_reference,
+            current_period_start, current_period_end
+        )
+        VALUES ($1, $2, 'annual', 'active', $3, $4, $4 + interval '1 year')
+        ON CONFLICT (tenant_id) DO UPDATE SET
+            plan_id = EXCLUDED.plan_id,
+            billing_cycle = 'annual',
+            status = 'active',
+            gateway_reference = EXCLUDED.gateway_reference,
+            current_period_start = EXCLUDED.current_period_start,
+            current_period_end = EXCLUDED.current_period_end,
+            cancelled_at = NULL,
+            updated_at = now()
+        WHERE tenant_subscriptions.status = 'pending'
+        RETURNING id, current_period_end
+        """,
+        attempt["tenant_id"],
+        attempt["plan_id"],
+        provider_reference,
+        period_anchor,
+    )
+    if subscription is None:
+        raise HTTPException(status_code=409, detail="Tenant subscription activation conflict")
+
+    metadata = {
+        "payment_attempt_id": str(attempt["id"]),
+        "wompi_transaction_id": transaction_id,
+        "gateway_reference": provider_reference,
+        "plan_id": str(attempt["plan_id"]),
+    }
+    await conn.execute(
+        """
+        INSERT INTO billing_events (
+            tenant_id, subscription_id, event_type, amount, currency, metadata
+        )
+        VALUES ($1, $2, 'payment_approved', $3, 'COP', $4)
+        """,
+        attempt["tenant_id"],
+        subscription["id"],
+        Decimal(amount_in_cents) / Decimal("100"),
+        json.dumps(metadata),
+    )
+    await conn.execute(
+        """
+        UPDATE billing_payment_attempts
+        SET status = 'approved', provider_transaction_id = $2,
+            resolved_at = now(), updated_at = now()
+        WHERE id = $1
+        """,
+        attempt["id"],
+        transaction_id,
+    )
+
+    return {
+        "handled": True,
+        "tenant_info": {
+            "tenant_id": str(attempt["tenant_id"]),
+            "subscription_id": str(subscription["id"]),
+            "tenant_name": identity["tenant_name"],
+            "tenant_email": identity["tenant_email"],
+            "plan_name": attempt["plan_name"],
+            "next_period_end": subscription["current_period_end"].isoformat(),
+        },
+    }
 
 
 async def activate_tenant_subscription(

@@ -41,6 +41,34 @@ async def handle_transaction_updated(
     if not payment_link_id:
         return
 
+    async with get_db_connection() as conn:
+        onboarding_result = await billing_service.process_onboarding_payment_transaction(
+            conn, transaction
+        )
+    if onboarding_result["handled"]:
+        tenant_info = onboarding_result["tenant_info"]
+        if tenant_info:
+            background_tasks.add_task(
+                billing_email_service.send_payment_renewed_email,
+                tenant_name=tenant_info["tenant_name"],
+                tenant_email=tenant_info["tenant_email"],
+                next_period_end=tenant_info["next_period_end"],
+            )
+            background_tasks.add_task(
+                billing_webhook_service.send_payment_approved_webhook,
+                tenant_id=tenant_info["tenant_id"],
+                subscription_id=tenant_info["subscription_id"],
+                tenant_name=tenant_info["tenant_name"],
+                tenant_email=tenant_info["tenant_email"],
+                plan_name=tenant_info["plan_name"],
+                amount=amount_cents / 100,
+                currency="COP",
+                next_period_end=tenant_info["next_period_end"],
+                gateway_reference=payment_link_id,
+                transaction_id=transaction_id,
+            )
+        return
+
     if wompi_status == "APPROVED":
         period_anchor = billing_service.parse_wompi_period_anchor(transaction)
         async with get_db_connection() as conn:

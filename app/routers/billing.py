@@ -27,7 +27,6 @@ from app.database import get_db_connection
 from app.services import (
     billing_service,
     billing_email_service,
-    billing_webhook_service,
     legal_service,
     onboarding_service,
     wompi_service,
@@ -91,15 +90,18 @@ async def subscribe(body: SubscribeBody, request: Request):
 
     session = require_valid_session(request)
     tenant_id = session.tenant_id
+    is_pending_onboarding = session.lifecycle_status == "pending"
 
     async with get_db_connection() as conn:
-        if session.lifecycle_status == "pending":
+        if is_pending_onboarding:
             await onboarding_service.ensure_onboarding_payment_ready(conn, session)
         plan = await billing_service.get_plan_for_subscribe(conn, body.plan_id)
-        if session.lifecycle_status != "pending":
+        if not is_pending_onboarding:
             await legal_service.ensure_current_terms_accepted(conn, tenant_id)
 
-        amount = plan["price_annual"]
+        amount_in_cents = plan.get("amount_in_cents")
+        if amount_in_cents is None:
+            amount_in_cents = billing_service.annual_price_in_cents(plan["price_annual"])
 
         # Strip any base path from frontend_url to get the root host
         # e.g. "http://localhost:8080/waro-colombia" → "http://localhost:8080"
@@ -108,22 +110,55 @@ async def subscribe(body: SubscribeBody, request: Request):
         frontend_host = f"{parsed.scheme}://{parsed.netloc}"
         redirect_url = f"{frontend_host}/billing/confirmacion"
 
-        wompi_result = await wompi_service.create_payment_link(
-            plan_name=plan["name"],
-            amount=amount,
-            billing_cycle=body.billing_cycle,
-            tenant_id=tenant_id,
-            redirect_url=redirect_url,
-        )
+        if is_pending_onboarding:
+            attempt_id = await billing_service.create_onboarding_payment_attempt(
+                conn,
+                tenant_id=tenant_id,
+                plan_id=body.plan_id,
+                amount_in_cents=amount_in_cents,
+            )
+        else:
+            wompi_result = await wompi_service.create_payment_link(
+                plan_name=plan["name"],
+                amount_in_cents=amount_in_cents,
+                billing_cycle=body.billing_cycle,
+                sku=tenant_id,
+                redirect_url=redirect_url,
+            )
+            return await billing_service.subscribe_tenant(
+                conn,
+                tenant_id=tenant_id,
+                plan_id=body.plan_id,
+                billing_cycle=body.billing_cycle,
+                checkout_url=wompi_result["checkout_url"],
+                gateway_reference=wompi_result["wompi_link_id"],
+            )
 
-        return await billing_service.subscribe_tenant(
+    wompi_result = await wompi_service.create_payment_link(
+        plan_name=plan["name"],
+        amount_in_cents=amount_in_cents,
+        billing_cycle=body.billing_cycle,
+        sku=attempt_id,
+        redirect_url=redirect_url,
+    )
+    async with get_db_connection() as conn:
+        await billing_service.attach_onboarding_payment_link(
             conn,
+            attempt_id=attempt_id,
             tenant_id=tenant_id,
-            plan_id=body.plan_id,
-            billing_cycle=body.billing_cycle,
+            provider_reference=wompi_result["wompi_link_id"],
             checkout_url=wompi_result["checkout_url"],
-            gateway_reference=wompi_result["wompi_link_id"],
         )
+    return {
+        "attempt_id": str(attempt_id),
+        "plan_id": str(body.plan_id),
+        "checkout_url": wompi_result["checkout_url"],
+        "gateway_reference": wompi_result["wompi_link_id"],
+        "amount_in_cents": amount_in_cents,
+        "currency": "COP",
+        "billing_cycle": "annual",
+        "status": "pending",
+    }
 
 
 @tenant_router.get(
@@ -154,8 +189,9 @@ async def get_my_remaining_usage(request: Request):
 )
 async def verify_payment(request: Request, transaction_id: str = Query(...)):
     """
-    Verifica el estado de una transacción de Wompi y activa la suscripción si fue aprobada.
-    Llamado desde /billing/confirmacion al regresar del checkout de Wompi.
+    Consulta el estado de una transacción al regresar del checkout de Wompi.
+
+    Este endpoint nunca activa acceso; solo el webhook firmado puede hacerlo.
     """
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -165,18 +201,19 @@ async def verify_payment(request: Request, transaction_id: str = Query(...)):
     internal_status = wompi_service.map_status(wompi_status)
     payment_link_id = transaction.get("payment_link_id")
 
-    period_anchor = billing_service.parse_wompi_period_anchor(transaction)
+    if not payment_link_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Payment reference not found")
 
-    async with get_db_connection() as conn:
-        if internal_status == "active" and payment_link_id:
-            await billing_service.activate_subscription_by_gateway_ref(
-                conn,
-                tenant_id=tenant_id,
-                gateway_reference=payment_link_id,
-                wompi_transaction_id=transaction_id,
-                amount=transaction.get("amount_in_cents", 0) / 100,
-                period_anchor=period_anchor,
-            )
+    async with get_db_connection(use_transaction=False) as conn:
+        belongs_to_tenant = await billing_service.payment_reference_belongs_to_tenant(
+            conn,
+            tenant_id=tenant_id,
+            provider_reference=payment_link_id,
+        )
+    if not belongs_to_tenant:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Payment transaction not found")
 
     return {
         "status": internal_status,
