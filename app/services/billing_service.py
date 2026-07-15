@@ -1264,6 +1264,7 @@ async def activate_subscription_by_gateway_ref(
         },
         period_anchor=period_anchor,
     )
+    await onboarding_service.activate_paid_onboarding_identity(conn, tenant_id)
 
     logger.info(
         "Subscription activated: tenant=%s transaction=%s amount=%s period_end=%s",
@@ -1841,6 +1842,7 @@ async def activate_tenant_subscription(
         metadata=metadata,
         period_anchor=period_anchor,
     )
+    await onboarding_service.activate_paid_onboarding_identity(conn, row["tenant_id"])
     next_period_end = period_end.isoformat() if period_end else None
 
     logger.info(
@@ -1897,6 +1899,18 @@ async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
     """, tenant_id)
 
     if sub is None:
+        onboarding_state = await conn.fetchval(
+            "SELECT state FROM tenant_onboarding WHERE tenant_id = $1",
+            tenant_id,
+        )
+        if onboarding_state == "payment_pending":
+            return SubscriptionAccess(
+                level="blocked",
+                grace_days_remaining=0,
+                subscription_status="payment_pending",
+                next_payment_date=None,
+                message="Elige un plan y completa el pago para activar los módulos de WARO.",
+            )
         return SubscriptionAccess(
             level="free",
             grace_days_remaining=0,

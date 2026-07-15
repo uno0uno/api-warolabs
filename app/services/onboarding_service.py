@@ -734,7 +734,7 @@ async def accept_onboarding_terms(
         """,
         tenant_id,
     )
-    if not context or context["lifecycle_status"] != "pending":
+    if not context or context["lifecycle_status"] not in {"pending", "active"}:
         raise HTTPException(status_code=409, detail={"code": "ONBOARDING_NOT_PENDING"})
     if not context.get("country_code"):
         raise HTTPException(
@@ -770,6 +770,31 @@ async def accept_onboarding_terms(
         """,
         tenant_id,
     )
+    owner_update = await conn.execute(
+        """
+        UPDATE tenant_members tm
+        SET is_active = true
+        FROM tenant_onboarding o
+        WHERE o.tenant_id = $1
+          AND tm.tenant_id = o.tenant_id
+          AND tm.user_id = o.owner_user_id
+          AND tm.role = 'owner'
+        """,
+        tenant_id,
+    )
+    tenant_update = await conn.execute(
+        """
+        UPDATE tenants
+        SET lifecycle_status = 'active'
+        WHERE id = $1 AND lifecycle_status = 'pending'
+        """,
+        tenant_id,
+    )
+    if owner_update != "UPDATE 1" or tenant_update not in {"UPDATE 0", "UPDATE 1"}:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ONBOARDING_PROVISIONING_CONFLICT"},
+        )
     result["data"]["onboarding"] = {
         "state": state_row["state"],
         "nextStep": next_step_for_state(state_row["state"]),
@@ -778,7 +803,7 @@ async def accept_onboarding_terms(
 
 
 async def ensure_onboarding_payment_ready(conn, session) -> None:
-    """Fail closed unless a pending tenant completed profile and current terms."""
+    """Fail closed unless a provisioned tenant completed profile and current terms."""
     tenant_id = _require_tenant_id(session.tenant_id)
     context = await conn.fetchrow(
         """
@@ -793,7 +818,7 @@ async def ensure_onboarding_payment_ready(conn, session) -> None:
     )
     if (
         not context
-        or context["lifecycle_status"] != "pending"
+        or context["lifecycle_status"] not in {"pending", "active"}
         or context["state"] != "payment_pending"
         or not context.get("profile_tenant_id")
     ):
@@ -819,7 +844,7 @@ async def ensure_onboarding_payment_ready(conn, session) -> None:
 
 
 async def activate_paid_onboarding_identity(conn, tenant_id: UUID) -> Optional[dict]:
-    """Lock and activate the pending tenant, onboarding record, and owner once."""
+    """Complete onboarding after payment, including already-provisioned identities."""
     context = await conn.fetchrow(
         """
         SELECT t.id AS tenant_id, t.name AS tenant_name, t.email AS tenant_email,
@@ -837,9 +862,9 @@ async def activate_paid_onboarding_identity(conn, tenant_id: UUID) -> Optional[d
         tenant_id,
     )
     if context is None:
-        raise HTTPException(status_code=409, detail={"code": "ONBOARDING_OWNER_MISSING"})
+        return None
 
-    if context["lifecycle_status"] != "pending" or context["state"] != "payment_pending":
+    if context["state"] != "payment_pending":
         return None
 
     owner_update = await conn.execute(
@@ -858,7 +883,7 @@ async def activate_paid_onboarding_identity(conn, tenant_id: UUID) -> Optional[d
         """
         UPDATE tenants
         SET lifecycle_status = 'active'
-        WHERE id = $1 AND lifecycle_status = 'pending'
+        WHERE id = $1 AND lifecycle_status IN ('pending', 'active')
         """,
         tenant_id,
     )
