@@ -1,5 +1,6 @@
-from uuid import UUID
+from typing import Optional
 from urllib.parse import urlparse
+from uuid import UUID
 
 from fastapi import APIRouter, Body, Query, Request
 
@@ -117,7 +118,7 @@ async def create_payment_checkout(
 @router.get("/payment-status", response_model=OnboardingPaymentStatusResponse)
 async def get_payment_status(
     request: Request,
-    attempt_id: UUID | None = Query(default=None),
+    attempt_id: Optional[UUID] = Query(default=None),
 ):
     session = require_valid_session(request)
     async with get_db_connection(use_transaction=False) as conn:
