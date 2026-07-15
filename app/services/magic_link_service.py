@@ -16,6 +16,7 @@ from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.core.onboarding_access import next_step_for_state
 from app.models.auth import (
     MagicLinkResponse,
+    RegistrationAttribution,
     RegistrationMagicLinkRequest,
     Tenant,
     User,
@@ -170,6 +171,7 @@ async def _complete_registration_login(
 
     notification = identity.pop("registration_notification", None)
     request.state.registration_notification = notification
+    request.state.registration_attribution = _registration_attribution_from(notification)
 
     user = User(
         id=identity["user_id"],
@@ -626,6 +628,26 @@ def _schedule_registration_notification(request: Request) -> None:
     asyncio.create_task(notify_self_service_registration(**notification))
 
 
+def _registration_attribution_from(notification) -> Optional[RegistrationAttribution]:
+    if not notification:
+        return None
+    values = {
+        key: notification.get(key)
+        for key in ("source", "content", "campaign", "variant")
+        if notification.get(key)
+    }
+    return RegistrationAttribution(**values) if values else None
+
+
+def _registration_attribution(request: Request) -> Optional[RegistrationAttribution]:
+    stored = getattr(request.state, "registration_attribution", None)
+    if stored:
+        return stored
+    return _registration_attribution_from(
+        getattr(request.state, "registration_notification", None)
+    )
+
+
 async def verify_registration_token(
     request: Request,
     response: Response,
@@ -649,7 +671,12 @@ async def verify_registration_token(
             if not registration:
                 raise AuthenticationError("Invalid or expired registration token")
             user, tenant, onboarding = registration
-            result = VerifyTokenResponse(user=user, tenant=tenant, onboarding=onboarding)
+            result = VerifyTokenResponse(
+                user=user,
+                tenant=tenant,
+                onboarding=onboarding,
+                registration_attribution=_registration_attribution(request),
+            )
         _schedule_registration_notification(request)
         return result
     except (ValidationError, AuthenticationError, HTTPException):
@@ -683,7 +710,12 @@ async def verify_registration_code(
             if not registration:
                 raise AuthenticationError("Invalid or expired registration code")
             user, tenant, onboarding = registration
-            result = VerifyCodeResponse(user=user, tenant=tenant, onboarding=onboarding)
+            result = VerifyCodeResponse(
+                user=user,
+                tenant=tenant,
+                onboarding=onboarding,
+                registration_attribution=_registration_attribution(request),
+            )
         _schedule_registration_notification(request)
         return result
     except (ValidationError, AuthenticationError, HTTPException):
