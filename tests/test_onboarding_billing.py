@@ -1,4 +1,5 @@
 """Paid onboarding checkout and webhook authority (#632)."""
+import json
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from types import SimpleNamespace
@@ -271,8 +272,12 @@ async def test_inactive_plan_blocks_approved_activation():
 @pytest.mark.asyncio
 async def test_late_valid_attempt_after_activation_records_evidence_without_plan_change():
     attempt = _attempt_row(price="200000.00")
+    subscription_id = uuid4()
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(side_effect=[attempt, {"id": uuid4(), "status": "active"}])
+    conn.fetchrow = AsyncMock(side_effect=[
+        attempt,
+        {"id": subscription_id, "status": "active"},
+    ])
     conn.fetchval = AsyncMock(return_value=None)
 
     with patch.object(
@@ -290,7 +295,16 @@ async def test_late_valid_attempt_after_activation_records_evidence_without_plan
         "UPDATE billing_payment_attempts" in call.args[0]
         for call in conn.execute.await_args_list
     )
-    assert not any("INSERT INTO billing_events" in call.args[0] for call in conn.execute.await_args_list)
+    reconciliation = next(
+        call for call in conn.execute.await_args_list
+        if "payment_reconciliation_required" in call.args[0]
+    )
+    assert reconciliation.args[2] == subscription_id
+    assert reconciliation.args[3] == Decimal("200000.00")
+    metadata = json.loads(reconciliation.args[4])
+    assert metadata["reason"] == "onboarding_already_activated"
+    assert metadata["payment_attempt_id"] == str(attempt["id"])
+    assert metadata["requested_plan_id"] == str(attempt["plan_id"])
 
 
 @pytest.mark.asyncio

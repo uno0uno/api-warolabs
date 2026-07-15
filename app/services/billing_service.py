@@ -1655,6 +1655,28 @@ async def process_onboarding_payment_transaction(
         conn, attempt["tenant_id"]
     )
     if identity is None:
+        reconciliation_metadata = {
+            "reason": "onboarding_already_activated",
+            "payment_attempt_id": str(attempt["id"]),
+            "wompi_transaction_id": transaction_id,
+            "gateway_reference": provider_reference,
+            "requested_plan_id": str(attempt["plan_id"]),
+            "subscription_status": (
+                existing_subscription["status"] if existing_subscription else None
+            ),
+        }
+        await conn.execute(
+            """
+            INSERT INTO billing_events (
+                tenant_id, subscription_id, event_type, amount, currency, metadata
+            )
+            VALUES ($1, $2, 'payment_reconciliation_required', $3, 'COP', $4)
+            """,
+            attempt["tenant_id"],
+            existing_subscription["id"] if existing_subscription else None,
+            Decimal(amount_in_cents) / Decimal("100"),
+            json.dumps(reconciliation_metadata),
+        )
         await conn.execute(
             """
             UPDATE billing_payment_attempts
@@ -1664,6 +1686,14 @@ async def process_onboarding_payment_transaction(
             """,
             attempt["id"],
             transaction_id,
+        )
+        logger.error(
+            "Onboarding payment requires reconciliation: tenant=%s attempt=%s "
+            "transaction=%s subscription_status=%s",
+            attempt["tenant_id"],
+            attempt["id"],
+            transaction_id,
+            existing_subscription["status"] if existing_subscription else None,
         )
         return {"handled": True, "tenant_info": None}
 
