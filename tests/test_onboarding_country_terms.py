@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from app.models.onboarding import OnboardingBusinessProfileUpdate
 from app.routers import billing
@@ -31,6 +32,15 @@ def _profile_row(
         "profile_created_at": None,
         "profile_updated_at": None,
     }
+
+
+def test_business_name_rejects_the_pending_placeholder():
+    with pytest.raises(ValidationError):
+        OnboardingBusinessProfileUpdate(
+            business_name="  Negocio pendiente  ",
+            country_code="CO",
+            base_currency_code="COP",
+        )
 
 
 @pytest.mark.asyncio

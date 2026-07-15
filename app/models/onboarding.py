@@ -53,7 +53,10 @@ class OnboardingBusinessProfileUpdate(TenantFinancialProfileUpdate):
     @field_validator("business_name", mode="before")
     @classmethod
     def _normalize_business_name(cls, value: str) -> str:
-        return " ".join(value.split()) if isinstance(value, str) else value
+        normalized = " ".join(value.split()) if isinstance(value, str) else value
+        if isinstance(normalized, str) and normalized.casefold() == "negocio pendiente":
+            raise ValueError("Business name is required")
+        return normalized
 
     class Config:
         populate_by_name = True
