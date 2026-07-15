@@ -97,3 +97,40 @@ async def test_update_product_duplicate_name_returns_409():
 
     assert exc.value.status_code == 409
     assert "producto" in exc.value.detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_update_product_name_check_excludes_current_product():
+    request = MagicMock(spec=Request)
+    session = _session()
+    product_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"id": product_id, "name": "Producto actual"})
+    conn.fetchval = AsyncMock(return_value=True)
+    conn.execute = AsyncMock()
+    conn.transaction = MagicMock()
+
+    @asynccontextmanager
+    async def _txn():
+        yield
+
+    conn.transaction.return_value = _txn()
+
+    @asynccontextmanager
+    async def _db_ctx():
+        yield conn
+
+    product_data = ProductUpdate(name="  Nombre ocupado  ")
+
+    with patch("app.services.products_service.require_valid_session", return_value=session), \
+         patch("app.services.products_service.get_db_connection", side_effect=_db_ctx):
+        with pytest.raises(HTTPException) as exc:
+            await update_product_with_recipe(request, product_id, product_data)
+
+    assert exc.value.status_code == 409
+    query, tenant_arg, product_arg, name_arg = conn.fetchval.await_args.args
+    assert "id <> $2" in query
+    assert tenant_arg == session.tenant_id
+    assert product_arg == product_id
+    assert name_arg == "Nombre ocupado"
+    conn.execute.assert_not_awaited()

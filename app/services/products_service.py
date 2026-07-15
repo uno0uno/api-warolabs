@@ -1141,6 +1141,32 @@ async def update_product_with_recipe(
             if not product_exists:
                 raise HTTPException(status_code=404, detail="Product not found")
 
+            # A rename must only conflict with another product in the tenant.
+            # Excluding the current row lets clients submit an unchanged name,
+            # and LOWER keeps this check consistent with /menu/check-name.
+            if product_data.name is not None:
+                normalized_name = product_data.name.strip()
+                duplicate_name = await conn.fetchval(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1
+                        FROM product
+                        WHERE tenant_id = $1
+                          AND id <> $2
+                          AND LOWER(name) = LOWER($3)
+                    )
+                    """,
+                    tenant_id,
+                    product_id,
+                    normalized_name,
+                )
+                if duplicate_name:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=_DUPLICATE_PRODUCT_NAME_DETAIL,
+                    )
+                product_data.name = normalized_name
+
             # Obtener snapshot ANTES de actualizar (para historial)
             old_snapshot = await menu_history_service.get_product_snapshot(conn, product_id, tenant_id)
             product_name = product_exists['name']
