@@ -1,12 +1,14 @@
 import re
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 from datetime import datetime
 from typing import Literal, Optional, Dict, Any
 from uuid import UUID
 
 from app.core.email_utils import normalize_email
+from app.core.tenant_prefs import validate_country_currency_pair
 from app.models.onboarding import OnboardingStatus, OnboardingState, TenantLifecycle
+from app.models.tenant_financial_profile import CountryCurrencyOption
 
 PreferredLocale = Literal['es', 'en', 'pt', 'fr', 'de', 'ar', 'hi', 'zh']
 
@@ -83,6 +85,9 @@ class RegistrationMagicLinkRequest(BaseModel):
     phone_country_code: int = Field(ge=1, le=999)
     phone_number: str
     consent: Literal[True]
+    business_name: str = Field(min_length=2, max_length=120)
+    country_code: str
+    base_currency_code: str
     source: Optional[str] = None
     content: Optional[str] = None
     campaign: Optional[str] = None
@@ -101,6 +106,21 @@ class RegistrationMagicLinkRequest(BaseModel):
             raise ValueError("Phone number must contain 7 to 15 digits")
         return digits
 
+    @field_validator("business_name", mode="before")
+    @classmethod
+    def _normalize_business_name(cls, value: str) -> str:
+        normalized = " ".join(value.split()) if isinstance(value, str) else value
+        if isinstance(normalized, str) and normalized.casefold() == "negocio pendiente":
+            raise ValueError("Business name is required")
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_business_country_currency(self):
+        self.country_code, self.base_currency_code = validate_country_currency_pair(
+            self.country_code, self.base_currency_code
+        )
+        return self
+
     @field_validator("source", "content", "campaign", "variant")
     @classmethod
     def _validate_attribution(cls, value: Optional[str]) -> Optional[str]:
@@ -116,6 +136,10 @@ class RegistrationVerifyTokenRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     token: str = Field(min_length=32, max_length=128, pattern=r"^[A-Fa-f0-9]+$")
+
+
+class RegistrationOptionsResponse(BaseModel):
+    catalog: list[CountryCurrencyOption]
 
 
 class RegistrationVerifyCodeRequest(BaseModel):

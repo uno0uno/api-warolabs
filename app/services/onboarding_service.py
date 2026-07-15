@@ -53,6 +53,9 @@ async def store_registration_challenge(
     phone_country_code: Optional[int] = None,
     phone_number: Optional[str] = None,
     consent: bool = False,
+    business_name: Optional[str] = None,
+    country_code: Optional[str] = None,
+    base_currency_code: Optional[str] = None,
     source: Optional[str] = None,
     content: Optional[str] = None,
     campaign: Optional[str] = None,
@@ -106,34 +109,35 @@ async def store_registration_challenge(
             normalized_email, token_hash, code_hash, opaque_token_hash,
             purpose, request_ip, user_agent, expires_at,
             phone_country_code, phone_number, consent_at, consent_version,
+            business_name, country_code, base_currency_code,
             first_source, first_content, first_campaign, first_variant,
             last_source, last_content, last_campaign, last_variant
         )
         VALUES (
             $1, $2, $3, $4, 'registration', $5::inet, $6,
             NOW() + INTERVAL '15 minutes', $7, $8, NOW(),
-            'self_service_registration_v1',
+            'self_service_registration_v1', $9, $10, $11,
             COALESCE((
                 SELECT first_source FROM onboarding_email_challenges
                 WHERE normalized_email = $1 AND purpose = 'registration'
                 ORDER BY created_at ASC LIMIT 1
-            ), $9),
+            ), $12),
             COALESCE((
                 SELECT first_content FROM onboarding_email_challenges
                 WHERE normalized_email = $1 AND purpose = 'registration'
                 ORDER BY created_at ASC LIMIT 1
-            ), $10),
+            ), $13),
             COALESCE((
                 SELECT first_campaign FROM onboarding_email_challenges
                 WHERE normalized_email = $1 AND purpose = 'registration'
                 ORDER BY created_at ASC LIMIT 1
-            ), $11),
+            ), $14),
             COALESCE((
                 SELECT first_variant FROM onboarding_email_challenges
                 WHERE normalized_email = $1 AND purpose = 'registration'
                 ORDER BY created_at ASC LIMIT 1
-            ), $12),
-            $9, $10, $11, $12
+            ), $15),
+            $12, $13, $14, $15
         )
         """,
         email,
@@ -144,6 +148,9 @@ async def store_registration_challenge(
         user_agent,
         phone_country_code,
         phone_number,
+        business_name,
+        country_code,
+        base_currency_code,
         source,
         content,
         campaign,
@@ -199,6 +206,7 @@ async def complete_registration(
     challenge_fields = """
         id, normalized_email, consumed_at, completed_user_id, completed_tenant_id,
         phone_country_code, phone_number,
+        business_name, country_code, base_currency_code,
         first_source, first_content, first_campaign, first_variant,
         last_source, last_content, last_campaign, last_variant
     """
@@ -382,6 +390,24 @@ async def complete_registration(
                 "email_verified_at": onboarding["email_verified_at"],
                 "next_step": next_step_for_state(onboarding["state"]),
             }
+
+    if identity["lifecycle_status"] == "pending" and all((
+        challenge.get("business_name"),
+        challenge.get("country_code"),
+        challenge.get("base_currency_code"),
+    )):
+        financial = await update_onboarding_financial_profile(
+            conn,
+            identity["tenant_id"],
+            OnboardingBusinessProfileUpdate(
+                businessName=challenge["business_name"],
+                country_code=challenge["country_code"],
+                base_currency_code=challenge["base_currency_code"],
+            ),
+        )
+        identity["tenant_name"] = financial.data.business_name
+        identity["onboarding_state"] = financial.data.state
+        identity["next_step"] = financial.data.next_step
 
     notification = None
     if identity["lifecycle_status"] == "pending":

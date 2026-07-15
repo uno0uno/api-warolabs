@@ -107,6 +107,9 @@ async def test_verified_challenge_atomically_creates_pending_owner():
             "completed_tenant_id": None,
             "phone_country_code": 57,
             "phone_number": "3001234567",
+            "business_name": "Restaurante Nuevo",
+            "country_code": "CO",
+            "base_currency_code": "COP",
             "first_source": "home",
             "first_content": "hero",
             "first_campaign": "launch",
@@ -130,8 +133,15 @@ async def test_verified_challenge_atomically_creates_pending_owner():
     ])
     conn.execute = AsyncMock(return_value="OK")
 
+    financial = AsyncMock(return_value=SimpleNamespace(data=SimpleNamespace(
+        business_name="Restaurante Nuevo",
+        state="terms_pending",
+        next_step="terms",
+    )))
     with patch("app.services.onboarding_service.settings.auth_secret", "test-secret"), patch(
         "app.services.onboarding_service.uuid4", return_value=tenant_id
+    ), patch(
+        "app.services.onboarding_service.update_onboarding_financial_profile", financial
     ):
         identity = await complete_registration(
             conn,
@@ -143,8 +153,10 @@ async def test_verified_challenge_atomically_creates_pending_owner():
     assert identity["user_id"] == user_id
     assert identity["tenant_id"] == tenant_id
     assert identity["lifecycle_status"] == "pending"
-    assert identity["onboarding_state"] == "business_profile_pending"
-    assert identity["next_step"] == "business_profile"
+    assert identity["tenant_name"] == "Restaurante Nuevo"
+    assert identity["onboarding_state"] == "terms_pending"
+    assert identity["next_step"] == "terms"
+    financial.assert_awaited_once()
     assert identity["registration_notification"]["source"] == "blog"
     assert identity["registration_notification"]["variant"] == "b"
     writes = "\n".join(call.args[0] for call in conn.execute.await_args_list)
