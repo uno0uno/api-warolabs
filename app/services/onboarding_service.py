@@ -44,6 +44,17 @@ async def store_registration_challenge(
     user_agent: Optional[str],
 ) -> bool:
     """Persist a pre-user challenge for an address without an active tenant."""
+    # Serialize the read/check/write sequence for every affected rate-limit
+    # bucket. Sorting avoids deadlocks when requests share only one bucket.
+    lock_keys = [f"onboarding-email:{email}"]
+    if request_ip:
+        lock_keys.append(f"onboarding-ip:{request_ip}")
+    for lock_key in sorted(lock_keys):
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            lock_key,
+        )
+
     limits = await conn.fetchrow(
         """
         SELECT
