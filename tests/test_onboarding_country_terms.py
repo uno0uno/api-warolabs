@@ -214,7 +214,7 @@ async def test_pending_acceptance_uses_canonical_source_and_advances_payment():
         },
         {"state": "payment_pending"},
     ])
-    conn.execute = AsyncMock(side_effect=["UPDATE 1", "UPDATE 1"])
+    conn.execute = AsyncMock()
     session = SimpleNamespace(tenant_id=tenant_id)
     accepted = {"success": True, "data": {"acceptance": {"id": "evidence"}}}
 
@@ -232,9 +232,7 @@ async def test_pending_acceptance_uses_canonical_source_and_advances_payment():
         "state": "payment_pending",
         "nextStep": "payment",
     }
-    statements = [" ".join(call.args[0].split()) for call in conn.execute.await_args_list]
-    assert "UPDATE tenant_members" in statements[0]
-    assert "SET lifecycle_status = 'active'" in statements[1]
+    conn.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -76,6 +76,37 @@ async def test_unknown_login_is_generic_and_has_no_side_effects():
 
 
 @pytest.mark.asyncio
+async def test_unverified_registration_login_reissues_consented_challenge():
+    draft = {
+        "phone_country_code": 57,
+        "phone_number": "3001234567",
+        "business_name": "Restaurante Prueba",
+        "country_code": "CO",
+        "base_currency_code": "COP",
+        "first_source": "home",
+        "last_source": "login",
+    }
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[None, draft])
+
+    @asynccontextmanager
+    async def db_ctx(**_kwargs):
+        yield conn
+
+    issue = AsyncMock()
+    with patch("app.services.magic_link_service.get_db_connection", side_effect=db_ctx), patch(
+        "app.services.magic_link_service.require_valid_tenant", return_value=_tenant()
+    ), patch("app.services.magic_link_service._issue_registration_challenge", issue):
+        result = await send_magic_link(_request(), "nuevo@example.com")
+
+    assert result.success is True
+    issue.assert_awaited_once()
+    assert issue.await_args.kwargs["email"] == "nuevo@example.com"
+    assert issue.await_args.kwargs["draft"] == draft
+    conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_registration_link_is_opaque_and_challenge_contains_no_raw_secret():
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(side_effect=[None, {"email_count": 0, "ip_count": 0}])

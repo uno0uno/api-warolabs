@@ -358,7 +358,8 @@ async def test_paid_identity_activation_updates_owner_onboarding_and_tenant_once
     assert activated["tenant_id"] == tenant_id
     assert conn.execute.await_count == 3
     statements = [" ".join(call.args[0].split()) for call in conn.execute.await_args_list]
-    assert "SET is_active = true" in statements[0]
+    assert "SET is_active = true, role = 'admin'" in statements[0]
+    assert "role = 'owner'" in statements[0]
     assert "SET state = 'active'" in statements[1]
     assert "SET lifecycle_status = 'active'" in statements[2]
 
