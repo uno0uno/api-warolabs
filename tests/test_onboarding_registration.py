@@ -28,6 +28,7 @@ async def test_new_email_challenge_is_hashed_and_does_not_create_identity():
             code="123456",
             request_ip="127.0.0.1",
             user_agent="pytest",
+            consent=True,
         )
 
     assert created is True
@@ -58,10 +59,11 @@ async def test_profile_without_active_tenant_can_start_verified_onboarding():
         code="123456",
         request_ip=None,
         user_agent="pytest",
+        consent=True,
     )
 
     assert created is True
-    assert conn.execute.await_count == 3
+    assert conn.execute.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -77,6 +79,7 @@ async def test_registration_challenge_enforces_persisted_rate_limit():
             code="123456",
             request_ip="127.0.0.1",
             user_agent="pytest",
+            consent=True,
         )
 
     assert exc.value.status_code == 429
@@ -98,9 +101,23 @@ async def test_verified_challenge_atomically_creates_pending_owner():
     conn.fetchrow = AsyncMock(side_effect=[
         {
             "id": challenge_id,
+            "normalized_email": "new@example.com",
             "consumed_at": None,
             "completed_user_id": None,
             "completed_tenant_id": None,
+            "phone_country_code": 57,
+            "phone_number": "3001234567",
+            "business_name": "Restaurante Nuevo",
+            "country_code": "CO",
+            "base_currency_code": "COP",
+            "first_source": "home",
+            "first_content": "hero",
+            "first_campaign": "launch",
+            "first_variant": "a",
+            "last_source": "blog",
+            "last_content": "cta",
+            "last_campaign": "launch",
+            "last_variant": "b",
         },
         None,
         None,
@@ -111,11 +128,20 @@ async def test_verified_challenge_atomically_creates_pending_owner():
             "created_at": created_at,
         },
         {"state": "business_profile_pending", "email_verified_at": verified_at},
+        {"id": uuid4()},
+        {"id": uuid4()},
     ])
     conn.execute = AsyncMock(return_value="OK")
 
+    financial = AsyncMock(return_value=SimpleNamespace(data=SimpleNamespace(
+        business_name="Restaurante Nuevo",
+        state="terms_pending",
+        next_step="terms",
+    )))
     with patch("app.services.onboarding_service.settings.auth_secret", "test-secret"), patch(
         "app.services.onboarding_service.uuid4", return_value=tenant_id
+    ), patch(
+        "app.services.onboarding_service.update_onboarding_financial_profile", financial
     ):
         identity = await complete_registration(
             conn,
@@ -127,14 +153,19 @@ async def test_verified_challenge_atomically_creates_pending_owner():
     assert identity["user_id"] == user_id
     assert identity["tenant_id"] == tenant_id
     assert identity["lifecycle_status"] == "pending"
-    assert identity["onboarding_state"] == "business_profile_pending"
-    assert identity["next_step"] == "business_profile"
+    assert identity["tenant_name"] == "Restaurante Nuevo"
+    assert identity["onboarding_state"] == "terms_pending"
+    assert identity["next_step"] == "terms"
+    financial.assert_awaited_once()
+    assert identity["registration_notification"]["source"] == "blog"
+    assert identity["registration_notification"]["variant"] == "b"
     writes = "\n".join(call.args[0] for call in conn.execute.await_args_list)
     assert "pg_advisory_xact_lock" in writes
     assert "INSERT INTO tenants" in writes
     assert "'pending'" in writes
     assert "INSERT INTO tenant_members" in writes
     assert "'owner', false" in writes
+    assert "UPDATE profile" in writes
     assert "tenant_public_profiles" not in writes
     assert "seed_tenant_accounts" not in writes
 

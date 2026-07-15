@@ -602,24 +602,50 @@ class DiscordWebhookService:
         button_source: str,
         ip_address: Optional[str] = None,
         phone: Optional[str] = None,
+        phone_country_code: Optional[int] = 57,
+        tenant_name: Optional[str] = None,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
+        content: Optional[str] = None,
+        campaign: Optional[str] = None,
+        variant: Optional[str] = None,
     ) -> bool:
         """Send notification when a new lead is captured from the homepage CTA."""
         button_labels = {
             "comenzar": "Comenzar",
             "habla_con_nosotros": "Habla con nosotros",
             "access_request": "Solicitar acceso",
+            "self_service_registration": "Registro autogestionado",
         }
         button_label = button_labels.get(button_source, button_source)
 
         description = f"**Email:** {email}\n"
         if phone:
-            description += f"**Teléfono:** +57 {phone}\n"
+            country_prefix = f"+{phone_country_code} " if phone_country_code else ""
+            description += f"**Teléfono:** {country_prefix}{phone}\n"
         description += f"**Botón:** {button_label}"
+        if tenant_name:
+            description += f"\n**Negocio:** {tenant_name}"
+        if status:
+            description += f"\n**Estado:** {status}"
+        attribution = {
+            "Source": source,
+            "Content": content,
+            "Campaign": campaign,
+            "Variant": variant,
+        }
+        for label, value in attribution.items():
+            if value:
+                description += f"\n**{label}:** {value}"
         if ip_address:
             description += f"\n**IP:** {ip_address}"
 
         return await self.send_notification(
-            title="🎯 Nuevo Lead Capturado",
+            title=(
+                "🚀 Nuevo registro autogestionado"
+                if button_source == "self_service_registration"
+                else "🎯 Nuevo Lead Capturado"
+            ),
             description=description,
             color=5763719,  # Green
         )

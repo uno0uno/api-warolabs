@@ -1,10 +1,14 @@
-from pydantic import BaseModel, Field, field_validator
+import re
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 from datetime import datetime
 from typing import Literal, Optional, Dict, Any
 from uuid import UUID
 
 from app.core.email_utils import normalize_email
+from app.core.tenant_prefs import validate_country_currency_pair
 from app.models.onboarding import OnboardingStatus, OnboardingState, TenantLifecycle
+from app.models.tenant_financial_profile import CountryCurrencyOption
 
 PreferredLocale = Literal['es', 'en', 'pt', 'fr', 'de', 'ar', 'hi', 'zh']
 
@@ -70,6 +74,85 @@ class MagicLinkResponse(BaseModel):
     success: bool = True
     message: str = "Magic link sent successfully"
 
+
+_ATTRIBUTION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+
+
+class RegistrationMagicLinkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    phone_country_code: int = Field(ge=1, le=999)
+    phone_number: str
+    consent: Literal[True]
+    business_name: str = Field(min_length=2, max_length=120)
+    country_code: str
+    base_currency_code: str
+    source: Optional[str] = None
+    content: Optional[str] = None
+    campaign: Optional[str] = None
+    variant: Optional[str] = None
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, value: str) -> str:
+        return normalize_email(value)
+
+    @field_validator("phone_number", mode="before")
+    @classmethod
+    def _normalize_phone(cls, value: str) -> str:
+        digits = re.sub(r"\D", "", value or "")
+        if len(digits) < 7 or len(digits) > 15:
+            raise ValueError("Phone number must contain 7 to 15 digits")
+        return digits
+
+    @field_validator("business_name", mode="before")
+    @classmethod
+    def _normalize_business_name(cls, value: str) -> str:
+        normalized = " ".join(value.split()) if isinstance(value, str) else value
+        if isinstance(normalized, str) and normalized.casefold() == "negocio pendiente":
+            raise ValueError("Business name is required")
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_business_country_currency(self):
+        self.country_code, self.base_currency_code = validate_country_currency_pair(
+            self.country_code, self.base_currency_code
+        )
+        return self
+
+    @field_validator("source", "content", "campaign", "variant")
+    @classmethod
+    def _validate_attribution(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not _ATTRIBUTION_PATTERN.fullmatch(normalized):
+            raise ValueError("Attribution values must be slug-like and at most 100 characters")
+        return normalized
+
+
+class RegistrationVerifyTokenRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=32, max_length=128, pattern=r"^[A-Fa-f0-9]+$")
+
+
+class RegistrationOptionsResponse(BaseModel):
+    catalog: list[CountryCurrencyOption]
+
+
+class RegistrationVerifyCodeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    code: str = Field(pattern=r"^[0-9]{6}$")
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, value: str) -> str:
+        return normalize_email(value)
+
 class VerifyCodeRequest(BaseModel):
     email: str
     code: str
@@ -88,12 +171,21 @@ class VerifyTokenRequest(BaseModel):
     def _normalize_email(cls, v: str) -> str:
         return normalize_email(v)
 
+
+class RegistrationAttribution(BaseModel):
+    source: Optional[str] = None
+    content: Optional[str] = None
+    campaign: Optional[str] = None
+    variant: Optional[str] = None
+
+
 class VerifyCodeResponse(BaseModel):
     success: bool = True
     message: str = "Verification successful"
     user: User
     tenant: Tenant
     onboarding: Optional[OnboardingStatus] = None
+    registration_attribution: Optional[RegistrationAttribution] = None
 
 class VerifyTokenResponse(BaseModel):
     success: bool = True
@@ -101,6 +193,7 @@ class VerifyTokenResponse(BaseModel):
     user: User
     tenant: Optional[Tenant] = None
     onboarding: Optional[OnboardingStatus] = None
+    registration_attribution: Optional[RegistrationAttribution] = None
 
 class UserTenantsResponse(BaseModel):
     success: bool = True
