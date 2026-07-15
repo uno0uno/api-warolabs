@@ -113,8 +113,23 @@ async def test_no_subscription_returns_free():
     tenant_id = uuid4()
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=None)
+    conn.fetchval = AsyncMock(return_value=None)
 
     access = await billing_service.get_subscription_access(tenant_id, conn)
 
     assert access.level == "free"
     conn.fetchrow.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_payment_pending_onboarding_without_subscription_is_blocked():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=None)
+    conn.fetchval = AsyncMock(return_value="payment_pending")
+
+    access = await billing_service.get_subscription_access(tenant_id, conn)
+
+    assert access.level == "blocked"
+    assert access.subscription_status == "payment_pending"
+    assert "completa el pago" in access.message
