@@ -9,7 +9,7 @@ Docs: https://docs.wompi.co/docs/colombia/links-de-pago/
 import hashlib
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 from uuid import UUID
 
 import httpx
@@ -41,9 +41,9 @@ def _headers() -> Dict[str, str]:
 
 async def create_payment_link(
     plan_name: str,
-    amount: float,
+    amount_in_cents: int,
     billing_cycle: str,
-    tenant_id: UUID,
+    sku: UUID,
     redirect_url: str,
 ) -> Dict[str, Any]:
     """
@@ -51,7 +51,12 @@ async def create_payment_link(
 
     Retorna: { wompi_link_id, checkout_url }
     """
-    amount_in_cents = int(amount * 100)
+    if isinstance(amount_in_cents, bool) or not isinstance(amount_in_cents, int):
+        raise HTTPException(status_code=422, detail="El monto de Wompi debe ser entero")
+    if amount_in_cents <= 0:
+        raise HTTPException(status_code=422, detail="El monto de Wompi debe ser positivo")
+    if billing_cycle != "annual":
+        raise HTTPException(status_code=422, detail="Wompi onboarding solo admite ciclo anual")
     cycle_label = "Mensual" if billing_cycle == "monthly" else "Anual"
 
     # 2 horas para completar el pago
@@ -66,7 +71,7 @@ async def create_payment_link(
         "currency": "COP",
         "expires_at": expiration.strftime("%Y-%m-%dT%H:%M:%S") + "Z",
         "redirect_url": redirect_url,
-        "sku": str(tenant_id)[:36],
+        "sku": str(sku),
         "collect_methods": [
             "CARD",
             "NEQUI",
@@ -112,7 +117,7 @@ async def create_payment_link(
     checkout_url = f"https://checkout.wompi.co/l/{link_id}"
     logger.info(
         "Wompi payment link created: id=%s tenant=%s plan=%s amount=%s",
-        link_id, tenant_id, plan_name, amount_in_cents,
+        link_id, sku, plan_name, amount_in_cents,
     )
 
     return {"wompi_link_id": link_id, "checkout_url": checkout_url}
@@ -125,8 +130,8 @@ def verify_event_signature(event_data: Dict[str, Any]) -> bool:
     Wompi incluye signature.checksum en el body del evento.
     """
     if not settings.wompi_events_secret:
-        logger.warning("WOMPI_EVENTS_SECRET no configurado — omitiendo verificación")
-        return True
+        logger.error("WOMPI_EVENTS_SECRET no configurado — webhook rechazado")
+        return False
 
     signature_data = event_data.get("signature", {})
     properties = signature_data.get("properties", [])

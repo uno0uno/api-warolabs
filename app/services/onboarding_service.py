@@ -558,6 +558,55 @@ async def ensure_onboarding_payment_ready(conn, session) -> None:
         )
 
 
+async def activate_paid_onboarding_identity(conn, tenant_id: UUID) -> Optional[dict]:
+    """Lock and activate the pending tenant, onboarding record, and owner once."""
+    context = await conn.fetchrow(
+        """
+        SELECT t.id AS tenant_id, t.name AS tenant_name, t.email AS tenant_email,
+               t.lifecycle_status, o.id AS onboarding_id, o.state,
+               o.owner_user_id, tm.id AS owner_member_id
+        FROM tenants t
+        JOIN tenant_onboarding o ON o.tenant_id = t.id
+        JOIN tenant_members tm
+          ON tm.tenant_id = t.id
+         AND tm.user_id = o.owner_user_id
+         AND tm.role = 'owner'
+        WHERE t.id = $1
+        FOR UPDATE OF t, o, tm
+        """,
+        tenant_id,
+    )
+    if context is None:
+        raise HTTPException(status_code=409, detail={"code": "ONBOARDING_OWNER_MISSING"})
+
+    if context["lifecycle_status"] != "pending" or context["state"] != "payment_pending":
+        return None
+
+    owner_update = await conn.execute(
+        "UPDATE tenant_members SET is_active = true WHERE id = $1",
+        context["owner_member_id"],
+    )
+    onboarding_update = await conn.execute(
+        """
+        UPDATE tenant_onboarding
+        SET state = 'active', updated_at = now()
+        WHERE id = $1 AND state = 'payment_pending'
+        """,
+        context["onboarding_id"],
+    )
+    tenant_update = await conn.execute(
+        """
+        UPDATE tenants
+        SET lifecycle_status = 'active'
+        WHERE id = $1 AND lifecycle_status = 'pending'
+        """,
+        tenant_id,
+    )
+    if owner_update != "UPDATE 1" or onboarding_update != "UPDATE 1" or tenant_update != "UPDATE 1":
+        raise HTTPException(status_code=409, detail={"code": "ONBOARDING_ACTIVATION_CONFLICT"})
+    return dict(context)
+
+
 async def get_status_for_tenant(conn, tenant_id: UUID) -> OnboardingStatusResponse:
     tenant_id = _require_tenant_id(tenant_id)
     row = await conn.fetchrow(
