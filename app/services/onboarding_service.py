@@ -28,8 +28,6 @@ PRE_PAYMENT_FINANCIAL_STATES = frozenset({
     "terms_pending",
     "payment_pending",
 })
-SELF_SERVICE_TRIAL_PLAN_SLUG = "pro"
-SELF_SERVICE_TRIAL_DAYS = 15
 
 
 def _credential_hash(email: str, kind: str, value: str) -> str:
@@ -727,52 +725,16 @@ async def accept_onboarding_terms(
     tenant_id = _require_tenant_id(session.tenant_id)
     context = await conn.fetchrow(
         """
-        SELECT t.id AS tenant_id, t.name AS tenant_name, t.email AS tenant_email,
-               t.lifecycle_status, o.id AS onboarding_id, o.state,
-               o.owner_user_id, tm.id AS owner_member_id, fp.country_code
+        SELECT t.lifecycle_status, o.state, fp.country_code
         FROM tenants t
         JOIN tenant_onboarding o ON o.tenant_id = t.id
-        JOIN tenant_members tm
-          ON tm.tenant_id = t.id
-         AND tm.user_id = o.owner_user_id
-         AND tm.role = 'owner'
         LEFT JOIN tenant_financial_profiles fp ON fp.tenant_id = t.id
         WHERE t.id = $1
-        FOR UPDATE OF t, o, tm
+        FOR UPDATE OF t, o
         """,
         tenant_id,
     )
-    if not context:
-        raise HTTPException(status_code=409, detail={"code": "ONBOARDING_OWNER_MISSING"})
-
-    if context["lifecycle_status"] == "active" and context["state"] == "active":
-        existing_trial = await conn.fetchrow(
-            """
-            SELECT id, status, trial_started_at, trial_ends_at
-            FROM tenant_subscriptions
-            WHERE tenant_id = $1
-              AND trial_started_at IS NOT NULL
-              AND trial_ends_at IS NOT NULL
-            FOR UPDATE
-            """,
-            tenant_id,
-        )
-        if existing_trial:
-            return {
-                "success": True,
-                "data": {
-                    "already_accepted": True,
-                    "onboarding": {"state": "active", "nextStep": "setup"},
-                    "trial": {
-                        "subscriptionId": str(existing_trial["id"]),
-                        "status": existing_trial["status"],
-                        "startedAt": existing_trial["trial_started_at"].isoformat(),
-                        "endsAt": existing_trial["trial_ends_at"].isoformat(),
-                    },
-                },
-            }
-
-    if context["lifecycle_status"] != "pending":
+    if not context or context["lifecycle_status"] != "pending":
         raise HTTPException(status_code=409, detail={"code": "ONBOARDING_NOT_PENDING"})
     if not context.get("country_code"):
         raise HTTPException(
@@ -792,94 +754,25 @@ async def accept_onboarding_terms(
         user_agent=user_agent,
         source="onboarding",
     )
-    plan = await conn.fetchrow(
-        """
-        SELECT id
-        FROM subscription_plans
-        WHERE slug = $1 AND is_active = true
-        FOR SHARE
-        """,
-        SELF_SERVICE_TRIAL_PLAN_SLUG,
-    )
-    if not plan:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "SELF_SERVICE_TRIAL_PLAN_UNAVAILABLE"},
-        )
-
-    trial = await conn.fetchrow(
-        """
-        INSERT INTO tenant_subscriptions (
-            tenant_id, plan_id, billing_cycle, status,
-            current_period_start, current_period_end,
-            trial_started_at, trial_ends_at
-        )
-        VALUES (
-            $1, $2, 'annual', 'trialing',
-            now(), now() + ($3 * INTERVAL '1 day'),
-            now(), now() + ($3 * INTERVAL '1 day')
-        )
-        ON CONFLICT (tenant_id) DO NOTHING
-        RETURNING id, status, trial_started_at, trial_ends_at
-        """,
-        tenant_id,
-        plan["id"],
-        SELF_SERVICE_TRIAL_DAYS,
-    )
-    if not trial:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "ONBOARDING_TRIAL_ACTIVATION_CONFLICT"},
-        )
-
-    owner_update = await conn.execute(
-        "UPDATE tenant_members SET is_active = true WHERE id = $1",
-        context["owner_member_id"],
-    )
-    onboarding_update = await conn.execute(
+    state_row = await conn.fetchrow(
         """
         UPDATE tenant_onboarding
-        SET state = 'active', updated_at = now()
-        WHERE id = $1 AND state IN ('terms_pending', 'payment_pending')
-        """,
-        context["onboarding_id"],
-    )
-    tenant_update = await conn.execute(
-        """
-        UPDATE tenants
-        SET lifecycle_status = 'active'
-        WHERE id = $1 AND lifecycle_status = 'pending'
-        """,
-        tenant_id,
-    )
-    if owner_update != "UPDATE 1" or onboarding_update != "UPDATE 1" or tenant_update != "UPDATE 1":
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "ONBOARDING_TRIAL_ACTIVATION_CONFLICT"},
-        )
-
-    await conn.execute(
-        """
-        INSERT INTO billing_events (tenant_id, subscription_id, event_type, metadata)
-        VALUES ($1, $2, 'trial_started', $3)
+        SET state = CASE
+                WHEN state = 'terms_pending' THEN 'payment_pending'
+                ELSE state
+            END,
+            updated_at = CASE
+                WHEN state = 'terms_pending' THEN NOW()
+                ELSE updated_at
+            END
+        WHERE tenant_id = $1
+        RETURNING state
         """,
         tenant_id,
-        trial["id"],
-        json.dumps({
-            "plan_id": str(plan["id"]),
-            "trial_started_at": trial["trial_started_at"].isoformat(),
-            "trial_ends_at": trial["trial_ends_at"].isoformat(),
-        }),
     )
     result["data"]["onboarding"] = {
-        "state": "active",
-        "nextStep": next_step_for_state("active"),
-    }
-    result["data"]["trial"] = {
-        "subscriptionId": str(trial["id"]),
-        "status": trial["status"],
-        "startedAt": trial["trial_started_at"].isoformat(),
-        "endsAt": trial["trial_ends_at"].isoformat(),
+        "state": state_row["state"],
+        "nextStep": next_step_for_state(state_row["state"]),
     }
     return result
 

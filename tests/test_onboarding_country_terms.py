@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -203,34 +203,17 @@ async def test_pending_acceptance_requires_financial_profile():
 
 
 @pytest.mark.asyncio
-async def test_pending_acceptance_uses_canonical_source_and_activates_trial():
+async def test_pending_acceptance_uses_canonical_source_and_advances_payment():
     tenant_id = uuid4()
-    subscription_id = uuid4()
-    plan_id = uuid4()
-    started_at = datetime(2026, 7, 15, tzinfo=timezone.utc)
-    ends_at = started_at + timedelta(days=15)
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(side_effect=[
         {
-            "tenant_id": tenant_id,
-            "tenant_name": "Restaurante",
-            "tenant_email": "owner@example.com",
             "lifecycle_status": "pending",
-            "onboarding_id": uuid4(),
             "state": "terms_pending",
-            "owner_user_id": uuid4(),
-            "owner_member_id": uuid4(),
             "country_code": "CO",
         },
-        {"id": plan_id},
-        {
-            "id": subscription_id,
-            "status": "trialing",
-            "trial_started_at": started_at,
-            "trial_ends_at": ends_at,
-        },
+        {"state": "payment_pending"},
     ])
-    conn.execute = AsyncMock(side_effect=["UPDATE 1", "UPDATE 1", "UPDATE 1", None])
     session = SimpleNamespace(tenant_id=tenant_id)
     accepted = {"success": True, "data": {"acceptance": {"id": "evidence"}}}
 
@@ -244,25 +227,10 @@ async def test_pending_acceptance_uses_canonical_source_and_activates_trial():
         )
 
     assert accept.await_args.kwargs["source"] == "onboarding"
-    assert result["data"]["onboarding"] == {"state": "active", "nextStep": "setup"}
-    assert result["data"]["trial"] == {
-        "subscriptionId": str(subscription_id),
-        "status": "trialing",
-        "startedAt": started_at.isoformat(),
-        "endsAt": ends_at.isoformat(),
+    assert result["data"]["onboarding"] == {
+        "state": "payment_pending",
+        "nextStep": "payment",
     }
-    trial_insert = conn.fetchrow.await_args_list[2]
-    assert trial_insert.args[3] == 15
-    assert "now() + ($3 * INTERVAL '1 day')" in trial_insert.args[0]
-    statements = [" ".join(call.args[0].split()) for call in conn.execute.await_args_list]
-    assert "SET is_active = true" in statements[0]
-    assert "SET state = 'active'" in statements[1]
-    assert "SET lifecycle_status = 'active'" in statements[2]
-    assert "'trial_started'" in statements[3]
-    event_metadata = conn.execute.await_args_list[3].args[3]
-    assert "owner@example.com" not in event_metadata
-    assert "email" not in event_metadata
-    assert "phone" not in event_metadata
 
 
 @pytest.mark.asyncio

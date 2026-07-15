@@ -12,7 +12,6 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from math import ceil
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -196,7 +195,7 @@ async def check_plan_quota_growth(
           ON tq.tenant_id = ts.tenant_id
          AND tq.resource = $2
         WHERE ts.tenant_id = $1
-          AND ts.status IN ('active', 'past_due', 'trialing')
+          AND ts.status IN ('active', 'past_due')
           AND ts.current_period_end > now()
         ORDER BY ts.current_period_end DESC
         LIMIT 1
@@ -260,8 +259,6 @@ async def _get_completed_online_order_quota_state(conn, tenant_id: UUID) -> Opti
             sp.features AS plan_features,
             ts.current_period_start,
             ts.current_period_end,
-            ts.trial_started_at,
-            ts.trial_ends_at,
             tq.id AS override_id,
             tq.limit_override,
             COALESCE(tq.disabled, false) AS override_disabled,
@@ -272,7 +269,7 @@ async def _get_completed_online_order_quota_state(conn, tenant_id: UUID) -> Opti
           ON tq.tenant_id = ts.tenant_id
          AND tq.resource = $2
         WHERE ts.tenant_id = $1
-          AND ts.status IN ('active', 'past_due', 'trialing')
+          AND ts.status IN ('active', 'past_due')
           AND ts.current_period_end > now()
         ORDER BY ts.current_period_end DESC
         LIMIT 1
@@ -614,7 +611,7 @@ async def _create_period_usage(tenant_id: UUID, conn) -> None:
         FROM tenant_subscriptions ts
         JOIN subscription_plans sp ON sp.id = ts.plan_id
         WHERE ts.tenant_id = $1
-          AND ts.status IN ('active', 'trialing')
+          AND ts.status    = 'active'
           AND ts.current_period_end > now()
         LIMIT 1
     """, tenant_id)
@@ -650,7 +647,7 @@ async def _upsert_monthly_log(tenant_id: UUID, conn) -> None:
     sub = await conn.fetchrow("""
         SELECT id FROM tenant_subscriptions
         WHERE tenant_id = $1
-          AND status IN ('active', 'past_due', 'trialing')
+          AND status IN ('active', 'past_due')
           AND current_period_end > now()
         ORDER BY current_period_end DESC
         LIMIT 1
@@ -963,20 +960,6 @@ async def create_onboarding_payment_attempt(
         RETURNING id
     """, tenant_id, plan_id, amount_in_cents)
     return row["id"]
-
-
-async def tenant_has_trial_subscription(conn, tenant_id: UUID) -> bool:
-    """Return whether checkout must preserve an existing trial row."""
-    exists = await conn.fetchval(
-        """
-        SELECT 1
-        FROM tenant_subscriptions
-        WHERE tenant_id = $1
-          AND status IN ('trialing', 'trial_expired')
-        """,
-        tenant_id,
-    )
-    return exists is not None
 
 
 async def attach_onboarding_payment_link(
@@ -1337,12 +1320,6 @@ async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
         "status": row["status"],
         "current_period_start": row["current_period_start"].isoformat(),
         "current_period_end": row["current_period_end"].isoformat(),
-        "trial_started_at": (
-            row.get("trial_started_at").isoformat() if row.get("trial_started_at") else None
-        ),
-        "trial_ends_at": (
-            row.get("trial_ends_at").isoformat() if row.get("trial_ends_at") else None
-        ),
         "gateway_reference": row["gateway_reference"],
         "cancelled_at": row["cancelled_at"].isoformat() if row["cancelled_at"] else None,
         "created_at": row["created_at"].isoformat(),
@@ -1684,25 +1661,16 @@ async def process_onboarding_payment_transaction(
 
     existing_subscription = await conn.fetchrow(
         """
-        SELECT ts.id, ts.status,
-               t.name AS tenant_name, t.email AS tenant_email
-        FROM tenant_subscriptions ts
-        JOIN tenants t ON t.id = ts.tenant_id
-        WHERE ts.tenant_id = $1
+        SELECT id, status
+        FROM tenant_subscriptions
+        WHERE tenant_id = $1
         FOR UPDATE
         """,
         attempt["tenant_id"],
     )
-    is_trial_conversion = (
-        existing_subscription is not None
-        and existing_subscription["status"] in {"trialing", "trial_expired"}
+    identity = await onboarding_service.activate_paid_onboarding_identity(
+        conn, attempt["tenant_id"]
     )
-    if is_trial_conversion:
-        identity = dict(existing_subscription)
-    else:
-        identity = await onboarding_service.activate_paid_onboarding_identity(
-            conn, attempt["tenant_id"]
-        )
     if identity is None:
         reconciliation_metadata = {
             "reason": "onboarding_already_activated",
@@ -1746,10 +1714,7 @@ async def process_onboarding_payment_transaction(
         )
         return {"handled": True, "tenant_info": None}
 
-    if (
-        existing_subscription is not None
-        and existing_subscription["status"] not in {"pending", "trialing", "trial_expired"}
-    ):
+    if existing_subscription is not None and existing_subscription["status"] != "pending":
         raise HTTPException(status_code=409, detail="Tenant subscription activation conflict")
 
     period_anchor = parse_wompi_period_anchor(transaction)
@@ -1769,7 +1734,7 @@ async def process_onboarding_payment_transaction(
             current_period_end = EXCLUDED.current_period_end,
             cancelled_at = NULL,
             updated_at = now()
-        WHERE tenant_subscriptions.status IN ('pending', 'trialing', 'trial_expired')
+        WHERE tenant_subscriptions.status = 'pending'
         RETURNING id, current_period_end
         """,
         attempt["tenant_id"],
@@ -1897,7 +1862,6 @@ async def activate_tenant_subscription(
 
 GRACE_PERIOD_DAYS = 7
 WARNING_THRESHOLD_DAYS = 3
-TRIAL_WARNING_DAYS = (7, 3, 1)
 
 
 @dataclass
@@ -1917,8 +1881,6 @@ class SubscriptionAccess:
     subscription_status: Optional[str]
     next_payment_date: Optional[str]
     message: str
-    trial_ends_at: Optional[str] = None
-    trial_days_remaining: int = 0
 
 
 async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
@@ -1929,8 +1891,7 @@ async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
     Uses timezone.utc (Python 3.9 safe — NOT datetime.UTC which requires 3.11+).
     """
     sub = await conn.fetchrow("""
-        SELECT status, current_period_end, plan_id,
-               trial_started_at, trial_ends_at
+        SELECT status, current_period_end, plan_id
         FROM tenant_subscriptions
         WHERE tenant_id = $1
     """, tenant_id)
@@ -1946,41 +1907,6 @@ async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
 
     status = sub["status"]
     period_end = sub["current_period_end"]
-    trial_ends_at = sub.get("trial_ends_at")
-
-    if status in {"trialing", "trial_expired"}:
-        if trial_ends_at is None:
-            logger.error("Trial subscription missing trial_ends_at: tenant=%s", tenant_id)
-            return SubscriptionAccess(
-                level="read_only",
-                grace_days_remaining=0,
-                subscription_status="trial_expired",
-                next_payment_date=None,
-                message="Tu prueba terminó. Realiza el pago para recuperar el acceso completo.",
-            )
-        if trial_ends_at.tzinfo is None:
-            trial_ends_at = trial_ends_at.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
-        remaining_seconds = (trial_ends_at - now).total_seconds()
-        if status == "trialing" and remaining_seconds > 0:
-            return SubscriptionAccess(
-                level="full",
-                grace_days_remaining=0,
-                subscription_status="trialing",
-                next_payment_date=None,
-                message="Tu prueba está activa.",
-                trial_ends_at=trial_ends_at.isoformat(),
-                trial_days_remaining=max(1, ceil(remaining_seconds / 86400)),
-            )
-        return SubscriptionAccess(
-            level="read_only",
-            grace_days_remaining=0,
-            subscription_status="trial_expired",
-            next_payment_date=None,
-            message="Tu prueba terminó. Realiza el pago para recuperar el acceso completo.",
-            trial_ends_at=trial_ends_at.isoformat(),
-            trial_days_remaining=0,
-        )
 
     if status == "active":
         return SubscriptionAccess(
@@ -2038,119 +1964,6 @@ async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
         subscription_status=status,
         next_payment_date=None,
         message="Tu suscripción ha vencido. Renueva para recuperar el acceso.",
-    )
-
-
-async def expire_due_trials(conn) -> int:
-    """Persist trial expiry once; access enforcement does not wait for this job."""
-    rows = await conn.fetch(
-        """
-        WITH expired AS (
-            UPDATE tenant_subscriptions
-            SET status = 'trial_expired', updated_at = now()
-            WHERE status = 'trialing'
-              AND trial_ends_at <= now()
-            RETURNING id, tenant_id, trial_started_at, trial_ends_at
-        )
-        INSERT INTO billing_events (tenant_id, subscription_id, event_type, metadata)
-        SELECT expired.tenant_id,
-               expired.id,
-               'trial_expired',
-               jsonb_build_object(
-                   'trial_started_at', expired.trial_started_at,
-                   'trial_ends_at', expired.trial_ends_at
-               )
-        FROM expired
-        WHERE NOT EXISTS (
-            SELECT 1 FROM billing_events existing
-            WHERE existing.subscription_id = expired.id
-              AND existing.event_type = 'trial_expired'
-        )
-        RETURNING subscription_id
-        """
-    )
-    return len(rows)
-
-
-async def get_trial_warning_candidates(conn) -> List[Dict[str, Any]]:
-    """Return active trials entering a 7/3/1-day warning bucket."""
-    rows = await conn.fetch(
-        """
-        SELECT ts.id AS subscription_id,
-               ts.tenant_id,
-               ts.trial_ends_at,
-               t.name AS tenant_name,
-               COALESCE(NULLIF(p.email, ''), NULLIF(t.email, '')) AS tenant_email
-        FROM tenant_subscriptions ts
-        JOIN tenants t ON t.id = ts.tenant_id
-        LEFT JOIN tenant_onboarding o ON o.tenant_id = ts.tenant_id
-        LEFT JOIN profile p ON p.id = o.owner_user_id
-        WHERE ts.status = 'trialing'
-          AND ts.trial_ends_at > now()
-          AND ts.trial_ends_at <= now() + INTERVAL '7 days'
-        ORDER BY ts.trial_ends_at ASC
-        """
-    )
-    now = datetime.now(timezone.utc)
-    candidates: List[Dict[str, Any]] = []
-    for row in rows:
-        trial_end = row["trial_ends_at"]
-        if trial_end.tzinfo is None:
-            trial_end = trial_end.replace(tzinfo=timezone.utc)
-        days_remaining = max(1, ceil((trial_end - now).total_seconds() / 86400))
-        if days_remaining not in TRIAL_WARNING_DAYS:
-            continue
-        candidate = dict(row)
-        candidate["trial_ends_at"] = trial_end
-        candidate["days_remaining"] = days_remaining
-        candidates.append(candidate)
-    return candidates
-
-
-async def trial_warning_already_sent(
-    conn, subscription_id: UUID, days_remaining: int
-) -> bool:
-    if days_remaining not in TRIAL_WARNING_DAYS:
-        return True
-    return bool(await conn.fetchval(
-        """
-        SELECT 1 FROM billing_events
-        WHERE subscription_id = $1
-          AND event_type = $2
-        LIMIT 1
-        """,
-        subscription_id,
-        f"trial_warning_day_{days_remaining}",
-    ))
-
-
-async def record_trial_warning_sent(
-    conn,
-    *,
-    tenant_id: UUID,
-    subscription_id: UUID,
-    days_remaining: int,
-    trial_ends_at: datetime,
-) -> None:
-    if days_remaining not in TRIAL_WARNING_DAYS:
-        raise ValueError("Unsupported trial warning bucket")
-    await conn.execute(
-        """
-        INSERT INTO billing_events (tenant_id, subscription_id, event_type, metadata)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (subscription_id, event_type)
-        WHERE event_type IN (
-            'trial_started', 'trial_warning_day_7', 'trial_warning_day_3',
-            'trial_warning_day_1', 'trial_expired'
-        ) DO NOTHING
-        """,
-        tenant_id,
-        subscription_id,
-        f"trial_warning_day_{days_remaining}",
-        json.dumps({
-            "days_remaining": days_remaining,
-            "trial_ends_at": trial_ends_at.isoformat(),
-        }),
     )
 
 

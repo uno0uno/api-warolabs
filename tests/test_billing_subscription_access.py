@@ -1,6 +1,6 @@
 """Grace-period access levels via get_subscription_access (#62, #363)."""
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -8,22 +8,13 @@ import pytest
 from app.services import billing_service
 
 
-def _conn_with_subscription(
-    status: str,
-    period_end: datetime | None,
-    *,
-    trial_ends_at: datetime | None = None,
-):
+def _conn_with_subscription(status: str, period_end: datetime | None):
     conn = MagicMock()
     conn.fetchrow = AsyncMock(
         return_value={
             "status": status,
             "current_period_end": period_end,
             "plan_id": uuid4(),
-            "trial_started_at": (
-                trial_ends_at - timedelta(days=15) if trial_ends_at else None
-            ),
-            "trial_ends_at": trial_ends_at,
         }
     )
     return conn
@@ -127,47 +118,3 @@ async def test_no_subscription_returns_free():
 
     assert access.level == "free"
     conn.fetchrow.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_trialing_before_exact_boundary_returns_full_without_paid_grace():
-    frozen = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
-    trial_end = frozen + timedelta(seconds=1)
-    conn = _conn_with_subscription("trialing", trial_end, trial_ends_at=trial_end)
-
-    with patch.object(billing_service, "datetime") as mocked_datetime:
-        mocked_datetime.now.return_value = frozen
-        access = await billing_service.get_subscription_access(uuid4(), conn)
-
-    assert access.level == "full"
-    assert access.subscription_status == "trialing"
-    assert access.grace_days_remaining == 0
-    assert access.trial_days_remaining == 1
-    assert access.trial_ends_at == trial_end.isoformat()
-
-
-@pytest.mark.asyncio
-async def test_trialing_at_exact_boundary_is_effectively_expired_and_read_only():
-    frozen = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
-    conn = _conn_with_subscription("trialing", frozen, trial_ends_at=frozen)
-
-    with patch.object(billing_service, "datetime") as mocked_datetime:
-        mocked_datetime.now.return_value = frozen
-        access = await billing_service.get_subscription_access(uuid4(), conn)
-
-    assert access.level == "read_only"
-    assert access.subscription_status == "trial_expired"
-    assert access.grace_days_remaining == 0
-    assert access.trial_days_remaining == 0
-
-
-@pytest.mark.asyncio
-async def test_persisted_trial_expired_never_inherits_paid_grace():
-    trial_end = datetime.now(timezone.utc) - timedelta(days=1)
-    conn = _conn_with_subscription("trial_expired", trial_end, trial_ends_at=trial_end)
-
-    access = await billing_service.get_subscription_access(uuid4(), conn)
-
-    assert access.level == "read_only"
-    assert access.subscription_status == "trial_expired"
-    assert access.grace_days_remaining == 0
