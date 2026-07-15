@@ -78,6 +78,11 @@ class MagicLinkResponse(BaseModel):
     message: str = "Magic link sent successfully"
 
 
+class RegistrationMagicLinkResponse(BaseModel):
+    success: bool = True
+    action: Literal["verification_sent", "login_required"]
+
+
 _ATTRIBUTION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 

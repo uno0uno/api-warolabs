@@ -18,6 +18,7 @@ from app.models.auth import (
     MagicLinkResponse,
     RegistrationAttribution,
     RegistrationMagicLinkRequest,
+    RegistrationMagicLinkResponse,
     Tenant,
     User,
     VerifyCodeResponse,
@@ -324,15 +325,15 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
 async def send_registration_magic_link(
     request: Request,
     payload: RegistrationMagicLinkRequest,
-) -> MagicLinkResponse:
-    """Start registration, or send login access when the identity already exists."""
+) -> RegistrationMagicLinkResponse:
+    """Start registration, or direct an existing identity to sign in."""
     try:
         email = normalize_email(str(payload.email))
         tenant_context = require_valid_tenant(request)
         async with get_db_connection() as conn:
             existing = await _lookup_internal_team_member(conn, email)
         if existing:
-            return await send_magic_link(request, email)
+            return RegistrationMagicLinkResponse(action="login_required")
 
         await _issue_registration_challenge(
             request,
@@ -350,7 +351,7 @@ async def send_registration_magic_link(
                 "last_variant": payload.variant,
             },
         )
-        return MagicLinkResponse()
+        return RegistrationMagicLinkResponse(action="verification_sent")
     except (ValidationError, AuthenticationError, HTTPException):
         raise
     except Exception as exc:

@@ -15,6 +15,7 @@ from app.models.auth import (
     MagicLinkRequest,
     MagicLinkResponse,
     RegistrationMagicLinkRequest,
+    RegistrationMagicLinkResponse,
     RegistrationOptionsResponse,
     RegistrationVerifyCodeRequest,
     RegistrationVerifyTokenRequest,
@@ -65,7 +66,7 @@ async def sign_in_magic_link(request: Request, payload: MagicLinkRequest):
     return await send_magic_link(request, payload.email, payload.redirect)
 
 
-@router.post("/register-magic-link", response_model=MagicLinkResponse)
+@router.post("/register-magic-link", response_model=RegistrationMagicLinkResponse)
 async def register_magic_link(request: Request, payload: RegistrationMagicLinkRequest):
     """Start an explicit self-service registration without provisioning identity."""
     return await send_registration_magic_link(request, payload)
