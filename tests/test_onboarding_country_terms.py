@@ -7,15 +7,19 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
-from app.models.tenant_financial_profile import TenantFinancialProfileUpdate
+from app.models.onboarding import OnboardingBusinessProfileUpdate
 from app.routers import billing
 from app.services import legal_service, onboarding_service
 
 
-def _profile_row(tenant_id, *, country="US", currency="USD", revision=1):
+def _profile_row(
+    tenant_id, *, business_name="Cafe Central", country="US", currency="USD", revision=1
+):
     colombia = country == "CO"
     return {
+        "business_name": business_name,
         "profile_tenant_id": tenant_id,
         "country_code": country,
         "base_currency_code": currency,
@@ -30,6 +34,15 @@ def _profile_row(tenant_id, *, country="US", currency="USD", revision=1):
     }
 
 
+def test_business_name_rejects_the_pending_placeholder():
+    with pytest.raises(ValidationError):
+        OnboardingBusinessProfileUpdate(
+            business_name="  Negocio pendiente  ",
+            country_code="CO",
+            base_currency_code="COP",
+        )
+
+
 @pytest.mark.asyncio
 async def test_catalog_read_has_no_default_profile_write():
     tenant_id = uuid4()
@@ -37,6 +50,7 @@ async def test_catalog_read_has_no_default_profile_write():
     conn.fetchrow = AsyncMock(return_value={
         "lifecycle_status": "pending",
         "state": "business_profile_pending",
+        "business_name": "Negocio pendiente",
         "profile_tenant_id": None,
     })
 
@@ -64,10 +78,15 @@ async def test_initial_selection_is_atomic_and_advances_to_terms():
     result = await onboarding_service.update_onboarding_financial_profile(
         conn,
         tenant_id,
-        TenantFinancialProfileUpdate(country_code="us", base_currency_code="usd"),
+        OnboardingBusinessProfileUpdate(
+            business_name="  Cafe   Central  ",
+            country_code="us",
+            base_currency_code="usd",
+        ),
     )
 
     assert result.data.profile.country_code == "US"
+    assert result.data.business_name == "Cafe Central"
     assert result.data.profile.selection_revision == 1
     assert result.data.state == "terms_pending"
     assert result.data.next_step == "terms"
@@ -76,6 +95,9 @@ async def test_initial_selection_is_atomic_and_advances_to_terms():
     assert "FOR UPDATE OF t, o" in lock_query
     assert "ON CONFLICT (tenant_id) DO UPDATE" in upsert_query
     assert "selection_revision + 1" in upsert_query
+    tenant_update = conn.execute.await_args.args[0]
+    assert "UPDATE tenants" in tenant_update
+    assert conn.execute.await_args.args[2] == "Cafe Central"
 
 
 @pytest.mark.asyncio
@@ -91,7 +113,11 @@ async def test_idempotent_selection_keeps_database_revision():
     result = await onboarding_service.update_onboarding_financial_profile(
         conn,
         tenant_id,
-        TenantFinancialProfileUpdate(country_code="US", base_currency_code="USD"),
+        OnboardingBusinessProfileUpdate(
+            business_name="Cafe Central",
+            country_code="US",
+            base_currency_code="USD",
+        ),
     )
 
     assert result.data.profile.selection_revision == 4
@@ -110,7 +136,11 @@ async def test_paid_onboarding_cannot_change_financial_selection():
         await onboarding_service.update_onboarding_financial_profile(
             conn,
             uuid4(),
-            TenantFinancialProfileUpdate(country_code="CO", base_currency_code="COP"),
+            OnboardingBusinessProfileUpdate(
+                business_name="Cafe Central",
+                country_code="CO",
+                base_currency_code="COP",
+            ),
         )
 
     assert exc.value.status_code == 409
@@ -259,6 +289,7 @@ async def test_resume_status_includes_profile_and_current_acceptance():
     version_id = uuid4()
     row = {
         "tenant_id": tenant_id,
+        "business_name": "Cafe Central",
         "lifecycle_status": "pending",
         "state": "payment_pending",
         "email_verified_at": datetime.now(timezone.utc),
@@ -279,6 +310,7 @@ async def test_resume_status_includes_profile_and_current_acceptance():
         result = await onboarding_service.get_status_for_tenant(conn, tenant_id)
 
     assert result.data.financial_profile.country_code == "CO"
+    assert result.data.business_name == "Cafe Central"
     assert result.data.financial_profile.selection_revision == 2
     assert result.data.terms_accepted is True
     assert result.data.terms_version == "1.1"

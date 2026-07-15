@@ -2,12 +2,13 @@ from datetime import datetime
 from typing import Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.tenant_financial_profile import (
     CountryCurrencyOption,
     CurrencyMetadata,
     TenantFinancialProfile,
+    TenantFinancialProfileUpdate,
 )
 
 
@@ -30,6 +31,7 @@ class OnboardingStatus(BaseModel):
     state: Optional[OnboardingState] = None
     next_step: Optional[str] = Field(alias="nextStep", default=None)
     email_verified_at: Optional[datetime] = Field(alias="emailVerifiedAt", default=None)
+    business_name: str = Field(alias="businessName")
     financial_profile: Optional[TenantFinancialProfile] = Field(
         alias="financialProfile", default=None
     )
@@ -45,7 +47,23 @@ class OnboardingStatusResponse(BaseModel):
     data: OnboardingStatus
 
 
+class OnboardingBusinessProfileUpdate(TenantFinancialProfileUpdate):
+    business_name: str = Field(alias="businessName", min_length=2, max_length=120)
+
+    @field_validator("business_name", mode="before")
+    @classmethod
+    def _normalize_business_name(cls, value: str) -> str:
+        normalized = " ".join(value.split()) if isinstance(value, str) else value
+        if isinstance(normalized, str) and normalized.casefold() == "negocio pendiente":
+            raise ValueError("Business name is required")
+        return normalized
+
+    class Config:
+        populate_by_name = True
+
+
 class OnboardingFinancialData(BaseModel):
+    business_name: str = Field(alias="businessName")
     profile: Optional[TenantFinancialProfile] = None
     catalog: list[CountryCurrencyOption]
     currencies: list[CurrencyMetadata]
