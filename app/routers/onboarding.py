@@ -2,8 +2,11 @@ from fastapi import APIRouter, Body, Request
 
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
-from app.models.onboarding import OnboardingFinancialResponse, OnboardingStatusResponse
-from app.models.tenant_financial_profile import TenantFinancialProfileUpdate
+from app.models.onboarding import (
+    OnboardingBusinessProfileUpdate,
+    OnboardingFinancialResponse,
+    OnboardingStatusResponse,
+)
 from app.services.onboarding_service import (
     get_onboarding_financial_profile,
     get_status_for_tenant,
@@ -31,7 +34,7 @@ async def get_financial_profile(request: Request):
 @router.put("/financial-profile", response_model=OnboardingFinancialResponse)
 async def update_financial_profile(
     request: Request,
-    profile_data: TenantFinancialProfileUpdate = Body(...),
+    profile_data: OnboardingBusinessProfileUpdate = Body(...),
 ):
     session = require_valid_session(request)
     async with get_db_connection() as conn:

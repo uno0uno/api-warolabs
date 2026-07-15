@@ -9,15 +9,13 @@ from app.config import settings
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.core.onboarding_access import next_step_for_state
 from app.models.onboarding import (
+    OnboardingBusinessProfileUpdate,
     OnboardingFinancialData,
     OnboardingFinancialResponse,
     OnboardingStatus,
     OnboardingStatusResponse,
 )
-from app.models.tenant_financial_profile import (
-    TenantFinancialProfile,
-    TenantFinancialProfileUpdate,
-)
+from app.models.tenant_financial_profile import TenantFinancialProfile
 from app.services import legal_service
 from app.services import tenant_financial_profile_service as financial_service
 
@@ -336,6 +334,7 @@ def _financial_response(row: Any) -> OnboardingFinancialResponse:
     state = row["state"]
     return OnboardingFinancialResponse(
         data=OnboardingFinancialData(
+            businessName=row["business_name"],
             profile=_profile_from_row(row),
             catalog=financial_service._catalog(),
             currencies=financial_service._currencies(),
@@ -351,7 +350,7 @@ async def get_onboarding_financial_profile(
     tenant_id = _require_tenant_id(tenant_id)
     row = await conn.fetchrow(
         """
-        SELECT t.lifecycle_status, o.state,
+        SELECT t.lifecycle_status, t.name AS business_name, o.state,
                fp.tenant_id AS profile_tenant_id,
                fp.country_code, fp.base_currency_code,
                fp.accounting_localization, fp.document_mode, fp.fiscal_provider,
@@ -372,7 +371,7 @@ async def get_onboarding_financial_profile(
 async def update_onboarding_financial_profile(
     conn,
     tenant_id: Optional[UUID],
-    data: TenantFinancialProfileUpdate,
+    data: OnboardingBusinessProfileUpdate,
 ) -> OnboardingFinancialResponse:
     tenant_id = _require_tenant_id(tenant_id)
     context = await conn.fetchrow(
@@ -389,6 +388,16 @@ async def update_onboarding_financial_profile(
 
     country_code, currency_code = financial_service.validate_country_currency_pair(
         data.country_code, data.base_currency_code
+    )
+    await conn.execute(
+        """
+        UPDATE tenants
+        SET name = $2
+        WHERE id = $1
+          AND name IS DISTINCT FROM $2
+        """,
+        tenant_id,
+        data.business_name,
     )
     accounting_localization, document_mode, fiscal_provider = (
         financial_service._financial_mode(country_code)
@@ -450,6 +459,7 @@ async def update_onboarding_financial_profile(
         tenant_id,
     )
     result = dict(profile)
+    result["business_name"] = data.business_name
     result["lifecycle_status"] = "pending"
     result["state"] = state_row["state"]
     return _financial_response(result)
@@ -562,7 +572,7 @@ async def get_status_for_tenant(conn, tenant_id: UUID) -> OnboardingStatusRespon
     tenant_id = _require_tenant_id(tenant_id)
     row = await conn.fetchrow(
         """
-        SELECT t.id AS tenant_id, t.lifecycle_status,
+        SELECT t.id AS tenant_id, t.name AS business_name, t.lifecycle_status,
                o.state, o.email_verified_at,
                fp.tenant_id AS profile_tenant_id,
                fp.country_code, fp.base_currency_code,
@@ -589,6 +599,7 @@ async def get_status_for_tenant(conn, tenant_id: UUID) -> OnboardingStatusRespon
         data=OnboardingStatus(
             tenantId=row["tenant_id"],
             lifecycleStatus=row["lifecycle_status"],
+            businessName=row["business_name"],
             state=row.get("state"),
             nextStep=next_step_for_state(row.get("state")),
             emailVerifiedAt=row.get("email_verified_at"),
