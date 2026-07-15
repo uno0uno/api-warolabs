@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
@@ -34,6 +35,11 @@ def _credential_hash(email: str, kind: str, value: str) -> str:
     return hmac.new(settings.auth_secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
 
 
+def _opaque_token_hash(value: str) -> str:
+    payload = f"onboarding:opaque-token:{value}".encode("utf-8")
+    return hmac.new(settings.auth_secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+
+
 async def store_registration_challenge(
     conn,
     *,
@@ -42,8 +48,18 @@ async def store_registration_challenge(
     code: str,
     request_ip: Optional[str],
     user_agent: Optional[str],
+    phone_country_code: Optional[int] = None,
+    phone_number: Optional[str] = None,
+    consent: bool = False,
+    source: Optional[str] = None,
+    content: Optional[str] = None,
+    campaign: Optional[str] = None,
+    variant: Optional[str] = None,
 ) -> bool:
     """Persist a pre-user challenge for an address without an active tenant."""
+    if consent is not True:
+        raise HTTPException(status_code=422, detail="Registration consent is required")
+
     # Serialize the read/check/write sequence for every affected rate-limit
     # bucket. Sorting avoids deadlocks when requests share only one bucket.
     lock_keys = [f"onboarding-email:{email}"]
@@ -77,6 +93,7 @@ async def store_registration_challenge(
         UPDATE onboarding_email_challenges
         SET consumed_at = COALESCE(consumed_at, NOW())
         WHERE normalized_email = $1
+          AND purpose = 'registration'
           AND consumed_at IS NULL
         """,
         email,
@@ -84,16 +101,57 @@ async def store_registration_challenge(
     await conn.execute(
         """
         INSERT INTO onboarding_email_challenges (
-            normalized_email, token_hash, code_hash, request_ip,
-            user_agent, expires_at
+            normalized_email, token_hash, code_hash, opaque_token_hash,
+            purpose, request_ip, user_agent, expires_at,
+            phone_country_code, phone_number, consent_at, consent_version,
+            first_source, first_content, first_campaign, first_variant,
+            last_source, last_content, last_campaign, last_variant
         )
-        VALUES ($1, $2, $3, $4::inet, $5, NOW() + INTERVAL '15 minutes')
+        VALUES (
+            $1, $2, $3, $4, 'registration', $5::inet, $6,
+            NOW() + INTERVAL '15 minutes', $7, $8, NOW(),
+            'self_service_registration_v1',
+            COALESCE((
+                SELECT first_source FROM onboarding_email_challenges
+                WHERE normalized_email = $1 AND purpose = 'registration'
+                ORDER BY created_at ASC LIMIT 1
+            ), $9),
+            COALESCE((
+                SELECT first_content FROM onboarding_email_challenges
+                WHERE normalized_email = $1 AND purpose = 'registration'
+                ORDER BY created_at ASC LIMIT 1
+            ), $10),
+            COALESCE((
+                SELECT first_campaign FROM onboarding_email_challenges
+                WHERE normalized_email = $1 AND purpose = 'registration'
+                ORDER BY created_at ASC LIMIT 1
+            ), $11),
+            COALESCE((
+                SELECT first_variant FROM onboarding_email_challenges
+                WHERE normalized_email = $1 AND purpose = 'registration'
+                ORDER BY created_at ASC LIMIT 1
+            ), $12),
+            $9, $10, $11, $12
+        )
         """,
         email,
         _credential_hash(email, "token", token),
         _credential_hash(email, "code", code),
+        _opaque_token_hash(token),
         request_ip,
         user_agent,
+        phone_country_code,
+        phone_number,
+        source,
+        content,
+        campaign,
+        variant,
+    )
+    await conn.execute(
+        """
+        DELETE FROM onboarding_email_challenges
+        WHERE created_at < NOW() - INTERVAL '24 hours'
+        """
     )
     return True
 
@@ -126,49 +184,86 @@ async def _identity_for_tenant(conn, user_id: UUID, tenant_id: UUID) -> Optional
 async def complete_registration(
     conn,
     *,
-    email: str,
+    email: Optional[str],
     credential: str,
     kind: str,
+    opaque_token: bool = False,
+    legacy_only: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Consume a challenge and atomically create or resume pending identity."""
     if kind not in {"token", "code"}:
         raise ValueError("Unsupported onboarding credential kind")
 
-    hash_column = "token_hash" if kind == "token" else "code_hash"
-    challenge = await conn.fetchrow(
-        f"""
-        SELECT id, consumed_at, completed_user_id, completed_tenant_id
-        FROM onboarding_email_challenges
-        WHERE normalized_email = $1
-          AND {hash_column} = $2
-          AND expires_at > NOW()
-          AND failed_attempts < $3
-        ORDER BY created_at DESC
-        LIMIT 1
-        FOR UPDATE
-        """,
-        email,
-        _credential_hash(email, kind, credential),
-        MAX_VERIFY_ATTEMPTS,
-    )
-    if not challenge:
-        await conn.execute(
-            """
-            UPDATE onboarding_email_challenges
-            SET failed_attempts = LEAST(failed_attempts + 1, $2)
-            WHERE id = (
-                SELECT id
-                FROM onboarding_email_challenges
-                WHERE normalized_email = $1
-                  AND consumed_at IS NULL
-                  AND expires_at > NOW()
-                ORDER BY created_at DESC
-                LIMIT 1
-            )
+    challenge_fields = """
+        id, normalized_email, consumed_at, completed_user_id, completed_tenant_id,
+        phone_country_code, phone_number,
+        first_source, first_content, first_campaign, first_variant,
+        last_source, last_content, last_campaign, last_variant
+    """
+    if opaque_token:
+        if kind != "token":
+            raise ValueError("Opaque lookup is only supported for registration tokens")
+        challenge = await conn.fetchrow(
+            f"""
+            SELECT {challenge_fields}
+            FROM onboarding_email_challenges
+            WHERE purpose = 'registration'
+              AND opaque_token_hash = $1
+              AND expires_at > NOW()
+              AND failed_attempts < $2
+            LIMIT 1
+            FOR UPDATE
             """,
-            email,
+            _opaque_token_hash(credential),
             MAX_VERIFY_ATTEMPTS,
         )
+    else:
+        if not email:
+            raise ValueError("Email is required for code and legacy token verification")
+        hash_column = "token_hash" if kind == "token" else "code_hash"
+        legacy_filter = "AND opaque_token_hash IS NULL" if legacy_only else ""
+        challenge = await conn.fetchrow(
+            f"""
+            SELECT {challenge_fields}
+            FROM onboarding_email_challenges
+            WHERE purpose = 'registration'
+              AND normalized_email = $1
+              AND {hash_column} = $2
+              {legacy_filter}
+              AND expires_at > NOW()
+              AND failed_attempts < $3
+            ORDER BY created_at DESC
+            LIMIT 1
+            FOR UPDATE
+            """,
+            email,
+            _credential_hash(email, kind, credential),
+            MAX_VERIFY_ATTEMPTS,
+        )
+    if not challenge:
+        if email:
+            await conn.execute(
+                """
+                UPDATE onboarding_email_challenges
+                SET failed_attempts = LEAST(failed_attempts + 1, $2)
+                WHERE id = (
+                    SELECT id
+                    FROM onboarding_email_challenges
+                    WHERE purpose = 'registration'
+                      AND normalized_email = $1
+                      AND consumed_at IS NULL
+                      AND expires_at > NOW()
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                )
+                """,
+                email,
+                MAX_VERIFY_ATTEMPTS,
+            )
+        return None
+
+    email = challenge.get("normalized_email") or email
+    if not email:
         return None
 
     if challenge.get("completed_user_id") and challenge.get("completed_tenant_id"):
@@ -286,6 +381,89 @@ async def complete_registration(
                 "next_step": next_step_for_state(onboarding["state"]),
             }
 
+    notification = None
+    if identity["lifecycle_status"] == "pending":
+        phone_number = challenge.get("phone_number")
+        phone_country_code = challenge.get("phone_country_code")
+        if phone_number and phone_country_code:
+            await conn.execute(
+                """
+                UPDATE profile
+                SET phone_number = $2, phone_country_code = $3, updated_at = NOW()
+                WHERE id = $1
+                """,
+                identity["user_id"],
+                phone_number,
+                phone_country_code,
+            )
+
+        full_phone = (
+            f"+{phone_country_code}{phone_number}"
+            if phone_country_code and phone_number
+            else None
+        )
+        lead = await conn.fetchrow(
+            """
+            INSERT INTO leads (
+                profile_id, tenant_id, email, phone, source, status,
+                utm_source, utm_campaign, utm_content
+            )
+            VALUES ($1, $2, $3, $4, 'self_service_registration', 'verified', $5, $6, $7)
+            ON CONFLICT (tenant_id) WHERE source = 'self_service_registration'
+            DO UPDATE SET
+                email = EXCLUDED.email,
+                phone = COALESCE(EXCLUDED.phone, leads.phone),
+                status = 'verified'
+            RETURNING id
+            """,
+            identity["user_id"],
+            identity["tenant_id"],
+            email,
+            full_phone,
+            challenge.get("first_source"),
+            challenge.get("first_campaign"),
+            challenge.get("first_content"),
+        )
+        metadata = json.dumps({
+            "variant": challenge.get("last_variant"),
+            "first_variant": challenge.get("first_variant"),
+        })
+        event = await conn.fetchrow(
+            """
+            INSERT INTO lead_interactions (
+                lead_id, interaction_type, source, campaign, content,
+                metadata, interaction_context
+            )
+            VALUES ($1, 'registration_verified', $2, $3, $4, $5::jsonb,
+                    'self_service_registration')
+            ON CONFLICT (lead_id, interaction_type)
+                WHERE interaction_type = 'registration_verified'
+            DO NOTHING
+            RETURNING id
+            """,
+            lead["id"],
+            challenge.get("last_source"),
+            challenge.get("last_campaign"),
+            challenge.get("last_content"),
+            metadata,
+        )
+        if event:
+            notification = {
+                "email": email,
+                "phone": phone_number,
+                "phone_country_code": phone_country_code,
+                "tenant_name": (
+                    identity["tenant_name"]
+                    if identity["tenant_name"] != "Negocio pendiente"
+                    else None
+                ),
+                "status": identity["onboarding_state"],
+                "source": challenge.get("last_source"),
+                "content": challenge.get("last_content"),
+                "campaign": challenge.get("last_campaign"),
+                "variant": challenge.get("last_variant"),
+            }
+
     await conn.execute(
         """
         UPDATE onboarding_email_challenges
@@ -298,6 +476,7 @@ async def complete_registration(
         identity["user_id"],
         identity["tenant_id"],
     )
+    identity["registration_notification"] = notification
     return identity
 
 

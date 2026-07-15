@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field, field_validator
+import re
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from datetime import datetime
 from typing import Literal, Optional, Dict, Any
 from uuid import UUID
@@ -69,6 +71,63 @@ class MagicLinkRequest(BaseModel):
 class MagicLinkResponse(BaseModel):
     success: bool = True
     message: str = "Magic link sent successfully"
+
+
+_ATTRIBUTION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+
+
+class RegistrationMagicLinkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    phone_country_code: int = Field(ge=1, le=999)
+    phone_number: str
+    consent: Literal[True]
+    source: Optional[str] = None
+    content: Optional[str] = None
+    campaign: Optional[str] = None
+    variant: Optional[str] = None
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, value: str) -> str:
+        return normalize_email(value)
+
+    @field_validator("phone_number", mode="before")
+    @classmethod
+    def _normalize_phone(cls, value: str) -> str:
+        digits = re.sub(r"\D", "", value or "")
+        if len(digits) < 7 or len(digits) > 15:
+            raise ValueError("Phone number must contain 7 to 15 digits")
+        return digits
+
+    @field_validator("source", "content", "campaign", "variant")
+    @classmethod
+    def _validate_attribution(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not _ATTRIBUTION_PATTERN.fullmatch(normalized):
+            raise ValueError("Attribution values must be slug-like and at most 100 characters")
+        return normalized
+
+
+class RegistrationVerifyTokenRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=32, max_length=128, pattern=r"^[A-Fa-f0-9]+$")
+
+
+class RegistrationVerifyCodeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    code: str = Field(pattern=r"^[0-9]{6}$")
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, value: str) -> str:
+        return normalize_email(value)
 
 class VerifyCodeRequest(BaseModel):
     email: str

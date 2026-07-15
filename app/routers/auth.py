@@ -1,11 +1,21 @@
 import logging
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
 from app.services.auth_service import get_session_data, switch_tenant, update_profile, upload_profile_avatar
-from app.services.magic_link_service import send_magic_link, verify_code, verify_token
+from app.services.magic_link_service import (
+    send_magic_link,
+    send_registration_magic_link,
+    verify_code,
+    verify_registration_code,
+    verify_registration_token,
+    verify_token,
+)
 from app.models.auth import (
     SessionResponse,
     MagicLinkRequest,
     MagicLinkResponse,
+    RegistrationMagicLinkRequest,
+    RegistrationVerifyCodeRequest,
+    RegistrationVerifyTokenRequest,
     VerifyCodeRequest,
     VerifyCodeResponse,
     VerifyTokenRequest,
@@ -52,6 +62,12 @@ async def sign_in_magic_link(request: Request, payload: MagicLinkRequest):
     """
     return await send_magic_link(request, payload.email, payload.redirect)
 
+
+@router.post("/register-magic-link", response_model=MagicLinkResponse)
+async def register_magic_link(request: Request, payload: RegistrationMagicLinkRequest):
+    """Start an explicit self-service registration without provisioning identity."""
+    return await send_registration_magic_link(request, payload)
+
 @router.post("/verify-code", response_model=VerifyCodeResponse)
 async def verify_magic_code(request: Request, response: Response, payload: VerifyCodeRequest):
     """
@@ -67,6 +83,26 @@ async def verify_magic_token(request: Request, response: Response, payload: Veri
     Tenant context automatically validated from request origin via middleware
     """
     return await verify_token(request, response, payload.email, payload.token)
+
+
+@router.post("/registration/verify", response_model=VerifyTokenResponse)
+async def verify_registration_magic_token(
+    request: Request,
+    response: Response,
+    payload: RegistrationVerifyTokenRequest,
+):
+    """Verify an opaque registration token without putting email in the URL."""
+    return await verify_registration_token(request, response, payload.token)
+
+
+@router.post("/registration/verify-code", response_model=VerifyCodeResponse)
+async def verify_registration_magic_code(
+    request: Request,
+    response: Response,
+    payload: RegistrationVerifyCodeRequest,
+):
+    """Verify a registration code with email kept in the request body."""
+    return await verify_registration_code(request, response, str(payload.email), payload.code)
 
 @router.post("/switch-tenant", response_model=SwitchTenantResponse)
 async def switch_tenant_endpoint(request: Request, response: Response, payload: SwitchTenantRequest):

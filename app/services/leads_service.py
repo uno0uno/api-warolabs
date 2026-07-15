@@ -23,6 +23,42 @@ _FOOTER = (
 )
 
 
+async def notify_self_service_registration(
+    *,
+    email: str,
+    phone: Optional[str],
+    phone_country_code: Optional[int],
+    tenant_name: Optional[str],
+    status: Optional[str],
+    source: Optional[str],
+    content: Optional[str],
+    campaign: Optional[str],
+    variant: Optional[str],
+) -> None:
+    """Notify the internal lead channel without sending legacy advisory email."""
+    try:
+        from app.services.discord_service import discord_leads_service
+
+        if not discord_leads_service:
+            return
+        sent = await discord_leads_service.notify_new_lead(
+            email=email,
+            phone=phone,
+            phone_country_code=phone_country_code,
+            button_source="self_service_registration",
+            tenant_name=tenant_name,
+            status=status,
+            source=source,
+            content=content,
+            campaign=campaign,
+            variant=variant,
+        )
+        if not sent:
+            logger.error("[self_service_registration] Discord notification was not delivered")
+    except Exception:
+        logger.exception("[self_service_registration] Discord notification failed")
+
+
 def _build_confirmation_email(email: str) -> str:
     return (
         "WARO Colombia\n\n"
