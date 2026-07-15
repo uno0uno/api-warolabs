@@ -31,7 +31,10 @@ async def test_new_email_challenge_is_hashed_and_does_not_create_identity():
         )
 
     assert created is True
-    insert = conn.execute.await_args_list[1]
+    insert = next(
+        call for call in conn.execute.await_args_list
+        if "INSERT INTO onboarding_email_challenges" in call.args[0]
+    )
     assert "onboarding_email_challenges" in insert.args[0]
     assert "raw-token" not in insert.args
     assert "123456" not in insert.args
@@ -58,7 +61,7 @@ async def test_profile_without_active_tenant_can_start_verified_onboarding():
     )
 
     assert created is True
-    assert conn.execute.await_count == 2
+    assert conn.execute.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -77,7 +80,11 @@ async def test_registration_challenge_enforces_persisted_rate_limit():
         )
 
     assert exc.value.status_code == 429
-    conn.execute.assert_not_awaited()
+    assert conn.execute.await_count == 2
+    assert all(
+        "pg_advisory_xact_lock" in call.args[0]
+        for call in conn.execute.await_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -255,6 +262,7 @@ async def test_magic_token_verification_returns_pending_session_contract():
 def test_migration_has_database_idempotency_and_lifecycle_guards():
     sql = Path("migrations/106_onboarding_registration.sql").read_text()
     assert "profile_email_lower_unique" in sql
+    assert "duplicate group(s) require identity reconciliation" in sql
     assert "tenants_lifecycle_status_check" in sql
     assert "tenant_onboarding_owner_in_progress_unique" in sql
     assert "tenant_members_pending_owner_unique" in sql

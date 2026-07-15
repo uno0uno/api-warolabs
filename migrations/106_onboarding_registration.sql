@@ -1,5 +1,29 @@
 -- Issue #630: resumable self-service registration without operational access.
 
+-- Fail before changing the schema when historical identities collide under the
+-- normalized comparison used by onboarding. These rows require an explicit
+-- identity merge; silently choosing or deleting one would be destructive.
+DO $$
+DECLARE
+    duplicate_groups integer;
+BEGIN
+    SELECT COUNT(*)
+    INTO duplicate_groups
+    FROM (
+        SELECT lower(trim(email))
+        FROM profile
+        WHERE email IS NOT NULL AND trim(email) <> ''
+        GROUP BY lower(trim(email))
+        HAVING COUNT(*) > 1
+    ) duplicates;
+
+    IF duplicate_groups > 0 THEN
+        RAISE EXCEPTION
+            'Cannot enforce normalized profile email uniqueness: % duplicate group(s) require identity reconciliation',
+            duplicate_groups;
+    END IF;
+END $$;
+
 CREATE UNIQUE INDEX IF NOT EXISTS profile_email_lower_unique
     ON profile (lower(trim(email)));
 

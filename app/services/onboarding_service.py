@@ -44,6 +44,17 @@ async def store_registration_challenge(
     user_agent: Optional[str],
 ) -> bool:
     """Persist a pre-user challenge for an address without an active tenant."""
+    # Serialize the read/check/write sequence for every affected rate-limit
+    # bucket. Sorting avoids deadlocks when requests share only one bucket.
+    lock_keys = [f"onboarding-email:{email}"]
+    if request_ip:
+        lock_keys.append(f"onboarding-ip:{request_ip}")
+    for lock_key in sorted(lock_keys):
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            lock_key,
+        )
+
     limits = await conn.fetchrow(
         """
         SELECT
@@ -376,7 +387,7 @@ async def update_onboarding_financial_profile(
     tenant_id = _require_tenant_id(tenant_id)
     context = await conn.fetchrow(
         """
-        SELECT t.lifecycle_status, o.state
+        SELECT t.lifecycle_status, t.name AS business_name, o.state
         FROM tenants t
         JOIN tenant_onboarding o ON o.tenant_id = t.id
         WHERE t.id = $1
@@ -389,6 +400,40 @@ async def update_onboarding_financial_profile(
     country_code, currency_code = financial_service.validate_country_currency_pair(
         data.country_code, data.base_currency_code
     )
+    if context["state"] == "payment_pending":
+        profile = await conn.fetchrow(
+            """
+            SELECT tenant_id AS profile_tenant_id,
+                   country_code, base_currency_code,
+                   accounting_localization, document_mode, fiscal_provider,
+                   selection_revision,
+                   created_at AS profile_created_at,
+                   updated_at AS profile_updated_at
+            FROM tenant_financial_profiles
+            WHERE tenant_id = $1
+            FOR UPDATE
+            """,
+            tenant_id,
+        )
+        if (
+            not profile
+            or context["business_name"] != data.business_name
+            or profile["country_code"] != country_code
+            or profile["base_currency_code"] != currency_code
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ONBOARDING_FINANCIAL_PROFILE_LOCKED",
+                    "state": context["state"],
+                },
+            )
+        result = dict(profile)
+        result["business_name"] = context["business_name"]
+        result["lifecycle_status"] = context["lifecycle_status"]
+        result["state"] = context["state"]
+        return _financial_response(result)
+
     await conn.execute(
         """
         UPDATE tenants
