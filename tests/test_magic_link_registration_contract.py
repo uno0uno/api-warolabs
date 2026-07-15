@@ -139,7 +139,7 @@ async def test_registration_link_is_opaque_and_challenge_contains_no_raw_secret(
 
 
 @pytest.mark.asyncio
-async def test_existing_identity_registration_sends_login_instead_of_provisioning():
+async def test_existing_identity_registration_redirects_to_login_without_sending_code():
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value={
         "user_id": uuid4(),
@@ -151,13 +151,13 @@ async def test_existing_identity_registration_sends_login_instead_of_provisionin
     async def db_ctx(**_kwargs):
         yield conn
 
-    login = AsyncMock()
     with patch("app.services.magic_link_service.get_db_connection", side_effect=db_ctx), patch(
         "app.services.magic_link_service.require_valid_tenant", return_value=_tenant()
-    ), patch("app.services.magic_link_service.send_magic_link", login):
-        await send_registration_magic_link(_request(), _payload())
+    ), patch("app.services.magic_link_service.send_magic_link", new=AsyncMock()) as login:
+        result = await send_registration_magic_link(_request(), _payload())
 
-    login.assert_awaited_once()
+    assert result.action == "login_required"
+    login.assert_not_awaited()
     conn.execute.assert_not_awaited()
 
 
