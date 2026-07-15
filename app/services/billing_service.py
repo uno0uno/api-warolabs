@@ -991,14 +991,31 @@ async def get_onboarding_payment_attempt(
     conn,
     *,
     tenant_id: UUID,
-    attempt_id: UUID,
+    attempt_id: Optional[UUID] = None,
 ) -> Dict[str, Any]:
-    row = await conn.fetchrow("""
-        SELECT id, plan_id, provider_reference, provider_transaction_id,
-               expected_amount_in_cents, currency, status
-        FROM billing_payment_attempts
-        WHERE id = $1 AND tenant_id = $2
-    """, attempt_id, tenant_id)
+    if attempt_id is None:
+        row = await conn.fetchrow(
+            """
+            SELECT id, plan_id, provider_reference, provider_transaction_id,
+                   expected_amount_in_cents, currency, status
+            FROM billing_payment_attempts
+            WHERE tenant_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            tenant_id,
+        )
+    else:
+        row = await conn.fetchrow(
+            """
+            SELECT id, plan_id, provider_reference, provider_transaction_id,
+                   expected_amount_in_cents, currency, status
+            FROM billing_payment_attempts
+            WHERE id = $1 AND tenant_id = $2
+            """,
+            attempt_id,
+            tenant_id,
+        )
     if row is None:
         raise HTTPException(status_code=404, detail="Intento de pago no encontrado")
     return {

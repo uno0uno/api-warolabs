@@ -124,6 +124,33 @@ async def test_each_retry_inserts_a_new_payment_attempt():
 
 
 @pytest.mark.asyncio
+async def test_payment_status_can_resume_latest_tenant_attempt():
+    tenant_id = uuid4()
+    attempt = _attempt_row()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "id": attempt["id"],
+        "plan_id": attempt["plan_id"],
+        "provider_reference": attempt["provider_reference"],
+        "provider_transaction_id": None,
+        "expected_amount_in_cents": attempt["expected_amount_in_cents"],
+        "currency": "COP",
+        "status": "pending",
+    })
+
+    result = await billing_service.get_onboarding_payment_attempt(
+        conn,
+        tenant_id=tenant_id,
+    )
+
+    assert result["attempt_id"] == attempt["id"]
+    query = conn.fetchrow.await_args.args[0]
+    assert "WHERE tenant_id = $1" in query
+    assert "ORDER BY created_at DESC" in query
+    assert conn.fetchrow.await_args.args[1] == tenant_id
+
+
+@pytest.mark.asyncio
 async def test_wompi_link_uses_exact_amount_single_use_and_opaque_attempt_sku():
     attempt_id = uuid4()
     response = MagicMock(status_code=201)

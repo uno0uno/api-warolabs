@@ -91,7 +91,9 @@ async def create_payment_checkout(
         amount_in_cents=plan["amount_in_cents"],
         billing_cycle="annual",
         sku=attempt_id,
-        redirect_url=f"{frontend_host}/billing/confirmacion",
+        redirect_url=(
+            f"{frontend_host}/billing/confirmacion?attempt_id={attempt_id}"
+        ),
     )
     async with get_db_connection() as conn:
         await billing_service.attach_onboarding_payment_link(
@@ -115,7 +117,7 @@ async def create_payment_checkout(
 @router.get("/payment-status", response_model=OnboardingPaymentStatusResponse)
 async def get_payment_status(
     request: Request,
-    attempt_id: UUID = Query(...),
+    attempt_id: UUID | None = Query(default=None),
 ):
     session = require_valid_session(request)
     async with get_db_connection(use_transaction=False) as conn:
