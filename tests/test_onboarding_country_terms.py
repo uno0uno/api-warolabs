@@ -105,9 +105,12 @@ async def test_idempotent_selection_keeps_database_revision():
     tenant_id = uuid4()
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(side_effect=[
-        {"lifecycle_status": "pending", "state": "payment_pending"},
+        {
+            "lifecycle_status": "pending",
+            "state": "payment_pending",
+            "business_name": "Cafe Central",
+        },
         _profile_row(tenant_id, revision=4),
-        {"state": "payment_pending"},
     ])
 
     result = await onboarding_service.update_onboarding_financial_profile(
@@ -122,6 +125,39 @@ async def test_idempotent_selection_keeps_database_revision():
 
     assert result.data.profile.selection_revision == 4
     assert result.data.state == "payment_pending"
+    conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_payment_pending_rejects_changes_after_legal_acceptance():
+    tenant_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        {
+            "lifecycle_status": "pending",
+            "state": "payment_pending",
+            "business_name": "Cafe Central",
+        },
+        _profile_row(tenant_id, country="CO", currency="COP", revision=2),
+    ])
+
+    with pytest.raises(HTTPException) as exc:
+        await onboarding_service.update_onboarding_financial_profile(
+            conn,
+            tenant_id,
+            OnboardingBusinessProfileUpdate(
+                business_name="Cafe Central",
+                country_code="US",
+                base_currency_code="USD",
+            ),
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == {
+        "code": "ONBOARDING_FINANCIAL_PROFILE_LOCKED",
+        "state": "payment_pending",
+    }
+    conn.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
