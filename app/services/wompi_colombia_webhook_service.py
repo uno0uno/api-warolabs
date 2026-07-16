@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 async def handle_transaction_updated(
     body: Dict[str, Any],
     background_tasks: BackgroundTasks,
+    provider_environment: str = "prod",
 ) -> None:
     """
     Process a verified Wompi transaction.updated event for Colombia billing.
@@ -43,7 +44,9 @@ async def handle_transaction_updated(
 
     async with get_db_connection() as conn:
         onboarding_result = await billing_service.process_onboarding_payment_transaction(
-            conn, transaction
+            conn,
+            transaction,
+            provider_environment=provider_environment,
         )
     if onboarding_result["handled"]:
         tenant_info = onboarding_result["tenant_info"]
@@ -67,6 +70,13 @@ async def handle_transaction_updated(
                 gateway_reference=payment_link_id,
                 transaction_id=transaction_id,
             )
+        return
+
+    if provider_environment != "prod":
+        logger.warning(
+            "Wompi sandbox event has no matching onboarding attempt; "
+            "legacy subscription handling skipped"
+        )
         return
 
     if wompi_status == "APPROVED":

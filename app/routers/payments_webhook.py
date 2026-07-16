@@ -23,5 +23,17 @@ async def wompi_central_webhook(
     """
     body = await request.json()
     return await wompi_webhook_router_service.dispatch_verified_event(
-        body, background_tasks
+        body, background_tasks, expected_environment="prod"
+    )
+
+
+@router.post("/wompi/sandbox", status_code=200)
+async def wompi_sandbox_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """Sandbox Wompi webhook; isolated from the production events secret."""
+    body = await request.json()
+    return await wompi_webhook_router_service.dispatch_verified_event(
+        body, background_tasks, expected_environment="test"
     )

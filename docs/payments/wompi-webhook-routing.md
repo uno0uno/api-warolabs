@@ -2,11 +2,31 @@
 
 **Status:** Classification rules for epic [#351](https://github.com/uno0uno/api-warolabs/issues/351) — router implementation is [#353](https://github.com/uno0uno/api-warolabs/issues/353).  
 **Issue:** [#352](https://github.com/uno0uno/api-warolabs/issues/352)  
-**Last updated:** 2026-06-01
+**Last updated:** 2026-07-15
 
-Wompi sends `transaction.updated` events to a **single merchant webhook URL**. Today that URL points at **api.warotickets.com**, so Colombia billing (`tenant_subscriptions`) never receives events. Epic #351 adds a **central ingress** on **api.warocol.com** that verifies the signature once and **dispatches** to existing handlers without rewriting them.
+Wompi sends `transaction.updated` events to the configured URL for each
+environment. Production points at the central ingress on
+**api.warolabs.com**, which verifies the signature once and dispatches to the
+existing product handler.
 
 This document defines **how to classify** an event before dispatch. It does not change handler code.
+
+## Production and Sandbox isolation
+
+Wompi environments share the backend and public domain, but use different event
+paths and secrets:
+
+| Wompi environment | Event URL | Signed body | Server secret |
+|---|---|---|---|
+| Production | `https://api.warolabs.com/payments/webhooks/wompi` | `environment=prod` | `WOMPI_EVENTS_SECRET` |
+| Sandbox | `https://api.warolabs.com/payments/webhooks/wompi/sandbox` | `environment=test` | `WOMPI_SANDBOX_EVENTS_SECRET` |
+
+The endpoint environment, signed payload environment, and
+`billing_payment_attempts.provider_environment` must match before any billing or
+onboarding mutation. Existing attempts are migrated to `prod`. Sandbox events
+without a matching `test` attempt are acknowledged without entering legacy
+subscription activation. Secret values remain server-side and must never be
+stored in this document, Git, frontend configuration, or logs.
 
 ---
 
@@ -104,11 +124,12 @@ flowchart TD
 
 **Diagnostic:** If Wompi or logs show `{"status":"received"}`, Tickets handled the event. If `{"received": true}`, Colombia handled it.
 
-### Future central ingress (#353)
+### Central ingress (#353)
 
 | Item | Value |
 |------|--------|
-| Target public URL | `https://api.warolabs.com/payments/webhooks/wompi` (prod hostname; `api.warocol.com` is not in public DNS) |
+| Production URL | `https://api.warolabs.com/payments/webhooks/wompi` |
+| Sandbox URL | `https://api.warolabs.com/payments/webhooks/wompi/sandbox` |
 | Behavior | Verify signature once → classify per this doc → HTTP forward to handler above |
 | Colombia legacy URL | Keep `POST /billing/webhook` during transition or proxy from router |
 
@@ -147,7 +168,8 @@ Do **not** route solely on amount — use `reference`, `payment_link_id`, then `
 
 | Step | Action |
 |------|--------|
-| After #353 + Tickets #46 deployed | Set Wompi merchant event URL to **`https://api.warocol.com/payments/webhooks/wompi`** |
+| Production | Keep Wompi event URL at **`https://api.warolabs.com/payments/webhooks/wompi`** |
+| Sandbox | Set Wompi Sandbox event URL to **`https://api.warolabs.com/payments/webhooks/wompi/sandbox`** |
 | Deprecate sole URL | Stop using **only** `https://api.warotickets.com/payments/webhooks/wompi` as the merchant webhook |
 | Monitoring | Alert on unknown-classification rate; compare response body shape in logs |
 | Incident reference | Natural Food `past_due` after `payment_approved` — epic [#351](https://github.com/uno0uno/api-warolabs/issues/351) |

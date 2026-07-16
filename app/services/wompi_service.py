@@ -7,6 +7,7 @@ Reemplaza MercadoPago. Usa Payment Links de Wompi para cobros únicos
 Docs: https://docs.wompi.co/docs/colombia/links-de-pago/
 """
 import hashlib
+import hmac
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict
@@ -22,9 +23,21 @@ logger = logging.getLogger(__name__)
 WOMPI_SANDBOX_URL = "https://sandbox.wompi.co/v1"
 WOMPI_PRODUCTION_URL = "https://production.wompi.co/v1"
 
+WOMPI_PROD_ENVIRONMENT = "prod"
+WOMPI_TEST_ENVIRONMENT = "test"
+
 
 def _base_url() -> str:
     return WOMPI_PRODUCTION_URL if settings.wompi_environment == "production" else WOMPI_SANDBOX_URL
+
+
+def configured_event_environment() -> str:
+    """Map the configured Wompi API runtime to the signed event label."""
+    return (
+        WOMPI_PROD_ENVIRONMENT
+        if settings.wompi_environment == "production"
+        else WOMPI_TEST_ENVIRONMENT
+    )
 
 
 def _headers() -> Dict[str, str]:
@@ -123,14 +136,37 @@ async def create_payment_link(
     return {"wompi_link_id": link_id, "checkout_url": checkout_url}
 
 
-def verify_event_signature(event_data: Dict[str, Any]) -> bool:
+def verify_event_signature(
+    event_data: Dict[str, Any],
+    expected_environment: str = WOMPI_PROD_ENVIRONMENT,
+) -> bool:
     """
     Verifica la firma del webhook de Wompi.
 
     Wompi incluye signature.checksum en el body del evento.
     """
-    if not settings.wompi_events_secret:
-        logger.error("WOMPI_EVENTS_SECRET no configurado — webhook rechazado")
+    if expected_environment not in (WOMPI_PROD_ENVIRONMENT, WOMPI_TEST_ENVIRONMENT):
+        logger.error("Wompi webhook environment is not supported")
+        return False
+
+    if event_data.get("environment") != expected_environment:
+        logger.warning(
+            "Wompi webhook environment mismatch: expected=%s received=%s",
+            expected_environment,
+            event_data.get("environment"),
+        )
+        return False
+
+    events_secret = (
+        settings.wompi_events_secret
+        if expected_environment == WOMPI_PROD_ENVIRONMENT
+        else settings.wompi_sandbox_events_secret
+    )
+    if not events_secret:
+        logger.error(
+            "Wompi events secret is not configured for environment=%s",
+            expected_environment,
+        )
         return False
 
     signature_data = event_data.get("signature", {})
@@ -147,10 +183,10 @@ def verify_event_signature(event_data: Dict[str, Any]) -> bool:
         values.append(str(transaction.get(key, "")))
 
     values.append(str(event_data.get("timestamp", "")))
-    values.append(settings.wompi_events_secret)
+    values.append(events_secret)
 
     computed = hashlib.sha256("".join(values).encode()).hexdigest()
-    return computed == checksum
+    return hmac.compare_digest(computed, checksum)
 
 
 def map_status(wompi_status: str) -> str:

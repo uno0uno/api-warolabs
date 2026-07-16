@@ -135,6 +135,7 @@ async def forward_to_tickets(body: Dict[str, Any]) -> None:
 async def dispatch_verified_event(
     body: Dict[str, Any],
     background_tasks: BackgroundTasks,
+    expected_environment: str = wompi_service.WOMPI_PROD_ENVIRONMENT,
 ) -> Dict[str, Any]:
     """
     Verify signature, classify, and dispatch a Wompi event.
@@ -142,9 +143,15 @@ async def dispatch_verified_event(
     Returns the HTTP response body for the ingress endpoint.
     """
     event = body.get("event", "")
-    logger.info("Wompi ingress: event=%s", event)
+    logger.info(
+        "Wompi ingress: event=%s environment=%s",
+        event,
+        expected_environment,
+    )
 
-    if not wompi_service.verify_event_signature(body):
+    if not wompi_service.verify_event_signature(
+        body, expected_environment=expected_environment
+    ):
         logger.warning("Wompi ingress: invalid signature")
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
@@ -163,12 +170,19 @@ async def dispatch_verified_event(
 
     try:
         if route == WompiRoute.TICKETS:
+            if expected_environment != wompi_service.WOMPI_PROD_ENVIRONMENT:
+                logger.warning(
+                    "Wompi sandbox ingress: ignoring non-Colombia reference"
+                )
+                return {"received": True, "classification": "unknown"}
             await forward_to_tickets(body)
             return {"status": "received"}
 
         if route == WompiRoute.COLOMBIA:
             await wompi_colombia_webhook_service.handle_transaction_updated(
-                body, background_tasks
+                body,
+                background_tasks,
+                provider_environment=expected_environment,
             )
             return {"received": True}
 

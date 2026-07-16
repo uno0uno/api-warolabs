@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     wompi_public_key: Optional[str] = Field(default=None, alias='WOMPI_PUBLIC_KEY')
     wompi_private_key: Optional[str] = Field(default=None, alias='WOMPI_PRIVATE_KEY')
     wompi_events_secret: Optional[str] = Field(default=None, alias='WOMPI_EVENTS_SECRET')
+    wompi_sandbox_events_secret: Optional[str] = Field(
+        default=None, alias='WOMPI_SANDBOX_EVENTS_SECRET'
+    )
     wompi_integrity_secret: Optional[str] = Field(default=None, alias='WOMPI_INTEGRITY_SECRET')
     wompi_environment: str = Field(default='sandbox', alias='WOMPI_ENVIRONMENT')
 
