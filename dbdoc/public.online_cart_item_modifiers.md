@@ -9,6 +9,8 @@
 | modifier_id | uuid |  | false |  | [public.modifiers](public.modifiers.md) |  |
 | modifier_name | varchar |  | false |  |  |  |
 | price | numeric |  | false |  |  |  |
+| quantity | numeric(10,4) | 1 | false |  |  |  |
+| included_quantity | integer | 0 | false |  |  |  |
 | created_at | timestamp with time zone | now() | true |  |  |  |
 
 ## Constraints
@@ -18,6 +20,8 @@
 | online_cart_item_modifiers_modifier_id_fkey | FOREIGN KEY | FOREIGN KEY (modifier_id) REFERENCES modifiers(id) |
 | online_cart_item_modifiers_cart_item_id_fkey | FOREIGN KEY | FOREIGN KEY (cart_item_id) REFERENCES online_cart_items(id) ON DELETE CASCADE |
 | online_cart_item_modifiers_pkey | PRIMARY KEY | PRIMARY KEY (id) |
+| online_cart_item_modifiers_quantity_positive | CHECK | CHECK ((quantity > (0)::numeric)) |
+| online_cart_item_modifiers_included_quantity_check | CHECK | CHECK ((included_quantity >= 0)) |
 
 ## Indexes
 

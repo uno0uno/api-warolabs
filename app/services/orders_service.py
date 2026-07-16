@@ -36,6 +36,10 @@ from app.services.invoicing_presentation import (
     build_invoice_presentation,
     commercial_header_name,
 )
+from app.services.modifier_option_service import (
+    modifier_line_subtotal,
+    resolve_modifier_selections,
+)
 from fastapi import HTTPException
 from datetime import datetime, date, timezone
 import csv
@@ -1714,7 +1718,8 @@ async def get_order_items(
                         modifier_id,
                         modifier_name,
                         price_at_purchase,
-                        quantity
+                        quantity,
+                        included_quantity_at_purchase
                     FROM order_item_modifiers
                     WHERE order_item_id = $1
                 """
@@ -1727,6 +1732,9 @@ async def get_order_items(
                         "name": mod['modifier_name'],
                         "price": float(mod['price_at_purchase']),
                         "quantity": int(mod['quantity'] or 1),
+                        "included_quantity": int(
+                            mod["included_quantity_at_purchase"] or 0
+                        ),
                     }
                     for mod in modifiers_rows
                 ]
@@ -3299,6 +3307,7 @@ async def delete_order_item_modifier(
                         oim.price_at_purchase,
                         oim.modifier_name,
                         oim.quantity as modifier_qty,
+                        oim.included_quantity_at_purchase,
                         oim.modifier_id as original_modifier_id,
                         m.ingredient_id,
                         m.ingredient_quantity,
@@ -3343,7 +3352,15 @@ async def delete_order_item_modifier(
                 new_item_subtotal_query = """
                     SELECT
                         oi.price_at_purchase * oi.quantity +
-                        COALESCE(SUM(oim.price_at_purchase * oi.quantity), 0) as new_subtotal
+                        COALESCE(SUM(
+                            oim.price_at_purchase
+                            * GREATEST(
+                                COALESCE(oim.quantity, 1)
+                                - oim.included_quantity_at_purchase,
+                                0
+                              )
+                            * oi.quantity
+                        ), 0) as new_subtotal
                     FROM order_items oi
                     LEFT JOIN order_item_modifiers oim ON oim.order_item_id = oi.id
                     WHERE oi.id = $1
@@ -3732,7 +3749,20 @@ async def create_manual_order(
                     return float(modifier.get("quantity") or 1)
 
                 def modifier_unit_total(modifier: dict) -> float:
-                    return float(modifier.get("price", 0)) * modifier_quantity(modifier)
+                    return float(
+                        modifier_line_subtotal(
+                            modifier.get("price", 0),
+                            modifier_quantity(modifier),
+                            modifier.get("included_quantity", 0),
+                        )
+                    )
+
+                for item in items:
+                    item["modifiers"] = await resolve_modifier_selections(
+                        conn,
+                        UUID(str(item["product_id"])),
+                        item.get("modifiers", []),
+                    )
 
                 # Compute total server-side — never trust client total.
                 gross_total = sum(
@@ -3836,15 +3866,17 @@ async def create_manual_order(
                             """
                             INSERT INTO order_item_modifiers (
                                 order_item_id, modifier_id, modifier_name,
-                                price_at_purchase, quantity
+                                price_at_purchase, quantity,
+                                included_quantity_at_purchase
                             )
-                            VALUES ($1, $2, $3, $4, $5)
+                            VALUES ($1, $2, $3, $4, $5, $6)
                             """,
                             order_item_id,
-                            UUID(modifier["id"]),
+                            UUID(str(modifier["id"])),
                             modifier["name"],
                             float(modifier.get("price", 0)),
-                            modifier_qty
+                            modifier_qty,
+                            modifier.get("included_quantity", 0),
                         )
 
                         await deduct_modifier_inventory(

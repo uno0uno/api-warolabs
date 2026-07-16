@@ -43,9 +43,23 @@ from app.services.open_priced_service import (
     resolve_line_unit_price,
     validate_items_unit_prices,
 )
+from app.services.modifier_option_service import (
+    modifier_line_subtotal,
+    resolve_modifier_selections,
+)
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _modifier_snapshot_total(modifier: Dict[str, Any]) -> float:
+    return float(
+        modifier_line_subtotal(
+            modifier.get("price", 0),
+            modifier.get("quantity") or 1,
+            modifier.get("included_quantity") or 0,
+        )
+    )
 
 
 async def _order_payment_splits_for_gl(conn, order_id: UUID) -> List[Dict[str, Any]]:
@@ -112,7 +126,7 @@ def _cart_items_to_promo_lines(items: List[dict]) -> List[dict]:
         if raw_unit_price is None:
             raw_unit_price = item.get("product", {}).get("price")
         eligible_modifier_total = sum(
-            float(mod.get("price") or 0)
+            _modifier_snapshot_total(mod)
             for mod in item.get("modifiers", [])
             if mod.get("group_is_required") or mod.get("is_default")
         )
@@ -403,9 +417,12 @@ async def create_cart_with_batch_items(
                     unit_price = item['unit_price']
                     modifiers = item.get('modifiers', [])
                     notes = item.get('notes')
+                    modifiers = await resolve_modifier_selections(
+                        conn, UUID(str(product_id)), modifiers
+                    )
 
                     # Calculate subtotal
-                    modifiers_total = sum(mod['price'] for mod in modifiers)
+                    modifiers_total = sum(_modifier_snapshot_total(mod) for mod in modifiers)
                     subtotal = (unit_price + modifiers_total) * quantity
 
                     # Insert cart item
@@ -432,9 +449,10 @@ async def create_cart_with_batch_items(
                     if modifiers:
                         modifier_query = """
                             INSERT INTO pos_cart_item_modifiers (
-                                cart_item_id, modifier_id, modifier_name, price
+                                cart_item_id, modifier_id, modifier_name, price,
+                                quantity, included_quantity
                             )
-                            VALUES ($1, $2, $3, $4)
+                            VALUES ($1, $2, $3, $4, $5, $6)
                         """
                         for mod in modifiers:
                             await conn.execute(
@@ -442,7 +460,9 @@ async def create_cart_with_batch_items(
                                 item_id,
                                 mod['id'],
                                 mod['name'],
-                                mod['price']
+                                mod['price'],
+                                mod["quantity"],
+                                mod["included_quantity"],
                             )
 
                     await _refresh_cart_item_promotion_lock(conn, tenant_id, cart_id, item_id)
@@ -509,6 +529,8 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
                         'id', m.modifier_id::text,
                         'name', m.modifier_name,
                         'price', m.price,
+                        'quantity', m.quantity,
+                        'included_quantity', m.included_quantity,
                         'is_default', COALESCE(mod.is_default, false),
                         'group_is_required', COALESCE(mg.is_required, false)
                     ) ORDER BY m.created_at
@@ -555,6 +577,8 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
                     "id": mod['id'],
                     "name": mod['name'],
                     "price": float(mod['price']),
+                    "quantity": int(mod.get("quantity") or 1),
+                    "included_quantity": int(mod.get("included_quantity") or 0),
                     "is_default": bool(mod.get("is_default")),
                     "group_is_required": bool(mod.get("group_is_required")),
                 }
@@ -684,9 +708,10 @@ async def add_item_to_cart(
                         pricing_map, product_id, unit_price, modifiers
                     )
                 )
+                modifiers = await resolve_modifier_selections(conn, product_id, modifiers)
 
                 # Calculate subtotal
-                modifiers_total = sum(mod['price'] for mod in modifiers)
+                modifiers_total = sum(_modifier_snapshot_total(mod) for mod in modifiers)
                 subtotal = (unit_price + modifiers_total) * quantity
 
                 # Insert cart item
@@ -712,9 +737,10 @@ async def add_item_to_cart(
                 if modifiers:
                     modifier_query = """
                         INSERT INTO pos_cart_item_modifiers (
-                            cart_item_id, modifier_id, modifier_name, price
+                            cart_item_id, modifier_id, modifier_name, price,
+                            quantity, included_quantity
                         )
-                        VALUES ($1, $2, $3, $4)
+                        VALUES ($1, $2, $3, $4, $5, $6)
                     """
                     for mod in modifiers:
                         await conn.execute(
@@ -722,7 +748,9 @@ async def add_item_to_cart(
                             item_id,
                             mod['id'],
                             mod['name'],
-                            mod['price']
+                            mod['price'],
+                            mod["quantity"],
+                            mod["included_quantity"],
                         )
 
                 await _refresh_cart_item_promotion_lock(conn, tenant_id, cart_id, item_id)
@@ -804,9 +832,12 @@ async def update_cart_item(
                         modifiers,
                     )
                 )
+                modifiers = await resolve_modifier_selections(
+                    conn, product_row["product_id"], modifiers
+                )
 
                 # Calculate new subtotal
-                modifiers_total = sum(mod['price'] for mod in modifiers)
+                modifiers_total = sum(_modifier_snapshot_total(mod) for mod in modifiers)
                 subtotal = (unit_price + modifiers_total) * quantity
 
                 # Update cart item
@@ -834,9 +865,10 @@ async def update_cart_item(
                 if modifiers:
                     modifier_query = """
                         INSERT INTO pos_cart_item_modifiers (
-                            cart_item_id, modifier_id, modifier_name, price
+                            cart_item_id, modifier_id, modifier_name, price,
+                            quantity, included_quantity
                         )
-                        VALUES ($1, $2, $3, $4)
+                        VALUES ($1, $2, $3, $4, $5, $6)
                     """
                     for mod in modifiers:
                         await conn.execute(
@@ -844,7 +876,9 @@ async def update_cart_item(
                             item_id,
                             mod['id'],
                             mod['name'],
-                            mod['price']
+                            mod['price'],
+                            mod["quantity"],
+                            mod["included_quantity"],
                         )
 
                 await _refresh_cart_item_promotion_lock(conn, tenant_id, cart_id, item_id)
@@ -880,7 +914,7 @@ def _normalize_cart_channel(channel: Optional[str]) -> str:
 async def _fetch_cart_item_modifiers(conn, cart_item_id: UUID) -> List[Dict[str, Any]]:
     rows = await conn.fetch(
         """
-        SELECT modifier_id, modifier_name, price
+        SELECT modifier_id, modifier_name, price, quantity, included_quantity
         FROM pos_cart_item_modifiers
         WHERE cart_item_id = $1
         """,
@@ -891,6 +925,8 @@ async def _fetch_cart_item_modifiers(conn, cart_item_id: UUID) -> List[Dict[str,
             "id": str(r["modifier_id"]) if r["modifier_id"] else None,
             "name": r["modifier_name"],
             "price": float(r["price"]),
+            "quantity": int(r["quantity"] or 1),
+            "included_quantity": int(r["included_quantity"] or 0),
         }
         for r in rows
     ]
@@ -2162,9 +2198,11 @@ async def complete_pos_order(
 
                             modifier_query = """
                                 INSERT INTO order_item_modifiers (
-                                    order_item_id, modifier_id, modifier_name, price_at_purchase, quantity
+                                    order_item_id, modifier_id, modifier_name,
+                                    price_at_purchase, quantity,
+                                    included_quantity_at_purchase
                                 )
-                                VALUES ($1, $2, $3, $4, $5)
+                                VALUES ($1, $2, $3, $4, $5, $6)
                             """
                             await conn.execute(
                                 modifier_query,
@@ -2172,7 +2210,8 @@ async def complete_pos_order(
                                 modifier['id'],
                                 modifier['name'],
                                 modifier['price'],
-                                modifier_qty
+                                modifier_qty,
+                                modifier.get("included_quantity", 0),
                             )
 
                             await _deduct_modifier_inventory_for_order_item(

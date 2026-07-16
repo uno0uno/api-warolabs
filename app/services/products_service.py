@@ -491,6 +491,7 @@ async def get_product_by_id(
                         m.is_available,
                         m.is_default,
                         m.max_limit,
+                        m.included_quantity,
                         m.sort_order,
                         m.option_type
                     FROM modifiers m
@@ -512,6 +513,7 @@ async def get_product_by_id(
                         'is_available': mod['is_available'],
                         'is_default': mod['is_default'],
                         'max_limit': mod['max_limit'],
+                        'included_quantity': mod['included_quantity'],
                         'sort_order': mod['sort_order'],
                         'option_type': mod['option_type'] or 'INGREDIENT',
                     })
@@ -835,6 +837,7 @@ async def get_products_list(
                                 m.is_available,
                                 m.is_default,
                                 m.max_limit,
+                                m.included_quantity,
                                 m.sort_order,
                                 m.option_type
                             FROM modifiers m
@@ -856,6 +859,7 @@ async def get_products_list(
                                 'is_available': mod['is_available'],
                                 'is_default': mod['is_default'],
                                 'max_limit': mod['max_limit'],
+                                'included_quantity': mod['included_quantity'],
                                 'sort_order': mod['sort_order'],
                                 'option_type': mod['option_type'] or 'INGREDIENT',
                             })

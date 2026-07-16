@@ -7076,6 +7076,12 @@
           "comment": "Cuántas veces se puede agregar este modificador (ej: 2 = puede pedir doble queso)"
         },
         {
+          "name": "included_quantity",
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        {
           "name": "is_default",
           "type": "boolean",
           "nullable": true,
@@ -7177,6 +7183,17 @@
           "referenced_table": "",
           "columns": [
             "price"
+          ]
+        },
+        {
+          "name": "modifiers_included_quantity_check",
+          "type": "CHECK",
+          "def": "CHECK (((included_quantity \u003e= 0) AND (included_quantity \u003c= COALESCE(max_limit, 1))))",
+          "table": "public.modifiers",
+          "referenced_table": "",
+          "columns": [
+            "included_quantity",
+            "max_limit"
           ]
         },
         {
@@ -8025,6 +8042,12 @@
           "name": "modifier_name",
           "type": "varchar(255)",
           "nullable": true
+        },
+        {
+          "name": "included_quantity_at_purchase",
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
         }
       ],
       "indexes": [
@@ -8080,6 +8103,16 @@
           "referenced_table": "",
           "columns": [
             "quantity"
+          ]
+        },
+        {
+          "name": "order_item_modifiers_included_quantity_check",
+          "type": "CHECK",
+          "def": "CHECK ((included_quantity_at_purchase \u003e= 0))",
+          "table": "public.order_item_modifiers",
+          "referenced_table": "",
+          "columns": [
+            "included_quantity_at_purchase"
           ]
         },
         {
@@ -9422,6 +9455,18 @@
           "nullable": false
         },
         {
+          "name": "quantity",
+          "type": "numeric(10,4)",
+          "nullable": false,
+          "default": "1"
+        },
+        {
+          "name": "included_quantity",
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        {
           "name": "created_at",
           "type": "timestamp with time zone",
           "nullable": true,
@@ -9447,6 +9492,26 @@
         }
       ],
       "constraints": [
+        {
+          "name": "pos_cart_item_modifiers_quantity_positive",
+          "type": "CHECK",
+          "def": "CHECK ((quantity \u003e (0)::numeric))",
+          "table": "public.pos_cart_item_modifiers",
+          "referenced_table": "",
+          "columns": [
+            "quantity"
+          ]
+        },
+        {
+          "name": "pos_cart_item_modifiers_included_quantity_check",
+          "type": "CHECK",
+          "def": "CHECK ((included_quantity \u003e= 0))",
+          "table": "public.pos_cart_item_modifiers",
+          "referenced_table": "",
+          "columns": [
+            "included_quantity"
+          ]
+        },
         {
           "name": "fk_pos_cart_item_modifiers_modifier",
           "type": "FOREIGN KEY",
@@ -21716,6 +21781,18 @@
           "nullable": false
         },
         {
+          "name": "quantity",
+          "type": "numeric(10,4)",
+          "nullable": false,
+          "default": "1"
+        },
+        {
+          "name": "included_quantity",
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        {
           "name": "created_at",
           "type": "timestamp with time zone",
           "nullable": true,
@@ -21741,6 +21818,26 @@
         }
       ],
       "constraints": [
+        {
+          "name": "online_cart_item_modifiers_quantity_positive",
+          "type": "CHECK",
+          "def": "CHECK ((quantity \u003e (0)::numeric))",
+          "table": "public.online_cart_item_modifiers",
+          "referenced_table": "",
+          "columns": [
+            "quantity"
+          ]
+        },
+        {
+          "name": "online_cart_item_modifiers_included_quantity_check",
+          "type": "CHECK",
+          "def": "CHECK ((included_quantity \u003e= 0))",
+          "table": "public.online_cart_item_modifiers",
+          "referenced_table": "",
+          "columns": [
+            "included_quantity"
+          ]
+        },
         {
           "name": "online_cart_item_modifiers_modifier_id_fkey",
           "type": "FOREIGN KEY",

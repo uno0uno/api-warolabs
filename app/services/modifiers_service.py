@@ -26,6 +26,7 @@ _MODIFIER_SELECT_COLS = """
     m.name,
     m.price,
     m.max_limit,
+    m.included_quantity,
     m.is_default,
     m.is_available,
     m.sort_order,
@@ -121,6 +122,7 @@ async def _build_modifier(
         "name": row["name"],
         "price": row["price"],
         "max_limit": row["max_limit"],
+        "included_quantity": row["included_quantity"],
         "is_default": row["is_default"],
         "is_available": row["is_available"],
         "sort_order": row["sort_order"],
@@ -177,20 +179,21 @@ async def _insert_modifier(conn, group_id: UUID, modifier) -> UUID:
     row = await conn.fetchrow(
         """
         INSERT INTO modifiers (
-            modifier_group_id, name, price, max_limit,
+            modifier_group_id, name, price, max_limit, included_quantity,
             is_default, is_available, sort_order,
             option_type,
             ingredient_id, ingredient_quantity, ingredient_unit,
             recipe_base_type_id, recipe_base_quantity,
             linked_product_id, linked_product_quantity
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         RETURNING id
         """,
         group_id,
         modifier.name,
         modifier.price,
         modifier.max_limit,
+        modifier.included_quantity,
         modifier.is_default,
         modifier.is_available,
         modifier.sort_order,
@@ -594,10 +597,13 @@ async def update_modifier_group(
                 if group_data.modifiers is not None:
                     # Get existing modifiers
                     existing_modifiers = await conn.fetch(
-                        "SELECT id, name FROM modifiers WHERE modifier_group_id = $1",
+                        "SELECT id, name, included_quantity FROM modifiers WHERE modifier_group_id = $1",
                         group_id
                     )
                     existing_names = {row['name']: row['id'] for row in existing_modifiers}
+                    existing_included = {
+                        row["id"]: row["included_quantity"] for row in existing_modifiers
+                    }
                     existing_ids = set(existing_names.values())
                     modifiers_to_keep = set()
 
@@ -618,20 +624,30 @@ async def update_modifier_group(
                         if modifier.name in existing_names:
                             mod_id = existing_names[modifier.name]
                             modifiers_to_keep.add(mod_id)
+                            included_quantity = (
+                                modifier.included_quantity
+                                if "included_quantity" in modifier.model_fields_set
+                                else existing_included[mod_id]
+                            )
+                            if included_quantity > modifier.max_limit:
+                                raise ValueError(
+                                    "included_quantity must be between 0 and max_limit"
+                                )
                             await conn.execute(
                                 """
                                 UPDATE modifiers SET
-                                    price = $2, max_limit = $3, is_default = $4,
-                                    is_available = $5, sort_order = $6,
-                                    option_type = $7,
-                                    ingredient_id = $8, ingredient_quantity = $9, ingredient_unit = $10,
-                                    recipe_base_type_id = $11, recipe_base_quantity = $12,
-                                    linked_product_id = $13, linked_product_quantity = $14
+                                    price = $2, max_limit = $3, included_quantity = $4,
+                                    is_default = $5, is_available = $6, sort_order = $7,
+                                    option_type = $8,
+                                    ingredient_id = $9, ingredient_quantity = $10, ingredient_unit = $11,
+                                    recipe_base_type_id = $12, recipe_base_quantity = $13,
+                                    linked_product_id = $14, linked_product_quantity = $15
                                 WHERE id = $1
                                 """,
                                 mod_id,
                                 modifier.price,
                                 modifier.max_limit,
+                                included_quantity,
                                 modifier.is_default,
                                 modifier.is_available,
                                 modifier.sort_order,

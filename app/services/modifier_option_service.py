@@ -7,11 +7,128 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
+from app.core.exceptions import APIError
 from app.services.cost_resolution_service import calculated_product_cost_real
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 
 
 OPTION_TYPES = frozenset({"INGREDIENT", "RECIPE", "PRODUCT", "NONE"})
+
+
+def modifier_chargeable_quantity(quantity: Any, included_quantity: Any) -> Decimal:
+    selected = Decimal(str(quantity))
+    included = Decimal(str(included_quantity or 0))
+    return max(selected - included, Decimal("0"))
+
+
+def modifier_line_subtotal(
+    price: Any,
+    quantity: Any,
+    included_quantity: Any,
+) -> Decimal:
+    return Decimal(str(price or 0)) * modifier_chargeable_quantity(
+        quantity, included_quantity
+    )
+
+
+async def resolve_modifier_selections(
+    conn,
+    product_id: UUID,
+    modifiers: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Resolve and validate modifier selections from persisted configuration."""
+    requested = modifiers or []
+    if not requested:
+        return []
+    try:
+        requested_ids = [UUID(str(mod["id"])) for mod in requested]
+    except (KeyError, TypeError, ValueError):
+        raise APIError("Modifier id must be a valid UUID", status_code=422)
+    if len(requested_ids) != len(set(requested_ids)):
+        raise APIError("Duplicate modifier selections are not allowed", status_code=422)
+
+    group_rows = await conn.fetch(
+        """
+        SELECT mg.id, mg.name, mg.is_required, mg.min_qty, mg.max_qty
+        FROM product_modifier_groups pmg
+        JOIN modifier_groups mg ON mg.id = pmg.modifier_group_id
+        WHERE pmg.product_id = $1
+        """,
+        product_id,
+    )
+    product_group_ids = {row["id"] for row in group_rows}
+
+    resolved_rows = []
+    if requested_ids:
+        resolved_rows = await conn.fetch(
+            """
+            SELECT m.id, m.modifier_group_id, m.name, m.price,
+                   m.max_limit, m.included_quantity, m.is_available
+            FROM modifiers m
+            WHERE m.id = ANY($1::uuid[])
+            """,
+            requested_ids,
+        )
+    row_by_id = {row["id"]: row for row in resolved_rows}
+
+    resolved = []
+    selected_by_group: Dict[UUID, int] = {}
+    for submitted, modifier_id in zip(requested, requested_ids):
+        row = row_by_id.get(modifier_id)
+        if not row or not row["is_available"]:
+            raise APIError(
+                f"Modifier '{modifier_id}' does not exist or is not available",
+                status_code=422,
+            )
+        if row["modifier_group_id"] not in product_group_ids:
+            raise APIError(
+                f"Modifier '{modifier_id}' is not associated with product '{product_id}'",
+                status_code=422,
+            )
+
+        quantity = Decimal(str(submitted.get("quantity") or 1))
+        if quantity <= 0 or quantity != quantity.to_integral_value():
+            raise APIError("Modifier quantity must be a positive integer", status_code=422)
+        if quantity > Decimal(str(row["max_limit"] or 1)):
+            raise APIError(
+                f"Modifier '{row['name']}' allows at most {row['max_limit']} unit(s)",
+                status_code=422,
+            )
+
+        included_quantity = int(row["included_quantity"] or 0)
+        selected_by_group[row["modifier_group_id"]] = (
+            selected_by_group.get(row["modifier_group_id"], 0) + 1
+        )
+        resolved.append(
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "price": Decimal(str(row["price"])),
+                "quantity": int(quantity),
+                "included_quantity": included_quantity,
+                "chargeable_quantity": int(
+                    modifier_chargeable_quantity(quantity, included_quantity)
+                ),
+                "subtotal": modifier_line_subtotal(
+                    row["price"], quantity, included_quantity
+                ),
+            }
+        )
+
+    for group in group_rows:
+        count = selected_by_group.get(group["id"], 0)
+        minimum = max(1, group["min_qty"]) if group["is_required"] else group["min_qty"]
+        if group["is_required"] and count < minimum:
+            raise APIError(
+                f"Group '{group['name']}' requires at least {minimum} selection(s), got {count}",
+                status_code=422,
+            )
+        if count > group["max_qty"]:
+            raise APIError(
+                f"Group '{group['name']}' allows at most {group['max_qty']} selection(s), got {count}",
+                status_code=422,
+            )
+    return resolved
 
 
 async def fetch_modifier_option_row(conn, modifier_id: UUID) -> Optional[Dict[str, Any]]:
@@ -281,6 +398,12 @@ def validate_modifier_option_fields(modifier_data) -> None:
     recipe_base_type_id = getattr(modifier_data, "recipe_base_type_id", None)
     recipe_lines = getattr(modifier_data, "recipe_lines", None) or []
     linked_product_id = getattr(modifier_data, "linked_product_id", None)
+    max_limit = getattr(modifier_data, "max_limit", 1)
+    included_quantity = getattr(modifier_data, "included_quantity", 0)
+
+    if included_quantity is not None and max_limit is not None:
+        if included_quantity < 0 or included_quantity > max_limit:
+            raise ValueError("included_quantity must be between 0 and max_limit")
 
     if option_type == "INGREDIENT" and not ingredient_id:
         raise ValueError("INGREDIENT option requires ingredient_id")

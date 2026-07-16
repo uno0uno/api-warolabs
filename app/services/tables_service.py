@@ -46,6 +46,10 @@ from app.services.open_priced_service import (
     fetch_product_pricing_map,
     validate_items_unit_prices,
 )
+from app.services.modifier_option_service import (
+    modifier_line_subtotal,
+    resolve_modifier_selections,
+)
 from app.services.table_session_advances_service import (
     TABLE_SESSION_ADVANCE_PAYMENT_SLUG,
     apply_session_advances_for_close,
@@ -81,7 +85,13 @@ def _completed_session_orders_payload(order_rows: List[Any]) -> Dict[str, Any]:
 
 
 def _modifier_unit_total(mod: dict) -> float:
-    return float(mod.get("price", 0)) * float(mod.get("quantity", 1))
+    return float(
+        modifier_line_subtotal(
+            mod.get("price", 0),
+            mod.get("quantity", 1),
+            mod.get("included_quantity", 0),
+        )
+    )
 
 
 async def _generate_unique_qr_token(conn) -> str:
@@ -2956,7 +2966,8 @@ async def _prefetch_product_names(
 async def _fetch_order_item_modifiers(conn, order_item_id: UUID) -> List[Dict[str, Any]]:
     rows = await conn.fetch(
         """
-        SELECT modifier_id, modifier_name, price_at_purchase, quantity
+        SELECT modifier_id, modifier_name, price_at_purchase, quantity,
+               included_quantity_at_purchase
         FROM order_item_modifiers
         WHERE order_item_id = $1
         """,
@@ -2967,7 +2978,8 @@ async def _fetch_order_item_modifiers(conn, order_item_id: UUID) -> List[Dict[st
             "id": str(r["modifier_id"]) if r["modifier_id"] else None,
             "name": r["modifier_name"],
             "price": float(r["price_at_purchase"]),
-            "quantity": int(r["quantity"]),
+            "quantity": int(r["quantity"] or 1),
+            "included_quantity": int(r["included_quantity_at_purchase"] or 0),
         }
         for r in rows
     ]
@@ -3237,6 +3249,9 @@ async def update_tab_item_content(
         old_modifiers = await _fetch_order_item_modifiers(conn, order_item_id)
         old_notes = row["notes"]
         quantity = float(row["quantity"])
+        modifiers = await resolve_modifier_selections(
+            conn, row["product_id"], modifiers or []
+        )
 
         await conn.execute(
             "DELETE FROM order_item_modifiers WHERE order_item_id = $1",
@@ -3244,22 +3259,25 @@ async def update_tab_item_content(
         )
         modifier_sum = 0.0
         for mod in modifiers or []:
-            mod_qty = float(mod.get("quantity") or 1)
+            mod_qty = int(mod.get("quantity") or 1)
             mod_price = float(mod.get("price") or 0)
-            modifier_sum += mod_price * mod_qty
+            included_quantity = int(mod.get("included_quantity") or 0)
+            modifier_sum += _modifier_unit_total(mod)
             mod_id = mod.get("id")
             await conn.execute(
                 """
                 INSERT INTO order_item_modifiers (
-                    order_item_id, modifier_id, modifier_name, price_at_purchase, quantity
+                    order_item_id, modifier_id, modifier_name, price_at_purchase,
+                    quantity, included_quantity_at_purchase
                 )
-                VALUES ($1, $2, $3, $4, $5)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 """,
                 order_item_id,
                 mod_id,
                 mod.get("name"),
                 mod_price,
                 mod_qty,
+                included_quantity,
             )
 
         normalized_notes = (notes or "").strip() or None
@@ -3290,6 +3308,7 @@ async def update_tab_item_content(
                     "name": m.get("name"),
                     "price": float(m.get("price") or 0),
                     "quantity": int(m.get("quantity") or 1),
+                    "included_quantity": int(m.get("included_quantity") or 0),
                 }
                 for m in (modifiers or [])
             ]
@@ -3686,7 +3705,13 @@ async def update_tab_item_quantity(
 
             modifier_sum = await conn.fetchval(
                 """
-                SELECT COALESCE(SUM(price_at_purchase * quantity), 0)
+                SELECT COALESCE(SUM(
+                    price_at_purchase
+                    * GREATEST(
+                        COALESCE(quantity, 1) - included_quantity_at_purchase,
+                        0
+                    )
+                ), 0)
                 FROM order_item_modifiers
                 WHERE order_item_id = $1
                 """,
@@ -3855,6 +3880,12 @@ async def _add_tab_items_core(
     product_names = await _prefetch_product_names(conn, tenant_id, product_ids)
     pricing_map = await fetch_product_pricing_map(conn, tenant_id, product_ids)
     validate_items_unit_prices(pricing_map, items)
+    for item in items:
+        item["modifiers"] = await resolve_modifier_selections(
+            conn,
+            UUID(str(item["product_id"])),
+            item.get("modifiers") or [],
+        )
 
     for item in items:
         mod_sum = sum(_modifier_unit_total(m) for m in (item.get("modifiers") or []))
@@ -3949,15 +3980,16 @@ async def _add_tab_items_core(
                 """
                 INSERT INTO order_item_modifiers (
                     order_item_id, modifier_id, modifier_name,
-                    price_at_purchase, quantity
+                    price_at_purchase, quantity, included_quantity_at_purchase
                 )
-                VALUES ($1, $2, $3, $4, $5)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 """,
                 order_item_id,
                 mod.get("id"),
                 mod.get("name"),
                 mod.get("price", 0),
                 modifier_qty,
+                mod.get("included_quantity", 0),
             )
 
         try:

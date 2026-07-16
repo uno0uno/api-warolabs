@@ -1307,6 +1307,17 @@ async def test_create_manual_order_uses_modifier_quantity_for_totals_persistence
     ), patch(
         "app.services.orders_service._post_order_cogs_gl_entry",
         new=AsyncMock(),
+    ), patch(
+        "app.services.orders_service.resolve_modifier_selections",
+        new=AsyncMock(return_value=[{
+            "id": modifier_id,
+            "name": "Extra queso",
+            "price": Decimal("2500"),
+            "quantity": 2,
+            "included_quantity": 0,
+            "chargeable_quantity": 2,
+            "subtotal": Decimal("5000"),
+        }]),
     ):
         result = await orders_service.create_manual_order(
             Request({"type": "http"}),
@@ -1381,6 +1392,17 @@ async def test_create_manual_order_legacy_modifier_payload_defaults_quantity_to_
     ), patch(
         "app.services.orders_service._post_order_cogs_gl_entry",
         new=AsyncMock(),
+    ), patch(
+        "app.services.orders_service.resolve_modifier_selections",
+        new=AsyncMock(return_value=[{
+            "id": modifier_id,
+            "name": "Extra queso",
+            "price": Decimal("2500"),
+            "quantity": 1,
+            "included_quantity": 0,
+            "chargeable_quantity": 1,
+            "subtotal": Decimal("2500"),
+        }]),
     ):
         result = await orders_service.create_manual_order(
             Request({"type": "http"}),

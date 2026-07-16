@@ -46,6 +46,11 @@ class ModifierBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, description="Modifier name")
     price: Decimal = Field(default=0, description="Additional price (can be negative)")
     max_limit: int = Field(default=1, ge=1, description="Maximum quantity allowed")
+    included_quantity: int = Field(
+        default=0,
+        ge=0,
+        description="Units included before the additional price applies",
+    )
     is_default: bool = Field(default=False, description="Selected by default")
     is_available: bool = Field(default=True, description="Available for selection")
     sort_order: int = Field(default=0, ge=0, description="Display order")
@@ -83,6 +88,7 @@ class ModifierUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     price: Optional[Decimal] = None
     max_limit: Optional[int] = Field(None, ge=1)
+    included_quantity: Optional[int] = Field(None, ge=0)
     is_default: Optional[bool] = None
     is_available: Optional[bool] = None
     sort_order: Optional[int] = Field(None, ge=0)

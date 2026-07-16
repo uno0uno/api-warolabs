@@ -15,6 +15,7 @@ Modificadores seleccionados por el cliente en cada venta (histórico inmutable)
 | price_at_purchase | numeric(10,2) |  | false |  |  | Precio del modificador al momento de la compra (snapshot histórico) |
 | created_at | timestamp with time zone | now() | true |  |  |  |
 | modifier_name | varchar(255) |  | true |  |  |  |
+| included_quantity_at_purchase | integer | 0 | false |  |  |  |
 
 ## Constraints
 
@@ -25,6 +26,7 @@ Modificadores seleccionados por el cliente en cada venta (histórico inmutable)
 | order_item_modifiers_modifier_id_fkey | FOREIGN KEY | FOREIGN KEY (modifier_id) REFERENCES modifiers(id) |
 | order_item_modifiers_pkey | PRIMARY KEY | PRIMARY KEY (id) |
 | order_item_modifiers_order_item_id_fkey | FOREIGN KEY | FOREIGN KEY (order_item_id) REFERENCES order_items(id) ON DELETE CASCADE |
+| order_item_modifiers_included_quantity_check | CHECK | CHECK ((included_quantity_at_purchase >= 0)) |
 
 ## Indexes
 

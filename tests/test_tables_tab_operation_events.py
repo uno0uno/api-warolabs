@@ -17,6 +17,7 @@ async def test_add_tab_items_core_records_tab_item_added_per_line():
     session_id = uuid4()
     order_id = uuid4()
     product_id = uuid4()
+    modifier_id = uuid4()
     order_item_id = uuid4()
     recorded = []
 
@@ -44,7 +45,7 @@ async def test_add_tab_items_core_records_tab_item_added_per_line():
         "product_id": product_id,
         "quantity": 1,
         "unit_price": 15.0,
-        "modifiers": [{"id": None, "name": "Extra", "price": 0.0}],
+        "modifiers": [{"id": str(modifier_id), "name": "Extra", "price": 0.0}],
         "notes": "Sin cebolla",
     }]
 
@@ -63,6 +64,20 @@ async def test_add_tab_items_core_records_tab_item_added_per_line():
     ), patch(
         "app.services.tables_service._capture_order_item_ingredients",
         new=AsyncMock(),
+    ), patch(
+        "app.services.tables_service._deduct_modifier_inventory_for_order_item",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.tables_service.resolve_modifier_selections",
+        new=AsyncMock(return_value=[{
+            "id": modifier_id,
+            "name": "Extra",
+            "price": Decimal("0"),
+            "quantity": 1,
+            "included_quantity": 0,
+            "chargeable_quantity": 1,
+            "subtotal": Decimal("0"),
+        }]),
     ):
         result = await tables_service._add_tab_items_core(
             mock_conn, tenant_id, user_id, table_id, items
