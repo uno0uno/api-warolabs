@@ -27,6 +27,7 @@ from app.database import get_db_connection
 from app.services import (
     billing_service,
     billing_email_service,
+    billing_webhook_service,
     legal_service,
     onboarding_service,
     wompi_service,
@@ -188,11 +189,17 @@ async def get_my_remaining_usage(request: Request):
     "/verify-payment",
     dependencies=[Depends(require_module(Module.MI_PLAN))],
 )
-async def verify_payment(request: Request, transaction_id: str = Query(...)):
+async def verify_payment(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    transaction_id: str = Query(...),
+):
     """
-    Consulta el estado de una transacción al regresar del checkout de Wompi.
+    Consulta el estado de una transacción al regresar del checkout de Wompi
+    y reconcilia una aprobación si el webhook todavía no fue procesado.
 
-    Este endpoint nunca activa acceso; solo el webhook firmado puede hacerlo.
+    La activación usa exclusivamente el resultado consultado por el servidor
+    en Wompi y exige que la referencia pertenezca al tenant autenticado.
     """
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -215,6 +222,44 @@ async def verify_payment(request: Request, transaction_id: str = Query(...)):
     if not belongs_to_tenant:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Payment transaction not found")
+
+    if wompi_status == "APPROVED":
+        amount_in_cents = billing_service._webhook_amount_in_cents(
+            transaction.get("amount_in_cents")
+        )
+        currency = str(transaction.get("currency") or "").strip().upper()
+        period_anchor = billing_service.parse_wompi_period_anchor(transaction)
+        async with get_db_connection() as conn:
+            tenant_info = await billing_service.activate_tenant_subscription(
+                conn,
+                gateway_reference=payment_link_id,
+                payment_id=transaction_id,
+                amount=amount_in_cents / 100,
+                currency=currency,
+                period_anchor=period_anchor,
+                expected_tenant_id=tenant_id,
+                amount_in_cents=amount_in_cents,
+            )
+        if tenant_info:
+            background_tasks.add_task(
+                billing_email_service.send_payment_renewed_email,
+                tenant_name=tenant_info["tenant_name"],
+                tenant_email=tenant_info["tenant_email"],
+                next_period_end=tenant_info["next_period_end"],
+            )
+            background_tasks.add_task(
+                billing_webhook_service.send_payment_approved_webhook,
+                tenant_id=tenant_info["tenant_id"],
+                subscription_id=tenant_info["subscription_id"],
+                tenant_name=tenant_info["tenant_name"],
+                tenant_email=tenant_info["tenant_email"],
+                plan_name=tenant_info["plan_name"],
+                amount=amount_in_cents / 100,
+                currency=currency,
+                next_period_end=tenant_info["next_period_end"],
+                gateway_reference=payment_link_id,
+                transaction_id=transaction_id,
+            )
 
     return {
         "status": internal_status,

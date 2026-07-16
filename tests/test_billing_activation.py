@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
 from app.services import billing_service
 
@@ -205,6 +206,34 @@ async def test_activate_tenant_subscription_duplicate_returns_none():
     )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_activate_tenant_subscription_rejects_return_amount_mismatch():
+    tenant_id = uuid4()
+    sub_row = {
+        "id": uuid4(),
+        "tenant_id": tenant_id,
+        "billing_cycle": "annual",
+        "tenant_name": "Test tenant",
+        "tenant_email": "test@example.com",
+        "plan_name": "Pro",
+        "price_annual": 95900,
+    }
+    conn, _ = _conn_with_activation(sub_row=sub_row)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await billing_service.activate_tenant_subscription(
+            conn,
+            gateway_reference="test-link",
+            payment_id="tx-mismatch",
+            amount=1,
+            currency="COP",
+            expected_tenant_id=tenant_id,
+            amount_in_cents=100,
+        )
+
+    assert exc_info.value.status_code == 409
     conn.execute.assert_not_called()
 
 

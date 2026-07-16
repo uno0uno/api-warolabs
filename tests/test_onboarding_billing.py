@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 
 from app.routers import billing
 from app.services import billing_service, wompi_service
@@ -468,14 +468,25 @@ async def test_unmatched_sandbox_event_never_calls_legacy_subscription_handlers(
 
 
 @pytest.mark.asyncio
-async def test_browser_verify_payment_is_read_only():
+async def test_browser_verify_payment_reconciles_owned_approved_subscription():
     tenant_id = uuid4()
     session = SimpleNamespace(tenant_id=tenant_id)
+    background_tasks = BackgroundTasks()
     transaction = {
         "id": "tx-approved",
         "status": "APPROVED",
         "payment_link_id": "link-onboarding",
         "amount_in_cents": 9590000,
+        "currency": "COP",
+        "finalized_at": "2026-07-16T18:32:25.077Z",
+    }
+    tenant_info = {
+        "tenant_id": str(tenant_id),
+        "subscription_id": str(uuid4()),
+        "tenant_name": "Test tenant",
+        "tenant_email": "test@example.com",
+        "plan_name": "Pro",
+        "next_period_end": "2027-07-16T18:32:25.077+00:00",
     }
 
     @asynccontextmanager
@@ -490,10 +501,58 @@ async def test_browser_verify_payment_is_read_only():
         new=AsyncMock(return_value=True),
     ), patch.object(
         billing.billing_service,
-        "activate_subscription_by_gateway_ref",
-        new=AsyncMock(),
+        "activate_tenant_subscription",
+        new=AsyncMock(return_value=tenant_info),
     ) as activate:
-        result = await billing.verify_payment(object(), transaction_id="tx-approved")
+        result = await billing.verify_payment(
+            object(),
+            background_tasks,
+            transaction_id="tx-approved",
+        )
 
     assert result["status"] == "active"
+    activate.assert_awaited_once()
+    kwargs = activate.await_args.kwargs
+    assert kwargs["gateway_reference"] == "link-onboarding"
+    assert kwargs["payment_id"] == "tx-approved"
+    assert kwargs["expected_tenant_id"] == tenant_id
+    assert kwargs["amount_in_cents"] == 9590000
+    assert kwargs["currency"] == "COP"
+    assert len(background_tasks.tasks) == 2
+
+
+@pytest.mark.asyncio
+async def test_browser_verify_payment_does_not_activate_pending_transaction():
+    tenant_id = uuid4()
+    session = SimpleNamespace(tenant_id=tenant_id)
+    transaction = {
+        "id": "tx-pending",
+        "status": "PENDING",
+        "payment_link_id": "link-pending",
+        "amount_in_cents": 9590000,
+        "currency": "COP",
+    }
+
+    @asynccontextmanager
+    async def db_context(*args, **kwargs):
+        yield AsyncMock()
+
+    with patch.object(billing, "require_valid_session", return_value=session), patch.object(
+        billing.wompi_service, "get_transaction", new=AsyncMock(return_value=transaction)
+    ), patch.object(billing, "get_db_connection", side_effect=db_context), patch.object(
+        billing.billing_service,
+        "payment_reference_belongs_to_tenant",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        billing.billing_service,
+        "activate_tenant_subscription",
+        new=AsyncMock(),
+    ) as activate:
+        result = await billing.verify_payment(
+            object(),
+            BackgroundTasks(),
+            transaction_id="tx-pending",
+        )
+
+    assert result["status"] == "pending"
     activate.assert_not_awaited()
