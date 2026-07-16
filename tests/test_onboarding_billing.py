@@ -13,7 +13,9 @@ from app.routers import billing
 from app.services import billing_service, wompi_service
 
 
-def _attempt_row(*, status="pending", price="95900.00", active=True):
+def _attempt_row(
+    *, status="pending", price="95900.00", active=True, provider_environment="prod"
+):
     attempt_id = uuid4()
     return {
         "id": attempt_id,
@@ -24,6 +26,7 @@ def _attempt_row(*, status="pending", price="95900.00", active=True):
         "currency": "COP",
         "status": status,
         "provider_transaction_id": "tx-approved" if status == "approved" else None,
+        "provider_environment": provider_environment,
         "plan_name": "Pro",
         "price_annual": Decimal(price),
         "plan_is_active": active,
@@ -121,6 +124,7 @@ async def test_each_retry_inserts_a_new_payment_attempt():
     for call in conn.fetchrow.await_args_list:
         assert "INSERT INTO billing_payment_attempts" in call.args[0]
         assert "ON CONFLICT" not in call.args[0]
+        assert call.args[4] == "prod"
 
 
 @pytest.mark.asyncio
@@ -182,7 +186,26 @@ async def test_wompi_link_uses_exact_amount_single_use_and_opaque_attempt_sku():
 
 def test_missing_wompi_events_secret_fails_closed():
     with patch.object(wompi_service.settings, "wompi_events_secret", None):
-        assert wompi_service.verify_event_signature({}) is False
+        assert wompi_service.verify_event_signature({"environment": "prod"}) is False
+
+
+@pytest.mark.asyncio
+async def test_payment_attempt_environment_mismatch_never_mutates_state():
+    attempt = _attempt_row(provider_environment="test")
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=attempt)
+
+    with pytest.raises(HTTPException) as exc:
+        await billing_service.process_onboarding_payment_transaction(
+            conn,
+            _approved_transaction(attempt),
+            provider_environment="prod",
+        )
+
+    assert exc.value.status_code == 409
+    assert "environment" in exc.value.detail.lower()
+    conn.execute.assert_not_awaited()
+    conn.fetchval.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -399,6 +422,48 @@ async def test_declined_onboarding_attempt_never_calls_legacy_past_due():
             {"data": {"transaction": transaction}}, background_tasks
         )
 
+    legacy_past_due.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unmatched_sandbox_event_never_calls_legacy_subscription_handlers():
+    transaction = {
+        "id": "tx-sandbox",
+        "status": "APPROVED",
+        "payment_link_id": "sandbox-link",
+    }
+    background_tasks = MagicMock()
+
+    @asynccontextmanager
+    async def db_context():
+        yield AsyncMock()
+
+    from app.services import wompi_colombia_webhook_service
+
+    with patch.object(
+        wompi_colombia_webhook_service,
+        "get_db_connection",
+        side_effect=db_context,
+    ), patch.object(
+        wompi_colombia_webhook_service.billing_service,
+        "process_onboarding_payment_transaction",
+        new=AsyncMock(return_value={"handled": False, "tenant_info": None}),
+    ), patch.object(
+        wompi_colombia_webhook_service.billing_service,
+        "activate_tenant_subscription",
+        new=AsyncMock(),
+    ) as legacy_activate, patch.object(
+        wompi_colombia_webhook_service.billing_service,
+        "mark_subscription_past_due",
+        new=AsyncMock(),
+    ) as legacy_past_due:
+        await wompi_colombia_webhook_service.handle_transaction_updated(
+            {"data": {"transaction": transaction}},
+            background_tasks,
+            provider_environment="test",
+        )
+
+    legacy_activate.assert_not_awaited()
     legacy_past_due.assert_not_awaited()
 
 

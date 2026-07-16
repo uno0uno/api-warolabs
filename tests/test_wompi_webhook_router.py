@@ -1,4 +1,5 @@
 """Wompi central ingress classification and dispatch (#353, #355)."""
+import hashlib
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,11 +16,26 @@ from app.services.wompi_webhook_router_service import (
 TX_UPDATED = "transaction.updated"
 
 
-def _transaction_body(**tx_fields):
+def _transaction_body(environment="prod", **tx_fields):
     return {
         "event": TX_UPDATED,
         "data": {"transaction": dict(tx_fields)},
+        "environment": environment,
     }
+
+
+def _signed_non_transaction_body(environment, secret):
+    body = {
+        "event": "nequi_token.updated",
+        "data": {"transaction": {}},
+        "environment": environment,
+        "timestamp": 1784144472,
+        "signature": {"properties": [], "checksum": ""},
+    }
+    body["signature"]["checksum"] = hashlib.sha256(
+        f"{body['timestamp']}{secret}".encode()
+    ).hexdigest()
+    return body
 
 
 @pytest.fixture
@@ -115,7 +131,9 @@ async def test_dispatch_gateway_reference_calls_colombia_not_tickets(background_
         result = await dispatch_verified_event(body, background_tasks)
 
     assert result == {"received": True}
-    colombia.assert_awaited_once_with(body, background_tasks)
+    colombia.assert_awaited_once_with(
+        body, background_tasks, provider_environment="prod"
+    )
     forward.assert_not_awaited()
 
 
@@ -142,7 +160,9 @@ async def test_dispatch_billing_redirect_calls_colombia_not_tickets(background_t
         result = await dispatch_verified_event(body, background_tasks)
 
     assert result == {"received": True}
-    colombia.assert_awaited_once_with(body, background_tasks)
+    colombia.assert_awaited_once_with(
+        body, background_tasks, provider_environment="prod"
+    )
     forward.assert_not_awaited()
 
 
@@ -201,3 +221,46 @@ def test_central_webhook_endpoint_rejects_invalid_signature():
 
     assert response.status_code == 401
     assert "signature" in response.json()["detail"].lower()
+
+
+def test_production_and_sandbox_endpoints_use_separate_signed_environments():
+    app = FastAPI()
+    app.include_router(payments_webhook_router)
+    client = TestClient(app)
+    prod_body = _signed_non_transaction_body("prod", "prod-secret")
+    test_body = _signed_non_transaction_body("test", "test-secret")
+
+    with patch(
+        "app.services.wompi_service.settings.wompi_events_secret",
+        "prod-secret",
+    ), patch(
+        "app.services.wompi_service.settings.wompi_sandbox_events_secret",
+        "test-secret",
+    ):
+        assert client.post("/payments/webhooks/wompi", json=prod_body).status_code == 200
+        assert client.post("/payments/webhooks/wompi", json=test_body).status_code == 401
+        assert client.post(
+            "/payments/webhooks/wompi/sandbox", json=test_body
+        ).status_code == 200
+        assert client.post(
+            "/payments/webhooks/wompi/sandbox", json=prod_body
+        ).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_sandbox_ticket_reference_is_not_forwarded(background_tasks):
+    body = _transaction_body(environment="test", reference="WT-abc-123")
+    forward = AsyncMock()
+    with patch(
+        "app.services.wompi_webhook_router_service.wompi_service.verify_event_signature",
+        return_value=True,
+    ), patch(
+        "app.services.wompi_webhook_router_service.forward_to_tickets",
+        forward,
+    ):
+        result = await dispatch_verified_event(
+            body, background_tasks, expected_environment="test"
+        )
+
+    assert result == {"received": True, "classification": "unknown"}
+    forward.assert_not_awaited()

@@ -116,6 +116,7 @@ async def subscribe(body: SubscribeBody, request: Request):
                 tenant_id=tenant_id,
                 plan_id=body.plan_id,
                 amount_in_cents=amount_in_cents,
+                provider_environment=wompi_service.configured_event_environment(),
             )
         else:
             wompi_result = await wompi_service.create_payment_link(

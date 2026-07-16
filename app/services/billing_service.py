@@ -949,16 +949,19 @@ async def create_onboarding_payment_attempt(
     tenant_id: UUID,
     plan_id: UUID,
     amount_in_cents: int,
+    provider_environment: str = "prod",
 ) -> UUID:
     """Create immutable attempt evidence before requesting a Wompi link."""
+    if provider_environment not in ("prod", "test"):
+        raise HTTPException(status_code=422, detail="Invalid Wompi environment")
     row = await conn.fetchrow("""
         INSERT INTO billing_payment_attempts (
             tenant_id, plan_id, expected_amount_in_cents,
-            currency, billing_cycle, status
+            currency, billing_cycle, status, provider_environment
         )
-        VALUES ($1, $2, $3, 'COP', 'annual', 'created')
+        VALUES ($1, $2, $3, 'COP', 'annual', 'created', $4)
         RETURNING id
-    """, tenant_id, plan_id, amount_in_cents)
+    """, tenant_id, plan_id, amount_in_cents, provider_environment)
     return row["id"]
 
 
@@ -1565,6 +1568,7 @@ def _webhook_amount_in_cents(value: Any) -> int:
 async def process_onboarding_payment_transaction(
     conn,
     transaction: Dict[str, Any],
+    provider_environment: str = "prod",
 ) -> Dict[str, Any]:
     """Resolve an onboarding attempt and activate access only for a valid webhook."""
     provider_reference = str(transaction.get("payment_link_id") or "").strip()
@@ -1575,17 +1579,22 @@ async def process_onboarding_payment_transaction(
         """
         SELECT a.id, a.tenant_id, a.plan_id, a.provider_reference,
                a.expected_amount_in_cents, a.currency, a.status,
-               a.provider_transaction_id,
+               a.provider_transaction_id, a.provider_environment,
                p.name AS plan_name, p.price_annual, p.is_active AS plan_is_active
         FROM billing_payment_attempts a
         JOIN subscription_plans p ON p.id = a.plan_id
         WHERE a.provider = 'wompi' AND a.provider_reference = $1
+        ORDER BY (a.provider_environment = $2) DESC
+        LIMIT 1
         FOR UPDATE OF a
         """,
         provider_reference,
+        provider_environment,
     )
     if attempt is None:
         return {"handled": False, "tenant_info": None}
+    if attempt["provider_environment"] != provider_environment:
+        raise HTTPException(status_code=409, detail="Wompi environment mismatch")
 
     wompi_status = str(transaction.get("status") or "").upper()
     transaction_id = str(transaction.get("id") or "").strip()
@@ -1597,10 +1606,13 @@ async def process_onboarding_payment_transaction(
         """
         SELECT id
         FROM billing_payment_attempts
-        WHERE provider_transaction_id = $1 AND id <> $2
+        WHERE provider_transaction_id = $1
+          AND provider_environment = $2
+          AND id <> $3
         LIMIT 1
         """,
         transaction_id,
+        provider_environment,
         attempt["id"],
     )
     if duplicate_attempt_id is not None:
@@ -1679,6 +1691,7 @@ async def process_onboarding_payment_transaction(
             "wompi_transaction_id": transaction_id,
             "gateway_reference": provider_reference,
             "requested_plan_id": str(attempt["plan_id"]),
+            "provider_environment": provider_environment,
             "subscription_status": (
                 existing_subscription["status"] if existing_subscription else None
             ),
@@ -1751,6 +1764,7 @@ async def process_onboarding_payment_transaction(
         "wompi_transaction_id": transaction_id,
         "gateway_reference": provider_reference,
         "plan_id": str(attempt["plan_id"]),
+        "provider_environment": provider_environment,
     }
     await conn.execute(
         """

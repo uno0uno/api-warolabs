@@ -83,6 +83,7 @@ async def create_payment_checkout(
             tenant_id=session.tenant_id,
             plan_id=body.plan_id,
             amount_in_cents=plan["amount_in_cents"],
+            provider_environment=wompi_service.configured_event_environment(),
         )
 
     parsed = urlparse(settings.frontend_url)
