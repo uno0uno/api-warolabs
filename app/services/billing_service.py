@@ -1298,6 +1298,18 @@ async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
             ts.cancelled_at,
             ts.created_at,
             ts.updated_at,
+            CASE
+                WHEN ts.status = 'pending' THEN (
+                    SELECT be.metadata->>'checkout_url'
+                    FROM billing_events be
+                    WHERE be.subscription_id = ts.id
+                      AND be.event_type = 'subscribe_initiated'
+                      AND NULLIF(be.metadata->>'checkout_url', '') IS NOT NULL
+                    ORDER BY be.created_at DESC
+                    LIMIT 1
+                )
+                ELSE NULL
+            END AS checkout_url,
             COALESCE(su.scans_used, 0) AS scans_used
         FROM tenant_subscriptions ts
         JOIN tenants t ON t.id = ts.tenant_id
@@ -1328,6 +1340,7 @@ async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
         "cancelled_at": row["cancelled_at"].isoformat() if row["cancelled_at"] else None,
         "created_at": row["created_at"].isoformat(),
         "updated_at": row["updated_at"].isoformat(),
+        "checkout_url": row["checkout_url"],
         "scans_used": row["scans_used"],
     }
     return data
