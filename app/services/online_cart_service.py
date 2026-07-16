@@ -9,6 +9,10 @@ from app.database import get_db_connection
 from app.core.exceptions import APIError
 from app.services.billing_service import check_completed_online_order_quota
 from app.services.email_helpers import send_order_confirmation_email
+from app.services.modifier_option_service import (
+    modifier_line_subtotal,
+    resolve_modifier_selections,
+)
 import logging
 import datetime as _dt
 from decimal import Decimal
@@ -38,7 +42,7 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
     for item_row in item_rows:
         # Get modifiers for this item
         modifiers_query = """
-            SELECT id, modifier_id, modifier_name, price, quantity
+            SELECT id, modifier_id, modifier_name, price, quantity, included_quantity
             FROM online_cart_item_modifiers
             WHERE cart_item_id = $1
         """
@@ -58,7 +62,8 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
                     "modifier_id": str(mod['modifier_id']),
                     "modifier_name": mod['modifier_name'],
                     "price": float(mod['price']),
-                    "quantity": float(mod['quantity'] or 1)
+                    "quantity": float(mod['quantity'] or 1),
+                    "included_quantity": int(mod["included_quantity"] or 0),
                 }
                 for mod in modifier_rows
             ]
@@ -70,7 +75,13 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
 def calculate_item_subtotal(unit_price: float, modifiers: List[dict], quantity: int) -> float:
     """Calculate item subtotal including modifiers"""
     modifier_total = sum(
-        float(mod.get('price', 0)) * float(mod.get('quantity') or 1)
+        float(
+            modifier_line_subtotal(
+                mod.get("price", 0),
+                mod.get("quantity") or 1,
+                mod.get("included_quantity") or 0,
+            )
+        )
         for mod in modifiers
     )
     return (unit_price + modifier_total) * quantity
@@ -226,32 +237,14 @@ async def create_cart_with_batch_items(
                     modifiers = item_data.get('modifiers', [])
                     notes = item_data.get('notes')
 
-                    # Validate modifiers before insert
-                    if modifiers:
-                        await validate_modifiers_for_item(conn, UUID(str(product_id)), modifiers)
-
-                    # Fetch real modifier prices and names from DB
-                    modifier_ids = [UUID(str(mod['id'])) for mod in modifiers]
-                    resolved_modifiers = []
-                    if modifier_ids:
-                        mod_price_query = """
-                            SELECT id, name, price FROM modifiers
-                            WHERE id = ANY($1)
-                        """
-                        mod_rows = await conn.fetch(mod_price_query, modifier_ids)
-                        mod_map = {str(row['id']): row for row in mod_rows}
-                        for mod in modifiers:
-                            db_mod = mod_map.get(str(mod['id']))
-                            if db_mod:
-                                resolved_modifiers.append({
-                                    'id': mod['id'],
-                                    'name': db_mod['name'],
-                                    'price': Decimal(str(db_mod['price'])),
-                                    'quantity': Decimal(str(mod.get('quantity') or 1)),
-                                })
+                    resolved_modifiers = await resolve_modifier_selections(
+                        conn, UUID(str(product_id)), modifiers
+                    )
 
                     # Calculate subtotal from DB prices
-                    modifier_total = sum(m['price'] * m['quantity'] for m in resolved_modifiers)
+                    modifier_total = sum(
+                        (m["subtotal"] for m in resolved_modifiers), Decimal("0")
+                    )
                     subtotal = (unit_price + modifier_total) * quantity
 
                     # Insert cart item
@@ -277,9 +270,10 @@ async def create_cart_with_batch_items(
                     for mod in resolved_modifiers:
                         mod_insert_query = """
                             INSERT INTO online_cart_item_modifiers (
-                                cart_item_id, modifier_id, modifier_name, price, quantity
+                                cart_item_id, modifier_id, modifier_name, price,
+                                quantity, included_quantity
                             )
-                            VALUES ($1, $2, $3, $4, $5)
+                            VALUES ($1, $2, $3, $4, $5, $6)
                         """
                         await conn.execute(
                             mod_insert_query,
@@ -288,6 +282,7 @@ async def create_cart_with_batch_items(
                             mod['name'],
                             mod['price'],
                             mod['quantity'],
+                            mod["included_quantity"],
                         )
 
                     cart_total += subtotal
@@ -315,7 +310,7 @@ async def create_cart_with_batch_items(
                     }
                 }
 
-    except HTTPException:
+    except (HTTPException, APIError):
         raise
     except Exception as e:
         logger.error(f"Error creating online cart with batch: {str(e)}")
@@ -879,15 +874,17 @@ async def checkout_cart(
                         await conn.execute(
                             """
                             INSERT INTO order_item_modifiers (
-                                order_item_id, modifier_id, modifier_name, price_at_purchase, quantity
+                                order_item_id, modifier_id, modifier_name,
+                                price_at_purchase, quantity, included_quantity_at_purchase
                             )
-                            VALUES ($1, $2, $3, $4, $5)
+                            VALUES ($1, $2, $3, $4, $5, $6)
                             """,
                             order_item_id,
                             mod['modifier_id'],
                             mod['modifier_name'],
                             Decimal(str(mod['price'])),
-                            Decimal(str(mod.get('quantity') or 1))
+                            Decimal(str(mod.get('quantity') or 1)),
+                            int(mod.get("included_quantity") or 0),
                         )
 
                 # 9. Fetch delivery address for the confirmation email (inside transaction,

@@ -11,13 +11,11 @@ Real DB anchors (warocolombia tenant):
   product_id : ea55265f-fc65-4834-8529-0cd9cbd3950c  (Pizza Especial, price=25000)
   Groups via product_modifier_groups:
     modificador 1  (a766a3cf-...) is_required=false  max_qty=3
-      Achiote/Color  64700ab3-4fda-40c6-bbec-314cbb72a762  price=3000
-    modificador 2  (dd5d0110-...) is_required=false  max_qty=1
+      Achiote/Color  64700ab3-4fda-40c6-bbec-314cbb72a762  price=3000 max_limit=1
+    modificador 2  (dd5d0110-...) is_required=true  max_qty=1
       Mix de Mariscos  b04743f8-d81f-4d8b-9a6c-24b67ed8ea07  price=5000
 
-Note: no product in the current DB has is_required=true groups via the
-product_modifier_groups junction table, so the required-group validation
-path is not covered by integration tests here.
+The current fixture requires one selection from modificador 2.
 """
 import pytest
 from httpx import AsyncClient
@@ -102,18 +100,19 @@ class TestOnlineCartBatchModifierValidation:
             "unit_price": 25000.0,
             "modifiers": [
                 {"id": MODIFIER_ACHIOTE, "name": "Achiote/Color", "price": 3000.0},
+                {"id": MODIFIER_MARISCOS, "name": "Mix de Mariscos", "price": 5000.0},
             ],
         }])
         response = await client.post("/online/cart/batch", json=payload)
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
-        # subtotal = (25000 + 3000) * 2 = 56000
-        assert data["data"]["items"][0]["subtotal"] == 56000.0
+        # subtotal = (25000 + 3000 + 5000) * 2 = 66000
+        assert data["data"]["items"][0]["subtotal"] == 66000.0
 
     @pytest.mark.asyncio
-    async def test_modifier_quantity_multiplies_subtotal_and_response(self, client: AsyncClient):
-        """Modifier quantity is preserved and priced with DB-sourced unit price."""
+    async def test_modifier_quantity_above_max_limit_returns_422(self, client: AsyncClient):
+        """Per-option max_limit rejects a quantity that the old flat formula accepted."""
         payload = _batch_payload([{
             "product_id": PRODUCT_ID,
             "quantity": 2,
@@ -123,16 +122,7 @@ class TestOnlineCartBatchModifierValidation:
             ],
         }])
         response = await client.post("/online/cart/batch", json=payload)
-        assert response.status_code == 200
-        data = response.json()["data"]
-        item = data["items"][0]
-        modifier = item["modifiers"][0]
-
-        # subtotal = (25000 + (3000 * 2)) * 2 = 62000
-        assert item["subtotal"] == 62000.0
-        assert data["total_amount"] == 62000.0
-        assert modifier["price"] == 3000.0
-        assert modifier["quantity"] == 2.0
+        assert response.status_code == 422
 
     @pytest.mark.asyncio
     async def test_no_modifiers_returns_200(self, client: AsyncClient):
@@ -161,12 +151,13 @@ class TestOnlineCartBatchModifierValidation:
             "unit_price": 25000.0,
             "modifiers": [
                 {"id": MODIFIER_ACHIOTE, "name": "Achiote/Color", "price": 0.0},
+                {"id": MODIFIER_MARISCOS, "name": "Ignored", "price": 0.0},
             ],
         }])
         response = await client.post("/online/cart/batch", json=payload)
         assert response.status_code == 200
-        # subtotal = (25000 + 3000) * 1 = 28000  (DB price used, client price ignored)
-        assert response.json()["data"]["items"][0]["subtotal"] == 28000.0
+        # subtotal = 25000 + 3000 + 5000 = 33000 (both DB prices used)
+        assert response.json()["data"]["items"][0]["subtotal"] == 33000.0
 
     @pytest.mark.asyncio
     async def test_missing_tenant_id_returns_422(self, client: AsyncClient):

@@ -277,6 +277,7 @@ async def get_product_detail_for_token(token: str, product_id: UUID) -> Dict[str
                 m.is_available AS modifier_is_available,
                 m.is_default AS modifier_is_default,
                 m.max_limit AS modifier_max_limit,
+                m.included_quantity AS modifier_included_quantity,
                 m.sort_order AS modifier_sort_order,
                 m.option_type AS modifier_option_type
             FROM product_modifier_groups pmg
@@ -308,6 +309,7 @@ async def get_product_detail_for_token(token: str, product_id: UUID) -> Dict[str
                 "is_available": row["modifier_is_available"],
                 "is_default": row["modifier_is_default"],
                 "max_limit": row["modifier_max_limit"],
+                "included_quantity": row["modifier_included_quantity"],
                 "option_type": row["modifier_option_type"] or "INGREDIENT",
             })
 

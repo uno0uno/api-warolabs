@@ -524,6 +524,8 @@ def _modifiers_changed(old_list: List, new_list: List) -> bool:
             str(m.get('id', '')),
             m.get('name', ''),
             float(m.get('price', 0)),
+            m.get('max_limit', 1),
+            m.get('included_quantity', 0),
             m.get('is_available', True),
             str(m.get('ingredient_id', '')),
             float(m.get('ingredient_quantity', 0)) if m.get('ingredient_quantity') else 0
@@ -626,7 +628,8 @@ async def get_modifier_group_snapshot(conn, modifier_group_id: UUID, tenant_id: 
 
         # Modificadores
         modifiers = await conn.fetch("""
-            SELECT id, name, price, is_available, is_default, sort_order,
+            SELECT id, name, price, max_limit, included_quantity,
+                   is_available, is_default, sort_order,
                    option_type,
                    ingredient_id, ingredient_quantity, ingredient_unit,
                    recipe_base_type_id, recipe_base_quantity,

@@ -19,6 +19,7 @@ class ModifierInput(BaseModel):
     id: UUID
     name: str
     price: float
+    quantity: int = Field(default=1, ge=1)
 
 
 class AddItemRequest(BaseModel):

@@ -13,6 +13,7 @@ Opciones específicas dentro de grupos (ej: "Queso extra", "Sin cebolla", "Térm
 | name | varchar(255) |  | false |  |  |  |
 | price | numeric(10,2) | 0 | false |  |  | Precio adicional al producto base (puede ser 0 si no tiene costo extra) |
 | max_limit | integer | 1 | true |  |  | Cuántas veces se puede agregar este modificador (ej: 2 = puede pedir doble queso) |
+| included_quantity | integer | 0 | false |  |  |  |
 | is_default | boolean | false | true |  |  | true = viene seleccionado por defecto al agregar el producto |
 | is_available | boolean | true | true |  |  |  |
 | sort_order | integer | 0 | true |  |  |  |
@@ -28,6 +29,7 @@ Opciones específicas dentro de grupos (ej: "Queso extra", "Sin cebolla", "Térm
 | ---- | ---- | ---------- |
 | check_modifier_max_limit | CHECK | CHECK ((max_limit > 0)) |
 | check_modifier_price_positive | CHECK | CHECK ((price >= (0)::numeric)) |
+| modifiers_included_quantity_check | CHECK | CHECK (((included_quantity >= 0) AND (included_quantity <= COALESCE(max_limit, 1)))) |
 | modifiers_ingredient_id_fkey | FOREIGN KEY | FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE SET NULL |
 | modifiers_modifier_group_id_fkey | FOREIGN KEY | FOREIGN KEY (modifier_group_id) REFERENCES modifier_groups(id) ON DELETE CASCADE |
 | modifiers_pkey | PRIMARY KEY | PRIMARY KEY (id) |

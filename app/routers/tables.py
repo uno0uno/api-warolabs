@@ -42,7 +42,7 @@ class TabModifier(BaseModel):
     id: Optional[str] = None
     name: Optional[str] = None
     price: float = 0.0
-    quantity: float = Field(default=1.0, gt=0)
+    quantity: int = Field(default=1, ge=1)
 
 
 class TabItem(BaseModel):

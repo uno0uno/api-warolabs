@@ -65,6 +65,17 @@ async def test_add_tab_items_core_deducts_modifier_inventory():
     ), patch(
         "app.services.tables_service._deduct_modifier_inventory_for_order_item",
         deduct_mock,
+    ), patch(
+        "app.services.tables_service.resolve_modifier_selections",
+        new=AsyncMock(return_value=[{
+            "id": modifier_id,
+            "name": "Tocineta",
+            "price": Decimal("4"),
+            "quantity": 1,
+            "included_quantity": 0,
+            "chargeable_quantity": 1,
+            "subtotal": Decimal("4"),
+        }]),
     ):
         await tables_service._add_tab_items_core(
             mock_conn, tenant_id, user_id, table_id, items
@@ -134,6 +145,17 @@ async def test_add_tab_items_core_persists_modifier_quantity():
     ), patch(
         "app.services.tables_service._deduct_modifier_inventory_for_order_item",
         new=AsyncMock(),
+    ), patch(
+        "app.services.tables_service.resolve_modifier_selections",
+        new=AsyncMock(return_value=[{
+            "id": modifier_id,
+            "name": "Carne de Res",
+            "price": Decimal("9"),
+            "quantity": 3,
+            "included_quantity": 0,
+            "chargeable_quantity": 3,
+            "subtotal": Decimal("27"),
+        }]),
     ):
         await tables_service._add_tab_items_core(
             mock_conn, tenant_id, user_id, table_id, items

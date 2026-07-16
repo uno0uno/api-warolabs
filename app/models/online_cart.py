@@ -31,6 +31,7 @@ class OnlineCartItemModifier(BaseModel):
     modifier_name: str
     price: Decimal
     quantity: Decimal
+    included_quantity: int = 0
 
 
 class OnlineCartItem(BaseModel):
