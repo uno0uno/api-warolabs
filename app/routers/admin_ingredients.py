@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
 from app.database import get_db_connection
+from app.services.warehouse_categories_service import resolve_global_warehouse_category
 
 logger = logging.getLogger(__name__)
 
@@ -316,15 +317,19 @@ async def create_global_ingredient(
                 )
 
         async with conn.transaction():
+            warehouse_category = await resolve_global_warehouse_category(conn, body.category)
             new_row = await conn.fetchrow(
                 """
-                INSERT INTO ingredients (name, unit, category, tenant_id)
-                VALUES ($1, $2, $3, NULL)
-                RETURNING id::text, name, unit, category
+                INSERT INTO ingredients (
+                    name, unit, category, warehouse_category_id, tenant_id
+                )
+                VALUES ($1, $2, $3, $4, NULL)
+                RETURNING id::text, name, unit, category, warehouse_category_id
                 """,
                 name,
                 unit_to_use,
-                body.category,
+                warehouse_category["name"] if warehouse_category else None,
+                warehouse_category["id"] if warehouse_category else None,
             )
 
             hierarchy_id = None

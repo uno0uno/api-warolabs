@@ -7,6 +7,10 @@ import logging
 import asyncpg
 from app.core.exceptions import AuthenticationError
 from app.models.ingredient import Ingredient, IngredientsListResponse, TenantIngredientCreate, TenantIngredientUpdate
+from app.services.warehouse_categories_service import (
+    list_warehouse_categories,
+    resolve_assignable_warehouse_category,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,39 +75,8 @@ async def get_ingredient_categories(
     search: Optional[str] = None,
     limit: int = 100,
 ) -> List[Dict[str, Any]]:
-    """
-    Return distinct active ingredient categories visible to a tenant.
-
-    Categories remain textual until the managed warehouse-category catalog is
-    introduced, so this endpoint derives options from the data already stored
-    in `ingredients.category`.
-    """
-    query = """
-        SELECT
-            BTRIM(category) AS name,
-            COUNT(*)::int AS ingredient_count,
-            COUNT(*) FILTER (WHERE tenant_id IS NULL)::int AS global_count,
-            COUNT(*) FILTER (WHERE tenant_id = $1)::int AS tenant_count
-        FROM ingredients
-        WHERE (tenant_id IS NULL OR tenant_id = $1)
-          AND is_active = TRUE
-          AND NULLIF(BTRIM(category), '') IS NOT NULL
-    """
-    params: List[Any] = [tenant_id]
-
-    if search and search.strip():
-        query += " AND LOWER(unaccent(BTRIM(category))) LIKE LOWER(unaccent($2))"
-        params.append(f"%{search.strip()}%")
-
-    query += f"""
-        GROUP BY BTRIM(category)
-        ORDER BY LOWER(BTRIM(category)), BTRIM(category)
-        LIMIT ${len(params) + 1}
-    """
-    params.append(limit)
-
-    rows = await conn.fetch(query, *params)
-    return [dict(row) for row in rows]
+    """Compatibility alias backed by the managed warehouse category catalog."""
+    return await list_warehouse_categories(conn, tenant_id, search, limit)
 
 
 def resolve_purchase_units(purchase_units: list, base_unit: str) -> list:
@@ -168,6 +141,7 @@ async def get_ingredients_list(
                     i.name,
                     i.unit,
                     i.category,
+                    i.warehouse_category_id,
                     i.type,
                     i.description,
                     CAST(i.minimum_order_quantity AS float) as minimum_order_quantity,
@@ -427,18 +401,29 @@ async def create_tenant_ingredient(
             )
         parent_name = parent_row["name"]
 
+    category = await resolve_assignable_warehouse_category(
+        conn,
+        tenant_id,
+        data.warehouse_category_id,
+        data.category,
+    )
+
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO ingredients (name, unit, type, category, costo_unitario, parent_id, tenant_id, is_resale, unit_weight_gr, unit_weight_unit)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            RETURNING id::text, name, unit, type, category, costo_unitario,
+            INSERT INTO ingredients (
+                name, unit, type, category, warehouse_category_id, costo_unitario,
+                parent_id, tenant_id, is_resale, unit_weight_gr, unit_weight_unit
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            RETURNING id::text, name, unit, type, category, warehouse_category_id, costo_unitario,
                       parent_id::text, tenant_id::text, is_resale, unit_weight_gr, unit_weight_unit, created_at
             """,
             name,
             data.unit,
             ingredient_type,
-            data.category,
+            category["name"] if category else None,
+            category["id"] if category else None,
             data.costo_unitario,
             parent_uuid,
             tenant_id,
@@ -492,7 +477,7 @@ async def update_tenant_ingredient(
     tenant_id guard ensures tenants can only edit their own ingredients.
     """
     row = await conn.fetchrow(
-        "SELECT id, name, unit, type, category, costo_unitario, parent_id::text FROM ingredients WHERE id = $1 AND tenant_id = $2",
+        "SELECT id, name, unit, type, category, warehouse_category_id, costo_unitario, parent_id::text FROM ingredients WHERE id = $1 AND tenant_id = $2",
         ingredient_id,
         tenant_id,
     )
@@ -512,8 +497,19 @@ async def update_tenant_ingredient(
         _validate_unit_for_type(data.unit, effective_type)
         updates["unit"] = data.unit
 
-    if data.category is not None:
-        updates["category"] = data.category or None
+    category_id_unchanged = (
+        data.warehouse_category_id is not None
+        and data.warehouse_category_id == row["warehouse_category_id"]
+    )
+    if (data.warehouse_category_id is not None or data.category is not None) and not category_id_unchanged:
+        category = await resolve_assignable_warehouse_category(
+            conn,
+            tenant_id,
+            data.warehouse_category_id,
+            data.category,
+        )
+        updates["category"] = category["name"] if category else None
+        updates["warehouse_category_id"] = category["id"] if category else None
 
     if data.costo_unitario is not None:
         updates["costo_unitario"] = data.costo_unitario
@@ -578,7 +574,8 @@ async def update_tenant_ingredient(
             f"""
             UPDATE ingredients SET {set_clauses}, updated_at = NOW()
             WHERE id = $1
-            RETURNING id::text, name, unit, category, costo_unitario, parent_id::text, tenant_id::text, updated_at
+            RETURNING id::text, name, unit, category, warehouse_category_id,
+                      costo_unitario, parent_id::text, tenant_id::text, updated_at
             """,
             ingredient_id,
             *values,

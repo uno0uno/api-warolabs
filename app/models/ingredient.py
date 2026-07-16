@@ -11,6 +11,7 @@ class IngredientBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, description="Name of the ingredient")
     unit: str = Field(..., min_length=1, max_length=50, description="Unit of measure (e.g., kg, liter, unit)")
     category: Optional[str] = Field(None, max_length=255, description="Category of the ingredient")
+    warehouse_category_id: Optional[UUID] = Field(None, description="Stable warehouse category ID")
     type: Optional[str] = Field('food', max_length=20, description="Type of ingredient: 'food' (alimentos), 'service' (servicios), 'supply' (insumos)")
     description: Optional[str] = Field(None, max_length=1024, description="Detailed description of the ingredient")
     minimum_order_quantity: Optional[float] = Field(None, gt=0, description="Minimum order quantity for the ingredient")
@@ -40,6 +41,7 @@ class TenantIngredientCreate(BaseModel):
     unit: str = Field(..., description="food: gr/ml/kg/und/lt; service: hr or und; supply: und")
     type: Optional[str] = Field(default="food", description="food | service | supply")
     category: Optional[str] = Field(default=None, max_length=255)
+    warehouse_category_id: Optional[UUID] = None
     costo_unitario: Optional[float] = Field(default=None, ge=0)
     parent_id: Optional[str] = Field(default=None, description="UUID of a global base ingredient")
     is_resale: Optional[bool] = Field(default=False, description="Mark as resale product — will appear in /menu/reventa")
@@ -53,6 +55,7 @@ class TenantIngredientUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     unit: Optional[str] = Field(default=None, description="food: gr/ml/kg/und/lt; service: hr or und; supply: und")
     category: Optional[str] = Field(default=None, max_length=255)
+    warehouse_category_id: Optional[UUID] = None
     costo_unitario: Optional[float] = Field(default=None, ge=0)
     parent_id: Optional[str] = Field(default=None, description="UUID of a global base ingredient, or empty string to clear")
     is_resale: Optional[bool] = Field(default=None, description="Mark as resale product")
@@ -65,6 +68,7 @@ class IngredientUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     unit: Optional[str] = Field(None, min_length=1, max_length=50)
     category: Optional[str] = Field(None, max_length=255)
+    warehouse_category_id: Optional[UUID] = None
     type: Optional[str] = Field(None, max_length=20, description="Type: 'food', 'service', 'supply'")
     description: Optional[str] = Field(None, max_length=1024)
     minimum_order_quantity: Optional[float] = Field(None, gt=0)
@@ -101,7 +105,13 @@ class IngredientsListResponse(BaseModel):
 
 
 class IngredientCategoryOption(BaseModel):
+    id: UUID
+    tenant_id: Optional[UUID] = None
     name: str
+    normalized_name: str
+    is_active: bool
+    scope: str
+    can_manage: bool
     ingredient_count: int
     global_count: int
     tenant_count: int

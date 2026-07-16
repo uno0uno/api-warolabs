@@ -12,6 +12,7 @@ from app.routers import (
     recipe_bases,
     modifiers,
     ingredient_purchase_units,
+    warehouse_categories,
     customers,
     pos_cart,
     pos_context,
