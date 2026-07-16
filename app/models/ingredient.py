@@ -100,6 +100,19 @@ class IngredientsListResponse(BaseModel):
     data: List[Ingredient]
 
 
+class IngredientCategoryOption(BaseModel):
+    name: str
+    ingredient_count: int
+    global_count: int
+    tenant_count: int
+
+
+class IngredientCategoriesResponse(BaseModel):
+    success: bool = True
+    total: int
+    data: List[IngredientCategoryOption]
+
+
 # =============================================================================
 # INGREDIENT PURCHASE UNITS MODELS
 # =============================================================================

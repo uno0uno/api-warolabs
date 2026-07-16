@@ -16,6 +16,7 @@ from app.models.ingredient import TenantIngredientCreate
 from app.services.ingredients_service import (
     _validate_unit_for_type,
     create_tenant_ingredient,
+    get_ingredient_categories,
     update_tenant_ingredient,
 )
 from app.models.ingredient import TenantIngredientUpdate
@@ -157,6 +158,43 @@ class TestIngredientUnitTypeValidation:
         data = TenantIngredientUpdate(unit="hr")
         result = await update_tenant_ingredient(conn, tenant_id, ingredient_id, data)
         assert result["unit"] == "hr"
+
+
+class TestIngredientCategorySearch:
+    @pytest.mark.asyncio
+    async def test_lists_tenant_visible_categories_with_partial_search(self):
+        tenant_id = uuid4()
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[
+            {
+                "name": "categoria de prueba",
+                "ingredient_count": 2,
+                "global_count": 0,
+                "tenant_count": 2,
+            },
+            {
+                "name": "ingrediente categoria",
+                "ingredient_count": 1,
+                "global_count": 0,
+                "tenant_count": 1,
+            },
+        ])
+
+        result = await get_ingredient_categories(
+            conn,
+            tenant_id,
+            search=" categoria ",
+            limit=50,
+        )
+
+        assert [category["name"] for category in result] == [
+            "categoria de prueba",
+            "ingrediente categoria",
+        ]
+        query, *params = conn.fetch.await_args.args
+        assert "(tenant_id IS NULL OR tenant_id = $1)" in query
+        assert "LOWER(unaccent(BTRIM(category))) LIKE LOWER(unaccent($2))" in query
+        assert params == [tenant_id, "%categoria%", 50]
 
 
 class TestIngredientsEndpoint:

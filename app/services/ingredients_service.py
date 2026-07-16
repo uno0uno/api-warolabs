@@ -65,6 +65,47 @@ PURCHASE_UNIT_CATALOG: Dict[str, Dict[str, Any]] = {
 }
 
 
+async def get_ingredient_categories(
+    conn,
+    tenant_id: UUID,
+    search: Optional[str] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """
+    Return distinct active ingredient categories visible to a tenant.
+
+    Categories remain textual until the managed warehouse-category catalog is
+    introduced, so this endpoint derives options from the data already stored
+    in `ingredients.category`.
+    """
+    query = """
+        SELECT
+            BTRIM(category) AS name,
+            COUNT(*)::int AS ingredient_count,
+            COUNT(*) FILTER (WHERE tenant_id IS NULL)::int AS global_count,
+            COUNT(*) FILTER (WHERE tenant_id = $1)::int AS tenant_count
+        FROM ingredients
+        WHERE (tenant_id IS NULL OR tenant_id = $1)
+          AND is_active = TRUE
+          AND NULLIF(BTRIM(category), '') IS NOT NULL
+    """
+    params: List[Any] = [tenant_id]
+
+    if search and search.strip():
+        query += " AND LOWER(unaccent(BTRIM(category))) LIKE LOWER(unaccent($2))"
+        params.append(f"%{search.strip()}%")
+
+    query += f"""
+        GROUP BY BTRIM(category)
+        ORDER BY LOWER(BTRIM(category)), BTRIM(category)
+        LIMIT ${len(params) + 1}
+    """
+    params.append(limit)
+
+    rows = await conn.fetch(query, *params)
+    return [dict(row) for row in rows]
+
+
 def resolve_purchase_units(purchase_units: list, base_unit: str) -> list:
     """
     Validate each purchase_unit key against the catalog and resolve
