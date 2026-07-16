@@ -3,8 +3,8 @@ from typing import Any, Dict, Optional
 from uuid import UUID
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
-from app.services.ingredients_service import get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name, create_tenant_ingredient, update_tenant_ingredient, archive_tenant_ingredient, restore_tenant_ingredient, hard_delete_tenant_ingredient
-from app.models.ingredient import IngredientsListResponse, TenantIngredientCreate, TenantIngredientUpdate
+from app.services.ingredients_service import get_ingredient_categories, get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name, create_tenant_ingredient, update_tenant_ingredient, archive_tenant_ingredient, restore_tenant_ingredient, hard_delete_tenant_ingredient
+from app.models.ingredient import IngredientCategoriesResponse, IngredientsListResponse, TenantIngredientCreate, TenantIngredientUpdate
 from app.database import get_db_connection
 
 router = APIRouter()
@@ -71,6 +71,33 @@ async def get_ingredients_endpoint(
     return await get_ingredients_list(
         request, response, page, limit, search, category, supplier_id, type, is_resale, base_only, tenant_only, show_archived
     )
+
+
+@router.get(
+    "/categories",
+    response_model=IngredientCategoriesResponse,
+    dependencies=[Depends(require_module(Module.ABASTECIMIENTO))],
+)
+async def get_ingredient_categories_endpoint(
+    request: Request,
+    search: Optional[str] = Query(default=None, description="Filter warehouse categories by name"),
+    limit: int = Query(default=100, ge=1, le=250),
+):
+    """List distinct ingredient categories visible to the current tenant."""
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant context required")
+
+    async with get_db_connection() as conn:
+        categories = await get_ingredient_categories(conn, tenant_id, search, limit)
+
+    return {
+        "success": True,
+        "total": len(categories),
+        "data": categories,
+    }
 
 
 @router.get("/{ingredient_id}", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
