@@ -1822,6 +1822,8 @@ async def activate_tenant_subscription(
     amount: float = 0,
     currency: str = "COP",
     period_anchor: Optional[datetime] = None,
+    expected_tenant_id: Optional[UUID] = None,
+    amount_in_cents: Optional[int] = None,
 ):
     """
     Llamado desde el webhook de Wompi cuando la transacción es APPROVED.
@@ -1831,13 +1833,14 @@ async def activate_tenant_subscription(
     row = await conn.fetchrow("""
         SELECT ts.id, ts.tenant_id, ts.billing_cycle,
                t.name AS tenant_name, t.email AS tenant_email,
-               sp.name AS plan_name
+               sp.name AS plan_name, sp.price_annual
         FROM tenant_subscriptions ts
         JOIN tenants t ON t.id = ts.tenant_id
         JOIN subscription_plans sp ON sp.id = ts.plan_id
         WHERE ts.gateway_reference = $1
           AND ts.status IN ('pending', 'past_due')
-    """, gateway_reference)
+          AND ($2::uuid IS NULL OR ts.tenant_id = $2)
+    """, gateway_reference, expected_tenant_id)
 
     if row is None:
         logger.warning(
@@ -1845,6 +1848,17 @@ async def activate_tenant_subscription(
             gateway_reference,
         )
         return None
+
+    if amount_in_cents is not None:
+        expected_amount_in_cents = annual_price_in_cents(row["price_annual"])
+        if (
+            currency.upper() != "COP"
+            or amount_in_cents != expected_amount_in_cents
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="La transacción no coincide con el valor de la suscripción",
+            )
 
     if await payment_approved_exists(conn, row["id"], payment_id):
         logger.info(
