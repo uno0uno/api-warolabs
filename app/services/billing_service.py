@@ -1923,7 +1923,10 @@ async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
                 grace_days_remaining=0,
                 subscription_status="payment_pending",
                 next_payment_date=None,
-                message="Elige un plan y completa el pago para activar los módulos de WARO.",
+                message=(
+                    "Ve a Mi Plan, elige una suscripción y completa el pago "
+                    "para activar los módulos de WARO."
+                ),
             )
         return SubscriptionAccess(
             level="free",

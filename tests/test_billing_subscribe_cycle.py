@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.core import permissions
 from app.core.middleware import SessionContext
+from app.routers import billing
 from app.routers.billing import tenant_router
 
 
@@ -76,9 +77,11 @@ def test_subscribe_requires_current_terms_before_wompi_link():
         conn.fetch = AsyncMock(return_value=[])
         yield conn
 
+    conn = MagicMock()
+
     @asynccontextmanager
     async def _billing_db():
-        yield MagicMock()
+        yield conn
 
     terms_error = HTTPException(
         status_code=409,
@@ -110,3 +113,71 @@ def test_subscribe_requires_current_terms_before_wompi_link():
     assert res.status_code == 409
     assert res.json()["detail"]["code"] == "terms_acceptance_required"
     wompi_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_active_promoted_tenant_uses_normal_subscription_flow():
+    tenant_id = uuid4()
+    plan_id = uuid4()
+    session = SessionContext({
+        "user_id": uuid4(),
+        "tenant_id": tenant_id,
+        "email": "test@example.com",
+        "name": "Test User",
+        "expires_at": None,
+        "is_active": True,
+        "role": "admin",
+        "lifecycle_status": "active",
+        "onboarding_state": "payment_pending",
+    })
+
+    conn = MagicMock()
+
+    @asynccontextmanager
+    async def _billing_db():
+        yield conn
+
+    plan = {
+        "id": plan_id,
+        "name": "Plan Pro",
+        "price_annual": 1200000,
+        "amount_in_cents": 120000000,
+    }
+    checkout = {
+        "checkout_url": "https://checkout.example.test",
+        "wompi_link_id": "link-normal",
+    }
+    subscribed = {"status": "pending", "checkout_url": checkout["checkout_url"]}
+
+    with patch.object(billing, "require_valid_session", return_value=session), patch.object(
+        billing, "get_db_connection", side_effect=_billing_db
+    ), patch.object(
+        billing.billing_service,
+        "get_plan_for_subscribe",
+        new=AsyncMock(return_value=plan),
+    ), patch.object(
+        billing.legal_service,
+        "ensure_current_terms_accepted",
+        new=AsyncMock(),
+    ) as terms, patch.object(
+        billing.wompi_service,
+        "create_payment_link",
+        new=AsyncMock(return_value=checkout),
+    ), patch.object(
+        billing.billing_service,
+        "subscribe_tenant",
+        new=AsyncMock(return_value=subscribed),
+    ) as subscribe, patch.object(
+        billing.billing_service,
+        "create_onboarding_payment_attempt",
+        new=AsyncMock(),
+    ) as onboarding_attempt:
+        result = await billing.subscribe(
+            billing.SubscribeBody(plan_id=plan_id, billing_cycle="annual"),
+            MagicMock(),
+        )
+
+    assert result == subscribed
+    terms.assert_awaited_once_with(conn, tenant_id)
+    subscribe.assert_awaited_once()
+    onboarding_attempt.assert_not_awaited()
