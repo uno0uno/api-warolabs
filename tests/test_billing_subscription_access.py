@@ -132,4 +132,5 @@ async def test_payment_pending_onboarding_without_subscription_is_blocked():
 
     assert access.level == "blocked"
     assert access.subscription_status == "payment_pending"
+    assert "Mi Plan" in access.message
     assert "completa el pago" in access.message
