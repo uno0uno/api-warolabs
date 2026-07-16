@@ -28,7 +28,8 @@ async def create_custom_ingredient(
         raise HTTPException(status_code=401, detail="Tenant context required")
 
     async with get_db_connection() as conn:
-        data = await create_tenant_ingredient(conn, tenant_id, body)
+        async with conn.transaction():
+            data = await create_tenant_ingredient(conn, tenant_id, body)
 
     return {"success": True, "data": data}
 
@@ -189,7 +190,8 @@ async def update_custom_ingredient(
         raise HTTPException(status_code=401, detail="Tenant context required")
 
     async with get_db_connection() as conn:
-        data = await update_tenant_ingredient(conn, tenant_id, ingredient_id, body)
+        async with conn.transaction():
+            data = await update_tenant_ingredient(conn, tenant_id, ingredient_id, body)
 
     return {"success": True, "data": data}
 

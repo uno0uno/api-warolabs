@@ -80,22 +80,32 @@ class TestIngredientUnitTypeValidation:
     @pytest.mark.asyncio
     async def test_create_service_ingredient_und(self):
         tenant_id = uuid4()
+        warehouse_category_id = uuid4()
         conn = AsyncMock()
         conn.fetchrow = AsyncMock(
-            return_value={
-                "id": str(uuid4()),
-                "name": "Transporte domicilios",
-                "unit": "und",
-                "type": "service",
-                "category": "Logística",
-                "costo_unitario": None,
-                "parent_id": None,
-                "tenant_id": str(tenant_id),
-                "is_resale": False,
-                "unit_weight_gr": None,
-                "unit_weight_unit": "gr",
-                "created_at": None,
-            }
+            side_effect=[
+                {
+                    "id": warehouse_category_id,
+                    "name": "Logística",
+                    "tenant_id": tenant_id,
+                    "is_active": True,
+                },
+                {
+                    "id": str(uuid4()),
+                    "name": "Transporte domicilios",
+                    "unit": "und",
+                    "type": "service",
+                    "category": "Logística",
+                    "warehouse_category_id": warehouse_category_id,
+                    "costo_unitario": None,
+                    "parent_id": None,
+                    "tenant_id": str(tenant_id),
+                    "is_resale": False,
+                    "unit_weight_gr": None,
+                    "unit_weight_unit": "gr",
+                    "created_at": None,
+                },
+            ]
         )
         data = TenantIngredientCreate(
             name="Transporte domicilios",
@@ -106,6 +116,7 @@ class TestIngredientUnitTypeValidation:
         result = await create_tenant_ingredient(conn, tenant_id, data)
         assert result["unit"] == "und"
         assert result["type"] == "service"
+        assert result["warehouse_category_id"] == warehouse_category_id
 
     @pytest.mark.asyncio
     async def test_create_service_rejects_gr(self):
@@ -167,13 +178,25 @@ class TestIngredientCategorySearch:
         conn = AsyncMock()
         conn.fetch = AsyncMock(return_value=[
             {
+                "id": uuid4(),
+                "tenant_id": tenant_id,
                 "name": "categoria de prueba",
+                "normalized_name": "categoria de prueba",
+                "is_active": True,
+                "created_at": None,
+                "updated_at": None,
                 "ingredient_count": 2,
                 "global_count": 0,
                 "tenant_count": 2,
             },
             {
+                "id": uuid4(),
+                "tenant_id": tenant_id,
                 "name": "ingrediente categoria",
+                "normalized_name": "ingrediente categoria",
+                "is_active": True,
+                "created_at": None,
+                "updated_at": None,
                 "ingredient_count": 1,
                 "global_count": 0,
                 "tenant_count": 1,
@@ -192,8 +215,8 @@ class TestIngredientCategorySearch:
             "ingrediente categoria",
         ]
         query, *params = conn.fetch.await_args.args
-        assert "(tenant_id IS NULL OR tenant_id = $1)" in query
-        assert "LOWER(unaccent(BTRIM(category))) LIKE LOWER(unaccent($2))" in query
+        assert "(wc.tenant_id IS NULL OR wc.tenant_id = $1)" in query
+        assert "wc.normalized_name LIKE $2" in query
         assert params == [tenant_id, "%categoria%", 50]
 
 
