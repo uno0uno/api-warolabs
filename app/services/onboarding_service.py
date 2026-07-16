@@ -415,6 +415,7 @@ async def complete_registration(
                 "next_step": next_step_for_state(onboarding["state"]),
             }
 
+    is_self_service_onboarding = identity.get("onboarding_state") is not None
     if identity["lifecycle_status"] == "pending" and all((
         challenge.get("business_name"),
         challenge.get("country_code"),
@@ -432,9 +433,10 @@ async def complete_registration(
         identity["tenant_name"] = financial.data.business_name
         identity["onboarding_state"] = financial.data.state
         identity["next_step"] = financial.data.next_step
+        identity["lifecycle_status"] = "active"
 
     notification = None
-    if identity["lifecycle_status"] == "pending":
+    if is_self_service_onboarding:
         phone_number = challenge.get("phone_number")
         phone_country_code = challenge.get("phone_country_code")
         if phone_number and phone_country_code:
@@ -557,7 +559,12 @@ def _profile_from_row(row: Any) -> Optional[TenantFinancialProfile]:
 def _ensure_pending_financial_state(row: Any) -> None:
     if not row:
         raise HTTPException(status_code=404, detail="Onboarding not found")
-    if row["lifecycle_status"] != "pending":
+    is_pending = row["lifecycle_status"] == "pending"
+    is_promoted = (
+        row["lifecycle_status"] == "active"
+        and row["state"] == "payment_pending"
+    )
+    if not is_pending and not is_promoted:
         raise HTTPException(
             status_code=409,
             detail={"code": "ONBOARDING_NOT_PENDING"},
@@ -608,6 +615,55 @@ async def get_onboarding_financial_profile(
     )
     _ensure_pending_financial_state(row)
     return _financial_response(row)
+
+
+async def _promote_onboarding_identity(conn, tenant_id: UUID) -> str:
+    state_row = await conn.fetchrow(
+        """
+        UPDATE tenant_onboarding
+        SET state = 'payment_pending',
+            updated_at = CASE
+                WHEN state IS DISTINCT FROM 'payment_pending' THEN NOW()
+                ELSE updated_at
+            END
+        WHERE tenant_id = $1
+          AND state IN ('business_profile_pending', 'terms_pending', 'payment_pending')
+        RETURNING state
+        """,
+        tenant_id,
+    )
+    if state_row is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ONBOARDING_ACTIVATION_CONFLICT"},
+        )
+
+    member_update = await conn.execute(
+        """
+        UPDATE tenant_members tm
+        SET role = 'admin', is_active = true
+        FROM tenant_onboarding o
+        WHERE o.tenant_id = $1
+          AND tm.tenant_id = o.tenant_id
+          AND tm.user_id = o.owner_user_id
+          AND tm.role IN ('owner', 'admin')
+        """,
+        tenant_id,
+    )
+    tenant_update = await conn.execute(
+        """
+        UPDATE tenants
+        SET lifecycle_status = 'active'
+        WHERE id = $1 AND lifecycle_status IN ('pending', 'active')
+        """,
+        tenant_id,
+    )
+    if member_update != "UPDATE 1" or tenant_update != "UPDATE 1":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ONBOARDING_ACTIVATION_CONFLICT"},
+        )
+    return state_row["state"]
 
 
 async def update_onboarding_financial_profile(
@@ -661,8 +717,8 @@ async def update_onboarding_financial_profile(
             )
         result = dict(profile)
         result["business_name"] = context["business_name"]
-        result["lifecycle_status"] = context["lifecycle_status"]
-        result["state"] = context["state"]
+        result["lifecycle_status"] = "active"
+        result["state"] = await _promote_onboarding_identity(conn, tenant_id)
         return _financial_response(result)
 
     await conn.execute(
@@ -718,26 +774,11 @@ async def update_onboarding_financial_profile(
         document_mode,
         fiscal_provider,
     )
-    state_row = await conn.fetchrow(
-        """
-        UPDATE tenant_onboarding
-        SET state = CASE
-                WHEN state = 'business_profile_pending' THEN 'terms_pending'
-                ELSE state
-            END,
-            updated_at = CASE
-                WHEN state = 'business_profile_pending' THEN NOW()
-                ELSE updated_at
-            END
-        WHERE tenant_id = $1
-        RETURNING state
-        """,
-        tenant_id,
-    )
+    state = await _promote_onboarding_identity(conn, tenant_id)
     result = dict(profile)
     result["business_name"] = data.business_name
-    result["lifecycle_status"] = "pending"
-    result["state"] = state_row["state"]
+    result["lifecycle_status"] = "active"
+    result["state"] = state
     return _financial_response(result)
 
 
@@ -856,7 +897,7 @@ async def activate_paid_onboarding_identity(conn, tenant_id: UUID) -> Optional[d
         JOIN tenant_members tm
           ON tm.tenant_id = t.id
          AND tm.user_id = o.owner_user_id
-         AND tm.role = 'owner'
+         AND tm.role IN ('owner', 'admin')
         WHERE t.id = $1
         FOR UPDATE OF t, o, tm
         """,
@@ -872,7 +913,7 @@ async def activate_paid_onboarding_identity(conn, tenant_id: UUID) -> Optional[d
         """
         UPDATE tenant_members
         SET is_active = true, role = 'admin'
-        WHERE id = $1 AND role = 'owner'
+        WHERE id = $1 AND role IN ('owner', 'admin')
         """,
         context["owner_member_id"],
     )

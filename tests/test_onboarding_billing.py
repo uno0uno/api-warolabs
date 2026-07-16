@@ -335,13 +335,13 @@ async def test_late_valid_attempt_after_activation_records_evidence_without_plan
 
 
 @pytest.mark.asyncio
-async def test_paid_identity_activation_updates_owner_onboarding_and_tenant_once():
+async def test_paid_identity_activation_accepts_promoted_admin_and_updates_once():
     tenant_id = uuid4()
     context = {
         "tenant_id": tenant_id,
         "tenant_name": "Restaurante",
         "tenant_email": "owner@example.com",
-        "lifecycle_status": "pending",
+        "lifecycle_status": "active",
         "onboarding_id": uuid4(),
         "state": "payment_pending",
         "owner_user_id": uuid4(),
@@ -356,10 +356,12 @@ async def test_paid_identity_activation_updates_owner_onboarding_and_tenant_once
     )
 
     assert activated["tenant_id"] == tenant_id
+    identity_query = " ".join(conn.fetchrow.await_args.args[0].split())
+    assert "tm.role IN ('owner', 'admin')" in identity_query
     assert conn.execute.await_count == 3
     statements = [" ".join(call.args[0].split()) for call in conn.execute.await_args_list]
     assert "SET is_active = true, role = 'admin'" in statements[0]
-    assert "role = 'owner'" in statements[0]
+    assert "role IN ('owner', 'admin')" in statements[0]
     assert "SET state = 'active'" in statements[1]
     assert "SET lifecycle_status = 'active'" in statements[2]
 

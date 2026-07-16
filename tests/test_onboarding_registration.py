@@ -135,8 +135,8 @@ async def test_verified_challenge_atomically_creates_pending_owner():
 
     financial = AsyncMock(return_value=SimpleNamespace(data=SimpleNamespace(
         business_name="Restaurante Nuevo",
-        state="terms_pending",
-        next_step="terms",
+        state="payment_pending",
+        next_step="payment",
     )))
     with patch("app.services.onboarding_service.settings.auth_secret", "test-secret"), patch(
         "app.services.onboarding_service.uuid4", return_value=tenant_id
@@ -152,10 +152,10 @@ async def test_verified_challenge_atomically_creates_pending_owner():
 
     assert identity["user_id"] == user_id
     assert identity["tenant_id"] == tenant_id
-    assert identity["lifecycle_status"] == "pending"
+    assert identity["lifecycle_status"] == "active"
     assert identity["tenant_name"] == "Restaurante Nuevo"
-    assert identity["onboarding_state"] == "terms_pending"
-    assert identity["next_step"] == "terms"
+    assert identity["onboarding_state"] == "payment_pending"
+    assert identity["next_step"] == "payment"
     financial.assert_awaited_once()
     assert identity["registration_notification"]["source"] == "blog"
     assert identity["registration_notification"]["variant"] == "b"
@@ -166,6 +166,8 @@ async def test_verified_challenge_atomically_creates_pending_owner():
     assert "INSERT INTO tenant_members" in writes
     assert "'owner', false" in writes
     assert "UPDATE profile" in writes
+    assert "billing_payment_attempts" not in writes
+    assert "tenant_subscriptions" not in writes
     assert "tenant_public_profiles" not in writes
     assert "seed_tenant_accounts" not in writes
 

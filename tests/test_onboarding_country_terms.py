@@ -65,14 +65,19 @@ async def test_catalog_read_has_no_default_profile_write():
 
 
 @pytest.mark.asyncio
-async def test_initial_selection_is_atomic_and_advances_to_terms():
+async def test_initial_selection_atomically_promotes_identity_to_billing_boundary():
     tenant_id = uuid4()
     profile = _profile_row(tenant_id)
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(side_effect=[
         {"lifecycle_status": "pending", "state": "business_profile_pending"},
         profile,
-        {"state": "terms_pending"},
+        {"state": "payment_pending"},
+    ])
+    conn.execute = AsyncMock(side_effect=[
+        "UPDATE 1",
+        "UPDATE 1",
+        "UPDATE 1",
     ])
 
     result = await onboarding_service.update_onboarding_financial_profile(
@@ -88,16 +93,18 @@ async def test_initial_selection_is_atomic_and_advances_to_terms():
     assert result.data.profile.country_code == "US"
     assert result.data.business_name == "Cafe Central"
     assert result.data.profile.selection_revision == 1
-    assert result.data.state == "terms_pending"
-    assert result.data.next_step == "terms"
+    assert result.data.state == "payment_pending"
+    assert result.data.next_step == "payment"
     lock_query = conn.fetchrow.await_args_list[0].args[0]
     upsert_query = conn.fetchrow.await_args_list[1].args[0]
     assert "FOR UPDATE OF t, o" in lock_query
     assert "ON CONFLICT (tenant_id) DO UPDATE" in upsert_query
     assert "selection_revision + 1" in upsert_query
-    tenant_update = conn.execute.await_args.args[0]
-    assert "UPDATE tenants" in tenant_update
-    assert conn.execute.await_args.args[2] == "Cafe Central"
+    statements = [" ".join(call.args[0].split()) for call in conn.execute.await_args_list]
+    assert "UPDATE tenants SET name" in statements[0]
+    assert conn.execute.await_args_list[0].args[2] == "Cafe Central"
+    assert "SET role = 'admin', is_active = true" in statements[1]
+    assert "SET lifecycle_status = 'active'" in statements[2]
 
 
 @pytest.mark.asyncio
@@ -106,12 +113,14 @@ async def test_idempotent_selection_keeps_database_revision():
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(side_effect=[
         {
-            "lifecycle_status": "pending",
+            "lifecycle_status": "active",
             "state": "payment_pending",
             "business_name": "Cafe Central",
         },
         _profile_row(tenant_id, revision=4),
+        {"state": "payment_pending"},
     ])
+    conn.execute = AsyncMock(side_effect=["UPDATE 1", "UPDATE 1"])
 
     result = await onboarding_service.update_onboarding_financial_profile(
         conn,
@@ -125,7 +134,7 @@ async def test_idempotent_selection_keeps_database_revision():
 
     assert result.data.profile.selection_revision == 4
     assert result.data.state == "payment_pending"
-    conn.execute.assert_not_awaited()
+    assert conn.execute.await_count == 2
 
 
 @pytest.mark.asyncio
