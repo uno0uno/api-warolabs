@@ -636,7 +636,29 @@ async def get_modifier_group_snapshot(conn, modifier_group_id: UUID, tenant_id: 
                    linked_product_id, linked_product_quantity
             FROM modifiers WHERE modifier_group_id = $1
         """, modifier_group_id)
-        snapshot['modifiers'] = [dict(m) for m in modifiers]
+        recipe_lines = await conn.fetch("""
+            SELECT mr.modifier_id, mr.ingredient_id, mr.quantity, mr.unit
+            FROM modifier_recipes mr
+            JOIN modifiers m ON m.id = mr.modifier_id
+            WHERE m.modifier_group_id = $1
+            ORDER BY mr.modifier_id, mr.created_at, mr.id
+        """, modifier_group_id)
+        lines_by_modifier: Dict[UUID, List[Dict]] = {}
+        for line in recipe_lines:
+            modifier_id = line["modifier_id"]
+            lines_by_modifier.setdefault(modifier_id, []).append({
+                "ingredient_id": line["ingredient_id"],
+                "quantity": line["quantity"],
+                "unit": line["unit"],
+            })
+
+        snapshot['modifiers'] = [
+            {
+                **dict(modifier),
+                "recipe_lines": lines_by_modifier.get(modifier["id"], []),
+            }
+            for modifier in modifiers
+        ]
 
         return snapshot
     except Exception as e:
