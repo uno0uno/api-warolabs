@@ -14,7 +14,6 @@ from uuid import UUID
 
 import asyncpg
 
-from app.config import settings
 from app.database import get_db_connection
 from app.core.platform_legal import get_platform_legal_for_print
 from app.core.timezones import normalize_timezone
@@ -241,8 +240,8 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         'invoicing_ready': invoicing_ready,
         # WARO software + Matias facturador labels for tickets (env-driven; not tenant issuer)
         'platform_legal': get_platform_legal_for_print(),
-        # When false, POS/Ventas must not offer download/attach of Matias PDF
-        'invoice_pdf_enabled': bool(settings.invoice_pdf_enabled),
+        # PDF retrieval and email attachment are always enabled.
+        'invoice_pdf_enabled': True,
         'open_sale_product': open_sale_product,
         'members': [
             {

@@ -313,3 +313,35 @@ def test_pos_receipt_fiscal_invoice_labels_render_in_english(platform_print_env)
     assert "Verify in DIAN:" in text
     assert "CUFE: CUFE123" in text
     assert "Technical DIAN biller: Matias API" in text
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected"),
+    [
+        ("es", "Archivos: PDF/XML aún no disponibles en el repositorio fiscal."),
+        ("en", "Files: PDF/XML not yet available in the fiscal repository."),
+    ],
+)
+def test_pos_receipt_reports_pending_fiscal_artifacts(
+    platform_print_env,
+    locale,
+    expected,
+):
+    text = get_pos_receipt_text(
+        order_number=51,
+        total_amount=120000,
+        payment_method="cash",
+        items=[{"quantity": 1, "subtotal": 120000, "product": {"name": "Cena"}}],
+        order_date=datetime(2026, 7, 1, 18, 0, tzinfo=timezone.utc),
+        invoice_prefix="LZT",
+        invoice_number=5463,
+        invoice_cufe="CUFE124",
+        locale=locale,
+        currency_code="COP",
+        invoice_presentation={
+            "status": "accepted",
+            "attachments": {"pdf": False, "xml": False},
+        },
+    )
+
+    assert expected in text

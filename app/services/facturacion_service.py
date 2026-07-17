@@ -494,11 +494,7 @@ async def get_order_invoice(
         return None
 
     pdf_presigned_url: Optional[str] = None
-    if (
-        settings.invoice_pdf_enabled
-        and row['status'] == 'accepted'
-        and row['r2_pdf_key']
-    ):
+    if row['status'] == 'accepted' and row['r2_pdf_key']:
         try:
             s3 = AWSS3Service()
             pdf_presigned_url = await s3.get_presigned_url(row['r2_pdf_key'], expiration=3600)
@@ -520,18 +516,6 @@ async def get_order_invoice(
         'pdf': bool(row['r2_pdf_key']),
         'xml': bool(row['r2_xml_key']),
     }
-    if not settings.invoice_pdf_enabled:
-        attachments = {**attachments, 'pdf': False}
-
-    # Hide Matias "missing PDF" noise when PDF is intentionally disabled
-    error_message = row['error_message']
-    if (
-        not settings.invoice_pdf_enabled
-        and error_message
-        and 'did not return PDF' in str(error_message)
-        and 'XML' not in str(error_message)
-    ):
-        error_message = None
 
     return {
         'id': str(row['id']),
@@ -541,8 +525,8 @@ async def get_order_invoice(
         'cufe': row['cufe'],
         'status': row['status'],
         'pdf_presigned_url': pdf_presigned_url,
-        'pdf_enabled': bool(settings.invoice_pdf_enabled),
-        'error_message': error_message,
+        'pdf_enabled': True,
+        'error_message': row['error_message'],
         'emitted_at': row['emitted_at'].isoformat() if row['emitted_at'] else None,
         'created_at': row['created_at'].isoformat() if row['created_at'] else None,
         'dian_url': presentation.get('dian_url'),

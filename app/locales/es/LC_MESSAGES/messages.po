@@ -143,8 +143,8 @@ msgstr "PDF adjunto"
 msgid "XML attached"
 msgstr "XML adjunto"
 
-msgid "Files: fiscal XML when available; graphic PDF is not sent."
-msgstr "Archivos: XML fiscal cuando esté disponible; PDF gráfico no se envía."
+msgid "Files: PDF/XML not yet available in the fiscal repository."
+msgstr "Archivos: PDF/XML aún no disponibles en el repositorio fiscal."
 
 msgid "Verify in DIAN: {url}"
 msgstr "Verificar en DIAN: {url}"
