@@ -581,24 +581,19 @@ async def send_pos_receipt_email(
                     track_id = str(inv_row["id"])
                     s3 = AWSS3Service()
 
-                    # PDF optional: Matias often omits graphic PDF; POS/Ventas use
-                    # thermal + text/XML. Controlled by INVOICE_PDF_ENABLED.
-                    if settings.invoice_pdf_enabled:
-                        if inv_row.get("r2_pdf_key"):
-                            pdf_bytes = await s3.get_object_bytes(inv_row["r2_pdf_key"])
-                            if pdf_bytes:
-                                attachment_status["pdf"] = True
-                                attachments.append({
-                                    "data": pdf_bytes,
-                                    "filename": f"{invoice_prefix}-{invoice_number}.pdf",
-                                    "content_type": "application/pdf",
-                                })
-                            else:
-                                attachment_warnings.append("invoice_pdf_unavailable")
+                    if inv_row.get("r2_pdf_key"):
+                        pdf_bytes = await s3.get_object_bytes(inv_row["r2_pdf_key"])
+                        if pdf_bytes:
+                            attachment_status["pdf"] = True
+                            attachments.append({
+                                "data": pdf_bytes,
+                                "filename": f"{invoice_prefix}-{invoice_number}.pdf",
+                                "content_type": "application/pdf",
+                            })
                         else:
-                            attachment_warnings.append("invoice_pdf_missing")
+                            attachment_warnings.append("invoice_pdf_unavailable")
                     else:
-                        attachment_status["pdf"] = False
+                        attachment_warnings.append("invoice_pdf_missing")
 
                     if inv_row.get("r2_xml_key"):
                         xml_bytes = await s3.get_object_bytes(inv_row["r2_xml_key"])

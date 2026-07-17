@@ -278,8 +278,7 @@ def get_pos_receipt_text(
         if attachment_lines:
             invoice_lines.append(_tr(_, "Files: {files}", files=", ".join(attachment_lines)))
         elif attachment_status.get("xml") is False and not attachment_status.get("pdf"):
-            # PDF disabled env: do not alarm about missing graphic PDF
-            invoice_lines.append(_("Files: fiscal XML when available; graphic PDF is not sent."))
+            invoice_lines.append(_("Files: PDF/XML not yet available in the fiscal repository."))
 
         invoice_lines.extend([
             f"CUFE: {invoice_cufe}",
