@@ -358,12 +358,12 @@ async def search_customers_by_query(
     limit: int = 20
 ) -> CustomerQuerySearchResponse:
     """
-    Search customers by partial name or phone number (ILIKE OR).
+    Search customers by name, phone number, fiscal ID, or business name.
     Results are scoped to the current tenant via tenant_customers.
 
     Args:
         request: FastAPI request object
-        q: Search query (partial name or phone)
+        q: Search query (exact, prefix, or partial match)
         limit: Maximum number of results (default 20)
 
     Returns:
@@ -377,32 +377,65 @@ async def search_customers_by_query(
             raise APIError("No tenant context found", status_code=400)
 
         async with get_db_connection() as conn:
-            # Match against name, phone, OR fiscal_id (NIT/cédula) so users
-            # can find a customer by typing the document number.
-            # Also return fiscal_id + fiscal_id_type so the UI can display
-            # the document that matched.
+            # Rank exact matches before prefixes and partial matches so the
+            # most relevant customers are not displaced by the result limit.
             query = """
-                SELECT DISTINCT
-                    p.id,
-                    p.name,
-                    p.phone_number,
-                    p.email,
-                    p.fiscal_id,
-                    p.fiscal_id_type
-                FROM profile p
-                JOIN tenant_customers tc ON tc.profile_id = p.id
-                WHERE tc.tenant_id = $1
-                  AND tc.is_active = true
-                  AND (
-                      p.name ILIKE $2
-                      OR p.phone_number ILIKE $2
-                      OR p.fiscal_id ILIKE $2
-                  )
-                ORDER BY p.name
-                LIMIT $3
+                WITH matching_customers AS (
+                    SELECT DISTINCT
+                        p.id,
+                        p.name,
+                        p.phone_number,
+                        p.email,
+                        p.fiscal_id,
+                        p.fiscal_id_type,
+                        p.fiscal_business_name,
+                        CASE
+                            WHEN (
+                                p.name ILIKE $2
+                                OR p.phone_number ILIKE $2
+                                OR p.fiscal_id ILIKE $2
+                                OR p.fiscal_business_name ILIKE $2
+                            ) THEN 0
+                            WHEN (
+                                p.name ILIKE $3
+                                OR p.phone_number ILIKE $3
+                                OR p.fiscal_id ILIKE $3
+                                OR p.fiscal_business_name ILIKE $3
+                            ) THEN 1
+                            ELSE 2
+                        END AS match_rank
+                    FROM profile p
+                    JOIN tenant_customers tc ON tc.profile_id = p.id
+                    WHERE tc.tenant_id = $1
+                      AND tc.is_active = true
+                      AND (
+                          p.name ILIKE $4
+                          OR p.phone_number ILIKE $4
+                          OR p.fiscal_id ILIKE $4
+                          OR p.fiscal_business_name ILIKE $4
+                      )
+                )
+                SELECT
+                    id,
+                    name,
+                    phone_number,
+                    email,
+                    fiscal_id,
+                    fiscal_id_type,
+                    fiscal_business_name
+                FROM matching_customers
+                ORDER BY match_rank, name NULLS LAST, id
+                LIMIT $5
             """
 
-            rows = await conn.fetch(query, tenant_id, f"%{q}%", limit)
+            rows = await conn.fetch(
+                query,
+                tenant_id,
+                q,
+                f"{q}%",
+                f"%{q}%",
+                limit,
+            )
 
             data = [
                 CustomerSummary(
@@ -412,6 +445,7 @@ async def search_customers_by_query(
                     email=row['email'],
                     fiscal_id=row['fiscal_id'],
                     fiscal_id_type=row['fiscal_id_type'],
+                    fiscal_business_name=row['fiscal_business_name'],
                 )
                 for row in rows
             ]

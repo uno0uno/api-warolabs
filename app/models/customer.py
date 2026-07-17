@@ -94,6 +94,7 @@ class CustomerSummary(BaseModel):
     email: Optional[str] = None
     fiscal_id: Optional[str] = None
     fiscal_id_type: Optional[str] = None
+    fiscal_business_name: Optional[str] = None
 
 
 class CustomerUpdate(FiscalDataMixin):
