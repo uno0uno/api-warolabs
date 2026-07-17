@@ -23,6 +23,10 @@ from app.models.tenant_financial_profile import (
 from app.services import tenant_financial_profile_service
 from app.models.tax_config import TaxConfigUpdate
 from app.core.exceptions import AuthenticationError
+from app.core.sales_tax_profile import (
+    ALLOWED_SALES_TAX_PROFILES,
+    settings_for_sales_tax_profile,
+)
 from typing import Optional
 
 router = APIRouter()
@@ -234,6 +238,22 @@ def _normalize_matias_company_id(data: dict) -> Optional[str]:
     return value
 
 
+def _normalize_sales_tax_profile(data: dict) -> str:
+    raw = data.get('sales_tax_profile', 'unconfigured')
+    if not isinstance(raw, str):
+        raise HTTPException(
+            status_code=400,
+            detail='El perfil tributario de ventas debe ser un texto válido',
+        )
+    value = raw.strip().lower()
+    if value not in ALLOWED_SALES_TAX_PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail='Perfil tributario de ventas no soportado por WARO/Matias',
+        )
+    return value
+
+
 @router.get("/fiscal-data", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def get_fiscal_data(request: Request):
     """
@@ -270,6 +290,7 @@ async def get_fiscal_data(request: Request):
             'type_organization_id': row['type_organization_id'],
             'tax_regime_id': row['tax_regime_id'],
             'tax_level_id': row['tax_level_id'],
+            'sales_tax_profile': row.get('sales_tax_profile', 'unconfigured'),
             'fiscal_address': row['fiscal_address'],
             'city': row['city'],
             'city_id': row['city_id'],
@@ -306,22 +327,47 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
     show_logo = bool(data.get('show_logo_on_receipts', True))
     matias_company_id = _normalize_matias_company_id(data)
     electronic_invoicing_requested = bool(data.get('electronic_invoicing_requested', False))
+    sales_tax_profile = _normalize_sales_tax_profile(data)
+
+    type_organization_id = data.get('type_organization_id', 1)
+    tax_level_id = data.get('tax_level_id', 5)
+    if type_organization_id not in (1, 2):
+        raise HTTPException(status_code=400, detail='Tipo de organización no soportado por Matias')
+    if tax_level_id not in (1, 2, 3, 4, 5):
+        raise HTTPException(status_code=400, detail='Responsabilidad tributaria no soportada por Matias')
+    if sales_tax_profile == 'non_responsible_iva_inc' and type_organization_id != 2:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                'El perfil no responsable de IVA e INC (RUT 49 + 50) '
+                'solo aplica a persona natural'
+            ),
+        )
+
+    profile_settings = settings_for_sales_tax_profile(sales_tax_profile)
+    if profile_settings:
+        tax_regime_id = profile_settings['tax_regime_id']
+    else:
+        tax_regime_id = data.get('tax_regime_id', 2)
+        if tax_regime_id not in (1, 2):
+            raise HTTPException(status_code=400, detail='Régimen de IVA no soportado por Matias')
 
     async with get_db_connection() as conn:
         await conn.execute(
             """INSERT INTO tenant_fiscal_data (tenant_id, nit, business_name,
-                   type_organization_id, tax_regime_id, tax_level_id,
+                   type_organization_id, tax_regime_id, tax_level_id, sales_tax_profile,
                    fiscal_address, city, city_id, phone, email,
                    electronic_invoicing_requested, matias_company_id,
                    receipt_document_label, receipt_tip_label, show_logo_on_receipts,
                    updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
                ON CONFLICT (tenant_id) DO UPDATE SET
                    nit = EXCLUDED.nit,
                    business_name = EXCLUDED.business_name,
                    type_organization_id = EXCLUDED.type_organization_id,
                    tax_regime_id = EXCLUDED.tax_regime_id,
                    tax_level_id = EXCLUDED.tax_level_id,
+                   sales_tax_profile = EXCLUDED.sales_tax_profile,
                    fiscal_address = EXCLUDED.fiscal_address,
                    city = EXCLUDED.city,
                    city_id = EXCLUDED.city_id,
@@ -336,9 +382,10 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
             tenant_id,
             data.get('nit'),
             data.get('business_name'),
-            data.get('type_organization_id', 1),
-            data.get('tax_regime_id', 2),
-            data.get('tax_level_id', 5),
+            type_organization_id,
+            tax_regime_id,
+            tax_level_id,
+            sales_tax_profile,
             data.get('fiscal_address'),
             data.get('city'),
             data.get('city_id', 149),
@@ -350,6 +397,21 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
             tip_label,
             show_logo,
         )
+
+        if profile_settings:
+            await conn.execute(
+                """INSERT INTO tenant_tax_config (
+                       tenant_id, inc_applicable, iva_applicable, updated_at
+                   )
+                   VALUES ($1, $2, $3, now())
+                   ON CONFLICT (tenant_id) DO UPDATE SET
+                       inc_applicable = EXCLUDED.inc_applicable,
+                       iva_applicable = EXCLUDED.iva_applicable,
+                       updated_at = now()""",
+                tenant_id,
+                profile_settings['inc_applicable'],
+                profile_settings['iva_applicable'],
+            )
 
     return {'success': True, 'message': 'Datos fiscales actualizados'}
 

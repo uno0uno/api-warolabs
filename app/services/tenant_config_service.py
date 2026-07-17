@@ -9,6 +9,7 @@ from fastapi import Request, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
+from app.core.sales_tax_profile import settings_for_sales_tax_profile
 from app.core.timezones import DEFAULT_TENANT_TIMEZONE, normalize_timezone, validate_timezone
 from app.core.tenant_prefs import (
     DEFAULT_CURRENCY_CODE,
@@ -667,6 +668,39 @@ async def update_tax_config(request: Request, data) -> dict:
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
+            fiscal_row = await conn.fetchrow(
+                """SELECT sales_tax_profile
+                   FROM tenant_fiscal_data
+                   WHERE tenant_id = $1""",
+                tenant_id,
+            )
+            sales_tax_profile = (
+                fiscal_row['sales_tax_profile']
+                if fiscal_row and fiscal_row['sales_tax_profile']
+                else 'unconfigured'
+            )
+            expected = settings_for_sales_tax_profile(sales_tax_profile)
+            if expected is None:
+                if data.inc_applicable or data.iva_applicable:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            'Selecciona primero el perfil tributario de ventas '
+                            'en Datos fiscales'
+                        ),
+                    )
+            elif (
+                data.inc_applicable is not expected['inc_applicable']
+                or data.iva_applicable is not expected['iva_applicable']
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        'La selección de IVA/INC no coincide con el perfil '
+                        'tributario configurado'
+                    ),
+                )
+
             row = await conn.fetchrow(
                 """
                 INSERT INTO tenant_tax_config (
@@ -704,6 +738,8 @@ async def update_tax_config(request: Request, data) -> dict:
 
     except AuthenticationError as e:
         raise e
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error updating tax config: {e}")
         raise HTTPException(status_code=500, detail=f"Error updating tax config: {str(e)}")

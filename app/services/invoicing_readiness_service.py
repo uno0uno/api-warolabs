@@ -63,6 +63,10 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from app.database import get_db_connection
+from app.core.sales_tax_profile import (
+    settings_for_sales_tax_profile,
+    sales_tax_profile_is_aligned,
+)
 
 
 _READINESS_QUERY = """
@@ -79,6 +83,7 @@ SELECT
     fd.type_organization_id         AS type_organization_id,
     fd.tax_regime_id                AS tax_regime_id,
     fd.tax_level_id                 AS tax_level_id,
+    fd.sales_tax_profile            AS sales_tax_profile,
     tfp.country_code                AS country_code,
     tfp.document_mode               AS document_mode,
     tfp.fiscal_provider             AS fiscal_provider,
@@ -116,14 +121,21 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
     dev_flag_enabled  = bool(row['dev_flag_enabled'])
     active_resolution = bool(row['active_resolution'])
 
-    taxes_configured = bool(row['inc_applicable']) or bool(row['iva_applicable'])
-    no_tax_allowed = (
-        not taxes_configured
-        and row['type_organization_id'] == 2
-        and row['tax_regime_id'] == 2
-        and row['tax_level_id'] == 5
+    inc_applicable = bool(row['inc_applicable'])
+    iva_applicable = bool(row['iva_applicable'])
+    taxes_configured = inc_applicable or iva_applicable
+    sales_tax_profile = row['sales_tax_profile'] or 'unconfigured'
+    sales_tax_profile_configured = (
+        settings_for_sales_tax_profile(sales_tax_profile) is not None
     )
-    tax_requirement_satisfied = taxes_configured or no_tax_allowed
+    tax_profile_aligned = sales_tax_profile_is_aligned(
+        sales_tax_profile,
+        row['type_organization_id'],
+        row['tax_regime_id'],
+        inc_applicable,
+        iva_applicable,
+    )
+    tax_requirement_satisfied = tax_profile_aligned
     matias_company_id = row['matias_company_id']
     matias_company_id_configured = bool(
         matias_company_id and str(matias_company_id).strip()
@@ -156,7 +168,7 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         missing.append('No hay una resolución DIAN vigente con numeración disponible')
     if not tax_requirement_satisfied:
         missing.append(
-            'La configuración fiscal requiere INC/IVA activo o un escenario sin impuesto válido para emitir'
+            'El perfil tributario debe coincidir con la responsabilidad de IVA/INC y los impuestos de venta'
         )
     if not matias_company_id_configured:
         missing.append(
@@ -175,6 +187,8 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         'fiscal_data_complete': fiscal_data_complete,
         'active_resolution': active_resolution,
         'taxes_configured': taxes_configured,
+        'sales_tax_profile_configured': sales_tax_profile_configured,
+        'tax_profile_aligned': tax_profile_aligned,
         'tax_requirement_satisfied': tax_requirement_satisfied,
         'matias_company_id_configured': matias_company_id_configured,
         'country_is_colombia': country_is_colombia,
@@ -186,6 +200,8 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         ('dev_flag_enabled', 'electronic_invoicing_disabled'),
         ('fiscal_data_complete', 'fiscal_data_incomplete'),
         ('active_resolution', 'dian_resolution_unavailable'),
+        ('sales_tax_profile_configured', 'sales_tax_profile_unconfigured'),
+        ('tax_profile_aligned', 'sales_tax_profile_mismatch'),
         ('tax_requirement_satisfied', 'tax_configuration_invalid'),
         ('matias_company_id_configured', 'matias_company_id_missing'),
         ('country_is_colombia', 'tenant_country_not_colombia'),
@@ -202,6 +218,8 @@ async def get_readiness(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             and dev_flag_enabled
             and fiscal_data_complete
             and active_resolution
+            and sales_tax_profile_configured
+            and tax_profile_aligned
             and tax_requirement_satisfied
             and matias_company_id_configured
             and country_is_colombia

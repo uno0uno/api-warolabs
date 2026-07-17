@@ -28,8 +28,9 @@ def _row(
     customer_requested: bool = True,
     active_resolution: bool = True,
     type_organization_id: int = 1,
-    tax_regime_id: int = 2,
+    tax_regime_id: int = 1,
     tax_level_id: int = 5,
+    sales_tax_profile: str = 'iva_responsible',
     inc_applicable: bool = False,
     iva_applicable: bool = True,
     country_code: str = 'CO',
@@ -48,6 +49,7 @@ def _row(
         'type_organization_id': type_organization_id,
         'tax_regime_id':     tax_regime_id,
         'tax_level_id':      tax_level_id,
+        'sales_tax_profile': sales_tax_profile,
         'active_resolution': active_resolution,
         'inc_applicable':    inc_applicable,
         'iva_applicable':    iva_applicable,
@@ -93,6 +95,8 @@ class TestReadinessService:
             'fiscal_data_complete': True,
             'active_resolution':    True,
             'taxes_configured':     True,
+            'sales_tax_profile_configured': True,
+            'tax_profile_aligned': True,
             'tax_requirement_satisfied': True,
             'matias_company_id_configured': True,
             'country_is_colombia': True,
@@ -149,7 +153,12 @@ class TestReadinessService:
     @pytest.mark.asyncio
     async def test_taxes_configured_via_inc_alone(self):
         # Restaurant under INC (8%) without IVA → still considered configured
-        with _patch_db(_row(inc_applicable=True, iva_applicable=False)):
+        with _patch_db(_row(
+            sales_tax_profile='inc_responsible',
+            tax_regime_id=2,
+            inc_applicable=True,
+            iva_applicable=False,
+        )):
             payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
 
         assert payload['checks']['taxes_configured'] is True
@@ -162,6 +171,7 @@ class TestReadinessService:
             type_organization_id=1,
             tax_regime_id=1,
             tax_level_id=48,
+            sales_tax_profile='iva_responsible',
             inc_applicable=False,
             iva_applicable=False,
         )):
@@ -170,7 +180,7 @@ class TestReadinessService:
         assert payload['checks']['taxes_configured'] is False
         assert payload['checks']['tax_requirement_satisfied'] is False
         assert payload['ready'] is False
-        assert any('requiere INC/IVA activo o un escenario sin impuesto válido' in m for m in payload['missing'])
+        assert any('perfil tributario' in m.lower() for m in payload['missing'])
 
     @pytest.mark.asyncio
     async def test_no_responsable_persona_natural_without_taxes_can_be_ready(self):
@@ -178,6 +188,7 @@ class TestReadinessService:
             type_organization_id=2,
             tax_regime_id=2,
             tax_level_id=5,
+            sales_tax_profile='non_responsible_iva_inc',
             inc_applicable=False,
             iva_applicable=False,
         )):
@@ -195,6 +206,7 @@ class TestReadinessService:
             type_organization_id=2,
             tax_regime_id=2,
             tax_level_id=5,
+            sales_tax_profile='non_responsible_iva_inc',
             inc_applicable=False,
             iva_applicable=False,
         )):
@@ -204,7 +216,24 @@ class TestReadinessService:
         assert payload['checks']['tax_requirement_satisfied'] is True
         assert payload['ready'] is False
         assert any('NIT' in m for m in payload['missing'])
-        assert not any('requiere INC/IVA activo o un escenario sin impuesto válido' in m for m in payload['missing'])
+        assert not any('perfil tributario' in m.lower() for m in payload['missing'])
+
+    @pytest.mark.asyncio
+    async def test_no_tax_profile_must_be_explicit(self):
+        with _patch_db(_row(
+            type_organization_id=2,
+            tax_regime_id=2,
+            tax_level_id=5,
+            sales_tax_profile='unconfigured',
+            inc_applicable=False,
+            iva_applicable=False,
+        )):
+            payload = await invoicing_readiness_service.get_readiness(_TENANT_ID)
+
+        assert payload['checks']['sales_tax_profile_configured'] is False
+        assert payload['checks']['tax_profile_aligned'] is False
+        assert payload['ready'] is False
+        assert 'sales_tax_profile_unconfigured' in payload['reason_codes']
 
     @pytest.mark.asyncio
     async def test_production_missing_matias_company_id_blocks_ready(self, monkeypatch):
