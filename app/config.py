@@ -138,9 +138,10 @@ class Settings(BaseSettings):
     waro_legal_email: str = Field(default='', alias='WARO_LEGAL_EMAIL')
     waro_legal_phone_1: str = Field(default='', alias='WARO_LEGAL_PHONE_1')
     waro_legal_phone_2: str = Field(default='', alias='WARO_LEGAL_PHONE_2')
+    waro_legal_website: str = Field(default='warocol.com', alias='WARO_LEGAL_WEBSITE')
     waro_legal_iva_label: str = Field(default='', alias='WARO_LEGAL_IVA_LABEL')
     waro_legal_role_label: str = Field(
-        default='Proveedor tecnológico / software',
+        default='Software de gestión',
         alias='WARO_LEGAL_ROLE_LABEL',
     )
     waro_legal_not_issuer_disclaimer: str = Field(

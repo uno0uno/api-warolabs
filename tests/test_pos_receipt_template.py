@@ -11,6 +11,7 @@ def platform_print_env(monkeypatch):
     monkeypatch.setenv("WARO_LEGAL_COMMERCIAL_NAME", "WARO COLOMBIA")
     monkeypatch.setenv("WARO_LEGAL_LEGAL_NAME", "AREVALO TEST")
     monkeypatch.setenv("WARO_LEGAL_NIT", "700128766-3")
+    monkeypatch.setenv("WARO_LEGAL_WEBSITE", "warocol.com")
     monkeypatch.setenv("WARO_LEGAL_IVA_LABEL", "No responsable de IVA")
     monkeypatch.setenv("FACTURADOR_LEGAL_BRAND_NAME", "Matias API")
     monkeypatch.setenv("FACTURADOR_LEGAL_LEGAL_NAME", "LOPEZSOFT S.A.S.")
@@ -39,6 +40,8 @@ def test_pos_receipt_uses_custom_tip_label(platform_print_env):
     assert "No es factura electrónica DIAN" in text
     assert "WARO COLOMBIA" in text
     assert "700128766-3" in text
+    assert "warocol.com" in text
+    assert "AREVALO TEST" not in text
     assert "No es el emisor de esta venta" in text
     # Sin FE no se exige bloquear Matias en el pie comercial
     assert "LOPEZSOFT" not in text
@@ -247,7 +250,7 @@ def test_pos_receipt_subject_and_body_render_in_english(platform_print_env):
     assert "SALE RECEIPT" in text
     assert "Not a DIAN electronic invoice" in text
     assert "Thank you for your purchase." in text
-    assert "Technology provider / software" in text
+    assert "Management software" in text
     assert "Método de pago" not in text
     assert "Gracias por tu compra" not in text
 

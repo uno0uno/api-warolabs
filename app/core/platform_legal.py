@@ -24,6 +24,17 @@ def _s(value: Optional[str]) -> str:
     return (value or "").strip()
 
 
+def _waro_software_role_label() -> str:
+    value = _s(settings.waro_legal_role_label)
+    if not value or value.casefold() in {
+        "proveedor tecnológico / software",
+        "proveedor tecnologico / software",
+        "technology provider / software",
+    }:
+        return "Software de gestión"
+    return value
+
+
 def get_waro_legal_entity() -> Dict[str, Any]:
     """Full WARO legal block from env (may include PII — not for browser by default)."""
     phones = tuple(
@@ -39,8 +50,9 @@ def get_waro_legal_entity() -> Dict[str, Any]:
         "city": _s(settings.waro_legal_city),
         "email": _s(settings.waro_legal_email),
         "phones": phones,
+        "website": _s(settings.waro_legal_website) or "warocol.com",
         "iva_responsibility_label": _s(settings.waro_legal_iva_label),
-        "role_label": _s(settings.waro_legal_role_label) or "Proveedor tecnológico / software",
+        "role_label": _waro_software_role_label(),
         "not_issuer_disclaimer": _s(settings.waro_legal_not_issuer_disclaimer)
         or "No es el emisor de esta venta",
     }
@@ -75,8 +87,8 @@ def get_platform_legal_for_print() -> Dict[str, Any]:
         "software": {
             "role_label": waro["role_label"],
             "commercial_name": waro["commercial_name"] or None,
-            "legal_name": waro["legal_name"] or None,
             "nit": waro["nit"] or None,
+            "website": waro["website"] or None,
             "iva_responsibility_label": waro["iva_responsibility_label"] or None,
             "not_issuer_disclaimer": waro["not_issuer_disclaimer"],
         },
@@ -110,8 +122,8 @@ def waro_platform_footer_lines(*, with_fe_note: bool = False, locale: str = "es"
     if waro["commercial_name"] or waro["nit"]:
         lines.append(_localized_env_label(
             waro["role_label"],
-            "Proveedor tecnológico / software",
-            "Technology provider / software",
+            "Software de gestión",
+            "Management software",
             locale,
         ))
         if waro["commercial_name"] and waro["nit"]:
@@ -120,8 +132,8 @@ def waro_platform_footer_lines(*, with_fe_note: bool = False, locale: str = "es"
             lines.append(waro["commercial_name"])
         elif waro["nit"]:
             lines.append(f"NIT {waro['nit']}")
-        if waro["legal_name"]:
-            lines.append(waro["legal_name"])
+        if waro["website"]:
+            lines.append(waro["website"])
         if waro["iva_responsibility_label"]:
             lines.append(_localized_env_label(
                 waro["iva_responsibility_label"],

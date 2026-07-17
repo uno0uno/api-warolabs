@@ -9,6 +9,7 @@ def platform_env(monkeypatch):
     monkeypatch.setenv("WARO_LEGAL_COMMERCIAL_NAME", "WARO COLOMBIA")
     monkeypatch.setenv("WARO_LEGAL_LEGAL_NAME", "AREVALO RAMIREZ ANDERSON EDUARDO")
     monkeypatch.setenv("WARO_LEGAL_NIT", "700128766-3")
+    monkeypatch.setenv("WARO_LEGAL_WEBSITE", "warocol.com")
     monkeypatch.setenv("WARO_LEGAL_IVA_LABEL", "No responsable de IVA")
     monkeypatch.setenv("FACTURADOR_LEGAL_BRAND_NAME", "Matias API")
     monkeypatch.setenv("FACTURADOR_LEGAL_LEGAL_NAME", "LOPEZSOFT S.A.S.")
@@ -27,11 +28,14 @@ def test_print_payload_has_waro_and_matias_without_pii_phones(platform_env):
     payload = get_platform_legal_for_print()
     assert payload["software"]["commercial_name"] == "WARO COLOMBIA"
     assert payload["software"]["nit"] == "700128766-3"
+    assert payload["software"]["website"] == "warocol.com"
+    assert payload["software"]["role_label"] == "Software de gestión"
     assert payload["software"]["not_issuer_disclaimer"]
     # print payload must not expose personal email/phone keys
     assert "email" not in payload["software"]
     assert "phones" not in payload["software"]
     assert "document_number" not in payload["software"]
+    assert "legal_name" not in payload["software"]
 
     assert payload["facturador"]["brand_name"] == "Matias API"
     assert payload["facturador"]["legal_name"] == "LOPEZSOFT S.A.S."
@@ -45,6 +49,8 @@ def test_footer_with_fe_mentions_facturador(platform_env):
     text = waro_platform_footer_text(with_fe_note=True)
     assert "WARO COLOMBIA" in text
     assert "700128766-3" in text
+    assert "warocol.com" in text
+    assert "AREVALO RAMIREZ" not in text
     assert "Matias API" in text
     assert "901.091.403-2" in text
     assert "LOPEZSOFT" in text
@@ -56,4 +62,6 @@ def test_footer_without_fe_no_matias_required(platform_env):
 
     text = waro_platform_footer_text(with_fe_note=False)
     assert "WARO COLOMBIA" in text
+    assert "warocol.com" in text
+    assert "AREVALO RAMIREZ" not in text
     assert "Comprobante del establecimiento" in text

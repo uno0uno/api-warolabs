@@ -149,8 +149,8 @@ msgstr "Archivos: XML fiscal cuando esté disponible; PDF gráfico no se envía.
 msgid "Verify in DIAN: {url}"
 msgstr "Verificar en DIAN: {url}"
 
-msgid "Technology provider / software"
-msgstr "Proveedor tecnológico / software"
+msgid "Management software"
+msgstr "Software de gestión"
 
 msgid "Not responsible for VAT"
 msgstr "No responsable de IVA"
