@@ -17,6 +17,7 @@ from app.services.ingredients_service import (
     _validate_unit_for_type,
     create_tenant_ingredient,
     get_ingredient_categories,
+    resolve_ingredients_by_warehouse_categories,
     update_tenant_ingredient,
 )
 from app.models.ingredient import TenantIngredientUpdate
@@ -218,6 +219,120 @@ class TestIngredientCategorySearch:
         assert "(wc.tenant_id IS NULL OR wc.tenant_id = $1)" in query
         assert "wc.normalized_name LIKE $2" in query
         assert params == [tenant_id, "%categoria%", 50]
+
+
+class TestIngredientCategoryResolution:
+    @pytest.mark.asyncio
+    async def test_resolves_unique_candidates_in_requested_category_order(self):
+        tenant_id = uuid4()
+        first_category_id = uuid4()
+        second_category_id = uuid4()
+        first_ingredient_id = uuid4()
+        second_ingredient_id = uuid4()
+        excluded_ingredient_id = uuid4()
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[
+            {
+                "category_id": first_category_id,
+                "position": 1,
+                "is_available": True,
+                "ingredient_id": first_ingredient_id,
+                "name": "Aguacate",
+                "unit": "gr",
+                "warehouse_category_id": first_category_id,
+            },
+            {
+                "category_id": second_category_id,
+                "position": 2,
+                "is_available": True,
+                "ingredient_id": second_ingredient_id,
+                "name": "Yogur",
+                "unit": "ml",
+                "warehouse_category_id": second_category_id,
+            },
+            {
+                "category_id": second_category_id,
+                "position": 2,
+                "is_available": True,
+                "ingredient_id": second_ingredient_id,
+                "name": "Yogur",
+                "unit": "ml",
+                "warehouse_category_id": second_category_id,
+            },
+        ])
+
+        result = await resolve_ingredients_by_warehouse_categories(
+            conn,
+            tenant_id,
+            [first_category_id, first_category_id, second_category_id],
+            [excluded_ingredient_id, excluded_ingredient_id],
+        )
+
+        assert [row["ingredient_id"] for row in result["ingredients"]] == [
+            first_ingredient_id,
+            second_ingredient_id,
+        ]
+        assert result["empty_category_ids"] == []
+        assert result["unavailable_category_ids"] == []
+        query, *params = conn.fetch.await_args.args
+        assert "WITH ORDINALITY" in query
+        assert "wc.tenant_id IS NULL OR wc.tenant_id = $1" in query
+        assert "ingredient.tenant_id IS NULL OR ingredient.tenant_id = $1" in query
+        assert "ingredient.id = ANY($3::uuid[])" in query
+        assert params == [
+            tenant_id,
+            [first_category_id, second_category_id],
+            [excluded_ingredient_id],
+        ]
+        conn.fetch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reports_empty_and_unavailable_categories_without_failing_candidates(self):
+        tenant_id = uuid4()
+        populated_category_id = uuid4()
+        empty_category_id = uuid4()
+        unavailable_category_id = uuid4()
+        ingredient_id = uuid4()
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[
+            {
+                "category_id": populated_category_id,
+                "position": 1,
+                "is_available": True,
+                "ingredient_id": ingredient_id,
+                "name": "Arroz",
+                "unit": "gr",
+                "warehouse_category_id": populated_category_id,
+            },
+            {
+                "category_id": empty_category_id,
+                "position": 2,
+                "is_available": True,
+                "ingredient_id": None,
+                "name": None,
+                "unit": None,
+                "warehouse_category_id": None,
+            },
+            {
+                "category_id": unavailable_category_id,
+                "position": 3,
+                "is_available": False,
+                "ingredient_id": None,
+                "name": None,
+                "unit": None,
+                "warehouse_category_id": None,
+            },
+        ])
+
+        result = await resolve_ingredients_by_warehouse_categories(
+            conn,
+            tenant_id,
+            [populated_category_id, empty_category_id, unavailable_category_id],
+        )
+
+        assert [row["ingredient_id"] for row in result["ingredients"]] == [ingredient_id]
+        assert result["empty_category_ids"] == [empty_category_id]
+        assert result["unavailable_category_ids"] == [unavailable_category_id]
 
 
 class TestIngredientsEndpoint:
