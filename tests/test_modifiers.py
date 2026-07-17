@@ -12,6 +12,9 @@ Endpoints tested:
 import pytest
 from httpx import AsyncClient
 from uuid import uuid4
+from unittest.mock import AsyncMock
+
+from app.services.menu_history_service import get_modifier_group_snapshot
 
 
 class TestModifierGroupsListEndpoint:
@@ -138,3 +141,57 @@ class TestModifierGroupCRUD:
         fake_id = str(uuid4())
         response = await client.delete(f"/menu/modifier-groups/{fake_id}")
         assert response.status_code in [404, 401, 403, 500]
+
+
+@pytest.mark.asyncio
+async def test_modifier_group_snapshot_includes_recipe_lines():
+    group_id = uuid4()
+    tenant_id = uuid4()
+    modifier_id = uuid4()
+    ingredient_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow.return_value = {
+        "id": group_id,
+        "name": "Salsas",
+        "min_qty": 0,
+        "max_qty": 2,
+        "is_required": False,
+        "sort_order": 0,
+    }
+    conn.fetch.side_effect = [
+        [{"product_id": uuid4()}],
+        [{
+            "id": modifier_id,
+            "name": "Salsa de la casa",
+            "price": 0,
+            "max_limit": 1,
+            "included_quantity": 0,
+            "is_available": True,
+            "is_default": False,
+            "sort_order": 0,
+            "option_type": "RECIPE",
+            "ingredient_id": None,
+            "ingredient_quantity": None,
+            "ingredient_unit": None,
+            "recipe_base_type_id": None,
+            "recipe_base_quantity": 1,
+            "linked_product_id": None,
+            "linked_product_quantity": 1,
+        }],
+        [{
+            "modifier_id": modifier_id,
+            "ingredient_id": ingredient_id,
+            "quantity": 2,
+            "unit": "gr",
+        }],
+    ]
+
+    snapshot = await get_modifier_group_snapshot(conn, group_id, tenant_id)
+
+    assert snapshot is not None
+    assert snapshot["modifiers"][0]["recipe_lines"] == [{
+        "ingredient_id": ingredient_id,
+        "quantity": 2,
+        "unit": "gr",
+    }]
+    assert conn.fetch.await_count == 3
