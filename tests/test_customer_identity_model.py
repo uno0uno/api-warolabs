@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.models.customer import CustomerSearchOrCreate, CustomerUpdate
+from app.models.customer import CustomerSearchOrCreate, CustomerSummary, CustomerUpdate
 from app.services import customers_service
 
 
@@ -64,6 +64,17 @@ def test_customer_models_normalize_fiscal_id_for_invoicing():
 
     assert created.fiscal_id == "9001234567"
     assert updated.fiscal_id == "1063279307"
+
+
+def test_customer_summary_accepts_optional_business_name_without_fiscal_triplet():
+    summary = CustomerSummary(
+        id=uuid4(),
+        fiscal_business_name="ACME SAS",
+    )
+
+    assert summary.fiscal_business_name == "ACME SAS"
+    assert summary.fiscal_id is None
+    assert summary.fiscal_id_type is None
 
 
 @pytest.mark.asyncio
@@ -130,30 +141,67 @@ async def test_get_customer_by_id_uses_tenant_customers_as_source_of_truth():
 
 
 @pytest.mark.asyncio
-async def test_search_customers_by_query_uses_tenant_customers():
+async def test_search_customers_by_query_uses_tenant_customers_and_returns_fiscal_identity():
     tenant_id = uuid4()
-    profile_id = uuid4()
+    mixed_profile_id = uuid4()
+    no_fiscal_profile_id = uuid4()
     conn = MagicMock()
-    conn.fetch = AsyncMock(return_value=[
-        {
-            "id": profile_id,
-            "name": "Buyer",
-            "phone_number": "3001234567",
-            "email": "buyer@example.com",
-            "fiscal_id": None,
-            "fiscal_id_type": None,
-        }
-    ])
+    conn.fetch = AsyncMock(
+        return_value=[
+            {
+                "id": mixed_profile_id,
+                "name": "Rebel Rebel",
+                "phone_number": "3001234567",
+                "email": "buyer@example.com",
+                "fiscal_id": "900123456",
+                "fiscal_id_type": "NIT",
+                "fiscal_business_name": "ACME SAS",
+            },
+            {
+                "id": no_fiscal_profile_id,
+                "name": "Buyer",
+                "phone_number": "3007654321",
+                "email": None,
+                "fiscal_id": None,
+                "fiscal_id_type": None,
+                "fiscal_business_name": None,
+            },
+        ]
+    )
 
     session_patch, db_patch = _patch_customer_service_db(conn, tenant_id)
     with session_patch, db_patch:
-        result = await customers_service.search_customers_by_query(_request(), "Buyer")
+        result = await customers_service.search_customers_by_query(_request(), "ACME")
 
-    assert result.data[0].id == profile_id
+    assert result.data[0].id == mixed_profile_id
+    assert result.data[0].name == "Rebel Rebel"
+    assert result.data[0].fiscal_business_name == "ACME SAS"
+    assert result.data[1].id == no_fiscal_profile_id
+    assert result.data[1].fiscal_business_name is None
+
     query = conn.fetch.await_args.args[0]
+    assert "SELECT DISTINCT" in query
     assert "tenant_customers tc" in query
     assert "tenant_members" not in query
+    assert "tc.tenant_id = $1" in query
     assert "tc.is_active = true" in query
+    for placeholder in ("$2", "$3", "$4"):
+        for field in (
+            "p.name",
+            "p.phone_number",
+            "p.fiscal_id",
+            "p.fiscal_business_name",
+        ):
+            assert f"{field} ILIKE {placeholder}" in query
+    assert "ORDER BY match_rank, name NULLS LAST, id" in query
+    assert query.index("ILIKE $2") < query.index("ILIKE $3") < query.index("ILIKE $4")
+    assert conn.fetch.await_args.args[1:] == (
+        tenant_id,
+        "ACME",
+        "ACME%",
+        "%ACME%",
+        20,
+    )
 
 
 @pytest.mark.asyncio
