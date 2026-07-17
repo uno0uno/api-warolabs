@@ -3,8 +3,8 @@ from typing import Any, Dict, Optional
 from uuid import UUID
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
-from app.services.ingredients_service import get_ingredient_categories, get_ingredients_list, update_ingredient_unit_weight, match_ingredient_by_name, create_tenant_ingredient, update_tenant_ingredient, archive_tenant_ingredient, restore_tenant_ingredient, hard_delete_tenant_ingredient
-from app.models.ingredient import IngredientCategoriesResponse, IngredientsListResponse, TenantIngredientCreate, TenantIngredientUpdate
+from app.services.ingredients_service import get_ingredient_categories, get_ingredients_list, resolve_ingredients_by_warehouse_categories, update_ingredient_unit_weight, match_ingredient_by_name, create_tenant_ingredient, update_tenant_ingredient, archive_tenant_ingredient, restore_tenant_ingredient, hard_delete_tenant_ingredient
+from app.models.ingredient import IngredientCategoriesResponse, IngredientCategoryResolutionRequest, IngredientCategoryResolutionResponse, IngredientsListResponse, TenantIngredientCreate, TenantIngredientUpdate
 from app.database import get_db_connection
 
 router = APIRouter()
@@ -99,6 +99,33 @@ async def get_ingredient_categories_endpoint(
         "total": len(categories),
         "data": categories,
     }
+
+
+@router.post(
+    "/resolve-by-warehouse-categories",
+    response_model=IngredientCategoryResolutionResponse,
+    dependencies=[Depends(require_module(Module.ABASTECIMIENTO))],
+)
+async def resolve_ingredients_by_warehouse_categories_endpoint(
+    body: IngredientCategoryResolutionRequest,
+    request: Request,
+):
+    """Prepare ingredient candidates for one or more warehouse categories."""
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant context required")
+
+    async with get_db_connection() as conn:
+        data = await resolve_ingredients_by_warehouse_categories(
+            conn,
+            tenant_id,
+            body.category_ids,
+            body.exclude_ingredient_ids,
+        )
+
+    return {"success": True, "data": data}
 
 
 @router.get("/{ingredient_id}", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])

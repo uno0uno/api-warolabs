@@ -123,6 +123,29 @@ class IngredientCategoriesResponse(BaseModel):
     data: List[IngredientCategoryOption]
 
 
+class IngredientCategoryResolutionRequest(BaseModel):
+    category_ids: List[UUID] = Field(..., min_length=1, max_length=100)
+    exclude_ingredient_ids: List[UUID] = Field(default_factory=list, max_length=10000)
+
+
+class IngredientCategoryCandidate(BaseModel):
+    ingredient_id: UUID
+    name: str
+    unit: str
+    warehouse_category_id: UUID
+
+
+class IngredientCategoryResolutionData(BaseModel):
+    ingredients: List[IngredientCategoryCandidate]
+    empty_category_ids: List[UUID]
+    unavailable_category_ids: List[UUID]
+
+
+class IngredientCategoryResolutionResponse(BaseModel):
+    success: bool = True
+    data: IngredientCategoryResolutionData
+
+
 # =============================================================================
 # INGREDIENT PURCHASE UNITS MODELS
 # =============================================================================

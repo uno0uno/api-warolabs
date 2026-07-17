@@ -79,6 +79,84 @@ async def get_ingredient_categories(
     return await list_warehouse_categories(conn, tenant_id, search, limit)
 
 
+async def resolve_ingredients_by_warehouse_categories(
+    conn,
+    tenant_id: UUID,
+    category_ids: List[UUID],
+    exclude_ingredient_ids: Optional[List[UUID]] = None,
+) -> Dict[str, Any]:
+    """Resolve visible active ingredients for ordered warehouse categories."""
+    ordered_category_ids = list(dict.fromkeys(category_ids))
+    excluded_ids = list(dict.fromkeys(exclude_ingredient_ids or []))
+
+    rows = await conn.fetch(
+        """
+        WITH requested_categories AS (
+            SELECT category_id, MIN(position)::int AS position
+            FROM unnest($2::uuid[]) WITH ORDINALITY AS requested(category_id, position)
+            GROUP BY category_id
+        ),
+        visible_categories AS (
+            SELECT requested.category_id, requested.position, wc.id IS NOT NULL AS is_available
+            FROM requested_categories requested
+            LEFT JOIN warehouse_categories wc
+              ON wc.id = requested.category_id
+             AND wc.is_active = TRUE
+             AND (wc.tenant_id IS NULL OR wc.tenant_id = $1)
+        )
+        SELECT
+            category.category_id,
+            category.position,
+            category.is_available,
+            ingredient.id AS ingredient_id,
+            ingredient.name,
+            ingredient.unit,
+            ingredient.warehouse_category_id
+        FROM visible_categories category
+        LEFT JOIN ingredients ingredient
+          ON ingredient.warehouse_category_id = category.category_id
+         AND category.is_available
+         AND ingredient.is_active = TRUE
+         AND (ingredient.tenant_id IS NULL OR ingredient.tenant_id = $1)
+         AND NOT (ingredient.id = ANY($3::uuid[]))
+        ORDER BY category.position, LOWER(ingredient.name) NULLS LAST,
+                 ingredient.name NULLS LAST, ingredient.id
+        """,
+        tenant_id,
+        ordered_category_ids,
+        excluded_ids,
+    )
+
+    ingredients: List[Dict[str, Any]] = []
+    empty_category_ids: List[UUID] = []
+    unavailable_category_ids: List[UUID] = []
+    seen_ingredient_ids = set()
+
+    for row in rows:
+        category_id = row["category_id"]
+        if not row["is_available"]:
+            unavailable_category_ids.append(category_id)
+            continue
+        if row["ingredient_id"] is None:
+            empty_category_ids.append(category_id)
+            continue
+        if row["ingredient_id"] in seen_ingredient_ids:
+            continue
+        seen_ingredient_ids.add(row["ingredient_id"])
+        ingredients.append({
+            "ingredient_id": row["ingredient_id"],
+            "name": row["name"],
+            "unit": row["unit"],
+            "warehouse_category_id": row["warehouse_category_id"],
+        })
+
+    return {
+        "ingredients": ingredients,
+        "empty_category_ids": empty_category_ids,
+        "unavailable_category_ids": unavailable_category_ids,
+    }
+
+
 def resolve_purchase_units(purchase_units: list, base_unit: str) -> list:
     """
     Validate each purchase_unit key against the catalog and resolve
