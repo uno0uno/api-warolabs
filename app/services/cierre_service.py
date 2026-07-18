@@ -1230,19 +1230,15 @@ async def _resolve_suggested_opening_cash(
 def _compute_cash_expected(
     opening_cash: float,
     total_cash: float,
-    cash_tips: float,
-    total_sales: float,
     gastos_efectivo: float,
     cash_purchases: float = 0.0,
 ) -> float:
-    """Expected drawer cash: opening float + cash received − cash expenses.
+    """Expected drawer cash: opening float + settled cash − cash outflows.
 
-    When total_cash already includes tip settlement (all-cash), do not add
-    cash_tips again. Otherwise cash_tips is additive (split-pay / card tips).
+    ``total_cash`` comes from ``method_totals`` and already includes tip
+    settlement assigned to cash, so tips must not be added a second time.
     """
-    if total_cash >= total_sales + cash_tips:
-        return opening_cash + total_cash - gastos_efectivo - cash_purchases
-    return opening_cash + total_cash + cash_tips - gastos_efectivo - cash_purchases
+    return opening_cash + total_cash - gastos_efectivo - cash_purchases
 
 
 def _sum_advance_bucket(bucket: Dict[str, float]) -> float:
@@ -1656,8 +1652,6 @@ async def _compute_preview(
     cash_expected = _compute_cash_expected(
         float(opening_cash),
         total_cash,
-        cash_tips,
-        float(sales_row["total_sales"]),
         gastos_efectivo,
         cash_purchases,
     )
