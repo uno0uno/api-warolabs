@@ -2,7 +2,7 @@
 Publish WARO legal Terms and Conditions v1.1.
 
 Default production usage expects the SSH tunnel and .env variables:
-    ssh -L 5432:localhost:5432 warolabs -N
+    ssh -L 5432:localhost:5432 warolabs-hostinger -N
     python scripts/publish_legal_terms_v11.py
 
 Dry run:

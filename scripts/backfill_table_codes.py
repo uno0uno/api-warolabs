@@ -5,7 +5,7 @@ Uses the same inference as POS tableShortId. Resolves tenant-level collisions
 with single-letter suffixes. Bar tables get BAR.
 
 Requires DB access (SSH tunnel or local):
-    ssh -L 5432:localhost:5432 warolabs -N &
+    ssh -L 5432:localhost:5432 warolabs-hostinger -N &
     cd api_warocol.com && python scripts/backfill_table_codes.py
 """
 

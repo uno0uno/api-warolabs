@@ -107,7 +107,7 @@ The full schema lives auto-generated in [`dbdoc/`](dbdoc/) — one Markdown file
 
 ```bash
 # 1. Tunnel must be up
-ssh -L 5432:localhost:5432 warolabs -N &
+ssh -L 5432:localhost:5432 warolabs-hostinger -N &
 
 # 2. Load DB credentials from .env
 set -a && source .env && set +a

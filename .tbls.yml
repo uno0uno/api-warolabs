@@ -3,7 +3,7 @@
 # Read-only schema introspection. Generates dbdoc/ from the live Postgres
 # database via SSH tunnel. Re-run after any migration that lands in prod:
 #
-#   ssh -L 5432:localhost:5432 warolabs -N &           # if tunnel not up
+#   ssh -L 5432:localhost:5432 warolabs-hostinger -N & # if tunnel not up
 #   set -a && source .env && set +a
 #   export TBLS_DSN="postgres://${NUXT_PRIVATE_DB_USER}:${NUXT_PRIVATE_DB_PASSWORD}@host.docker.internal:5432/${NUXT_PRIVATE_DB_NAME}?sslmode=disable"
 #   docker run --rm -v "$PWD:/work" -w /work -e TBLS_DSN ghcr.io/k1low/tbls:latest doc -f
