@@ -11,46 +11,38 @@ def test_cash_expected_all_cash_tips_embedded_in_total_cash():
     result = _compute_cash_expected(
         opening_cash=200_000.0,
         total_cash=459_000.0,
-        cash_tips=99_000.0,
-        total_sales=360_000.0,
         gastos_efectivo=0.0,
     )
     assert result == 659_000.0
 
 
-def test_cash_expected_split_pay_cash_sales_only():
-    """Regression: cash portion excludes tips settled on card — keep additive branch."""
+def test_cash_expected_marimba_mixed_payments_does_not_duplicate_cash_tips():
+    """Marimba: totalCash 640.9k already contains the 41.9k cash tip settlement."""
+    result = _compute_cash_expected(
+        opening_cash=10_000.0,
+        total_cash=640_900.0,
+        gastos_efectivo=0.0,
+    )
+    assert result == 650_900.0
+
+
+def test_cash_expected_mixed_pay_cash_portion_without_cash_tips():
     result = _compute_cash_expected(
         opening_cash=50_000.0,
         total_cash=100_000.0,
-        cash_tips=0.0,
-        total_sales=360_000.0,
         gastos_efectivo=10_000.0,
     )
     assert result == 140_000.0
 
 
-def test_cash_expected_exact_equality_uses_embedded_branch():
-    result = _compute_cash_expected(
-        opening_cash=0.0,
-        total_cash=459_000.0,
-        cash_tips=99_000.0,
-        total_sales=360_000.0,
-        gastos_efectivo=5_000.0,
-    )
-    assert result == 454_000.0
-
-
-def test_cash_expected_additive_when_cash_tips_not_embedded():
-    """When total_cash is sales-only, cash_tips must be added."""
+def test_cash_expected_subtracts_expenses_and_cash_purchases_once():
     result = _compute_cash_expected(
         opening_cash=100_000.0,
         total_cash=200_000.0,
-        cash_tips=30_000.0,
-        total_sales=360_000.0,
-        gastos_efectivo=0.0,
+        gastos_efectivo=10_000.0,
+        cash_purchases=20_000.0,
     )
-    assert result == 330_000.0
+    assert result == 270_000.0
 
 
 def test_table_advance_partial_close_moves_amount_to_advance_tender():
