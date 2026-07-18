@@ -9,7 +9,7 @@ from pydantic import BaseModel, EmailStr, Field
 from app.core.dependencies import require_invoicing_ready
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
-from app.services import orders_service, facturacion_service
+from app.services import orders_service, facturacion_service, invoice_email_tracking_service
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
@@ -546,3 +546,26 @@ async def send_order_invoice_email(
 ):
     """Send the fiscal receipt email for this order's accepted invoice."""
     return await orders_service.send_invoice_email(request, order_id, body.email)
+
+
+@router.get(
+    "/{order_id}/invoice/email-history",
+    tags=["Invoices"],
+    dependencies=[Depends(require_module(Module.VENTAS))],
+)
+async def get_order_invoice_email_history(
+    request: Request,
+    order_id: UUID,
+):
+    """Delivery history of invoice emails for this order (api-warolabs#657).
+
+    Newest first. `sent` means SES accepted the request — not proof of
+    delivery or human read. `open_count` is only an open-detection signal
+    from the tracking pixel.
+    """
+    session_context = require_valid_session(request)
+    deliveries = await invoice_email_tracking_service.list_deliveries_for_order(
+        tenant_id=session_context.tenant_id,
+        order_id=order_id,
+    )
+    return {"deliveries": deliveries}

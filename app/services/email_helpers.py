@@ -477,6 +477,34 @@ async def send_order_accepted_email(
         return False
 
 
+def _build_receipt_html_with_pixel(
+    text_body: str,
+    tracking_pixel_url: Optional[str],
+) -> Optional[str]:
+    """Wrap the plain-text receipt in a minimal HTML body with a 1x1 pixel.
+
+    Returns None when no pixel is requested, so existing flows (POS receipts
+    without tracking) keep sending text-only emails untouched.
+
+    The HTML is a faithful <pre> render of the text body — no extra content,
+    no claims of "read", just the open-detection signal (api-warolabs#657).
+    """
+    if not tracking_pixel_url:
+        return None
+    from html import escape
+
+    escaped_text = escape(text_body or "")
+    escaped_pixel = escape(tracking_pixel_url, quote=True)
+    return (
+        '<!DOCTYPE html><html><body style="margin:0;padding:0;">'
+        f'<pre style="font-family:monospace;font-size:13px;white-space:pre-wrap;'
+        f'word-wrap:break-word;margin:0;padding:16px;">{escaped_text}</pre>'
+        f'<img src="{escaped_pixel}" width="1" height="1" alt="" '
+        'style="display:block;width:1px;height:1px;border:0;" />'
+        "</body></html>"
+    )
+
+
 async def send_pos_receipt_email(
     customer_email: str,
     order_number: int,
@@ -507,6 +535,7 @@ async def send_pos_receipt_email(
     currency_code: Optional[str] = None,
     timezone: Optional[str] = None,
     return_details: bool = False,
+    tracking_pixel_url: Optional[str] = None,
 ) -> Any:
     """
     Send a POS receipt email to the customer after a point-of-sale order completes.
@@ -659,6 +688,10 @@ async def send_pos_receipt_email(
             locale=locale_settings.locale,
         )
 
+        # api-warolabs#657: when a tracking pixel is provided, wrap the text
+        # receipt in a minimal HTML body (text stays as multipart alternative).
+        html_body = _build_receipt_html_with_pixel(text_body, tracking_pixel_url)
+
         if attachments:
             success = await ses_service.send_email_with_attachments(
                 from_email=await resolve_sender_email_for_tenant(tenant_id),
@@ -666,6 +699,7 @@ async def send_pos_receipt_email(
                 to_emails=[customer_email],
                 subject=subject,
                 text_body=text_body,
+                html_body=html_body,
                 attachments=attachments,
             )
         else:
@@ -674,7 +708,7 @@ async def send_pos_receipt_email(
                 from_name=business_name or "WARO Colombia",
                 to_emails=[customer_email],
                 subject=subject,
-                html_body=None,
+                html_body=html_body,
                 text_body=text_body,
             )
 

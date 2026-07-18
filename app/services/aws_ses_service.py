@@ -188,10 +188,14 @@ class AWSSESService:
         to_emails: List[str] = None,
         subject: str = "",
         text_body: Optional[str] = None,
+        html_body: Optional[str] = None,
         attachments: Optional[List[dict]] = None,
     ) -> bool:
         """
         Send email with multiple attachments using AWS SES raw email.
+
+        Body is wrapped as multipart/alternative (text + html) inside the
+        multipart/mixed envelope, so clients pick the best renderable part.
 
         attachments: list of { data: bytes, filename: str, content_type: str }
         """
@@ -210,7 +214,13 @@ class AWSSESService:
             msg['To'] = ', '.join(to_emails)
             msg['Subject'] = subject
 
-            if text_body:
+            if html_body:
+                alternative = MIMEMultipart('alternative')
+                if text_body:
+                    alternative.attach(MIMEText(text_body, 'plain', 'utf-8'))
+                alternative.attach(MIMEText(html_body, 'html', 'utf-8'))
+                msg.attach(alternative)
+            elif text_body:
                 msg.attach(MIMEText(text_body, 'plain', 'utf-8'))
 
             for att in (attachments or []):

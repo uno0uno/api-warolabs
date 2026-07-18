@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, me, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, pos_products, categories, recipe_bases, modifiers, ingredient_purchase_units, warehouse_categories, customers, pos_cart, pos_context, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, public_table_qr, table_qr_requests, tenant_config, promotions, online_cart, online_verification, address_profile, analytics, online_orders, notifications, ai_agents, customer_portal, leads, waros, billing, legal, onboarding, payments_webhook, admin_ingredients, menu, tables, credit, cartera, cierre, payment_methods, accounting, stations, comandas, operaciones_context, operaciones_shifts, operaciones_operation_events, invoices as invoices_router, support_documents, documents as documents_router, facturacion as facturacion_router, webhooks as webhooks_router
+from app.routers import auth, me, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, pos_products, categories, recipe_bases, modifiers, ingredient_purchase_units, warehouse_categories, customers, pos_cart, pos_context, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, public_table_qr, table_qr_requests, tenant_config, promotions, online_cart, online_verification, address_profile, analytics, online_orders, notifications, ai_agents, customer_portal, leads, waros, billing, legal, onboarding, payments_webhook, admin_ingredients, menu, tables, credit, cartera, cierre, payment_methods, accounting, stations, comandas, operaciones_context, operaciones_shifts, operaciones_operation_events, invoices as invoices_router, support_documents, documents as documents_router, facturacion as facturacion_router, webhooks as webhooks_router, email_tracking
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -203,6 +203,7 @@ app.include_router(v1_ordering.customer_router_v1)  # V1 customer validate — A
 app.include_router(v1_ordering.product_router_v1)   # V1 product detail + modifiers — API key auth
 app.include_router(public_restaurant.router, prefix="/public/restaurant", tags=["public-restaurant"])
 app.include_router(public_table_qr.router, prefix="/public/table-qr", tags=["public-table-qr"])
+app.include_router(email_tracking.router, prefix="/public/email-tracking", tags=["public-email-tracking"])
 app.include_router(table_qr_requests.router, prefix="/table-qr-requests", tags=["table-qr-requests"])
 app.include_router(tenant_config.router, prefix="/api/tenant", tags=["tenant-config"])
 app.include_router(promotions.router)  # /api/promotions — tenant promotion CRUD (#980)
