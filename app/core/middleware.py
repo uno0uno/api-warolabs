@@ -502,6 +502,7 @@ async def session_validation_middleware(request: Request, call_next):
             '/supplier-portal',
             '/public/restaurant',
             '/public/table-qr',
+            '/public/email-tracking',
             '/payments/webhooks',
             '/billing/webhook',
         ]

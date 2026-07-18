@@ -31,6 +31,7 @@ from app.services.account_role_service import (
     resolve_account,
 )
 from app.services.email_helpers import send_pos_receipt_email
+from app.services import invoice_email_tracking_service
 from app.services.email_sender import resolve_sender_email_for_tenant
 from app.services.invoicing_presentation import (
     build_invoice_presentation,
@@ -4370,6 +4371,23 @@ async def send_invoice_email(
         or (_row_get(profile_row, "phone_number") if profile_row else None)
     )
 
+    # api-warolabs#657: persist the attempt before SES. Raw token goes only
+    # into the pixel URL; the DB stores its SHA-256 hash. Fail-open: when
+    # tracking persistence is unavailable, send exactly as before #657.
+    tracking_token = invoice_email_tracking_service.generate_tracking_token()
+    tracking_token_hash = invoice_email_tracking_service.hash_tracking_token(tracking_token)
+    delivery_id = await invoice_email_tracking_service.create_pending_delivery(
+        tenant_id=tenant_id,
+        order_id=order_id,
+        recipient_email=recipient_email,
+        tracking_token_hash=tracking_token_hash,
+    )
+    pixel_url = (
+        invoice_email_tracking_service.build_pixel_url(tracking_token)
+        if delivery_id is not None
+        else None
+    )
+
     send_result = await send_pos_receipt_email(
         customer_email=recipient_email,
         order_number=int(order_row['order_number']),
@@ -4395,6 +4413,7 @@ async def send_invoice_email(
         invoice_cufe=invoice_row['cufe'],
         invoice_presentation=invoice_presentation,
         return_details=True,
+        tracking_pixel_url=pixel_url,
     )
     if isinstance(send_result, dict):
         success = bool(send_result.get("success"))
@@ -4406,10 +4425,17 @@ async def send_invoice_email(
         attachment_warnings = []
 
     if not success:
+        if delivery_id is not None:
+            await invoice_email_tracking_service.mark_delivery_failed(
+                delivery_id, failure_code="ses_rejected"
+            )
         raise HTTPException(
             status_code=502,
             detail="No se pudo enviar el correo. Intentá nuevamente en unos segundos.",
         )
+
+    if delivery_id is not None:
+        await invoice_email_tracking_service.mark_delivery_sent(delivery_id)
 
     return {
         'success': True,
