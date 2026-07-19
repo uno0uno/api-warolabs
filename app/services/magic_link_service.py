@@ -256,7 +256,7 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
                 registration_draft = None
 
             if not user_result and not registration_draft:
-                return MagicLinkResponse()
+                return MagicLinkResponse(action="registration_required")
 
             if not registration_draft:
                 token = secrets.token_hex(32)

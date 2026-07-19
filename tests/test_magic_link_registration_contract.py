@@ -71,6 +71,7 @@ async def test_unknown_login_is_generic_and_has_no_side_effects():
         result = await send_magic_link(_request(), "missing@example.com")
 
     assert result.success is True
+    assert result.action == "registration_required"
     conn.execute.assert_not_awaited()
     ses.assert_not_awaited()
 
@@ -100,6 +101,7 @@ async def test_unverified_registration_login_reissues_consented_challenge():
         result = await send_magic_link(_request(), "nuevo@example.com")
 
     assert result.success is True
+    assert result.action == "email_sent"
     issue.assert_awaited_once()
     assert issue.await_args.kwargs["email"] == "nuevo@example.com"
     assert issue.await_args.kwargs["draft"] == draft

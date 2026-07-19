@@ -76,6 +76,7 @@ class MagicLinkRequest(BaseModel):
 class MagicLinkResponse(BaseModel):
     success: bool = True
     message: str = "Magic link sent successfully"
+    action: Literal["email_sent", "registration_required"] = "email_sent"
 
 
 class RegistrationMagicLinkResponse(BaseModel):
