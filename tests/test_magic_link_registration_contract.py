@@ -56,7 +56,7 @@ def _payload(**overrides):
 
 
 @pytest.mark.asyncio
-async def test_unknown_login_is_generic_and_has_no_side_effects():
+async def test_unknown_login_requests_registration_and_has_no_side_effects():
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value=None)
 
@@ -74,6 +74,38 @@ async def test_unknown_login_is_generic_and_has_no_side_effects():
     assert result.action == "registration_required"
     conn.execute.assert_not_awaited()
     ses.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_registered_identity_login_returns_email_sent_action():
+    user_row = {
+        "user_id": uuid4(),
+        "tenant_id": uuid4(),
+        "role": "owner",
+        "email": "dueno@example.com",
+        "name": "Dueña",
+    }
+    branding_row = {
+        "tenant_name": "WARO Colombia",
+        "tenant_email": "soporte@warolabs.com",
+        "brand_name": "WARO",
+    }
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[user_row, branding_row])
+
+    @asynccontextmanager
+    async def db_ctx(**_kwargs):
+        yield conn
+
+    deliver = AsyncMock()
+    with patch("app.services.magic_link_service.get_db_connection", side_effect=db_ctx), patch(
+        "app.services.magic_link_service.require_valid_tenant", return_value=_tenant()
+    ), patch("app.services.magic_link_service._deliver_magic_link", deliver):
+        result = await send_magic_link(_request(), "dueno@example.com")
+
+    assert result.success is True
+    assert result.action == "email_sent"
+    deliver.assert_awaited_once()
 
 
 @pytest.mark.asyncio
