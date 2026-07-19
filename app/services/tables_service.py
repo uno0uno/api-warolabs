@@ -3631,6 +3631,15 @@ async def remove_tab_item(
                 new_total, row["order_id"],
             )
 
+            # Re-evaluate promos for the remaining tab lines: the arithmetic
+            # adjustment above ignores promo savings, so without this the locked
+            # savings go stale when the eligible pool shrinks (#665).
+            from app.services.promotions_service import persist_session_tab_promos
+
+            await persist_session_tab_promos(
+                conn, UUID(str(tenant_id)), row["table_session_id"]
+            )
+
         return {"success": True, "data": {"removed": str(order_item_id)}}
     except (AuthenticationError, NotFoundError, APIError):
         raise
@@ -3728,6 +3737,15 @@ async def update_tab_item_quantity(
             await conn.execute(
                 "UPDATE orders SET total_amount = $1 WHERE id = $2",
                 new_total, row["order_id"],
+            )
+
+            # Re-evaluate promos after the quantity change: the arithmetic
+            # adjustment above ignores promo savings, so without this the locked
+            # savings go stale when the eligible pool grows or shrinks (#665).
+            from app.services.promotions_service import persist_session_tab_promos
+
+            await persist_session_tab_promos(
+                conn, UUID(str(tenant_id)), row["table_session_id"]
             )
 
             payload = _build_tab_item_payload(

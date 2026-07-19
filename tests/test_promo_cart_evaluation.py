@@ -375,3 +375,63 @@ def test_cross_line_bogo_uses_eligible_unit_price_and_cap():
     assert by_subtotal[20000] == 10000
     assert by_subtotal[12000] == 0
     assert by_subtotal[11000] == 0
+
+
+def _locked_bogo_line(*, promo, subtotal, quantity, locked_savings, product_id):
+    return {
+        **_line(subtotal=subtotal, quantity=quantity, product_id=product_id),
+        "locked_promotion_id": str(promo["id"]),
+        "locked_promotion_name": promo["name"],
+        "locked_promo_type": "bogo",
+        "locked_promo_savings": locked_savings,
+    }
+
+
+def test_locked_bogo_recalibrates_when_pool_grows():
+    """#665: 4+2 units in two tab rounds with BOGO 1+1 must grant 3 free units,
+    not truncate to the first round's locked savings (44000)."""
+    product_id = uuid4()
+    promo = _promo(promo_type="bogo", value_json={"buy_qty": 1, "get_qty": 1})
+    lines = [
+        _locked_bogo_line(
+            promo=promo, subtotal=88000, quantity=4,
+            locked_savings=44000, product_id=product_id,
+        ),
+        _line(subtotal=44000, quantity=2, product_id=product_id),
+    ]
+    result = evaluate_cart_promotions(lines, [promo])
+    assert result["promo_savings"] == 66000
+    assert result["subtotal_after_promos"] == 66000
+
+
+def test_locked_bogo_recalibrates_when_pool_shrinks():
+    """#665: a stale lock from a larger pool must shrink back when the tab now
+    only holds 4 eligible units (2 free)."""
+    product_id = uuid4()
+    promo = _promo(promo_type="bogo", value_json={"buy_qty": 1, "get_qty": 1})
+    lines = [
+        _locked_bogo_line(
+            promo=promo, subtotal=88000, quantity=4,
+            locked_savings=66000, product_id=product_id,
+        ),
+    ]
+    result = evaluate_cart_promotions(lines, [promo])
+    assert result["promo_savings"] == 44000
+    assert result["subtotal_after_promos"] == 44000
+
+
+def test_locked_bogo_kept_when_promo_inactive():
+    """The snapshot lock still protects savings when the BOGO is no longer
+    evaluable (deactivated/expired) — its original purpose (#4484b6d)."""
+    product_id = uuid4()
+    promo = _promo(promo_type="bogo", value_json={"buy_qty": 1, "get_qty": 1})
+    lines = [
+        _locked_bogo_line(
+            promo=promo, subtotal=88000, quantity=4,
+            locked_savings=44000, product_id=product_id,
+        ),
+    ]
+    result = evaluate_cart_promotions(lines, [])
+    assert result["promo_savings"] == 44000
+    assert result["lines"][0]["promotion_id"] == str(promo["id"])
+    assert result["lines"][0]["promotion_name"] == "Test promo"
