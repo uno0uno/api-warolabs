@@ -95,7 +95,7 @@ DATASETS: dict[str, DatasetSpec] = {
     "customers": DatasetSpec(
         name="customers",
         label="Customers",
-        description="Identified customer purchase and frequency rows.",
+        description="Customer purchase and frequency rows, including unassigned orders as Sin identificar.",
         required_scope="customers:read",
         dimensions={
             "customer": QueryField("COALESCE(p.name, 'Sin identificar')", "string", "Customer", groupable=True),
@@ -110,7 +110,7 @@ DATASETS: dict[str, DatasetSpec] = {
         },
         filters={
             "date_range": {"type": "date_range", "field": "o.order_date"},
-            "customer": {"type": "string", "field": "p.name"},
+            "customer": {"type": "string", "field": "COALESCE(p.name, 'Sin identificar')"},
         },
         sortable={"customer", "order_count", "total_spent", "avg_ticket", "last_order_date", "waros_balance"},
         from_sql="""
@@ -122,7 +122,6 @@ DATASETS: dict[str, DatasetSpec] = {
             "o.tenant_id = $1",
             POS_LIKE_FILTER_ALIAS_O,
             "o.status = 'completed'",
-            "o.customer_id IS NOT NULL",
         ),
     ),
     "product_profitability": DatasetSpec(

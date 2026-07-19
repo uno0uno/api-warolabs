@@ -162,6 +162,25 @@ def test_compile_product_profitability_accepts_cost_source_dimension():
     assert "pc.cost_used_for_classification" in compiled["sql"]
 
 
+def test_compile_customers_queryspec_keeps_unidentified_customer_group():
+    compiled = queries_service.compile_queryspec(
+        {
+            "dataset": "customers",
+            "measures": ["order_count", "total_spent"],
+            "dimensions": ["customer"],
+            "filters": {"customer": "Sin identificar"},
+            "order_by": [{"field": "order_count", "direction": "desc"}],
+            "limit": 20,
+        }
+    )
+
+    sql = compiled["sql"]
+    assert "COALESCE(p.name, 'Sin identificar') AS customer" in sql
+    assert "o.customer_id IS NOT NULL" not in sql
+    assert "COALESCE(p.name, 'Sin identificar') = $2" in sql
+    assert compiled["params"] == ["Sin identificar", 20]
+
+
 def test_compile_inventory_stock_queryspec_uses_tenant_scope_and_latest_costs():
     compiled = queries_service.compile_queryspec(
         {
