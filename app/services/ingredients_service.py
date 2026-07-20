@@ -197,6 +197,9 @@ async def get_ingredients_list(
     base_only: Optional[bool] = None,
     tenant_only: Optional[bool] = None,
     show_archived: Optional[bool] = None,
+    unit: Optional[str] = None,
+    has_cost: Optional[bool] = None,
+    has_unit_weight: Optional[bool] = None,
 ) -> IngredientsListResponse:
     """
     Fetches a list of ingredients from the database with tenant isolation,
@@ -226,6 +229,7 @@ async def get_ingredients_list(
                     CAST(i.unit_weight_gr AS float) as unit_weight_gr,
                     i.unit_weight_unit,
                     i.is_resale,
+                    CAST(i.costo_unitario AS float) as costo_unitario,
                     i.created_at,
                     i.updated_at,
                     CAST(COALESCE(tsp.unit_price, tim.cost_per_unit) AS float) as price,
@@ -338,6 +342,28 @@ async def get_ingredients_list(
                 # Override the is_active=TRUE filter added in the base WHERE clause
                 base_query = base_query.replace("AND i.is_active = TRUE", "AND i.is_active = FALSE")
                 count_query = count_query.replace("AND is_active = TRUE", "AND is_active = FALSE")
+
+            if unit:
+                base_query += f" AND LOWER(i.unit) = LOWER(${base_param_count})"
+                count_query += f" AND LOWER(unit) = LOWER(${count_param_count})"
+                base_params.append(unit)
+                count_params.append(unit)
+                base_param_count += 1
+                count_param_count += 1
+
+            if has_cost is True:
+                base_query += " AND i.costo_unitario IS NOT NULL AND i.costo_unitario > 0"
+                count_query += " AND costo_unitario IS NOT NULL AND costo_unitario > 0"
+            elif has_cost is False:
+                base_query += " AND (i.costo_unitario IS NULL OR i.costo_unitario <= 0)"
+                count_query += " AND (costo_unitario IS NULL OR costo_unitario <= 0)"
+
+            if has_unit_weight is True:
+                base_query += " AND i.unit_weight_gr IS NOT NULL AND i.unit_weight_gr > 0"
+                count_query += " AND unit_weight_gr IS NOT NULL AND unit_weight_gr > 0"
+            elif has_unit_weight is False:
+                base_query += " AND (i.unit_weight_gr IS NULL OR i.unit_weight_gr <= 0)"
+                count_query += " AND (unit_weight_gr IS NULL OR unit_weight_gr <= 0)"
 
             # Add pagination
             offset = (page - 1) * limit

@@ -64,13 +64,17 @@ async def get_ingredients_endpoint(
     base_only: Optional[bool] = Query(default=None, description="When true, exclude variant ingredients (those with a base assigned)"),
     tenant_only: Optional[bool] = Query(default=None, description="When true, return only tenant-scoped custom ingredients"),
     show_archived: Optional[bool] = Query(default=None, description="When true, return archived (is_active=false) ingredients instead of active ones"),
+    unit: Optional[str] = Query(default=None, description="Filter by unit of measure"),
+    has_cost: Optional[bool] = Query(default=None, description="When true, only ingredients with unit cost; when false, only without"),
+    has_unit_weight: Optional[bool] = Query(default=None, description="When true, only ingredients with gr/und weight; when false, only without"),
 ):
     """
     Get ingredients list with tenant isolation
     Requires valid session with tenant context
     """
     return await get_ingredients_list(
-        request, response, page, limit, search, category, supplier_id, type, is_resale, base_only, tenant_only, show_archived
+        request, response, page, limit, search, category, supplier_id, type, is_resale,
+        base_only, tenant_only, show_archived, unit, has_cost, has_unit_weight,
     )
 
 
