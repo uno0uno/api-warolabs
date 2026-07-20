@@ -1,0 +1,44 @@
+issue: 665
+repo: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-665-bogo-lock-growing-pool
+title: fix(promotions) mesa BOGO lock trunca el ahorro cuando el pool elegible crece entre tandas
+
+paths:
+  - app/services/promotions_service.py
+  - app/services/tables_service.py
+  - tests/test_tables_tab_promo_persist.py
+  - tests/test_promo_cart_evaluation.py
+
+ac:
+  - Caso 4+2 unidades elegibles en dos tandas de tab de mesa con BOGO 1+1 aplica
+    3 unidades gratis (ahorro 66000), no trunca al lock de la primera tanda.
+  - El lock/persisted promo solo se conserva cuando la promo ya no es evaluable
+    (desactivada/vencida); si sigue activa, la asignacion cross-line fresca manda.
+  - Remove / qty-change de lineas del tab re-evalua promos via
+    persist_session_tab_promos en vez de solo ajuste aritmetico del total.
+  - Tests de regresion: BOGO cross-line con lock previo y pool creciente;
+    remove/qty-change con promo aplicada; control 2 unidades sin lock -> 1 gratis.
+
+hints:
+  root_cause_1: promotions_service.py evaluate_cart_promotions ~1437-1501 — el lock
+    (locked_promo_from_line / persisted) se aplica incondicional y trunca
+    savings a min(locked, subtotal) aunque el grupo BOGO cross-line asigne mas.
+  root_cause_2: tables_service.py remove tab item (~3628) y qty-change (~3727)
+    ajustan orders.total_amount aritmeticamente sin re-evaluar promos.
+  lock_purpose: commit 4484b6d — preservar snapshot de promo cuando la promo ya no
+    es evaluable (desactivada/vencida) al cerrar la mesa; no congelar el ahorro.
+  tests:
+    - venv/bin/pytest tests/test_tables_tab_promo_persist.py tests/test_promo_cart_evaluation.py -x -q
+  case_real: orden 16759 mesa 11 Rebel Rebel 2026-07-19 — 6 oktobert (4+2) BOGO 1+1
+    deberia dar 3 gratis (66000) pero muestra 44000; diferencia 22000.
+
+plan:
+  - En evaluate_cart_promotions: si el locked/persisted promo es bogo y existe una
+    promo activa evaluable con el mismo id, usar la promo real (evaluacion fresca
+    cross-line manda). Solo conservar el snapshot locked cuando la promo no esta
+    en el set activo.
+  - En tables_service remove tab item y qty-change: llamar
+    persist_session_tab_promos tras la mutacion (igual que el add).
+  - Tests de regresion y control.

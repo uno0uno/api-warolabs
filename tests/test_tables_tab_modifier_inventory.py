@@ -197,6 +197,7 @@ async def test_remove_tab_item_returns_inventory_from_snapshots():
 
     mock_conn = AsyncMock()
     mock_conn.fetchrow = AsyncMock(side_effect=[row, None])
+    mock_conn.fetch = AsyncMock(return_value=[])
     mock_conn.execute = AsyncMock()
     return_mock = AsyncMock()
 

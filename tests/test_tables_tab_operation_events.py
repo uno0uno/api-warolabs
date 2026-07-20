@@ -653,3 +653,119 @@ async def test_clear_tab_records_reason_on_tab_cleared():
 
     assert len(recorded) == 1
     assert recorded[0]["reason"] == "Cliente se fue"
+
+
+@pytest.mark.asyncio
+async def test_remove_tab_item_reevaluates_promos():
+    """#665: removing a tab line must re-run promo persistence so locked BOGO
+    savings do not go stale."""
+    tenant_id = uuid4()
+    user_id = uuid4()
+    table_id = uuid4()
+    order_item_id = uuid4()
+    order_id = uuid4()
+    session_id = uuid4()
+
+    row = {
+        "id": order_item_id,
+        "product_id": uuid4(),
+        "quantity": 2,
+        "price_at_purchase": 22000.0,
+        "subtotal": 44000.0,
+        "notes": None,
+        "order_id": order_id,
+        "total_amount": 172000.0,
+        "order_number": 16759,
+        "table_session_id": session_id,
+        "product_name": "Hofbrau oktobert 500ml",
+        "table_name": "Mesa 11",
+        "is_bar": False,
+        "effective_waiter_member_id": None,
+        "fulfillment_status": "new",
+    }
+
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow = AsyncMock(side_effect=[row, None])
+    mock_conn.fetch = AsyncMock(return_value=[])
+    mock_conn.execute = AsyncMock()
+
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    persist_mock = AsyncMock(return_value={})
+    mock_request = MagicMock()
+    with patch("app.services.tables_service.require_valid_session") as mock_sess, \
+         patch("app.services.tables_service.get_db_connection", return_value=mock_cm), \
+         patch(
+             "app.services.tables_service._record_tab_operation_event",
+             new=AsyncMock(),
+         ), patch(
+             "app.services.tables_service._return_tab_item_inventory_from_snapshots",
+             new=AsyncMock(),
+         ), patch(
+             "app.services.promotions_service.persist_session_tab_promos",
+             persist_mock,
+         ):
+        mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id)
+        await tables_service.remove_tab_item(mock_request, table_id, order_item_id)
+
+    persist_mock.assert_awaited_once_with(mock_conn, tenant_id, session_id)
+
+
+@pytest.mark.asyncio
+async def test_update_tab_item_quantity_reevaluates_promos():
+    """#665: changing quantity must re-run promo persistence so locked BOGO
+    savings recalibrate with the new eligible pool."""
+    tenant_id = uuid4()
+    user_id = uuid4()
+    table_id = uuid4()
+    order_item_id = uuid4()
+    order_id = uuid4()
+    session_id = uuid4()
+
+    row = {
+        "id": order_item_id,
+        "product_id": uuid4(),
+        "quantity": 4,
+        "price_at_purchase": 22000.0,
+        "subtotal": 88000.0,
+        "notes": None,
+        "order_id": order_id,
+        "total_amount": 172000.0,
+        "order_number": 16759,
+        "table_session_id": session_id,
+        "product_name": "Hofbrau oktobert 500ml",
+        "table_name": "Mesa 11",
+        "is_bar": False,
+        "effective_waiter_member_id": None,
+        "fulfillment_status": "new",
+    }
+
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow = AsyncMock(side_effect=[row, None])
+    mock_conn.fetchval = AsyncMock(return_value=0)
+    mock_conn.fetch = AsyncMock(return_value=[])
+    mock_conn.execute = AsyncMock()
+
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    persist_mock = AsyncMock(return_value={})
+    mock_request = MagicMock()
+    with patch("app.services.tables_service.require_valid_session") as mock_sess, \
+         patch("app.services.tables_service.get_db_connection", return_value=mock_cm), \
+         patch(
+             "app.services.tables_service._record_tab_operation_event",
+             new=AsyncMock(),
+         ), patch(
+             "app.services.promotions_service.persist_session_tab_promos",
+             persist_mock,
+         ):
+        mock_sess.return_value = MagicMock(tenant_id=tenant_id, user_id=user_id)
+        await tables_service.update_tab_item_quantity(
+            mock_request, table_id, order_item_id, 2,
+        )
+
+    persist_mock.assert_awaited_once_with(mock_conn, tenant_id, session_id)

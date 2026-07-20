@@ -1423,6 +1423,9 @@ def evaluate_cart_promotions(
 
     pending: List[Dict[str, Any]] = []
     bogo_group_indices: Dict[tuple[str, str], List[int]] = {}
+    active_promo_ids = {
+        str(p.get("id")) for p in promotions if isinstance(p, dict) and p.get("id")
+    }
 
     for line in lines:
         line_id = str(line["id"])
@@ -1444,6 +1447,23 @@ def evaluate_cart_promotions(
             promo = None
         elif locked_promo is not None:
             promo = locked_promo
+            if (
+                locked_promo.get("promo_type") == "bogo"
+                and str(locked_promo["id"]) in active_promo_ids
+            ):
+                # The lock exists to preserve a promo snapshot when the promo is
+                # no longer evaluable (deactivated/expired). While the BOGO is
+                # still active, the fresh cross-line evaluation is authoritative
+                # so a growing (or shrinking) eligible pool recalibrates savings
+                # instead of truncating them to the stale snapshot (#665).
+                fresh_promo = _pick_best_promotion_for_line(
+                    promotions,
+                    product_id=product_id,
+                    category_id=category_id,
+                    promo_type_block_map=promo_type_block_map,
+                )
+                if fresh_promo is not None:
+                    promo = fresh_promo
         else:
             promo = _pick_best_promotion_for_line(
                 promotions,
