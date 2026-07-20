@@ -1,5 +1,6 @@
 import jwt
 import logging
+import random
 from datetime import datetime, timedelta
 from urllib.parse import unquote
 from uuid import UUID
@@ -12,6 +13,7 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 SESSION_COOKIE_NAME = "session-token"
+INTERNAL_SESSION_HOURS = 24
 
 
 def _normalize_session_token(raw: str) -> Optional[str]:
@@ -182,7 +184,7 @@ async def set_session_cookie(response: Response, session_token: str, tenant_site
         httponly=True,
         secure=not settings.is_development,
         samesite="lax",  # Use lax for better proxy compatibility across environments
-        max_age=7 * 24 * 60 * 60,  # 7 days (1 week)
+        max_age=INTERNAL_SESSION_HOURS * 60 * 60,  # 24 hours
         domain=cookie_domain,
         path="/"  # Ensure cookie is available for all paths
     )
@@ -360,7 +362,6 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
                         logger.info(f"🔒 Marked session {session_token[:8]}... as {end_reason}")
 
                     # Opportunistically clean up other zombie sessions (1 in 10 chance)
-                    import random
                     if random.random() < 0.1:
                         await cleanup_zombie_sessions(conn, limit=50)
 
