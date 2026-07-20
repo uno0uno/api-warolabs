@@ -98,7 +98,7 @@ async def _fetch_modifier_recipe_lines(conn, modifier_id: UUID) -> List[Modifier
             unit=r["ingredient_base_unit"],
             costo_unitario=r["costo_unitario"],
             controla_inventario=r["controla_inventario"] or False,
-            is_resale=bool(r.get("ingredient_is_resale")),
+            is_resale=bool(r.get("is_resale")),
         )
         lines.append(
             ModifierRecipeLine(
