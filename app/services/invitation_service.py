@@ -5,7 +5,7 @@ from typing import Optional, List
 from uuid import uuid4
 from fastapi import Request, Response
 from app.database import get_db_connection
-from app.core.security import set_session_cookie, get_client_ip, get_current_user_id
+from app.core.security import INTERNAL_SESSION_HOURS, set_session_cookie, get_client_ip, get_current_user_id
 from app.core.middleware import require_valid_tenant, require_valid_session
 from app.core.exceptions import APIError, AuthenticationError, ValidationError, AuthorizationError
 from app.core.email_utils import normalize_email
@@ -325,7 +325,7 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
 
             # Create session (same as magic link flow)
             session_id = secrets.token_hex(16)
-            expires_at = datetime.utcnow() + timedelta(days=7)
+            expires_at = datetime.utcnow() + timedelta(hours=INTERNAL_SESSION_HOURS)  # 24 hours
             client_ip = get_client_ip(request)
             user_agent = request.headers.get('user-agent')
 

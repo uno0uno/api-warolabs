@@ -8,7 +8,7 @@ from uuid import UUID
 from urllib.parse import urlencode
 from fastapi import HTTPException, Request, Response
 from app.database import get_db_connection
-from app.core.security import set_session_cookie, get_client_ip
+from app.core.security import INTERNAL_SESSION_HOURS, set_session_cookie, get_client_ip
 from app.core.middleware import require_valid_tenant
 from app.core.exceptions import AuthenticationError, ValidationError
 from app.core.email_utils import normalize_email
@@ -198,7 +198,7 @@ async def _complete_registration_login(
         return None
 
     session_id = secrets.token_hex(16)
-    expires_at = datetime.utcnow() + timedelta(days=7)
+    expires_at = datetime.utcnow() + timedelta(hours=INTERNAL_SESSION_HOURS)  # 24 hours
     await conn.execute(
         """
         INSERT INTO sessions (
@@ -437,7 +437,7 @@ async def verify_code(request: Request, response: Response, email: str, code: st
 
             # Create session with user's tenant from token
             session_id = secrets.token_hex(16)
-            expires_at = datetime.utcnow() + timedelta(days=7)  # 7 days (1 week)
+            expires_at = datetime.utcnow() + timedelta(hours=INTERNAL_SESSION_HOURS)  # 24 hours
             user_tenant_id = token_data['tenant_id']
 
             # Get client info for analytics
@@ -593,7 +593,7 @@ async def verify_token(request: Request, response: Response, email: str, token: 
 
             # Create session with user's tenant from token
             session_id = secrets.token_hex(16)
-            expires_at = datetime.utcnow() + timedelta(days=7)  # 7 days (1 week)
+            expires_at = datetime.utcnow() + timedelta(hours=INTERNAL_SESSION_HOURS)  # 24 hours
             user_tenant_id = token_data['tenant_id']
 
             # Get client info for analytics

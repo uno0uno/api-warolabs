@@ -129,6 +129,13 @@ async def test_verify_token_replaces_previous_active_admin_sessions():
         result = await verify_token(_request(), response, "admin@example.com", "token")
 
     assert result.success is True
+    session_inserts = [
+        call.args for call in conn.execute.await_args_list
+        if "INSERT INTO sessions" in call.args[0]
+    ]
+    assert len(session_inserts) == 1
+    ttl = session_inserts[0][4] - datetime.utcnow()
+    assert timedelta(hours=23, minutes=59) < ttl <= timedelta(hours=24)
     replacement_calls = [
         call.args for call in conn.execute.await_args_list
         if "replaced_by_new_login" in call.args[0]
@@ -212,7 +219,8 @@ async def test_session_resolver_invalidates_customer_internal_session():
     ])
 
     with patch("app.database.get_db_connection", side_effect=db_ctx), \
-         patch("app.core.security.get_session_token", new=AsyncMock(return_value=session_token)):
+         patch("app.core.security.get_session_token", new=AsyncMock(return_value=session_token)), \
+         patch("app.core.security.cleanup_zombie_sessions", new=AsyncMock()):
         result = await get_session_from_request(_request())
 
     assert result is None
@@ -237,7 +245,8 @@ async def test_session_resolver_replaced_session_returns_invalid_without_overwri
     ])
 
     with patch("app.database.get_db_connection", side_effect=db_ctx), \
-         patch("app.core.security.get_session_token", new=AsyncMock(return_value=session_token)):
+         patch("app.core.security.get_session_token", new=AsyncMock(return_value=session_token)), \
+         patch("app.core.security.cleanup_zombie_sessions", new=AsyncMock()):
         result = await get_session_from_request(_request())
 
     assert result is None

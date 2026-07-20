@@ -5,7 +5,7 @@ from typing import Optional, Set
 from fastapi import HTTPException, Request, Response
 from app.config import settings
 from app.database import get_db_connection
-from app.core.security import collect_session_tokens, get_session_token, clear_session_cookie, set_session_cookie, get_client_ip
+from app.core.security import INTERNAL_SESSION_HOURS, collect_session_tokens, get_session_token, clear_session_cookie, set_session_cookie, get_client_ip
 from app.core.exceptions import AuthenticationError
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES, is_legacy_internal_team_role
 from app.core.onboarding_access import next_step_for_state
@@ -290,7 +290,7 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
 
             # Create new session with new tenant
             new_session_id = secrets.token_hex(16)
-            expires_at = datetime.utcnow() + timedelta(days=7)  # 7 days (1 week)
+            expires_at = datetime.utcnow() + timedelta(hours=INTERNAL_SESSION_HOURS)  # 24 hours
             
             # Use current client info for new session
             current_client_ip = get_client_ip(request)
