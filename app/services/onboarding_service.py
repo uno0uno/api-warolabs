@@ -593,30 +593,6 @@ def _financial_response(row: Any) -> OnboardingFinancialResponse:
     )
 
 
-async def get_onboarding_financial_profile(
-    conn, tenant_id: Optional[UUID]
-) -> OnboardingFinancialResponse:
-    tenant_id = _require_tenant_id(tenant_id)
-    row = await conn.fetchrow(
-        """
-        SELECT t.lifecycle_status, t.name AS business_name, o.state,
-               fp.tenant_id AS profile_tenant_id,
-               fp.country_code, fp.base_currency_code,
-               fp.accounting_localization, fp.document_mode, fp.fiscal_provider,
-               fp.selection_revision,
-               fp.created_at AS profile_created_at,
-               fp.updated_at AS profile_updated_at
-        FROM tenants t
-        JOIN tenant_onboarding o ON o.tenant_id = t.id
-        LEFT JOIN tenant_financial_profiles fp ON fp.tenant_id = t.id
-        WHERE t.id = $1
-        """,
-        tenant_id,
-    )
-    _ensure_pending_financial_state(row)
-    return _financial_response(row)
-
-
 async def _promote_onboarding_identity(conn, tenant_id: UUID) -> str:
     state_row = await conn.fetchrow(
         """
