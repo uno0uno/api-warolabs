@@ -3,7 +3,7 @@ import logging
 import secrets
 import random
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID
 from urllib.parse import urlencode
 from fastapi import HTTPException, Request, Response
@@ -101,6 +101,7 @@ async def _deliver_magic_link(
     brand_name: str,
     tenant_name: str,
     tenant_email: Optional[str],
+    purpose: Literal["login", "registration"] = "login",
 ) -> None:
     from app.services.aws_ses_service import ses_service
     from app.services.email_sender import resolve_sender_email_value
@@ -116,11 +117,12 @@ async def _deliver_magic_link(
         from_email=resolve_sender_email_value(tenant_email),
         from_name=f"Saifer 101 (Anderson Arévalo) - {brand_name}",
         to_emails=[email],
-        subject=get_magic_link_subject(brand_name),
+        subject=get_magic_link_subject(brand_name, purpose),
         html_body=get_magic_link_template(
             magic_link_url,
             verification_code,
             template_context,
+            purpose,
         ),
     )
     if sent:
@@ -167,6 +169,7 @@ async def _issue_registration_challenge(
         brand_name=tenant_context.brand_name or "WARO",
         tenant_name=tenant_context.tenant_name or "WARO",
         tenant_email=tenant_context.tenant_email,
+        purpose="registration",
     )
 
 
