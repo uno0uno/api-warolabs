@@ -161,6 +161,7 @@ async def test_registration_link_is_opaque_and_challenge_contains_no_raw_secret(
     link = deliver.await_args.kwargs["magic_link_url"]
     assert "purpose=registration" in link
     assert "email=" not in link
+    assert deliver.await_args.kwargs["purpose"] == "registration"
     insert = next(
         call for call in conn.execute.await_args_list
         if "INSERT INTO onboarding_email_challenges" in call.args[0]
@@ -272,6 +273,40 @@ async def test_registration_verifier_uses_token_only_and_dispatches_once_after_d
     notification.assert_called_once()
     create_task.assert_called_once()
     assert request.state.registration_notification is None
+
+
+def test_magic_link_email_copy_distinguishes_registration_from_login():
+    from app.templates.magic_link_template import (
+        get_magic_link_subject,
+        get_magic_link_template,
+    )
+
+    context = {
+        "brand_name": "WARO",
+        "tenant_name": "WARO Colombia",
+        "admin_name": "Admin",
+        "admin_email": "admin@warolabs.com",
+    }
+
+    login_subject = get_magic_link_subject("WARO")
+    registration_subject = get_magic_link_subject("WARO", "registration")
+    assert "acceso" in login_subject
+    assert "registro" in registration_subject
+    assert login_subject != registration_subject
+
+    login_html = get_magic_link_template("https://x.test/verify?token=1", "123456", context)
+    registration_html = get_magic_link_template(
+        "https://x.test/verify?token=1&purpose=registration",
+        "123456",
+        context,
+        "registration",
+    )
+    assert "Has solicitado acceso a tu cuenta" in login_html
+    assert "Acceder a mi cuenta" in login_html
+    assert "Has iniciado tu registro" in registration_html
+    assert "Completar mi registro" in registration_html
+    assert "Acceder a mi cuenta" not in registration_html
+    assert "123456" in registration_html
 
 
 def test_registration_payload_rejects_missing_consent_and_pii_attribution():

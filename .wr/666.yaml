@@ -1,0 +1,39 @@
+issue: 666
+title: "Email de registro indistinguible del de login: agregar purpose a la plantilla magic link"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-666-registration-email-purpose
+
+paths:
+  - app/templates/magic_link_template.py
+  - app/services/magic_link_service.py
+  - tests/test_magic_link_registration_contract.py
+
+ac:
+  - "get_magic_link_template/get_magic_link_subject aceptan purpose (login|registration), default login retrocompatible"
+  - "registration -> asunto '✨ Completa tu registro en {brand}', copy de registro, botón 'Completar mi registro'"
+  - "login -> asunto y copy actuales sin cambios"
+  - "_deliver_magic_link propaga purpose; _issue_registration_challenge pasa 'registration'"
+  - "Tests de subject/copy por propósito + suite magic link verde"
+
+out_of_scope:
+  - identidad global cross-tenant (decisión de producto pendiente)
+  - rediseño visual de la plantilla
+  - QA general (validación manual del usuario)
+
+hints:
+  entry: "_deliver_magic_link (magic_link_service.py:96); call sites: :163 (registration), :308 (login)"
+  pattern: "template get_magic_link_template (magic_link_template.py:6), subject :66"
+  tests: "./venv/bin/python -m pytest tests/test_magic_link_registration_contract.py tests/test_magic_link_email_normalize.py tests/test_magic_link_cross_tenant.py tests/test_customer_internal_access.py -q"
+
+risk:
+  sensitive: true
+  areas: [auth, email]
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "auto review wr-review"
