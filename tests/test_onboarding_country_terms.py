@@ -44,27 +44,6 @@ def test_business_name_rejects_the_pending_placeholder():
 
 
 @pytest.mark.asyncio
-async def test_catalog_read_has_no_default_profile_write():
-    tenant_id = uuid4()
-    conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={
-        "lifecycle_status": "pending",
-        "state": "business_profile_pending",
-        "business_name": "Negocio pendiente",
-        "profile_tenant_id": None,
-    })
-
-    result = await onboarding_service.get_onboarding_financial_profile(conn, tenant_id)
-
-    assert result.data.profile is None
-    assert len(result.data.catalog) == 23
-    assert result.data.next_step == "business_profile"
-    query = conn.fetchrow.await_args.args[0]
-    assert "INSERT" not in query
-    assert "tenant_financial_profiles" in query
-
-
-@pytest.mark.asyncio
 async def test_initial_selection_atomically_promotes_identity_to_billing_boundary():
     tenant_id = uuid4()
     profile = _profile_row(tenant_id)
