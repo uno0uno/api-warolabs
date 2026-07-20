@@ -44,6 +44,7 @@ _MODIFIER_SELECT_COLS = """
     i.unit as ingredient_base_unit,
     i.costo_unitario,
     i.controla_inventario,
+    i.is_resale as ingredient_is_resale,
     pbt.name as recipe_base_name,
     lp.name as linked_product_name
 """
@@ -81,7 +82,7 @@ async def _fetch_modifier_recipe_lines(conn, modifier_id: UUID) -> List[Modifier
         """
         SELECT mr.id, mr.ingredient_id, mr.quantity, mr.unit,
                i.name as ingredient_name, i.unit as ingredient_base_unit,
-               i.costo_unitario, i.controla_inventario
+               i.costo_unitario, i.controla_inventario, i.is_resale
         FROM modifier_recipes mr
         JOIN ingredients i ON mr.ingredient_id = i.id
         WHERE mr.modifier_id = $1
@@ -97,6 +98,7 @@ async def _fetch_modifier_recipe_lines(conn, modifier_id: UUID) -> List[Modifier
             unit=r["ingredient_base_unit"],
             costo_unitario=r["costo_unitario"],
             controla_inventario=r["controla_inventario"] or False,
+            is_resale=bool(r.get("ingredient_is_resale")),
         )
         lines.append(
             ModifierRecipeLine(
@@ -145,6 +147,7 @@ async def _build_modifier(
             unit=row["ingredient_base_unit"],
             costo_unitario=row["costo_unitario"],
             controla_inventario=row["controla_inventario"] or False,
+            is_resale=bool(row.get("ingredient_is_resale")),
         )
     if row["recipe_base_type_id"] and row.get("recipe_base_name"):
         mod_dict["recipe_base"] = RecipeBaseInfo(

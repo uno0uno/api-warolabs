@@ -22,6 +22,7 @@ class IngredientInfo(BaseModel):
     unit: str
     costo_unitario: Optional[Decimal] = None
     controla_inventario: bool = False
+    is_resale: bool = False
 
 
 class RecipeBaseInfo(BaseModel):
