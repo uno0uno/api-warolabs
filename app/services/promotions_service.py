@@ -1423,9 +1423,6 @@ def evaluate_cart_promotions(
 
     pending: List[Dict[str, Any]] = []
     bogo_group_indices: Dict[tuple[str, str], List[int]] = {}
-    active_promo_ids = {
-        str(p.get("id")) for p in promotions if isinstance(p, dict) and p.get("id")
-    }
 
     for line in lines:
         line_id = str(line["id"])
@@ -1446,24 +1443,10 @@ def evaluate_cart_promotions(
         if line.get("promo_opt_out"):
             promo = None
         elif locked_promo is not None:
+            # Frozen snapshot: a line keeps the promo it was granted when it was
+            # added (expected business behavior). Locked lines never rejoin the
+            # cross-line BOGO group — only fresh lines evaluate among themselves.
             promo = locked_promo
-            if (
-                locked_promo.get("promo_type") == "bogo"
-                and str(locked_promo["id"]) in active_promo_ids
-            ):
-                # The lock exists to preserve a promo snapshot when the promo is
-                # no longer evaluable (deactivated/expired). While the BOGO is
-                # still active, the fresh cross-line evaluation is authoritative
-                # so a growing (or shrinking) eligible pool recalibrates savings
-                # instead of truncating them to the stale snapshot (#665).
-                fresh_promo = _pick_best_promotion_for_line(
-                    promotions,
-                    product_id=product_id,
-                    category_id=category_id,
-                    promo_type_block_map=promo_type_block_map,
-                )
-                if fresh_promo is not None:
-                    promo = fresh_promo
         else:
             promo = _pick_best_promotion_for_line(
                 promotions,
@@ -1482,7 +1465,13 @@ def evaluate_cart_promotions(
             "promo": promo,
         })
 
-        if promo is not None and promo["promo_type"] == "bogo":
+        # Locked (frozen) lines keep their snapshot and stay out of the
+        # cross-line group; only fresh lines pool units together (#665 follow-up).
+        if (
+            promo is not None
+            and promo["promo_type"] == "bogo"
+            and promo.get("locked_savings") is None
+        ):
             group_key = (str(product_id), str(promo["id"]))
             bogo_group_indices.setdefault(group_key, []).append(idx)
 

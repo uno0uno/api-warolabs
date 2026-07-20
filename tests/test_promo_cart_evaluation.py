@@ -387,9 +387,11 @@ def _locked_bogo_line(*, promo, subtotal, quantity, locked_savings, product_id):
     }
 
 
-def test_locked_bogo_recalibrates_when_pool_grows():
-    """#665: 4+2 units in two tab rounds with BOGO 1+1 must grant 3 free units,
-    not truncate to the first round's locked savings (44000)."""
+def test_locked_bogo_frozen_and_fresh_line_evaluates_on_its_own():
+    """#665 follow-up: frozen snapshots are expected behavior. The locked line
+    keeps its granted savings and stays OUT of the cross-line group; the fresh
+    2-unit line evaluates among itself (1 free). Total 44000 + 22000 = 66000 —
+    the cross-line re-evaluation must not swallow the fresh line's free unit."""
     product_id = uuid4()
     promo = _promo(promo_type="bogo", value_json={"buy_qty": 1, "get_qty": 1})
     lines = [
@@ -402,11 +404,13 @@ def test_locked_bogo_recalibrates_when_pool_grows():
     result = evaluate_cart_promotions(lines, [promo])
     assert result["promo_savings"] == 66000
     assert result["subtotal_after_promos"] == 66000
+    assert result["lines"][0]["promo_savings"] == 44000
+    assert result["lines"][1]["promo_savings"] == 22000
 
 
-def test_locked_bogo_recalibrates_when_pool_shrinks():
-    """#665: a stale lock from a larger pool must shrink back when the tab now
-    only holds 4 eligible units (2 free)."""
+def test_locked_bogo_snapshot_stays_frozen_when_line_shrinks():
+    """Frozen semantics: once granted, the snapshot is kept (capped at the line
+    subtotal) even if the line later holds fewer units than the lock implies."""
     product_id = uuid4()
     promo = _promo(promo_type="bogo", value_json={"buy_qty": 1, "get_qty": 1})
     lines = [
@@ -416,8 +420,8 @@ def test_locked_bogo_recalibrates_when_pool_shrinks():
         ),
     ]
     result = evaluate_cart_promotions(lines, [promo])
-    assert result["promo_savings"] == 44000
-    assert result["subtotal_after_promos"] == 44000
+    assert result["promo_savings"] == 66000
+    assert result["subtotal_after_promos"] == 22000
 
 
 def test_locked_bogo_kept_when_promo_inactive():
