@@ -127,6 +127,7 @@ async def resolve_ingredients_by_warehouse_categories_endpoint(
             tenant_id,
             body.category_ids,
             body.exclude_ingredient_ids,
+            body.exclude_resale,
         )
 
     return {"success": True, "data": data}

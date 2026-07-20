@@ -283,6 +283,7 @@ class TestIngredientCategoryResolution:
             tenant_id,
             [first_category_id, second_category_id],
             [excluded_ingredient_id],
+            False,
         ]
         conn.fetch.assert_awaited_once()
 

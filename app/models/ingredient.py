@@ -127,6 +127,7 @@ class IngredientCategoriesResponse(BaseModel):
 class IngredientCategoryResolutionRequest(BaseModel):
     category_ids: List[UUID] = Field(..., min_length=1, max_length=100)
     exclude_ingredient_ids: List[UUID] = Field(default_factory=list, max_length=10000)
+    exclude_resale: bool = Field(default=False, description="When true, omit resale warehouse items")
 
 
 class IngredientCategoryCandidate(BaseModel):
