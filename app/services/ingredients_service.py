@@ -84,6 +84,7 @@ async def resolve_ingredients_by_warehouse_categories(
     tenant_id: UUID,
     category_ids: List[UUID],
     exclude_ingredient_ids: Optional[List[UUID]] = None,
+    exclude_resale: bool = False,
 ) -> Dict[str, Any]:
     """Resolve visible active ingredients for ordered warehouse categories."""
     ordered_category_ids = list(dict.fromkeys(category_ids))
@@ -119,12 +120,14 @@ async def resolve_ingredients_by_warehouse_categories(
          AND ingredient.is_active = TRUE
          AND (ingredient.tenant_id IS NULL OR ingredient.tenant_id = $1)
          AND NOT (ingredient.id = ANY($3::uuid[]))
+         AND ($4::boolean IS FALSE OR COALESCE(ingredient.is_resale, FALSE) = FALSE)
         ORDER BY category.position, LOWER(ingredient.name) NULLS LAST,
                  ingredient.name NULLS LAST, ingredient.id
         """,
         tenant_id,
         ordered_category_ids,
         excluded_ids,
+        exclude_resale,
     )
 
     ingredients: List[Dict[str, Any]] = []
