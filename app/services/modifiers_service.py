@@ -345,6 +345,7 @@ async def get_modifier_group_by_id(
                 LEFT JOIN product_base_types pbt ON m.recipe_base_type_id = pbt.id
                 LEFT JOIN product lp ON m.linked_product_id = lp.id
                 WHERE m.modifier_group_id = $1
+                  AND m.removed_at IS NULL
                 ORDER BY m.sort_order, m.name
             """
 
@@ -600,7 +601,12 @@ async def update_modifier_group(
                 if group_data.modifiers is not None:
                     # Get existing modifiers
                     existing_modifiers = await conn.fetch(
-                        "SELECT id, name, included_quantity FROM modifiers WHERE modifier_group_id = $1",
+                        """
+                        SELECT id, name, included_quantity
+                        FROM modifiers
+                        WHERE modifier_group_id = $1
+                          AND removed_at IS NULL
+                        """,
                         group_id
                     )
                     existing_names = {row['name']: row['id'] for row in existing_modifiers}
@@ -644,7 +650,8 @@ async def update_modifier_group(
                                     option_type = $8,
                                     ingredient_id = $9, ingredient_quantity = $10, ingredient_unit = $11,
                                     recipe_base_type_id = $12, recipe_base_quantity = $13,
-                                    linked_product_id = $14, linked_product_quantity = $15
+                                    linked_product_id = $14, linked_product_quantity = $15,
+                                    removed_at = NULL
                                 WHERE id = $1
                                 """,
                                 mod_id,
@@ -675,12 +682,17 @@ async def update_modifier_group(
                         else:
                             await _insert_modifier(conn, group_id, modifier)
 
-                    # Soft-delete removed modifiers (preserve order history)
-                    modifiers_to_disable = existing_ids - modifiers_to_keep
-                    if modifiers_to_disable:
+                    # Remove options omitted from PUT (preserve row for order history)
+                    modifiers_to_remove = existing_ids - modifiers_to_keep
+                    if modifiers_to_remove:
                         await conn.execute(
-                            "UPDATE modifiers SET is_available = false WHERE id = ANY($1::uuid[])",
-                            list(modifiers_to_disable)
+                            """
+                            UPDATE modifiers
+                            SET is_available = false,
+                                removed_at = NOW()
+                            WHERE id = ANY($1::uuid[])
+                            """,
+                            list(modifiers_to_remove)
                         )
 
                 # 4. Registrar cambios en historial
