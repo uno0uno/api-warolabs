@@ -10,6 +10,7 @@ def test_product_modifier_response_keeps_included_quantity_and_option_type():
     group_id = uuid4()
     product_id = uuid4()
     tenant_id = uuid4()
+    category_id = uuid4()
     now = datetime(2026, 7, 21, 12, 0, 0)
 
     response = ProductsListResponse(
@@ -18,6 +19,7 @@ def test_product_modifier_response_keeps_included_quantity_and_option_type():
         data=[{
             "id": product_id,
             "tenant_id": tenant_id,
+            "category_id": category_id,
             "name": "BUBASICO TRADICIONAL",
             "price": Decimal("14500"),
             "created_at": now,
