@@ -5,15 +5,26 @@ from uuid import UUID
 from datetime import datetime
 from decimal import Decimal
 
+from app.models.modifier import ModifierOptionType
+
 class Modifier(BaseModel):
     """Modifier option within a modifier group"""
     id: UUID
     name: str
     price: Decimal
     max_limit: int = Field(default=1, ge=1, description="Max times this option can be added")
+    included_quantity: int = Field(
+        default=0,
+        ge=0,
+        description="Units included before the additional price applies",
+    )
     is_available: Optional[bool] = True
     is_default: Optional[bool] = False
     sort_order: Optional[int] = None
+    option_type: ModifierOptionType = Field(
+        default="INGREDIENT",
+        description="INGREDIENT | RECIPE | PRODUCT | NONE",
+    )
 
     class Config:
         from_attributes = True
