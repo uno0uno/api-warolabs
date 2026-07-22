@@ -15,6 +15,7 @@ from app.services.aws_s3_service import AWSS3Service
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 from app.services.open_priced_service import assert_single_open_priced_per_tenant
 from app.services.ingredients_service import create_tenant_ingredient
+from app.services.billing_service import check_plan_quota_growth, check_plan_quota_scoped
 from app.models.ingredient import TenantIngredientCreate, PurchaseUnitInput
 import asyncpg
 import logging
@@ -168,6 +169,7 @@ async def create_product_with_recipe(
         async with get_db_connection() as conn:
             # Start transaction
             async with conn.transaction():
+                await check_plan_quota_growth(conn, tenant_id, "menu_products")
                 if product_data.open_priced:
                     await assert_single_open_priced_per_tenant(conn, tenant_id)
 
@@ -237,6 +239,18 @@ async def create_product_with_recipe(
                 )
 
                 product_id = product_result['id']
+
+                recipe_line_count = len(product_data.ingredients or [])
+                if auto_resale_ingredient_id:
+                    recipe_line_count += 1
+                if recipe_line_count:
+                    await check_plan_quota_scoped(
+                        conn,
+                        tenant_id,
+                        "recipe_lines_per_product",
+                        product_id,
+                        projected_count=recipe_line_count,
+                    )
 
                 # 2. Insert recipe base associations (with per-product quantity, Issue #517)
                 if normalized_bases:
@@ -1252,6 +1266,14 @@ async def update_product_with_recipe(
                 # 3. Update recipe if ingredients provided.
                 # Empty list is now valid — product becomes "no inventory tracking".
                 if product_data.ingredients is not None:
+                    if product_data.ingredients:
+                        await check_plan_quota_scoped(
+                            conn,
+                            tenant_id,
+                            "recipe_lines_per_product",
+                            product_id,
+                            projected_count=len(product_data.ingredients),
+                        )
                     # Delete existing recipe
                     delete_recipe_query = "DELETE FROM product_recipes WHERE product_id = $1"
                     await conn.execute(delete_recipe_query, product_id)

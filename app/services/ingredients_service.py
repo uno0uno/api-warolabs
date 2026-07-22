@@ -11,6 +11,7 @@ from app.services.warehouse_categories_service import (
     list_warehouse_categories,
     resolve_assignable_warehouse_category,
 )
+from app.services.billing_service import check_plan_quota_growth
 
 logger = logging.getLogger(__name__)
 
@@ -546,6 +547,8 @@ async def create_tenant_ingredient(
         data.warehouse_category_id,
         data.category,
     )
+
+    await check_plan_quota_growth(conn, tenant_id, "tenant_ingredients")
 
     try:
         row = await conn.fetchrow(

@@ -1,10 +1,20 @@
 from fastapi import APIRouter, Depends, Request
+from typing import Optional
 from app.core.middleware import SessionContext, require_valid_session
-from app.core.permissions import get_enforcement_mode, get_role_modules
+from app.core.permissions import Module, get_enforcement_mode, get_role_modules
+from app.database import get_db_connection
 from app.models.me import AccessResponse
+from app.services.billing_service import STARTER_PLAN_MODULE_VALUES, get_effective_plan_slug
 from app.services.kali_access_service import get_kali_access_features
 
 router = APIRouter()
+
+
+def _intersect_plan_modules(role_modules, plan_slug: Optional[str]):
+    if plan_slug != "starter":
+        return role_modules
+    allowed = {Module(value) for value in STARTER_PLAN_MODULE_VALUES}
+    return frozenset(m for m in role_modules if m in allowed)
 
 
 @router.get("/access", response_model=AccessResponse)
@@ -43,9 +53,15 @@ async def get_my_access(
         )
 
     modules = await get_role_modules(session.tenant_id, session.role)
+    async with get_db_connection() as conn:
+        plan_slug = await get_effective_plan_slug(conn, session.tenant_id)
+    modules = _intersect_plan_modules(modules, plan_slug)
+    if plan_slug == "starter":
+        features = {**features, "kali_enabled": False}
     return AccessResponse(
         role=session.role,
         modules=sorted(m.value for m in modules),
+        plan_slug=plan_slug,
         enforcement_mode=enforcement_mode,
         features=features,
     )

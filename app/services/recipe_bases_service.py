@@ -19,6 +19,7 @@ from app.models.recipe_base import (
 )
 from app.services import menu_history_service
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
+from app.services.billing_service import check_plan_quota_scoped
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,15 @@ async def create_recipe_base_type(
             )
 
             base_type_id = base_type_row['id']
+
+            if recipe_data.ingredients:
+                await check_plan_quota_scoped(
+                    conn,
+                    tenant_id,
+                    "recipe_base_template_lines",
+                    base_type_id,
+                    projected_count=len(recipe_data.ingredients),
+                )
 
             # Insert ingredients into base_recipe_templates
             ingredients = []
@@ -481,6 +491,15 @@ async def update_recipe_base_type(
                     WHERE product_base_type_id = $1 AND tenant_id = $2
                 """
                 await conn.execute(delete_ingredients_query, recipe_base_id, tenant_id)
+
+                if update_data.ingredients:
+                    await check_plan_quota_scoped(
+                        conn,
+                        tenant_id,
+                        "recipe_base_template_lines",
+                        recipe_base_id,
+                        projected_count=len(update_data.ingredients),
+                    )
 
                 # Insert new ingredients
                 for ingredient_data in update_data.ingredients:

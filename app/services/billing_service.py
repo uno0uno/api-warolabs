@@ -37,6 +37,12 @@ STARTER_OPERATIONAL_QUOTAS = {
     "active_qr_tables": 0,
     "completed_online_orders_per_month": 30,
     "electronic_invoices_per_period": 0,
+    "menu_products": 10,
+    "tenant_ingredients": 5,
+    "modifier_groups": 2,
+    "recipe_lines_per_product": 4,
+    "modifier_options_per_group": 6,
+    "recipe_base_template_lines": 4,
 }
 QUOTA_KEYS = (
     "admin_users",
@@ -46,7 +52,14 @@ QUOTA_KEYS = (
     "active_qr_tables",
     "completed_online_orders_per_month",
     "electronic_invoices_per_period",
+    "menu_products",
+    "tenant_ingredients",
+    "modifier_groups",
+    "recipe_lines_per_product",
+    "modifier_options_per_group",
+    "recipe_base_template_lines",
 )
+CATALOG_UNLIMITED = 1_000_000
 BASE_OPERATIONAL_QUOTAS = {
     "admin_users": 6,
     "active_sessions_per_admin_user": 1,
@@ -54,6 +67,12 @@ BASE_OPERATIONAL_QUOTAS = {
     "active_tables_including_bar": 20,
     "active_qr_tables": 20,
     "completed_online_orders_per_month": 300,
+    "menu_products": CATALOG_UNLIMITED,
+    "tenant_ingredients": CATALOG_UNLIMITED,
+    "modifier_groups": CATALOG_UNLIMITED,
+    "recipe_lines_per_product": 100,
+    "modifier_options_per_group": 50,
+    "recipe_base_template_lines": 75,
 }
 PLAN_QUOTA_DEFAULTS = {
     STARTER_PLAN_SLUG: {
@@ -81,6 +100,14 @@ ENFORCEABLE_QUOTA_RESOURCES = {
     "active_kitchens",
     "active_tables_including_bar",
     "active_qr_tables",
+    "menu_products",
+    "tenant_ingredients",
+    "modifier_groups",
+}
+SCOPED_QUOTA_RESOURCES = {
+    "recipe_lines_per_product",
+    "modifier_options_per_group",
+    "recipe_base_template_lines",
 }
 
 
@@ -227,6 +254,42 @@ async def get_effective_plan_quotas(conn, tenant_id: UUID) -> Dict[str, int]:
     return _normalize_plan_quotas(plan_slug, features)
 
 
+STARTER_PLAN_MODULE_VALUES = frozenset({
+    "pos",
+    "ventas",
+    "menu",
+    "operaciones",
+    "abastecimiento",
+    "mi_negocio",
+    "mi_plan",
+})
+STARTER_LOCKED_OPERATION_TOGGLES = frozenset({
+    "tables_enabled",
+    "comandas_enabled",
+    "kds_enabled",
+})
+
+
+async def is_starter_plan(conn, tenant_id: UUID) -> bool:
+    return await get_effective_plan_slug(conn, tenant_id) == STARTER_PLAN_SLUG
+
+
+async def assert_starter_toggle_allowed(conn, tenant_id: UUID, column_name: str, enabled: bool) -> None:
+    if not enabled or column_name not in STARTER_LOCKED_OPERATION_TOGGLES:
+        return
+    if await is_starter_plan(conn, tenant_id):
+        raise APIError(
+            "Función no disponible en el plan Starter",
+            status_code=403,
+            details={
+                "code": "starter_plan_restriction",
+                "toggle": column_name,
+                "upgrade_url": QUOTA_UPGRADE_URL,
+                "message": QUOTA_CONTACT_MESSAGE,
+            },
+        )
+
+
 async def _default_scan_limit_for_tenant(conn, tenant_id: UUID) -> int:
     plan_slug = await get_effective_plan_slug(conn, tenant_id)
     if plan_slug == STARTER_PLAN_SLUG:
@@ -359,6 +422,61 @@ async def check_plan_quota_growth(
     )
 
 
+async def check_plan_quota_scoped(
+    conn,
+    tenant_id: UUID,
+    resource: str,
+    scope_id: UUID,
+    *,
+    projected_count: Optional[int] = None,
+) -> None:
+    """Block scoped resource growth (per product/group/template)."""
+    if resource not in SCOPED_QUOTA_RESOURCES:
+        raise ValueError(f"Unsupported scoped quota resource: {resource}")
+
+    plan = await _fetch_plan_quota_context(conn, tenant_id, resource)
+    if not plan:
+        return
+
+    quotas = _normalize_plan_quotas(plan["plan_slug"], plan["plan_features"])
+    quota = _effective_quota_from_row(resource, quotas.get(resource, 0), plan)
+    if quota.limit is None:
+        return
+
+    if projected_count is not None:
+        used = projected_count
+    else:
+        used = await _count_scoped_quota_usage(conn, resource, scope_id) + 1
+
+    if used <= quota.limit:
+        return
+
+    _log_quota_block(
+        tenant_id=tenant_id,
+        resource=resource,
+        used=used,
+        quota=quota,
+        plan_slug=plan["plan_slug"],
+    )
+    raise APIError(
+        "Límite del plan alcanzado",
+        status_code=429,
+        details={
+            "code": "quota_exceeded",
+            "error": "quota_exceeded",
+            "resource": resource,
+            "scope_id": str(scope_id),
+            "used": used,
+            "limit": quota.limit,
+            "plan_limit": quota.plan_limit,
+            "plan_slug": plan["plan_slug"],
+            "override": _quota_override_payload(quota),
+            "upgrade_url": QUOTA_UPGRADE_URL,
+            "message": QUOTA_CONTACT_MESSAGE,
+        },
+    )
+
+
 async def _get_completed_online_order_quota_state(conn, tenant_id: UUID) -> Optional[OnlineOrderQuotaState]:
     """
     Read current online-order quota state.
@@ -392,7 +510,34 @@ async def _get_completed_online_order_quota_state(conn, tenant_id: UUID) -> Opti
         ONLINE_ORDER_QUOTA_RESOURCE,
     )
     if not plan:
-        return None
+        effective_slug = await get_effective_plan_slug(conn, tenant_id)
+        if effective_slug != STARTER_PLAN_SLUG:
+            return None
+        plan = await conn.fetchrow(
+            """
+            SELECT
+                sp.slug AS plan_slug,
+                sp.features AS plan_features,
+                date_trunc('month', now()) AS current_period_start,
+                date_trunc('month', now()) + interval '1 month' AS current_period_end,
+                tq.id AS override_id,
+                tq.limit_override,
+                COALESCE(tq.disabled, false) AS override_disabled,
+                tq.reason AS override_reason
+            FROM subscription_plans sp
+            LEFT JOIN tenant_quota_overrides tq
+              ON tq.tenant_id = $1
+             AND tq.resource = $2
+            WHERE sp.slug = $3
+              AND sp.is_active = true
+            LIMIT 1
+            """,
+            tenant_id,
+            ONLINE_ORDER_QUOTA_RESOURCE,
+            STARTER_PLAN_SLUG,
+        )
+        if not plan:
+            return None
 
     quotas = _normalize_plan_quotas(plan["plan_slug"], plan["plan_features"])
     quota = _effective_quota_from_row(
@@ -706,8 +851,72 @@ async def _count_quota_resource_usage(
             """,
             tenant_id,
         )
+    elif resource == "menu_products":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM product
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+    elif resource == "tenant_ingredients":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM ingredients
+            WHERE tenant_id = $1
+              AND is_active = TRUE
+            """,
+            tenant_id,
+        )
+    elif resource == "modifier_groups":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM modifier_groups
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
     else:
         raise ValueError(f"Unsupported quota resource: {resource}")
+
+    return int(value or 0)
+
+
+async def _count_scoped_quota_usage(conn, resource: str, scope_id: UUID) -> int:
+    if resource == "recipe_lines_per_product":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM product_recipes
+            WHERE product_id = $1
+            """,
+            scope_id,
+        )
+    elif resource == "modifier_options_per_group":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM modifiers
+            WHERE modifier_group_id = $1
+              AND is_available = TRUE
+              AND removed_at IS NULL
+            """,
+            scope_id,
+        )
+    elif resource == "recipe_base_template_lines":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM base_recipe_templates
+            WHERE product_base_type_id = $1
+            """,
+            scope_id,
+        )
+    else:
+        raise ValueError(f"Unsupported scoped quota resource: {resource}")
 
     return int(value or 0)
 
