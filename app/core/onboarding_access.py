@@ -5,6 +5,7 @@ _NEXT_STEP_BY_STATE = {
     "email_verified": "business_profile",
     "business_profile_pending": "business_profile",
     "terms_pending": "terms",
+    "starter_active": "setup",
     "payment_pending": "payment",
     "paid": "activation",
     "active": "setup",

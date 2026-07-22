@@ -364,7 +364,7 @@ async def get_access_status(request: Request):
     Return the subscription access level for the authenticated tenant.
 
     Levels:
-      free             — no subscription; limited free plan
+      starter          — no paid subscription; permanent Starter plan
       full             — active subscription
       full_with_warning — past_due, ≤ 3 days overdue
       read_only        — past_due, 3-7 days overdue
@@ -373,12 +373,20 @@ async def get_access_status(request: Request):
     session = require_valid_session(request)
     async with get_db_connection(use_transaction=False) as conn:
         access = await billing_service.get_subscription_access(session.tenant_id, conn)
+        plan_slug = await billing_service.get_effective_plan_slug(conn, session.tenant_id)
+        quotas = (
+            await billing_service.get_effective_plan_quotas(conn, session.tenant_id)
+            if plan_slug
+            else {}
+        )
         return {
             "level": access.level,
             "grace_days_remaining": access.grace_days_remaining,
             "subscription_status": access.subscription_status,
             "next_payment_date": access.next_payment_date,
             "message": access.message,
+            "plan_slug": plan_slug,
+            "quotas": quotas,
         }
 
 
