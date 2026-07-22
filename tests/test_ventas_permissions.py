@@ -22,6 +22,7 @@ from app.core import permissions
 from app.core.middleware import SessionContext
 from app.core.permissions import Module
 from app.routers.orders import router as orders_router
+from app.routers.customers import router as customers_router
 
 
 # ─── Fixtures ─────────────────────────────────────────────────────────
@@ -126,3 +127,33 @@ def test_cashier_role_denied_ventas_endpoint_under_enforce():
     assert response.status_code == 403
     assert "ventas" in response.json()["detail"].lower()
     dashboard.assert_not_awaited()
+
+
+def test_cashier_role_still_denied_ventas_customer_search_or_create_under_enforce():
+    """Cashier still hits 403 on VENTAS /customers/search-or-create (POS uses /pos/customers)."""
+    session = _build_session(role="cashier")
+    app = FastAPI()
+    app.include_router(customers_router, prefix="/customers")
+
+    cashier_modules = frozenset({Module.POS})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=cashier_modules),
+         ), \
+         patch(
+             "app.routers.customers.search_or_create_customer",
+             new=AsyncMock(return_value={"success": True, "data": {}, "is_new": False}),
+         ) as search_or_create:
+        client = TestClient(app)
+        response = client.post(
+            "/customers/search-or-create",
+            json={"phone_number": "3001234567"},
+        )
+
+    assert response.status_code == 403
+    assert "ventas" in response.json()["detail"].lower()
+    search_or_create.assert_not_awaited()
