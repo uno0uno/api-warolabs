@@ -70,6 +70,7 @@ class Article(ArticleBase):
     draft: bool
     is_active: bool
     views: Optional[int] = 0
+    pillar: Optional[str] = None
     lang: str
     planet: str
     country: str
@@ -96,6 +97,7 @@ class ArticleSummary(BaseModel):
     cover: str
     tags: str
     views: Optional[int] = 0
+    pillar: Optional[str] = None
     published: bool
     created_at: datetime
     updated_at: Optional[datetime] = None

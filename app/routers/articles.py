@@ -19,9 +19,10 @@ async def get_articles_endpoint(
     request: Request,
     response: Response,
     page: int = Query(default=1, ge=1, description="Page number"),
-    limit: int = Query(default=10, ge=1, le=50, description="Items per page"),
+    limit: int = Query(default=10, ge=1, le=60, description="Items per page"),
     search: Optional[str] = Query(default=None, description="Search in title and description"),
-    tag: Optional[str] = Query(default=None, description="Filter by tag")
+    tag: Optional[str] = Query(default=None, description="Filter by tag"),
+    pillar: Optional[str] = Query(default=None, description="Filter by editorial pillar id")
 ):
     """
     Get published articles list for blog page.
@@ -33,7 +34,7 @@ async def get_articles_endpoint(
     """
     tenant_context = get_tenant_context(request)
     return await get_articles_list(
-        request, response, tenant_context.tenant_id, page, limit, search, tag
+        request, response, tenant_context.tenant_id, page, limit, search, tag, pillar
     )
 
 
