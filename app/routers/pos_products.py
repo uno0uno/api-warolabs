@@ -4,8 +4,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Request, Response
 
 from app.core.permissions import Module, require_module
-from app.models.product import ProductsListResponse
-from app.services.products_service import get_products_list
+from app.models.product import ProductResponse, ProductsListResponse
+from app.services.products_service import get_product_by_id, get_products_list
 
 
 router = APIRouter(prefix="/pos/products", tags=["pos"])
@@ -76,3 +76,16 @@ async def get_pos_products_endpoint(
         include_modifiers,
         include_all_types,
     )
+
+
+@router.get(
+    "/{product_id}",
+    response_model=ProductResponse,
+    dependencies=[Depends(require_module(Module.POS))],
+)
+async def get_pos_product_endpoint(
+    request: Request,
+    product_id: UUID,
+):
+    """POS-scoped single product read (modifiers included) for cashier product detail."""
+    return await get_product_by_id(request, product_id)
