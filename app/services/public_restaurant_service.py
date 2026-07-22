@@ -45,21 +45,6 @@ _PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL = """
 )
 """
 
-_PUBLIC_DIRECTORY_TENANT_ELIGIBILITY_FILTER = """
-(
-  ts.status IN ('active', 'past_due')
-  OR (
-    ts.tenant_id IS NULL
-    AND NOT EXISTS (
-      SELECT 1
-      FROM tenant_onboarding tob
-      WHERE tob.tenant_id = tpp.tenant_id
-        AND tob.state = 'payment_pending'
-    )
-  )
-)
-"""
-
 
 async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
     """
@@ -720,9 +705,7 @@ async def list_restaurants(
     """
     try:
         async with get_db_connection() as conn:
-            # Gate by billing: only tenants with an active or past_due
-            # subscription appear in the public directory. INNER JOIN drops
-            # tenants with no subscription row (free / never paid).
+            # Paid subscription or permanent Starter (same predicate as profile/menu).
             query = f"""
                 SELECT
                     tpp.id, tpp.tenant_id, tpp.slug, tpp.is_active,
@@ -845,13 +828,11 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
                     pc.sort_order,
                     COUNT(tpp.id) FILTER (
                         WHERE tpp.is_active = true
-                          AND {_PUBLIC_DIRECTORY_TENANT_ELIGIBILITY_FILTER}
+                          AND {_PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL}
                     ) AS tenant_count
                 FROM public_cities pc
                 LEFT JOIN tenant_public_profiles tpp
                        ON tpp.city_slug = pc.city_slug
-                LEFT JOIN tenant_subscriptions ts
-                       ON ts.tenant_id = tpp.tenant_id
                 WHERE pc.is_active = true
                 GROUP BY
                     pc.country,
