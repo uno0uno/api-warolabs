@@ -23,4 +23,4 @@ INSERT INTO public_cities (
   ('Colombia', 'Pacoa', 'pacoa', true, 9000, '97', 'Vaupés', '97511', 'Área no municipalizada', '0.020698', '-71.004339'),
   ('Colombia', 'Papunahua', 'papunahua', true, 9000, '97', 'Vaupés', '97777', 'Área no municipalizada', '1.908124', '-70.76091'),
   ('Colombia', 'Yavaraté', 'yavarate', true, 9000, '97', 'Vaupés', '97889', 'Área no municipalizada', '0.609142', '-69.203337')
-ON CONFLICT (municipality_code) DO NOTHING;
+ON CONFLICT (city_slug) DO NOTHING;
