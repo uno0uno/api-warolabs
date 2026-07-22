@@ -108,8 +108,51 @@ async def _merge_order_into_primary(
     """Move checkout lines and payments onto the primary order, then drop the shell."""
     if primary_order_id == secondary_order_id:
         return
+
+    collisions = await conn.fetch(
+        """
+        SELECT sec.id AS secondary_item_id,
+               pri.id AS primary_item_id,
+               sec.quantity AS sec_qty,
+               sec.subtotal AS sec_subtotal,
+               COALESCE(sec.net_total, sec.subtotal) AS sec_net,
+               COALESCE(sec.discount_allocated, 0) AS sec_discount
+        FROM order_items sec
+        JOIN order_items pri
+          ON pri.order_id = $1
+         AND sec.order_id = $2
+         AND sec.variant_id IS NOT NULL
+         AND pri.variant_id = sec.variant_id
+        """,
+        primary_order_id,
+        secondary_order_id,
+    )
+    for row in collisions:
+        await conn.execute(
+            """
+            UPDATE order_items
+            SET quantity = quantity + $2,
+                subtotal = subtotal + $3,
+                net_total = COALESCE(net_total, subtotal) + $4,
+                discount_allocated = COALESCE(discount_allocated, 0) + $5,
+                updated_at = now()
+            WHERE id = $1
+            """,
+            row["primary_item_id"],
+            row["sec_qty"],
+            row["sec_subtotal"],
+            row["sec_net"],
+            row["sec_discount"],
+        )
+        await conn.execute(
+            "UPDATE comanda_items SET order_item_id = $1 WHERE order_item_id = $2",
+            row["primary_item_id"],
+            row["secondary_item_id"],
+        )
+        await conn.execute("DELETE FROM order_items WHERE id = $1", row["secondary_item_id"])
+
     await conn.execute(
-        "UPDATE order_items SET order_id = $1 WHERE order_id = $2",
+        "UPDATE order_items SET order_id = $1, updated_at = now() WHERE order_id = $2",
         primary_order_id,
         secondary_order_id,
     )
@@ -118,66 +161,92 @@ async def _merge_order_into_primary(
         primary_order_id,
         secondary_order_id,
     )
+    await conn.execute(
+        "UPDATE comandas SET order_id = $1, updated_at = now() WHERE order_id = $2",
+        primary_order_id,
+        secondary_order_id,
+    )
     await conn.execute("DELETE FROM orders WHERE id = $1", secondary_order_id)
 
 
-async def _consolidate_session_orders_for_checkout(conn, session_id: UUID) -> None:
+async def _merge_duplicate_pending_orders_for_session(conn, session_id: UUID) -> None:
+    pending_rows = await conn.fetch(
+        """
+        SELECT id FROM orders
+        WHERE table_session_id = $1 AND status = 'pending'
+        ORDER BY created_at, id
+        """,
+        session_id,
+    )
+    if len(pending_rows) <= 1:
+        return
+    primary_id = pending_rows[0]["id"]
+    for row in pending_rows[1:]:
+        await _merge_order_into_primary(conn, primary_id, row["id"])
+    await _recalc_order_total_from_items(conn, primary_id)
+
+
+async def _fold_pending_orders_into_completed_for_session(conn, session_id: UUID) -> None:
+    pending_rows = await conn.fetch(
+        """
+        SELECT id FROM orders
+        WHERE table_session_id = $1 AND status = 'pending'
+        ORDER BY created_at, id
+        """,
+        session_id,
+    )
+    completed_rows = await conn.fetch(
+        """
+        SELECT id FROM orders
+        WHERE table_session_id = $1 AND status = 'completed'
+        ORDER BY created_at, id
+        """,
+        session_id,
+    )
+    if not pending_rows or not completed_rows:
+        return
+    primary_id = completed_rows[0]["id"]
+    for row in pending_rows:
+        await _merge_order_into_primary(conn, primary_id, row["id"])
+    await _recalc_order_total_from_items(conn, primary_id)
+
+
+async def _merge_duplicate_completed_orders_for_session(conn, session_id: UUID) -> None:
+    completed_rows = await conn.fetch(
+        """
+        SELECT id FROM orders
+        WHERE table_session_id = $1 AND status = 'completed'
+        ORDER BY created_at, id
+        """,
+        session_id,
+    )
+    if len(completed_rows) <= 1:
+        return
+    primary_id = completed_rows[0]["id"]
+    for row in completed_rows[1:]:
+        await _merge_order_into_primary(conn, primary_id, row["id"])
+    await _recalc_order_total_from_items(conn, primary_id)
+
+
+async def _consolidate_session_orders_for_checkout(
+    conn,
+    session_id: UUID,
+    *,
+    fold_pending_into_completed: bool = True,
+) -> None:
     """
     Ensure a table session checkout produces a single order where possible.
 
     - Multiple pending orders → oldest pending absorbs the rest.
-    - Pending + completed/partial → pending lines fold into oldest completed.
+    - Pending + completed/partial → pending lines fold into oldest completed (optional).
     - Multiple completed/partial → oldest completed absorbs siblings (split legacy).
+
+    close_session defers fold_pending_into_completed until after pending settlement.
     """
-    pending_rows = await conn.fetch(
-        """
-        SELECT id FROM orders
-        WHERE table_session_id = $1 AND status = 'pending'
-        ORDER BY created_at, id
-        """,
-        session_id,
-    )
-    if len(pending_rows) > 1:
-        primary_id = pending_rows[0]["id"]
-        for row in pending_rows[1:]:
-            await _merge_order_into_primary(conn, primary_id, row["id"])
-        await _recalc_order_total_from_items(conn, primary_id)
-
-    pending_rows = await conn.fetch(
-        """
-        SELECT id FROM orders
-        WHERE table_session_id = $1 AND status = 'pending'
-        ORDER BY created_at, id
-        """,
-        session_id,
-    )
-    completed_rows = await conn.fetch(
-        """
-        SELECT id FROM orders
-        WHERE table_session_id = $1 AND status = 'completed'
-        ORDER BY created_at, id
-        """,
-        session_id,
-    )
-    if pending_rows and completed_rows:
-        primary_id = completed_rows[0]["id"]
-        for row in pending_rows:
-            await _merge_order_into_primary(conn, primary_id, row["id"])
-        await _recalc_order_total_from_items(conn, primary_id)
-
-    completed_rows = await conn.fetch(
-        """
-        SELECT id FROM orders
-        WHERE table_session_id = $1 AND status = 'completed'
-        ORDER BY created_at, id
-        """,
-        session_id,
-    )
-    if len(completed_rows) > 1:
-        primary_id = completed_rows[0]["id"]
-        for row in completed_rows[1:]:
-            await _merge_order_into_primary(conn, primary_id, row["id"])
-        await _recalc_order_total_from_items(conn, primary_id)
+    await _merge_duplicate_pending_orders_for_session(conn, session_id)
+    if fold_pending_into_completed:
+        await _fold_pending_orders_into_completed_for_session(conn, session_id)
+    await _merge_duplicate_completed_orders_for_session(conn, session_id)
 
 
 def _modifier_unit_total(mod: dict) -> float:
@@ -1273,7 +1342,11 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
 
                 # Mark pending orders as completed if payment_method provided
                 if payment_method:
-                    await _consolidate_session_orders_for_checkout(conn, session_row["id"])
+                    await _consolidate_session_orders_for_checkout(
+                        conn,
+                        session_row["id"],
+                        fold_pending_into_completed=False,
+                    )
                     # Backend guard: credit / wallet require an identified (non-anonymous) customer
                     if payment_method in ('credit', 'customer_wallet') and customer_id:
                         cust_row = await conn.fetchrow(
@@ -1512,6 +1585,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         f"(payment_method={payment_method}, payment_status={payment_status}, "
                         f"discount_amount={_discount_amount}) for session {session_row['id']}"
                     )
+
+                    await _merge_duplicate_completed_orders_for_session(conn, session_row["id"])
 
                     # warocol.com#663 — checkout waiter attribution on all completed session orders
                     if resolved_served_by is not None:
