@@ -187,6 +187,38 @@ def resolve_purchase_units(purchase_units: list, base_unit: str) -> list:
         })
     return resolved
 
+
+async def _copy_parent_purchase_units(conn, parent_id: UUID, ingredient_id: UUID) -> None:
+    """Seed a new variant ingredient with independent copies of the parent's purchase units."""
+    parent_units = await conn.fetch(
+        """
+        SELECT purchase_unit, purchase_unit_label, conversion_factor, unit_cost,
+               is_default, is_active, notes
+        FROM ingredient_purchase_units
+        WHERE ingredient_id = $1
+        ORDER BY is_default DESC, purchase_unit_label
+        """,
+        parent_id,
+    )
+    for pu in parent_units:
+        await conn.execute(
+            """
+            INSERT INTO ingredient_purchase_units
+                (ingredient_id, purchase_unit, purchase_unit_label, conversion_factor,
+                 unit_cost, is_default, is_active, notes)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            ingredient_id,
+            pu["purchase_unit"],
+            pu["purchase_unit_label"],
+            pu["conversion_factor"],
+            pu["unit_cost"],
+            pu["is_default"],
+            pu["is_active"],
+            pu["notes"],
+        )
+
+
 async def get_ingredients_list(
     request: Request,
     response: Response,
@@ -551,9 +583,10 @@ async def create_tenant_ingredient(
         result["parent_name"] = parent_name
 
     # Insert purchase units within the same transaction
+    from uuid import UUID as _UUID
+    ingredient_uuid = _UUID(ingredient_id_text)
+
     if data.purchase_units:
-        from uuid import UUID as _UUID
-        ingredient_uuid = _UUID(ingredient_id_text)
         resolved = resolve_purchase_units(data.purchase_units, data.unit)
         for pu in resolved:
             await conn.execute(
@@ -568,6 +601,8 @@ async def create_tenant_ingredient(
                 pu['conversion_factor'],
                 pu['is_default'],
             )
+    elif parent_uuid:
+        await _copy_parent_purchase_units(conn, parent_uuid, ingredient_uuid)
 
     return result
 
