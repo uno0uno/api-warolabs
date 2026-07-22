@@ -51,7 +51,7 @@ async def test_initial_selection_atomically_promotes_identity_to_billing_boundar
     conn.fetchrow = AsyncMock(side_effect=[
         {"lifecycle_status": "pending", "state": "business_profile_pending"},
         profile,
-        {"state": "payment_pending"},
+        {"state": "starter_active"},
     ])
     conn.execute = AsyncMock(side_effect=[
         "UPDATE 1",
@@ -72,8 +72,8 @@ async def test_initial_selection_atomically_promotes_identity_to_billing_boundar
     assert result.data.profile.country_code == "US"
     assert result.data.business_name == "Cafe Central"
     assert result.data.profile.selection_revision == 1
-    assert result.data.state == "payment_pending"
-    assert result.data.next_step == "payment"
+    assert result.data.state == "starter_active"
+    assert result.data.next_step == "setup"
     lock_query = conn.fetchrow.await_args_list[0].args[0]
     upsert_query = conn.fetchrow.await_args_list[1].args[0]
     assert "FOR UPDATE OF t, o" in lock_query
@@ -93,11 +93,11 @@ async def test_idempotent_selection_keeps_database_revision():
     conn.fetchrow = AsyncMock(side_effect=[
         {
             "lifecycle_status": "active",
-            "state": "payment_pending",
+            "state": "starter_active",
             "business_name": "Cafe Central",
         },
         _profile_row(tenant_id, revision=4),
-        {"state": "payment_pending"},
+        {"state": "starter_active"},
     ])
     conn.execute = AsyncMock(side_effect=["UPDATE 1", "UPDATE 1"])
 
@@ -112,18 +112,18 @@ async def test_idempotent_selection_keeps_database_revision():
     )
 
     assert result.data.profile.selection_revision == 4
-    assert result.data.state == "payment_pending"
+    assert result.data.state == "starter_active"
     assert conn.execute.await_count == 2
 
 
 @pytest.mark.asyncio
-async def test_payment_pending_rejects_changes_after_legal_acceptance():
+async def test_starter_active_rejects_changes_after_legal_acceptance():
     tenant_id = uuid4()
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(side_effect=[
         {
             "lifecycle_status": "pending",
-            "state": "payment_pending",
+            "state": "starter_active",
             "business_name": "Cafe Central",
         },
         _profile_row(tenant_id, country="CO", currency="COP", revision=2),
@@ -143,7 +143,7 @@ async def test_payment_pending_rejects_changes_after_legal_acceptance():
     assert exc.value.status_code == 409
     assert exc.value.detail == {
         "code": "ONBOARDING_FINANCIAL_PROFILE_LOCKED",
-        "state": "payment_pending",
+        "state": "starter_active",
     }
     conn.execute.assert_not_awaited()
 
@@ -191,7 +191,7 @@ async def test_pending_acceptance_requires_financial_profile():
 
 
 @pytest.mark.asyncio
-async def test_pending_acceptance_uses_canonical_source_and_advances_payment():
+async def test_pending_acceptance_uses_canonical_source_and_advances_starter():
     tenant_id = uuid4()
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(side_effect=[
@@ -200,7 +200,7 @@ async def test_pending_acceptance_uses_canonical_source_and_advances_payment():
             "state": "terms_pending",
             "country_code": "CO",
         },
-        {"state": "payment_pending"},
+        {"state": "starter_active"},
     ])
     conn.execute = AsyncMock()
     session = SimpleNamespace(tenant_id=tenant_id)
@@ -217,8 +217,8 @@ async def test_pending_acceptance_uses_canonical_source_and_advances_payment():
 
     assert accept.await_args.kwargs["source"] == "onboarding"
     assert result["data"]["onboarding"] == {
-        "state": "payment_pending",
-        "nextStep": "payment",
+        "state": "starter_active",
+        "nextStep": "setup",
     }
     conn.execute.assert_not_awaited()
 
@@ -317,7 +317,7 @@ async def test_resume_status_includes_profile_and_current_acceptance():
         "tenant_id": tenant_id,
         "business_name": "Cafe Central",
         "lifecycle_status": "pending",
-        "state": "payment_pending",
+        "state": "starter_active",
         "email_verified_at": datetime.now(timezone.utc),
         **_profile_row(tenant_id, country="CO", currency="COP", revision=2),
     }
@@ -340,7 +340,7 @@ async def test_resume_status_includes_profile_and_current_acceptance():
     assert result.data.financial_profile.selection_revision == 2
     assert result.data.terms_accepted is True
     assert result.data.terms_version == "1.1"
-    assert result.data.next_step == "payment"
+    assert result.data.next_step == "setup"
 
 
 @pytest.mark.asyncio

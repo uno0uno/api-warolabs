@@ -24,9 +24,20 @@ from app.services import onboarding_service
 logger = logging.getLogger(__name__)
 
 ELECTRONIC_INVOICE_PLAN_SLUG = "facturacion-electronica"
+STARTER_PLAN_SLUG = "starter"
+STARTER_SCAN_LIMIT = 10
 ELECTRONIC_INVOICE_PERIOD_LIMIT = 200
 ELECTRONIC_INVOICE_LIMIT_FEATURE = "electronic_invoice_limit"
 QUOTAS_FEATURE = "quotas"
+STARTER_OPERATIONAL_QUOTAS = {
+    "admin_users": 1,
+    "active_sessions_per_admin_user": 1,
+    "active_kitchens": 0,
+    "active_tables_including_bar": 0,
+    "active_qr_tables": 0,
+    "completed_online_orders_per_month": 30,
+    "electronic_invoices_per_period": 0,
+}
 QUOTA_KEYS = (
     "admin_users",
     "active_sessions_per_admin_user",
@@ -45,6 +56,9 @@ BASE_OPERATIONAL_QUOTAS = {
     "completed_online_orders_per_month": 300,
 }
 PLAN_QUOTA_DEFAULTS = {
+    STARTER_PLAN_SLUG: {
+        **STARTER_OPERATIONAL_QUOTAS,
+    },
     "pro": {
         **BASE_OPERATIONAL_QUOTAS,
         "electronic_invoices_per_period": 0,
@@ -164,22 +178,75 @@ async def check_scan_quota(tenant_id: UUID, conn) -> None:
     await _upsert_monthly_log(tenant_id, conn)
 
 
-async def check_plan_quota_growth(
-    conn,
-    tenant_id: UUID,
-    resource: str,
-    *,
-    exclude_pending_invitation_id: Optional[UUID] = None,
-) -> None:
+async def get_effective_plan_slug(conn, tenant_id: UUID) -> Optional[str]:
     """
-    Block active resource growth once the tenant reaches the plan quota.
-
-    This is intentionally non-destructive: it never modifies existing rows and
-    should be called only before create/reactivate/enable transitions.
+    Paid subscription wins. Otherwise Starter applies unless onboarding is still
+    waiting on payment (legacy paid-first path).
     """
-    if resource not in ENFORCEABLE_QUOTA_RESOURCES:
-        raise ValueError(f"Unsupported quota resource: {resource}")
+    paid = await conn.fetchrow(
+        """
+        SELECT sp.slug AS plan_slug
+        FROM tenant_subscriptions ts
+        JOIN subscription_plans sp ON sp.id = ts.plan_id
+        WHERE ts.tenant_id = $1
+          AND ts.status IN ('active', 'past_due')
+          AND ts.current_period_end > now()
+        ORDER BY ts.current_period_end DESC
+        LIMIT 1
+        """,
+        tenant_id,
+    )
+    if paid:
+        return paid["plan_slug"]
 
+    onboarding_state = await conn.fetchval(
+        "SELECT state FROM tenant_onboarding WHERE tenant_id = $1",
+        tenant_id,
+    )
+    if onboarding_state == "payment_pending":
+        return None
+
+    return STARTER_PLAN_SLUG
+
+
+async def get_effective_plan_quotas(conn, tenant_id: UUID) -> Dict[str, int]:
+    plan_slug = await get_effective_plan_slug(conn, tenant_id)
+    if not plan_slug:
+        plan_slug = STARTER_PLAN_SLUG
+    row = await conn.fetchrow(
+        """
+        SELECT features
+        FROM subscription_plans
+        WHERE slug = $1
+          AND is_active = true
+        LIMIT 1
+        """,
+        plan_slug,
+    )
+    features = row["features"] if row else {}
+    return _normalize_plan_quotas(plan_slug, features)
+
+
+async def _default_scan_limit_for_tenant(conn, tenant_id: UUID) -> int:
+    plan_slug = await get_effective_plan_slug(conn, tenant_id)
+    if plan_slug == STARTER_PLAN_SLUG:
+        row = await conn.fetchrow(
+            """
+            SELECT scan_limit
+            FROM subscription_plans
+            WHERE slug = $1
+              AND is_active = true
+            LIMIT 1
+            """,
+            STARTER_PLAN_SLUG,
+        )
+        if row and row["scan_limit"] is not None:
+            return int(row["scan_limit"])
+        return STARTER_SCAN_LIMIT
+    return 1000
+
+
+async def _fetch_plan_quota_context(conn, tenant_id: UUID, resource: str):
     plan = await conn.fetchrow(
         """
         SELECT
@@ -203,6 +270,53 @@ async def check_plan_quota_growth(
         tenant_id,
         resource,
     )
+    if plan:
+        return plan
+
+    effective_slug = await get_effective_plan_slug(conn, tenant_id)
+    if effective_slug != STARTER_PLAN_SLUG:
+        return None
+
+    return await conn.fetchrow(
+        """
+        SELECT
+            sp.slug AS plan_slug,
+            sp.features AS plan_features,
+            tq.id AS override_id,
+            tq.limit_override,
+            COALESCE(tq.disabled, false) AS override_disabled,
+            tq.reason AS override_reason
+        FROM subscription_plans sp
+        LEFT JOIN tenant_quota_overrides tq
+          ON tq.tenant_id = $1
+         AND tq.resource = $2
+        WHERE sp.slug = $3
+          AND sp.is_active = true
+        LIMIT 1
+        """,
+        tenant_id,
+        resource,
+        STARTER_PLAN_SLUG,
+    )
+
+
+async def check_plan_quota_growth(
+    conn,
+    tenant_id: UUID,
+    resource: str,
+    *,
+    exclude_pending_invitation_id: Optional[UUID] = None,
+) -> None:
+    """
+    Block active resource growth once the tenant reaches the plan quota.
+
+    This is intentionally non-destructive: it never modifies existing rows and
+    should be called only before create/reactivate/enable transitions.
+    """
+    if resource not in ENFORCEABLE_QUOTA_RESOURCES:
+        raise ValueError(f"Unsupported quota resource: {resource}")
+
+    plan = await _fetch_plan_quota_context(conn, tenant_id, resource)
     if not plan:
         return
 
@@ -617,7 +731,7 @@ async def _create_period_usage(tenant_id: UUID, conn) -> None:
     """, tenant_id)
 
     subscription_id: Optional[UUID] = sub["subscription_id"] if sub else None
-    scan_limit: int = sub["scan_limit"] if sub else 1000
+    scan_limit: int = sub["scan_limit"] if sub else await _default_scan_limit_for_tenant(conn, tenant_id)
 
     await conn.execute("""
         INSERT INTO scan_usage
@@ -701,9 +815,10 @@ async def get_scan_usage(tenant_id: UUID, conn) -> Dict[str, Any]:
     """, tenant_id)
 
     if row is None:
+        scans_limit = await _default_scan_limit_for_tenant(conn, tenant_id)
         return {
             "scans_used": 0,
-            "scans_limit": 1000,
+            "scans_limit": scans_limit,
             "period_start": None,
             "period_end": None,
             "percentage": 0.0,
@@ -1913,7 +2028,8 @@ class SubscriptionAccess:
     Represents the access level for a tenant based on subscription status.
 
     Levels:
-      free             — no subscription row; default 1000 scans/month
+      starter          — no paid subscription; permanent free Starter plan
+      free             — legacy alias; treated as starter for access
       full             — active subscription
       full_with_warning — past_due, < 3 days overdue — access OK but banner shown
       read_only        — past_due, 3-7 days overdue — IA scanner blocked
@@ -1956,11 +2072,11 @@ async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
                 ),
             )
         return SubscriptionAccess(
-            level="free",
+            level="starter",
             grace_days_remaining=0,
             subscription_status=None,
             next_payment_date=None,
-            message="Estás en el plan gratuito con 1000 escaneos al mes.",
+            message="Estás en el plan Starter con límites operativos gratuitos.",
         )
 
     status = sub["status"]

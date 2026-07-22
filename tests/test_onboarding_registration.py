@@ -135,8 +135,8 @@ async def test_verified_challenge_atomically_creates_pending_owner():
 
     financial = AsyncMock(return_value=SimpleNamespace(data=SimpleNamespace(
         business_name="Restaurante Nuevo",
-        state="payment_pending",
-        next_step="payment",
+        state="starter_active",
+        next_step="setup",
     )))
     with patch("app.services.onboarding_service.settings.auth_secret", "test-secret"), patch(
         "app.services.onboarding_service.uuid4", return_value=tenant_id
@@ -154,8 +154,8 @@ async def test_verified_challenge_atomically_creates_pending_owner():
     assert identity["tenant_id"] == tenant_id
     assert identity["lifecycle_status"] == "active"
     assert identity["tenant_name"] == "Restaurante Nuevo"
-    assert identity["onboarding_state"] == "payment_pending"
-    assert identity["next_step"] == "payment"
+    assert identity["onboarding_state"] == "starter_active"
+    assert identity["next_step"] == "setup"
     financial.assert_awaited_once()
     assert identity["registration_notification"]["source"] == "blog"
     assert identity["registration_notification"]["variant"] == "b"

@@ -26,6 +26,7 @@ MAX_VERIFY_ATTEMPTS = 5
 PRE_PAYMENT_FINANCIAL_STATES = frozenset({
     "business_profile_pending",
     "terms_pending",
+    "starter_active",
     "payment_pending",
 })
 
@@ -562,7 +563,7 @@ def _ensure_pending_financial_state(row: Any) -> None:
     is_pending = row["lifecycle_status"] == "pending"
     is_promoted = (
         row["lifecycle_status"] == "active"
-        and row["state"] == "payment_pending"
+        and row["state"] in {"starter_active", "payment_pending"}
     )
     if not is_pending and not is_promoted:
         raise HTTPException(
@@ -597,13 +598,13 @@ async def _promote_onboarding_identity(conn, tenant_id: UUID) -> str:
     state_row = await conn.fetchrow(
         """
         UPDATE tenant_onboarding
-        SET state = 'payment_pending',
+        SET state = 'starter_active',
             updated_at = CASE
-                WHEN state IS DISTINCT FROM 'payment_pending' THEN NOW()
+                WHEN state IS DISTINCT FROM 'starter_active' THEN NOW()
                 ELSE updated_at
             END
         WHERE tenant_id = $1
-          AND state IN ('business_profile_pending', 'terms_pending', 'payment_pending')
+          AND state IN ('business_profile_pending', 'terms_pending', 'starter_active')
         RETURNING state
         """,
         tenant_id,
@@ -663,7 +664,7 @@ async def update_onboarding_financial_profile(
     country_code, currency_code = financial_service.validate_country_currency_pair(
         data.country_code, data.base_currency_code
     )
-    if context["state"] == "payment_pending":
+    if context["state"] == "starter_active":
         profile = await conn.fetchrow(
             """
             SELECT tenant_id AS profile_tenant_id,
@@ -801,7 +802,7 @@ async def accept_onboarding_terms(
         """
         UPDATE tenant_onboarding
         SET state = CASE
-                WHEN state = 'terms_pending' THEN 'payment_pending'
+                WHEN state = 'terms_pending' THEN 'starter_active'
                 ELSE state
             END,
             updated_at = CASE

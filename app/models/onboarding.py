@@ -17,6 +17,7 @@ OnboardingState = Literal[
     "email_verified",
     "business_profile_pending",
     "terms_pending",
+    "starter_active",
     "payment_pending",
     "paid",
     "active",

@@ -1,10 +1,11 @@
 """Grace-period access levels via get_subscription_access (#62, #363)."""
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
+from app.core.exceptions import APIError
 from app.services import billing_service
 
 
@@ -109,7 +110,7 @@ async def test_expired_subscription_returns_blocked():
 
 
 @pytest.mark.asyncio
-async def test_no_subscription_returns_free():
+async def test_no_subscription_returns_starter():
     tenant_id = uuid4()
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=None)
@@ -117,7 +118,7 @@ async def test_no_subscription_returns_free():
 
     access = await billing_service.get_subscription_access(tenant_id, conn)
 
-    assert access.level == "free"
+    assert access.level == "starter"
     conn.fetchrow.assert_called_once()
 
 
@@ -134,3 +135,49 @@ async def test_payment_pending_onboarding_without_subscription_is_blocked():
     assert access.subscription_status == "payment_pending"
     assert "Mi Plan" in access.message
     assert "completa el pago" in access.message
+
+
+@pytest.mark.asyncio
+async def test_get_effective_plan_slug_returns_starter_without_paid_sub():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=[None, None])
+    conn.fetchval = AsyncMock(return_value="starter_active")
+
+    slug = await billing_service.get_effective_plan_slug(conn, tenant_id)
+
+    assert slug == billing_service.STARTER_PLAN_SLUG
+
+
+@pytest.mark.asyncio
+async def test_check_plan_quota_growth_blocks_starter_table_growth_at_zero():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        None,
+        None,
+        {
+            "plan_slug": billing_service.STARTER_PLAN_SLUG,
+            "plan_features": {"quotas": billing_service.STARTER_OPERATIONAL_QUOTAS},
+            "override_id": None,
+            "limit_override": None,
+            "override_disabled": False,
+            "override_reason": None,
+        },
+    ])
+    conn.fetchval = AsyncMock(return_value="starter_active")
+
+    with patch.object(
+        billing_service,
+        "_count_quota_resource_usage",
+        new=AsyncMock(return_value=0),
+    ):
+        with pytest.raises(APIError) as exc:
+            await billing_service.check_plan_quota_growth(
+                conn,
+                tenant_id,
+                "active_tables_including_bar",
+            )
+
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["plan_slug"] == billing_service.STARTER_PLAN_SLUG
