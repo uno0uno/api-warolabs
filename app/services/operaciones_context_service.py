@@ -32,6 +32,7 @@ from app.services.open_priced_service import (
     fetch_open_sale_product,
 )
 from app.services.pos_context_service import get_restaurant_context as _pos_get_context
+from app.services.billing_service import assert_starter_toggle_allowed
 
 
 ALLOWED_TOGGLES = frozenset({
@@ -98,6 +99,7 @@ async def update_toggle(
     """
 
     async with get_db_connection() as conn:
+        await assert_starter_toggle_allowed(conn, tenant_id, column_name, enabled)
         await conn.execute(query, tenant_id, enabled)
 
     return {"success": True, "data": {column_name: enabled}}

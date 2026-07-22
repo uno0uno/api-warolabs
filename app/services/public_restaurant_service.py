@@ -18,6 +18,33 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+_PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL = """
+(
+  EXISTS (
+    SELECT 1
+    FROM tenant_subscriptions ts
+    WHERE ts.tenant_id = tpp.tenant_id
+      AND ts.status IN ('active', 'past_due')
+      AND ts.current_period_end > now()
+  )
+  OR (
+    NOT EXISTS (
+      SELECT 1
+      FROM tenant_subscriptions ts
+      WHERE ts.tenant_id = tpp.tenant_id
+        AND ts.status IN ('active', 'past_due')
+        AND ts.current_period_end > now()
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM tenant_onboarding tob
+      WHERE tob.tenant_id = tpp.tenant_id
+        AND tob.state = 'payment_pending'
+    )
+  )
+)
+"""
+
 
 async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
     """
@@ -31,13 +58,8 @@ async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
     """
     try:
         async with get_db_connection() as conn:
-            # JOIN tenant_subscriptions to gate out tenants without an active
-            # paid subscription. INNER JOIN drops tenants with no row at all
-            # (the "free / never paid" case). Visible statuses follow the
-            # canonical predicate used elsewhere in billing_service: 'active'
-            # plus 'past_due' (any age — only flips dark when billing actually
-            # marks the row as 'cancelled').
-            query = """
+            # Paid subscription or permanent Starter plan (no payment_pending).
+            query = f"""
                 SELECT
                     tpp.id, tpp.tenant_id, tpp.slug, tpp.is_active,
                     tpp.display_name, tpp.description, tpp.logo_url, tpp.banner_url,
@@ -51,10 +73,9 @@ async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
                     tpp.tip_enabled, tpp.tip_default_percentages, tpp.tip_preselect_index,
                     tpp.created_at, tpp.updated_at
                 FROM tenant_public_profiles tpp
-                JOIN tenant_subscriptions ts ON ts.tenant_id = tpp.tenant_id
                 WHERE tpp.slug = $1
                   AND tpp.is_active = true
-                  AND ts.status IN ('active', 'past_due')
+                  AND {_PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL}
             """
 
             row = await conn.fetchrow(query, slug)
@@ -129,13 +150,12 @@ async def get_menu_by_slug(
             # 1. Get tenant_id from profile (gated by billing subscription —
             # mirror the predicate from get_profile_by_slug so a hidden tenant
             # cannot leak menu data either).
-            profile_query = """
+            profile_query = f"""
                 SELECT tpp.tenant_id, tpp.display_name
                 FROM tenant_public_profiles tpp
-                JOIN tenant_subscriptions ts ON ts.tenant_id = tpp.tenant_id
                 WHERE tpp.slug = $1
                   AND tpp.is_active = true
-                  AND ts.status IN ('active', 'past_due')
+                  AND {_PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL}
             """
             profile = await conn.fetchrow(profile_query, slug)
 
@@ -685,10 +705,8 @@ async def list_restaurants(
     """
     try:
         async with get_db_connection() as conn:
-            # Gate by billing: only tenants with an active or past_due
-            # subscription appear in the public directory. INNER JOIN drops
-            # tenants with no subscription row (free / never paid).
-            query = """
+            # Paid subscription or permanent Starter (same predicate as profile/menu).
+            query = f"""
                 SELECT
                     tpp.id, tpp.tenant_id, tpp.slug, tpp.is_active,
                     tpp.display_name, tpp.description, tpp.logo_url, tpp.banner_url,
@@ -699,9 +717,8 @@ async def list_restaurants(
                     tpp.accepts_online_orders,
                     tpp.created_at, tpp.updated_at
                 FROM tenant_public_profiles tpp
-                JOIN tenant_subscriptions ts ON ts.tenant_id = tpp.tenant_id
                 WHERE tpp.is_active = true
-                  AND ts.status IN ('active', 'past_due')
+                  AND {_PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL}
             """
             params: List[Any] = []
 
@@ -797,7 +814,7 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
     try:
         async with get_db_connection() as conn:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT
                     pc.country,
                     pc.city,
@@ -811,13 +828,11 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
                     pc.sort_order,
                     COUNT(tpp.id) FILTER (
                         WHERE tpp.is_active = true
-                          AND ts.status IN ('active', 'past_due')
+                          AND {_PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL}
                     ) AS tenant_count
                 FROM public_cities pc
                 LEFT JOIN tenant_public_profiles tpp
                        ON tpp.city_slug = pc.city_slug
-                LEFT JOIN tenant_subscriptions ts
-                       ON ts.tenant_id = tpp.tenant_id
                 WHERE pc.is_active = true
                 GROUP BY
                     pc.country,

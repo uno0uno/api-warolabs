@@ -16,6 +16,7 @@ from app.services.modifier_option_service import (
     calculated_modifier_option_unit_cost,
     validate_modifier_option_fields,
 )
+from app.services.billing_service import check_plan_quota_growth, check_plan_quota_scoped
 import logging
 
 logger = logging.getLogger(__name__)
@@ -165,9 +166,22 @@ async def _build_modifier(
     return Modifier(**mod_dict)
 
 
-async def _insert_modifier(conn, group_id: UUID, modifier) -> UUID:
+async def _insert_modifier(conn, group_id: UUID, modifier, *, skip_quota_check: bool = False) -> UUID:
     validate_modifier_option_fields(modifier)
     option_type = (modifier.option_type or "INGREDIENT").upper()
+
+    if not skip_quota_check:
+        tenant_id = await conn.fetchval(
+            "SELECT tenant_id FROM modifier_groups WHERE id = $1",
+            group_id,
+        )
+        if tenant_id:
+            await check_plan_quota_scoped(
+                conn,
+                tenant_id,
+                "modifier_options_per_group",
+                group_id,
+            )
 
     ing_qty = modifier.ingredient_quantity
     ing_unit = modifier.ingredient_unit
@@ -231,6 +245,7 @@ async def create_modifier_group(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
+                await check_plan_quota_growth(conn, tenant_id, "modifier_groups")
                 # 1. Insert modifier group (without product_id)
                 group_query = """
                     INSERT INTO modifier_groups (
@@ -269,8 +284,15 @@ async def create_modifier_group(
 
                 # 3. Insert modifiers (option types + optional modifier_recipes)
                 if group_data.modifiers:
+                    await check_plan_quota_scoped(
+                        conn,
+                        tenant_id,
+                        "modifier_options_per_group",
+                        group_id,
+                        projected_count=len(group_data.modifiers),
+                    )
                     for modifier in group_data.modifiers:
-                        await _insert_modifier(conn, group_id, modifier)
+                        await _insert_modifier(conn, group_id, modifier, skip_quota_check=True)
 
                 # 4. Registrar en historial
                 user_id = session_context.user_id if hasattr(session_context, 'user_id') else None

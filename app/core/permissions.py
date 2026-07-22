@@ -361,6 +361,20 @@ def require_module(module: Module) -> Callable[[Request], Awaitable[None]]:
         if not tenant_id:
             return  # no tenant resolved → cannot gate; let handler decide
 
+        from app.services.billing_service import (
+            STARTER_PLAN_MODULE_VALUES,
+            STARTER_PLAN_SLUG,
+            get_effective_plan_slug,
+        )
+
+        async with get_db_connection() as conn:
+            plan_slug = await get_effective_plan_slug(conn, tenant_id)
+        if plan_slug == STARTER_PLAN_SLUG and module.value not in STARTER_PLAN_MODULE_VALUES:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Módulo no disponible en el plan Starter: {module.value}",
+            )
+
         mode = await get_enforcement_mode(tenant_id)
         if mode == "disabled":
             return
