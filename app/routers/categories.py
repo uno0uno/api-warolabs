@@ -12,7 +12,9 @@ from app.models.category import (
     CategoryCreate,
     CategoryResponse,
     CategoryUpdate,
+    ReorderOnlineMenuCategoriesRequest,
 )
+from app.services import categories_service
 
 router = APIRouter()
 
@@ -98,6 +100,29 @@ async def create_category_endpoint(request: Request, payload: CategoryCreate):
         )
 
     return CategoryResponse(success=True, data=Category(**dict(row)))
+
+
+# Static paths before /{category_id} (see stations.py:53-55).
+@router.get(
+    "/online-menu",
+    response_model=CategoriesListResponse,
+    dependencies=[Depends(require_module(Module.MI_NEGOCIO))],
+)
+async def get_online_menu_categories_endpoint(request: Request):
+    """Eligible online-menu categories in tenant saved order."""
+    return await categories_service.list_online_menu_categories(request)
+
+
+@router.patch(
+    "/online-menu/reorder",
+    dependencies=[Depends(require_module(Module.MI_NEGOCIO))],
+)
+async def reorder_online_menu_categories_endpoint(
+    request: Request,
+    body: ReorderOnlineMenuCategoriesRequest,
+):
+    """Persist drag order for public online menu category chips."""
+    return await categories_service.reorder_online_menu_categories(request, body.category_ids)
 
 
 async def _load_owned_category(conn, category_id: UUID, tenant_id: UUID):

@@ -50,3 +50,8 @@ class CategoryResponse(BaseModel):
     """Single category response (for POST)"""
     success: bool = True
     data: Category
+
+
+class ReorderOnlineMenuCategoriesRequest(BaseModel):
+    """Payload for PATCH /menu/categories/online-menu/reorder."""
+    category_ids: List[UUID] = Field(..., min_length=1)

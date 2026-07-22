@@ -10,6 +10,7 @@ from app.services.billing_service import (
     ONLINE_ORDER_QUOTA_CUSTOMER_MESSAGE,
     get_public_online_order_quota_availability,
 )
+from app.services import categories_service
 from app.core.timezones import get_zoneinfo, normalize_timezone
 from app.database import get_db_connection
 import json
@@ -148,13 +149,7 @@ async def get_menu_by_slug(
             restaurant_name = profile['display_name']
 
             # 2. Get categories for this tenant
-            categories_query = """
-                SELECT DISTINCT c.id, c.name, c.description
-                FROM categories c
-                JOIN product p ON p.category_id = c.id
-                WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
-                ORDER BY c.name
-            """
+            categories_query = categories_service.online_menu_categories_select_sql()
             categories_rows = await conn.fetch(categories_query, tenant_id)
             categories = [dict(row) for row in categories_rows]
 
@@ -172,6 +167,8 @@ async def get_menu_by_slug(
                     ) as has_modifiers
                 FROM product p
                 JOIN categories c ON p.category_id = c.id
+                LEFT JOIN tenant_online_menu_category_orders o
+                    ON o.category_id = c.id AND o.tenant_id = $1
                 WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
             """
 
@@ -182,7 +179,7 @@ async def get_menu_by_slug(
                 products_query += " AND p.category_id = $2"
                 params.append(category_id)
 
-            products_query += " ORDER BY c.name, p.name"
+            products_query += f" ORDER BY {categories_service.online_menu_products_order_by_sql()}"
 
             products_rows = await conn.fetch(products_query, *params)
             products = [dict(row) for row in products_rows]
@@ -324,13 +321,7 @@ async def get_menu_by_tenant_id(
 
             restaurant_name = profile['display_name']
 
-            categories_query = """
-                SELECT DISTINCT c.id, c.name, c.description
-                FROM categories c
-                JOIN product p ON p.category_id = c.id
-                WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
-                ORDER BY c.name
-            """
+            categories_query = categories_service.online_menu_categories_select_sql()
             categories_rows = await conn.fetch(categories_query, tenant_id)
             categories = [dict(row) for row in categories_rows]
 
@@ -347,6 +338,8 @@ async def get_menu_by_tenant_id(
                     ) as has_modifiers
                 FROM product p
                 JOIN categories c ON p.category_id = c.id
+                LEFT JOIN tenant_online_menu_category_orders o
+                    ON o.category_id = c.id AND o.tenant_id = $1
                 WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
             """
 
@@ -356,7 +349,7 @@ async def get_menu_by_tenant_id(
                 products_query += " AND p.category_id = $2"
                 params.append(category_id)
 
-            products_query += " ORDER BY c.name, p.name"
+            products_query += f" ORDER BY {categories_service.online_menu_products_order_by_sql()}"
 
             products_rows = await conn.fetch(products_query, *params)
             products = [dict(row) for row in products_rows]
