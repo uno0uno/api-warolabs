@@ -33,11 +33,16 @@ _ONLINE_MENU_ORDER_JOIN = """
 def online_menu_categories_select_sql() -> str:
     """SELECT fragment for public online menu categories (id, name, description)."""
     return f"""
-        SELECT DISTINCT c.id, c.name, c.description
-        FROM categories c
-        {_ONLINE_MENU_PRODUCT_JOIN}
-        {_ONLINE_MENU_ORDER_JOIN}
-        ORDER BY {ONLINE_MENU_CATEGORY_ORDER_BY}
+        SELECT sub.id, sub.name, sub.description
+        FROM (
+            SELECT DISTINCT ON (c.id)
+                c.id, c.name, c.description, o.display_order
+            FROM categories c
+            {_ONLINE_MENU_PRODUCT_JOIN}
+            {_ONLINE_MENU_ORDER_JOIN}
+            ORDER BY c.id, o.display_order NULLS LAST
+        ) sub
+        ORDER BY sub.display_order NULLS LAST, sub.name ASC
     """
 
 
@@ -49,11 +54,12 @@ def online_menu_products_order_by_sql() -> str:
 async def fetch_eligible_online_menu_category_ids(conn, tenant_id: UUID) -> List[UUID]:
     rows = await conn.fetch(
         f"""
-        SELECT DISTINCT c.id
+        SELECT c.id
         FROM categories c
         {_ONLINE_MENU_PRODUCT_JOIN}
         WHERE (c.tenant_id IS NULL OR c.tenant_id = $1)
-        ORDER BY c.name ASC
+        GROUP BY c.id
+        ORDER BY MIN(c.name) ASC
         """,
         tenant_id,
     )
@@ -69,13 +75,20 @@ async def list_online_menu_categories(request: Request) -> Dict[str, Any]:
     async with get_db_connection() as conn:
         rows = await conn.fetch(
             f"""
-            SELECT DISTINCT
-                c.id, c.name, c.description, c.tenant_id, c.created_at, c.updated_at
-            FROM categories c
-            {_ONLINE_MENU_PRODUCT_JOIN}
-            {_ONLINE_MENU_ORDER_JOIN}
-            WHERE (c.tenant_id IS NULL OR c.tenant_id = $1)
-            ORDER BY {ONLINE_MENU_CATEGORY_ORDER_BY}
+            SELECT
+                sub.id, sub.name, sub.description, sub.tenant_id,
+                sub.created_at, sub.updated_at
+            FROM (
+                SELECT DISTINCT ON (c.id)
+                    c.id, c.name, c.description, c.tenant_id,
+                    c.created_at, c.updated_at, o.display_order
+                FROM categories c
+                {_ONLINE_MENU_PRODUCT_JOIN}
+                {_ONLINE_MENU_ORDER_JOIN}
+                WHERE (c.tenant_id IS NULL OR c.tenant_id = $1)
+                ORDER BY c.id, o.display_order NULLS LAST
+            ) sub
+            ORDER BY sub.display_order NULLS LAST, sub.name ASC
             """,
             tenant_id,
         )
