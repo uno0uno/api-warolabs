@@ -23,6 +23,7 @@ from app.services.customers_service import (
     search_or_create_customer,
     update_customer,
 )
+from app.services.customer_wallet_service import get_customer_wallet
 
 router = APIRouter(prefix="/pos/customers", tags=["pos"])
 
@@ -92,3 +93,17 @@ async def pos_get_customer_insights_endpoint(
     customer_id: UUID,
 ):
     return await get_customer_insights(request, customer_id)
+
+
+@router.get(
+    "/{customer_id}/wallet",
+    status_code=200,
+    dependencies=[Depends(require_module(Module.POS))],
+)
+async def pos_get_customer_wallet_endpoint(
+    request: Request,
+    customer_id: UUID,
+    limit: int = Query(20, ge=1, le=50),
+):
+    """COP wallet balance for POS checkout (cashier RBAC — no VENTAS module)."""
+    return await get_customer_wallet(request, customer_id, limit=limit)
