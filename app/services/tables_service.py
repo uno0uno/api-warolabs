@@ -84,6 +84,102 @@ def _completed_session_orders_payload(order_rows: List[Any]) -> Dict[str, Any]:
     return payload
 
 
+async def _recalc_order_total_from_items(conn, order_id: UUID) -> None:
+    """Recompute orders.total_amount from line net/subtotal after a merge."""
+    await conn.execute(
+        """
+        UPDATE orders
+        SET total_amount = COALESCE((
+            SELECT SUM(COALESCE(oi.net_total, oi.subtotal))
+            FROM order_items oi
+            WHERE oi.order_id = $1
+        ), 0)
+        WHERE id = $1
+        """,
+        order_id,
+    )
+
+
+async def _merge_order_into_primary(
+    conn,
+    primary_order_id: UUID,
+    secondary_order_id: UUID,
+) -> None:
+    """Move checkout lines and payments onto the primary order, then drop the shell."""
+    if primary_order_id == secondary_order_id:
+        return
+    await conn.execute(
+        "UPDATE order_items SET order_id = $1 WHERE order_id = $2",
+        primary_order_id,
+        secondary_order_id,
+    )
+    await conn.execute(
+        "UPDATE order_payments SET order_id = $1 WHERE order_id = $2",
+        primary_order_id,
+        secondary_order_id,
+    )
+    await conn.execute("DELETE FROM orders WHERE id = $1", secondary_order_id)
+
+
+async def _consolidate_session_orders_for_checkout(conn, session_id: UUID) -> None:
+    """
+    Ensure a table session checkout produces a single order where possible.
+
+    - Multiple pending orders → oldest pending absorbs the rest.
+    - Pending + completed/partial → pending lines fold into oldest completed.
+    - Multiple completed/partial → oldest completed absorbs siblings (split legacy).
+    """
+    pending_rows = await conn.fetch(
+        """
+        SELECT id FROM orders
+        WHERE table_session_id = $1 AND status = 'pending'
+        ORDER BY created_at, id
+        """,
+        session_id,
+    )
+    if len(pending_rows) > 1:
+        primary_id = pending_rows[0]["id"]
+        for row in pending_rows[1:]:
+            await _merge_order_into_primary(conn, primary_id, row["id"])
+        await _recalc_order_total_from_items(conn, primary_id)
+
+    pending_rows = await conn.fetch(
+        """
+        SELECT id FROM orders
+        WHERE table_session_id = $1 AND status = 'pending'
+        ORDER BY created_at, id
+        """,
+        session_id,
+    )
+    completed_rows = await conn.fetch(
+        """
+        SELECT id FROM orders
+        WHERE table_session_id = $1 AND status = 'completed'
+        ORDER BY created_at, id
+        """,
+        session_id,
+    )
+    if pending_rows and completed_rows:
+        primary_id = completed_rows[0]["id"]
+        for row in pending_rows:
+            await _merge_order_into_primary(conn, primary_id, row["id"])
+        await _recalc_order_total_from_items(conn, primary_id)
+
+    completed_rows = await conn.fetch(
+        """
+        SELECT id FROM orders
+        WHERE table_session_id = $1 AND status = 'completed'
+        ORDER BY created_at, id
+        """,
+        session_id,
+    )
+    if len(completed_rows) > 1:
+        primary_id = completed_rows[0]["id"]
+        for row in completed_rows[1:]:
+            await _merge_order_into_primary(conn, primary_id, row["id"])
+        await _recalc_order_total_from_items(conn, primary_id)
+
+
 def _modifier_unit_total(mod: dict) -> float:
     return float(
         modifier_line_subtotal(
@@ -1177,6 +1273,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
 
                 # Mark pending orders as completed if payment_method provided
                 if payment_method:
+                    await _consolidate_session_orders_for_checkout(conn, session_row["id"])
                     # Backend guard: credit / wallet require an identified (non-anonymous) customer
                     if payment_method in ('credit', 'customer_wallet') and customer_id:
                         cust_row = await conn.fetchrow(
@@ -2071,6 +2168,8 @@ async def add_session_payment(
                 )
                 if not session_row:
                     raise NotFoundError("No open session found for this table")
+
+                await _consolidate_session_orders_for_checkout(conn, session_row["id"])
 
                 # Get all completed (partial) orders for this session
                 order_rows = await conn.fetch(
