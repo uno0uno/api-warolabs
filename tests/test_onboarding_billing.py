@@ -383,7 +383,7 @@ async def test_paid_identity_activation_accepts_promoted_admin_and_updates_once(
     assert "tm.role IN ('owner', 'admin')" in identity_query
     assert conn.execute.await_count == 3
     statements = [" ".join(call.args[0].split()) for call in conn.execute.await_args_list]
-    assert "SET is_active = true, role = 'admin'" in statements[0]
+    assert "SET is_active = true, role = 'owner'" in statements[0]
     assert "role IN ('owner', 'admin')" in statements[0]
     assert "SET state = 'active'" in statements[1]
     assert "SET lifecycle_status = 'active'" in statements[2]

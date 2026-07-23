@@ -618,7 +618,7 @@ async def _promote_onboarding_identity(conn, tenant_id: UUID) -> str:
     member_update = await conn.execute(
         """
         UPDATE tenant_members tm
-        SET role = 'admin', is_active = true
+        SET role = 'owner', is_active = true
         FROM tenant_onboarding o
         WHERE o.tenant_id = $1
           AND tm.tenant_id = o.tenant_id
@@ -889,7 +889,7 @@ async def activate_paid_onboarding_identity(conn, tenant_id: UUID) -> Optional[d
     owner_update = await conn.execute(
         """
         UPDATE tenant_members
-        SET is_active = true, role = 'admin'
+        SET is_active = true, role = 'owner'
         WHERE id = $1 AND role IN ('owner', 'admin')
         """,
         context["owner_member_id"],

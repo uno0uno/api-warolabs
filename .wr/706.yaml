@@ -1,0 +1,42 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 706
+title: "Keep founding tenant member as owner on starter/paid activation"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-706-keep-founding-owner
+
+paths:
+  - app/services/onboarding_service.py
+  - migrations/116_keep_onboarding_founding_owner.sql
+  - tests/test_onboarding_country_terms.py
+  - tests/test_onboarding_billing.py
+  - tests/test_onboarding_founding_owner.py
+
+ac:
+  - _promote_onboarding_identity activates founding member as owner (never demote to admin)
+  - activate_paid_onboarding_identity keeps/sets founding member as owner
+  - Trigger no longer allows owner→admin onboarding demotion; founding admins backfilled to owner
+  - Unit tests expect owner on activation
+  - Invited staff can still be admin; only founding onboarding identity stays owner
+
+out_of_scope:
+  - Plan-based module gating
+  - Front role labels
+  - Rewriting historical migrations 110/112
+
+hints:
+  entry: "onboarding_service._promote_onboarding_identity / activate_paid_onboarding_identity"
+  pattern: "SET role = 'owner', is_active = true; trigger early-exit when OLD inactive"
+  tests: "pytest tests/test_onboarding_country_terms.py tests/test_onboarding_billing.py tests/test_onboarding_founding_owner.py -q"
+
+risk:
+  sensitive: true
+  areas: [auth, roles, onboarding]
+
+skip:
+  audits: []
+
+next:
+  after_pr: "Suggest human /wr-review in new chat (roles/auth)."
