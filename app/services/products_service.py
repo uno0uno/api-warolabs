@@ -1153,7 +1153,7 @@ async def update_product_with_recipe(
 
         async with get_db_connection() as conn:
             # Verify product exists and belongs to tenant
-            verify_query = "SELECT id, name FROM product WHERE id = $1 AND tenant_id = $2"
+            verify_query = "SELECT id, name, is_resale FROM product WHERE id = $1 AND tenant_id = $2"
             product_exists = await conn.fetchrow(verify_query, product_id, tenant_id)
 
             if not product_exists:
@@ -1228,6 +1228,23 @@ async def update_product_with_recipe(
                     """
                     update_values.extend([product_id, tenant_id])
                     await conn.execute(update_query, *update_values)
+
+                # 1b. Resale: keep warehouse seed cost in sync with Mi costo when no purchases
+                # drive real cost yet (#700). Purchase unit_cost still wins in the resolver.
+                update_payload = product_data.dict(
+                    exclude={'ingredients', 'recipe_base_ids', 'recipe_bases', 'controla_stock'},
+                    exclude_unset=True,
+                )
+                if (
+                    product_exists.get("is_resale")
+                    and "costo_percibido" in update_payload
+                ):
+                    await cost_resolution_service.sync_resale_mi_costo_to_ingredient(
+                        conn,
+                        tenant_id=tenant_id,
+                        product_id=product_id,
+                        costo_percibido=update_payload.get("costo_percibido"),
+                    )
 
                 # 2. Update recipe base associations if provided (Issue #517 — with quantity).
                 # Either of the two fields (recipe_bases / recipe_base_ids) being set means

@@ -114,6 +114,85 @@ async def product_has_any_recipe(product_id: UUID, conn) -> bool:
     )
 
 
+async def ingredient_has_purchase_unit_cost(
+    conn,
+    *,
+    tenant_id: UUID,
+    ingredient_id: UUID,
+) -> bool:
+    """True when a purchase line supplies a positive unit_cost for this ingredient."""
+    return bool(
+        await conn.fetchval(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM tenant_purchase_items pi
+                JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                WHERE tp.tenant_id = $1
+                  AND pi.ingredient_id = $2
+                  AND pi.unit_cost IS NOT NULL
+                  AND pi.unit_cost > 0
+            )
+            """,
+            tenant_id,
+            ingredient_id,
+        )
+    )
+
+
+async def sync_resale_mi_costo_to_ingredient(
+    conn,
+    *,
+    tenant_id: UUID,
+    product_id: UUID,
+    costo_percibido: Optional[Decimal],
+) -> bool:
+    """
+    For resale products, seed linked warehouse ingredient.costo_unitario from Mi costo
+    when no purchase-based unit cost exists. Returns True if the ingredient was updated.
+    """
+    ingredient_id = await conn.fetchval(
+        """
+        SELECT i.id
+        FROM product p
+        JOIN product_recipes pr ON pr.product_id = p.id
+        JOIN ingredients i ON i.id = pr.ingredient_id
+        WHERE p.id = $1
+          AND p.tenant_id = $2
+          AND p.is_resale = true
+          AND i.tenant_id = $2
+          AND i.is_resale = true
+        ORDER BY pr.created_at ASC
+        LIMIT 1
+        """,
+        product_id,
+        tenant_id,
+    )
+    if ingredient_id is None:
+        return False
+
+    if await ingredient_has_purchase_unit_cost(
+        conn,
+        tenant_id=tenant_id,
+        ingredient_id=ingredient_id,
+    ):
+        return False
+
+    await conn.execute(
+        """
+        UPDATE ingredients
+        SET costo_unitario = $2,
+            updated_at = NOW()
+        WHERE id = $1
+          AND tenant_id = $3
+        """,
+        ingredient_id,
+        float(costo_percibido) if costo_percibido is not None else None,
+        tenant_id,
+    )
+    return True
+
+
 async def persist_product_costo_calculado(
     product_id: UUID,
     tenant_id: UUID,
