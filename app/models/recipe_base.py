@@ -35,6 +35,11 @@ class RecipeBaseIngredient(RecipeBaseIngredientBase):
     ingredient_name: Optional[str] = None
     costo_unitario: Optional[float] = 0
     controla_inventario: Optional[bool] = False
+    # Stock unit + weight for ml|gr ↔ und costing (#704); costo_linea is converted.
+    stock_unit: Optional[str] = None
+    unit_weight_gr: Optional[float] = None
+    unit_weight_unit: Optional[str] = None
+    costo_linea: Optional[float] = 0
 
     class Config:
         from_attributes = True

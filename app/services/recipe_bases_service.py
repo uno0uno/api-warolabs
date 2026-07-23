@@ -20,9 +20,63 @@ from app.models.recipe_base import (
 from app.services import menu_history_service
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 from app.services.billing_service import check_plan_quota_scoped
+from app.services.cost_resolution_service import recipe_qty_to_stock_units
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
+# Shared SELECT for recipe-base ingredient rows (cost + stock metadata for #704).
+_RECIPE_BASE_INGREDIENT_SELECT = """
+    SELECT
+        brt.id,
+        brt.product_base_type_id,
+        brt.ingredient_id,
+        brt.base_quantity,
+        brt.unit,
+        brt.is_required,
+        brt.notes,
+        brt.tenant_id,
+        brt.created_at,
+        brt.updated_at,
+        i.name as ingredient_name,
+        COALESCE(i.controla_inventario, false) as controla_inventario,
+        i.unit as stock_unit,
+        CAST(i.unit_weight_gr AS float) as unit_weight_gr,
+        i.unit_weight_unit,
+        COALESCE(
+            (SELECT pi.unit_cost
+             FROM tenant_purchase_items pi
+             JOIN tenant_purchases p ON pi.purchase_id = p.id
+             WHERE pi.ingredient_id = brt.ingredient_id
+             AND p.tenant_id = brt.tenant_id
+             AND pi.unit_cost IS NOT NULL
+             AND pi.unit_cost > 0
+             ORDER BY p.purchase_date DESC
+             LIMIT 1),
+            i.costo_unitario,
+            0
+        ) as costo_unitario
+    FROM base_recipe_templates brt
+    LEFT JOIN ingredients i ON brt.ingredient_id = i.id
+    WHERE brt.product_base_type_id = $1 AND brt.tenant_id = $2
+    ORDER BY brt.created_at
+"""
+
+
+def _recipe_base_ingredient_from_row(ing_row) -> RecipeBaseIngredient:
+    """Build RecipeBaseIngredient with converted costo_linea (#704)."""
+    data = dict(ing_row)
+    unit_cost = Decimal(str(data.get("costo_unitario") or 0))
+    stock_qty = recipe_qty_to_stock_units(
+        data.get("base_quantity") or 0,
+        data.get("unit"),
+        data.get("stock_unit"),
+        data.get("unit_weight_gr"),
+    )
+    data["costo_linea"] = float(stock_qty * unit_cost)
+    # Defaults when create path omits optional joins
+    data.setdefault("controla_inventario", False)
+    return RecipeBaseIngredient(**data)
 
 async def create_recipe_base_type(
     request: Request,
@@ -123,16 +177,31 @@ async def create_recipe_base_type(
                         tenant_id
                     )
 
-                    # Fetch ingredient name for the response
-                    name_query = """
-                        SELECT name FROM ingredients WHERE id = $1
+                    # Fetch ingredient cost/stock metadata for the response
+                    meta_query = """
+                        SELECT
+                            name,
+                            unit as stock_unit,
+                            CAST(unit_weight_gr AS float) as unit_weight_gr,
+                            unit_weight_unit,
+                            COALESCE(costo_unitario, 0) as costo_unitario,
+                            COALESCE(controla_inventario, false) as controla_inventario
+                        FROM ingredients WHERE id = $1
                     """
-                    ingredient_name_row = await conn.fetchrow(name_query, ingredient_data.ingredient_id)
+                    meta_row = await conn.fetchrow(meta_query, ingredient_data.ingredient_id)
 
                     ingredient_dict = dict(ingredient_row)
-                    ingredient_dict['ingredient_name'] = ingredient_name_row['name'] if ingredient_name_row else None
+                    if meta_row:
+                        ingredient_dict['ingredient_name'] = meta_row['name']
+                        ingredient_dict['stock_unit'] = meta_row['stock_unit']
+                        ingredient_dict['unit_weight_gr'] = meta_row['unit_weight_gr']
+                        ingredient_dict['unit_weight_unit'] = meta_row['unit_weight_unit']
+                        ingredient_dict['costo_unitario'] = float(meta_row['costo_unitario'] or 0)
+                        ingredient_dict['controla_inventario'] = meta_row['controla_inventario']
+                    else:
+                        ingredient_dict['ingredient_name'] = None
 
-                    ingredients.append(RecipeBaseIngredient(**ingredient_dict))
+                    ingredients.append(_recipe_base_ingredient_from_row(ingredient_dict))
 
             # Build response
             recipe_base_type = RecipeBaseType(
@@ -249,41 +318,13 @@ async def get_recipe_base_types_list(
                 # Optionally fetch ingredients
                 ingredients = []
                 if include_ingredients:
-                    ingredients_query = """
-                        SELECT
-                            brt.id,
-                            brt.product_base_type_id,
-                            brt.ingredient_id,
-                            brt.base_quantity,
-                            brt.unit,
-                            brt.is_required,
-                            brt.notes,
-                            brt.tenant_id,
-                            brt.created_at,
-                            brt.updated_at,
-                            i.name as ingredient_name,
-                            COALESCE(i.controla_inventario, false) as controla_inventario,
-                            COALESCE(
-                                (SELECT pi.unit_cost
-                                 FROM tenant_purchase_items pi
-                                 JOIN tenant_purchases p ON pi.purchase_id = p.id
-                                 WHERE pi.ingredient_id = brt.ingredient_id
-                                 AND p.tenant_id = brt.tenant_id
-                                 AND pi.unit_cost IS NOT NULL
-                                 AND pi.unit_cost > 0
-                                 ORDER BY p.purchase_date DESC
-                                 LIMIT 1),
-                                i.costo_unitario,
-                                0
-                            ) as costo_unitario
-                        FROM base_recipe_templates brt
-                        LEFT JOIN ingredients i ON brt.ingredient_id = i.id
-                        WHERE brt.product_base_type_id = $1 AND brt.tenant_id = $2
-                        ORDER BY brt.created_at
-                    """
-
-                    ingredient_rows = await conn.fetch(ingredients_query, row['id'], tenant_id)
-                    ingredients = [RecipeBaseIngredient(**dict(ing_row)) for ing_row in ingredient_rows]
+                    ingredient_rows = await conn.fetch(
+                        _RECIPE_BASE_INGREDIENT_SELECT, row['id'], tenant_id
+                    )
+                    ingredients = [
+                        _recipe_base_ingredient_from_row(ing_row)
+                        for ing_row in ingredient_rows
+                    ]
 
                 recipe_dict['ingredients'] = ingredients
                 recipe_base_types.append(RecipeBaseType(**recipe_dict))
@@ -341,41 +382,13 @@ async def get_recipe_base_type_by_id(
                 raise HTTPException(status_code=404, detail="Recipe base type not found")
 
             # Fetch ingredients
-            ingredients_query = """
-                SELECT
-                    brt.id,
-                    brt.product_base_type_id,
-                    brt.ingredient_id,
-                    brt.base_quantity,
-                    brt.unit,
-                    brt.is_required,
-                    brt.notes,
-                    brt.tenant_id,
-                    brt.created_at,
-                    brt.updated_at,
-                    i.name as ingredient_name,
-                    COALESCE(i.controla_inventario, false) as controla_inventario,
-                    COALESCE(
-                        (SELECT pi.unit_cost
-                         FROM tenant_purchase_items pi
-                         JOIN tenant_purchases p ON pi.purchase_id = p.id
-                         WHERE pi.ingredient_id = brt.ingredient_id
-                         AND p.tenant_id = brt.tenant_id
-                         AND pi.unit_cost IS NOT NULL
-                         AND pi.unit_cost > 0
-                         ORDER BY p.purchase_date DESC
-                         LIMIT 1),
-                        i.costo_unitario,
-                        0
-                    ) as costo_unitario
-                FROM base_recipe_templates brt
-                LEFT JOIN ingredients i ON brt.ingredient_id = i.id
-                WHERE brt.product_base_type_id = $1 AND brt.tenant_id = $2
-                ORDER BY brt.created_at
-            """
-
-            ingredient_rows = await conn.fetch(ingredients_query, recipe_base_id, tenant_id)
-            ingredients = [RecipeBaseIngredient(**dict(ing_row)) for ing_row in ingredient_rows]
+            ingredient_rows = await conn.fetch(
+                _RECIPE_BASE_INGREDIENT_SELECT, recipe_base_id, tenant_id
+            )
+            ingredients = [
+                _recipe_base_ingredient_from_row(ing_row)
+                for ing_row in ingredient_rows
+            ]
 
             recipe_dict = dict(row)
             recipe_dict['ingredients'] = ingredients
@@ -538,41 +551,13 @@ async def update_recipe_base_type(
                     )
 
             # Fetch ingredients
-            ingredients_query = """
-                SELECT
-                    brt.id,
-                    brt.product_base_type_id,
-                    brt.ingredient_id,
-                    brt.base_quantity,
-                    brt.unit,
-                    brt.is_required,
-                    brt.notes,
-                    brt.tenant_id,
-                    brt.created_at,
-                    brt.updated_at,
-                    i.name as ingredient_name,
-                    COALESCE(i.controla_inventario, false) as controla_inventario,
-                    COALESCE(
-                        (SELECT pi.unit_cost
-                         FROM tenant_purchase_items pi
-                         JOIN tenant_purchases p ON pi.purchase_id = p.id
-                         WHERE pi.ingredient_id = brt.ingredient_id
-                         AND p.tenant_id = brt.tenant_id
-                         AND pi.unit_cost IS NOT NULL
-                         AND pi.unit_cost > 0
-                         ORDER BY p.purchase_date DESC
-                         LIMIT 1),
-                        i.costo_unitario,
-                        0
-                    ) as costo_unitario
-                FROM base_recipe_templates brt
-                LEFT JOIN ingredients i ON brt.ingredient_id = i.id
-                WHERE brt.product_base_type_id = $1 AND brt.tenant_id = $2
-                ORDER BY brt.created_at
-            """
-
-            ingredient_rows = await conn.fetch(ingredients_query, recipe_base_id, tenant_id)
-            ingredients = [RecipeBaseIngredient(**dict(ing_row)) for ing_row in ingredient_rows]
+            ingredient_rows = await conn.fetch(
+                _RECIPE_BASE_INGREDIENT_SELECT, recipe_base_id, tenant_id
+            )
+            ingredients = [
+                _recipe_base_ingredient_from_row(ing_row)
+                for ing_row in ingredient_rows
+            ]
 
             recipe_dict = dict(row)
             recipe_dict['ingredients'] = ingredients
