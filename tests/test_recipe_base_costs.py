@@ -249,12 +249,45 @@ class TestUnifiedProductCostResolution:
 
         assert "i.costo_unitario" in LIST_COST_CTE_PREFIX
         assert "COALESCE(lpc.unit_cost, i.costo_unitario, 0)" in LIST_COST_CTE_PREFIX
+        assert "unit_weight_gr" in LIST_COST_CTE_PREFIX
+        assert "pr.unit" in LIST_COST_CTE_PREFIX
+        assert "brt.unit" in LIST_COST_CTE_PREFIX
 
     def test_direct_plus_base_recipe_total(self):
         """Product cost = direct ingredients + base template ingredients."""
         direct = Decimal("10") * Decimal("100")  # 1000
         base = Decimal("2") * Decimal("500") * Decimal("3")  # qty × base_qty × unit
         assert direct + base == Decimal("4000")
+
+    def test_resale_und_recipe_ml_converts_before_cost(self):
+        """45 ml of a 750 ml/und bottle at 350/und → 21, not 15750 (#702)."""
+        from app.services.cost_resolution_service import recipe_qty_to_stock_units
+
+        stock_qty = recipe_qty_to_stock_units(
+            Decimal("45"), "ml", "und", unit_weight_gr=Decimal("750")
+        )
+        cost = stock_qty * Decimal("350")
+        assert stock_qty == Decimal("45") / Decimal("750")
+        assert cost == Decimal("21")
+
+    def test_same_unit_ml_unchanged(self):
+        from app.services.cost_resolution_service import recipe_qty_to_stock_units
+
+        assert recipe_qty_to_stock_units(Decimal("45"), "ml", "ml") == Decimal("45")
+
+    def test_same_unit_und_unchanged(self):
+        from app.services.cost_resolution_service import recipe_qty_to_stock_units
+
+        assert recipe_qty_to_stock_units(Decimal("1"), "und", "und") == Decimal("1")
+
+    def test_base_multiplier_applies_after_unit_conversion(self):
+        from app.services.cost_resolution_service import recipe_qty_to_stock_units
+
+        per_base = recipe_qty_to_stock_units(
+            Decimal("45"), "ml", "und", unit_weight_gr=Decimal("750")
+        ) * Decimal("350")
+        multiplier = Decimal("2")
+        assert per_base * multiplier == Decimal("42")
 
     def test_purchase_wins_over_costo_unitario_for_line(self):
         purchase = Decimal("500")
