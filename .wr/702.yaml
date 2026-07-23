@@ -1,0 +1,39 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 702
+title: "fix cost: convert recipe ml/gr to und via unit_weight before multiplying unit cost"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-702-recipe-cost-unit-convert
+
+paths:
+  - app/services/cost_resolution_service.py
+  - tests/test_recipe_base_costs.py
+
+ac:
+  - Cost SQL converts recipe qty to stock unit via unit_weight (ml|gr ↔ und) before × unit cost
+  - Direct product_recipes and base_recipe_templates both convert
+  - 45 ml of 750 ml/und @ 350 → ~21 not 15750
+  - Same-unit lines unchanged; base multiplier still applies
+  - persist/recalc paths keep using calculated_product_cost_real
+
+out_of_scope:
+  - Resale 1:1 model changes
+  - Front UX warning
+  - Separate ml tequila SKU requirement
+
+hints:
+  entry: "app/services/cost_resolution_service.py LIST_COST_CTE_PREFIX + _CALCULATE_PRODUCT_COST_SQL"
+  pattern: "resolve_recipe_quantity_to_base_unit in ingredient_purchase_units_service.py"
+  tests: "pytest tests/test_recipe_base_costs.py -q"
+
+risk:
+  sensitive: false
+  areas: [costing]
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "ready-for-review + wr-review subagent"
