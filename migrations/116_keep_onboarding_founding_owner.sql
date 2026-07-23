@@ -1,7 +1,6 @@
--- Keep the founding onboarding member as owner (super usuario).
--- Previous activation paths demoted owner → admin, which hid equipo/mi_negocio.
--- Historical migrations 110/112 stay as applied history; this updates the live
--- safeguard and backfills founding members still stuck as admin.
+-- Founding onboarding identity must stay superuser (platform "super usuario"),
+-- matching legacy tenants. Do not demote to admin on activation.
+-- Historical migrations 110/112 stay as applied history.
 
 CREATE OR REPLACE FUNCTION enforce_tenant_owner_minimum()
 RETURNS TRIGGER AS $$
@@ -12,8 +11,8 @@ BEGIN
         RETURN COALESCE(NEW, OLD);
     END IF;
 
-    -- Pending self-service onboarding may deactivate the bound owner while
-    -- payment is incomplete. Role must remain owner (never demote to admin).
+    -- Pending self-service onboarding may deactivate the bound founder while
+    -- payment is incomplete. Role must remain owner/superuser (never demote to admin).
     IF TG_OP = 'UPDATE'
        AND NEW.tenant_id = OLD.tenant_id
        AND NEW.user_id = OLD.user_id
@@ -60,12 +59,18 @@ END;
 $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION enforce_tenant_owner_minimum() IS
-    'Protects the last active owner. Pending onboarding may deactivate the bound owner but must not demote them to admin.';
+    'Protects the last active owner/superuser. Pending onboarding may deactivate the founder but must not demote them to admin.';
 
--- Founding onboarding identity should be owner, not admin.
+-- Pending founding membership uniqueness covers both legacy owner and superuser.
+DROP INDEX IF EXISTS tenant_members_pending_owner_unique;
+CREATE UNIQUE INDEX tenant_members_pending_owner_unique
+  ON tenant_members (tenant_id, user_id)
+  WHERE role IN ('owner', 'superuser');
+
+-- Founding onboarding identity should be superuser (not admin or canonical owner).
 UPDATE tenant_members tm
-SET role = 'owner'
+SET role = 'superuser'
 FROM tenant_onboarding o
 WHERE o.tenant_id = tm.tenant_id
   AND tm.user_id = o.owner_user_id
-  AND tm.role = 'admin';
+  AND tm.role IN ('admin', 'owner');

@@ -164,7 +164,7 @@ async def test_verified_challenge_atomically_creates_pending_owner():
     assert "INSERT INTO tenants" in writes
     assert "'pending'" in writes
     assert "INSERT INTO tenant_members" in writes
-    assert "'owner', false" in writes
+    assert "'superuser', false" in writes
     assert "UPDATE profile" in writes
     assert "billing_payment_attempts" not in writes
     assert "tenant_subscriptions" not in writes
