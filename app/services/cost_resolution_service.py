@@ -171,6 +171,10 @@ async def sync_resale_mi_costo_to_ingredient(
     if ingredient_id is None:
         return False
 
+    # Match create seeding: only write a concrete Mi costo, never wipe via null.
+    if costo_percibido is None:
+        return False
+
     if await ingredient_has_purchase_unit_cost(
         conn,
         tenant_id=tenant_id,
@@ -187,7 +191,7 @@ async def sync_resale_mi_costo_to_ingredient(
           AND tenant_id = $3
         """,
         ingredient_id,
-        float(costo_percibido) if costo_percibido is not None else None,
+        float(costo_percibido),
         tenant_id,
     )
     return True
