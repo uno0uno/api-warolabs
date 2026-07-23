@@ -143,6 +143,22 @@ from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
+CONTADO_REQUIRES_PAYMENT_METHOD_DETAIL = (
+    "Contado requires a payment method. Use credito when payment is not registered yet."
+)
+
+
+def assert_contado_requires_payment_method(
+    payment_type: Optional[str],
+    payment_method: Optional[str],
+) -> None:
+    """Contado = paid now; unpaid purchases must use credito (or other deferred type)."""
+    if (payment_type or "").strip().lower() != "contado":
+        return
+    if payment_method and str(payment_method).strip():
+        return
+    raise HTTPException(status_code=400, detail=CONTADO_REQUIRES_PAYMENT_METHOD_DETAIL)
+
 
 async def _normalize_direct_purchase_payment(
     conn,
@@ -413,6 +429,8 @@ async def create_direct_purchase(
         if not items or len(items) == 0:
             raise HTTPException(status_code=400, detail="At least one item is required")
 
+        assert_contado_requires_payment_method(payment_type, payment_method)
+
         async with get_db_connection() as conn:
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             async with conn.transaction():
@@ -424,6 +442,7 @@ async def create_direct_purchase(
                     payment_method,
                     payment_method_id,
                 )
+                assert_contado_requires_payment_method(payment_type, payment_method)
 
                 # 2. Calculate totals from items
                 total_amount = _calculate_direct_purchase_total(items)
@@ -1094,6 +1113,7 @@ async def update_direct_purchase(
     purchase_date: Optional[str] = None,
     notes: Optional[str] = None,
     invoice_number: Optional[str] = None,
+    payment_type: Optional[str] = None,
     payment_method: Optional[str] = None,
     payment_method_id: Optional[str] = None,
     payment_reference: Optional[str] = None,
@@ -1129,7 +1149,7 @@ async def update_direct_purchase(
             async with conn.transaction():
                 # 1. Get existing purchase and verify ownership
                 existing_purchase = await conn.fetchrow("""
-                    SELECT id, status, purchase_number, tenant_id
+                    SELECT id, status, purchase_number, tenant_id, payment_type
                     FROM tenant_purchases
                     WHERE id = $1 AND tenant_id = $2 AND is_direct_entry = TRUE
                 """, purchase_id, tenant_id)
@@ -1138,6 +1158,12 @@ async def update_direct_purchase(
                     raise HTTPException(status_code=404, detail="Compra directa no encontrada")
 
                 purchase_number = existing_purchase['purchase_number']
+                effective_payment_type = (
+                    payment_type
+                    if payment_type is not None
+                    else existing_purchase["payment_type"]
+                )
+                assert_contado_requires_payment_method(effective_payment_type, payment_method)
 
                 # 2. Get existing items WITH ingredient names for audit trail
                 existing_items = await conn.fetch("""
@@ -1451,6 +1477,7 @@ async def update_direct_purchase(
                     payment_method,
                     payment_method_id,
                 )
+                assert_contado_requires_payment_method(effective_payment_type, payment_method)
 
                 # 9. Update purchase record
                 await conn.execute("""
@@ -1459,6 +1486,7 @@ async def update_direct_purchase(
                         total_amount = $1,
                         notes = $2,
                         invoice_number = $3,
+                        payment_type = COALESCE($13, payment_type),
                         payment_method = $4,
                         payment_method_id = $5::uuid,
                         payment_reference = $6,
@@ -1481,7 +1509,8 @@ async def update_direct_purchase(
                     new_status,
                     bool(payment_method and payment_amount and current_status != 'paid'),
                     purchase_id,
-                    _parse_date(purchase_date)
+                    _parse_date(purchase_date),
+                    payment_type,
                 )
 
                 # 10. Create status history if status changed

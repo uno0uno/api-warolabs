@@ -298,6 +298,7 @@ async def update_direct_purchase_endpoint(
         purchase_date=purchase_data.purchase_date,
         notes=purchase_data.notes,
         invoice_number=purchase_data.invoice_number,
+        payment_type=purchase_data.payment_type,
         payment_method=purchase_data.payment_method,
         payment_method_id=purchase_data.payment_method_id,
         payment_reference=purchase_data.payment_reference,
