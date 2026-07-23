@@ -488,6 +488,7 @@ class DirectPurchaseUpdate(BaseModel):
     purchase_date: Optional[str] = None
     notes: Optional[str] = None
     invoice_number: Optional[str] = None
+    payment_type: Optional[str] = Field(None, description="Payment type: contado, credito, contraentrega")
     payment_method: Optional[str] = None
     payment_method_id: Optional[str] = None
     payment_reference: Optional[str] = None
