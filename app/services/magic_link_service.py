@@ -47,7 +47,7 @@ _LOGIN_IDENTITY_QUERY = """
         (tm.is_active = true AND tm.role = ANY($2::text[]))
         OR (
           t.lifecycle_status = 'pending'
-          AND tm.role = 'owner'
+          AND tm.role IN ('owner', 'superuser')
           AND o.state NOT IN ('setup_complete', 'cancelled')
         )
       )
@@ -392,7 +392,7 @@ async def verify_code(request: Request, response: Response, email: str, code: st
                     (tm.is_active = true AND tm.role = ANY($3::text[]))
                     OR (
                         t.lifecycle_status = 'pending'
-                        AND tm.role = 'owner'
+                        AND tm.role IN ('owner', 'superuser')
                         AND o.state NOT IN ('setup_complete', 'cancelled')
                     )
                 )
@@ -548,7 +548,7 @@ async def verify_token(request: Request, response: Response, email: str, token: 
                     (tm.is_active = true AND tm.role = ANY($3::text[]))
                     OR (
                         t.lifecycle_status = 'pending'
-                        AND tm.role = 'owner'
+                        AND tm.role IN ('owner', 'superuser')
                         AND o.state NOT IN ('setup_complete', 'cancelled')
                     )
                 )

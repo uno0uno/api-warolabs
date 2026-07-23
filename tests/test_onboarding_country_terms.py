@@ -82,7 +82,7 @@ async def test_initial_selection_atomically_promotes_identity_to_billing_boundar
     statements = [" ".join(call.args[0].split()) for call in conn.execute.await_args_list]
     assert "UPDATE tenants SET name" in statements[0]
     assert conn.execute.await_args_list[0].args[2] == "Cafe Central"
-    assert "SET role = 'admin', is_active = true" in statements[1]
+    assert "SET role = 'superuser', is_active = true" in statements[1]
     assert "SET lifecycle_status = 'active'" in statements[2]
 
 

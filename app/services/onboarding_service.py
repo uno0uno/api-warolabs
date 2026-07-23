@@ -397,7 +397,7 @@ async def complete_registration(
             await conn.execute(
                 """
                 INSERT INTO tenant_members (id, tenant_id, user_id, role, is_active)
-                VALUES (gen_random_uuid(), $1, $2, 'owner', false)
+                VALUES (gen_random_uuid(), $1, $2, 'superuser', false)
                 """,
                 tenant_id,
                 profile["id"],
@@ -618,12 +618,12 @@ async def _promote_onboarding_identity(conn, tenant_id: UUID) -> str:
     member_update = await conn.execute(
         """
         UPDATE tenant_members tm
-        SET role = 'admin', is_active = true
+        SET role = 'superuser', is_active = true
         FROM tenant_onboarding o
         WHERE o.tenant_id = $1
           AND tm.tenant_id = o.tenant_id
           AND tm.user_id = o.owner_user_id
-          AND tm.role IN ('owner', 'admin')
+          AND tm.role IN ('owner', 'admin', 'superuser')
         """,
         tenant_id,
     )
@@ -874,7 +874,7 @@ async def activate_paid_onboarding_identity(conn, tenant_id: UUID) -> Optional[d
         JOIN tenant_members tm
           ON tm.tenant_id = t.id
          AND tm.user_id = o.owner_user_id
-         AND tm.role IN ('owner', 'admin')
+         AND tm.role IN ('owner', 'admin', 'superuser')
         WHERE t.id = $1
         FOR UPDATE OF t, o, tm
         """,
@@ -889,8 +889,8 @@ async def activate_paid_onboarding_identity(conn, tenant_id: UUID) -> Optional[d
     owner_update = await conn.execute(
         """
         UPDATE tenant_members
-        SET is_active = true, role = 'admin'
-        WHERE id = $1 AND role IN ('owner', 'admin')
+        SET is_active = true, role = 'superuser'
+        WHERE id = $1 AND role IN ('owner', 'admin', 'superuser')
         """,
         context["owner_member_id"],
     )
