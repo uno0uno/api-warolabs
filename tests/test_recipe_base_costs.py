@@ -289,6 +289,65 @@ class TestUnifiedProductCostResolution:
         multiplier = Decimal("2")
         assert per_base * multiplier == Decimal("42")
 
+    def test_recipe_base_ingredient_costo_linea_converts_ml_und(self):
+        """API recipe-base payload costo_linea uses unit_weight (#704)."""
+        from datetime import datetime, timezone
+        from uuid import uuid4
+        from app.services.recipe_bases_service import _recipe_base_ingredient_from_row
+
+        now = datetime.now(timezone.utc)
+        ing = _recipe_base_ingredient_from_row(
+            {
+                "id": uuid4(),
+                "product_base_type_id": uuid4(),
+                "ingredient_id": uuid4(),
+                "base_quantity": 45,
+                "unit": "ml",
+                "is_required": True,
+                "notes": None,
+                "tenant_id": uuid4(),
+                "created_at": now,
+                "updated_at": now,
+                "ingredient_name": "Tequila blanco botella 750 ml",
+                "controla_inventario": True,
+                "stock_unit": "und",
+                "unit_weight_gr": 750.0,
+                "unit_weight_unit": "ml",
+                "costo_unitario": 350.0,
+            }
+        )
+        assert ing.costo_linea == pytest.approx(21.0)
+        assert ing.stock_unit == "und"
+        assert ing.unit_weight_gr == 750.0
+
+    def test_recipe_base_ingredient_costo_linea_same_unit_ml(self):
+        from datetime import datetime, timezone
+        from uuid import uuid4
+        from app.services.recipe_bases_service import _recipe_base_ingredient_from_row
+
+        now = datetime.now(timezone.utc)
+        ing = _recipe_base_ingredient_from_row(
+            {
+                "id": uuid4(),
+                "product_base_type_id": uuid4(),
+                "ingredient_id": uuid4(),
+                "base_quantity": 20,
+                "unit": "ml",
+                "is_required": True,
+                "notes": None,
+                "tenant_id": uuid4(),
+                "created_at": now,
+                "updated_at": now,
+                "ingredient_name": "Triple sec",
+                "controla_inventario": True,
+                "stock_unit": "ml",
+                "unit_weight_gr": None,
+                "unit_weight_unit": None,
+                "costo_unitario": 0.25,
+            }
+        )
+        assert ing.costo_linea == pytest.approx(5.0)
+
     def test_purchase_wins_over_costo_unitario_for_line(self):
         purchase = Decimal("500")
         configured = Decimal("100")
