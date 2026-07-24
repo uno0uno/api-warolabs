@@ -40,6 +40,7 @@ STARTER_OPERATIONAL_QUOTAS = {
     "menu_products": 10,
     "tenant_ingredients": 5,
     "modifier_groups": 2,
+    "recipe_bases": 5,
     "recipe_lines_per_product": 4,
     "modifier_options_per_group": 6,
     "recipe_base_template_lines": 4,
@@ -55,6 +56,7 @@ QUOTA_KEYS = (
     "menu_products",
     "tenant_ingredients",
     "modifier_groups",
+    "recipe_bases",
     "recipe_lines_per_product",
     "modifier_options_per_group",
     "recipe_base_template_lines",
@@ -70,6 +72,7 @@ BASE_OPERATIONAL_QUOTAS = {
     "menu_products": CATALOG_UNLIMITED,
     "tenant_ingredients": CATALOG_UNLIMITED,
     "modifier_groups": CATALOG_UNLIMITED,
+    "recipe_bases": CATALOG_UNLIMITED,
     "recipe_lines_per_product": 100,
     "modifier_options_per_group": 50,
     "recipe_base_template_lines": 75,
@@ -103,6 +106,7 @@ ENFORCEABLE_QUOTA_RESOURCES = {
     "menu_products",
     "tenant_ingredients",
     "modifier_groups",
+    "recipe_bases",
 }
 SCOPED_QUOTA_RESOURCES = {
     "recipe_lines_per_product",
@@ -880,6 +884,15 @@ async def _count_quota_resource_usage(
             """
             SELECT COUNT(*)
             FROM modifier_groups
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+    elif resource == "recipe_bases":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM product_base_types
             WHERE tenant_id = $1
             """,
             tenant_id,
@@ -1835,7 +1848,12 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
                 SELECT COUNT(*)
                 FROM modifier_groups mg
                 WHERE mg.tenant_id = $1
-            ) AS modifier_groups
+            ) AS modifier_groups,
+            (
+                SELECT COUNT(*)
+                FROM product_base_types pbt
+                WHERE pbt.tenant_id = $1
+            ) AS recipe_bases
     """, tenant_id, period_start, period_end, list(LEGACY_INTERNAL_TEAM_ROLES))
 
     def metric(used: int, quota: EffectiveQuota) -> Dict[str, Any]:
@@ -1904,6 +1922,10 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             "modifier_groups": metric(
                 int(quota_counts["modifier_groups"] or 0),
                 effective_quotas["modifier_groups"],
+            ),
+            "recipe_bases": metric(
+                int(quota_counts["recipe_bases"] or 0),
+                effective_quotas["recipe_bases"],
             ),
         },
     }

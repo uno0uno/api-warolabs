@@ -104,6 +104,7 @@ async def test_remaining_usage_exposes_quota_usage_and_internal_roles_only():
                 "completed_online_orders_per_month": 28,
                 "menu_products": 9,
                 "modifier_groups": 1,
+                "recipe_bases": 2,
             },
         ]
     )
@@ -131,6 +132,8 @@ async def test_remaining_usage_exposes_quota_usage_and_internal_roles_only():
     }
     assert usage["quota_usage"]["modifier_groups"]["used"] == 1
     assert usage["quota_usage"]["modifier_groups"]["limit"] == 1_000_000
+    assert usage["quota_usage"]["recipe_bases"]["used"] == 2
+    assert usage["quota_usage"]["recipe_bases"]["limit"] == 1_000_000
 
     quota_query_args = conn.fetchrow.await_args_list[1].args
     assert quota_query_args[4] == list(LEGACY_INTERNAL_TEAM_ROLES)
@@ -164,6 +167,7 @@ async def test_remaining_usage_exposes_effective_quota_override_state():
                 "completed_online_orders_per_month": 28,
                 "menu_products": 0,
                 "modifier_groups": 0,
+                "recipe_bases": 0,
             },
         ]
     )
@@ -220,6 +224,7 @@ async def test_remaining_usage_exposes_disabled_override_as_unlimited():
                 "completed_online_orders_per_month": 301,
                 "menu_products": 0,
                 "modifier_groups": 0,
+                "recipe_bases": 0,
             },
         ]
     )

@@ -19,7 +19,7 @@ from app.models.recipe_base import (
 )
 from app.services import menu_history_service
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
-from app.services.billing_service import check_plan_quota_scoped
+from app.services.billing_service import check_plan_quota_growth, check_plan_quota_scoped
 from app.services.cost_resolution_service import recipe_qty_to_stock_units
 from decimal import Decimal
 
@@ -114,6 +114,7 @@ async def create_recipe_base_type(
                 )
 
         async with get_db_connection() as conn:
+            await check_plan_quota_growth(conn, tenant_id, "recipe_bases")
             # Insert product_base_type
             insert_base_query = """
                 INSERT INTO product_base_types (name, description, is_active, tenant_id)

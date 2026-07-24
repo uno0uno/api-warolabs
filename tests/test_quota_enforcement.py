@@ -861,6 +861,30 @@ async def test_starter_modifier_groups_quota_blocks_at_limit():
 
 
 @pytest.mark.asyncio
+async def test_starter_recipe_bases_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("recipe_bases", 5))
+    conn.fetchval = AsyncMock(return_value=4)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "recipe_bases")
+
+
+@pytest.mark.asyncio
+async def test_starter_recipe_bases_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("recipe_bases", 5))
+    conn.fetchval = AsyncMock(return_value=5)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(conn, tenant_id, "recipe_bases")
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["resource"] == "recipe_bases"
+
+
+@pytest.mark.asyncio
 async def test_scoped_recipe_base_template_lines_quota_blocks_over_limit():
     tenant_id = uuid4()
     base_type_id = uuid4()
