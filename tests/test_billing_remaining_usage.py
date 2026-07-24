@@ -26,14 +26,35 @@ def _subscription_row(
     }
 
 
+def _quota_counts_row(**overrides):
+    base = {
+        "admin_users": 0,
+        "active_sessions_per_admin_user": 0,
+        "active_kitchens": 0,
+        "active_tables_including_bar": 0,
+        "active_qr_tables": 0,
+        "completed_online_orders_per_month": 0,
+        "menu_products": 0,
+        "modifier_groups": 0,
+    }
+    base.update(overrides)
+    return base
+
+
+def _mock_remaining_usage_conn(subscription_row, *, invoice_used=0):
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=[subscription_row, _quota_counts_row()])
+    conn.fetchval = AsyncMock(return_value=invoice_used)
+    conn.fetch = AsyncMock(return_value=[])
+    return conn
+
+
 @pytest.mark.asyncio
 async def test_remaining_usage_non_fe_plan_reports_zero_invoice_quota():
     tenant_id = uuid4()
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_subscription_row(plan_slug="pro", scans_used=12, scans_limit=500)
+    conn = _mock_remaining_usage_conn(
+        _subscription_row(plan_slug="pro", scans_used=12, scans_limit=500)
     )
-    conn.fetchval = AsyncMock()
 
     result = await billing_service.get_remaining_billing_usage(conn, tenant_id)
 
@@ -51,7 +72,9 @@ async def test_remaining_usage_non_fe_plan_reports_zero_invoice_quota():
         "period_start": "2026-06-01T00:00:00+00:00",
         "period_end": "2026-07-01T00:00:00+00:00",
     }
-    subscription_query = conn.fetchrow.await_args.args[0]
+    assert result["quota_usage"]["menu_products"]["limit"] == 1_000_000
+    assert result["quota_usage"]["modifier_groups"]["limit"] == 1_000_000
+    subscription_query = conn.fetchrow.await_args_list[0].args[0]
     assert "su.period_start <= now()" in subscription_query
     assert "su.period_end > now()" in subscription_query
     assert "sp.features AS plan_features" in subscription_query
@@ -61,14 +84,12 @@ async def test_remaining_usage_non_fe_plan_reports_zero_invoice_quota():
 @pytest.mark.asyncio
 async def test_remaining_usage_non_fe_plan_ignores_invoice_feature_metadata():
     tenant_id = uuid4()
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_subscription_row(
+    conn = _mock_remaining_usage_conn(
+        _subscription_row(
             plan_slug="pro",
             plan_features={"electronic_invoice_limit": 200},
         )
     )
-    conn.fetchval = AsyncMock()
 
     result = await billing_service.get_remaining_billing_usage(conn, tenant_id)
 
@@ -81,16 +102,15 @@ async def test_remaining_usage_non_fe_plan_ignores_invoice_feature_metadata():
 @pytest.mark.asyncio
 async def test_remaining_usage_fe_plan_counts_accepted_invoices_in_period():
     tenant_id = uuid4()
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_subscription_row(
+    conn = _mock_remaining_usage_conn(
+        _subscription_row(
             plan_slug="facturacion-electronica",
             plan_features={"electronic_invoice_limit": 200},
             scans_used=20,
             scans_limit=500,
-        )
+        ),
+        invoice_used=37,
     )
-    conn.fetchval = AsyncMock(return_value=37)
 
     result = await billing_service.get_remaining_billing_usage(conn, tenant_id)
 
@@ -116,14 +136,13 @@ async def test_remaining_usage_fe_plan_counts_accepted_invoices_in_period():
 @pytest.mark.asyncio
 async def test_remaining_usage_fe_plan_reads_numeric_invoice_limit_from_features():
     tenant_id = uuid4()
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_subscription_row(
+    conn = _mock_remaining_usage_conn(
+        _subscription_row(
             plan_slug="facturacion-electronica",
             plan_features={"electronic_invoice_limit": "150"},
-        )
+        ),
+        invoice_used=12,
     )
-    conn.fetchval = AsyncMock(return_value=12)
 
     result = await billing_service.get_remaining_billing_usage(conn, tenant_id)
 
@@ -135,16 +154,15 @@ async def test_remaining_usage_fe_plan_reads_numeric_invoice_limit_from_features
 @pytest.mark.asyncio
 async def test_remaining_usage_caps_remaining_at_zero():
     tenant_id = uuid4()
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_subscription_row(
+    conn = _mock_remaining_usage_conn(
+        _subscription_row(
             plan_slug="facturacion-electronica",
             plan_features={"electronic_invoice_limit": 200},
             scans_used=550,
             scans_limit=500,
-        )
+        ),
+        invoice_used=220,
     )
-    conn.fetchval = AsyncMock(return_value=220)
 
     result = await billing_service.get_remaining_billing_usage(conn, tenant_id)
 
@@ -156,9 +174,71 @@ async def test_remaining_usage_caps_remaining_at_zero():
 async def test_remaining_usage_missing_subscription_mirrors_subscription_endpoint():
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=None)
+    conn.fetchval = AsyncMock(return_value="payment_pending")
 
     with pytest.raises(HTTPException) as exc:
         await billing_service.get_remaining_billing_usage(conn, uuid4())
 
     assert exc.value.status_code == 404
     assert exc.value.detail == "Subscription not found"
+
+
+@pytest.mark.asyncio
+async def test_remaining_usage_starter_without_subscription_exposes_catalog_quotas():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            None,  # no tenant_subscriptions row
+            None,  # get_effective_plan_slug paid lookup
+            {
+                "current_period_start": period_start,
+                "current_period_end": period_end,
+                "plan_slug": "starter",
+                "plan_features": {
+                    "quotas": {
+                        "menu_products": 10,
+                        "modifier_groups": 2,
+                        "admin_users": 1,
+                        "active_sessions_per_admin_user": 1,
+                        "active_kitchens": 0,
+                        "active_tables_including_bar": 0,
+                        "active_qr_tables": 0,
+                        "completed_online_orders_per_month": 30,
+                        "electronic_invoices_per_period": 0,
+                    }
+                },
+                "plan_scan_limit": 10,
+                "scans_used": 3,
+                "scans_limit": 10,
+            },
+            {
+                "admin_users": 1,
+                "active_sessions_per_admin_user": 1,
+                "active_kitchens": 0,
+                "active_tables_including_bar": 0,
+                "active_qr_tables": 0,
+                "completed_online_orders_per_month": 5,
+                "menu_products": 10,
+                "modifier_groups": 2,
+            },
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value="starter_active")
+    conn.fetch = AsyncMock(return_value=[])
+
+    usage = await billing_service.get_remaining_billing_usage(conn, tenant_id)
+
+    assert usage["scan_usage"]["used"] == 3
+    assert usage["scan_usage"]["limit"] == 10
+    assert usage["quota_usage"]["menu_products"] == {
+        "used": 10,
+        "limit": 10,
+        "remaining": 0,
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+    }
+    assert usage["quota_usage"]["modifier_groups"]["used"] == 2
+    assert usage["quota_usage"]["modifier_groups"]["remaining"] == 0
