@@ -738,6 +738,34 @@ async def test_starter_menu_products_quota_blocks_at_limit():
 
 
 @pytest.mark.asyncio
+async def test_starter_menu_categories_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("menu_categories", 5))
+    conn.fetchval = AsyncMock(return_value=4)
+
+    await billing_service.check_plan_quota_growth(
+        conn, tenant_id, "menu_categories"
+    )
+
+
+@pytest.mark.asyncio
+async def test_starter_menu_categories_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("menu_categories", 5))
+    conn.fetchval = AsyncMock(return_value=5)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(
+            conn, tenant_id, "menu_categories"
+        )
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["resource"] == "menu_categories"
+
+
+@pytest.mark.asyncio
 async def test_starter_tenant_ingredients_quota_blocks_at_limit():
     tenant_id = uuid4()
     conn = MagicMock()
@@ -851,8 +879,8 @@ async def test_assert_starter_toggle_rejects_tables_enabled():
 async def test_starter_modifier_groups_quota_blocks_at_limit():
     tenant_id = uuid4()
     conn = MagicMock()
-    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("modifier_groups", 2))
-    conn.fetchval = AsyncMock(return_value=2)
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("modifier_groups", 4))
+    conn.fetchval = AsyncMock(return_value=4)
 
     with pytest.raises(APIError) as exc:
         await billing_service.check_plan_quota_growth(conn, tenant_id, "modifier_groups")
@@ -882,6 +910,18 @@ async def test_starter_recipe_bases_quota_blocks_at_limit():
 
     assert exc.value.status_code == 429
     assert exc.value.details["resource"] == "recipe_bases"
+
+
+@pytest.mark.asyncio
+async def test_starter_modifier_groups_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("modifier_groups", 4))
+    conn.fetchval = AsyncMock(return_value=3)
+
+    await billing_service.check_plan_quota_growth(
+        conn, tenant_id, "modifier_groups"
+    )
 
 
 @pytest.mark.asyncio
