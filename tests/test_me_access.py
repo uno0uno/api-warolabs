@@ -92,8 +92,8 @@ def test_owner_returns_all_modules():
     assert body["features"]["kali_enabled"] is True
 
 
-def test_starter_owner_excludes_finanzas_and_facturacion():
-    """Starter plan intersects owner modules — paid-only modules hidden."""
+def test_starter_owner_includes_all_product_modules():
+    """Starter plan still intersects role modules, but no longer hides product modules."""
     session = _build_session(role="owner")
     app = FastAPI()
     app.include_router(me_router, prefix="/me")
@@ -113,15 +113,27 @@ def test_starter_owner_excludes_finanzas_and_facturacion():
     assert response.status_code == 200
     body = response.json()
     assert body["plan_slug"] == "starter"
-    assert "finanzas" not in body["modules"]
-    assert "facturacion" not in body["modules"]
-    assert "equipo" not in body["modules"]
-    assert "pos" in body["modules"]
+    for module in (
+        "pos",
+        "ventas",
+        "menu",
+        "operaciones",
+        "abastecimiento",
+        "analitica",
+        "finanzas",
+        "integraciones",
+        "equipo",
+        "facturacion",
+        "mi_negocio",
+        "mi_plan",
+    ):
+        assert module in body["modules"]
     assert body["features"]["kali_enabled"] is False
 
 
 @pytest.mark.parametrize("role", ["cashier", "employee"])
-def test_cashier_and_legacy_employee_return_pos_only(role):
+@pytest.mark.parametrize("plan_slug", ["pro", "starter"])
+def test_cashier_and_legacy_employee_return_pos_only(role, plan_slug):
     """Cashier and legacy employee see only [pos] per DEFAULT_ROLE_MODULES."""
     session = _build_session(role=role)
     app = FastAPI()
@@ -133,7 +145,7 @@ def test_cashier_and_legacy_employee_return_pos_only(role):
          patch("app.routers.me.require_valid_session", return_value=session), \
          patch("app.core.permissions.get_db_connection", side_effect=_mock_db_ctx("disabled")), \
          patch("app.routers.me.get_db_connection", side_effect=_mock_db_ctx("disabled")), \
-         patch("app.routers.me.get_effective_plan_slug", new=AsyncMock(return_value="pro")), \
+         patch("app.routers.me.get_effective_plan_slug", new=AsyncMock(return_value=plan_slug)), \
          patch(
              "app.routers.me.get_kali_access_features",
              new=AsyncMock(return_value={"kali_enabled": False}),
@@ -148,6 +160,7 @@ def test_cashier_and_legacy_employee_return_pos_only(role):
     assert response.status_code == 200
     body = response.json()
     assert body["role"] == role
+    assert body["plan_slug"] == plan_slug
     assert body["modules"] == ["pos"]
     assert body["features"]["kali_enabled"] is False
 

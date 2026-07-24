@@ -913,7 +913,7 @@ async def test_default_scan_limit_for_starter_is_ten():
 
 
 @pytest.mark.asyncio
-async def test_require_module_blocks_finanzas_for_starter_plan():
+async def test_require_module_allows_finanzas_for_starter_plan():
     from app.core.permissions import Module, require_module
 
     session = SimpleNamespace(
@@ -931,11 +931,12 @@ async def test_require_module_blocks_finanzas_for_starter_plan():
              "app.services.billing_service.get_effective_plan_slug",
              new=AsyncMock(return_value="starter"),
          ), \
+         patch(
+             "app.core.permissions.get_enforcement_mode",
+             new=AsyncMock(return_value="disabled"),
+         ), \
          patch("app.core.permissions.get_db_connection") as db_ctx:
         db_ctx.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
         db_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
-        with pytest.raises(HTTPException) as exc:
-            await dep(request)
+        await dep(request)
 
-    assert exc.value.status_code == 403
-    assert "Starter" in exc.value.detail
