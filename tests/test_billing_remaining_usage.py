@@ -35,6 +35,7 @@ def _quota_counts_row(**overrides):
         "active_qr_tables": 0,
         "completed_online_orders_per_month": 0,
         "menu_products": 0,
+        "menu_categories": 0,
         "modifier_groups": 0,
     }
     base.update(overrides)
@@ -73,6 +74,7 @@ async def test_remaining_usage_non_fe_plan_reports_zero_invoice_quota():
         "period_end": "2026-07-01T00:00:00+00:00",
     }
     assert result["quota_usage"]["menu_products"]["limit"] == 1_000_000
+    assert result["quota_usage"]["menu_categories"]["limit"] == 1_000_000
     assert result["quota_usage"]["modifier_groups"]["limit"] == 1_000_000
     subscription_query = conn.fetchrow.await_args_list[0].args[0]
     assert "su.period_start <= now()" in subscription_query
@@ -200,7 +202,8 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
                 "plan_features": {
                     "quotas": {
                         "menu_products": 10,
-                        "modifier_groups": 2,
+                        "menu_categories": 5,
+                        "modifier_groups": 4,
                         "admin_users": 1,
                         "active_sessions_per_admin_user": 1,
                         "active_kitchens": 0,
@@ -222,7 +225,8 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
                 "active_qr_tables": 0,
                 "completed_online_orders_per_month": 5,
                 "menu_products": 10,
-                "modifier_groups": 2,
+                "menu_categories": 5,
+                "modifier_groups": 4,
             },
         ]
     )
@@ -240,5 +244,7 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
     }
-    assert usage["quota_usage"]["modifier_groups"]["used"] == 2
+    assert usage["quota_usage"]["menu_categories"]["used"] == 5
+    assert usage["quota_usage"]["menu_categories"]["remaining"] == 0
+    assert usage["quota_usage"]["modifier_groups"]["used"] == 4
     assert usage["quota_usage"]["modifier_groups"]["remaining"] == 0

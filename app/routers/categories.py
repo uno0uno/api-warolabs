@@ -15,6 +15,7 @@ from app.models.category import (
     ReorderOnlineMenuCategoriesRequest,
 )
 from app.services import categories_service
+from app.services.billing_service import check_plan_quota_growth
 
 router = APIRouter()
 
@@ -87,12 +88,14 @@ async def create_category_endpoint(request: Request, payload: CategoryCreate):
 
     try:
         async with get_db_connection() as conn:
-            row = await conn.fetchrow(
-                insert_query,
-                payload.name.strip(),
-                (payload.description.strip() if payload.description else None),
-                tenant_id,
-            )
+            async with conn.transaction():
+                await check_plan_quota_growth(conn, tenant_id, "menu_categories")
+                row = await conn.fetchrow(
+                    insert_query,
+                    payload.name.strip(),
+                    (payload.description.strip() if payload.description else None),
+                    tenant_id,
+                )
     except asyncpg.UniqueViolationError:
         raise HTTPException(
             status_code=409,
