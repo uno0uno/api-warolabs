@@ -1,0 +1,40 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 716
+title: "Close warehouse-article create gaps: backfill stock-0 inventory + regression guards"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-716-inventory-seed-backfill
+
+paths:
+  - sql/20260724_backfill_tenant_inventory_zero.sql
+  - tests/test_tenant_inventory_seed_guards.py
+  - tests/test_ingredients.py
+  - app/services/ingredients_service.py
+
+ac:
+  - Backfill tenant_inventory 0/0 for tenant ingredients missing a row
+  - Regression: create_tenant_ingredient seeds stock 0
+  - Regression: auto_resale + convert_to_resale call create_tenant_ingredient
+  - Entry-point matrix documented; AI global path does not seed tenant inventory
+
+out_of_scope:
+  - Front UI changes
+  - Rewriting purchase/POS inventory inserts
+  - Merging warocol.com#1782 front PR
+
+hints:
+  entry: "create_tenant_ingredient + sql backfill"
+  pattern: "sql/20260724_backfill_seed_tenant_accounts.sql style; seed already on wr-1782"
+  tests: "./venv/bin/pytest tests/test_tenant_inventory_seed_guards.py tests/test_ingredients.py::TestVariantPurchaseUnitInheritance::test_create_tenant_ingredient_seeds_zero_inventory -q"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: []
+
+next:
+  after_pr: "Run backfill SQL on prod after merge; stack on / merge after #715"
