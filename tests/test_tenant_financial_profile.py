@@ -146,7 +146,23 @@ async def test_update_locks_tenant_and_derives_global_mode_server_side():
     assert result.capabilities.matias_dian is False
     lock_query = next(query for query, _ in conn.queries if "FROM tenants WHERE id" in query)
     assert "FOR UPDATE" in lock_query
-    assert all(args == (tenant_id,) for _, args in conn.queries[:-1])
+    seed_queries = [
+        (query, args)
+        for query, args in conn.queries
+        if "seed_tenant_accounts" in query
+    ]
+    assert len(seed_queries) == 2
+    assert all(args == (tenant_id,) for _, args in seed_queries)
+    update_query = next(
+        query for query, _ in conn.queries if "UPDATE tenant_financial_profiles" in query
+    )
+    assert "accounting_localization = $4" in update_query
+    non_update = [
+        args
+        for query, args in conn.queries
+        if "UPDATE tenant_financial_profiles" not in query
+    ]
+    assert all(args == (tenant_id,) for args in non_update)
 
 
 @pytest.mark.asyncio

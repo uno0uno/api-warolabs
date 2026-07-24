@@ -751,6 +751,7 @@ async def update_onboarding_financial_profile(
         document_mode,
         fiscal_provider,
     )
+    await financial_service.seed_tenant_accounts(conn, tenant_id)
     state = await _promote_onboarding_identity(conn, tenant_id)
     result = dict(profile)
     result["business_name"] = data.business_name
