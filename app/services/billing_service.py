@@ -38,8 +38,9 @@ STARTER_OPERATIONAL_QUOTAS = {
     "completed_online_orders_per_month": 30,
     "electronic_invoices_per_period": 0,
     "menu_products": 10,
+    "menu_categories": 5,
     "tenant_ingredients": 5,
-    "modifier_groups": 2,
+    "modifier_groups": 4,
     "recipe_lines_per_product": 4,
     "modifier_options_per_group": 6,
     "recipe_base_template_lines": 4,
@@ -53,6 +54,7 @@ QUOTA_KEYS = (
     "completed_online_orders_per_month",
     "electronic_invoices_per_period",
     "menu_products",
+    "menu_categories",
     "tenant_ingredients",
     "modifier_groups",
     "recipe_lines_per_product",
@@ -68,6 +70,7 @@ BASE_OPERATIONAL_QUOTAS = {
     "active_qr_tables": 20,
     "completed_online_orders_per_month": 300,
     "menu_products": CATALOG_UNLIMITED,
+    "menu_categories": CATALOG_UNLIMITED,
     "tenant_ingredients": CATALOG_UNLIMITED,
     "modifier_groups": CATALOG_UNLIMITED,
     "recipe_lines_per_product": 100,
@@ -101,6 +104,7 @@ ENFORCEABLE_QUOTA_RESOURCES = {
     "active_tables_including_bar",
     "active_qr_tables",
     "menu_products",
+    "menu_categories",
     "tenant_ingredients",
     "modifier_groups",
 }
@@ -861,6 +865,15 @@ async def _count_quota_resource_usage(
             """
             SELECT COUNT(*)
             FROM product
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+    elif resource == "menu_categories":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM categories
             WHERE tenant_id = $1
             """,
             tenant_id,
@@ -1833,6 +1846,11 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             ) AS menu_products,
             (
                 SELECT COUNT(*)
+                FROM categories c
+                WHERE c.tenant_id = $1
+            ) AS menu_categories,
+            (
+                SELECT COUNT(*)
                 FROM modifier_groups mg
                 WHERE mg.tenant_id = $1
             ) AS modifier_groups
@@ -1900,6 +1918,10 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             "menu_products": metric(
                 int(quota_counts["menu_products"] or 0),
                 effective_quotas["menu_products"],
+            ),
+            "menu_categories": metric(
+                int(quota_counts["menu_categories"] or 0),
+                effective_quotas["menu_categories"],
             ),
             "modifier_groups": metric(
                 int(quota_counts["modifier_groups"] or 0),
