@@ -222,47 +222,75 @@ async def test_send_invoice_email_blocks_cross_tenant():
     helper_mock.assert_not_awaited()
 
 
-# ── No invoice on the order ──────────────────────────────────────────────────
+# ── No invoice on the order → receipt-style send (#1769) ─────────────────────
 
 @pytest.mark.asyncio
-async def test_send_invoice_email_rejects_when_no_invoice():
-    """Order exists but has no electronic_invoices row → 422, no helper call."""
+async def test_send_invoice_email_allows_when_no_invoice():
+    """Order exists but has no electronic_invoices row → receipt email still sends."""
     request = MagicMock()
-    helper_mock = AsyncMock(return_value=True)
+    helper_mock = AsyncMock(return_value={
+        'success': True,
+        'attachments': {'pdf': False, 'xml': False},
+        'attachment_warnings': [],
+    })
 
-    with _patch_session(), _patch_db(fetchrow=[_order_row(), None], fetch=[]), patch(
+    fetchrow = [_order_row(), None, _waro_inferred_row(), _profile_row()]
+    fetch = [
+        [],  # tax items
+        [],  # promo summary
+        [],  # waro redemption
+        [{'id': uuid4(), 'quantity': 1, 'subtotal': 200.0, 'product_name': 'tomate barranca'}],
+        [],  # modifiers
+    ]
+
+    with _patch_session(), _patch_db(fetchrow=fetchrow, fetch=fetch), _patch_tax(), patch(
         'app.services.orders_service.send_pos_receipt_email',
         new=helper_mock,
     ):
-        with pytest.raises(HTTPException) as exc_info:
-            await orders_service.send_invoice_email(request, _ORDER_ID, _RECIPIENT)
+        result = await orders_service.send_invoice_email(request, _ORDER_ID, _RECIPIENT)
 
-    assert exc_info.value.status_code == 422
-    assert 'no tiene factura' in exc_info.value.detail.lower()
-    helper_mock.assert_not_awaited()
+    assert result['success'] is True
+    assert result['sent_to'] == _RECIPIENT
+    assert result['attachments'] == {'pdf': False, 'xml': False}
+    helper_mock.assert_awaited_once()
+    kwargs = helper_mock.await_args.kwargs
+    assert kwargs['invoice_prefix'] is None
+    assert kwargs['invoice_number'] is None
+    assert kwargs['invoice_cufe'] is None
+    assert kwargs['invoice_presentation'] is None
 
 
-# ── Invoice not accepted ─────────────────────────────────────────────────────
+# ── Invoice not accepted → receipt-style send (#1769) ────────────────────────
 
 @pytest.mark.asyncio
-async def test_send_invoice_email_rejects_non_accepted():
-    """Invoice exists but status != 'accepted' → 422."""
+async def test_send_invoice_email_allows_non_accepted_as_receipt():
+    """Invoice exists but status != 'accepted' → receipt send without FE attachments."""
     request = MagicMock()
-    helper_mock = AsyncMock(return_value=True)
+    helper_mock = AsyncMock(return_value={
+        'success': True,
+        'attachments': {'pdf': False, 'xml': False},
+        'attachment_warnings': [],
+    })
 
-    with _patch_session(), _patch_db(
-        fetchrow=[_order_row(), _invoice_row(status='rejected')],
-        fetch=[],
-    ), patch(
+    fetchrow = [_order_row(), _invoice_row(status='rejected'), _waro_inferred_row(), _profile_row()]
+    fetch = [
+        [],
+        [],
+        [],
+        [{'id': uuid4(), 'quantity': 1, 'subtotal': 200.0, 'product_name': 'tomate barranca'}],
+        [],
+    ]
+
+    with _patch_session(), _patch_db(fetchrow=fetchrow, fetch=fetch), _patch_tax(), patch(
         'app.services.orders_service.send_pos_receipt_email',
         new=helper_mock,
     ):
-        with pytest.raises(HTTPException) as exc_info:
-            await orders_service.send_invoice_email(request, _ORDER_ID, _RECIPIENT)
+        result = await orders_service.send_invoice_email(request, _ORDER_ID, _RECIPIENT)
 
-    assert exc_info.value.status_code == 422
-    assert 'aceptada' in exc_info.value.detail.lower()
-    helper_mock.assert_not_awaited()
+    assert result['success'] is True
+    kwargs = helper_mock.await_args.kwargs
+    assert kwargs['invoice_prefix'] is None
+    assert kwargs['invoice_presentation'] is None
 
 
 # ── Missing PDF (r2_pdf_key is null) ─────────────────────────────────────────

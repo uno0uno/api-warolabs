@@ -4202,16 +4202,17 @@ async def send_invoice_email(
     recipient_email: str,
 ) -> Dict[str, Any]:
     """
-    Send the WARO-branded receipt email for an order's accepted invoice (warocol.com#603).
+    Send the WARO-branded receipt/invoice email for an order (warocol.com#603, #1769).
 
-    Loads the order header + items + invoice + tenant business profile from DB
-    (single connection, sequential reads), validates the invoice is accepted,
-    then dispatches the existing `send_pos_receipt_email` helper which handles
-    SES + template + optional PDF/XML attachment.
+    Loads the order header + items + optional invoice + tenant business profile
+    from DB, then dispatches `send_pos_receipt_email` (SES + template).
+
+    When an accepted electronic invoice exists, includes invoice fields and
+    optional PDF/XML attachments. Otherwise sends a receipt-style email so
+    cashiers can resend from `/ventas/[id]` without DIAN acceptance.
 
     Raises:
         HTTPException 404 — order not found for the session tenant
-        HTTPException 422 — no invoice / invoice not accepted
         HTTPException 502 — SES rejected the send
     """
     session_context = require_valid_session(request)
@@ -4238,8 +4239,8 @@ async def send_invoice_email(
         if not order_row:
             raise HTTPException(status_code=404, detail="Order not found")
 
-        # 2. Invoice header — must exist and be accepted. PDF attachment is optional:
-        # accepted Matias invoices may exist before the local R2 PDF key is stored.
+        # 2. Invoice header — optional. Accepted invoices get FE attachments;
+        # missing / non-accepted still allow a receipt-style resend (#1769).
         invoice_row = await conn.fetchrow(
             """SELECT prefix, invoice_number, cufe, status, r2_pdf_key, r2_xml_key,
                       emitted_at, created_at
@@ -4249,16 +4250,7 @@ async def send_invoice_email(
                LIMIT 1""",
             order_id, tenant_id,
         )
-        if not invoice_row:
-            raise HTTPException(
-                status_code=422,
-                detail="Esta orden no tiene factura electrónica. Emitila antes de enviarla.",
-            )
-        if invoice_row['status'] != 'accepted':
-            raise HTTPException(
-                status_code=422,
-                detail="La factura debe estar aceptada por DIAN para poder enviarla por correo.",
-            )
+        include_invoice = bool(invoice_row and invoice_row['status'] == 'accepted')
 
         # 3. Tax breakdown — net line base matches GL / cierre_service.
         tax_config = await _get_tenant_tax_config(conn, tenant_id)
@@ -4317,17 +4309,19 @@ async def send_invoice_email(
             tenant_id,
         )
 
-        resolution_row = await conn.fetchrow(
-            """SELECT resolution_number, prefix, date_from, date_to,
-                      from_number, to_number
-               FROM dian_resolutions
-               WHERE tenant_id = $1
-                 AND prefix = $2
-                 AND is_active = true
-               ORDER BY created_at DESC
-               LIMIT 1""",
-            tenant_id, invoice_row['prefix'],
-        )
+        resolution_row = None
+        if include_invoice:
+            resolution_row = await conn.fetchrow(
+                """SELECT resolution_number, prefix, date_from, date_to,
+                          from_number, to_number
+                   FROM dian_resolutions
+                   WHERE tenant_id = $1
+                     AND prefix = $2
+                     AND is_active = true
+                   ORDER BY created_at DESC
+                   LIMIT 1""",
+                tenant_id, invoice_row['prefix'],
+            )
 
     discount_amount = float(order_row['discount_amount']) if order_row['discount_amount'] is not None else 0.0
     promo_savings = float(promo_summary["promo_savings"])
@@ -4341,35 +4335,37 @@ async def send_invoice_email(
     )
 
     tax_details = _tax_detail_rows(items_for_tax, std_tax, liq_tax, tax_label)
-    invoice_presentation = _build_invoice_presentation(
-        invoice_row,
-        order_row,
-        profile_row,
-        resolution_row,
-        tax_details,
-        serialize_datetimes=False,
-        provider="matias",
-    )
+    invoice_presentation = None
+    if include_invoice:
+        invoice_presentation = _build_invoice_presentation(
+            invoice_row,
+            order_row,
+            profile_row,
+            resolution_row,
+            tax_details,
+            serialize_datetimes=False,
+            provider="matias",
+        )
 
     # FE email: subject/header prefer tenant fiscal name (emisor), not product brand.
-    issuer_name = (invoice_presentation.get("issuer") or {}).get("name")
+    issuer_name = (invoice_presentation or {}).get("issuer", {}).get("name") if invoice_presentation else None
     email_business_name = commercial_header_name(
         fiscal_row=profile_row,
         public_profile=profile_row,
         prefer_fiscal=True,
-    ) or issuer_name
+    ) or issuer_name or (_row_get(profile_row, "display_name") if profile_row else None)
     email_address = (
-        (invoice_presentation.get("issuer") or {}).get("address")
-        or (_row_get(profile_row, "address") if profile_row else None)
-    )
+        ((invoice_presentation or {}).get("issuer") or {}).get("address")
+        if invoice_presentation else None
+    ) or (_row_get(profile_row, "address") if profile_row else None)
     email_city = (
-        (invoice_presentation.get("issuer") or {}).get("city")
-        or (_row_get(profile_row, "city") if profile_row else None)
-    )
+        ((invoice_presentation or {}).get("issuer") or {}).get("city")
+        if invoice_presentation else None
+    ) or (_row_get(profile_row, "city") if profile_row else None)
     email_phone = (
-        (invoice_presentation.get("issuer") or {}).get("phone")
-        or (_row_get(profile_row, "phone_number") if profile_row else None)
-    )
+        ((invoice_presentation or {}).get("issuer") or {}).get("phone")
+        if invoice_presentation else None
+    ) or (_row_get(profile_row, "phone_number") if profile_row else None)
 
     # api-warolabs#657: persist the attempt before SES. Raw token goes only
     # into the pixel URL; the DB stores its SHA-256 hash. Fail-open: when
@@ -4408,20 +4404,24 @@ async def send_invoice_email(
         promo_savings=promo_savings,
         promo_breakdown=promo_breakdown,
         waro_redemption_summary=waro_summary,
-        invoice_prefix=invoice_row['prefix'],
-        invoice_number=int(invoice_row['invoice_number']),
-        invoice_cufe=invoice_row['cufe'],
+        invoice_prefix=invoice_row['prefix'] if include_invoice else None,
+        invoice_number=int(invoice_row['invoice_number']) if include_invoice else None,
+        invoice_cufe=invoice_row['cufe'] if include_invoice else None,
         invoice_presentation=invoice_presentation,
         return_details=True,
         tracking_pixel_url=pixel_url,
     )
     if isinstance(send_result, dict):
         success = bool(send_result.get("success"))
-        attachment_status = send_result.get("attachments") or _invoice_attachment_flags(invoice_row)
+        attachment_status = send_result.get("attachments") or (
+            _invoice_attachment_flags(invoice_row) if include_invoice else {"pdf": False, "xml": False}
+        )
         attachment_warnings = send_result.get("attachment_warnings") or []
     else:
         success = bool(send_result)
-        attachment_status = _invoice_attachment_flags(invoice_row)
+        attachment_status = (
+            _invoice_attachment_flags(invoice_row) if include_invoice else {"pdf": False, "xml": False}
+        )
         attachment_warnings = []
 
     if not success:
