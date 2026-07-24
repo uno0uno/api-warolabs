@@ -54,8 +54,8 @@ BEGIN
     END IF;
 
     IF (SELECT COUNT(*) FROM account_template_role_defaults
-        WHERE localization_id = 'WARO_HOSPITALITY_GLOBAL_V1') <> 10 THEN
-        RAISE EXCEPTION 'Global must have ten semantic defaults';
+        WHERE localization_id = 'WARO_HOSPITALITY_GLOBAL_V1') <> 12 THEN
+        RAISE EXCEPTION 'Global must have twelve semantic defaults';
     END IF;
 END $$;
 

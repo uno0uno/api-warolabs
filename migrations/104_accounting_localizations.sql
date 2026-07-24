@@ -145,9 +145,11 @@ INSERT INTO account_templates (
     ('WARO_HOSPITALITY_GLOBAL_V1', '4',    'Revenue',                    '4', 'income',    'credit', 1, NULL, false, NULL, true),
     ('WARO_HOSPITALITY_GLOBAL_V1', '40',   'Operating revenue',          '4', 'income',    'credit', 2, '4',  false, NULL, true),
     ('WARO_HOSPITALITY_GLOBAL_V1', '4000', 'Sales revenue',              '4', 'income',    'credit', 4, '40', true,  NULL, true),
+    ('WARO_HOSPITALITY_GLOBAL_V1', '4010', 'Other income',               '4', 'income',    'credit', 4, '40', true,  NULL, true),
     ('WARO_HOSPITALITY_GLOBAL_V1', '5',    'Expenses',                   '5', 'expense',   'debit',  1, NULL, false, NULL, true),
     ('WARO_HOSPITALITY_GLOBAL_V1', '50',   'Operating expenses',         '5', 'expense',   'debit',  2, '5',  false, NULL, true),
     ('WARO_HOSPITALITY_GLOBAL_V1', '5000', 'Payroll expense',            '5', 'expense',   'debit',  4, '50', true,  NULL, true),
+    ('WARO_HOSPITALITY_GLOBAL_V1', '5100', 'Bank fees expense',          '5', 'expense',   'debit',  4, '50', true,  NULL, true),
     ('WARO_HOSPITALITY_GLOBAL_V1', '6',    'Cost of goods sold',         '6', 'cogs',      'debit',  1, NULL, false, NULL, true),
     ('WARO_HOSPITALITY_GLOBAL_V1', '60',   'Cost of goods sold details', '6', 'cogs',      'debit',  2, '6',  false, NULL, true),
     ('WARO_HOSPITALITY_GLOBAL_V1', '6000', 'Cost of goods sold',         '6', 'cogs',      'debit',  4, '60', true,  NULL, true)
@@ -175,7 +177,8 @@ CREATE TABLE IF NOT EXISTS account_template_role_defaults (
     role VARCHAR(40) NOT NULL CHECK (role IN (
         'CASH', 'BANK', 'ACCOUNTS_RECEIVABLE', 'INVENTORY',
         'ACCOUNTS_PAYABLE', 'SALES_REVENUE', 'TAX_PAYABLE', 'COGS',
-        'PAYROLL_EXPENSE', 'CUSTOMER_ADVANCES'
+        'PAYROLL_EXPENSE', 'CUSTOMER_ADVANCES',
+        'BANK_FEES_EXPENSE', 'OTHER_INCOME'
     )),
     account_template_id UUID NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -218,7 +221,9 @@ WITH role_codes(role, code) AS (
         ('TAX_PAYABLE', '2100'),
         ('CUSTOMER_ADVANCES', '2200'),
         ('SALES_REVENUE', '4000'),
+        ('OTHER_INCOME', '4010'),
         ('PAYROLL_EXPENSE', '5000'),
+        ('BANK_FEES_EXPENSE', '5100'),
         ('COGS', '6000')
 )
 INSERT INTO account_template_role_defaults (localization_id, role, account_template_id)
