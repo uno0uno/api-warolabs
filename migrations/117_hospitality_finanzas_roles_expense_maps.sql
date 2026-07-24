@@ -109,7 +109,10 @@ BEGIN
             (p_tenant_id, 'INSURANCE',    '5000', '1000', '1010'),
             (p_tenant_id, 'CAPITAL',      '5000', '1000', '2000'),
             (p_tenant_id, 'CONTINGENCY',  '5000', '1000', '1010')
-        ON CONFLICT (tenant_id, category_code) DO NOTHING;
+        ON CONFLICT (tenant_id, category_code) DO UPDATE SET
+            debit_account_code = EXCLUDED.debit_account_code,
+            credit_cash_account_code = EXCLUDED.credit_cash_account_code,
+            credit_default_account_code = EXCLUDED.credit_default_account_code;
     ELSIF p_localization_id = 'WARO_CO_PUC_V1' THEN
         INSERT INTO expense_category_gl_mappings (
             tenant_id, category_code,

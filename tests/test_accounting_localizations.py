@@ -90,6 +90,7 @@ def test_migration_117_extends_seed_with_hospitality_expense_maps():
     assert "OTHER_INCOME" in migration_117
     assert "expense_category_gl_mappings" in migration_117
     assert "'SUPPLIES'" in migration_117 and "'6000'" in migration_117 and "'1000'" in migration_117
+    assert "DO UPDATE SET" in migration_117
     assert "WARO_CO_PUC_V1" in migration_117
     assert "DELETE FROM" not in migration_117
     assert "DROP TABLE" not in migration_117
