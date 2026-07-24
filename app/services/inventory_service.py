@@ -40,7 +40,7 @@ async def _get_inventory_stock_for_tenant(
     limit: int = 250,
     offset: int = 0,
     search: Optional[str] = None,
-    status_filter: Optional[str] = None,  # 'low', 'critical', 'ok', 'all'
+    status_filter: Optional[str] = None,  # 'low', 'critical'/'negative', 'ok', 'zero', 'all'
     category: Optional[str] = None,
     unit: Optional[str] = None,
     sort_field: str = "current_stock",
@@ -54,7 +54,7 @@ async def _get_inventory_stock_for_tenant(
         limit: Number of records to return
         offset: Number of records to skip
         search: Search term for ingredient name
-        status_filter: Filter by stock status (low, critical, ok, all)
+        status_filter: Filter by stock status (low, critical/negative, ok, zero, all)
         category: Filter by ingredient category
         unit: Filter by ingredient unit
         sort_field: Field to sort by
@@ -98,6 +98,7 @@ async def _get_inventory_stock_for_tenant(
                     ti.fecha_vencimiento,
                     CASE
                         WHEN ti.current_stock < 0 THEN 'negative'
+                        WHEN ti.current_stock = 0 THEN 'zero'
                         WHEN ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock THEN 'low'
                         ELSE 'ok'
                     END as status,
@@ -111,14 +112,14 @@ async def _get_inventory_stock_for_tenant(
                 FROM tenant_inventory ti
                 JOIN ingredients i ON ti.ingredient_id = i.id
                 LEFT JOIN latest_costs lc ON lc.ingredient_id = ti.ingredient_id
-                WHERE ti.tenant_id = $1 AND ti.current_stock != 0
+                WHERE ti.tenant_id = $1
             """
 
             count_query = """
                 SELECT COUNT(*) as total
                 FROM tenant_inventory ti
                 JOIN ingredients i ON ti.ingredient_id = i.id
-                WHERE ti.tenant_id = $1 AND ti.current_stock != 0
+                WHERE ti.tenant_id = $1
             """
 
             params = [tenant_id]
@@ -133,9 +134,12 @@ async def _get_inventory_stock_for_tenant(
 
             # Add status filter
             if status_filter and status_filter != 'all':
-                if status_filter == 'negative':
+                if status_filter in ('negative', 'critical'):
                     base_query += " AND ti.current_stock < 0"
                     count_query += " AND ti.current_stock < 0"
+                elif status_filter == 'zero':
+                    base_query += " AND ti.current_stock = 0"
+                    count_query += " AND ti.current_stock = 0"
                 elif status_filter == 'low':
                     base_query += " AND ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock"
                     count_query += " AND ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock"
@@ -179,8 +183,9 @@ async def _get_inventory_stock_for_tenant(
             # Get stats using CTE join (avoids correlated subquery per row)
             stats_query = cost_cte + """
                 SELECT
-                    COUNT(*) FILTER (WHERE ti.current_stock != 0) as total_ingredients,
+                    COUNT(*) as total_ingredients,
                     COUNT(*) FILTER (WHERE ti.current_stock < 0) as critical_count,
+                    COUNT(*) FILTER (WHERE ti.current_stock = 0) as zero_count,
                     COUNT(*) FILTER (WHERE ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock) as low_stock_count,
                     COUNT(*) FILTER (WHERE ti.current_stock > ti.minimum_stock) as ok_count,
                     SUM(ti.current_stock * COALESCE(lc.cost_per_unit, 0)) as total_inventory_value
@@ -199,7 +204,6 @@ async def _get_inventory_stock_for_tenant(
                             FROM tenant_inventory ti
                             JOIN ingredients i ON ti.ingredient_id = i.id
                             WHERE ti.tenant_id = $1
-                              AND ti.current_stock != 0
                               AND i.category IS NOT NULL
                         ) categories
                     ), ARRAY[]::text[]) AS categories,
@@ -210,7 +214,6 @@ async def _get_inventory_stock_for_tenant(
                             FROM tenant_inventory ti
                             JOIN ingredients i ON ti.ingredient_id = i.id
                             WHERE ti.tenant_id = $1
-                              AND ti.current_stock != 0
                               AND i.unit IS NOT NULL
                         ) units
                     ), ARRAY[]::text[]) AS units
@@ -248,6 +251,7 @@ async def _get_inventory_stock_for_tenant(
                 "stats": {
                     "total_ingredients": stats['total_ingredients'],
                     "critical_count": stats['critical_count'],
+                    "zero_count": stats['zero_count'],
                     "low_stock_count": stats['low_stock_count'],
                     "ok_count": stats['ok_count'],
                     "total_inventory_value": _json_decimal(stats['total_inventory_value'], _MONEY_JSON_SCALE, 0)
@@ -271,7 +275,7 @@ async def get_inventory_stock(
     limit: int = 250,
     offset: int = 0,
     search: Optional[str] = None,
-    status_filter: Optional[str] = None,  # 'low', 'critical', 'ok', 'all'
+    status_filter: Optional[str] = None,  # 'low', 'critical'/'negative', 'ok', 'zero', 'all'
     category: Optional[str] = None,
     unit: Optional[str] = None,
     sort_field: str = "current_stock",

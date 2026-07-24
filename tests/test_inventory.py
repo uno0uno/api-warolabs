@@ -88,6 +88,7 @@ async def test_inventory_stock_core_uses_explicit_tenant_without_session():
             {
                 "total_ingredients": 1,
                 "critical_count": 0,
+                "zero_count": 0,
                 "low_stock_count": 0,
                 "ok_count": 1,
                 "total_inventory_value": "1253.125",
@@ -115,6 +116,61 @@ async def test_inventory_stock_core_uses_explicit_tenant_without_session():
     assert result["data"][0]["ingredient_name"] == "Tomate"
     assert conn.fetch_calls[0][1][0] == tenant_id
     assert conn.fetch_calls[0][1][-2:] == (10, 5)
+    assert "current_stock != 0" not in conn.fetch_calls[0][0]
+
+
+@pytest.mark.asyncio
+async def test_inventory_stock_includes_zero_and_filters_zero_status():
+    tenant_id = "tenant-zero-stock"
+    ingredient_id = uuid4()
+    conn = _FakeInventoryConnection(
+        fetch_rows=[
+            {
+                "id": uuid4(),
+                "ingredient_id": ingredient_id,
+                "ingredient_name": "Sal",
+                "unit": "gr",
+                "category": "Guarniciones",
+                "current_stock": "0",
+                "minimum_stock": "0",
+                "maximum_stock": None,
+                "last_updated": datetime(2026, 1, 1, 12, 0),
+                "location": None,
+                "lote_actual": None,
+                "fecha_vencimiento": None,
+                "status": "zero",
+                "stock_percentage": None,
+                "unit_cost": None,
+                "total_value": "0",
+            }
+        ],
+        fetchrow_rows=[
+            {"total": 1},
+            {
+                "total_ingredients": 1,
+                "critical_count": 0,
+                "zero_count": 1,
+                "low_stock_count": 0,
+                "ok_count": 0,
+                "total_inventory_value": "0",
+            },
+            {"categories": ["Guarniciones"], "units": ["gr"]},
+        ],
+    )
+
+    with patch("app.services.inventory_service.require_valid_session", side_effect=AssertionError), \
+         patch("app.services.inventory_service.get_db_connection", return_value=conn):
+        result = await _get_inventory_stock_for_tenant(
+            tenant_id,
+            status_filter="zero",
+        )
+
+    query = conn.fetch_calls[0][0]
+    assert "current_stock != 0" not in query
+    assert "ti.current_stock = 0" in query
+    assert result["data"][0]["status"] == "zero"
+    assert result["data"][0]["current_stock"] == 0.0
+    assert result["stats"]["zero_count"] == 1
 
 
 @pytest.mark.asyncio
