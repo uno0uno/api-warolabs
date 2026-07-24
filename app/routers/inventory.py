@@ -57,7 +57,10 @@ async def get_inventory_movements(
     movement_type: Optional[str] = Query(None, description="Filter by movement type: purchase, consumption, adjustment, loss, transfer, return"),
     quantity_direction: Optional[Literal["positive", "negative"]] = Query(None, description="Filter by quantity direction: positive, negative"),
     start_date: Optional[str] = Query(None, description="Filter by start date (ISO format)"),
-    end_date: Optional[str] = Query(None, description="Filter by end date (ISO format)")
+    end_date: Optional[str] = Query(None, description="Filter by end date (ISO format)"),
+    search: Optional[str] = Query(None, description="Search by ingredient name or reference number"),
+    sort_field: str = Query("created_at", description="Field to sort by"),
+    sort_direction: str = Query("desc", description="Sort direction: asc or desc"),
 ):
     """
     Get inventory movements history
@@ -77,7 +80,10 @@ async def get_inventory_movements(
         movement_type=movement_type,
         quantity_direction=quantity_direction,
         start_date=start_date,
-        end_date=end_date
+        end_date=end_date,
+        search=search,
+        sort_field=sort_field,
+        sort_direction=sort_direction,
     )
 
 
