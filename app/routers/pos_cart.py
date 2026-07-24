@@ -9,8 +9,10 @@ from datetime import date, datetime
 from pydantic import BaseModel, EmailStr, Field
 from app.services import pos_cart_service
 from app.services.email_helpers import send_pos_receipt_email
+from app.services import invoice_email_tracking_service
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
+from app.database import get_db_connection
 
 router = APIRouter(prefix="/pos/cart", tags=["POS Cart"])
 
@@ -304,6 +306,10 @@ async def fire_pos_cart(request: Request, cart_id: UUID):
 class SendReceiptRequest(BaseModel):
     email: EmailStr = Field(..., description="Customer email to send receipt to")
     order_number: int
+    order_id: Optional[UUID] = Field(
+        None,
+        description="Order UUID — when set, registers invoice_email_deliveries for Ver historial (warocol.com#1769).",
+    )
     total_amount: float
     payment_method: str
     items: List[Dict[str, Any]] = Field(default_factory=list)
@@ -363,8 +369,42 @@ async def send_receipt_email(request: Request, receipt_data: SendReceiptRequest)
     """
     Send a POS receipt email on demand.
     Used when the cashier types a customer email in the success modal after order completion.
+
+    When order_id is provided and belongs to the session tenant, registers the
+    send in invoice_email_deliveries (same table as ventas Ver historial).
+    Tracking is fail-open: email still sends if the insert fails.
     """
     session = require_valid_session(request)
+    tenant_id = session.tenant_id if session else None
+
+    delivery_id = None
+    pixel_url = None
+    tracked_order_id = receipt_data.order_id
+    if tracked_order_id and tenant_id:
+        try:
+            async with get_db_connection(use_transaction=False) as conn:
+                owned = await conn.fetchrow(
+                    "SELECT id FROM orders WHERE id = $1 AND tenant_id = $2",
+                    tracked_order_id,
+                    tenant_id,
+                )
+            if owned:
+                tracking_token = invoice_email_tracking_service.generate_tracking_token()
+                tracking_token_hash = invoice_email_tracking_service.hash_tracking_token(
+                    tracking_token
+                )
+                delivery_id = await invoice_email_tracking_service.create_pending_delivery(
+                    tenant_id=tenant_id,
+                    order_id=tracked_order_id,
+                    recipient_email=str(receipt_data.email),
+                    tracking_token_hash=tracking_token_hash,
+                )
+                if delivery_id is not None:
+                    pixel_url = invoice_email_tracking_service.build_pixel_url(tracking_token)
+        except Exception:
+            delivery_id = None
+            pixel_url = None
+
     success = await send_pos_receipt_email(
         customer_email=receipt_data.email,
         order_number=receipt_data.order_number,
@@ -372,7 +412,7 @@ async def send_receipt_email(request: Request, receipt_data: SendReceiptRequest)
         payment_method=receipt_data.payment_method,
         items=receipt_data.items,
         order_date=datetime.utcnow(),
-        tenant_id=str(session.tenant_id) if session and session.tenant_id else None,
+        tenant_id=str(tenant_id) if tenant_id else None,
         business_name=receipt_data.business_name,
         business_address=receipt_data.business_address,
         business_city=receipt_data.business_city,
@@ -389,7 +429,17 @@ async def send_receipt_email(request: Request, receipt_data: SendReceiptRequest)
         promo_savings=receipt_data.promo_savings,
         promo_breakdown=receipt_data.promo_breakdown,
         waro_redemption_summary=receipt_data.waro_redemption_summary,
+        tracking_pixel_url=pixel_url,
     )
+
+    if delivery_id is not None:
+        if success:
+            await invoice_email_tracking_service.mark_delivery_sent(delivery_id)
+        else:
+            await invoice_email_tracking_service.mark_delivery_failed(
+                delivery_id, failure_code="ses_rejected"
+            )
+
     return {"success": success}
 
 

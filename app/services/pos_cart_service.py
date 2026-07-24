@@ -15,6 +15,7 @@ from app.core.timezones import get_zoneinfo, local_date_for_tenant, resolve_tena
 from app.services.waros_service import evaluate_and_award
 from app.services.orders_service import _get_order_waro_redemption_summary
 from app.services.email_helpers import send_pos_receipt_email
+from app.services import invoice_email_tracking_service
 from app.services.cierre_service import (
     _get_tenant_tax_config,
     _post_order_gl_entry,
@@ -1787,6 +1788,81 @@ async def void_order_payment(
         raise APIError(f"Error al anular el pago: {e}", status_code=500)
 
 
+async def _send_tracked_pos_receipt_email(
+    *,
+    customer_email: str,
+    order_id: UUID,
+    tenant_id: UUID,
+    order_number: int,
+    total_amount: float,
+    payment_method: str,
+    items: List[dict],
+    order_date: Any,
+    business_name: Optional[str],
+    business_address: Optional[str],
+    business_city: Optional[str],
+    business_phone: Optional[str],
+    discount_amount: float,
+    subtotal: float,
+    promo_savings: float,
+    promo_breakdown: List[dict],
+    waro_redemption_summary: Optional[Dict[str, Any]],
+    tip_amount: float,
+) -> bool:
+    """Fire-and-forget receipt send with optional delivery tracking (#1769). Fail-open."""
+    delivery_id = None
+    pixel_url = None
+    try:
+        tracking_token = invoice_email_tracking_service.generate_tracking_token()
+        tracking_token_hash = invoice_email_tracking_service.hash_tracking_token(tracking_token)
+        delivery_id = await invoice_email_tracking_service.create_pending_delivery(
+            tenant_id=tenant_id,
+            order_id=order_id,
+            recipient_email=customer_email,
+            tracking_token_hash=tracking_token_hash,
+        )
+        if delivery_id is not None:
+            pixel_url = invoice_email_tracking_service.build_pixel_url(tracking_token)
+    except Exception as track_err:
+        logger.warning(f"POS receipt tracking skipped for order {order_id}: {track_err}")
+        delivery_id = None
+        pixel_url = None
+
+    success = await send_pos_receipt_email(
+        customer_email=customer_email,
+        order_number=order_number,
+        total_amount=total_amount,
+        payment_method=payment_method,
+        items=items,
+        order_date=order_date,
+        tenant_id=str(tenant_id),
+        business_name=business_name,
+        business_address=business_address,
+        business_city=business_city,
+        business_phone=business_phone,
+        discount_amount=discount_amount,
+        subtotal=subtotal,
+        promo_savings=promo_savings,
+        promo_breakdown=promo_breakdown,
+        waro_redemption_summary=waro_redemption_summary,
+        tip_amount=tip_amount,
+        tracking_pixel_url=pixel_url,
+    )
+
+    if delivery_id is not None:
+        try:
+            if success:
+                await invoice_email_tracking_service.mark_delivery_sent(delivery_id)
+            else:
+                await invoice_email_tracking_service.mark_delivery_failed(
+                    delivery_id, failure_code="ses_rejected"
+                )
+        except Exception as mark_err:
+            logger.warning(f"POS receipt delivery status update failed: {mark_err}")
+
+    return bool(success)
+
+
 async def complete_pos_order(
     request: Request,
     cart_id: UUID,
@@ -2625,14 +2701,15 @@ async def complete_pos_order(
                     else 0.0
                 )
                 asyncio.create_task(
-                    send_pos_receipt_email(
+                    _send_tracked_pos_receipt_email(
                         customer_email=receipt_email,
+                        order_id=_order_id,
+                        tenant_id=_tenant_id,
                         order_number=_order_number,
                         total_amount=_total_amount,
                         payment_method=payment_method,
                         items=_items,
                         order_date=_order_date,
-                        tenant_id=str(_tenant_id),
                         business_name=_business_name,
                         business_address=_business_address,
                         business_city=_business_city,
