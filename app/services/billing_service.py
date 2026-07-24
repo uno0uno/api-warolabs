@@ -1949,6 +1949,16 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
                 int(quota_counts["recipe_bases"] or 0),
                 effective_quotas["recipe_bases"],
             ),
+            # Scoped caps: limit is plan-level; used is always 0 here (count is
+            # per product/group). Front compares local editor counts to limit.
+            "recipe_lines_per_product": metric(
+                0,
+                effective_quotas["recipe_lines_per_product"],
+            ),
+            "modifier_options_per_group": metric(
+                0,
+                effective_quotas["modifier_options_per_group"],
+            ),
         },
     }
 
