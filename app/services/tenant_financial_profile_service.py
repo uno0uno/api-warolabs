@@ -23,6 +23,7 @@ from app.models.tenant_financial_profile import (
 
 PERMANENT_REASON = "PERMANENT_FINANCIAL_ACTIVITY"
 TEMPORARY_REASON = "TEMPORARY_OPERATIONAL_ACTIVITY"
+CONFIGURED_REASON = "FINANCIAL_PROFILE_CONFIGURED"
 
 _DEFAULT_PROFILE_INSERT = """
     INSERT INTO tenant_financial_profiles (
@@ -180,7 +181,6 @@ async def update_financial_profile(
     country_code, currency_code = validate_country_currency_pair(
         data.country_code, data.base_currency_code
     )
-    accounting_localization, document_mode, fiscal_provider = _financial_mode(country_code)
 
     async with get_db_connection() as conn:
         async with conn.transaction():
@@ -191,36 +191,24 @@ async def update_financial_profile(
             )
             if same_pair:
                 return current
-            if not current.eligibility.eligible:
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "code": "FINANCIAL_PROFILE_LOCKED",
-                        "lock_type": current.eligibility.lock_type,
-                        "reason_codes": current.eligibility.reason_codes,
-                    },
-                )
 
-            row = await conn.fetchrow(
-                """
-                UPDATE tenant_financial_profiles
-                SET country_code = $2,
-                    base_currency_code = $3,
-                    accounting_localization = $4,
-                    document_mode = $5,
-                    fiscal_provider = $6,
-                    selection_revision = selection_revision + 1,
-                    updated_at = NOW()
-                WHERE tenant_id = $1
-                RETURNING tenant_id, country_code, base_currency_code,
-                          accounting_localization, document_mode, fiscal_provider,
-                          selection_revision, created_at, updated_at
-                """,
-                tenant_id,
-                country_code,
-                currency_code,
-                accounting_localization,
-                document_mode,
-                fiscal_provider,
+            # Country/currency are immutable after first configure (onboarding /
+            # default profile). Stronger than activity-only eligibility locks.
+            lock_type = (
+                current.eligibility.lock_type
+                if not current.eligibility.eligible
+                else "configured"
             )
-            return _response(row, {"permanent_activity": False, "temporary_activity": False})
+            reason_codes = (
+                current.eligibility.reason_codes
+                if not current.eligibility.eligible
+                else [CONFIGURED_REASON]
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "FINANCIAL_PROFILE_LOCKED",
+                    "lock_type": lock_type,
+                    "reason_codes": reason_codes,
+                },
+            )

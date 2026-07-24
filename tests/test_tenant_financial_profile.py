@@ -126,27 +126,35 @@ def test_temporary_activity_uses_distinct_reversible_lock():
 
 
 @pytest.mark.asyncio
-async def test_update_locks_tenant_and_derives_global_mode_server_side():
+async def test_update_rejects_country_change_when_eligible_hard_lock():
     tenant_id = uuid4()
-    conn = FakeConn(tenant_id, update_row=_profile(tenant_id, "US", "USD"))
+    conn = FakeConn(tenant_id)
     request = object()
     session = SimpleNamespace(tenant_id=tenant_id)
 
     with patch.object(service, "require_valid_session", return_value=session), patch.object(
         service, "get_db_connection", side_effect=_db_context(conn)
     ):
-        result = await service.update_financial_profile(
-            request,
-            TenantFinancialProfileUpdate(country_code="US", base_currency_code="USD"),
-        )
+        with pytest.raises(HTTPException) as exc:
+            await service.update_financial_profile(
+                request,
+                TenantFinancialProfileUpdate(country_code="US", base_currency_code="USD"),
+            )
 
-    assert result.profile.accounting_localization == "WARO_HOSPITALITY_GLOBAL_V1"
-    assert result.profile.document_mode == "waro_commercial"
-    assert result.profile.fiscal_provider is None
-    assert result.capabilities.matias_dian is False
-    lock_query = next(query for query, _ in conn.queries if "FROM tenants WHERE id" in query)
-    assert "FOR UPDATE" in lock_query
-    assert all(args == (tenant_id,) for _, args in conn.queries[:-1])
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "FINANCIAL_PROFILE_LOCKED"
+    assert exc.value.detail["lock_type"] == "configured"
+    assert exc.value.detail["reason_codes"] == [service.CONFIGURED_REASON]
+    assert not any("UPDATE tenant_financial_profiles" in q for q, _ in conn.queries)
+
+
+@pytest.mark.asyncio
+async def test_financial_mode_derives_hospitality_for_non_co():
+    localization, document_mode, fiscal_provider = service._financial_mode("US")
+    assert localization == "WARO_HOSPITALITY_GLOBAL_V1"
+    assert document_mode == "waro_commercial"
+    assert fiscal_provider is None
+    assert service._financial_mode("CO") == ("WARO_CO_PUC_V1", "fiscal_integrated", "matias")
 
 
 @pytest.mark.asyncio

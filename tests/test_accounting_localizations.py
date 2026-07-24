@@ -38,7 +38,9 @@ def test_global_chart_is_managerial_and_contains_only_generic_role_accounts():
         ("2100", "Tax payable"),
         ("2200", "Customer advances"),
         ("4000", "Sales revenue"),
+        ("4010", "Other income"),
         ("5000", "Payroll expense"),
+        ("5100", "Bank fees expense"),
         ("6000", "Cost of goods sold"),
     ):
         assert f"'{code}', '{name}'" in MIGRATION_104
@@ -60,6 +62,8 @@ def test_semantic_roles_are_scoped_and_co_tax_stays_specific():
         "COGS",
         "PAYROLL_EXPENSE",
         "CUSTOMER_ADVANCES",
+        "BANK_FEES_EXPENSE",
+        "OTHER_INCOME",
     )
     for role in roles:
         assert f"'{role}'" in MIGRATION_104
@@ -67,6 +71,8 @@ def test_semantic_roles_are_scoped_and_co_tax_stays_specific():
     co_roles = co_roles.split("WITH role_codes(role, code) AS (", 1)[0]
     assert "('TAX_PAYABLE'" not in co_roles
     assert "('CUSTOMER_ADVANCES', '2810')" in co_roles
+    assert "('BANK_FEES_EXPENSE', '5100')" in MIGRATION_104
+    assert "('OTHER_INCOME', '4010')" in MIGRATION_104
 
 
 def test_seed_function_requires_profile_localization_and_is_tenant_scoped():
@@ -76,6 +82,17 @@ def test_seed_function_requires_profile_localization_and_is_tenant_scoped():
     assert "ON CONFLICT (tenant_id, code) DO NOTHING" in MIGRATION_104
     assert "parent_template.id = child_template.parent_template_id" in MIGRATION_104
     assert "parent_account.tenant_id = p_tenant_id" in MIGRATION_104
+
+
+def test_migration_117_extends_seed_with_hospitality_expense_maps():
+    migration_117 = (ROOT / "migrations/117_hospitality_finanzas_roles_expense_maps.sql").read_text()
+    assert "BANK_FEES_EXPENSE" in migration_117
+    assert "OTHER_INCOME" in migration_117
+    assert "expense_category_gl_mappings" in migration_117
+    assert "'SUPPLIES'" in migration_117 and "'6000'" in migration_117 and "'1000'" in migration_117
+    assert "WARO_CO_PUC_V1" in migration_117
+    assert "DELETE FROM" not in migration_117
+    assert "DROP TABLE" not in migration_117
 
 
 def test_historical_bootstrap_conflicts_are_localization_aware():
