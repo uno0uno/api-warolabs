@@ -260,6 +260,11 @@ STARTER_PLAN_MODULE_VALUES = frozenset({
     "menu",
     "operaciones",
     "abastecimiento",
+    "analitica",
+    "finanzas",
+    "integraciones",
+    "equipo",
+    "facturacion",
     "mi_negocio",
     "mi_plan",
 })
