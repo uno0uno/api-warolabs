@@ -328,6 +328,32 @@ async def require_colombia_payroll_capability(request) -> None:
         await ensure_colombia_payroll(conn, session.tenant_id)
 
 
+async def ensure_matias_dian(conn, tenant_id: UUID) -> None:
+    """Fail closed when capabilities.matias_dian is off (non-CO profiles)."""
+    enabled = await conn.fetchval(
+        """
+        SELECT country_code = 'CO'
+        FROM tenant_financial_profiles
+        WHERE tenant_id = $1
+        """,
+        tenant_id,
+    )
+    if not enabled:
+        raise APIError(
+            "La facturacion electronica Matias/DIAN no esta disponible para este perfil financiero",
+            status_code=409,
+            details={"code": "MATIAS_DIAN_NOT_AVAILABLE"},
+        )
+
+
+async def require_matias_dian_capability(request) -> None:
+    session = require_valid_session(request)
+    if not session.tenant_id:
+        raise APIError("Tenant ID is required", status_code=401)
+    async with get_db_connection() as conn:
+        await ensure_matias_dian(conn, session.tenant_id)
+
+
 async def list_role_bindings(conn, tenant_id: UUID) -> List[Dict[str, Any]]:
     rows = await conn.fetch(
         """
