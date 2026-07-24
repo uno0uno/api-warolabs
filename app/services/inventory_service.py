@@ -309,7 +309,10 @@ async def _get_inventory_movements_for_tenant(
     movement_type: Optional[str] = None,  # 'purchase', 'consumption', 'adjustment', etc.
     quantity_direction: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_field: str = "created_at",
+    sort_direction: str = "desc",
 ) -> Dict[str, Any]:
     """
     Get inventory movements history for a tenant.
@@ -323,6 +326,9 @@ async def _get_inventory_movements_for_tenant(
         quantity_direction: Filter by quantity sign ('positive' or 'negative')
         start_date: Filter by start date
         end_date: Filter by end date
+        search: Search by ingredient name or reference number
+        sort_field: Field to sort by
+        sort_direction: Sort direction ('asc' or 'desc')
 
     Returns:
         Dictionary with movements data
@@ -331,9 +337,19 @@ async def _get_inventory_movements_for_tenant(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
+        reference_number_expr = """
+            CASE
+                WHEN tim.reference_table = 'tenant_purchases' THEN
+                    (SELECT purchase_number FROM tenant_purchases WHERE id = tim.reference_id)
+                WHEN tim.reference_table = 'orders' THEN
+                    (SELECT order_number::text FROM orders WHERE id = tim.reference_id)
+                ELSE NULL
+            END
+        """
+
         async with get_db_connection() as conn:
             # Build query
-            base_query = """
+            base_query = f"""
                 SELECT
                     tim.id,
                     tim.ingredient_id,
@@ -351,14 +367,7 @@ async def _get_inventory_movements_for_tenant(
                     tim.created_by,
                     tim.created_at,
                     p.name as created_by_name,
-                    -- Get reference details if it's a purchase
-                    CASE
-                        WHEN tim.reference_table = 'tenant_purchases' THEN
-                            (SELECT purchase_number FROM tenant_purchases WHERE id = tim.reference_id)
-                        WHEN tim.reference_table = 'orders' THEN
-                            (SELECT order_number::text FROM orders WHERE id = tim.reference_id)
-                        ELSE NULL
-                    END as reference_number
+                    {reference_number_expr} as reference_number
                 FROM tenant_ingredient_movements tim
                 JOIN ingredients i ON tim.ingredient_id = i.id
                 LEFT JOIN profile p ON tim.created_by = p.id
@@ -368,6 +377,7 @@ async def _get_inventory_movements_for_tenant(
             count_query = """
                 SELECT COUNT(*) as total
                 FROM tenant_ingredient_movements tim
+                JOIN ingredients i ON tim.ingredient_id = i.id
                 WHERE tim.tenant_id = $1
             """
 
@@ -406,8 +416,34 @@ async def _get_inventory_movements_for_tenant(
                 params.append(end_date)
                 param_count += 1
 
+            if search:
+                search_clause = (
+                    f" AND (i.name ILIKE ${param_count}"
+                    f" OR COALESCE(({reference_number_expr}), '') ILIKE ${param_count})"
+                )
+                base_query += search_clause
+                count_query += search_clause
+                params.append(f"%{search}%")
+                param_count += 1
+
+            valid_sort_fields = {
+                "created_at": "tim.created_at",
+                "ingredient_name": "i.name",
+                "movement_type": "tim.movement_type",
+                "quantity_change": "tim.quantity_change",
+                "previous_stock": "tim.previous_stock",
+                "new_stock": "tim.new_stock",
+                "reference_number": "reference_number",
+                "created_by_name": "p.name",
+            }
+            sort_column = valid_sort_fields.get(sort_field, "tim.created_at")
+            direction = "ASC" if str(sort_direction).lower() == "asc" else "DESC"
+
             # Add sorting and pagination
-            base_query += f" ORDER BY tim.created_at DESC LIMIT ${param_count} OFFSET ${param_count + 1}"
+            base_query += (
+                f" ORDER BY {sort_column} {direction}"
+                f" LIMIT ${param_count} OFFSET ${param_count + 1}"
+            )
             params.extend([limit, offset])
 
             # Execute queries
@@ -461,7 +497,10 @@ async def get_inventory_movements(
     movement_type: Optional[str] = None,  # 'purchase', 'consumption', 'adjustment', etc.
     quantity_direction: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_field: str = "created_at",
+    sort_direction: str = "desc",
 ) -> Dict[str, Any]:
     """
     Get inventory movements history for the current session tenant.
@@ -477,7 +516,10 @@ async def get_inventory_movements(
         movement_type=movement_type,
         quantity_direction=quantity_direction,
         start_date=start_date,
-        end_date=end_date
+        end_date=end_date,
+        search=search,
+        sort_field=sort_field,
+        sort_direction=sort_direction,
     )
 
 
