@@ -21,6 +21,7 @@ from app.models.customer import (
     CustomerInsightsResponse,
     normalize_fiscal_id,
 )
+from typing import Optional
 from uuid import UUID
 import json
 import logging
@@ -37,7 +38,7 @@ def _fold_ascii(value: str) -> str:
     return "".join(c for c in normalized if unicodedata.category(c) != "Mn")
 
 
-def rank_anonymous_phone_profile(name: str | None, email: str | None) -> int:
+def rank_anonymous_phone_profile(name: Optional[str], email: Optional[str]) -> int:
     """Lower rank wins. Prefer shared Genérico over other profiles with phone 0000000000."""
     email_l = (email or "").strip().lower()
     if email_l == GENERIC_CUSTOMER_EMAIL:
