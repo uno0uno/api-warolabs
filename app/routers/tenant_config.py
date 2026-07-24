@@ -8,6 +8,7 @@ from asyncpg.exceptions import UniqueViolationError
 from fastapi import APIRouter, Depends, Request, Body, HTTPException
 from fastapi.responses import JSONResponse
 from app.core.permissions import Module, require_module
+from app.services.account_role_service import require_matias_dian_capability
 from app.services import tenant_config_service
 from app.models.tenant_public_profile import (
     TenantPublicProfileCreate,
@@ -416,7 +417,13 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
     return {'success': True, 'message': 'Datos fiscales actualizados'}
 
 
-@router.get("/dian-resolutions", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+_dian_matias_deps = [
+    Depends(require_module(Module.MI_NEGOCIO)),
+    Depends(require_matias_dian_capability),
+]
+
+
+@router.get("/dian-resolutions", dependencies=_dian_matias_deps)
 async def get_dian_resolutions(request: Request):
     """
     Get all DIAN resolutions for the active tenant.
@@ -463,7 +470,7 @@ async def get_dian_resolutions(request: Request):
     return {'success': True, 'data': resolutions}
 
 
-@router.post("/dian-resolutions", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+@router.post("/dian-resolutions", dependencies=_dian_matias_deps)
 async def create_dian_resolution(request: Request, data: dict = Body(...)):
     """Create a new DIAN resolution for the active tenant."""
     from app.core.middleware import require_valid_session
@@ -548,7 +555,7 @@ async def create_dian_resolution(request: Request, data: dict = Body(...)):
     return {'success': True, 'data': {'id': str(row_id)}, 'message': 'Resolución creada'}
 
 
-@router.put("/dian-resolutions/{resolution_id}", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+@router.put("/dian-resolutions/{resolution_id}", dependencies=_dian_matias_deps)
 async def update_dian_resolution(request: Request, resolution_id: str, data: dict = Body(...)):
     """Update an existing DIAN resolution."""
     from app.core.middleware import require_valid_session
@@ -632,7 +639,7 @@ async def update_dian_resolution(request: Request, resolution_id: str, data: dic
     return {'success': True, 'message': 'Resolución actualizada'}
 
 
-@router.patch("/dian-resolutions/{resolution_id}/toggle", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+@router.patch("/dian-resolutions/{resolution_id}/toggle", dependencies=_dian_matias_deps)
 async def toggle_dian_resolution(request: Request, resolution_id: str):
     """Toggle is_active for a DIAN resolution."""
     from app.core.middleware import require_valid_session
@@ -659,7 +666,7 @@ async def toggle_dian_resolution(request: Request, resolution_id: str):
     return {'success': True, 'data': {'is_active': new_state}}
 
 
-@router.get("/dian-resolutions/gaps", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+@router.get("/dian-resolutions/gaps", dependencies=_dian_matias_deps)
 async def list_dian_sequence_gaps(
     request: Request,
     resolution_id: Optional[str] = None,
@@ -735,7 +742,7 @@ async def list_dian_sequence_gaps(
     }
 
 
-@router.get("/dian-resolutions/gaps-summary", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+@router.get("/dian-resolutions/gaps-summary", dependencies=_dian_matias_deps)
 async def dian_gaps_summary(request: Request):
     """Aggregate gap counts for the active tenant (warocol.com#592).
 
@@ -771,7 +778,7 @@ async def dian_gaps_summary(request: Request):
     }
 
 
-@router.get("/facturacion-status", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+@router.get("/facturacion-status", dependencies=_dian_matias_deps)
 async def get_facturacion_status(request: Request):
     """
     Get Matias API connection status and last emitted document.

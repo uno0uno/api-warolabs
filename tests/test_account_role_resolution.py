@@ -14,6 +14,7 @@ from app.services.account_role_service import (
     AccountRole,
     MissingAccountRoleError,
     ensure_colombia_payroll,
+    ensure_matias_dian,
     resolve_account,
     resolve_payment_account,
 )
@@ -127,6 +128,27 @@ async def test_colombia_payroll_gate_rejects_global_profile():
 
     assert exc.value.status_code == 409
     assert exc.value.details["code"] == "COLOMBIA_PAYROLL_NOT_AVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_matias_dian_gate_rejects_global_profile():
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=False)
+
+    with pytest.raises(APIError) as exc:
+        await ensure_matias_dian(conn, uuid4())
+
+    assert exc.value.status_code == 409
+    assert exc.value.details["code"] == "MATIAS_DIAN_NOT_AVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_matias_dian_gate_allows_colombia_profile():
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=True)
+
+    await ensure_matias_dian(conn, uuid4())
+    conn.fetchval.assert_awaited_once()
 
 
 @pytest.mark.asyncio
