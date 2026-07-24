@@ -18,7 +18,7 @@ async def get_inventory_stock(
     limit: int = Query(250, ge=1, le=500, description="Items per page"),
     offset: int = Query(0, ge=0, description="Number of items to skip"),
     search: Optional[str] = Query(None, description="Search by ingredient name"),
-    status_filter: Optional[str] = Query('all', description="Filter by status: low, critical, ok, all"),
+    status_filter: Optional[str] = Query('all', description="Filter by status: low, critical, zero, ok, all"),
     category: Optional[str] = Query(None, description="Filter by ingredient category"),
     unit: Optional[str] = Query(None, description="Filter by ingredient unit"),
     sort_field: str = Query("current_stock", description="Field to sort by"),

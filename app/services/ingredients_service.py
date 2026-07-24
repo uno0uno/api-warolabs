@@ -607,6 +607,17 @@ async def create_tenant_ingredient(
     elif parent_uuid:
         await _copy_parent_purchase_units(conn, parent_uuid, ingredient_uuid)
 
+    # Ensure the article appears on stock list at 0 before any movement/adjustment.
+    await conn.execute(
+        """
+        INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock)
+        VALUES ($1, $2, 0, 0)
+        ON CONFLICT (tenant_id, ingredient_id) DO NOTHING
+        """,
+        tenant_id,
+        ingredient_uuid,
+    )
+
     return result
 
 

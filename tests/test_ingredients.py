@@ -6,7 +6,7 @@ Endpoints tested:
 - type×unit validation (create_tenant_ingredient)
 """
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -220,15 +220,21 @@ class TestVariantPurchaseUnitInheritance:
             parent_id=str(parent_id),
         )
 
-        result = await create_tenant_ingredient(conn, tenant_id, data)
+        with patch("app.services.ingredients_service.check_plan_quota_growth", new_callable=AsyncMock):
+            result = await create_tenant_ingredient(conn, tenant_id, data)
 
         assert result["parent_id"] == str(parent_id)
         conn.fetch.assert_awaited_once()
         assert conn.fetch.await_args.args[1] == parent_id
-        conn.execute.assert_awaited_once()
-        insert_args = conn.execute.await_args.args
-        assert insert_args[1] == ingredient_id
-        assert insert_args[2] == "kg"
+        execute_sqls = [call.args[0] for call in conn.execute.await_args_list]
+        assert any("ingredient_purchase_units" in sql for sql in execute_sqls)
+        assert any("tenant_inventory" in sql for sql in execute_sqls)
+        purchase_call = next(
+            call for call in conn.execute.await_args_list
+            if "ingredient_purchase_units" in call.args[0]
+        )
+        assert purchase_call.args[1] == ingredient_id
+        assert purchase_call.args[2] == "kg"
 
     @pytest.mark.asyncio
     async def test_create_variant_parent_without_purchase_units(self):
@@ -263,10 +269,13 @@ class TestVariantPurchaseUnitInheritance:
             parent_id=str(parent_id),
         )
 
-        await create_tenant_ingredient(conn, tenant_id, data)
+        with patch("app.services.ingredients_service.check_plan_quota_growth", new_callable=AsyncMock):
+            await create_tenant_ingredient(conn, tenant_id, data)
 
         conn.fetch.assert_awaited_once()
-        conn.execute.assert_not_awaited()
+        execute_sqls = [call.args[0] for call in conn.execute.await_args_list]
+        assert not any("ingredient_purchase_units" in sql for sql in execute_sqls)
+        assert any("tenant_inventory" in sql for sql in execute_sqls)
 
     @pytest.mark.asyncio
     async def test_create_variant_explicit_purchase_units_skip_inheritance(self):
@@ -302,11 +311,51 @@ class TestVariantPurchaseUnitInheritance:
             purchase_units=[PurchaseUnitInput(purchase_unit="libra", is_default=True)],
         )
 
-        await create_tenant_ingredient(conn, tenant_id, data)
+        with patch("app.services.ingredients_service.check_plan_quota_growth", new_callable=AsyncMock):
+            await create_tenant_ingredient(conn, tenant_id, data)
 
         conn.fetch.assert_not_awaited()
-        conn.execute.assert_awaited_once()
-        assert conn.execute.await_args.args[2] == "libra"
+        execute_sqls = [call.args[0] for call in conn.execute.await_args_list]
+        assert any("tenant_inventory" in sql for sql in execute_sqls)
+        purchase_call = next(
+            call for call in conn.execute.await_args_list
+            if "ingredient_purchase_units" in call.args[0]
+        )
+        assert purchase_call.args[2] == "libra"
+
+    @pytest.mark.asyncio
+    async def test_create_tenant_ingredient_seeds_zero_inventory(self):
+        tenant_id = uuid4()
+        ingredient_id = uuid4()
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(
+            return_value={
+                "id": str(ingredient_id),
+                "name": "Sal",
+                "unit": "gr",
+                "type": "food",
+                "category": None,
+                "warehouse_category_id": None,
+                "costo_unitario": None,
+                "parent_id": None,
+                "tenant_id": str(tenant_id),
+                "is_resale": False,
+                "unit_weight_gr": None,
+                "unit_weight_unit": "gr",
+                "created_at": None,
+            }
+        )
+        data = TenantIngredientCreate(name="Sal", unit="gr", type="food")
+
+        with patch("app.services.ingredients_service.check_plan_quota_growth", new_callable=AsyncMock):
+            await create_tenant_ingredient(conn, tenant_id, data)
+
+        inventory_call = next(
+            call for call in conn.execute.await_args_list
+            if "tenant_inventory" in call.args[0]
+        )
+        assert inventory_call.args[1] == tenant_id
+        assert inventory_call.args[2] == ingredient_id
 
 
 class TestIngredientCategorySearch:
