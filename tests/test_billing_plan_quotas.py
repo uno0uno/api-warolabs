@@ -102,6 +102,8 @@ async def test_remaining_usage_exposes_quota_usage_and_internal_roles_only():
                 "active_tables_including_bar": 7,
                 "active_qr_tables": 6,
                 "completed_online_orders_per_month": 28,
+                "menu_products": 9,
+                "modifier_groups": 1,
             },
         ]
     )
@@ -120,6 +122,15 @@ async def test_remaining_usage_exposes_quota_usage_and_internal_roles_only():
     assert usage["quota_usage"]["completed_online_orders_per_month"]["used"] == 28
     assert usage["quota_usage"]["electronic_invoices_per_period"]["used"] == 12
     assert usage["quota_usage"]["electronic_invoices_per_period"]["limit"] == 200
+    assert usage["quota_usage"]["menu_products"] == {
+        "used": 9,
+        "limit": 1_000_000,
+        "remaining": 1_000_000 - 9,
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+    }
+    assert usage["quota_usage"]["modifier_groups"]["used"] == 1
+    assert usage["quota_usage"]["modifier_groups"]["limit"] == 1_000_000
 
     quota_query_args = conn.fetchrow.await_args_list[1].args
     assert quota_query_args[4] == list(LEGACY_INTERNAL_TEAM_ROLES)
@@ -151,6 +162,8 @@ async def test_remaining_usage_exposes_effective_quota_override_state():
                 "active_tables_including_bar": 7,
                 "active_qr_tables": 6,
                 "completed_online_orders_per_month": 28,
+                "menu_products": 0,
+                "modifier_groups": 0,
             },
         ]
     )
@@ -205,6 +218,8 @@ async def test_remaining_usage_exposes_disabled_override_as_unlimited():
                 "active_tables_including_bar": 7,
                 "active_qr_tables": 6,
                 "completed_online_orders_per_month": 301,
+                "menu_products": 0,
+                "modifier_groups": 0,
             },
         ]
     )

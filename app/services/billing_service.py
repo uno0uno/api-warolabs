@@ -1677,11 +1677,13 @@ async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
 
 async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
     """
-    Return current-period remaining usage for scans and electronic invoices.
+    Return current-period remaining usage for scans, electronic invoices, and
+    operational/catalog quotas.
 
-    The measurement window is the tenant subscription period. Electronic invoice
-    quota is only exposed for the paid FE plan; other plans intentionally report
-    0/0/0 to avoid implying an included entitlement.
+    Paid tenants use the subscription period. Starter tenants without a
+    subscription row use the calendar month and the active `starter` plan
+    catalog (warocol.com#1796). Electronic invoice quota is only exposed for
+    the paid FE plan; other plans intentionally report 0/0/0.
     """
     row = await conn.fetchrow("""
         SELECT
@@ -1701,7 +1703,33 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
         WHERE ts.tenant_id = $1
     """, tenant_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Subscription not found")
+        effective_slug = await get_effective_plan_slug(conn, tenant_id)
+        if effective_slug != STARTER_PLAN_SLUG:
+            raise HTTPException(status_code=404, detail="Subscription not found")
+        row = await conn.fetchrow(
+            """
+            SELECT
+                date_trunc('month', now()) AS current_period_start,
+                date_trunc('month', now()) + interval '1 month' AS current_period_end,
+                sp.slug AS plan_slug,
+                sp.features AS plan_features,
+                sp.scan_limit AS plan_scan_limit,
+                COALESCE(su.scans_used, 0) AS scans_used,
+                COALESCE(su.scans_limit, sp.scan_limit) AS scans_limit
+            FROM subscription_plans sp
+            LEFT JOIN scan_usage su
+                ON su.tenant_id = $1
+               AND su.period_start <= now()
+               AND su.period_end > now()
+            WHERE sp.slug = $2
+              AND sp.is_active = true
+            LIMIT 1
+            """,
+            tenant_id,
+            STARTER_PLAN_SLUG,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Subscription not found")
 
     period_start = row["current_period_start"]
     period_end = row["current_period_end"]
@@ -1797,7 +1825,17 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
                   AND o.status = 'completed'
                   AND o.order_date >= $2
                   AND o.order_date < $3
-            ) AS completed_online_orders_per_month
+            ) AS completed_online_orders_per_month,
+            (
+                SELECT COUNT(*)
+                FROM product p
+                WHERE p.tenant_id = $1
+            ) AS menu_products,
+            (
+                SELECT COUNT(*)
+                FROM modifier_groups mg
+                WHERE mg.tenant_id = $1
+            ) AS modifier_groups
     """, tenant_id, period_start, period_end, list(LEGACY_INTERNAL_TEAM_ROLES))
 
     def metric(used: int, quota: EffectiveQuota) -> Dict[str, Any]:
@@ -1858,6 +1896,14 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             "electronic_invoices_per_period": metric(
                 invoice_used,
                 effective_quotas["electronic_invoices_per_period"],
+            ),
+            "menu_products": metric(
+                int(quota_counts["menu_products"] or 0),
+                effective_quotas["menu_products"],
+            ),
+            "modifier_groups": metric(
+                int(quota_counts["modifier_groups"] or 0),
+                effective_quotas["modifier_groups"],
             ),
         },
     }
