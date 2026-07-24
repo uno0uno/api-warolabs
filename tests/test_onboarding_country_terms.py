@@ -55,6 +55,7 @@ async def test_initial_selection_atomically_promotes_identity_to_billing_boundar
     ])
     conn.execute = AsyncMock(side_effect=[
         "UPDATE 1",
+        "SELECT 1",
         "UPDATE 1",
         "UPDATE 1",
     ])
@@ -82,8 +83,10 @@ async def test_initial_selection_atomically_promotes_identity_to_billing_boundar
     statements = [" ".join(call.args[0].split()) for call in conn.execute.await_args_list]
     assert "UPDATE tenants SET name" in statements[0]
     assert conn.execute.await_args_list[0].args[2] == "Cafe Central"
-    assert "SET role = 'superuser', is_active = true" in statements[1]
-    assert "SET lifecycle_status = 'active'" in statements[2]
+    assert "seed_tenant_accounts($1)" in statements[1]
+    assert conn.execute.await_args_list[1].args[1] == tenant_id
+    assert "SET role = 'superuser', is_active = true" in statements[2]
+    assert "SET lifecycle_status = 'active'" in statements[3]
 
 
 @pytest.mark.asyncio
