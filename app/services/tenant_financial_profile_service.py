@@ -132,6 +132,11 @@ def _response(profile_row: Any, blockers: Any) -> TenantFinancialProfileResponse
     )
 
 
+async def seed_tenant_accounts(conn, tenant_id) -> None:
+    """Idempotent chart seed from tenant_financial_profiles.accounting_localization."""
+    await conn.execute("SELECT seed_tenant_accounts($1)", tenant_id)
+
+
 async def build_financial_response(
     conn, tenant_id, *, lock_tenant: bool = False
 ) -> TenantFinancialProfileResponse:
@@ -143,7 +148,9 @@ async def build_financial_response(
         if not tenant:
             raise HTTPException(status_code=404, detail="Tenant not found")
 
-    await conn.execute(_DEFAULT_PROFILE_INSERT, tenant_id)
+    insert_status = await conn.execute(_DEFAULT_PROFILE_INSERT, tenant_id)
+    if insert_status == "INSERT 0 1":
+        await seed_tenant_accounts(conn, tenant_id)
     suffix = " FOR UPDATE" if lock_tenant else ""
     profile = await conn.fetchrow(
         """
@@ -223,4 +230,5 @@ async def update_financial_profile(
                 document_mode,
                 fiscal_provider,
             )
+            await seed_tenant_accounts(conn, tenant_id)
             return _response(row, {"permanent_activity": False, "temporary_activity": False})
