@@ -78,6 +78,10 @@ async def test_remaining_usage_non_fe_plan_reports_zero_invoice_quota():
     assert result["quota_usage"]["menu_categories"]["limit"] == 1_000_000
     assert result["quota_usage"]["modifier_groups"]["limit"] == 1_000_000
     assert result["quota_usage"]["recipe_bases"]["limit"] == 1_000_000
+    assert result["quota_usage"]["recipe_lines_per_product"]["used"] == 0
+    assert result["quota_usage"]["recipe_lines_per_product"]["limit"] == 100
+    assert result["quota_usage"]["modifier_options_per_group"]["used"] == 0
+    assert result["quota_usage"]["modifier_options_per_group"]["limit"] == 50
     subscription_query = conn.fetchrow.await_args_list[0].args[0]
     assert "su.period_start <= now()" in subscription_query
     assert "su.period_end > now()" in subscription_query
@@ -254,3 +258,12 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
     assert usage["quota_usage"]["modifier_groups"]["remaining"] == 0
     assert usage["quota_usage"]["recipe_bases"]["used"] == 5
     assert usage["quota_usage"]["recipe_bases"]["remaining"] == 0
+    assert usage["quota_usage"]["recipe_lines_per_product"] == {
+        "used": 0,
+        "limit": 4,
+        "remaining": 4,
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+    }
+    assert usage["quota_usage"]["modifier_options_per_group"]["limit"] == 6
+    assert usage["quota_usage"]["modifier_options_per_group"]["used"] == 0
