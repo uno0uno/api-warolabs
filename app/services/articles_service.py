@@ -18,7 +18,8 @@ async def get_articles_list(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
-    tag: Optional[str] = None
+    tag: Optional[str] = None,
+    pillar: Optional[str] = None
 ) -> ArticlesListResponse:
     """
     Get published articles list for a tenant (public endpoint for blog).
@@ -47,6 +48,11 @@ async def get_articles_list(
                 where_clauses.append(f"a.tags ILIKE ${param_count}")
                 params.append(f"%{tag}%")
 
+            if pillar:
+                param_count += 1
+                where_clauses.append(f"a.pillar = ${param_count}")
+                params.append(pillar)
+
             where_sql = " AND ".join(where_clauses)
 
             # Count total
@@ -73,6 +79,7 @@ async def get_articles_list(
                     a.thumbnail,
                     a.cover,
                     a.tags,
+                    a.pillar,
                     COALESCE(a.views, 0) as views,
                     a.published,
                     a.created_at,
@@ -98,6 +105,7 @@ async def get_articles_list(
                     thumbnail=row['thumbnail'],
                     cover=row['cover'],
                     tags=row['tags'],
+                    pillar=row['pillar'],
                     views=row['views'],
                     published=row['published'],
                     created_at=row['created_at'],
@@ -148,6 +156,7 @@ async def get_article_by_slug(
                     a.thumbnail,
                     a.cover,
                     a.tags,
+                    a.pillar,
                     COALESCE(a.views, 0) as views,
                     a.published,
                     a.draft,
@@ -214,6 +223,7 @@ async def get_article_by_slug(
                 thumbnail=row['thumbnail'],
                 cover=row['cover'],
                 tags=row['tags'],
+                pillar=row['pillar'],
                 views=row['views'] + (1 if increment_views else 0),
                 published=row['published'],
                 draft=row['draft'],
@@ -278,6 +288,7 @@ async def get_related_articles(
                     a.thumbnail,
                     a.cover,
                     a.tags,
+                    a.pillar,
                     COALESCE(a.views, 0) as views,
                     a.published,
                     a.created_at,
@@ -306,6 +317,7 @@ async def get_related_articles(
                     thumbnail=row['thumbnail'],
                     cover=row['cover'],
                     tags=row['tags'],
+                    pillar=row['pillar'],
                     views=row['views'],
                     published=row['published'],
                     created_at=row['created_at'],
