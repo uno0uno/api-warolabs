@@ -9,6 +9,7 @@ from fastapi import Request, Response, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
+from app.services.billing_service import check_plan_quota_period
 import logging
 
 logger = logging.getLogger(__name__)
@@ -657,6 +658,9 @@ async def create_adjustment(
         async with get_db_connection() as conn:
             # Start transaction
             async with conn.transaction():
+                await check_plan_quota_period(
+                    conn, tenant_id, "stock_adjustments_per_period"
+                )
                 # Get ingredient base unit
                 ingredient_query = """
                     SELECT unit

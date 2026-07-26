@@ -7,6 +7,7 @@ from fastapi import Request, Response, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
+from app.services.billing_service import check_plan_quota_growth
 from app.models.supplier import (
     Supplier,
     SupplierCreate,
@@ -278,6 +279,7 @@ async def create_supplier(
 
         # Create supplier and payment agreements in transaction
         async with get_db_connection() as conn:
+            await check_plan_quota_growth(conn, tenant_id, "tenant_suppliers")
             # Insert new supplier
             new_supplier = await conn.fetchrow("""
                 INSERT INTO tenant_suppliers (

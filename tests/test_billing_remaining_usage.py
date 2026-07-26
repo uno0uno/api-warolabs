@@ -36,6 +36,9 @@ def _quota_counts_row(**overrides):
         "completed_online_orders_per_month": 0,
         "menu_products": 0,
         "menu_categories": 0,
+        "tenant_suppliers": 0,
+        "direct_purchases_per_period": 0,
+        "stock_adjustments_per_period": 0,
         "modifier_groups": 0,
         "recipe_bases": 0,
     }
@@ -76,6 +79,9 @@ async def test_remaining_usage_non_fe_plan_reports_zero_invoice_quota():
     }
     assert result["quota_usage"]["menu_products"]["limit"] == 1_000_000
     assert result["quota_usage"]["menu_categories"]["limit"] == 1_000_000
+    assert result["quota_usage"]["tenant_suppliers"]["limit"] == 1_000_000
+    assert result["quota_usage"]["direct_purchases_per_period"]["limit"] == 1_000_000
+    assert result["quota_usage"]["stock_adjustments_per_period"]["limit"] == 1_000_000
     assert result["quota_usage"]["modifier_groups"]["limit"] == 1_000_000
     assert result["quota_usage"]["recipe_bases"]["limit"] == 1_000_000
     assert result["quota_usage"]["recipe_lines_per_product"]["used"] == 0
@@ -233,6 +239,9 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
                 "completed_online_orders_per_month": 5,
                 "menu_products": 10,
                 "menu_categories": 5,
+                "tenant_suppliers": 3,
+                "direct_purchases_per_period": 15,
+                "stock_adjustments_per_period": 20,
                 "modifier_groups": 4,
                 "recipe_bases": 5,
             },
@@ -254,6 +263,19 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
     }
     assert usage["quota_usage"]["menu_categories"]["used"] == 5
     assert usage["quota_usage"]["menu_categories"]["remaining"] == 0
+    assert usage["quota_usage"]["tenant_suppliers"] == {
+        "used": 3,
+        "limit": 3,
+        "remaining": 0,
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+    }
+    assert usage["quota_usage"]["direct_purchases_per_period"]["used"] == 15
+    assert usage["quota_usage"]["direct_purchases_per_period"]["limit"] == 15
+    assert usage["quota_usage"]["direct_purchases_per_period"]["remaining"] == 0
+    assert usage["quota_usage"]["stock_adjustments_per_period"]["used"] == 20
+    assert usage["quota_usage"]["stock_adjustments_per_period"]["limit"] == 20
+    assert usage["quota_usage"]["stock_adjustments_per_period"]["remaining"] == 0
     assert usage["quota_usage"]["modifier_groups"]["used"] == 4
     assert usage["quota_usage"]["modifier_groups"]["remaining"] == 0
     assert usage["quota_usage"]["recipe_bases"]["used"] == 5
@@ -267,3 +289,9 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
     }
     assert usage["quota_usage"]["modifier_options_per_group"]["limit"] == 6
     assert usage["quota_usage"]["modifier_options_per_group"]["used"] == 0
+
+    counts_query = conn.fetchrow.await_args_list[-1].args[0]
+    assert "tenant_suppliers" in counts_query
+    assert "is_direct_entry = TRUE" in counts_query
+    assert "movement_type = 'adjustment'" in counts_query
+    assert "tenant_ingredient_movements" in counts_query

@@ -40,6 +40,9 @@ STARTER_OPERATIONAL_QUOTAS = {
     "menu_products": 10,
     "menu_categories": 5,
     "tenant_ingredients": 5,
+    "tenant_suppliers": 3,
+    "direct_purchases_per_period": 15,
+    "stock_adjustments_per_period": 20,
     "modifier_groups": 4,
     "recipe_bases": 5,
     "recipe_lines_per_product": 4,
@@ -57,6 +60,9 @@ QUOTA_KEYS = (
     "menu_products",
     "menu_categories",
     "tenant_ingredients",
+    "tenant_suppliers",
+    "direct_purchases_per_period",
+    "stock_adjustments_per_period",
     "modifier_groups",
     "recipe_bases",
     "recipe_lines_per_product",
@@ -74,6 +80,9 @@ BASE_OPERATIONAL_QUOTAS = {
     "menu_products": CATALOG_UNLIMITED,
     "menu_categories": CATALOG_UNLIMITED,
     "tenant_ingredients": CATALOG_UNLIMITED,
+    "tenant_suppliers": CATALOG_UNLIMITED,
+    "direct_purchases_per_period": CATALOG_UNLIMITED,
+    "stock_adjustments_per_period": CATALOG_UNLIMITED,
     "modifier_groups": CATALOG_UNLIMITED,
     "recipe_bases": CATALOG_UNLIMITED,
     "recipe_lines_per_product": 100,
@@ -109,8 +118,13 @@ ENFORCEABLE_QUOTA_RESOURCES = {
     "menu_products",
     "menu_categories",
     "tenant_ingredients",
+    "tenant_suppliers",
     "modifier_groups",
     "recipe_bases",
+}
+PERIOD_QUOTA_RESOURCES = {
+    "direct_purchases_per_period",
+    "stock_adjustments_per_period",
 }
 SCOPED_QUOTA_RESOURCES = {
     "recipe_lines_per_product",
@@ -135,6 +149,15 @@ class EffectiveQuota:
 
 @dataclass(frozen=True)
 class OnlineOrderQuotaState:
+    plan_slug: str
+    quota: EffectiveQuota
+    period_start: datetime
+    period_end: datetime
+    used: int
+
+
+@dataclass(frozen=True)
+class PeriodQuotaState:
     plan_slug: str
     quota: EffectiveQuota
     period_start: datetime
@@ -484,6 +507,182 @@ async def check_plan_quota_scoped(
             "plan_limit": quota.plan_limit,
             "plan_slug": plan["plan_slug"],
             "override": _quota_override_payload(quota),
+            "upgrade_url": QUOTA_UPGRADE_URL,
+            "message": QUOTA_CONTACT_MESSAGE,
+        },
+    )
+
+
+async def _fetch_period_quota_context(conn, tenant_id: UUID, resource: str):
+    """Plan + billing-period window for period-based operational quotas."""
+    plan = await conn.fetchrow(
+        """
+        SELECT
+            sp.slug AS plan_slug,
+            sp.features AS plan_features,
+            ts.current_period_start,
+            ts.current_period_end,
+            tq.id AS override_id,
+            tq.limit_override,
+            COALESCE(tq.disabled, false) AS override_disabled,
+            tq.reason AS override_reason
+        FROM tenant_subscriptions ts
+        JOIN subscription_plans sp ON sp.id = ts.plan_id
+        LEFT JOIN tenant_quota_overrides tq
+          ON tq.tenant_id = ts.tenant_id
+         AND tq.resource = $2
+        WHERE ts.tenant_id = $1
+          AND ts.status IN ('active', 'past_due')
+          AND ts.current_period_end > now()
+        ORDER BY ts.current_period_end DESC
+        LIMIT 1
+        """,
+        tenant_id,
+        resource,
+    )
+    if plan:
+        return plan
+
+    effective_slug = await get_effective_plan_slug(conn, tenant_id)
+    if effective_slug != STARTER_PLAN_SLUG:
+        return None
+
+    return await conn.fetchrow(
+        """
+        SELECT
+            sp.slug AS plan_slug,
+            sp.features AS plan_features,
+            date_trunc('month', now()) AS current_period_start,
+            date_trunc('month', now()) + interval '1 month' AS current_period_end,
+            tq.id AS override_id,
+            tq.limit_override,
+            COALESCE(tq.disabled, false) AS override_disabled,
+            tq.reason AS override_reason
+        FROM subscription_plans sp
+        LEFT JOIN tenant_quota_overrides tq
+          ON tq.tenant_id = $1
+         AND tq.resource = $2
+        WHERE sp.slug = $3
+          AND sp.is_active = true
+        LIMIT 1
+        """,
+        tenant_id,
+        resource,
+        STARTER_PLAN_SLUG,
+    )
+
+
+async def _count_period_quota_usage(
+    conn,
+    tenant_id: UUID,
+    resource: str,
+    period_start: datetime,
+    period_end: datetime,
+) -> int:
+    if resource == "direct_purchases_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_purchases
+            WHERE tenant_id = $1
+              AND is_direct_entry = TRUE
+              AND created_at >= $2
+              AND created_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "stock_adjustments_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_ingredient_movements
+            WHERE tenant_id = $1
+              AND movement_type = 'adjustment'
+              AND created_at >= $2
+              AND created_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    else:
+        raise ValueError(f"Unsupported period quota resource: {resource}")
+
+    return int(value or 0)
+
+
+async def _get_period_quota_state(
+    conn,
+    tenant_id: UUID,
+    resource: str,
+) -> Optional[PeriodQuotaState]:
+    if resource not in PERIOD_QUOTA_RESOURCES:
+        raise ValueError(f"Unsupported period quota resource: {resource}")
+
+    plan = await _fetch_period_quota_context(conn, tenant_id, resource)
+    if not plan:
+        return None
+
+    quotas = _normalize_plan_quotas(plan["plan_slug"], plan["plan_features"])
+    quota = _effective_quota_from_row(resource, quotas.get(resource, 0), plan)
+    if quota.limit is None:
+        return None
+
+    period_start = plan["current_period_start"]
+    period_end = plan["current_period_end"]
+    used = await _count_period_quota_usage(
+        conn,
+        tenant_id,
+        resource,
+        period_start,
+        period_end,
+    )
+    return PeriodQuotaState(
+        plan_slug=plan["plan_slug"],
+        quota=quota,
+        period_start=period_start,
+        period_end=period_end,
+        used=used,
+    )
+
+
+async def check_plan_quota_period(conn, tenant_id: UUID, resource: str) -> None:
+    """
+    Block create once the tenant reaches a period-based operational quota.
+
+    Usage window = current subscription period (calendar month for starter
+    without a subscription row). Same 429 quota_exceeded payload as growth.
+    """
+    state = await _get_period_quota_state(conn, tenant_id, resource)
+    if state is None:
+        return
+
+    if state.used < state.quota.limit:
+        return
+
+    _log_quota_block(
+        tenant_id=tenant_id,
+        resource=resource,
+        used=state.used,
+        quota=state.quota,
+        plan_slug=state.plan_slug,
+    )
+    raise APIError(
+        "Límite del plan alcanzado",
+        status_code=429,
+        details={
+            "code": "quota_exceeded",
+            "error": "quota_exceeded",
+            "resource": resource,
+            "used": state.used,
+            "limit": state.quota.limit,
+            "plan_limit": state.quota.plan_limit,
+            "plan_slug": state.plan_slug,
+            "override": _quota_override_payload(state.quota),
+            "period_start": state.period_start.isoformat(),
+            "period_end": state.period_end.isoformat(),
             "upgrade_url": QUOTA_UPGRADE_URL,
             "message": QUOTA_CONTACT_MESSAGE,
         },
@@ -887,6 +1086,16 @@ async def _count_quota_resource_usage(
             """
             SELECT COUNT(*)
             FROM ingredients
+            WHERE tenant_id = $1
+              AND is_active = TRUE
+            """,
+            tenant_id,
+        )
+    elif resource == "tenant_suppliers":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_suppliers
             WHERE tenant_id = $1
               AND is_active = TRUE
             """,
@@ -1864,6 +2073,28 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             ) AS menu_categories,
             (
                 SELECT COUNT(*)
+                FROM tenant_suppliers ts
+                WHERE ts.tenant_id = $1
+                  AND ts.is_active = TRUE
+            ) AS tenant_suppliers,
+            (
+                SELECT COUNT(*)
+                FROM tenant_purchases tp
+                WHERE tp.tenant_id = $1
+                  AND tp.is_direct_entry = TRUE
+                  AND tp.created_at >= $2
+                  AND tp.created_at < $3
+            ) AS direct_purchases_per_period,
+            (
+                SELECT COUNT(*)
+                FROM tenant_ingredient_movements tim
+                WHERE tim.tenant_id = $1
+                  AND tim.movement_type = 'adjustment'
+                  AND tim.created_at >= $2
+                  AND tim.created_at < $3
+            ) AS stock_adjustments_per_period,
+            (
+                SELECT COUNT(*)
                 FROM modifier_groups mg
                 WHERE mg.tenant_id = $1
             ) AS modifier_groups,
@@ -1940,6 +2171,18 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             "menu_categories": metric(
                 int(quota_counts["menu_categories"] or 0),
                 effective_quotas["menu_categories"],
+            ),
+            "tenant_suppliers": metric(
+                int(quota_counts["tenant_suppliers"] or 0),
+                effective_quotas["tenant_suppliers"],
+            ),
+            "direct_purchases_per_period": metric(
+                int(quota_counts["direct_purchases_per_period"] or 0),
+                effective_quotas["direct_purchases_per_period"],
+            ),
+            "stock_adjustments_per_period": metric(
+                int(quota_counts["stock_adjustments_per_period"] or 0),
+                effective_quotas["stock_adjustments_per_period"],
             ),
             "modifier_groups": metric(
                 int(quota_counts["modifier_groups"] or 0),
