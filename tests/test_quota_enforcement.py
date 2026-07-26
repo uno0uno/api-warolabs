@@ -1119,6 +1119,7 @@ async def test_stock_adjustments_period_quota_blocks_at_limit():
     count_args = conn.fetchval.await_args.args
     assert "FROM tenant_ingredient_movements" in count_args[0]
     assert "movement_type = 'adjustment'" in count_args[0]
+    assert "COALESCE(reference_table, '') <> 'tenant_purchases'" in count_args[0]
     assert count_args[1:] == (tenant_id, period_start, period_end)
 
 

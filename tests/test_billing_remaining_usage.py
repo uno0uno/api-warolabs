@@ -295,3 +295,4 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
     assert "is_direct_entry = TRUE" in counts_query
     assert "movement_type = 'adjustment'" in counts_query
     assert "tenant_ingredient_movements" in counts_query
+    assert "COALESCE(tim.reference_table, '') <> 'tenant_purchases'" in counts_query

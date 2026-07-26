@@ -600,6 +600,7 @@ async def _count_period_quota_usage(
             FROM tenant_ingredient_movements
             WHERE tenant_id = $1
               AND movement_type = 'adjustment'
+              AND COALESCE(reference_table, '') <> 'tenant_purchases'
               AND created_at >= $2
               AND created_at < $3
             """,
@@ -2090,6 +2091,7 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
                 FROM tenant_ingredient_movements tim
                 WHERE tim.tenant_id = $1
                   AND tim.movement_type = 'adjustment'
+                  AND COALESCE(tim.reference_table, '') <> 'tenant_purchases'
                   AND tim.created_at >= $2
                   AND tim.created_at < $3
             ) AS stock_adjustments_per_period,
