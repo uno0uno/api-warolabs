@@ -1004,3 +1004,132 @@ async def test_require_module_allows_finanzas_for_starter_plan():
         db_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
         await dep(request)
 
+
+
+def _period_plan_row(resource: str, limit: int, *, period_start=None, period_end=None):
+    return {
+        "plan_slug": "starter",
+        "plan_features": {"quotas": {resource: limit}},
+        "current_period_start": period_start or datetime(2026, 7, 1, tzinfo=timezone.utc),
+        "current_period_end": period_end or datetime(2026, 8, 1, tzinfo=timezone.utc),
+        "override_id": None,
+        "limit_override": None,
+        "override_disabled": False,
+        "override_reason": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_starter_tenant_suppliers_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("tenant_suppliers", 3))
+    conn.fetchval = AsyncMock(return_value=3)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(conn, tenant_id, "tenant_suppliers")
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["resource"] == "tenant_suppliers"
+    assert exc.value.details["used"] == 3
+    assert exc.value.details["limit"] == 3
+    count_sql = conn.fetchval.await_args.args[0]
+    assert "FROM tenant_suppliers" in count_sql
+    assert "is_active = TRUE" in count_sql
+
+
+@pytest.mark.asyncio
+async def test_starter_tenant_suppliers_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("tenant_suppliers", 3))
+    conn.fetchval = AsyncMock(return_value=2)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "tenant_suppliers")
+
+
+@pytest.mark.asyncio
+async def test_direct_purchases_period_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "direct_purchases_per_period", 15, period_start=period_start, period_end=period_end
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=15)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_period(
+            conn, tenant_id, "direct_purchases_per_period"
+        )
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["resource"] == "direct_purchases_per_period"
+    assert exc.value.details["used"] == 15
+    assert exc.value.details["limit"] == 15
+    assert exc.value.details["period_start"] == period_start.isoformat()
+    assert exc.value.details["period_end"] == period_end.isoformat()
+    count_args = conn.fetchval.await_args.args
+    assert "FROM tenant_purchases" in count_args[0]
+    assert "is_direct_entry = TRUE" in count_args[0]
+    assert "created_at >= $2" in count_args[0]
+    assert count_args[1:] == (tenant_id, period_start, period_end)
+
+
+@pytest.mark.asyncio
+async def test_direct_purchases_period_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_period_plan_row("direct_purchases_per_period", 15))
+    conn.fetchval = AsyncMock(return_value=14)
+
+    await billing_service.check_plan_quota_period(
+        conn, tenant_id, "direct_purchases_per_period"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stock_adjustments_period_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "stock_adjustments_per_period", 20, period_start=period_start, period_end=period_end
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=20)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_period(
+            conn, tenant_id, "stock_adjustments_per_period"
+        )
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["resource"] == "stock_adjustments_per_period"
+    assert exc.value.details["used"] == 20
+    assert exc.value.details["limit"] == 20
+    count_args = conn.fetchval.await_args.args
+    assert "FROM tenant_ingredient_movements" in count_args[0]
+    assert "movement_type = 'adjustment'" in count_args[0]
+    assert "COALESCE(reference_table, '') <> 'tenant_purchases'" in count_args[0]
+    assert count_args[1:] == (tenant_id, period_start, period_end)
+
+
+@pytest.mark.asyncio
+async def test_stock_adjustments_period_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_period_plan_row("stock_adjustments_per_period", 20))
+    conn.fetchval = AsyncMock(return_value=19)
+
+    await billing_service.check_plan_quota_period(
+        conn, tenant_id, "stock_adjustments_per_period"
+    )

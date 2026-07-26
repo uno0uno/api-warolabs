@@ -131,6 +131,7 @@ from app.services.purchase_tracking_service import (
     create_status_history_entry,
     upload_purchase_attachments
 )
+from app.services.billing_service import check_plan_quota_period
 from app.services.account_role_service import (
     AccountRole,
     MissingAccountRoleError,
@@ -434,6 +435,9 @@ async def create_direct_purchase(
         async with get_db_connection() as conn:
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             async with conn.transaction():
+                await check_plan_quota_period(
+                    conn, tenant_id, "direct_purchases_per_period"
+                )
                 # 1. Generate purchase number with WR-CD prefix
                 purchase_number = await get_next_direct_purchase_number(conn, tenant_id)
 
