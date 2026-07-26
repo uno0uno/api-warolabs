@@ -2074,6 +2074,12 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             ) AS menu_categories,
             (
                 SELECT COUNT(*)
+                FROM ingredients i
+                WHERE i.tenant_id = $1
+                  AND i.is_active = TRUE
+            ) AS tenant_ingredients,
+            (
+                SELECT COUNT(*)
                 FROM tenant_suppliers ts
                 WHERE ts.tenant_id = $1
                   AND ts.is_active = TRUE
@@ -2173,6 +2179,10 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             "menu_categories": metric(
                 int(quota_counts["menu_categories"] or 0),
                 effective_quotas["menu_categories"],
+            ),
+            "tenant_ingredients": metric(
+                int(quota_counts["tenant_ingredients"] or 0),
+                effective_quotas["tenant_ingredients"],
             ),
             "tenant_suppliers": metric(
                 int(quota_counts["tenant_suppliers"] or 0),
