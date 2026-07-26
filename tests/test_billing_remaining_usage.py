@@ -36,6 +36,7 @@ def _quota_counts_row(**overrides):
         "completed_online_orders_per_month": 0,
         "menu_products": 0,
         "menu_categories": 0,
+        "tenant_ingredients": 0,
         "modifier_groups": 0,
         "recipe_bases": 0,
     }
@@ -209,6 +210,7 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
                     "quotas": {
                         "menu_products": 10,
                         "menu_categories": 5,
+                        "tenant_ingredients": 5,
                         "modifier_groups": 4,
                         "recipe_bases": 5,
                         "admin_users": 1,
@@ -233,6 +235,7 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
                 "completed_online_orders_per_month": 5,
                 "menu_products": 10,
                 "menu_categories": 5,
+                "tenant_ingredients": 5,
                 "modifier_groups": 4,
                 "recipe_bases": 5,
             },
@@ -254,6 +257,9 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
     }
     assert usage["quota_usage"]["menu_categories"]["used"] == 5
     assert usage["quota_usage"]["menu_categories"]["remaining"] == 0
+    assert usage["quota_usage"]["tenant_ingredients"]["used"] == 5
+    assert usage["quota_usage"]["tenant_ingredients"]["limit"] == 5
+    assert usage["quota_usage"]["tenant_ingredients"]["remaining"] == 0
     assert usage["quota_usage"]["modifier_groups"]["used"] == 4
     assert usage["quota_usage"]["modifier_groups"]["remaining"] == 0
     assert usage["quota_usage"]["recipe_bases"]["used"] == 5
