@@ -46,6 +46,9 @@ from app.services.billing_service import check_plan_quota_period
 
 logger = logging.getLogger(__name__)
 
+# Public POST /journal-entries only; auto GL uses other insert paths.
+MANUAL_JOURNAL_SOURCE_MODULES = frozenset({"manual", "manual_balance_adjustment"})
+
 VALID_ACCOUNT_TYPES = ['asset', 'liability', 'equity', 'income', 'expense', 'cogs']
 VALID_NORMAL_BALANCES = ['debit', 'credit']
 
@@ -597,17 +600,21 @@ async def create_journal_entry(request: Request, body: JournalEntryCreate) -> Jo
                 raise ValidationError("Una o más cuentas no pertenecen al tenant actual")
 
             async with conn.transaction():
-                # Issue #531 — accept caller-supplied source_module/source_id
-                # (e.g. 'manual_balance_adjustment' for the "Actualizar saldo
-                # real" flow) and the pending_review annotation flag.
+                # Public create path is manual-only. Auto GL posts use other
+                # service helpers and must not come through this endpoint with
+                # a forged source_module (warocol.com#1835 review).
                 source_module = body.source_module or 'manual'
+                if source_module not in MANUAL_JOURNAL_SOURCE_MODULES:
+                    raise ValidationError(
+                        "Los asientos creados desde esta API solo admiten "
+                        "source_module 'manual' o 'manual_balance_adjustment'."
+                    )
                 source_id = body.source_id
                 pending_review = bool(body.pending_review)
 
-                if source_module in ('manual', 'manual_balance_adjustment'):
-                    await check_plan_quota_period(
-                        conn, tenant_id, "manual_journal_entries_per_period"
-                    )
+                await check_plan_quota_period(
+                    conn, tenant_id, "manual_journal_entries_per_period"
+                )
 
                 entry_row = await conn.fetchrow(
                     """INSERT INTO tenant_journal_entries

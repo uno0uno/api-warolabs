@@ -1284,3 +1284,14 @@ async def test_accounting_period_closes_period_quota_blocks_at_limit():
 
     assert exc.value.details["resource"] == "accounting_period_closes_per_period"
     assert "FROM tenant_monthly_periods" in conn.fetchval.await_args.args[0]
+
+
+def test_manual_journal_allowed_source_modules_match_count_filter():
+    """Public JE create whitelist must stay aligned with period count SQL."""
+    from app.services.accounting_service import MANUAL_JOURNAL_SOURCE_MODULES
+
+    assert MANUAL_JOURNAL_SOURCE_MODULES == frozenset(
+        {"manual", "manual_balance_adjustment"}
+    )
+    assert "system" not in MANUAL_JOURNAL_SOURCE_MODULES
+    assert "orden" not in MANUAL_JOURNAL_SOURCE_MODULES
