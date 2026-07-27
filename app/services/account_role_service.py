@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
+from fastapi import Request
+
 from app.core.exceptions import APIError
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
@@ -320,7 +322,7 @@ async def ensure_colombia_payroll(conn, tenant_id: UUID) -> None:
         )
 
 
-async def require_colombia_payroll_capability(request) -> None:
+async def require_colombia_payroll_capability(request: Request) -> None:
     session = require_valid_session(request)
     if not session.tenant_id:
         raise APIError("Tenant ID is required", status_code=401)
@@ -346,7 +348,7 @@ async def ensure_matias_dian(conn, tenant_id: UUID) -> None:
         )
 
 
-async def require_matias_dian_capability(request) -> None:
+async def require_matias_dian_capability(request: Request) -> None:
     session = require_valid_session(request)
     if not session.tenant_id:
         raise APIError("Tenant ID is required", status_code=401)

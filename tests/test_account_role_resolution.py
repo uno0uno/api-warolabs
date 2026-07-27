@@ -151,6 +151,39 @@ async def test_matias_dian_gate_allows_colombia_profile():
     conn.fetchval.assert_awaited_once()
 
 
+def test_capability_deps_request_annotation_avoids_fastapi_query_422():
+    """Bare `request` is treated as a required query param → 422 (#725)."""
+    from fastapi import Depends, FastAPI, Request
+    from fastapi.testclient import TestClient
+
+    async def untyped_request_dep(request):
+        return None
+
+    async def typed_request_dep(request: Request):
+        return None
+
+    app = FastAPI()
+
+    @app.get("/untyped", dependencies=[Depends(untyped_request_dep)])
+    async def untyped_route():
+        return {"ok": True}
+
+    @app.get("/typed", dependencies=[Depends(typed_request_dep)])
+    async def typed_route():
+        return {"ok": True}
+
+    client = TestClient(app)
+    bad = client.get("/untyped")
+    assert bad.status_code == 422
+    assert any(
+        err.get("loc") == ["query", "request"] for err in bad.json().get("detail", [])
+    )
+
+    good = client.get("/typed")
+    assert good.status_code == 200
+    assert good.json() == {"ok": True}
+
+
 @pytest.mark.asyncio
 async def test_global_pl_does_not_query_or_include_colombia_payroll():
     conn = MagicMock()
