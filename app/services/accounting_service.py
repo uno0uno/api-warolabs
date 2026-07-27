@@ -42,6 +42,7 @@ from app.services.account_role_service import (
     resolve_account,
     set_role_override,
 )
+from app.services.billing_service import check_plan_quota_period
 
 logger = logging.getLogger(__name__)
 
@@ -602,6 +603,11 @@ async def create_journal_entry(request: Request, body: JournalEntryCreate) -> Jo
                 source_module = body.source_module or 'manual'
                 source_id = body.source_id
                 pending_review = bool(body.pending_review)
+
+                if source_module in ('manual', 'manual_balance_adjustment'):
+                    await check_plan_quota_period(
+                        conn, tenant_id, "manual_journal_entries_per_period"
+                    )
 
                 entry_row = await conn.fetchrow(
                     """INSERT INTO tenant_journal_entries

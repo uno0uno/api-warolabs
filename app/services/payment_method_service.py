@@ -15,6 +15,7 @@ from app.models.payment_method import (
     CreateMethodRequest,
     PatchMethodRequest,
 )
+from app.services.billing_service import check_plan_quota_growth
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +259,8 @@ async def create_method(request: Request, body: CreateMethodRequest) -> dict:
                 "Cannot add methods to the Efectivo group. "
                 "Cash is a single built-in payment method."
             )
+
+        await check_plan_quota_growth(conn, tenant_id, "payment_methods")
 
         try:
             # Issue #533 — accept gl_account_code on creation so the auto-create
