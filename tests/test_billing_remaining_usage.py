@@ -40,6 +40,13 @@ def _quota_counts_row(**overrides):
         "tenant_suppliers": 0,
         "direct_purchases_per_period": 0,
         "stock_adjustments_per_period": 0,
+        "cash_closes_per_period": 0,
+        "active_open_cash_shifts": 0,
+        "expenses_per_period": 0,
+        "supplier_payments_per_period": 0,
+        "payment_methods": 0,
+        "accounting_period_closes_per_period": 0,
+        "manual_journal_entries_per_period": 0,
         "modifier_groups": 0,
         "recipe_bases": 0,
     }
@@ -245,6 +252,13 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
                 "tenant_suppliers": 3,
                 "direct_purchases_per_period": 15,
                 "stock_adjustments_per_period": 20,
+                "cash_closes_per_period": 30,
+                "active_open_cash_shifts": 1,
+                "expenses_per_period": 30,
+                "supplier_payments_per_period": 30,
+                "payment_methods": 5,
+                "accounting_period_closes_per_period": 3,
+                "manual_journal_entries_per_period": 30,
                 "modifier_groups": 4,
                 "recipe_bases": 5,
             },
@@ -282,6 +296,15 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
     assert usage["quota_usage"]["stock_adjustments_per_period"]["used"] == 20
     assert usage["quota_usage"]["stock_adjustments_per_period"]["limit"] == 20
     assert usage["quota_usage"]["stock_adjustments_per_period"]["remaining"] == 0
+    assert usage["quota_usage"]["cash_closes_per_period"]["limit"] == 30
+    assert usage["quota_usage"]["cash_closes_per_period"]["used"] == 30
+    assert usage["quota_usage"]["cash_closes_per_period"]["remaining"] == 0
+    assert usage["quota_usage"]["active_open_cash_shifts"]["limit"] == 1
+    assert usage["quota_usage"]["expenses_per_period"]["limit"] == 30
+    assert usage["quota_usage"]["supplier_payments_per_period"]["limit"] == 30
+    assert usage["quota_usage"]["payment_methods"]["limit"] == 5
+    assert usage["quota_usage"]["accounting_period_closes_per_period"]["limit"] == 3
+    assert usage["quota_usage"]["manual_journal_entries_per_period"]["limit"] == 30
     assert usage["quota_usage"]["modifier_groups"]["used"] == 4
     assert usage["quota_usage"]["modifier_groups"]["remaining"] == 0
     assert usage["quota_usage"]["recipe_bases"]["used"] == 5
@@ -302,3 +325,8 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
     assert "movement_type = 'adjustment'" in counts_query
     assert "tenant_ingredient_movements" in counts_query
     assert "COALESCE(tim.reference_table, '') <> 'tenant_purchases'" in counts_query
+    assert "accounting_period" in counts_query
+    assert "cash_shift_openings" in counts_query
+    assert "recurring_expense_instances" in counts_query
+    assert "manual_balance_adjustment" in counts_query
+    assert "tenant_monthly_periods" in counts_query

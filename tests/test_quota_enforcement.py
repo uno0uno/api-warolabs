@@ -1133,3 +1133,165 @@ async def test_stock_adjustments_period_quota_allows_below_limit():
     await billing_service.check_plan_quota_period(
         conn, tenant_id, "stock_adjustments_per_period"
     )
+
+
+@pytest.mark.asyncio
+async def test_cash_closes_period_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "cash_closes_per_period", 30, period_start=period_start, period_end=period_end
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=30)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_period(
+            conn, tenant_id, "cash_closes_per_period"
+        )
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["resource"] == "cash_closes_per_period"
+    assert "FROM accounting_period" in conn.fetchval.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_manual_journal_entries_period_quota_filters_source_module():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "manual_journal_entries_per_period",
+            30,
+            period_start=period_start,
+            period_end=period_end,
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=30)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_period(
+            conn, tenant_id, "manual_journal_entries_per_period"
+        )
+
+    assert exc.value.status_code == 429
+    sql = conn.fetchval.await_args.args[0]
+    assert "FROM tenant_journal_entries" in sql
+    assert "manual_balance_adjustment" in sql
+    assert "source_module IN" in sql
+
+
+@pytest.mark.asyncio
+async def test_expenses_period_quota_counts_expenses_and_instances():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "expenses_per_period", 30, period_start=period_start, period_end=period_end
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=30)
+
+    with pytest.raises(APIError):
+        await billing_service.check_plan_quota_period(
+            conn, tenant_id, "expenses_per_period"
+        )
+
+    sql = conn.fetchval.await_args.args[0]
+    assert "FROM tenant_expenses" in sql
+    assert "FROM recurring_expense_instances" in sql
+
+
+@pytest.mark.asyncio
+async def test_active_open_cash_shifts_growth_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("active_open_cash_shifts", 1))
+    conn.fetchval = AsyncMock(return_value=1)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(
+            conn, tenant_id, "active_open_cash_shifts"
+        )
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["resource"] == "active_open_cash_shifts"
+    assert "FROM cash_shift_openings" in conn.fetchval.await_args.args[0]
+    assert "status = 'open'" in conn.fetchval.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_payment_methods_growth_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("payment_methods", 5))
+    conn.fetchval = AsyncMock(return_value=4)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "payment_methods")
+
+
+@pytest.mark.asyncio
+async def test_supplier_payments_period_quota_uses_paid_at():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "supplier_payments_per_period",
+            30,
+            period_start=period_start,
+            period_end=period_end,
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=29)
+
+    await billing_service.check_plan_quota_period(
+        conn, tenant_id, "supplier_payments_per_period"
+    )
+    sql = conn.fetchval.await_args.args[0]
+    assert "paid_at" in sql
+    assert "FROM tenant_purchases" in sql
+
+
+@pytest.mark.asyncio
+async def test_accounting_period_closes_period_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "accounting_period_closes_per_period",
+            3,
+            period_start=period_start,
+            period_end=period_end,
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=3)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_period(
+            conn, tenant_id, "accounting_period_closes_per_period"
+        )
+
+    assert exc.value.details["resource"] == "accounting_period_closes_per_period"
+    assert "FROM tenant_monthly_periods" in conn.fetchval.await_args.args[0]
+
+
+def test_manual_journal_allowed_source_modules_match_count_filter():
+    """Public JE create whitelist must stay aligned with period count SQL."""
+    from app.services.accounting_service import MANUAL_JOURNAL_SOURCE_MODULES
+
+    assert MANUAL_JOURNAL_SOURCE_MODULES == frozenset(
+        {"manual", "manual_balance_adjustment"}
+    )
+    assert "system" not in MANUAL_JOURNAL_SOURCE_MODULES
+    assert "orden" not in MANUAL_JOURNAL_SOURCE_MODULES

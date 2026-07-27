@@ -43,6 +43,13 @@ STARTER_OPERATIONAL_QUOTAS = {
     "tenant_suppliers": 3,
     "direct_purchases_per_period": 15,
     "stock_adjustments_per_period": 20,
+    "cash_closes_per_period": 30,
+    "active_open_cash_shifts": 1,
+    "expenses_per_period": 30,
+    "supplier_payments_per_period": 30,
+    "payment_methods": 5,
+    "accounting_period_closes_per_period": 3,
+    "manual_journal_entries_per_period": 30,
     "modifier_groups": 4,
     "recipe_bases": 5,
     "recipe_lines_per_product": 4,
@@ -63,6 +70,13 @@ QUOTA_KEYS = (
     "tenant_suppliers",
     "direct_purchases_per_period",
     "stock_adjustments_per_period",
+    "cash_closes_per_period",
+    "active_open_cash_shifts",
+    "expenses_per_period",
+    "supplier_payments_per_period",
+    "payment_methods",
+    "accounting_period_closes_per_period",
+    "manual_journal_entries_per_period",
     "modifier_groups",
     "recipe_bases",
     "recipe_lines_per_product",
@@ -83,6 +97,13 @@ BASE_OPERATIONAL_QUOTAS = {
     "tenant_suppliers": CATALOG_UNLIMITED,
     "direct_purchases_per_period": CATALOG_UNLIMITED,
     "stock_adjustments_per_period": CATALOG_UNLIMITED,
+    "cash_closes_per_period": CATALOG_UNLIMITED,
+    "active_open_cash_shifts": CATALOG_UNLIMITED,
+    "expenses_per_period": CATALOG_UNLIMITED,
+    "supplier_payments_per_period": CATALOG_UNLIMITED,
+    "payment_methods": CATALOG_UNLIMITED,
+    "accounting_period_closes_per_period": CATALOG_UNLIMITED,
+    "manual_journal_entries_per_period": CATALOG_UNLIMITED,
     "modifier_groups": CATALOG_UNLIMITED,
     "recipe_bases": CATALOG_UNLIMITED,
     "recipe_lines_per_product": 100,
@@ -119,12 +140,19 @@ ENFORCEABLE_QUOTA_RESOURCES = {
     "menu_categories",
     "tenant_ingredients",
     "tenant_suppliers",
+    "active_open_cash_shifts",
+    "payment_methods",
     "modifier_groups",
     "recipe_bases",
 }
 PERIOD_QUOTA_RESOURCES = {
     "direct_purchases_per_period",
     "stock_adjustments_per_period",
+    "cash_closes_per_period",
+    "expenses_per_period",
+    "supplier_payments_per_period",
+    "accounting_period_closes_per_period",
+    "manual_journal_entries_per_period",
 }
 SCOPED_QUOTA_RESOURCES = {
     "recipe_lines_per_product",
@@ -601,6 +629,85 @@ async def _count_period_quota_usage(
             WHERE tenant_id = $1
               AND movement_type = 'adjustment'
               AND COALESCE(reference_table, '') <> 'tenant_purchases'
+              AND created_at >= $2
+              AND created_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "cash_closes_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM accounting_period
+            WHERE tenant_id = $1
+              AND closed_at >= $2
+              AND closed_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "expenses_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT
+                (
+                    SELECT COUNT(*)
+                    FROM tenant_expenses
+                    WHERE tenant_id = $1
+                      AND created_at >= $2
+                      AND created_at < $3
+                )
+                +
+                (
+                    SELECT COUNT(*)
+                    FROM recurring_expense_instances
+                    WHERE tenant_id = $1
+                      AND created_at >= $2
+                      AND created_at < $3
+                )
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "supplier_payments_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_purchases
+            WHERE tenant_id = $1
+              AND paid_at IS NOT NULL
+              AND paid_at >= $2
+              AND paid_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "accounting_period_closes_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_monthly_periods
+            WHERE tenant_id = $1
+              AND status = 'closed'
+              AND closed_at >= $2
+              AND closed_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "manual_journal_entries_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_journal_entries
+            WHERE tenant_id = $1
+              AND source_module IN ('manual', 'manual_balance_adjustment')
               AND created_at >= $2
               AND created_at < $3
             """,
@@ -1097,6 +1204,26 @@ async def _count_quota_resource_usage(
             """
             SELECT COUNT(*)
             FROM tenant_suppliers
+            WHERE tenant_id = $1
+              AND is_active = TRUE
+            """,
+            tenant_id,
+        )
+    elif resource == "active_open_cash_shifts":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM cash_shift_openings
+            WHERE tenant_id = $1
+              AND status = 'open'
+            """,
+            tenant_id,
+        )
+    elif resource == "payment_methods":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM payment_methods
             WHERE tenant_id = $1
               AND is_active = TRUE
             """,
@@ -2103,6 +2230,67 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             ) AS stock_adjustments_per_period,
             (
                 SELECT COUNT(*)
+                FROM accounting_period ap
+                WHERE ap.tenant_id = $1
+                  AND ap.closed_at >= $2
+                  AND ap.closed_at < $3
+            ) AS cash_closes_per_period,
+            (
+                SELECT COUNT(*)
+                FROM cash_shift_openings cso
+                WHERE cso.tenant_id = $1
+                  AND cso.status = 'open'
+            ) AS active_open_cash_shifts,
+            (
+                SELECT
+                    (
+                        SELECT COUNT(*)
+                        FROM tenant_expenses te
+                        WHERE te.tenant_id = $1
+                          AND te.created_at >= $2
+                          AND te.created_at < $3
+                    )
+                    +
+                    (
+                        SELECT COUNT(*)
+                        FROM recurring_expense_instances rei
+                        WHERE rei.tenant_id = $1
+                          AND rei.created_at >= $2
+                          AND rei.created_at < $3
+                    )
+            ) AS expenses_per_period,
+            (
+                SELECT COUNT(*)
+                FROM tenant_purchases tp_paid
+                WHERE tp_paid.tenant_id = $1
+                  AND tp_paid.paid_at IS NOT NULL
+                  AND tp_paid.paid_at >= $2
+                  AND tp_paid.paid_at < $3
+            ) AS supplier_payments_per_period,
+            (
+                SELECT COUNT(*)
+                FROM payment_methods pm
+                WHERE pm.tenant_id = $1
+                  AND pm.is_active = TRUE
+            ) AS payment_methods,
+            (
+                SELECT COUNT(*)
+                FROM tenant_monthly_periods tmp
+                WHERE tmp.tenant_id = $1
+                  AND tmp.status = 'closed'
+                  AND tmp.closed_at >= $2
+                  AND tmp.closed_at < $3
+            ) AS accounting_period_closes_per_period,
+            (
+                SELECT COUNT(*)
+                FROM tenant_journal_entries tje
+                WHERE tje.tenant_id = $1
+                  AND tje.source_module IN ('manual', 'manual_balance_adjustment')
+                  AND tje.created_at >= $2
+                  AND tje.created_at < $3
+            ) AS manual_journal_entries_per_period,
+            (
+                SELECT COUNT(*)
                 FROM modifier_groups mg
                 WHERE mg.tenant_id = $1
             ) AS modifier_groups,
@@ -2195,6 +2383,34 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             "stock_adjustments_per_period": metric(
                 int(quota_counts["stock_adjustments_per_period"] or 0),
                 effective_quotas["stock_adjustments_per_period"],
+            ),
+            "cash_closes_per_period": metric(
+                int(quota_counts["cash_closes_per_period"] or 0),
+                effective_quotas["cash_closes_per_period"],
+            ),
+            "active_open_cash_shifts": metric(
+                int(quota_counts["active_open_cash_shifts"] or 0),
+                effective_quotas["active_open_cash_shifts"],
+            ),
+            "expenses_per_period": metric(
+                int(quota_counts["expenses_per_period"] or 0),
+                effective_quotas["expenses_per_period"],
+            ),
+            "supplier_payments_per_period": metric(
+                int(quota_counts["supplier_payments_per_period"] or 0),
+                effective_quotas["supplier_payments_per_period"],
+            ),
+            "payment_methods": metric(
+                int(quota_counts["payment_methods"] or 0),
+                effective_quotas["payment_methods"],
+            ),
+            "accounting_period_closes_per_period": metric(
+                int(quota_counts["accounting_period_closes_per_period"] or 0),
+                effective_quotas["accounting_period_closes_per_period"],
+            ),
+            "manual_journal_entries_per_period": metric(
+                int(quota_counts["manual_journal_entries_per_period"] or 0),
+                effective_quotas["manual_journal_entries_per_period"],
             ),
             "modifier_groups": metric(
                 int(quota_counts["modifier_groups"] or 0),

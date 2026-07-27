@@ -10,7 +10,7 @@ from decimal import Decimal
 from fastapi import Request, Response, HTTPException, UploadFile
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
-from app.core.exceptions import AuthenticationError
+from app.core.exceptions import AuthenticationError, APIError
 from app.services.aws_s3_service import AWSS3Service
 from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
 from app.services.account_role_service import (
@@ -19,6 +19,7 @@ from app.services.account_role_service import (
     resolve_account,
     resolve_payment_account,
 )
+from app.services.billing_service import check_plan_quota_period
 import logging
 
 logger = logging.getLogger(__name__)
@@ -1425,6 +1426,10 @@ async def transition_to_paid(
                     payment_method_id,
                 )
 
+                await check_plan_quota_period(
+                    conn, tenant_id, "supplier_payments_per_period"
+                )
+
                 # Update purchase
                 await conn.execute("""
                     UPDATE tenant_purchases
@@ -1519,6 +1524,8 @@ async def transition_to_paid(
     except MissingAccountRoleError:
         raise
     except AuthenticationError:
+        raise
+    except APIError:
         raise
     except HTTPException:
         raise

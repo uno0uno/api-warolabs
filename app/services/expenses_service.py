@@ -7,7 +7,7 @@ from datetime import date, datetime
 from fastapi import Request, Response, HTTPException, UploadFile
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
-from app.core.exceptions import AuthenticationError
+from app.core.exceptions import AuthenticationError, APIError
 from app.models.expense import (
     Expense,
     ExpenseCreate,
@@ -22,6 +22,7 @@ from app.models.expense import (
     ChangeType,
     InstanceStatus
 )
+from app.services.billing_service import check_plan_quota_period
 from app.services.purchase_tracking_service import upload_purchase_attachments
 from app.services.aws_s3_service import AWSS3Service
 
@@ -728,6 +729,8 @@ async def create_expense(
             if not category_exists:
                 raise HTTPException(status_code=400, detail="Invalid expense category")
 
+            await check_plan_quota_period(conn, tenant_id, "expenses_per_period")
+
             # Generate expense number inside the same connection
             expense_number = await get_next_expense_number(conn, tenant_id)
 
@@ -880,6 +883,8 @@ async def create_expense(
 
     except AuthenticationError:
         raise
+    except APIError:
+        raise
     except HTTPException:
         raise
     except Exception as e:
@@ -933,6 +938,8 @@ async def create_expense_json(
                 expense_data.payment_method,
                 expense_data.payment_method_id,
             )
+
+            await check_plan_quota_period(conn, tenant_id, "expenses_per_period")
 
             # Generate expense number inside the same connection
             expense_number = await get_next_expense_number(conn, tenant_id)
@@ -1047,6 +1054,8 @@ async def create_expense_json(
             return ExpenseResponse(data=expense)
 
     except AuthenticationError:
+        raise
+    except APIError:
         raise
     except HTTPException:
         raise
@@ -2068,6 +2077,8 @@ async def create_recurring_instance(
             # Use expense amount if not provided
             instance_amount = amount if amount is not None else float(expense['amount'])
 
+            await check_plan_quota_period(conn, tenant_id, "expenses_per_period")
+
             # Insert instance
             instance_id = await conn.fetchval("""
                 INSERT INTO recurring_expense_instances (
@@ -2182,6 +2193,8 @@ async def create_recurring_instance(
             }
 
     except AuthenticationError:
+        raise
+    except APIError:
         raise
     except HTTPException:
         raise
@@ -2368,6 +2381,8 @@ async def create_recurring_instance_json(
             # Use expense amount if not provided
             instance_amount = instance_data.amount if instance_data.amount is not None else float(expense['amount'])
 
+            await check_plan_quota_period(conn, tenant_id, "expenses_per_period")
+
             # Insert instance. Retrying the same recurring period returns the
             # existing row instead of surfacing a duplicate-key failure.
             instance_id = await conn.fetchval("""
@@ -2409,6 +2424,8 @@ async def create_recurring_instance_json(
             return _format_recurring_instance_response(instance_row)
 
     except AuthenticationError:
+        raise
+    except APIError:
         raise
     except HTTPException:
         raise

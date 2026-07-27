@@ -15,6 +15,7 @@ from app.models.payment_method import (
     CreateMethodRequest,
     PatchMethodRequest,
 )
+from app.services.billing_service import check_plan_quota_growth
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +260,8 @@ async def create_method(request: Request, body: CreateMethodRequest) -> dict:
                 "Cash is a single built-in payment method."
             )
 
+        await check_plan_quota_growth(conn, tenant_id, "payment_methods")
+
         try:
             # Issue #533 — accept gl_account_code on creation so the auto-create
             # flow in /finanzas/metodos-pago/{groupId} can link the new method
@@ -303,7 +306,7 @@ async def patch_method(request: Request, method_id: UUID, body: PatchMethodReque
 
     async with get_db_connection(use_transaction=True) as conn:
         existing = await conn.fetchrow(
-            "SELECT id, tenant_id FROM payment_methods WHERE id = $1 AND tenant_id = $2",
+            "SELECT id, tenant_id, is_active FROM payment_methods WHERE id = $1 AND tenant_id = $2",
             method_id,
             tenant_id,
         )
@@ -319,6 +322,8 @@ async def patch_method(request: Request, method_id: UUID, body: PatchMethodReque
             params.append(body.name)
             idx += 1
         if body.isActive is not None:
+            if body.isActive is True and not existing["is_active"]:
+                await check_plan_quota_growth(conn, tenant_id, "payment_methods")
             updates.append(f"is_active = ${idx}")
             params.append(body.isActive)
             idx += 1

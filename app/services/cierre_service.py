@@ -28,6 +28,7 @@ from app.models.cierre import (
     CierreReconciliationResolve,
     OpenShiftCreate,
 )
+from app.services.billing_service import check_plan_quota_growth, check_plan_quota_period
 from app.services.tip_tax_service import tip_settlement_total
 from app.services.account_role_service import (
     AccountRole,
@@ -2194,6 +2195,8 @@ async def open_shift(request: Request, body: OpenShiftCreate) -> dict:
                     status_code=409,
                 )
 
+            await check_plan_quota_growth(conn, tenant_id, "active_open_cash_shifts")
+
             breakdown_json = (
                 json.dumps(body.opening_breakdown)
                 if body.opening_breakdown is not None
@@ -2489,6 +2492,8 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                     "Ya existe un cierre para este período o uno que se superpone.",
                     status_code=409,
                 )
+
+            await check_plan_quota_period(conn, tenant_id, "cash_closes_per_period")
 
             open_shift = await _fetch_open_shift_for_window(
                 conn, tenant_id, eff_start, eff_end, timezone_name,
@@ -3572,6 +3577,10 @@ async def close_monthly_period(
                     f"El período {year}-{month:02d} ya está cerrado.",
                     status_code=409,
                 )
+
+            await check_plan_quota_period(
+                conn, tenant_id, "accounting_period_closes_per_period"
+            )
 
             if existing:
                 row = await conn.fetchrow(
