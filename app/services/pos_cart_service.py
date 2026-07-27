@@ -2569,11 +2569,13 @@ async def complete_pos_order(
                     except Exception as e:
                         logger.error(f"COGS GL entry failed for POS order {order_id}: {e}")
 
-                # Compute tax breakdown for receipt display
+                # Compute tax breakdown for receipt display (same engine as cart/orders)
                 _standard_tax = 0.0
                 _liquor_tax = 0.0
                 _standard_tax_label = "Impuesto"
                 try:
+                    from app.services.orders_service import _compute_tax_breakdown
+
                     items_tax_rows = await conn.fetch(
                         """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
                                   COALESCE(oi.subtotal, 0) AS subtotal
@@ -2582,29 +2584,9 @@ async def complete_pos_order(
                            WHERE oi.order_id = $1""",
                         order_id
                     )
-                    std_subtotal = sum(float(r['subtotal']) for r in items_tax_rows if r['tax_category'] == 'standard')
-                    liq_subtotal = sum(float(r['subtotal']) for r in items_tax_rows if r['tax_category'] == 'liquor')
-
-                    if tax_config.get('inc_applicable') and std_subtotal > 0:
-                        rate = float(tax_config['inc_rate'])
-                        if tax_config.get('inc_included_in_price'):
-                            _standard_tax = round(std_subtotal * rate / (1 + rate))
-                        else:
-                            _standard_tax = round(std_subtotal * rate)
-                        pct = round(rate * 100)
-                        _standard_tax_label = f"INC {pct}%"
-                    elif tax_config.get('iva_applicable') and std_subtotal > 0:
-                        rate = float(tax_config['iva_rate'])
-                        if tax_config.get('iva_included_in_price'):
-                            _standard_tax = round(std_subtotal * rate / (1 + rate))
-                        else:
-                            _standard_tax = round(std_subtotal * rate)
-                        pct = round(rate * 100)
-                        _standard_tax_label = f"IVA {pct}%"
-
-                    if tax_config.get('liquor_tax_applicable') and liq_subtotal > 0:
-                        liq_rate = float(tax_config.get('liquor_tax_rate') or 0.05)
-                        _liquor_tax = round(liq_subtotal * liq_rate)
+                    _standard_tax, _liquor_tax, _standard_tax_label = _compute_tax_breakdown(
+                        items_tax_rows, tax_config,
+                    )
                 except Exception as e:
                     logger.warning(f"Tax breakdown computation failed for order {order_id}: {e}")
 

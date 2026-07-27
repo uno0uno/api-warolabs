@@ -1,9 +1,9 @@
 """Pydantic v2 models for tenant tax configuration."""
 from decimal import Decimal
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TaxConfigResponse(BaseModel):
@@ -25,6 +25,14 @@ class TaxConfigResponse(BaseModel):
     liquor_tax_rate: Decimal
     liquor_tax_gl_account_code: str
     liquor_tax_gl_account_id: Optional[UUID] = None
+    tax_lines: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Optional profile tax_lines[]; when null, INC/IVA/liquor columns adapt",
+    )
+    category_map: Optional[Dict[str, Optional[str]]] = Field(
+        default=None,
+        description="Optional product tax_category → tax line key",
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -38,3 +46,5 @@ class TaxConfigUpdate(BaseModel):
     inc_gl_account_id: Optional[UUID] = None
     iva_gl_account_id: Optional[UUID] = None
     liquor_tax_gl_account_id: Optional[UUID] = None
+    tax_lines: Optional[List[Dict[str, Any]]] = None
+    category_map: Optional[Dict[str, Optional[str]]] = None

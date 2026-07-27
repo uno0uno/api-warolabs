@@ -60,6 +60,7 @@ PAYMENT_ROLE_BY_SLUG = {
 }
 
 _TAX_BINDINGS = {
+    # gl_role on tax_lines maps to these kinds (hospitality_tax_engine).
     "inc": ("inc_gl_account_id", "inc_gl_account_code", AccountRole.INC_PAYABLE),
     "iva": ("iva_gl_account_id", "iva_gl_account_code", AccountRole.IVA_PAYABLE),
     "liquor": (

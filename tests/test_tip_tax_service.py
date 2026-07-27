@@ -33,3 +33,21 @@ def test_split_settlement_includes_tip_tax():
 
 def test_tip_settlement_total():
     assert tip_settlement_total(5_000, 950) == 5_950
+
+
+def test_compute_tip_tax_from_tax_lines():
+    cfg = {
+        "inc_applicable": False,
+        "iva_applicable": False,
+        "tax_lines": [
+            {
+                "key": "gst",
+                "label": "GST 10%",
+                "rate": 0.10,
+                "included_in_price": False,
+                "gl_role": "iva",
+            }
+        ],
+        "category_map": {"standard": "gst", "exempt": None},
+    }
+    assert compute_tip_tax_amount(10_000, True, cfg) == 1000.0

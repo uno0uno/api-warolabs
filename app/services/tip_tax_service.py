@@ -38,18 +38,12 @@ def compute_tip_tax_amount(
     """Return tax on tip in COP (whole pesos). Zero when not taxable or no tip."""
     if not tip_taxable or float(tip_amount or 0) <= 0:
         return 0.0
-    amount = float(tip_amount)
-    if tax_config.get("inc_applicable"):
-        rate = float(tax_config["inc_rate"])
-        if tax_config.get("inc_included_in_price"):
-            return float(round(amount * rate / (1 + rate)))
-        return float(round(amount * rate))
-    if tax_config.get("iva_applicable"):
-        rate = float(tax_config["iva_rate"])
-        if tax_config.get("iva_included_in_price"):
-            return float(round(amount * rate / (1 + rate)))
-        return float(round(amount * rate))
-    return 0.0
+    from app.services.hospitality_tax_engine import resolve_tax_profile, tax_amount_float
+
+    line = resolve_tax_profile(tax_config).primary_line()
+    if not line:
+        return 0.0
+    return tax_amount_float(float(tip_amount), line)
 
 
 def tip_settlement_total(tip_amount: float, tip_tax_amount: float) -> float:

@@ -284,33 +284,9 @@ def _compute_tax_breakdown(
 
     Returns: (standard_tax: float, liquor_tax: float, standard_tax_label: str)
     """
-    std_subtotal = sum(float(r['subtotal']) for r in items_rows if r['tax_category'] == 'standard')
-    liq_subtotal = sum(float(r['subtotal']) for r in items_rows if r['tax_category'] == 'liquor')
+    from app.services.hospitality_tax_engine import compute_category_breakdown
 
-    standard_tax = 0.0
-    liquor_tax = 0.0
-    standard_tax_label = "Impuesto"
-
-    if tax_config.get('inc_applicable') and std_subtotal > 0:
-        rate = float(tax_config['inc_rate'])
-        if tax_config.get('inc_included_in_price'):
-            standard_tax = round(std_subtotal * rate / (1 + rate))
-        else:
-            standard_tax = round(std_subtotal * rate)
-        standard_tax_label = f"INC {round(rate * 100)}%"
-    elif tax_config.get('iva_applicable') and std_subtotal > 0:
-        rate = float(tax_config['iva_rate'])
-        if tax_config.get('iva_included_in_price'):
-            standard_tax = round(std_subtotal * rate / (1 + rate))
-        else:
-            standard_tax = round(std_subtotal * rate)
-        standard_tax_label = f"IVA {round(rate * 100)}%"
-
-    if tax_config.get('liquor_tax_applicable') and liq_subtotal > 0:
-        liq_rate = float(tax_config.get('liquor_tax_rate') or 0.05)
-        liquor_tax = round(liq_subtotal * liq_rate)
-
-    return float(standard_tax), float(liquor_tax), standard_tax_label
+    return compute_category_breakdown(items_rows, tax_config)
 
 
 def _row_get(row: Any, key: str, default: Any = None) -> Any:
@@ -344,6 +320,7 @@ def _tax_detail_rows(
     standard_tax: float,
     liquor_tax: float,
     standard_tax_label: str,
+    tax_config: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     std_base = sum(float(r["subtotal"]) for r in items_rows if r["tax_category"] == "standard")
     liq_base = sum(float(r["subtotal"]) for r in items_rows if r["tax_category"] == "liquor")
@@ -351,7 +328,14 @@ def _tax_detail_rows(
     if standard_tax > 0:
         rows.append({"label": standard_tax_label, "base": std_base, "amount": standard_tax})
     if liquor_tax > 0:
-        rows.append({"label": "IVA licores 5%", "base": liq_base, "amount": liquor_tax})
+        liquor_label = "IVA licores 5%"
+        if tax_config is not None:
+            from app.services.hospitality_tax_engine import resolve_tax_profile
+
+            liq_line = resolve_tax_profile(tax_config).line_for_category("liquor")
+            if liq_line:
+                liquor_label = liq_line.label
+        rows.append({"label": liquor_label, "base": liq_base, "amount": liquor_tax})
     return rows
 
 
@@ -4334,7 +4318,7 @@ async def send_invoice_email(
         else 0.0
     )
 
-    tax_details = _tax_detail_rows(items_for_tax, std_tax, liq_tax, tax_label)
+    tax_details = _tax_detail_rows(items_for_tax, std_tax, liq_tax, tax_label, tax_config)
     invoice_presentation = None
     if include_invoice:
         invoice_presentation = _build_invoice_presentation(
