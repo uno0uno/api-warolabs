@@ -33,6 +33,10 @@ class TaxConfigResponse(BaseModel):
         default=None,
         description="Optional product tax_category → tax line key",
     )
+    tax_jurisdiction_code: Optional[str] = Field(
+        default=None,
+        description="US state or CA province code when country requires jurisdiction",
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -48,3 +52,4 @@ class TaxConfigUpdate(BaseModel):
     liquor_tax_gl_account_id: Optional[UUID] = None
     tax_lines: Optional[List[Dict[str, Any]]] = None
     category_map: Optional[Dict[str, Optional[str]]] = None
+    tax_jurisdiction_code: Optional[str] = None

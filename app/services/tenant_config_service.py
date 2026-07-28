@@ -12,6 +12,12 @@ from app.core.exceptions import AuthenticationError
 from app.core.sales_tax_profile import settings_for_sales_tax_profile
 from app.core.timezones import DEFAULT_TENANT_TIMEZONE, normalize_timezone, validate_timezone
 from app.services.hospitality_tax_packs import ensure_wave1_tax_pack
+from app.services.hospitality_tax_jurisdictions import (
+    JURISDICTION_COUNTRIES,
+    apply_jurisdiction_pack,
+    list_jurisdictions,
+    normalize_jurisdiction_code,
+)
 from app.core.tenant_prefs import (
     DEFAULT_CURRENCY_CODE,
     DEFAULT_TENANT_LOCALE,
@@ -667,6 +673,29 @@ async def get_tax_config(request: Request) -> dict:
         raise HTTPException(status_code=500, detail=f"Error fetching tax config: {str(e)}")
 
 
+async def get_tax_jurisdictions(request: Request, country: str) -> dict:
+    """Return static US state or CA province tax jurisdiction catalog."""
+    try:
+        require_valid_session(request)
+        code = (country or "").strip().upper()
+        if code not in JURISDICTION_COUNTRIES:
+            raise HTTPException(
+                status_code=400,
+                detail="country must be US or CA",
+            )
+        return {"success": True, "data": list_jurisdictions(code)}
+    except AuthenticationError as e:
+        raise e
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing tax jurisdictions: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error listing tax jurisdictions: {str(e)}",
+        )
+
+
 async def update_tax_config(request: Request, data) -> dict:
     """
     Upsert the sale-tax configuration for the active tenant.
@@ -716,6 +745,50 @@ async def update_tax_config(request: Request, data) -> dict:
                     ),
                 )
 
+            profile = await conn.fetchrow(
+                "SELECT country_code FROM tenant_financial_profiles WHERE tenant_id = $1",
+                tenant_id,
+            )
+            country_code = (profile["country_code"] if profile else None) or ""
+            jurisdiction_raw = getattr(data, "tax_jurisdiction_code", None)
+            if (
+                jurisdiction_raw is not None
+                and str(jurisdiction_raw).strip() != ""
+                and country_code.upper() in JURISDICTION_COUNTRIES
+            ):
+                try:
+                    jurisdiction = normalize_jurisdiction_code(
+                        country_code, jurisdiction_raw
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                applied, row = await apply_jurisdiction_pack(
+                    conn, tenant_id, country_code, jurisdiction
+                )
+                if not applied or not row:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Could not apply tax jurisdiction pack",
+                    )
+                # Allow commercial rate override on top of jurisdiction seed.
+                if getattr(data, "tax_lines", None) is not None:
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE tenant_tax_config
+                        SET tax_lines = $2::jsonb,
+                            category_map = COALESCE($3::jsonb, category_map),
+                            updated_at = NOW()
+                        WHERE tenant_id = $1
+                        RETURNING *
+                        """,
+                        tenant_id,
+                        json.dumps(data.tax_lines),
+                        json.dumps(data.category_map)
+                        if getattr(data, "category_map", None) is not None
+                        else None,
+                    )
+                return {"success": True, "data": dict(row)}
+
             row = await conn.fetchrow(
                 """
                 INSERT INTO tenant_tax_config (
@@ -724,9 +797,9 @@ async def update_tax_config(request: Request, data) -> dict:
                     iva_applicable, iva_included_in_price,
                     liquor_tax_applicable,
                     inc_gl_account_id, iva_gl_account_id, liquor_tax_gl_account_id,
-                    tax_lines, category_map
+                    tax_lines, category_map, tax_jurisdiction_code
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12)
                 ON CONFLICT (tenant_id) DO UPDATE SET
                     inc_applicable        = EXCLUDED.inc_applicable,
                     inc_included_in_price = EXCLUDED.inc_included_in_price,
@@ -738,6 +811,10 @@ async def update_tax_config(request: Request, data) -> dict:
                     liquor_tax_gl_account_id = COALESCE(EXCLUDED.liquor_tax_gl_account_id, tenant_tax_config.liquor_tax_gl_account_id),
                     tax_lines = COALESCE(EXCLUDED.tax_lines, tenant_tax_config.tax_lines),
                     category_map = COALESCE(EXCLUDED.category_map, tenant_tax_config.category_map),
+                    tax_jurisdiction_code = COALESCE(
+                        EXCLUDED.tax_jurisdiction_code,
+                        tenant_tax_config.tax_jurisdiction_code
+                    ),
                     updated_at            = NOW()
                 RETURNING *
                 """,
@@ -752,6 +829,7 @@ async def update_tax_config(request: Request, data) -> dict:
                 data.liquor_tax_gl_account_id,
                 json.dumps(data.tax_lines) if getattr(data, "tax_lines", None) is not None else None,
                 json.dumps(data.category_map) if getattr(data, "category_map", None) is not None else None,
+                None,
             )
 
             return {"success": True, "data": dict(row)}
