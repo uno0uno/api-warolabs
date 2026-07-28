@@ -190,8 +190,22 @@ async def test_ensure_country_tax_pack_writes_wave2_mx():
     applied = await ensure_country_tax_pack(conn, tenant_id, "MX")
     assert applied is True
     assert any("UPDATE tenant_tax_config" in q for q, _ in conn.queries)
-    update = next(args for q, args in conn.queries if "UPDATE tenant_tax_config" in q)
+    update_q, update = next(
+        (q, args) for q, args in conn.queries if "UPDATE tenant_tax_config" in q
+    )
     assert '"IVA 16%"' in update[1] or "0.16" in update[1]
+    assert "commercial_tax_applicable = true" in update_q
+
+
+@pytest.mark.asyncio
+async def test_ensure_country_tax_pack_sets_applicable_true_on_seed():
+    tenant_id = uuid4()
+    conn = _PackConn(tax_lines=None)
+    await ensure_country_tax_pack(conn, tenant_id, "PE")
+    update_q, _ = next(
+        (q, args) for q, args in conn.queries if "UPDATE tenant_tax_config" in q
+    )
+    assert "commercial_tax_applicable = true" in update_q
 
 
 @pytest.mark.asyncio

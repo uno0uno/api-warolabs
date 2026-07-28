@@ -72,6 +72,7 @@ def test_commercial_tax_lines_standard_and_exempt():
         "inc_applicable": False,
         "iva_applicable": False,
         "liquor_tax_applicable": False,
+        "commercial_tax_applicable": True,
         "tax_lines": [
             {
                 "key": "itbms",
@@ -94,6 +95,48 @@ def test_commercial_tax_lines_standard_and_exempt():
     profile = resolve_tax_profile(cfg)
     assert profile.line_for_category("exempt") is None
     assert tax_amount_float(10000, profile.primary_line()) == 700.0
+
+
+def test_commercial_tax_disabled_keeps_lines_but_applies_zero():
+    """warocol.com#1868 — flag false → empty profile; tax_lines still on config."""
+    cfg = {
+        "inc_applicable": False,
+        "iva_applicable": False,
+        "liquor_tax_applicable": False,
+        "commercial_tax_applicable": False,
+        "tax_lines": [
+            {
+                "key": "iva",
+                "label": "IVA 16%",
+                "rate": 0.16,
+                "included_in_price": False,
+                "gl_role": "iva",
+            }
+        ],
+        "category_map": {"standard": "iva", "liquor": "iva", "exempt": None},
+    }
+    rows = [{"tax_category": "standard", "subtotal": 10000}]
+    std, liq, label = compute_category_breakdown(rows, cfg)
+    assert std == 0.0
+    assert liq == 0.0
+    profile = resolve_tax_profile(cfg)
+    assert profile.lines == {}
+    assert profile.primary_line() is None
+    # Re-enable restores prior rates without re-seeding.
+    cfg["commercial_tax_applicable"] = True
+    std_on, _, label_on = compute_category_breakdown(rows, cfg)
+    assert std_on == 1600.0
+    assert label_on == "IVA 16%"
+
+
+def test_co_path_ignores_commercial_flag_when_tax_lines_null():
+    cfg = _inc_config(included=True)
+    cfg["commercial_tax_applicable"] = False
+    cfg["tax_lines"] = None
+    rows = [{"tax_category": "standard", "subtotal": 10800}]
+    std, liq, label = compute_category_breakdown(rows, cfg)
+    assert std == 800.0
+    assert label == "INC 8%"
 
 
 def test_gl_decimal_inc_extractive():

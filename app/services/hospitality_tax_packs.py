@@ -306,6 +306,7 @@ def tax_config_from_wave1_pack(pack: Mapping[str, Any]) -> Dict[str, Any]:
         "inc_applicable": False,
         "iva_applicable": False,
         "liquor_tax_applicable": False,
+        "commercial_tax_applicable": True,
         "tax_lines": list(pack["tax_lines"]),
         "category_map": dict(pack["category_map"]),
     }
@@ -338,6 +339,7 @@ async def ensure_country_tax_pack(conn, tenant_id, country_code: str) -> bool:
         UPDATE tenant_tax_config
         SET tax_lines = $2::jsonb,
             category_map = $3::jsonb,
+            commercial_tax_applicable = true,
             updated_at = NOW()
         WHERE tenant_id = $1
           AND tax_lines IS NULL
