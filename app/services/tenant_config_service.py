@@ -11,6 +11,7 @@ from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
 from app.core.sales_tax_profile import settings_for_sales_tax_profile
 from app.core.timezones import DEFAULT_TENANT_TIMEZONE, normalize_timezone, validate_timezone
+from app.services.hospitality_tax_packs import ensure_wave1_tax_pack
 from app.core.tenant_prefs import (
     DEFAULT_CURRENCY_CODE,
     DEFAULT_TENANT_LOCALE,
@@ -642,6 +643,20 @@ async def get_tax_config(request: Request) -> dict:
                     "SELECT * FROM tenant_tax_config WHERE tenant_id = $1",
                     tenant_id,
                 )
+
+            profile = await conn.fetchrow(
+                "SELECT country_code FROM tenant_financial_profiles WHERE tenant_id = $1",
+                tenant_id,
+            )
+            if profile and profile.get("country_code"):
+                applied = await ensure_wave1_tax_pack(
+                    conn, tenant_id, profile["country_code"]
+                )
+                if applied:
+                    row = await conn.fetchrow(
+                        "SELECT * FROM tenant_tax_config WHERE tenant_id = $1",
+                        tenant_id,
+                    )
 
             return {"success": True, "data": dict(row)}
 
