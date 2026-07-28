@@ -89,7 +89,12 @@ class ProductBase(BaseModel):
         description="When true, POS may send a custom unit_price (venta libre); at most one per tenant",
     )
     allow_modifiers: bool = Field(True, description="Whether product allows modifiers")
-    tax_category: Literal['standard', 'liquor', 'exempt'] = Field("standard", description="Tax classification: standard (INC/IVA), liquor (IVA licores 5%), exempt (no tax)")
+    tax_category: Literal['standard', 'liquor', 'exempt'] = Field(
+        "standard",
+        description="Tax classification mapped via tenant category_map → tax_lines "
+        "(CO default: standard→INC/IVA, liquor→liquor line, exempt→none). "
+        "Same field for POS and venta directa.",
+    )
     station_id: Optional[UUID] = None
     kitchen_name: Optional[str] = Field(None, max_length=100)
     image_url: Optional[str] = Field(None, max_length=500, description="Public URL of the product hero image (Cloudflare R2)")

@@ -708,9 +708,10 @@ async def update_tax_config(request: Request, data) -> dict:
                     inc_applicable, inc_included_in_price,
                     iva_applicable, iva_included_in_price,
                     liquor_tax_applicable,
-                    inc_gl_account_id, iva_gl_account_id, liquor_tax_gl_account_id
+                    inc_gl_account_id, iva_gl_account_id, liquor_tax_gl_account_id,
+                    tax_lines, category_map
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb)
                 ON CONFLICT (tenant_id) DO UPDATE SET
                     inc_applicable        = EXCLUDED.inc_applicable,
                     inc_included_in_price = EXCLUDED.inc_included_in_price,
@@ -720,6 +721,8 @@ async def update_tax_config(request: Request, data) -> dict:
                     inc_gl_account_id = COALESCE(EXCLUDED.inc_gl_account_id, tenant_tax_config.inc_gl_account_id),
                     iva_gl_account_id = COALESCE(EXCLUDED.iva_gl_account_id, tenant_tax_config.iva_gl_account_id),
                     liquor_tax_gl_account_id = COALESCE(EXCLUDED.liquor_tax_gl_account_id, tenant_tax_config.liquor_tax_gl_account_id),
+                    tax_lines = COALESCE(EXCLUDED.tax_lines, tenant_tax_config.tax_lines),
+                    category_map = COALESCE(EXCLUDED.category_map, tenant_tax_config.category_map),
                     updated_at            = NOW()
                 RETURNING *
                 """,
@@ -732,6 +735,8 @@ async def update_tax_config(request: Request, data) -> dict:
                 data.inc_gl_account_id,
                 data.iva_gl_account_id,
                 data.liquor_tax_gl_account_id,
+                json.dumps(data.tax_lines) if getattr(data, "tax_lines", None) is not None else None,
+                json.dumps(data.category_map) if getattr(data, "category_map", None) is not None else None,
             )
 
             return {"success": True, "data": dict(row)}

@@ -85,17 +85,14 @@ def _tip_gl_amounts(
     Return (settlement_debit, net_tip_revenue, tip_tax_credit) for GL posting.
     Mirrors additive vs extractive tip tax from tenant_tax_config.
     """
+    from app.services.hospitality_tax_engine import tip_tax_is_additive
+
     tip_amt = Decimal(str(tip_amount or 0))
     tip_tax = Decimal(str(tip_tax_amount or 0))
     if tip_amt <= 0 and tip_tax <= 0:
         return Decimal("0"), Decimal("0"), Decimal("0")
 
-    tip_tax_additive = False
-    if tip_tax > 0:
-        if tax_config.get("inc_applicable"):
-            tip_tax_additive = not tax_config.get("inc_included_in_price", True)
-        elif tax_config.get("iva_applicable"):
-            tip_tax_additive = not tax_config.get("iva_included_in_price", False)
+    tip_tax_additive = tip_tax > 0 and tip_tax_is_additive(tax_config)
 
     if tip_tax_additive:
         settlement = tip_amt + tip_tax
@@ -112,11 +109,9 @@ async def _resolve_standard_tax_account_id(
     tax_config: Dict[str, Any],
 ) -> Optional[UUID]:
     """Resolve INC/IVA credit account for standard (non-liquor) tax, including tip tax."""
-    tax_kind = None
-    if tax_config.get("inc_applicable"):
-        tax_kind = "inc"
-    elif tax_config.get("iva_applicable"):
-        tax_kind = "iva"
+    from app.services.hospitality_tax_engine import primary_gl_role
+
+    tax_kind = primary_gl_role(tax_config)
     if not tax_kind:
         return None
     account = await resolve_tax_account(
@@ -136,7 +131,8 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
                   liquor_tax_applicable, liquor_tax_rate,
                   liquor_tax_gl_account_code, liquor_tax_gl_account_id,
                   iva_applicable, iva_rate, iva_gl_account_code, iva_gl_account_id,
-                  iva_included_in_price
+                  iva_included_in_price,
+                  tax_lines, category_map
            FROM tenant_tax_config WHERE tenant_id = $1""",
         tenant_id,
     )
@@ -157,6 +153,8 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
         "iva_gl_account_code":        None,
         "iva_gl_account_id":          None,
         "iva_included_in_price":      False,
+        "tax_lines":                  None,
+        "category_map":               None,
     }
 
 
@@ -222,18 +220,25 @@ async def _post_cierre_gl_entry(
         conn, tenant_id, AccountRole.SALES_REVENUE, source="cierre"
     )
 
-    # Determine tax split
+    # Determine tax split (primary standard line; extractive on total_sales)
+    from app.services.hospitality_tax_engine import resolve_tax_profile, tax_amount_decimal
+
     tax_amount = Decimal("0")
     tax_acct_id = None
-    if tax_config.get("inc_applicable"):
-        rate = Decimal(str(tax_config["inc_rate"]))
-        tax_amount = total_sales - (total_sales / (1 + rate))
-        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "inc")
-        tax_acct_id = tax_account.id if tax_account else None
-    elif tax_config.get("iva_applicable"):
-        rate = Decimal(str(tax_config["iva_rate"]))
-        tax_amount = total_sales - (total_sales / (1 + rate))
-        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "iva")
+    primary = resolve_tax_profile(tax_config).primary_line()
+    if primary and total_sales > 0:
+        # Cierre summary historically treats the period total as extractive on the
+        # primary rate (included-in-price style), matching pre-engine INC/IVA posts.
+        extractive_line = primary
+        if not primary.included_in_price:
+            # Keep legacy cierre behavior: always extract from total_sales.
+            from dataclasses import replace
+
+            extractive_line = replace(primary, included_in_price=True)
+        tax_amount, _ = tax_amount_decimal(total_sales, extractive_line)
+        tax_account = await resolve_tax_account(
+            conn, tenant_id, tax_config, primary.gl_role,
+        )
         tax_acct_id = tax_account.id if tax_account else None
 
     net_income = total_sales - tax_amount
@@ -407,39 +412,28 @@ async def _post_order_gl_entry(
     if not order_items:
         standard_subtotal = total_amount
 
-    # ── Calculate taxes per category ──────────────────────────────────────
-    standard_tax     = Decimal("0")
-    liquor_tax       = Decimal("0")
+    # ── Calculate taxes per category (profile-driven tax_lines) ───────────
+    from app.services.hospitality_tax_engine import compute_gl_category_taxes
+
+    tax_result = compute_gl_category_taxes(
+        standard_subtotal, liquor_subtotal, tax_config,
+    )
+    standard_tax = tax_result["standard_tax"]
+    liquor_tax = tax_result["liquor_tax"]
+    standard_is_additive = tax_result["standard_is_additive"]
     standard_acct_id = None
-    liquor_acct_id   = None
-    standard_is_additive = False
+    liquor_acct_id = None
 
-    if tax_config.get("inc_applicable") and standard_subtotal > 0:
-        rate = Decimal(str(tax_config["inc_rate"]))
-        if tax_config.get("inc_included_in_price", True):
-            # Extractive: price already includes INC
-            standard_tax = standard_subtotal - (standard_subtotal / (1 + rate))
-        else:
-            # Additive: INC charged on top of base price
-            standard_tax = standard_subtotal * rate
-            standard_is_additive = True
-        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "inc")
+    if tax_result["standard_gl_role"] and standard_tax > 0:
+        tax_account = await resolve_tax_account(
+            conn, tenant_id, tax_config, tax_result["standard_gl_role"],
+        )
         standard_acct_id = tax_account.id if tax_account else None
 
-    elif tax_config.get("iva_applicable") and standard_subtotal > 0:
-        rate = Decimal(str(tax_config["iva_rate"]))
-        if tax_config.get("iva_included_in_price", False):
-            standard_tax = standard_subtotal - (standard_subtotal / (1 + rate))
-        else:
-            standard_tax = standard_subtotal * rate
-            standard_is_additive = True
-        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "iva")
-        standard_acct_id = tax_account.id if tax_account else None
-
-    if tax_config.get("liquor_tax_applicable") and liquor_subtotal > 0:
-        rate = Decimal(str(tax_config["liquor_tax_rate"]))
-        liquor_tax = liquor_subtotal * rate  # IVA licores — always additive (external VAT)
-        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "liquor")
+    if tax_result["liquor_gl_role"] and liquor_tax > 0:
+        tax_account = await resolve_tax_account(
+            conn, tenant_id, tax_config, tax_result["liquor_gl_role"],
+        )
         liquor_acct_id = tax_account.id if tax_account else None
 
     # ── Compute debit_total and net_revenue ───────────────────────────────
