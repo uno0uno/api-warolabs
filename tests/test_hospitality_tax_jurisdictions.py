@@ -84,6 +84,14 @@ def test_migration_is_add_only():
     assert "DROP TABLE" not in sql.upper()
 
 
+def test_registration_jurisdiction_migration_is_add_only():
+    sql = Path("migrations/120_registration_tax_jurisdiction.sql").read_text()
+    assert "ADD COLUMN IF NOT EXISTS tax_jurisdiction_code" in sql
+    assert "onboarding_email_challenges" in sql
+    assert "DROP COLUMN" not in sql.upper()
+    assert "DROP TABLE" not in sql.upper()
+
+
 class _JurisConn:
     def __init__(self):
         self.row = {"tax_lines": None, "tax_jurisdiction_code": None}

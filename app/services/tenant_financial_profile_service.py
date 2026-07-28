@@ -10,6 +10,7 @@ from app.core.tenant_prefs import (
     SUPPORTED_CURRENCY_MINOR_UNITS,
     validate_country_currency_pair,
 )
+from app.core.timezones import seed_tenant_timezone_from_country
 from app.database import get_db_connection
 from app.models.tenant_financial_profile import (
     CountryCurrencyOption,
@@ -19,6 +20,11 @@ from app.models.tenant_financial_profile import (
     TenantFinancialProfile,
     TenantFinancialProfileResponse,
     TenantFinancialProfileUpdate,
+)
+from app.services.hospitality_tax_jurisdictions import (
+    JURISDICTION_COUNTRIES,
+    apply_jurisdiction_pack,
+    normalize_jurisdiction_code,
 )
 
 PERMANENT_REASON = "PERMANENT_FINANCIAL_ACTIVITY"
@@ -197,6 +203,29 @@ async def update_financial_profile(
                 and current.profile.base_currency_code == currency_code
             )
             if same_pair:
+                jurisdiction = data.tax_jurisdiction_code
+                if country_code in JURISDICTION_COUNTRIES and jurisdiction:
+                    try:
+                        jurisdiction = normalize_jurisdiction_code(
+                            country_code, jurisdiction
+                        )
+                    except ValueError as exc:
+                        raise HTTPException(status_code=422, detail=str(exc)) from exc
+                    applied, _ = await apply_jurisdiction_pack(
+                        conn, tenant_id, country_code, jurisdiction
+                    )
+                    if not applied:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"Unsupported jurisdiction {jurisdiction} "
+                                f"for {country_code}"
+                            ),
+                        )
+                    await seed_tenant_timezone_from_country(
+                        conn, tenant_id, country_code
+                    )
+                    return await build_financial_response(conn, tenant_id)
                 return current
 
             # Country/currency are immutable after first configure (onboarding /
