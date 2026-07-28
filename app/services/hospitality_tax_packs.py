@@ -1,6 +1,7 @@
-"""Wave-1 hospitality tax pack seeds — warocol.com#1847.
+"""Hospitality tax pack seeds — wave-1 (#1847) + wave-2 simple (#1862).
 
-Rates match front_nuxt/composables/useTenantTaxProfile.ts WAVE1_TAX_PRESETS.
+Wave-1 rates match front_nuxt/composables/useTenantTaxProfile.ts WAVE1_TAX_PRESETS.
+Wave-2 simple rates: warocol.com#1860 epic research / #1862 delta.
 """
 from __future__ import annotations
 
@@ -8,6 +9,10 @@ import json
 from typing import Any, Dict, Mapping, Optional
 
 WAVE1_COUNTRY_CODES = frozenset({"PA", "CL", "DO", "UY", "AU", "NZ", "SG", "AE"})
+
+WAVE2_SIMPLE_COUNTRY_CODES = frozenset(
+    {"PE", "MX", "CR", "AR", "ES", "FR", "GB", "CN"}
+)
 
 WAVE1_TAX_PACKS: Dict[str, Dict[str, Any]] = {
     "PA": {
@@ -108,12 +113,136 @@ WAVE1_TAX_PACKS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+WAVE2_SIMPLE_TAX_PACKS: Dict[str, Dict[str, Any]] = {
+    "PE": {
+        "tax_lines": [
+            {
+                "key": "igv",
+                "label": "IGV 18%",
+                "rate": 0.18,
+                "included_in_price": False,
+                "gl_role": "iva",
+            }
+        ],
+        "category_map": {"standard": "igv", "liquor": "igv", "exempt": None},
+    },
+    "MX": {
+        "tax_lines": [
+            {
+                "key": "iva",
+                "label": "IVA 16%",
+                "rate": 0.16,
+                "included_in_price": False,
+                "gl_role": "iva",
+            }
+        ],
+        "category_map": {"standard": "iva", "liquor": "iva", "exempt": None},
+    },
+    "CR": {
+        "tax_lines": [
+            {
+                "key": "iva",
+                "label": "IVA 13%",
+                "rate": 0.13,
+                "included_in_price": False,
+                "gl_role": "iva",
+            }
+        ],
+        "category_map": {"standard": "iva", "liquor": "iva", "exempt": None},
+    },
+    "AR": {
+        "tax_lines": [
+            {
+                "key": "iva",
+                "label": "IVA 21%",
+                "rate": 0.21,
+                "included_in_price": False,
+                "gl_role": "iva",
+            }
+        ],
+        "category_map": {"standard": "iva", "liquor": "iva", "exempt": None},
+    },
+    "ES": {
+        "tax_lines": [
+            {
+                "key": "iva",
+                "label": "IVA 10%",
+                "rate": 0.10,
+                "included_in_price": False,
+                "gl_role": "iva",
+            }
+        ],
+        "category_map": {"standard": "iva", "liquor": "iva", "exempt": None},
+    },
+    "FR": {
+        "tax_lines": [
+            {
+                "key": "tva",
+                "label": "TVA 10%",
+                "rate": 0.10,
+                "included_in_price": False,
+                "gl_role": "iva",
+            }
+        ],
+        "category_map": {"standard": "tva", "liquor": "tva", "exempt": None},
+    },
+    "GB": {
+        "tax_lines": [
+            {
+                "key": "vat",
+                "label": "VAT 20%",
+                "rate": 0.20,
+                "included_in_price": False,
+                "gl_role": "iva",
+            }
+        ],
+        "category_map": {"standard": "vat", "liquor": "vat", "exempt": None},
+    },
+    "CN": {
+        "tax_lines": [
+            {
+                "key": "vat",
+                "label": "VAT 6%",
+                "rate": 0.06,
+                "included_in_price": False,
+                "gl_role": "iva",
+            }
+        ],
+        "category_map": {"standard": "vat", "liquor": "vat", "exempt": None},
+    },
+}
+
+# Union for seed lookup (wave-1 + wave-2 simple). DE/NL stay in #1863.
+COUNTRY_TAX_PACKS: Dict[str, Dict[str, Any]] = {
+    **WAVE1_TAX_PACKS,
+    **WAVE2_SIMPLE_TAX_PACKS,
+}
+SEEDED_COUNTRY_CODES = frozenset(COUNTRY_TAX_PACKS)
+
+
+def _one_rate_pack(pack: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "tax_lines": list(pack["tax_lines"]),
+        "category_map": dict(pack["category_map"]),
+    }
+
+
+def pack_for_country(country_code: str) -> Optional[Dict[str, Any]]:
+    """Return wave-1 or wave-2 simple pack, or None for CO / jurisdiction / unknown."""
+    code = str(country_code or "").upper()
+    if code == "CO" or code not in SEEDED_COUNTRY_CODES:
+        return None
+    pack = COUNTRY_TAX_PACKS.get(code)
+    return _one_rate_pack(pack) if pack else None
+
 
 def wave1_pack_for_country(country_code: str) -> Optional[Dict[str, Any]]:
+    """Wave-1-only lookup (tests / callers that must not see wave-2)."""
     code = str(country_code or "").upper()
     if code == "CO" or code not in WAVE1_COUNTRY_CODES:
         return None
-    return WAVE1_TAX_PACKS.get(code)
+    pack = WAVE1_TAX_PACKS.get(code)
+    return _one_rate_pack(pack) if pack else None
 
 
 def tax_config_from_wave1_pack(pack: Mapping[str, Any]) -> Dict[str, Any]:
@@ -127,9 +256,9 @@ def tax_config_from_wave1_pack(pack: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-async def ensure_wave1_tax_pack(conn, tenant_id, country_code: str) -> bool:
-    """Write wave-1 pack when tax_lines is unset. Never overwrites existing lines."""
-    pack = wave1_pack_for_country(country_code)
+async def ensure_country_tax_pack(conn, tenant_id, country_code: str) -> bool:
+    """Write seeded pack when tax_lines is unset. Never overwrites existing lines."""
+    pack = pack_for_country(country_code)
     if not pack:
         return False
 
@@ -163,3 +292,8 @@ async def ensure_wave1_tax_pack(conn, tenant_id, country_code: str) -> bool:
         json.dumps(pack["category_map"]),
     )
     return result.endswith("1")
+
+
+async def ensure_wave1_tax_pack(conn, tenant_id, country_code: str) -> bool:
+    """Alias kept for existing call sites (onboarding + tax-config GET)."""
+    return await ensure_country_tax_pack(conn, tenant_id, country_code)
