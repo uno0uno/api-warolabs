@@ -265,6 +265,7 @@ async def apply_jurisdiction_pack(
         SET tax_jurisdiction_code = $2,
             tax_lines = $3::jsonb,
             category_map = $4::jsonb,
+            commercial_tax_applicable = true,
             updated_at = NOW()
         WHERE tenant_id = $1
         RETURNING *

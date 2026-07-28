@@ -772,11 +772,13 @@ async def update_tax_config(request: Request, data) -> dict:
                     )
                 # Allow commercial rate override on top of jurisdiction seed.
                 if getattr(data, "tax_lines", None) is not None:
+                    commercial_flag = getattr(data, "commercial_tax_applicable", None)
                     row = await conn.fetchrow(
                         """
                         UPDATE tenant_tax_config
                         SET tax_lines = $2::jsonb,
                             category_map = COALESCE($3::jsonb, category_map),
+                            commercial_tax_applicable = COALESCE($4, commercial_tax_applicable),
                             updated_at = NOW()
                         WHERE tenant_id = $1
                         RETURNING *
@@ -786,9 +788,23 @@ async def update_tax_config(request: Request, data) -> dict:
                         json.dumps(data.category_map)
                         if getattr(data, "category_map", None) is not None
                         else None,
+                        commercial_flag,
+                    )
+                elif getattr(data, "commercial_tax_applicable", None) is not None:
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE tenant_tax_config
+                        SET commercial_tax_applicable = $2,
+                            updated_at = NOW()
+                        WHERE tenant_id = $1
+                        RETURNING *
+                        """,
+                        tenant_id,
+                        data.commercial_tax_applicable,
                     )
                 return {"success": True, "data": dict(row)}
 
+            commercial_flag = getattr(data, "commercial_tax_applicable", None)
             row = await conn.fetchrow(
                 """
                 INSERT INTO tenant_tax_config (
@@ -797,9 +813,10 @@ async def update_tax_config(request: Request, data) -> dict:
                     iva_applicable, iva_included_in_price,
                     liquor_tax_applicable,
                     inc_gl_account_id, iva_gl_account_id, liquor_tax_gl_account_id,
-                    tax_lines, category_map, tax_jurisdiction_code
+                    tax_lines, category_map, tax_jurisdiction_code,
+                    commercial_tax_applicable
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12, COALESCE($13, false))
                 ON CONFLICT (tenant_id) DO UPDATE SET
                     inc_applicable        = EXCLUDED.inc_applicable,
                     inc_included_in_price = EXCLUDED.inc_included_in_price,
@@ -814,6 +831,10 @@ async def update_tax_config(request: Request, data) -> dict:
                     tax_jurisdiction_code = COALESCE(
                         EXCLUDED.tax_jurisdiction_code,
                         tenant_tax_config.tax_jurisdiction_code
+                    ),
+                    commercial_tax_applicable = COALESCE(
+                        EXCLUDED.commercial_tax_applicable,
+                        tenant_tax_config.commercial_tax_applicable
                     ),
                     updated_at            = NOW()
                 RETURNING *
@@ -830,6 +851,7 @@ async def update_tax_config(request: Request, data) -> dict:
                 json.dumps(data.tax_lines) if getattr(data, "tax_lines", None) is not None else None,
                 json.dumps(data.category_map) if getattr(data, "category_map", None) is not None else None,
                 None,
+                commercial_flag,
             )
 
             return {"success": True, "data": dict(row)}

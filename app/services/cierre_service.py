@@ -132,7 +132,7 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
                   liquor_tax_gl_account_code, liquor_tax_gl_account_id,
                   iva_applicable, iva_rate, iva_gl_account_code, iva_gl_account_id,
                   iva_included_in_price,
-                  tax_lines, category_map
+                  tax_lines, category_map, commercial_tax_applicable
            FROM tenant_tax_config WHERE tenant_id = $1""",
         tenant_id,
     )
@@ -155,6 +155,7 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
         "iva_included_in_price":      False,
         "tax_lines":                  None,
         "category_map":               None,
+        "commercial_tax_applicable":  False,
     }
 
 

@@ -37,6 +37,10 @@ class TaxConfigResponse(BaseModel):
         default=None,
         description="US state or CA province code when country requires jurisdiction",
     )
+    commercial_tax_applicable: bool = Field(
+        default=False,
+        description="When tax_lines present: apply commercial tax in POS/Menú if true",
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -53,3 +57,7 @@ class TaxConfigUpdate(BaseModel):
     tax_lines: Optional[List[Dict[str, Any]]] = None
     category_map: Optional[Dict[str, Optional[str]]] = None
     tax_jurisdiction_code: Optional[str] = None
+    commercial_tax_applicable: Optional[bool] = Field(
+        default=None,
+        description="Commercial on/off; omit on CO-only updates to leave unchanged",
+    )

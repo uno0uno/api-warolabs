@@ -132,6 +132,12 @@ def resolve_tax_profile(tax_config: Mapping[str, Any]) -> TaxProfile:
     """Build a TaxProfile from explicit tax_lines or CO column adapter."""
     raw_lines = _as_mapping_list(tax_config.get("tax_lines"))
     if raw_lines:
+        # Commercial disable: keep stored lines in DB but apply no tax (#1868).
+        if tax_config.get("commercial_tax_applicable") is False:
+            return TaxProfile(
+                lines={},
+                category_map={"standard": None, "liquor": None, "exempt": None},
+            )
         lines: Dict[str, TaxLine] = {}
         for item in raw_lines:
             line = _line_from_mapping(item)
