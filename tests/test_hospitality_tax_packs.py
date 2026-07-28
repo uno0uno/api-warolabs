@@ -1,4 +1,4 @@
-"""Hospitality tax packs — wave-1 (#1847) + wave-2 simple (#1862)."""
+"""Hospitality tax packs — wave-1 (#1847) + wave-2 simple/multi (#1862/#1863)."""
 from uuid import uuid4
 
 import pytest
@@ -11,6 +11,8 @@ from app.services.hospitality_tax_engine import (
 from app.services.hospitality_tax_packs import (
     WAVE1_COUNTRY_CODES,
     WAVE1_TAX_PACKS,
+    WAVE2_MULTI_COUNTRY_CODES,
+    WAVE2_MULTI_TAX_PACKS,
     WAVE2_SIMPLE_COUNTRY_CODES,
     WAVE2_SIMPLE_TAX_PACKS,
     ensure_country_tax_pack,
@@ -49,7 +51,6 @@ def test_wave1_pack_skips_colombia_and_unknown():
     assert wave1_pack_for_country("") is None
     assert pack_for_country("CO") is None
     assert pack_for_country("US") is None
-    assert pack_for_country("DE") is None  # multi-rate → #1863
 
 
 @pytest.mark.parametrize(
@@ -99,6 +100,41 @@ def test_wave2_simple_pack_computes_standard_and_exempt(country, subtotal, expec
     std, liq, _ = compute_category_breakdown(rows, cfg)
     assert std == expected_tax
     assert liq == 0.0
+    assert resolve_tax_profile(cfg).line_for_category("exempt") is None
+
+
+
+
+@pytest.mark.parametrize("country", sorted(WAVE2_MULTI_COUNTRY_CODES))
+def test_wave2_multi_pack_exists_for_each_country(country):
+    pack = pack_for_country(country)
+    assert pack is not None
+    assert pack == WAVE2_MULTI_TAX_PACKS[country]
+    assert len(pack["tax_lines"]) == 2
+    assert pack["category_map"]["exempt"] is None
+    assert pack["category_map"]["standard"] != pack["category_map"]["liquor"]
+    assert wave1_pack_for_country(country) is None
+
+
+@pytest.mark.parametrize(
+    ("country", "std_subtotal", "liq_subtotal", "expected_std", "expected_liq"),
+    [
+        ("DE", 10000, 10000, 700.0, 1900.0),
+        ("NL", 10000, 10000, 900.0, 2100.0),
+    ],
+)
+def test_wave2_multi_pack_computes_standard_and_liquor(
+    country, std_subtotal, liq_subtotal, expected_std, expected_liq
+):
+    cfg = tax_config_from_wave1_pack(WAVE2_MULTI_TAX_PACKS[country])
+    rows = [
+        {"tax_category": "standard", "subtotal": std_subtotal},
+        {"tax_category": "liquor", "subtotal": liq_subtotal},
+        {"tax_category": "exempt", "subtotal": 3000},
+    ]
+    std, liq, _ = compute_category_breakdown(rows, cfg)
+    assert std == expected_std
+    assert liq == expected_liq
     assert resolve_tax_profile(cfg).line_for_category("exempt") is None
 
 
@@ -184,6 +220,27 @@ async def test_ensure_country_tax_pack_does_not_overwrite_wave2():
     assert applied is False
     assert not any("UPDATE tenant_tax_config" in q for q, _ in conn.queries)
 
+
+
+
+@pytest.mark.asyncio
+async def test_ensure_country_tax_pack_writes_wave2_de():
+    tenant_id = uuid4()
+    conn = _PackConn(tax_lines=None)
+    applied = await ensure_country_tax_pack(conn, tenant_id, "DE")
+    assert applied is True
+    assert any("UPDATE tenant_tax_config" in q for q, _ in conn.queries)
+    update = next(args for q, args in conn.queries if "UPDATE tenant_tax_config" in q)
+    assert "mwst_reduced" in update[1] and "mwst_standard" in update[1]
+
+
+@pytest.mark.asyncio
+async def test_ensure_country_tax_pack_does_not_overwrite_wave2_multi():
+    tenant_id = uuid4()
+    conn = _PackConn(tax_lines=[{"key": "custom"}])
+    applied = await ensure_country_tax_pack(conn, tenant_id, "NL")
+    assert applied is False
+    assert not any("UPDATE tenant_tax_config" in q for q, _ in conn.queries)
 
 def test_co_adapter_regression_unchanged():
     cfg = {

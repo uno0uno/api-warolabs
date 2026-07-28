@@ -1,7 +1,7 @@
-"""Hospitality tax pack seeds — wave-1 (#1847) + wave-2 simple (#1862).
+"""Hospitality tax pack seeds — wave-1 (#1847) + wave-2 (#1862/#1863).
 
 Wave-1 rates match front_nuxt/composables/useTenantTaxProfile.ts WAVE1_TAX_PRESETS.
-Wave-2 simple rates: warocol.com#1860 epic research / #1862 delta.
+Wave-2 simple (#1862) and multi-rate DE/NL (#1863): warocol.com#1860 epic research.
 """
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ WAVE1_COUNTRY_CODES = frozenset({"PA", "CL", "DO", "UY", "AU", "NZ", "SG", "AE"}
 WAVE2_SIMPLE_COUNTRY_CODES = frozenset(
     {"PE", "MX", "CR", "AR", "ES", "FR", "GB", "CN"}
 )
+
+WAVE2_MULTI_COUNTRY_CODES = frozenset({"DE", "NL"})
 
 WAVE1_TAX_PACKS: Dict[str, Dict[str, Any]] = {
     "PA": {
@@ -212,15 +214,68 @@ WAVE2_SIMPLE_TAX_PACKS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-# Union for seed lookup (wave-1 + wave-2 simple). DE/NL stay in #1863.
+
+WAVE2_MULTI_TAX_PACKS: Dict[str, Dict[str, Any]] = {
+    # Commercial approx: food/soft → standard (reduced); alcohol → liquor (full).
+    "DE": {
+        "tax_lines": [
+            {
+                "key": "mwst_reduced",
+                "label": "MwSt 7%",
+                "rate": 0.07,
+                "included_in_price": False,
+                "gl_role": "iva",
+            },
+            {
+                "key": "mwst_standard",
+                "label": "MwSt 19%",
+                "rate": 0.19,
+                "included_in_price": False,
+                "gl_role": "iva",
+            },
+        ],
+        "category_map": {
+            "standard": "mwst_reduced",
+            "liquor": "mwst_standard",
+            "exempt": None,
+        },
+    },
+    "NL": {
+        "tax_lines": [
+            {
+                "key": "btw_reduced",
+                "label": "BTW 9%",
+                "rate": 0.09,
+                "included_in_price": False,
+                "gl_role": "iva",
+            },
+            {
+                "key": "btw_standard",
+                "label": "BTW 21%",
+                "rate": 0.21,
+                "included_in_price": False,
+                "gl_role": "iva",
+            },
+        ],
+        "category_map": {
+            "standard": "btw_reduced",
+            "liquor": "btw_standard",
+            "exempt": None,
+        },
+    },
+}
+
+# Union for seed lookup (wave-1 + wave-2 simple + DE/NL multi).
 COUNTRY_TAX_PACKS: Dict[str, Dict[str, Any]] = {
     **WAVE1_TAX_PACKS,
     **WAVE2_SIMPLE_TAX_PACKS,
+    **WAVE2_MULTI_TAX_PACKS,
 }
 SEEDED_COUNTRY_CODES = frozenset(COUNTRY_TAX_PACKS)
 
 
-def _one_rate_pack(pack: Mapping[str, Any]) -> Dict[str, Any]:
+def _copy_pack(pack: Mapping[str, Any]) -> Dict[str, Any]:
+    """Shallow-copy pack for callers (1-rate or multi-rate)."""
     return {
         "tax_lines": list(pack["tax_lines"]),
         "category_map": dict(pack["category_map"]),
@@ -228,12 +283,12 @@ def _one_rate_pack(pack: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def pack_for_country(country_code: str) -> Optional[Dict[str, Any]]:
-    """Return wave-1 or wave-2 simple pack, or None for CO / jurisdiction / unknown."""
+    """Return seeded country pack, or None for CO / jurisdiction / unknown."""
     code = str(country_code or "").upper()
     if code == "CO" or code not in SEEDED_COUNTRY_CODES:
         return None
     pack = COUNTRY_TAX_PACKS.get(code)
-    return _one_rate_pack(pack) if pack else None
+    return _copy_pack(pack) if pack else None
 
 
 def wave1_pack_for_country(country_code: str) -> Optional[Dict[str, Any]]:
@@ -242,7 +297,7 @@ def wave1_pack_for_country(country_code: str) -> Optional[Dict[str, Any]]:
     if code == "CO" or code not in WAVE1_COUNTRY_CODES:
         return None
     pack = WAVE1_TAX_PACKS.get(code)
-    return _one_rate_pack(pack) if pack else None
+    return _copy_pack(pack) if pack else None
 
 
 def tax_config_from_wave1_pack(pack: Mapping[str, Any]) -> Dict[str, Any]:
