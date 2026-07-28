@@ -19,6 +19,7 @@ from app.models.onboarding import (
 from app.models.tenant_financial_profile import TenantFinancialProfile
 from app.services import legal_service
 from app.services import tenant_financial_profile_service as financial_service
+from app.services.hospitality_tax_packs import ensure_wave1_tax_pack
 
 MAX_EMAIL_REQUESTS = 5
 MAX_IP_REQUESTS = 20
@@ -752,6 +753,7 @@ async def update_onboarding_financial_profile(
         fiscal_provider,
     )
     await financial_service.seed_tenant_accounts(conn, tenant_id)
+    await ensure_wave1_tax_pack(conn, tenant_id, country_code)
     state = await _promote_onboarding_identity(conn, tenant_id)
     result = dict(profile)
     result["business_name"] = data.business_name
