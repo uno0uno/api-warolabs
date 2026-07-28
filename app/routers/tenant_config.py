@@ -5,7 +5,7 @@ Authentication required
 from datetime import date as _date
 from uuid import UUID
 from asyncpg.exceptions import UniqueViolationError
-from fastapi import APIRouter, Depends, Request, Body, HTTPException
+from fastapi import APIRouter, Depends, Request, Body, HTTPException, Query
 from fastapi.responses import JSONResponse
 from app.core.permissions import Module, require_module
 from app.services.account_role_service import require_matias_dian_capability
@@ -175,6 +175,18 @@ async def get_tax_config_endpoint(request: Request):
     **Requires authentication**
     """
     return await tenant_config_service.get_tax_config(request)
+
+
+@router.get(
+    "/tax-jurisdictions",
+    dependencies=[Depends(require_module(Module.MI_NEGOCIO))],
+)
+async def get_tax_jurisdictions_endpoint(
+    request: Request,
+    country: str = Query(..., min_length=2, max_length=2),
+):
+    """Static US state / CA province hospitality tax defaults (warocol.com#1848)."""
+    return await tenant_config_service.get_tax_jurisdictions(request, country)
 
 
 @router.put("/tax-config", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
