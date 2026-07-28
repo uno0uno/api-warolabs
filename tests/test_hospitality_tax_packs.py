@@ -1,5 +1,4 @@
-"""Wave-1 hospitality tax packs — warocol.com#1847."""
-from decimal import Decimal
+"""Hospitality tax packs — wave-1 (#1847) + wave-2 simple (#1862)."""
 from uuid import uuid4
 
 import pytest
@@ -12,7 +11,11 @@ from app.services.hospitality_tax_engine import (
 from app.services.hospitality_tax_packs import (
     WAVE1_COUNTRY_CODES,
     WAVE1_TAX_PACKS,
+    WAVE2_SIMPLE_COUNTRY_CODES,
+    WAVE2_SIMPLE_TAX_PACKS,
+    ensure_country_tax_pack,
     ensure_wave1_tax_pack,
+    pack_for_country,
     tax_config_from_wave1_pack,
     wave1_pack_for_country,
 )
@@ -27,10 +30,26 @@ def test_wave1_pack_exists_for_each_shortlist_country(country):
     assert pack["category_map"]["exempt"] is None
 
 
+@pytest.mark.parametrize("country", sorted(WAVE2_SIMPLE_COUNTRY_CODES))
+def test_wave2_simple_pack_exists_for_each_country(country):
+    pack = pack_for_country(country)
+    assert pack is not None
+    assert pack == WAVE2_SIMPLE_TAX_PACKS[country]
+    assert len(pack["tax_lines"]) == 1
+    assert pack["category_map"]["exempt"] is None
+    assert pack["category_map"]["standard"] == pack["tax_lines"][0]["key"]
+    assert pack["category_map"]["liquor"] == pack["tax_lines"][0]["key"]
+    # wave1-only helper must not surface wave-2
+    assert wave1_pack_for_country(country) is None
+
+
 def test_wave1_pack_skips_colombia_and_unknown():
     assert wave1_pack_for_country("CO") is None
     assert wave1_pack_for_country("US") is None
     assert wave1_pack_for_country("") is None
+    assert pack_for_country("CO") is None
+    assert pack_for_country("US") is None
+    assert pack_for_country("DE") is None  # multi-rate → #1863
 
 
 @pytest.mark.parametrize(
@@ -48,6 +67,31 @@ def test_wave1_pack_skips_colombia_and_unknown():
 )
 def test_wave1_pack_computes_standard_and_exempt(country, subtotal, expected_tax):
     cfg = tax_config_from_wave1_pack(WAVE1_TAX_PACKS[country])
+    rows = [
+        {"tax_category": "standard", "subtotal": subtotal},
+        {"tax_category": "exempt", "subtotal": 3000},
+    ]
+    std, liq, _ = compute_category_breakdown(rows, cfg)
+    assert std == expected_tax
+    assert liq == 0.0
+    assert resolve_tax_profile(cfg).line_for_category("exempt") is None
+
+
+@pytest.mark.parametrize(
+    ("country", "subtotal", "expected_tax"),
+    [
+        ("PE", 10000, 1800.0),
+        ("MX", 10000, 1600.0),
+        ("CR", 10000, 1300.0),
+        ("AR", 10000, 2100.0),
+        ("ES", 10000, 1000.0),
+        ("FR", 10000, 1000.0),
+        ("GB", 10000, 2000.0),
+        ("CN", 10000, 600.0),
+    ],
+)
+def test_wave2_simple_pack_computes_standard_and_exempt(country, subtotal, expected_tax):
+    cfg = tax_config_from_wave1_pack(WAVE2_SIMPLE_TAX_PACKS[country])
     rows = [
         {"tax_category": "standard", "subtotal": subtotal},
         {"tax_category": "exempt", "subtotal": 3000},
@@ -104,6 +148,17 @@ async def test_ensure_wave1_tax_pack_writes_when_missing():
 
 
 @pytest.mark.asyncio
+async def test_ensure_country_tax_pack_writes_wave2_mx():
+    tenant_id = uuid4()
+    conn = _PackConn(tax_lines=None)
+    applied = await ensure_country_tax_pack(conn, tenant_id, "MX")
+    assert applied is True
+    assert any("UPDATE tenant_tax_config" in q for q, _ in conn.queries)
+    update = next(args for q, args in conn.queries if "UPDATE tenant_tax_config" in q)
+    assert '"IVA 16%"' in update[1] or "0.16" in update[1]
+
+
+@pytest.mark.asyncio
 async def test_ensure_wave1_tax_pack_skips_colombia():
     tenant_id = uuid4()
     conn = _PackConn(tax_lines=None)
@@ -117,6 +172,15 @@ async def test_ensure_wave1_tax_pack_does_not_overwrite_existing_lines():
     tenant_id = uuid4()
     conn = _PackConn(tax_lines=[{"key": "custom"}])
     applied = await ensure_wave1_tax_pack(conn, tenant_id, "CL")
+    assert applied is False
+    assert not any("UPDATE tenant_tax_config" in q for q, _ in conn.queries)
+
+
+@pytest.mark.asyncio
+async def test_ensure_country_tax_pack_does_not_overwrite_wave2():
+    tenant_id = uuid4()
+    conn = _PackConn(tax_lines=[{"key": "custom"}])
+    applied = await ensure_country_tax_pack(conn, tenant_id, "MX")
     assert applied is False
     assert not any("UPDATE tenant_tax_config" in q for q, _ in conn.queries)
 
