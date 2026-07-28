@@ -2,6 +2,7 @@ import logging
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
 from app.services.auth_service import get_session_data, switch_tenant, update_profile, upload_profile_avatar
 from app.core.tenant_prefs import COUNTRY_CALLING_CODES, COUNTRY_CURRENCY_PAIRS
+from app.services.hospitality_tax_jurisdictions import JURISDICTION_COUNTRIES, list_jurisdictions
 from app.services.magic_link_service import (
     send_magic_link,
     send_registration_magic_link,
@@ -75,6 +76,18 @@ async def register_magic_link(request: Request, payload: RegistrationMagicLinkRe
 @router.get("/registration/options", response_model=RegistrationOptionsResponse)
 async def registration_options():
     """Public server-owned country/currency options for pre-verification data."""
+    tax_jurisdictions = {
+        country: [
+            {
+                "code": item["code"],
+                "label": item["label"],
+                "regime": item.get("regime") or "",
+                "rate": item.get("rate") or 0,
+            }
+            for item in list_jurisdictions(country)
+        ]
+        for country in sorted(JURISDICTION_COUNTRIES)
+    }
     return {
         "catalog": [
             {"country_code": country, "currency_codes": list(currencies)}
@@ -84,6 +97,7 @@ async def registration_options():
             {"country_code": country, "calling_code": calling_code}
             for country, calling_code in COUNTRY_CALLING_CODES.items()
         ],
+        "tax_jurisdictions": tax_jurisdictions,
     }
 
 @router.post("/verify-code", response_model=VerifyCodeResponse)

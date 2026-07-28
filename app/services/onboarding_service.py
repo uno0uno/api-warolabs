@@ -19,7 +19,13 @@ from app.models.onboarding import (
 from app.models.tenant_financial_profile import TenantFinancialProfile
 from app.services import legal_service
 from app.services import tenant_financial_profile_service as financial_service
+from app.services.hospitality_tax_jurisdictions import (
+    JURISDICTION_COUNTRIES,
+    apply_jurisdiction_pack,
+    normalize_jurisdiction_code,
+)
 from app.services.hospitality_tax_packs import ensure_wave1_tax_pack
+from app.core.timezones import seed_tenant_timezone_from_country
 
 MAX_EMAIL_REQUESTS = 5
 MAX_IP_REQUESTS = 20
@@ -56,6 +62,7 @@ async def store_registration_challenge(
     business_name: Optional[str] = None,
     country_code: Optional[str] = None,
     base_currency_code: Optional[str] = None,
+    tax_jurisdiction_code: Optional[str] = None,
     source: Optional[str] = None,
     content: Optional[str] = None,
     campaign: Optional[str] = None,
@@ -109,35 +116,35 @@ async def store_registration_challenge(
             normalized_email, token_hash, code_hash, opaque_token_hash,
             purpose, request_ip, user_agent, expires_at,
             phone_country_code, phone_number, consent_at, consent_version,
-            business_name, country_code, base_currency_code,
+            business_name, country_code, base_currency_code, tax_jurisdiction_code,
             first_source, first_content, first_campaign, first_variant,
             last_source, last_content, last_campaign, last_variant
         )
         VALUES (
             $1, $2, $3, $4, 'registration', $5::inet, $6,
             NOW() + INTERVAL '15 minutes', $7, $8, NOW(),
-            'self_service_registration_v1', $9, $10, $11,
+            'self_service_registration_v1', $9, $10, $11, $12,
             COALESCE((
                 SELECT first_source FROM onboarding_email_challenges
                 WHERE normalized_email = $1 AND purpose = 'registration'
                 ORDER BY created_at ASC LIMIT 1
-            ), $12),
+            ), $13),
             COALESCE((
                 SELECT first_content FROM onboarding_email_challenges
                 WHERE normalized_email = $1 AND purpose = 'registration'
                 ORDER BY created_at ASC LIMIT 1
-            ), $13),
+            ), $14),
             COALESCE((
                 SELECT first_campaign FROM onboarding_email_challenges
                 WHERE normalized_email = $1 AND purpose = 'registration'
                 ORDER BY created_at ASC LIMIT 1
-            ), $14),
+            ), $15),
             COALESCE((
                 SELECT first_variant FROM onboarding_email_challenges
                 WHERE normalized_email = $1 AND purpose = 'registration'
                 ORDER BY created_at ASC LIMIT 1
-            ), $15),
-            $12, $13, $14, $15
+            ), $16),
+            $13, $14, $15, $16
         )
         """,
         email,
@@ -151,6 +158,7 @@ async def store_registration_challenge(
         business_name,
         country_code,
         base_currency_code,
+        tax_jurisdiction_code,
         source,
         content,
         campaign,
@@ -170,7 +178,7 @@ async def get_resumable_registration_draft(conn, email: str) -> Optional[dict[st
     row = await conn.fetchrow(
         """
         SELECT phone_country_code, phone_number,
-               business_name, country_code, base_currency_code,
+               business_name, country_code, base_currency_code, tax_jurisdiction_code,
                first_source, first_content, first_campaign, first_variant,
                last_source, last_content, last_campaign, last_variant
         FROM onboarding_email_challenges
@@ -232,7 +240,7 @@ async def complete_registration(
     challenge_fields = """
         id, normalized_email, consumed_at, completed_user_id, completed_tenant_id,
         phone_country_code, phone_number,
-        business_name, country_code, base_currency_code,
+        business_name, country_code, base_currency_code, tax_jurisdiction_code,
         first_source, first_content, first_campaign, first_variant,
         last_source, last_content, last_campaign, last_variant
     """
@@ -430,6 +438,7 @@ async def complete_registration(
                 businessName=challenge["business_name"],
                 country_code=challenge["country_code"],
                 base_currency_code=challenge["base_currency_code"],
+                tax_jurisdiction_code=challenge.get("tax_jurisdiction_code"),
             ),
         )
         identity["tenant_name"] = financial.data.business_name
@@ -754,6 +763,26 @@ async def update_onboarding_financial_profile(
     )
     await financial_service.seed_tenant_accounts(conn, tenant_id)
     await ensure_wave1_tax_pack(conn, tenant_id, country_code)
+    jurisdiction = getattr(data, "tax_jurisdiction_code", None)
+    if country_code in JURISDICTION_COUNTRIES:
+        try:
+            jurisdiction = normalize_jurisdiction_code(country_code, jurisdiction)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if not jurisdiction:
+            raise HTTPException(
+                status_code=422,
+                detail="tax_jurisdiction_code is required for US and CA",
+            )
+        applied, _ = await apply_jurisdiction_pack(
+            conn, tenant_id, country_code, jurisdiction
+        )
+        if not applied:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unsupported jurisdiction {jurisdiction} for {country_code}",
+            )
+    await seed_tenant_timezone_from_country(conn, tenant_id, country_code)
     state = await _promote_onboarding_identity(conn, tenant_id)
     result = dict(profile)
     result["business_name"] = data.business_name

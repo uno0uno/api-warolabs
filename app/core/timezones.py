@@ -15,6 +15,83 @@ import asyncpg
 DEFAULT_TENANT_TIMEZONE = "America/Bogota"
 logger = logging.getLogger(__name__)
 
+# Primary IANA default per hospitality HQ country (v1). Multi-zone countries
+# use one primary; Negocio may override later. warocol.com#1854 / epic #1852.
+COUNTRY_DEFAULT_TIMEZONES: dict[str, str] = {
+    "CO": "America/Bogota",
+    "PA": "America/Panama",
+    "CL": "America/Santiago",
+    "US": "America/New_York",
+    "CA": "America/Toronto",
+    "DO": "America/Santo_Domingo",
+    "UY": "America/Montevideo",
+    "AU": "Australia/Sydney",
+    "NZ": "Pacific/Auckland",
+    "SG": "Asia/Singapore",
+    "AE": "Asia/Dubai",
+}
+
+
+def default_timezone_for_country(country_code: Optional[str]) -> str:
+    """Return the primary operational timezone for a catalog country."""
+    code = str(country_code or "").strip().upper()
+    mapped = COUNTRY_DEFAULT_TIMEZONES.get(code)
+    if mapped:
+        return mapped
+    return DEFAULT_TENANT_TIMEZONE
+
+
+async def seed_tenant_timezone_from_country(conn, tenant_id, country_code: str) -> str:
+    """Seed public-profile timezone from country when still on the global default.
+
+    Does not overwrite a user/Negocio override (any timezone other than the
+    legacy DEFAULT_TENANT_TIMEZONE). Creates a minimal public profile row when
+    missing (slug + display_name from tenants).
+    """
+    timezone_name = default_timezone_for_country(country_code)
+    updated = await conn.execute(
+        """
+        UPDATE tenant_public_profiles
+        SET timezone = $2
+        WHERE tenant_id = $1
+          AND (
+            timezone IS NULL
+            OR btrim(timezone) = ''
+            OR timezone = $3
+          )
+        """,
+        tenant_id,
+        timezone_name,
+        DEFAULT_TENANT_TIMEZONE,
+    )
+    if updated and str(updated).endswith("1"):
+        return timezone_name
+
+    tenant = await conn.fetchrow(
+        "SELECT slug, name FROM tenants WHERE id = $1",
+        tenant_id,
+    )
+    if not tenant or not tenant.get("slug"):
+        return timezone_name
+
+    await conn.execute(
+        """
+        INSERT INTO tenant_public_profiles (tenant_id, slug, display_name, timezone)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (tenant_id) DO UPDATE
+        SET timezone = EXCLUDED.timezone
+        WHERE tenant_public_profiles.timezone IS NULL
+           OR btrim(tenant_public_profiles.timezone) = ''
+           OR tenant_public_profiles.timezone = $5
+        """,
+        tenant_id,
+        tenant["slug"],
+        tenant.get("name") or tenant["slug"],
+        timezone_name,
+        DEFAULT_TENANT_TIMEZONE,
+    )
+    return timezone_name
+
 
 def validate_timezone(value: Optional[str]) -> str:
     """Return a normalized IANA timezone or raise ValueError for user input."""

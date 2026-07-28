@@ -330,6 +330,9 @@ async def test_registration_options_are_public_and_server_owned():
     )
     assert colombia_phone["calling_code"] == 57
     assert len(result["phone_countries"]) == len(result["catalog"])
+    assert "US" in result["tax_jurisdictions"]
+    assert "CA" in result["tax_jurisdictions"]
+    assert len(result["tax_jurisdictions"]["US"]) >= 50
 
 
 @pytest.mark.asyncio

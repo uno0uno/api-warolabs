@@ -12,6 +12,10 @@ from app.core.tenant_prefs import (
 )
 from app.models.onboarding import OnboardingStatus, OnboardingState, TenantLifecycle
 from app.models.tenant_financial_profile import CountryCurrencyOption
+from app.services.hospitality_tax_jurisdictions import (
+    JURISDICTION_COUNTRIES,
+    normalize_jurisdiction_code,
+)
 
 PreferredLocale = Literal['es', 'en', 'pt', 'fr', 'de', 'ar', 'hi', 'zh']
 
@@ -97,6 +101,7 @@ class RegistrationMagicLinkRequest(BaseModel):
     business_name: str = Field(min_length=2, max_length=120)
     country_code: str
     base_currency_code: str
+    tax_jurisdiction_code: Optional[str] = None
     source: Optional[str] = None
     content: Optional[str] = None
     campaign: Optional[str] = None
@@ -130,11 +135,29 @@ class RegistrationMagicLinkRequest(BaseModel):
             raise ValueError("Business name is required")
         return normalized
 
+    @field_validator("tax_jurisdiction_code", mode="before")
+    @classmethod
+    def _normalize_jurisdiction(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return value.strip().upper() if isinstance(value, str) else value
+
     @model_validator(mode="after")
     def _validate_business_country_currency(self):
         self.country_code, self.base_currency_code = validate_country_currency_pair(
             self.country_code, self.base_currency_code
         )
+        if self.country_code in JURISDICTION_COUNTRIES:
+            if not self.tax_jurisdiction_code:
+                raise ValueError("tax_jurisdiction_code is required for US and CA")
+            try:
+                self.tax_jurisdiction_code = normalize_jurisdiction_code(
+                    self.country_code, self.tax_jurisdiction_code
+                )
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+        else:
+            self.tax_jurisdiction_code = None
         return self
 
     @field_validator("source", "content", "campaign", "variant")
@@ -159,9 +182,19 @@ class PhoneCountryOption(BaseModel):
     calling_code: int
 
 
+class RegistrationTaxJurisdictionOption(BaseModel):
+    code: str
+    label: str
+    regime: str = ""
+    rate: float = 0
+
+
 class RegistrationOptionsResponse(BaseModel):
     catalog: list[CountryCurrencyOption]
     phone_countries: list[PhoneCountryOption]
+    tax_jurisdictions: Dict[str, list[RegistrationTaxJurisdictionOption]] = Field(
+        default_factory=dict
+    )
 
 
 class RegistrationVerifyCodeRequest(BaseModel):
