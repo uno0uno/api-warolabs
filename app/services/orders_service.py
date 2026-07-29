@@ -343,11 +343,9 @@ def _tax_detail_rows(
     if liquor_tax > 0:
         liquor_label = "IVA licores 5%"
         if tax_config is not None:
-            from app.services.hospitality_tax_engine import resolve_tax_profile
+            from app.services.hospitality_tax_engine import liquor_tax_label_for_config
 
-            liq_line = resolve_tax_profile(tax_config).line_for_category("liquor")
-            if liq_line:
-                liquor_label = liq_line.label
+            liquor_label = liquor_tax_label_for_config(tax_config)
         rows.append({"label": liquor_label, "base": liq_base, "amount": liquor_tax})
     return rows
 
@@ -893,8 +891,12 @@ async def get_order_by_id(
             _std_tax = 0.0
             _liq_tax = 0.0
             _tax_label = "Impuesto"
+            _liq_label = "IVA licores 5%"
             try:
+                from app.services.hospitality_tax_engine import liquor_tax_label_for_config
+
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                _liq_label = liquor_tax_label_for_config(tax_config)
                 items_rows = await conn.fetch(
                     """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
                               COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
@@ -1029,6 +1031,7 @@ async def get_order_by_id(
                     "standard_tax": _std_tax,
                     "liquor_tax": _liq_tax,
                     "standard_tax_label": _tax_label,
+                    "liquor_tax_label": _liq_label,
                     "promo_savings": _promo_summary["promo_savings"],
                     "promo_breakdown": _promo_summary["promo_breakdown"],
                     "waro_redemption_summary": _waro_summary,

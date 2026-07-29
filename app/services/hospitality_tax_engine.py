@@ -157,7 +157,14 @@ def resolve_effective_tax_category(
     tax_line_key: Optional[str] = None,
     tax_category: Optional[str] = "standard",
 ) -> str:
-    """Map resolved line → standard|liquor|exempt for legacy POS/GL buckets."""
+    """Map resolved line → standard|liquor|exempt for legacy POS/GL buckets.
+
+    When ``category_map.standard`` and ``category_map.liquor`` share the same
+    tax line key (common in MX / single-rate packs), do **not** dump every
+    taxable item into ``liquor`` — that made receipts show CO "IVA licores 5%"
+    for ordinary IVA 16% (#1899). Use the distinct liquor key only when it
+    differs from standard; otherwise fall back to the product's fiscal tag.
+    """
     line = resolve_product_tax_line(
         tax_config,
         category_id=category_id,
@@ -168,10 +175,22 @@ def resolve_effective_tax_category(
     if line is None:
         return "exempt"
     profile = resolve_tax_profile(tax_config)
+    standard_key = profile.category_map.get("standard")
     liquor_key = profile.category_map.get("liquor")
-    if liquor_key and line.key == liquor_key:
+    if liquor_key and liquor_key != standard_key and line.key == liquor_key:
+        return "liquor"
+    legacy = str(tax_category or "standard").strip().lower()
+    if legacy == "liquor" and liquor_key and line.key == liquor_key:
         return "liquor"
     return "standard"
+
+
+def liquor_tax_label_for_config(tax_config: Mapping[str, Any]) -> str:
+    """Label for the liquor bucket — tenant tax_lines[].label, never a hard-coded CO string."""
+    line = resolve_tax_profile(tax_config).line_for_category("liquor")
+    if line and line.label:
+        return line.label
+    return "IVA licores 5%"
 
 
 def _line_from_mapping(item: Mapping[str, Any]) -> Optional[TaxLine]:
@@ -383,3 +402,99 @@ def tip_tax_is_additive(tax_config: Mapping[str, Any]) -> bool:
 def primary_gl_role(tax_config: Mapping[str, Any]) -> Optional[str]:
     line = resolve_tax_profile(tax_config).primary_line()
     return line.gl_role if line else None
+
+
+def additive_order_tax_total(
+    standard_tax: float,
+    liquor_tax: float,
+    tax_config: Mapping[str, Any],
+) -> float:
+    """Tax dollars added on top of product total_amount (cierre debit_total rule).
+
+    Included-in-price standard tax is extractive (already in prices) — omit it.
+    Liquor / any non-included bucket line is additive.
+    """
+    profile = resolve_tax_profile(tax_config)
+    std_line = profile.line_for_category("standard")
+    liq_line = profile.line_for_category("liquor")
+    std_extra = float(standard_tax or 0) if (std_line and not std_line.included_in_price) else 0.0
+    # Liquor with no line → 0; included liquor line (rare commercial) → omit
+    if liq_line is None:
+        liq_extra = 0.0
+    elif liq_line.included_in_price:
+        liq_extra = 0.0
+    else:
+        liq_extra = float(liquor_tax or 0)
+    return float(std_extra + liq_extra)
+
+
+def _line_tax_base(line: Mapping[str, Any]) -> float:
+    """Same base as POS `_tax_rows_from_evaluated_lines` (post-promo/manual net)."""
+    return float(
+        line.get("net_total", line.get("subtotal_after_promo", line.get("subtotal", 0))) or 0
+    )
+
+
+def annotate_line_tax_amounts(
+    lines: Sequence[Mapping[str, Any]],
+    tax_config: Mapping[str, Any],
+    *,
+    reconcile_to: Optional[Tuple[float, float]] = None,
+) -> List[Dict[str, Any]]:
+    """Attach per-line tax_amount / tax_label for POS Orden display.
+
+    Mutates dict lines in place when they are mutable mappings; always returns
+    the annotated list. When ``reconcile_to`` is (standard_tax, liquor_tax),
+    adjusts the last taxable line in each bucket so Σ line taxes match the
+    cart-level category rounding.
+    """
+    out: List[Dict[str, Any]] = []
+    bucket_indices: Dict[str, List[int]] = {"standard": [], "liquor": []}
+
+    for idx, raw in enumerate(lines):
+        line = dict(raw) if not isinstance(raw, dict) else raw
+        base = _line_tax_base(line)
+        tax_line = resolve_product_tax_line(
+            tax_config,
+            category_id=line.get("category_id"),
+            tax_resolution=line.get("tax_resolution") or "inherit",
+            tax_line_key=line.get("tax_line_key"),
+            tax_category=line.get("tax_category") or "standard",
+        )
+        bucket = resolve_effective_tax_category(
+            tax_config,
+            category_id=line.get("category_id"),
+            tax_resolution=line.get("tax_resolution") or "inherit",
+            tax_line_key=line.get("tax_line_key"),
+            tax_category=line.get("tax_category") or "standard",
+        )
+        if tax_line is None or base <= 0:
+            line["tax_amount"] = 0.0
+            line["tax_label"] = None
+            line["tax_rate"] = None
+            line["included_in_price"] = None
+        else:
+            amount = tax_amount_float(base, tax_line)
+            line["tax_amount"] = float(amount)
+            line["tax_label"] = tax_line.label
+            line["tax_rate"] = float(tax_line.rate)
+            line["included_in_price"] = bool(tax_line.included_in_price)
+            if bucket in bucket_indices and amount > 0:
+                bucket_indices[bucket].append(idx)
+
+        out.append(line)
+
+    if reconcile_to is not None:
+        targets = {"standard": float(reconcile_to[0] or 0), "liquor": float(reconcile_to[1] or 0)}
+        for bucket, target in targets.items():
+            indices = bucket_indices.get(bucket) or []
+            if not indices:
+                continue
+            current = sum(float(out[i].get("tax_amount") or 0) for i in indices)
+            delta = round(target - current)
+            if delta == 0:
+                continue
+            last = out[indices[-1]]
+            last["tax_amount"] = float(round(float(last.get("tax_amount") or 0) + delta))
+
+    return out

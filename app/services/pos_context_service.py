@@ -80,7 +80,12 @@ SELECT
     ttc.iva_applicable,
     ttc.iva_rate,
     ttc.iva_included_in_price,
-    ttc.liquor_tax_applicable
+    ttc.liquor_tax_applicable,
+    ttc.tax_lines,
+    ttc.category_map,
+    ttc.commercial_tax_applicable,
+    ttc.menu_category_line_map,
+    ttc.exempt_menu_category_ids
 FROM tenants t
 LEFT JOIN tenant_public_profiles tpp ON tpp.tenant_id = t.id
 LEFT JOIN tenant_fiscal_data      fd  ON fd.tenant_id  = t.id
@@ -157,6 +162,32 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
     readiness = await get_readiness(tenant_id)
     invoicing_ready = bool(readiness and readiness.get('ready'))
 
+    from app.services.tenant_config_service import decode_tax_config_jsonb
+
+    tax_config_raw = {
+        'inc_applicable': bool(row['inc_applicable']) if row['inc_applicable'] is not None else False,
+        'inc_rate': float(row['inc_rate']) if row['inc_rate'] is not None else 0.08,
+        'inc_included_in_price': bool(row['inc_included_in_price']) if row['inc_included_in_price'] is not None else False,
+        'iva_applicable': bool(row['iva_applicable']) if row['iva_applicable'] is not None else False,
+        'iva_rate': float(row['iva_rate']) if row['iva_rate'] is not None else 0.19,
+        'iva_included_in_price': bool(row['iva_included_in_price']) if row['iva_included_in_price'] is not None else False,
+        'liquor_tax_applicable': bool(row['liquor_tax_applicable']) if row['liquor_tax_applicable'] is not None else False,
+        'tax_lines': row['tax_lines'] if 'tax_lines' in row.keys() else None,
+        'category_map': row['category_map'] if 'category_map' in row.keys() else None,
+        'commercial_tax_applicable': (
+            bool(row['commercial_tax_applicable'])
+            if ('commercial_tax_applicable' in row.keys() and row['commercial_tax_applicable'] is not None)
+            else None
+        ),
+        'menu_category_line_map': (
+            row['menu_category_line_map'] if 'menu_category_line_map' in row.keys() else None
+        ),
+        'exempt_menu_category_ids': (
+            row['exempt_menu_category_ids'] if 'exempt_menu_category_ids' in row.keys() else None
+        ),
+    }
+    tax_config = decode_tax_config_jsonb(tax_config_raw)
+
     return {
         'display_name': row['display_name'],
         'timezone': normalize_timezone(row['timezone'] if 'timezone' in row else None),
@@ -228,15 +259,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             'phone': row['fiscal_phone'],
             'email': row['fiscal_email'],
         },
-        'tax_config': {
-            'inc_applicable': bool(row['inc_applicable']) if row['inc_applicable'] is not None else False,
-            'inc_rate': float(row['inc_rate']) if row['inc_rate'] is not None else 0.08,
-            'inc_included_in_price': bool(row['inc_included_in_price']) if row['inc_included_in_price'] is not None else False,
-            'iva_applicable': bool(row['iva_applicable']) if row['iva_applicable'] is not None else False,
-            'iva_rate': float(row['iva_rate']) if row['iva_rate'] is not None else 0.19,
-            'iva_included_in_price': bool(row['iva_included_in_price']) if row['iva_included_in_price'] is not None else False,
-            'liquor_tax_applicable': bool(row['liquor_tax_applicable']) if row['liquor_tax_applicable'] is not None else False,
-        },
+        'tax_config': tax_config,
         'invoicing_ready': invoicing_ready,
         # WARO software + Matias facturador labels for tickets (env-driven; not tenant issuer)
         'platform_legal': get_platform_legal_for_print(),
