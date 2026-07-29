@@ -2,11 +2,16 @@
 from decimal import Decimal
 
 from app.services.hospitality_tax_engine import (
+    additive_order_tax_total,
+    annotate_line_tax_amounts,
     compute_category_breakdown,
     compute_gl_category_taxes,
+    liquor_tax_label_for_config,
+    resolve_effective_tax_category,
     resolve_tax_profile,
     tax_amount_float,
 )
+from app.services.hospitality_tax_packs import WAVE2_SIMPLE_TAX_PACKS, tax_config_from_wave1_pack
 
 
 def _inc_config(*, included: bool = True, rate: float = 0.08):
@@ -149,3 +154,111 @@ def test_gl_decimal_inc_extractive():
     assert result["standard_gl_role"] == "inc"
     # 10800 - 10800/1.08 = 800
     assert result["standard_tax"] == Decimal("800")
+
+
+def _mx_config():
+    return tax_config_from_wave1_pack(WAVE2_SIMPLE_TAX_PACKS["MX"])
+
+
+def test_annotate_line_tax_mx_exclusive_sums_to_cart():
+    """Per-line IVA 16% amounts reconcile to category-level cart taxes."""
+    cfg = _mx_config()
+    lines = [
+        {
+            "id": "a",
+            "tax_category": "standard",
+            "net_total": 207,
+            "tax_resolution": "inherit",
+        },
+        {
+            "id": "b",
+            "tax_category": "standard",
+            "net_total": 1740,
+            "tax_resolution": "inherit",
+        },
+    ]
+    tax_rows = [{"tax_category": "standard", "subtotal": line["net_total"]} for line in lines]
+    std, liq, _ = compute_category_breakdown(tax_rows, cfg)
+    cart_tax = std + liq
+    annotated = annotate_line_tax_amounts(lines, cfg, reconcile_to=(std, liq))
+    assert annotated[0]["tax_label"] == "IVA 16%"
+    assert annotated[0]["included_in_price"] is False
+    assert annotated[0]["tax_amount"] == round(207 * 0.16)
+    assert sum(float(l["tax_amount"]) for l in annotated) == cart_tax
+    assert cart_tax == round((207 + 1740) * 0.16)
+
+
+def test_annotate_line_tax_exempt_is_zero():
+    cfg = _mx_config()
+    lines = [
+        {
+            "id": "taxable",
+            "tax_category": "standard",
+            "net_total": 10000,
+            "tax_resolution": "inherit",
+        },
+        {
+            "id": "exempt",
+            "tax_category": "exempt",
+            "net_total": 5000,
+            "tax_resolution": "inherit",
+        },
+        {
+            "id": "product_exempt",
+            "tax_category": "standard",
+            "net_total": 3000,
+            "tax_resolution": "exempt",
+        },
+    ]
+    tax_rows = [
+        {
+            "tax_category": line["tax_category"],
+            "tax_resolution": line["tax_resolution"],
+            "subtotal": line["net_total"],
+        }
+        for line in lines
+    ]
+    std, liq, _ = compute_category_breakdown(tax_rows, cfg)
+    annotated = annotate_line_tax_amounts(lines, cfg, reconcile_to=(std, liq))
+    assert annotated[0]["tax_amount"] == 1600.0
+    assert annotated[1]["tax_amount"] == 0.0
+    assert annotated[1]["tax_label"] is None
+    assert annotated[2]["tax_amount"] == 0.0
+    assert sum(float(l["tax_amount"]) for l in annotated) == std + liq
+
+
+def test_additive_order_tax_total_mx_vs_co_inc():
+    mx = _mx_config()
+    assert additive_order_tax_total(371, 0, mx) == 371.0
+    assert additive_order_tax_total(0, 371, mx) == 371.0
+
+    co = _inc_config(included=True)
+    assert additive_order_tax_total(800, 0, co) == 0.0
+    co_liq = _co_full()
+    assert additive_order_tax_total(800, 1000, co_liq) == 1000.0
+
+
+def test_mx_same_key_buckets_to_standard_not_liquor():
+    """#1899 — MX maps standard+liquor → iva; tax must land in standard_tax."""
+    cfg = _mx_config()
+    rows = [{"tax_category": "standard", "subtotal": 580}]
+    std, liq, label = compute_category_breakdown(rows, cfg)
+    assert label == "IVA 16%"
+    assert std == 93.0
+    assert liq == 0.0
+    assert resolve_effective_tax_category(cfg, tax_category="standard") == "standard"
+    assert liquor_tax_label_for_config(cfg) == "IVA 16%"
+
+
+def test_co_distinct_liquor_still_buckets_liquor():
+    cfg = _co_full()
+    rows = [
+        {"tax_category": "standard", "subtotal": 10800},
+        {"tax_category": "liquor", "subtotal": 20000},
+    ]
+    std, liq, label = compute_category_breakdown(rows, cfg)
+    assert std == 800.0
+    assert liq == 1000.0
+    assert label == "INC 8%"
+    assert liquor_tax_label_for_config(cfg) == "IVA licores 5%"
+    assert resolve_effective_tax_category(cfg, tax_category="liquor") == "liquor"

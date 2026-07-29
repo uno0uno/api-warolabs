@@ -55,6 +55,14 @@ def split_settlement_amount_due(
     order_total: float,
     tip_amount: float,
     tip_tax_amount: float = 0,
+    additive_tax: float = 0,
 ) -> float:
-    """warocol.com#737 + #740 — order total + tip + tip tax."""
-    return float(order_total) + tip_settlement_total(tip_amount, tip_tax_amount)
+    """warocol.com#737 + #740 — order total + additive tax + tip + tip tax.
+
+    ``additive_tax`` is IVA/etc. charged on top of product prices (not included_in_price).
+    """
+    return (
+        float(order_total)
+        + float(additive_tax or 0)
+        + tip_settlement_total(tip_amount, tip_tax_amount)
+    )

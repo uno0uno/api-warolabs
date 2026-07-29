@@ -2118,8 +2118,12 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
             _std_tax = 0.0
             _liq_tax = 0.0
             _tax_label = "Impuesto"
+            _liq_label = "IVA licores 5%"
             try:
+                from app.services.hospitality_tax_engine import liquor_tax_label_for_config
+
                 tax_config = await _get_tenant_tax_config(conn_ids, tenant_id)
+                _liq_label = liquor_tax_label_for_config(tax_config)
                 tax_rows = await conn_ids.fetch(
                     """
                     SELECT
@@ -2169,6 +2173,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 "standard_tax": float(_std_tax),
                 "liquor_tax": float(_liq_tax),
                 "standard_tax_label": _tax_label,
+                "liquor_tax_label": _liq_label,
                 "promo_savings": float(_promo_savings),
                 "promo_breakdown": _promo_breakdown,
                 "payment_method": payment_method,
@@ -2680,11 +2685,13 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
             _std_tax = 0.0
             _liq_tax = 0.0
             _tax_label = "Impuesto"
+            _liq_label = "IVA licores 5%"
             _promo_savings = 0.0
             _subtotal_after_promos = float(session_row["running_total"])
             _promo_breakdown: List[dict] = []
             _promo_lines_by_id: Dict[str, dict] = {}
             try:
+                from app.services.hospitality_tax_engine import liquor_tax_label_for_config
                 from app.services.orders_service import _compute_tax_breakdown
                 from app.services.promotions_service import (
                     enrich_order_item_rows_with_promo_basis,
@@ -2693,6 +2700,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                 )
 
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                _liq_label = liquor_tax_label_for_config(tax_config)
                 order_ids = [o["id"] for o in orders]
                 if order_ids:
                     eval_rows = await conn.fetch(
@@ -2848,6 +2856,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     "standard_tax": float(_std_tax),
                     "liquor_tax": float(_liq_tax),
                     "standard_tax_label": _tax_label,
+                    "liquor_tax_label": _liq_label,
                     "minimum_consumption": _minimum_consumption_state(
                         session_row,
                         partial_paid_total,

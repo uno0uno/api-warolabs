@@ -270,6 +270,75 @@ def _tax_rows_from_evaluated_lines(lines: Sequence[dict]) -> List[dict]:
     return rows
 
 
+def _reinject_tax_fields_on_eval_lines(
+    promo_lines: Sequence[dict],
+    eval_lines: Sequence[dict],
+) -> None:
+    """Copy product tax classification onto promotion-evaluated lines."""
+    tax_fields_by_id = {
+        line["id"]: {
+            "tax_category": line.get("tax_category") or "standard",
+            "category_id": line.get("category_id"),
+            "tax_resolution": line.get("tax_resolution") or "inherit",
+            "tax_line_key": line.get("tax_line_key"),
+        }
+        for line in promo_lines
+    }
+    for line in eval_lines:
+        fields = tax_fields_by_id.get(line["id"], {})
+        line["tax_category"] = fields.get("tax_category", "standard")
+        line["category_id"] = fields.get("category_id")
+        line["tax_resolution"] = fields.get("tax_resolution", "inherit")
+        line["tax_line_key"] = fields.get("tax_line_key")
+
+
+def _settlement_taxes_from_eval_lines(
+    eval_lines: Sequence[dict],
+    tax_config: dict,
+) -> tuple[float, float, str, str, float]:
+    """Return standard_tax, liquor_tax, std_label, liq_label, additive_tax for POS settlement."""
+    from app.services.hospitality_tax_engine import (
+        additive_order_tax_total,
+        liquor_tax_label_for_config,
+    )
+    from app.services.orders_service import _compute_tax_breakdown
+
+    std, liq, label = _compute_tax_breakdown(
+        _tax_rows_from_evaluated_lines(eval_lines),
+        tax_config,
+    )
+    additive = additive_order_tax_total(float(std), float(liq), tax_config)
+    return (
+        float(std),
+        float(liq),
+        label,
+        liquor_tax_label_for_config(tax_config),
+        float(additive),
+    )
+
+
+async def _additive_tax_for_order(conn, order_id, tax_config: dict) -> float:
+    """Additive tax on an existing order (net_total base — matches cierre)."""
+    from app.services.hospitality_tax_engine import additive_order_tax_total
+    from app.services.orders_service import _compute_tax_breakdown
+
+    rows = await conn.fetch(
+        """
+        SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
+               COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+               p.tax_line_key AS tax_line_key,
+               p.category_id::text AS category_id,
+               COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal
+        FROM order_items oi
+        JOIN product p ON p.id = oi.product_id
+        WHERE oi.order_id = $1
+        """,
+        order_id,
+    )
+    std, liq, _ = _compute_tax_breakdown(rows, tax_config)
+    return float(additive_order_tax_total(float(std), float(liq), tax_config))
+
+
 async def get_or_create_active_cart(
     request: Request,
     customer_id: UUID,
@@ -1226,6 +1295,7 @@ async def get_cart_tax_preview(
     Issue #982 — evaluates tenant promotions first, then applies optional
     manual discount_amount on the promo-adjusted subtotal.
     """
+    from app.services.hospitality_tax_engine import annotate_line_tax_amounts
     from app.services.orders_service import _compute_tax_breakdown
     from app.services.promotions_service import evaluate_checkout_promotions
 
@@ -1249,6 +1319,7 @@ async def get_cart_tax_preview(
                 "standard_tax": 0.0,
                 "liquor_tax": 0.0,
                 "standard_tax_label": "Impuesto",
+                "liquor_tax_label": "IVA licores 5%",
                 "subtotal": 0,
                 "promo_savings": 0,
                 "subtotal_after_promos": 0,
@@ -1282,11 +1353,20 @@ async def get_cart_tax_preview(
         tax_config = await _get_tenant_tax_config(conn, tenant_id)
         tax_rows = _tax_rows_from_evaluated_lines(checkout_eval["lines"])
         std_tax, liq_tax, tax_label = _compute_tax_breakdown(tax_rows, tax_config)
+        from app.services.hospitality_tax_engine import liquor_tax_label_for_config
+
+        liq_label = liquor_tax_label_for_config(tax_config)
+        annotate_line_tax_amounts(
+            checkout_eval["lines"],
+            tax_config,
+            reconcile_to=(float(std_tax), float(liq_tax)),
+        )
 
     return {
         "standard_tax": float(std_tax),
         "liquor_tax": float(liq_tax),
         "standard_tax_label": tax_label,
+        "liquor_tax_label": liq_label,
         "subtotal": checkout_eval["subtotal"],
         "promo_savings": checkout_eval["promo_savings"],
         "subtotal_after_promos": checkout_eval["subtotal_after_promos"],
@@ -1438,6 +1518,11 @@ async def add_order_payment(
                     total_amount,
                     resolved_tip_amount,
                     resolved_tip_tax_amount,
+                    await _additive_tax_for_order(
+                        conn,
+                        order_id,
+                        await _get_tenant_tax_config(conn, tenant_id),
+                    ),
                 )
                 paid_before_row = await conn.fetchrow(
                     """
@@ -1742,6 +1827,11 @@ async def void_order_payment(
                     total_amount,
                     float(payment_row["tip_amount"] or 0),
                     float(payment_row["tip_tax_amount"] or 0),
+                    await _additive_tax_for_order(
+                        conn,
+                        order_id,
+                        await _get_tenant_tax_config(conn, tenant_id),
+                    ),
                 )
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
@@ -2122,22 +2212,35 @@ async def complete_pos_order(
                 _promo_breakdown = checkout_eval.get("promo_breakdown") or []
                 _eval_by_id = {line["id"]: line for line in checkout_eval["lines"]}
 
+                _reinject_tax_fields_on_eval_lines(promo_lines, checkout_eval["lines"])
+                (
+                    _standard_tax,
+                    _liquor_tax,
+                    _standard_tax_label,
+                    _liquor_tax_label,
+                    _additive_tax,
+                ) = _settlement_taxes_from_eval_lines(checkout_eval["lines"], tax_config)
+                _settlement_due = split_settlement_amount_due(
+                    float(_discounted_total),
+                    float(tip_amount),
+                    _tip_tax_amount,
+                    _additive_tax,
+                )
+
                 # Issue #524 — single-payment cash flow stores cash_received on the orders row.
                 # Split mode keeps it NULL here and stores per-line on order_payments below (step 7a).
                 # warocol.com#637 — when tipping is in effect, cash_received must cover
-                # total + tip (the customer must hand over enough physical cash for both).
+                # total + additive tax + tip (the customer must hand over enough physical cash).
                 _orders_cash_received: Optional[float] = None
                 if not split_mode and cash_received is not None:
                     if payment_method != 'cash':
                         raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
-                    _required_cash = float(_discounted_total) + tip_settlement_total(
-                        float(tip_amount), _tip_tax_amount,
-                    )
+                    _required_cash = _settlement_due
                     if cash_received < _required_cash:
-                        if tip_amount > 0:
+                        if tip_amount > 0 or _additive_tax > 0:
                             raise APIError(
-                                f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total + propina"
-                                f" (+ IVA propina si aplica) ({_required_cash})",
+                                f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total a pagar"
+                                f" ({_required_cash})",
                                 status_code=400,
                             )
                         raise APIError(
@@ -2205,11 +2308,7 @@ async def complete_pos_order(
                 logger.info(f"Created order #{order_number} from cart {cart_id}")
 
                 if not split_mode and payment_method == WALLET_PAYMENT_SLUG:
-                    wallet_due = Decimal(str(split_settlement_amount_due(
-                        float(_discounted_total),
-                        float(tip_amount),
-                        float(_tip_tax_amount),
-                    )))
+                    wallet_due = Decimal(str(_settlement_due))
                     await apply_wallet_for_order(
                         conn,
                         customer_id,
@@ -2486,7 +2585,7 @@ async def complete_pos_order(
                 # 7a. In split mode: record first payment; cart stays active.
                 # Issue #524: split_first_cash_received is captured when the first split is cash.
                 _split_paid_total = 0.0
-                _split_remaining = float(_discounted_total)
+                _split_remaining = float(_settlement_due)
                 _split_is_complete = False
                 _split_first_payment_id: Optional[str] = None
                 if split_mode and split_first_amount > 0:
@@ -2498,9 +2597,7 @@ async def complete_pos_order(
                                 f"Efectivo recibido ({split_first_cash_received}) debe ser mayor o igual al monto ({split_first_amount})",
                                 status_code=400,
                             )
-                    _amount_due = split_settlement_amount_due(
-                        float(_discounted_total), float(tip_amount), _tip_tax_amount,
-                    )
+                    _amount_due = _settlement_due
                     if split_first_amount - _amount_due > 0.01:
                         raise APIError(
                             f"El pago excede el saldo pendiente ({_amount_due})",
@@ -2598,30 +2695,7 @@ async def complete_pos_order(
                     except Exception as e:
                         logger.error(f"COGS GL entry failed for POS order {order_id}: {e}")
 
-                # Compute tax breakdown for receipt display (same engine as cart/orders)
-                _standard_tax = 0.0
-                _liquor_tax = 0.0
-                _standard_tax_label = "Impuesto"
-                try:
-                    from app.services.orders_service import _compute_tax_breakdown
-
-                    items_tax_rows = await conn.fetch(
-                        """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
-                                  COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
-                                  p.tax_line_key AS tax_line_key,
-                                  p.category_id::text AS category_id,
-                                  COALESCE(oi.subtotal, 0) AS subtotal
-                           FROM order_items oi
-                           JOIN product p ON p.id = oi.product_id
-                           WHERE oi.order_id = $1""",
-                        order_id
-                    )
-                    _standard_tax, _liquor_tax, _standard_tax_label = _compute_tax_breakdown(
-                        items_tax_rows, tax_config,
-                    )
-                except Exception as e:
-                    logger.warning(f"Tax breakdown computation failed for order {order_id}: {e}")
-
+                # Tax already computed pre-insert for settlement (additive IVA etc.).
                 _waro_redemption_summary = await _get_order_waro_redemption_summary(conn, order_id)
 
                 # Capture values needed after the transaction closes
@@ -2644,9 +2718,7 @@ async def complete_pos_order(
                         "tip_source": tip_source,
                         "tip_taxable": _tip_taxable,
                         "tip_tax_amount": float(_tip_tax_amount),
-                        "charged_amount": float(_discounted_total) + tip_settlement_total(
-                            float(tip_amount), _tip_tax_amount,
-                        ),
+                        "charged_amount": float(_settlement_due),
                         "payment_method": payment_method,
                         "payment_status": payment_status,
                         "status": order_status,
@@ -2656,6 +2728,7 @@ async def complete_pos_order(
                         "standard_tax": _standard_tax,
                         "liquor_tax": _liquor_tax,
                         "standard_tax_label": _standard_tax_label,
+                        "liquor_tax_label": _liquor_tax_label,
                         "next_table_session_id": str(new_table_session_id) if new_table_session_id else None,
                         "subtotal": cart_subtotal,
                         "promo_savings": _promo_savings,
