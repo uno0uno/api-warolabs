@@ -17,6 +17,7 @@ from app.services.account_role_service import (
     ensure_matias_dian,
     resolve_account,
     resolve_payment_account,
+    resolve_tax_account,
 )
 
 
@@ -215,3 +216,64 @@ def test_migration_defines_scoped_uuid_bindings_and_compatibility_backfill():
     assert "ADD COLUMN IF NOT EXISTS gl_account_id UUID" in migration
     assert "methods.gl_account_id IS NULL" in migration
     assert "config.inc_gl_account_id IS NULL" in migration
+
+
+@pytest.mark.asyncio
+async def test_global_iva_falls_back_to_tax_payable_when_iva_role_missing():
+    """MX/global packs use gl_role=iva but chart only seeds TAX_PAYABLE (#1903)."""
+    tenant_id = uuid4()
+    tax_payable = AccountRef(
+        uuid4(), "2100", "Tax payable", AccountRole.TAX_PAYABLE, "localization_default"
+    )
+    conn = MagicMock()
+    tax_config = {
+        "iva_gl_account_id": None,
+        "iva_gl_account_code": "2408",  # stale CO code — must not block fallback
+    }
+
+    with patch(
+        "app.services.account_role_service.resolve_account_by_id",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "app.services.account_role_service.resolve_legacy_account",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "app.services.account_role_service.resolve_account",
+        new=AsyncMock(
+            side_effect=[
+                MissingAccountRoleError(tenant_id, AccountRole.IVA_PAYABLE, "iva_tax"),
+                tax_payable,
+            ]
+        ),
+    ) as resolve_role:
+        account = await resolve_tax_account(conn, tenant_id, tax_config, "iva")
+
+    assert account == tax_payable
+    assert resolve_role.await_args_list[0].args[2] == AccountRole.IVA_PAYABLE
+    assert resolve_role.await_args_list[1].args[2] == AccountRole.TAX_PAYABLE
+
+
+@pytest.mark.asyncio
+async def test_co_iva_uses_iva_payable_without_tax_payable_fallback():
+    tenant_id = uuid4()
+    iva_payable = AccountRef(
+        uuid4(), "2408", "IVA por pagar", AccountRole.IVA_PAYABLE, "localization_default"
+    )
+    conn = MagicMock()
+    tax_config = {"iva_gl_account_id": None, "iva_gl_account_code": None}
+
+    with patch(
+        "app.services.account_role_service.resolve_account_by_id",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "app.services.account_role_service.resolve_legacy_account",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "app.services.account_role_service.resolve_account",
+        new=AsyncMock(return_value=iva_payable),
+    ) as resolve_role:
+        account = await resolve_tax_account(conn, tenant_id, tax_config, "iva")
+
+    assert account == iva_payable
+    resolve_role.assert_awaited_once()
+    assert resolve_role.await_args.args[2] == AccountRole.IVA_PAYABLE
