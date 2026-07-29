@@ -278,3 +278,49 @@ def test_breakdown_exempt_vs_mapped_vs_missing_category_id():
     )
     assert override_std == 0.0
     assert override_liq == 0.0
+
+
+@pytest.mark.asyncio
+async def test_get_tenant_tax_config_loads_menu_category_maps():
+    """POS tax-preview uses cierre_service loader — must include Facturación maps."""
+    from app.services.cierre_service import _get_tenant_tax_config
+
+    captured: dict = {}
+
+    class _Conn:
+        async def fetchrow(self, query, *_args):
+            captured["query"] = query
+            return {
+                "inc_applicable": False,
+                "inc_rate": None,
+                "inc_gl_account_code": None,
+                "inc_gl_account_id": None,
+                "inc_included_in_price": True,
+                "liquor_tax_applicable": False,
+                "liquor_tax_rate": None,
+                "liquor_tax_gl_account_code": None,
+                "liquor_tax_gl_account_id": None,
+                "iva_applicable": False,
+                "iva_rate": None,
+                "iva_gl_account_code": None,
+                "iva_gl_account_id": None,
+                "iva_included_in_price": False,
+                "tax_lines": '[{"key":"iva","label":"IVA 16%","rate":0.16,'
+                '"included_in_price":false,"gl_role":"iva"}]',
+                "category_map": '{"standard":"iva","liquor":"iva","exempt":null}',
+                "commercial_tax_applicable": True,
+                "menu_category_line_map": f'{{"{CAT_A}":"iva"}}',
+                "exempt_menu_category_ids": [CAT_B],
+            }
+
+    cfg = await _get_tenant_tax_config(_Conn(), uuid4())
+    assert "menu_category_line_map" in captured["query"]
+    assert "exempt_menu_category_ids" in captured["query"]
+    assert cfg["menu_category_line_map"][CAT_A] == "iva"
+    assert cfg["exempt_menu_category_ids"] == [CAT_B]
+    assert resolve_effective_tax_category(
+        cfg,
+        category_id=CAT_B,
+        tax_resolution="inherit",
+        tax_category="standard",
+    ) == "exempt"

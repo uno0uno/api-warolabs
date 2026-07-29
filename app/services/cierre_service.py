@@ -124,7 +124,12 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
     """
     Return tax config for the tenant.  Falls back to all-disabled defaults
     if no row exists (safe for tenants created before migration 027).
+
+    Includes menu_category_line_map + exempt_menu_category_ids so POS/orders
+    tax breakdown can honor Facturación category maps (#1889 follow-up).
     """
+    from app.services.tenant_config_service import decode_tax_config_jsonb
+
     row = await conn.fetchrow(
         """SELECT inc_applicable, inc_rate, inc_gl_account_code, inc_gl_account_id,
                   inc_included_in_price,
@@ -132,12 +137,13 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
                   liquor_tax_gl_account_code, liquor_tax_gl_account_id,
                   iva_applicable, iva_rate, iva_gl_account_code, iva_gl_account_id,
                   iva_included_in_price,
-                  tax_lines, category_map, commercial_tax_applicable
+                  tax_lines, category_map, commercial_tax_applicable,
+                  menu_category_line_map, exempt_menu_category_ids
            FROM tenant_tax_config WHERE tenant_id = $1""",
         tenant_id,
     )
     if row:
-        return dict(row)
+        return decode_tax_config_jsonb(dict(row))
     return {
         "inc_applicable":             False,
         "inc_rate":                   Decimal("0.0800"),
@@ -156,6 +162,8 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
         "tax_lines":                  None,
         "category_map":               None,
         "commercial_tax_applicable":  False,
+        "menu_category_line_map":     {},
+        "exempt_menu_category_ids":   [],
     }
 
 
