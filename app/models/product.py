@@ -93,7 +93,15 @@ class ProductBase(BaseModel):
         "standard",
         description="Tax classification mapped via tenant category_map → tax_lines "
         "(CO default: standard→INC/IVA, liquor→liquor line, exempt→none). "
-        "Same field for POS and venta directa.",
+        "Same field for POS and venta directa. Kept for CO/legacy dual-read.",
+    )
+    tax_resolution: Literal['inherit', 'exempt', 'line'] = Field(
+        "inherit",
+        description="Commercial override: inherit from menu category map, force exempt, or force a tax line",
+    )
+    tax_line_key: Optional[str] = Field(
+        None,
+        description="Tax line key when tax_resolution=line; ignored otherwise",
     )
     station_id: Optional[UUID] = None
     kitchen_name: Optional[str] = Field(None, max_length=100)
@@ -209,6 +217,14 @@ class ProductUpdate(BaseModel):
     open_priced: Optional[bool] = None
     allow_modifiers: Optional[bool] = None
     tax_category: Optional[Literal['standard', 'liquor', 'exempt']] = Field(None, description="Tax classification: standard, liquor, exempt")
+    tax_resolution: Optional[Literal['inherit', 'exempt', 'line']] = Field(
+        None,
+        description="Commercial override mode; omit to leave unchanged",
+    )
+    tax_line_key: Optional[str] = Field(
+        None,
+        description="Tax line key when tax_resolution=line; null clears when resolution set",
+    )
     ingredients: Optional[List[RecipeIngredientBase]] = Field(None, description="Updated recipe ingredients")
     station_id: Optional[UUID] = None
     kitchen_name: Optional[str] = Field(None, max_length=100)

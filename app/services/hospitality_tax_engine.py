@@ -60,6 +60,120 @@ def _as_category_map(raw: Any) -> Dict[str, Optional[str]]:
     return out
 
 
+def _as_menu_category_line_map(raw: Any) -> Dict[str, Optional[str]]:
+    """Menu category UUID string → tax line key (same shape as category_map)."""
+    return _as_category_map(raw)
+
+
+def _as_uuid_str_set(raw: Any) -> set[str]:
+    if raw is None:
+        return set()
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return {raw.strip()} if raw.strip() else set()
+    if not isinstance(raw, (list, tuple, set)):
+        return set()
+    out: set[str] = set()
+    for item in raw:
+        if item is None:
+            continue
+        s = str(item).strip()
+        if s:
+            out.add(s)
+    return out
+
+
+def _row_field(row: Any, key: str, default: Any = None) -> Any:
+    if row is None:
+        return default
+    if hasattr(row, "get"):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def resolve_product_tax_line(
+    tax_config: Mapping[str, Any],
+    *,
+    category_id: Any = None,
+    tax_resolution: Optional[str] = "inherit",
+    tax_line_key: Optional[str] = None,
+    tax_category: Optional[str] = "standard",
+) -> Optional[TaxLine]:
+    """Epic #1881 order: override → exempt set → menu map → primary.
+
+    CO / column-only configs ignore menu maps and use legacy tax_category.
+    Empty menu map + empty exempt set dual-reads legacy tax_category so
+    existing standard/liquor POS keeps working until maps are configured.
+    """
+    profile = resolve_tax_profile(tax_config)
+    legacy_category = tax_category or "standard"
+
+    # No commercial tax_lines → CO adapter; ignore menu maps.
+    if not _as_mapping_list(tax_config.get("tax_lines")):
+        return profile.line_for_category(legacy_category)
+
+    # commercial_tax_applicable=false yields empty profile.lines
+    if not profile.lines:
+        return None
+
+    resolution = (tax_resolution or "inherit").strip().lower()
+    if resolution == "exempt":
+        return None
+    if resolution == "line":
+        key = (tax_line_key or "").strip()
+        return profile.lines.get(key) if key else None
+
+    # inherit
+    cat_id = str(category_id).strip() if category_id is not None else ""
+    exempt_ids = _as_uuid_str_set(tax_config.get("exempt_menu_category_ids"))
+    if cat_id and cat_id in exempt_ids:
+        return None
+
+    menu_map = _as_menu_category_line_map(tax_config.get("menu_category_line_map"))
+    if cat_id and cat_id in menu_map:
+        key = menu_map[cat_id]
+        if not key:
+            return None
+        return profile.lines.get(key)
+
+    # Dual-read: no menu maps configured yet → legacy fiscal tags.
+    if not menu_map and not exempt_ids:
+        return profile.line_for_category(legacy_category)
+
+    # Unmapped menu category → primary line.
+    return profile.primary_line()
+
+
+def resolve_effective_tax_category(
+    tax_config: Mapping[str, Any],
+    *,
+    category_id: Any = None,
+    tax_resolution: Optional[str] = "inherit",
+    tax_line_key: Optional[str] = None,
+    tax_category: Optional[str] = "standard",
+) -> str:
+    """Map resolved line → standard|liquor|exempt for legacy POS/GL buckets."""
+    line = resolve_product_tax_line(
+        tax_config,
+        category_id=category_id,
+        tax_resolution=tax_resolution,
+        tax_line_key=tax_line_key,
+        tax_category=tax_category,
+    )
+    if line is None:
+        return "exempt"
+    profile = resolve_tax_profile(tax_config)
+    liquor_key = profile.category_map.get("liquor")
+    if liquor_key and line.key == liquor_key:
+        return "liquor"
+    return "standard"
+
+
 def _line_from_mapping(item: Mapping[str, Any]) -> Optional[TaxLine]:
     key = str(item.get("key") or "").strip()
     if not key:
@@ -189,15 +303,27 @@ def compute_category_breakdown(
     items_rows: Sequence[Any],
     tax_config: Mapping[str, Any],
 ) -> Tuple[float, float, str]:
-    """Compat wrapper: (standard_tax, liquor_tax, standard_tax_label)."""
+    """Compat wrapper: (standard_tax, liquor_tax, standard_tax_label).
+
+    Dual-reads menu-category maps + product override when present on rows;
+    otherwise uses legacy tax_category.
+    """
     profile = resolve_tax_profile(tax_config)
+
+    def _effective_cat(row: Any) -> str:
+        return resolve_effective_tax_category(
+            tax_config,
+            category_id=_row_field(row, "category_id"),
+            tax_resolution=_row_field(row, "tax_resolution") or "inherit",
+            tax_line_key=_row_field(row, "tax_line_key"),
+            tax_category=_row_field(row, "tax_category") or "standard",
+        )
 
     def _subtotal(category: str) -> float:
         total = 0.0
         for row in items_rows:
-            cat = row["tax_category"] if hasattr(row, "__getitem__") else "standard"
-            if cat == category:
-                total += float(row["subtotal"])
+            if _effective_cat(row) == category:
+                total += float(_row_field(row, "subtotal") or 0)
         return total
 
     std_base = _subtotal("standard")
