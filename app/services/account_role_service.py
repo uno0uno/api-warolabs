@@ -277,6 +277,17 @@ async def resolve_payment_account(
     return account
 
 
+# CO-specific tax roles. Non-CO global chart only seeds TAX_PAYABLE (2100);
+# commercial packs still use gl_role iva/inc/liquor — fall back when missing.
+_TAX_ROLES_WITH_GLOBAL_FALLBACK = frozenset(
+    {
+        AccountRole.INC_PAYABLE,
+        AccountRole.IVA_PAYABLE,
+        AccountRole.LIQUOR_TAX_PAYABLE,
+    }
+)
+
+
 async def resolve_tax_account(
     conn,
     tenant_id: UUID,
@@ -290,6 +301,7 @@ async def resolve_tax_account(
     account_id = tax_config.get(id_field)
     if account_id and not isinstance(account_id, UUID):
         account_id = UUID(str(account_id))
+    source = "{}_tax".format(tax_kind)
     try:
         return await resolve_configured_account(
             conn,
@@ -297,9 +309,22 @@ async def resolve_tax_account(
             account_id,
             tax_config.get(code_field),
             role,
-            source="{}_tax".format(tax_kind),
+            source=source,
         )
     except MissingAccountRoleError:
+        if role in _TAX_ROLES_WITH_GLOBAL_FALLBACK:
+            try:
+                return await resolve_account(
+                    conn,
+                    tenant_id,
+                    AccountRole.TAX_PAYABLE,
+                    required=True,
+                    source="{}_fallback".format(source),
+                )
+            except MissingAccountRoleError:
+                if required:
+                    raise
+                return None
         if required:
             raise
         return None
