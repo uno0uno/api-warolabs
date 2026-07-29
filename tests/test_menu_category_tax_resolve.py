@@ -6,9 +6,11 @@ from fastapi import HTTPException
 
 from app.models.tax_config import TaxConfigUpdate
 from app.services.hospitality_tax_engine import (
+    compute_category_breakdown,
     resolve_effective_tax_category,
     resolve_product_tax_line,
 )
+from app.services.pos_cart_service import _tax_rows_from_evaluated_lines
 from app.services.tenant_config_service import (
     decode_tax_config_jsonb,
     validate_tax_matrix_payload,
@@ -190,3 +192,89 @@ def test_tax_config_update_accepts_menu_fields():
     )
     assert body.menu_category_line_map[CAT_A] == "mwst"
     assert str(body.exempt_menu_category_ids[0]) == CAT_B
+
+
+def test_pos_tax_rows_preserve_menu_category_fields():
+    """#1889 — do not collapse lines by legacy tax_category."""
+    rows = _tax_rows_from_evaluated_lines(
+        [
+            {
+                "tax_category": "standard",
+                "tax_resolution": "inherit",
+                "tax_line_key": None,
+                "category_id": CAT_B,
+                "subtotal": 145.0,
+            },
+            {
+                "tax_category": "standard",
+                "tax_resolution": "inherit",
+                "tax_line_key": None,
+                "category_id": CAT_A,
+                "net_total": 100.0,
+                "subtotal": 100.0,
+            },
+        ]
+    )
+    assert len(rows) == 2
+    assert rows[0]["category_id"] == CAT_B
+    assert rows[0]["tax_resolution"] == "inherit"
+    assert rows[1]["subtotal"] == 100.0
+
+
+def test_breakdown_exempt_vs_mapped_vs_missing_category_id():
+    """#1889 regression: missing category_id must not tax exempt categories as primary."""
+    cfg = _commercial_config(
+        menu_category_line_map={CAT_A: "mwst"},
+        exempt_menu_category_ids=[CAT_B],
+        category_map={"standard": "mwst", "liquor": "mwst", "exempt": None},
+    )
+    # Bug shape (old POS): only tax_category
+    bug_std, bug_liq, _ = compute_category_breakdown(
+        [{"tax_category": "standard", "subtotal": 145.0}],
+        cfg,
+    )
+    assert bug_std + bug_liq > 0
+
+    # Exempt category with inherit
+    ok_std, ok_liq, _ = compute_category_breakdown(
+        [
+            {
+                "tax_category": "standard",
+                "tax_resolution": "inherit",
+                "category_id": CAT_B,
+                "subtotal": 145.0,
+            }
+        ],
+        cfg,
+    )
+    assert ok_std == 0.0
+    assert ok_liq == 0.0
+
+    # Mapped category still taxes (bucket uses legacy standard/liquor lines)
+    mapped_std, mapped_liq, _ = compute_category_breakdown(
+        [
+            {
+                "tax_category": "standard",
+                "tax_resolution": "inherit",
+                "category_id": CAT_A,
+                "subtotal": 100.0,
+            }
+        ],
+        cfg,
+    )
+    assert mapped_std + mapped_liq > 0
+
+    # Product override exempt wins over mapped category
+    override_std, override_liq, _ = compute_category_breakdown(
+        [
+            {
+                "tax_category": "standard",
+                "tax_resolution": "exempt",
+                "category_id": CAT_A,
+                "subtotal": 100.0,
+            }
+        ],
+        cfg,
+    )
+    assert override_std == 0.0
+    assert override_liq == 0.0
