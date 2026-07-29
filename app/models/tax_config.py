@@ -61,3 +61,7 @@ class TaxConfigUpdate(BaseModel):
         default=None,
         description="Commercial on/off; omit on CO-only updates to leave unchanged",
     )
+    # CO column bridge (#1873): optional editable rates; omit to leave unchanged.
+    iva_rate: Optional[Decimal] = None
+    inc_rate: Optional[Decimal] = None
+    liquor_tax_rate: Optional[Decimal] = None

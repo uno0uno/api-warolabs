@@ -4,7 +4,8 @@ Requires authentication - these are admin endpoints
 """
 import asyncio
 import json
-from typing import Optional, Literal
+from decimal import Decimal
+from typing import Any, Dict, List, Mapping, Optional, Literal
 from fastapi import Request, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -623,6 +624,86 @@ async def upload_tenant_image(
     return public_url
 
 
+def decode_tax_config_jsonb(data: Mapping[str, Any]) -> Dict[str, Any]:
+    """Decode asyncpg jsonb strings so clients get objects, not raw JSON text."""
+    out = dict(data)
+    for key in ("tax_lines", "category_map"):
+        val = out.get(key)
+        if isinstance(val, str):
+            try:
+                out[key] = json.loads(val)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def validate_tax_matrix_payload(
+    tax_lines: Optional[List[Any]],
+    category_map: Optional[Mapping[str, Any]],
+) -> None:
+    """Validate commercial matrix rates and category_map line references."""
+    line_keys: set[str] = set()
+    if tax_lines is not None:
+        if not isinstance(tax_lines, list):
+            raise HTTPException(status_code=400, detail="tax_lines must be a list")
+        for item in tax_lines:
+            if not isinstance(item, Mapping):
+                raise HTTPException(status_code=400, detail="each tax line must be an object")
+            key = str(item.get("key") or "").strip()
+            if not key:
+                raise HTTPException(status_code=400, detail="each tax line requires a key")
+            try:
+                rate = float(item.get("rate") if item.get("rate") is not None else 0)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"invalid rate for tax line '{key}'"
+                ) from exc
+            if rate < 0:
+                raise HTTPException(
+                    status_code=400, detail=f"tax line '{key}' rate must be >= 0"
+                )
+            line_keys.add(key)
+
+    if category_map is not None:
+        if not isinstance(category_map, Mapping):
+            raise HTTPException(status_code=400, detail="category_map must be an object")
+        if tax_lines is None:
+            return
+        for cat, ref in category_map.items():
+            if ref in (None, "", "null"):
+                continue
+            ref_key = str(ref)
+            if ref_key not in line_keys:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"category_map['{cat}'] references unknown tax line key "
+                        f"'{ref_key}'"
+                    ),
+                )
+
+
+def validate_co_rate_fields(data: Any) -> None:
+    """Validate optional CO column rates when present on TaxConfigUpdate."""
+    for field in ("iva_rate", "inc_rate", "liquor_tax_rate"):
+        raw = getattr(data, field, None)
+        if raw is None:
+            continue
+        try:
+            rate = Decimal(str(raw))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400, detail=f"{field} must be a number >= 0"
+            ) from exc
+        if rate < 0:
+            raise HTTPException(status_code=400, detail=f"{field} must be >= 0")
+
+
+def _optional_co_rate(data: Any, field: str):
+    raw = getattr(data, field, None)
+    return None if raw is None else Decimal(str(raw))
+
+
 async def get_tax_config(request: Request) -> dict:
     """
     Return the tax configuration for the active tenant.
@@ -664,7 +745,7 @@ async def get_tax_config(request: Request) -> dict:
                         tenant_id,
                     )
 
-            return {"success": True, "data": dict(row)}
+            return {"success": True, "data": decode_tax_config_jsonb(dict(row))}
 
     except AuthenticationError as e:
         raise e
@@ -710,6 +791,14 @@ async def update_tax_config(request: Request, data) -> dict:
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
+
+        tax_lines = getattr(data, "tax_lines", None)
+        category_map = getattr(data, "category_map", None)
+        validate_tax_matrix_payload(tax_lines, category_map)
+        validate_co_rate_fields(data)
+        iva_rate = _optional_co_rate(data, "iva_rate")
+        inc_rate = _optional_co_rate(data, "inc_rate")
+        liquor_tax_rate = _optional_co_rate(data, "liquor_tax_rate")
 
         async with get_db_connection() as conn:
             fiscal_row = await conn.fetchrow(
@@ -771,7 +860,7 @@ async def update_tax_config(request: Request, data) -> dict:
                         detail="Could not apply tax jurisdiction pack",
                     )
                 # Allow commercial rate override on top of jurisdiction seed.
-                if getattr(data, "tax_lines", None) is not None:
+                if tax_lines is not None:
                     commercial_flag = getattr(data, "commercial_tax_applicable", None)
                     row = await conn.fetchrow(
                         """
@@ -784,10 +873,8 @@ async def update_tax_config(request: Request, data) -> dict:
                         RETURNING *
                         """,
                         tenant_id,
-                        json.dumps(data.tax_lines),
-                        json.dumps(data.category_map)
-                        if getattr(data, "category_map", None) is not None
-                        else None,
+                        json.dumps(tax_lines),
+                        json.dumps(category_map) if category_map is not None else None,
                         commercial_flag,
                     )
                 elif getattr(data, "commercial_tax_applicable", None) is not None:
@@ -802,7 +889,7 @@ async def update_tax_config(request: Request, data) -> dict:
                         tenant_id,
                         data.commercial_tax_applicable,
                     )
-                return {"success": True, "data": dict(row)}
+                return {"success": True, "data": decode_tax_config_jsonb(dict(row))}
 
             commercial_flag = getattr(data, "commercial_tax_applicable", None)
             row = await conn.fetchrow(
@@ -814,9 +901,14 @@ async def update_tax_config(request: Request, data) -> dict:
                     liquor_tax_applicable,
                     inc_gl_account_id, iva_gl_account_id, liquor_tax_gl_account_id,
                     tax_lines, category_map, tax_jurisdiction_code,
-                    commercial_tax_applicable
+                    commercial_tax_applicable,
+                    iva_rate, inc_rate, liquor_tax_rate
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12, COALESCE($13, false))
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12,
+                    COALESCE($13, false),
+                    COALESCE($14, 0.19), COALESCE($15, 0.08), COALESCE($16, 0.05)
+                )
                 ON CONFLICT (tenant_id) DO UPDATE SET
                     inc_applicable        = EXCLUDED.inc_applicable,
                     inc_included_in_price = EXCLUDED.inc_included_in_price,
@@ -836,6 +928,9 @@ async def update_tax_config(request: Request, data) -> dict:
                         EXCLUDED.commercial_tax_applicable,
                         tenant_tax_config.commercial_tax_applicable
                     ),
+                    iva_rate = COALESCE($14, tenant_tax_config.iva_rate),
+                    inc_rate = COALESCE($15, tenant_tax_config.inc_rate),
+                    liquor_tax_rate = COALESCE($16, tenant_tax_config.liquor_tax_rate),
                     updated_at            = NOW()
                 RETURNING *
                 """,
@@ -848,13 +943,16 @@ async def update_tax_config(request: Request, data) -> dict:
                 data.inc_gl_account_id,
                 data.iva_gl_account_id,
                 data.liquor_tax_gl_account_id,
-                json.dumps(data.tax_lines) if getattr(data, "tax_lines", None) is not None else None,
-                json.dumps(data.category_map) if getattr(data, "category_map", None) is not None else None,
+                json.dumps(tax_lines) if tax_lines is not None else None,
+                json.dumps(category_map) if category_map is not None else None,
                 None,
                 commercial_flag,
+                iva_rate,
+                inc_rate,
+                liquor_tax_rate,
             )
 
-            return {"success": True, "data": dict(row)}
+            return {"success": True, "data": decode_tax_config_jsonb(dict(row))}
 
     except AuthenticationError as e:
         raise e
