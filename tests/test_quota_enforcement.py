@@ -9,7 +9,15 @@ import pytest
 from fastapi import HTTPException
 
 from app.core.exceptions import APIError
-from app.services import billing_service, invitation_service, online_cart_service, public_restaurant_service, stations_service, tables_service
+from app.services import (
+    api_tokens_service,
+    billing_service,
+    invitation_service,
+    online_cart_service,
+    public_restaurant_service,
+    stations_service,
+    tables_service,
+)
 
 
 def _db_context(conn):
@@ -1272,6 +1280,48 @@ async def test_api_tokens_growth_quota_allows_below_paid_limit():
     conn.fetchval = AsyncMock(return_value=2)
 
     await billing_service.check_plan_quota_growth(conn, tenant_id, "api_tokens")
+
+
+@pytest.mark.asyncio
+async def test_api_token_reactivate_checks_growth_quota():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    token_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"role": "admin"},
+            {"is_active": False},
+        ]
+    )
+    quota_error = APIError("Límite del plan alcanzado", status_code=429)
+    session = {"user_id": str(user_id), "tenant_id": str(tenant_id)}
+
+    with (
+        patch(
+            "app.services.api_tokens_service.get_session_from_request",
+            new=AsyncMock(return_value=session),
+        ),
+        patch(
+            "app.services.api_tokens_service.get_db_connection",
+            side_effect=_db_context(conn),
+        ),
+        patch(
+            "app.services.api_tokens_service.check_plan_quota_growth",
+            new=AsyncMock(side_effect=quota_error),
+        ) as quota_check,
+    ):
+        with pytest.raises(APIError) as exc:
+            await api_tokens_service.update_api_token(
+                _request(),
+                str(token_id),
+                is_active=True,
+            )
+
+    assert exc.value.status_code == 429
+    quota_check.assert_awaited_once()
+    assert quota_check.await_args.args[2] == "api_tokens"
+    assert conn.fetchrow.await_count == 2
 
 
 @pytest.mark.asyncio
