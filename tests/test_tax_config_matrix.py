@@ -39,6 +39,8 @@ def test_decode_tax_config_jsonb_parses_asyncpg_strings():
     raw = {
         "tax_lines": '[{"key":"iva","rate":0.16}]',
         "category_map": '{"standard":"iva","exempt":null}',
+        "menu_category_line_map": '{"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee":"iva"}',
+        "exempt_menu_category_ids": '["ffffffff-0000-1111-2222-333333333333"]',
         "iva_rate": Decimal("0.19"),
     }
     decoded = decode_tax_config_jsonb(raw)
@@ -47,6 +49,8 @@ def test_decode_tax_config_jsonb_parses_asyncpg_strings():
     assert isinstance(decoded["category_map"], dict)
     assert decoded["category_map"]["standard"] == "iva"
     assert decoded["category_map"]["exempt"] is None
+    assert decoded["menu_category_line_map"]["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"] == "iva"
+    assert decoded["exempt_menu_category_ids"] == ["ffffffff-0000-1111-2222-333333333333"]
 
 
 def test_decode_tax_config_jsonb_leaves_objects_alone():

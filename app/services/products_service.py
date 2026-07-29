@@ -209,9 +209,10 @@ async def create_product_with_recipe(
                         name, description, price, category_id, product_base_type_id, preparation_time,
                         controla_stock, is_available, is_available_online, is_available_table_qr,
                         is_combo, is_resale, open_priced, allow_modifiers,
-                        tax_category, tenant_id, station_id, kitchen_name, image_url, costo_percibido
+                        tax_category, tax_resolution, tax_line_key,
+                        tenant_id, station_id, kitchen_name, image_url, costo_percibido
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
                     RETURNING id, created_at, updated_at
                 """
                 product_result = await conn.fetchrow(
@@ -231,6 +232,8 @@ async def create_product_with_recipe(
                     product_data.open_priced,
                     product_data.allow_modifiers,
                     product_data.tax_category,
+                    getattr(product_data, "tax_resolution", None) or "inherit",
+                    getattr(product_data, "tax_line_key", None),
                     tenant_id,
                     product_data.station_id,
                     product_data.kitchen_name,
@@ -376,6 +379,8 @@ async def get_product_by_id(
                     p.open_priced,
                     p.allow_modifiers,
                     p.tax_category,
+                    p.tax_resolution,
+                    p.tax_line_key,
                     p.costo_calculado,
                     p.costo_percibido,
                     p.precio_sugerido,
@@ -634,6 +639,8 @@ async def get_products_list(
                     p.open_priced,
                     p.allow_modifiers,
                     p.tax_category,
+                    p.tax_resolution,
+                    p.tax_line_key,
                     COALESCE(dc.direct_cost, 0) + COALESCE(bc.base_cost, 0) as costo_calculado,
                     p.costo_percibido,
                     p.precio_sugerido,
@@ -1208,7 +1215,7 @@ async def update_product_with_recipe(
                 # Fields where None is a valid "clear this value" intent (#465).
                 # Without this, the loop below silently drops attempts to remove
                 # an image when the user clicks "Eliminar imagen" in the form.
-                NULLABLE_FIELDS = {'image_url', 'costo_percibido'}
+                NULLABLE_FIELDS = {'image_url', 'costo_percibido', 'tax_line_key'}
                 for field, value in product_data.dict(exclude={'ingredients', 'recipe_base_ids', 'recipe_bases', 'controla_stock'}, exclude_unset=True).items():
                     if value is None and field not in NULLABLE_FIELDS:
                         continue

@@ -33,6 +33,14 @@ class TaxConfigResponse(BaseModel):
         default=None,
         description="Optional product tax_category → tax line key",
     )
+    menu_category_line_map: Optional[Dict[str, Optional[str]]] = Field(
+        default=None,
+        description="Menu category UUID → tax line key (commercial)",
+    )
+    exempt_menu_category_ids: Optional[List[UUID]] = Field(
+        default=None,
+        description="Menu category UUIDs with no tax (commercial)",
+    )
     tax_jurisdiction_code: Optional[str] = Field(
         default=None,
         description="US state or CA province code when country requires jurisdiction",
@@ -56,6 +64,14 @@ class TaxConfigUpdate(BaseModel):
     liquor_tax_gl_account_id: Optional[UUID] = None
     tax_lines: Optional[List[Dict[str, Any]]] = None
     category_map: Optional[Dict[str, Optional[str]]] = None
+    menu_category_line_map: Optional[Dict[str, Optional[str]]] = Field(
+        default=None,
+        description="Omit to leave unchanged; {} clears all menu-category mappings",
+    )
+    exempt_menu_category_ids: Optional[List[UUID]] = Field(
+        default=None,
+        description="Omit to leave unchanged; [] clears exempt set",
+    )
     tax_jurisdiction_code: Optional[str] = None
     commercial_tax_applicable: Optional[bool] = Field(
         default=None,

@@ -388,6 +388,9 @@ async def _post_order_gl_entry(
     order_items = await conn.fetch(
         """SELECT
                COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal,
+               COALESCE(p.category_id, pv_p.category_id) AS category_id,
+               COALESCE(p.tax_resolution, pv_p.tax_resolution, 'inherit') AS tax_resolution,
+               COALESCE(p.tax_line_key, pv_p.tax_line_key) AS tax_line_key,
                COALESCE(p.tax_category, pv_p.tax_category, 'standard') AS tax_category
            FROM order_items oi
            LEFT JOIN product p ON p.id = oi.product_id
@@ -398,10 +401,21 @@ async def _post_order_gl_entry(
     )
 
     # ── Accumulate subtotals per tax category ─────────────────────────────
+    from app.services.hospitality_tax_engine import (
+        compute_gl_category_taxes,
+        resolve_effective_tax_category,
+    )
+
     standard_subtotal = Decimal("0")
     liquor_subtotal   = Decimal("0")
     for item in order_items:
-        cat = item["tax_category"] or "standard"
+        cat = resolve_effective_tax_category(
+            tax_config,
+            category_id=item["category_id"],
+            tax_resolution=item["tax_resolution"] or "inherit",
+            tax_line_key=item["tax_line_key"],
+            tax_category=item["tax_category"] or "standard",
+        )
         sub = Decimal(str(item["subtotal"]))
         if cat == "liquor":
             liquor_subtotal += sub
@@ -414,8 +428,6 @@ async def _post_order_gl_entry(
         standard_subtotal = total_amount
 
     # ── Calculate taxes per category (profile-driven tax_lines) ───────────
-    from app.services.hospitality_tax_engine import compute_gl_category_taxes
-
     tax_result = compute_gl_category_taxes(
         standard_subtotal, liquor_subtotal, tax_config,
     )
