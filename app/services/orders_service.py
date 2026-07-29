@@ -322,8 +322,21 @@ def _tax_detail_rows(
     standard_tax_label: str,
     tax_config: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    std_base = sum(float(r["subtotal"]) for r in items_rows if r["tax_category"] == "standard")
-    liq_base = sum(float(r["subtotal"]) for r in items_rows if r["tax_category"] == "liquor")
+    from app.services.hospitality_tax_engine import resolve_effective_tax_category
+
+    def _effective(row: Any) -> str:
+        if tax_config is None:
+            return str(_row_get(row, "tax_category") or "standard")
+        return resolve_effective_tax_category(
+            tax_config,
+            category_id=_row_get(row, "category_id"),
+            tax_resolution=_row_get(row, "tax_resolution") or "inherit",
+            tax_line_key=_row_get(row, "tax_line_key"),
+            tax_category=_row_get(row, "tax_category") or "standard",
+        )
+
+    std_base = sum(float(r["subtotal"]) for r in items_rows if _effective(r) == "standard")
+    liq_base = sum(float(r["subtotal"]) for r in items_rows if _effective(r) == "liquor")
     rows: List[Dict[str, Any]] = []
     if standard_tax > 0:
         rows.append({"label": standard_tax_label, "base": std_base, "amount": standard_tax})
@@ -884,6 +897,9 @@ async def get_order_by_id(
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
                 items_rows = await conn.fetch(
                     """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
+                              COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                              p.tax_line_key AS tax_line_key,
+                              p.category_id::text AS category_id,
                               COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal
                        FROM order_items oi
                        JOIN product p ON p.id = oi.product_id
@@ -2262,12 +2278,14 @@ async def get_orders_metrics(
                 tax_where_sql = " AND ".join(tax_where)
                 tax_rows = await conn.fetch(
                     f"""SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
-                               COALESCE(SUM(oi.subtotal), 0) AS subtotal
+                               COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                               p.tax_line_key AS tax_line_key,
+                               p.category_id::text AS category_id,
+                               COALESCE(oi.subtotal, 0) AS subtotal
                         FROM order_items oi
                         JOIN product p ON p.id = oi.product_id
                         JOIN orders o ON o.id = oi.order_id
-                        WHERE {tax_where_sql}
-                        GROUP BY COALESCE(p.tax_category, 'standard')""",
+                        WHERE {tax_where_sql}""",
                     *tax_params
                 )
                 _total_std_tax, _total_liq_tax, _tax_label = _compute_tax_breakdown(tax_rows, tax_config)
@@ -2462,7 +2480,10 @@ async def get_orders_dashboard(
             _base_filter = f"o.tenant_id = $1 AND o.status = 'completed' AND {ANALYTICS_SALES_FILTER_ALIAS_O}"
             _tax_select = """
                 SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
-                       COALESCE(SUM(oi.subtotal), 0) AS subtotal
+                       COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                       p.tax_line_key AS tax_line_key,
+                       p.category_id::text AS category_id,
+                       COALESCE(oi.subtotal, 0) AS subtotal
                 FROM order_items oi
                 JOIN product p ON p.id = oi.product_id
                 JOIN orders o ON o.id = oi.order_id
@@ -2470,20 +2491,18 @@ async def get_orders_dashboard(
             try:
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
                 main_tax_rows = await conn.fetch(
-                    f"{_tax_select} WHERE {_base_filter} GROUP BY COALESCE(p.tax_category, 'standard')",
+                    f"{_tax_select} WHERE {_base_filter}",
                     tenant_id
                 )
                 month_tax_rows = await conn.fetch(
                     f"""{_tax_select} WHERE {_base_filter}
-                        AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('month', NOW() AT TIME ZONE $2)::date
-                        GROUP BY COALESCE(p.tax_category, 'standard')""",
+                        AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('month', NOW() AT TIME ZONE $2)::date""",
                     tenant_id,
                     timezone_name,
                 )
                 year_tax_rows = await conn.fetch(
                     f"""{_tax_select} WHERE {_base_filter}
-                        AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('year', NOW() AT TIME ZONE $2)::date
-                        GROUP BY COALESCE(p.tax_category, 'standard')""",
+                        AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('year', NOW() AT TIME ZONE $2)::date""",
                     tenant_id,
                     timezone_name,
                 )
@@ -4240,6 +4259,9 @@ async def send_invoice_email(
         tax_config = await _get_tenant_tax_config(conn, tenant_id)
         items_for_tax = await conn.fetch(
             """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
+                      COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                      p.tax_line_key AS tax_line_key,
+                      p.category_id::text AS category_id,
                       COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal
                FROM order_items oi
                JOIN product p ON p.id = oi.product_id

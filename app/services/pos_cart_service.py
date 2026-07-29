@@ -138,6 +138,8 @@ def _cart_items_to_promo_lines(items: List[dict]) -> List[dict]:
             "quantity": quantity,
             "subtotal": float(item["subtotal"]),
             "tax_category": item.get("tax_category") or "standard",
+            "tax_resolution": item.get("tax_resolution") or "inherit",
+            "tax_line_key": item.get("tax_line_key"),
             "promo_opt_out": bool(item.get("promo_opt_out")),
         }
         if raw_unit_price is not None:
@@ -249,13 +251,23 @@ def _manual_discount_amount(
 
 
 def _tax_rows_from_evaluated_lines(lines: Sequence[dict]) -> List[dict]:
-    grouped: Dict[str, float] = {}
+    """Item-level rows for hospitality resolve (menu category + override).
+
+    Do not collapse by legacy tax_category — that drops category_id and makes
+    exempt/mapped menu categories fall through to the primary line (#1889).
+    """
+    rows: List[dict] = []
     for line in lines:
-        category = line.get("tax_category") or "standard"
-        grouped[category] = grouped.get(category, 0.0) + float(
-            line.get("net_total", line.get("subtotal_after_promo", line["subtotal"]))
-        )
-    return [{"tax_category": k, "subtotal": v} for k, v in grouped.items()]
+        rows.append({
+            "tax_category": line.get("tax_category") or "standard",
+            "tax_resolution": line.get("tax_resolution") or "inherit",
+            "tax_line_key": line.get("tax_line_key"),
+            "category_id": line.get("category_id"),
+            "subtotal": float(
+                line.get("net_total", line.get("subtotal_after_promo", line["subtotal"]))
+            ),
+        })
+    return rows
 
 
 async def get_or_create_active_cart(
@@ -523,6 +535,8 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
             p.name as product_name,
             p.category_id as category_id,
             COALESCE(p.tax_category, 'standard') AS tax_category,
+            COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+            p.tax_line_key AS tax_line_key,
             p.is_resale as product_is_resale,
             COALESCE(
                 json_agg(
@@ -548,7 +562,8 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
                  ci.notes, ci.promo_opt_out, ci.locked_promotion_id, ci.promotion_locked_at,
                  ci.locked_promo_eligible_subtotal, ci.locked_promo_eligible_unit_price,
                  ci.locked_promotion_name, ci.locked_promo_type, ci.locked_promo_savings,
-                 ci.created_at, p.name, p.category_id, p.tax_category, p.is_resale
+                 ci.created_at, p.name, p.category_id, p.tax_category, p.tax_resolution,
+                 p.tax_line_key, p.is_resale
         ORDER BY ci.created_at
     """
     items_rows = await conn.fetch(items_query, cart_id)
@@ -565,6 +580,8 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
             "product_id": str(item_row['product_id']),
             "category_id": str(item_row['category_id']) if item_row['category_id'] else None,
             "tax_category": item_row['tax_category'] or 'standard',
+            "tax_resolution": item_row['tax_resolution'] or 'inherit',
+            "tax_line_key": item_row['tax_line_key'],
             "product": {
                 "id": str(item_row['product_id']),
                 "name": item_row['product_name'],
@@ -1246,9 +1263,21 @@ async def get_cart_tax_preview(
             promo_lines,
             manual_discount_amount=float(discount_amount or 0),
         )
-        tax_category_by_id = {line["id"]: line["tax_category"] for line in promo_lines}
+        tax_fields_by_id = {
+            line["id"]: {
+                "tax_category": line.get("tax_category") or "standard",
+                "category_id": line.get("category_id"),
+                "tax_resolution": line.get("tax_resolution") or "inherit",
+                "tax_line_key": line.get("tax_line_key"),
+            }
+            for line in promo_lines
+        }
         for line in checkout_eval["lines"]:
-            line["tax_category"] = tax_category_by_id.get(line["id"], "standard")
+            fields = tax_fields_by_id.get(line["id"], {})
+            line["tax_category"] = fields.get("tax_category", "standard")
+            line["category_id"] = fields.get("category_id")
+            line["tax_resolution"] = fields.get("tax_resolution", "inherit")
+            line["tax_line_key"] = fields.get("tax_line_key")
 
         tax_config = await _get_tenant_tax_config(conn, tenant_id)
         tax_rows = _tax_rows_from_evaluated_lines(checkout_eval["lines"])
@@ -2578,6 +2607,9 @@ async def complete_pos_order(
 
                     items_tax_rows = await conn.fetch(
                         """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
+                                  COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                                  p.tax_line_key AS tax_line_key,
+                                  p.category_id::text AS category_id,
                                   COALESCE(oi.subtotal, 0) AS subtotal
                            FROM order_items oi
                            JOIN product p ON p.id = oi.product_id
