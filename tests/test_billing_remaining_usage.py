@@ -45,6 +45,7 @@ def _quota_counts_row(**overrides):
         "expenses_per_period": 0,
         "supplier_payments_per_period": 0,
         "payment_methods": 0,
+        "api_tokens": 0,
         "accounting_period_closes_per_period": 0,
         "manual_journal_entries_per_period": 0,
         "modifier_groups": 0,
@@ -257,6 +258,7 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
                 "expenses_per_period": 30,
                 "supplier_payments_per_period": 30,
                 "payment_methods": 5,
+                "api_tokens": 0,
                 "accounting_period_closes_per_period": 3,
                 "manual_journal_entries_per_period": 30,
                 "modifier_groups": 4,
@@ -303,6 +305,9 @@ async def test_remaining_usage_starter_without_subscription_exposes_catalog_quot
     assert usage["quota_usage"]["expenses_per_period"]["limit"] == 30
     assert usage["quota_usage"]["supplier_payments_per_period"]["limit"] == 30
     assert usage["quota_usage"]["payment_methods"]["limit"] == 5
+    assert usage["quota_usage"]["api_tokens"]["limit"] == 0
+    assert usage["quota_usage"]["api_tokens"]["used"] == 0
+    assert usage["quota_usage"]["api_tokens"]["remaining"] == 0
     assert usage["quota_usage"]["accounting_period_closes_per_period"]["limit"] == 3
     assert usage["quota_usage"]["manual_journal_entries_per_period"]["limit"] == 30
     assert usage["quota_usage"]["modifier_groups"]["used"] == 4

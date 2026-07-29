@@ -8,6 +8,35 @@ from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.services import billing_service
 
 
+def _quota_counts(**overrides):
+    base = {
+        "admin_users": 0,
+        "active_sessions_per_admin_user": 0,
+        "active_kitchens": 0,
+        "active_tables_including_bar": 0,
+        "active_qr_tables": 0,
+        "completed_online_orders_per_month": 0,
+        "menu_products": 0,
+        "menu_categories": 0,
+        "tenant_ingredients": 0,
+        "tenant_suppliers": 0,
+        "direct_purchases_per_period": 0,
+        "stock_adjustments_per_period": 0,
+        "cash_closes_per_period": 0,
+        "active_open_cash_shifts": 0,
+        "expenses_per_period": 0,
+        "supplier_payments_per_period": 0,
+        "payment_methods": 0,
+        "api_tokens": 0,
+        "accounting_period_closes_per_period": 0,
+        "manual_journal_entries_per_period": 0,
+        "modifier_groups": 0,
+        "recipe_bases": 0,
+    }
+    base.update(overrides)
+    return base
+
+
 def _plan_row(slug: str, features: dict):
     now = datetime.now(timezone.utc)
     return {
@@ -36,6 +65,13 @@ def test_serialize_plan_exposes_pro_quota_defaults():
     assert plan["quotas"]["active_qr_tables"] == 20
     assert plan["quotas"]["completed_online_orders_per_month"] == 300
     assert plan["quotas"]["electronic_invoices_per_period"] == 0
+    assert plan["quotas"]["api_tokens"] == billing_service.CATALOG_UNLIMITED
+
+
+def test_serialize_plan_exposes_starter_api_tokens_zero():
+    plan = billing_service._serialize_plan(_plan_row("starter", {}))
+
+    assert plan["quotas"]["api_tokens"] == 0
 
 
 def test_serialize_plan_keeps_facturacion_legacy_invoice_limit():
@@ -95,22 +131,18 @@ async def test_remaining_usage_exposes_quota_usage_and_internal_roles_only():
                 "scans_used": 25,
                 "scans_limit": 500,
             },
-            {
-                "admin_users": 4,
-                "active_sessions_per_admin_user": 1,
-                "active_kitchens": 2,
-                "active_tables_including_bar": 7,
-                "active_qr_tables": 6,
-                "completed_online_orders_per_month": 28,
-                "menu_products": 9,
-                "menu_categories": 3,
-                "tenant_ingredients": 0,
-                "tenant_suppliers": 0,
-                "direct_purchases_per_period": 0,
-                "stock_adjustments_per_period": 0,
-                "modifier_groups": 1,
-                "recipe_bases": 2,
-            },
+            _quota_counts(
+                admin_users=4,
+                active_sessions_per_admin_user=1,
+                active_kitchens=2,
+                active_tables_including_bar=7,
+                active_qr_tables=6,
+                completed_online_orders_per_month=28,
+                menu_products=9,
+                menu_categories=3,
+                modifier_groups=1,
+                recipe_bases=2,
+            ),
         ]
     )
     conn.fetchval = AsyncMock(return_value=12)
@@ -165,22 +197,14 @@ async def test_remaining_usage_exposes_effective_quota_override_state():
                 "scans_used": 0,
                 "scans_limit": 500,
             },
-            {
-                "admin_users": 4,
-                "active_sessions_per_admin_user": 1,
-                "active_kitchens": 3,
-                "active_tables_including_bar": 7,
-                "active_qr_tables": 6,
-                "completed_online_orders_per_month": 28,
-                "menu_products": 0,
-                "menu_categories": 0,
-                "tenant_ingredients": 0,
-                "tenant_suppliers": 0,
-                "direct_purchases_per_period": 0,
-                "stock_adjustments_per_period": 0,
-                "modifier_groups": 0,
-                "recipe_bases": 0,
-            },
+            _quota_counts(
+                admin_users=4,
+                active_sessions_per_admin_user=1,
+                active_kitchens=3,
+                active_tables_including_bar=7,
+                active_qr_tables=6,
+                completed_online_orders_per_month=28,
+            ),
         ]
     )
     conn.fetchval = AsyncMock(return_value=0)
@@ -227,22 +251,14 @@ async def test_remaining_usage_exposes_disabled_override_as_unlimited():
                 "scans_used": 0,
                 "scans_limit": 500,
             },
-            {
-                "admin_users": 4,
-                "active_sessions_per_admin_user": 1,
-                "active_kitchens": 2,
-                "active_tables_including_bar": 7,
-                "active_qr_tables": 6,
-                "completed_online_orders_per_month": 301,
-                "menu_products": 0,
-                "menu_categories": 0,
-                "tenant_ingredients": 0,
-                "tenant_suppliers": 0,
-                "direct_purchases_per_period": 0,
-                "stock_adjustments_per_period": 0,
-                "modifier_groups": 0,
-                "recipe_bases": 0,
-            },
+            _quota_counts(
+                admin_users=4,
+                active_sessions_per_admin_user=1,
+                active_kitchens=2,
+                active_tables_including_bar=7,
+                active_qr_tables=6,
+                completed_online_orders_per_month=301,
+            ),
         ]
     )
     conn.fetchval = AsyncMock(return_value=0)

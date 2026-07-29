@@ -14,6 +14,7 @@ from app.models.api_token import (
     ApiTokenWithSecret,
     AVAILABLE_SCOPES
 )
+from app.services.billing_service import check_plan_quota_growth
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,8 @@ async def create_api_token(request: Request, token_data: ApiTokenCreate) -> dict
                 status_code=403,
                 detail="Only admin or superuser can create API tokens"
             )
+
+        await check_plan_quota_growth(conn, to_uuid(tenant_id), "api_tokens")
 
         # Insertar el token
         result = await conn.fetchrow("""
@@ -347,6 +350,18 @@ async def update_api_token(request: Request, token_id: str, name: Optional[str] 
                 detail="Only admin or superuser can update API tokens"
             )
 
+        existing = await conn.fetchrow(
+            """
+            SELECT is_active
+            FROM api_tokens
+            WHERE id = $1 AND tenant_id = $2
+            """,
+            to_uuid(token_id),
+            to_uuid(tenant_id),
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Token not found")
+
         # Construir query dinamica
         updates = []
         params = [to_uuid(token_id), to_uuid(tenant_id)]
@@ -364,6 +379,8 @@ async def update_api_token(request: Request, token_id: str, name: Optional[str] 
             param_idx += 1
 
         if is_active is not None:
+            if is_active is True and not existing["is_active"]:
+                await check_plan_quota_growth(conn, to_uuid(tenant_id), "api_tokens")
             updates.append(f"is_active = ${param_idx}")
             params.append(is_active)
             param_idx += 1

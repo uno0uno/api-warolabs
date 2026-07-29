@@ -9,7 +9,15 @@ import pytest
 from fastapi import HTTPException
 
 from app.core.exceptions import APIError
-from app.services import billing_service, invitation_service, online_cart_service, public_restaurant_service, stations_service, tables_service
+from app.services import (
+    api_tokens_service,
+    billing_service,
+    invitation_service,
+    online_cart_service,
+    public_restaurant_service,
+    stations_service,
+    tables_service,
+)
 
 
 def _db_context(conn):
@@ -1235,6 +1243,85 @@ async def test_payment_methods_growth_quota_allows_below_limit():
     conn.fetchval = AsyncMock(return_value=4)
 
     await billing_service.check_plan_quota_growth(conn, tenant_id, "payment_methods")
+
+
+@pytest.mark.asyncio
+async def test_api_tokens_growth_quota_blocks_at_starter_zero():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("api_tokens", 0))
+    conn.fetchval = AsyncMock(return_value=0)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(conn, tenant_id, "api_tokens")
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["resource"] == "api_tokens"
+    assert exc.value.details["limit"] == 0
+    assert "FROM api_tokens" in conn.fetchval.await_args.args[0]
+    assert "is_active = TRUE" in conn.fetchval.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_api_tokens_growth_quota_allows_below_paid_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "plan_slug": "pro",
+            "plan_features": {"quotas": {"api_tokens": billing_service.CATALOG_UNLIMITED}},
+            "override_id": None,
+            "limit_override": None,
+            "override_disabled": False,
+            "override_reason": None,
+        }
+    )
+    conn.fetchval = AsyncMock(return_value=2)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "api_tokens")
+
+
+@pytest.mark.asyncio
+async def test_api_token_reactivate_checks_growth_quota():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    token_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"role": "admin"},
+            {"is_active": False},
+        ]
+    )
+    quota_error = APIError("Límite del plan alcanzado", status_code=429)
+    session = {"user_id": str(user_id), "tenant_id": str(tenant_id)}
+
+    with (
+        patch(
+            "app.services.api_tokens_service.get_session_from_request",
+            new=AsyncMock(return_value=session),
+        ),
+        patch(
+            "app.services.api_tokens_service.get_db_connection",
+            side_effect=_db_context(conn),
+        ),
+        patch(
+            "app.services.api_tokens_service.check_plan_quota_growth",
+            new=AsyncMock(side_effect=quota_error),
+        ) as quota_check,
+    ):
+        with pytest.raises(APIError) as exc:
+            await api_tokens_service.update_api_token(
+                _request(),
+                str(token_id),
+                is_active=True,
+            )
+
+    assert exc.value.status_code == 429
+    quota_check.assert_awaited_once()
+    assert quota_check.await_args.args[2] == "api_tokens"
+    assert conn.fetchrow.await_count == 2
 
 
 @pytest.mark.asyncio
