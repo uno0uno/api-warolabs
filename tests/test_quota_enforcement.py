@@ -1238,6 +1238,43 @@ async def test_payment_methods_growth_quota_allows_below_limit():
 
 
 @pytest.mark.asyncio
+async def test_api_tokens_growth_quota_blocks_at_starter_zero():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("api_tokens", 0))
+    conn.fetchval = AsyncMock(return_value=0)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(conn, tenant_id, "api_tokens")
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["resource"] == "api_tokens"
+    assert exc.value.details["limit"] == 0
+    assert "FROM api_tokens" in conn.fetchval.await_args.args[0]
+    assert "is_active = TRUE" in conn.fetchval.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_api_tokens_growth_quota_allows_below_paid_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "plan_slug": "pro",
+            "plan_features": {"quotas": {"api_tokens": billing_service.CATALOG_UNLIMITED}},
+            "override_id": None,
+            "limit_override": None,
+            "override_disabled": False,
+            "override_reason": None,
+        }
+    )
+    conn.fetchval = AsyncMock(return_value=2)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "api_tokens")
+
+
+@pytest.mark.asyncio
 async def test_supplier_payments_period_quota_uses_paid_at():
     tenant_id = uuid4()
     period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)

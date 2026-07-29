@@ -14,6 +14,7 @@ from app.models.api_token import (
     ApiTokenWithSecret,
     AVAILABLE_SCOPES
 )
+from app.services.billing_service import check_plan_quota_growth
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,8 @@ async def create_api_token(request: Request, token_data: ApiTokenCreate) -> dict
                 status_code=403,
                 detail="Only admin or superuser can create API tokens"
             )
+
+        await check_plan_quota_growth(conn, to_uuid(tenant_id), "api_tokens")
 
         # Insertar el token
         result = await conn.fetchrow("""

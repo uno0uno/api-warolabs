@@ -48,6 +48,7 @@ STARTER_OPERATIONAL_QUOTAS = {
     "expenses_per_period": 30,
     "supplier_payments_per_period": 30,
     "payment_methods": 5,
+    "api_tokens": 0,
     "accounting_period_closes_per_period": 3,
     "manual_journal_entries_per_period": 30,
     "modifier_groups": 4,
@@ -75,6 +76,7 @@ QUOTA_KEYS = (
     "expenses_per_period",
     "supplier_payments_per_period",
     "payment_methods",
+    "api_tokens",
     "accounting_period_closes_per_period",
     "manual_journal_entries_per_period",
     "modifier_groups",
@@ -102,6 +104,7 @@ BASE_OPERATIONAL_QUOTAS = {
     "expenses_per_period": CATALOG_UNLIMITED,
     "supplier_payments_per_period": CATALOG_UNLIMITED,
     "payment_methods": CATALOG_UNLIMITED,
+    "api_tokens": CATALOG_UNLIMITED,
     "accounting_period_closes_per_period": CATALOG_UNLIMITED,
     "manual_journal_entries_per_period": CATALOG_UNLIMITED,
     "modifier_groups": CATALOG_UNLIMITED,
@@ -142,6 +145,7 @@ ENFORCEABLE_QUOTA_RESOURCES = {
     "tenant_suppliers",
     "active_open_cash_shifts",
     "payment_methods",
+    "api_tokens",
     "modifier_groups",
     "recipe_bases",
 }
@@ -1229,6 +1233,16 @@ async def _count_quota_resource_usage(
             """,
             tenant_id,
         )
+    elif resource == "api_tokens":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM api_tokens
+            WHERE tenant_id = $1
+              AND is_active = TRUE
+            """,
+            tenant_id,
+        )
     elif resource == "modifier_groups":
         value = await conn.fetchval(
             """
@@ -2275,6 +2289,12 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             ) AS payment_methods,
             (
                 SELECT COUNT(*)
+                FROM api_tokens atok
+                WHERE atok.tenant_id = $1
+                  AND atok.is_active = TRUE
+            ) AS api_tokens,
+            (
+                SELECT COUNT(*)
                 FROM tenant_monthly_periods tmp
                 WHERE tmp.tenant_id = $1
                   AND tmp.status = 'closed'
@@ -2403,6 +2423,10 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             "payment_methods": metric(
                 int(quota_counts["payment_methods"] or 0),
                 effective_quotas["payment_methods"],
+            ),
+            "api_tokens": metric(
+                int(quota_counts.get("api_tokens") or 0),
+                effective_quotas["api_tokens"],
             ),
             "accounting_period_closes_per_period": metric(
                 int(quota_counts["accounting_period_closes_per_period"] or 0),
