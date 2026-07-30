@@ -53,8 +53,8 @@ class Module(str, Enum):
 
     Grouped by business area as defined in Epic 2 (#164). 14 modules in
     Spanish to match the language operators use to talk about their own
-    business. Each module corresponds to a router group that Epic 2 will
-    decorate with `require_module()`.
+    business (CRM added in #1931). Each module corresponds to a router group
+    that Epic 2 will decorate with `require_module()`.
     """
     POS = "pos"                          # pos_cart, tables, comandas, online_orders
     VENTAS = "ventas"                    # orders, online_cart
@@ -63,6 +63,7 @@ class Module(str, Enum):
     OPERACIONES = "operaciones"          # tenant_config, stations
     ABASTECIMIENTO = "abastecimiento"    # purchases, suppliers, inventory, admin_ingredients, ingredient_purchase_units
     ANALITICA = "analitica"              # analytics, articles
+    CRM = "crm"                          # customers, Waros loyalty (moved from analitica)
     FINANZAS = "finanzas"                # accounting, expenses, salaries, cierre, cartera, credit, payment_methods, financial
     FACTURACION = "facturacion"          # facturacion, invoices, support_documents
     EQUIPO = "equipo"                    # tenants, invitations
@@ -87,6 +88,7 @@ DEFAULT_ROLE_MODULES: Dict[Role, FrozenSet[Module]] = {
         Module.OPERACIONES,
         Module.ABASTECIMIENTO,
         Module.ANALITICA,
+        Module.CRM,
         Module.FINANZAS,
         Module.FACTURACION,
         Module.INTEGRACIONES,
@@ -103,6 +105,7 @@ DEFAULT_ROLE_MODULES: Dict[Role, FrozenSet[Module]] = {
         Module.OPERACIONES,
         Module.ABASTECIMIENTO,
         Module.ANALITICA,
+        Module.CRM,
         # No MI_NEGOCIO — owner-only
     }),
     Role.CASHIER: frozenset({

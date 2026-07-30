@@ -121,6 +121,7 @@ def test_starter_owner_includes_all_product_modules():
         "operaciones",
         "abastecimiento",
         "analitica",
+        "crm",
         "finanzas",
         "integraciones",
         "equipo",
