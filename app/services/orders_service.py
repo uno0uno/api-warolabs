@@ -4317,10 +4317,15 @@ async def get_products_sold(
     sort: str = "qty_desc",
     search: Optional[str] = None,
     channel: Optional[str] = None,
+    limit: int = 25,
+    offset: int = 0,
 ) -> dict:
     """
     Get products sold aggregated by product, filtered by date range and category.
     Only includes orders with status = 'completed'.
+
+    Pagination (warocol.com#1943): `limit`/`offset` page the product rows.
+    `totals` and `pagination.total` always reflect the full filtered set.
     """
     try:
         session_context = require_valid_session(request)
@@ -4328,6 +4333,9 @@ async def get_products_sold(
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
+
+        limit = max(1, min(int(limit or 25), 250))
+        offset = max(0, int(offset or 0))
 
         async with get_db_connection() as conn:
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
@@ -4374,24 +4382,113 @@ async def get_products_sold(
             }
             order_by = sort_map.get(sort, "quantity_sold DESC")
 
+            # Categories for filter chips: same filters except category_id (stable while paging).
+            cat_where_conditions = ["o.tenant_id = $1", "o.status = 'completed'"]
+            cat_params: List = [tenant_id]
+            cat_param_count = _append_local_date_bounds(
+                cat_where_conditions,
+                cat_params,
+                1,
+                "o.order_date",
+                parsed_date_from,
+                parsed_date_to,
+                timezone_name,
+            )
+            if search and search.strip():
+                cat_param_count += 1
+                cat_where_conditions.append(f"p.name ILIKE ${cat_param_count}")
+                cat_params.append(f"%{search.strip()}%")
+            if channel == 'online':
+                cat_where_conditions.append("o.online_cart_id IS NOT NULL")
+            elif channel == 'mesa':
+                cat_where_conditions.append("o.table_session_id IS NOT NULL")
+            elif channel == 'pos':
+                cat_where_conditions.append("o.pos_cart_id IS NOT NULL AND o.table_session_id IS NULL")
+            cat_where_clause = " AND ".join(cat_where_conditions)
+
+            param_count += 1
+            limit_param = param_count
+            param_count += 1
+            offset_param = param_count
+            page_params = list(params) + [limit, offset]
+
             query = f"""
-                SELECT
-                    p.id::text AS product_id,
-                    p.name AS product_name,
+                WITH aggregated AS (
+                    SELECT
+                        p.id::text AS product_id,
+                        p.name AS product_name,
+                        p.category_id::text AS category_id,
+                        c.name AS category_name,
+                        SUM(oi.quantity)::int AS quantity_sold,
+                        SUM(oi.subtotal) AS total_revenue
+                    FROM order_items oi
+                    JOIN orders o ON o.id = oi.order_id
+                    JOIN product p ON p.id = oi.product_id
+                    LEFT JOIN categories c ON c.id = p.category_id
+                    WHERE {where_clause}
+                    GROUP BY p.id, p.name, p.category_id, c.name
+                ),
+                with_totals AS (
+                    SELECT
+                        product_id,
+                        product_name,
+                        category_id,
+                        category_name,
+                        quantity_sold,
+                        total_revenue,
+                        COUNT(*) OVER() AS total_products,
+                        COALESCE(SUM(quantity_sold) OVER(), 0)::int AS period_quantity_sold,
+                        COALESCE(SUM(total_revenue) OVER(), 0) AS period_total_revenue
+                    FROM aggregated
+                )
+                SELECT *
+                FROM with_totals
+                ORDER BY {order_by}
+                LIMIT ${limit_param} OFFSET ${offset_param}
+            """
+
+            rows = await conn.fetch(query, *page_params)
+
+            cat_query = f"""
+                SELECT DISTINCT
                     p.category_id::text AS category_id,
-                    c.name AS category_name,
-                    SUM(oi.quantity)::int AS quantity_sold,
-                    SUM(oi.subtotal) AS total_revenue
+                    c.name AS category_name
                 FROM order_items oi
                 JOIN orders o ON o.id = oi.order_id
                 JOIN product p ON p.id = oi.product_id
                 LEFT JOIN categories c ON c.id = p.category_id
-                WHERE {where_clause}
-                GROUP BY p.id, p.name, p.category_id, c.name
-                ORDER BY {order_by}
+                WHERE {cat_where_clause}
+                  AND p.category_id IS NOT NULL
+                ORDER BY c.name ASC NULLS LAST
             """
+            cat_rows = await conn.fetch(cat_query, *cat_params)
 
-            rows = await conn.fetch(query, *params)
+            if rows:
+                total_products = int(rows[0]["total_products"])
+                total_qty = int(rows[0]["period_quantity_sold"])
+                total_revenue = float(rows[0]["period_total_revenue"])
+            else:
+                totals_query = f"""
+                    SELECT
+                        COUNT(*)::int AS total_products,
+                        COALESCE(SUM(quantity_sold), 0)::int AS period_quantity_sold,
+                        COALESCE(SUM(total_revenue), 0) AS period_total_revenue
+                    FROM (
+                        SELECT
+                            SUM(oi.quantity)::int AS quantity_sold,
+                            SUM(oi.subtotal) AS total_revenue
+                        FROM order_items oi
+                        JOIN orders o ON o.id = oi.order_id
+                        JOIN product p ON p.id = oi.product_id
+                        LEFT JOIN categories c ON c.id = p.category_id
+                        WHERE {where_clause}
+                        GROUP BY p.id
+                    ) agg
+                """
+                totals_row = await conn.fetchrow(totals_query, *params)
+                total_products = int(totals_row["total_products"]) if totals_row else 0
+                total_qty = int(totals_row["period_quantity_sold"]) if totals_row else 0
+                total_revenue = float(totals_row["period_total_revenue"]) if totals_row else 0.0
 
             data = [
                 {
@@ -4405,8 +4502,11 @@ async def get_products_sold(
                 for row in rows
             ]
 
-            total_qty = sum(r["quantity_sold"] for r in data)
-            total_revenue = sum(r["total_revenue"] for r in data)
+            categories = [
+                {"id": row["category_id"], "name": row["category_name"]}
+                for row in cat_rows
+                if row["category_id"] and row["category_name"]
+            ]
 
             return {
                 "success": True,
@@ -4415,6 +4515,12 @@ async def get_products_sold(
                     "quantity_sold": total_qty,
                     "total_revenue": total_revenue,
                 },
+                "pagination": {
+                    "total": total_products,
+                    "limit": limit,
+                    "offset": offset,
+                },
+                "categories": categories,
             }
 
     except (AuthenticationError, APIError):
