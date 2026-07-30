@@ -1299,6 +1299,54 @@ async def test_api_tokens_growth_quota_blocks_at_starter_zero():
 
 
 @pytest.mark.asyncio
+async def test_tenant_promotions_growth_quota_blocks_at_starter_one():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("tenant_promotions", 1))
+    conn.fetchval = AsyncMock(return_value=1)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(
+            conn, tenant_id, "tenant_promotions"
+        )
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["resource"] == "tenant_promotions"
+    assert exc.value.details["limit"] == 1
+    assert "FROM tenant_promotions" in conn.fetchval.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_tenant_promotions_growth_quota_allows_below_starter_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("tenant_promotions", 1))
+    conn.fetchval = AsyncMock(return_value=0)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "tenant_promotions")
+
+
+@pytest.mark.asyncio
+async def test_tenant_promotions_growth_quota_allows_unlimited_pro():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "plan_slug": "pro",
+            "plan_features": {
+                "quotas": {"tenant_promotions": billing_service.CATALOG_UNLIMITED}
+            },
+            "override_limit": None,
+            "override_expires_at": None,
+        }
+    )
+    conn.fetchval = AsyncMock(return_value=50)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "tenant_promotions")
+
+
+@pytest.mark.asyncio
 async def test_api_tokens_growth_quota_allows_below_paid_limit():
     tenant_id = uuid4()
     conn = MagicMock()
