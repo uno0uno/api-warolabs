@@ -358,6 +358,21 @@ async def assert_starter_toggle_allowed(conn, tenant_id: UUID, column_name: str,
         )
 
 
+async def assert_starter_shift_template_growth_allowed(conn, tenant_id: UUID) -> None:
+    """Block Starter create/reactivate of Operaciones shift templates (warocol.com#1916)."""
+    if await is_starter_plan(conn, tenant_id):
+        raise APIError(
+            "Función no disponible en el plan Starter",
+            status_code=403,
+            details={
+                "code": "starter_plan_restriction",
+                "feature": "shift_templates",
+                "upgrade_url": QUOTA_UPGRADE_URL,
+                "message": QUOTA_CONTACT_MESSAGE,
+            },
+        )
+
+
 async def _default_scan_limit_for_tenant(conn, tenant_id: UUID) -> int:
     plan_slug = await get_effective_plan_slug(conn, tenant_id)
     if plan_slug == STARTER_PLAN_SLUG:
