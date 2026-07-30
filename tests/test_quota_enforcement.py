@@ -970,6 +970,41 @@ async def test_assert_starter_toggle_rejects_locked_operaciones_toggles(toggle):
 
 
 @pytest.mark.asyncio
+async def test_assert_starter_shift_template_growth_rejects_starter():
+    tenant_id = uuid4()
+    conn = MagicMock()
+
+    with patch.object(
+        billing_service,
+        "get_effective_plan_slug",
+        new=AsyncMock(return_value="starter"),
+    ):
+        with pytest.raises(APIError) as exc:
+            await billing_service.assert_starter_shift_template_growth_allowed(
+                conn, tenant_id
+            )
+
+    assert exc.value.status_code == 403
+    assert exc.value.details["code"] == "starter_plan_restriction"
+    assert exc.value.details["feature"] == "shift_templates"
+
+
+@pytest.mark.asyncio
+async def test_assert_starter_shift_template_growth_allows_non_starter():
+    tenant_id = uuid4()
+    conn = MagicMock()
+
+    with patch.object(
+        billing_service,
+        "get_effective_plan_slug",
+        new=AsyncMock(return_value="pro"),
+    ):
+        await billing_service.assert_starter_shift_template_growth_allowed(
+            conn, tenant_id
+        )
+
+
+@pytest.mark.asyncio
 async def test_default_scan_limit_for_starter_is_ten():
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value={"scan_limit": 10})

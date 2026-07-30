@@ -10,6 +10,7 @@ from app.core.exceptions import AuthenticationError
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
 from app.models.shift_template import ShiftTemplateCreate, ShiftTemplatePatch, _validate_shift_window
+from app.services.billing_service import assert_starter_shift_template_growth_allowed
 
 import logging
 
@@ -62,6 +63,7 @@ async def create_shift_template(request: Request, body: ShiftTemplateCreate) -> 
 
     try:
         async with get_db_connection() as conn:
+            await assert_starter_shift_template_growth_allowed(conn, tenant_id)
             row = await conn.fetchrow(
                 """
                 INSERT INTO tenant_shift_templates (
@@ -108,7 +110,7 @@ async def patch_shift_template(
     async with get_db_connection() as conn:
         existing = await conn.fetchrow(
             """
-            SELECT start_time, end_time, crosses_midnight
+            SELECT start_time, end_time, crosses_midnight, is_active
             FROM tenant_shift_templates
             WHERE id = $1 AND tenant_id = $2
             """,
@@ -117,6 +119,9 @@ async def patch_shift_template(
         )
         if not existing:
             raise HTTPException(status_code=404, detail="Shift template not found")
+
+        if data_dict.get("is_active") is True and not existing["is_active"]:
+            await assert_starter_shift_template_growth_allowed(conn, tenant_id)
 
         merged_start: time = data_dict.get("start_time", existing["start_time"])
         merged_end: time = data_dict.get("end_time", existing["end_time"])
