@@ -1,0 +1,33 @@
+# Machine contract for wr-fast — keep ≤80 lines.
+issue: 1925
+title: "Starter: enable Despacho module (domicilios / en-mesa / comandas nav)"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-1925-starter-despacho
+risk: low
+
+paths:
+  - app/services/billing_service.py
+  - tests/test_me_access.py
+  - .wr/1925.yaml
+
+ac:
+  - despacho in STARTER_PLAN_MODULE_VALUES /me/access for Starter owner/admin
+  - Sub-tabs still gated by tenant Operaciones flags (unchanged locks)
+  - Cashier without despacho role modules stays without despacho
+  - Focused access test asserts starter includes despacho
+
+out_of_scope:
+  - Unlocking comandas_enabled / tables_enabled / kds on Starter
+  - Analítica filters / food-cost (#1928)
+  - Front nav hard-codes (uses /me/access)
+
+hints:
+  entry: "STARTER_PLAN_MODULE_VALUES — billing_service.py"
+  pattern: "me.py _intersect_plan_modules + require_module starter gate"
+  tests: "pytest tests/test_me_access.py -v -k starter_owner"
+
+skip:
+  audits: [ux, color, typography]
