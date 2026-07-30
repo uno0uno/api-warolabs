@@ -116,6 +116,7 @@ def test_starter_owner_includes_all_product_modules():
     for module in (
         "pos",
         "ventas",
+        "despacho",
         "menu",
         "operaciones",
         "abastecimiento",

@@ -324,6 +324,7 @@ async def get_effective_plan_quotas(conn, tenant_id: UUID) -> Dict[str, int]:
 STARTER_PLAN_MODULE_VALUES = frozenset({
     "pos",
     "ventas",
+    "despacho",
     "menu",
     "operaciones",
     "abastecimiento",
