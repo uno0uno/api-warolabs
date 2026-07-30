@@ -47,7 +47,11 @@ async def test_menu_analysis_with_category_id_filters_sql_and_args():
 
     sql = captured_query[0]
     assert "p.category_id = $6::uuid" in sql
-    assert CATEGORY_UUID in captured_args[0]
+    assert "LIMIT $5" in sql
+    assert "LIMIT $7" not in sql
+    assert len(captured_args[0]) == 6
+    assert captured_args[0][4] == 10
+    assert captured_args[0][5] == CATEGORY_UUID
 
 
 @pytest.mark.asyncio

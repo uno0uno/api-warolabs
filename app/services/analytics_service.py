@@ -1112,11 +1112,10 @@ async def _get_menu_analysis_for_tenant(
             parsed_date_from = today.replace(month=1, day=1)
 
         # Real/perceived costs from product table (#744/#745); BCG uses operativo when set (#747).
+        # Bind order: $1 tenant, $2 from, $3 to, $4 tz, $5 limit, optional $6 category_id
         category_filter = ""
-        limit_param = "$5"
         if category_id:
             category_filter = "AND p.category_id = $6::uuid"
-            limit_param = "$7"
 
         query = f"""
             WITH {_PRODUCT_COSTS_CTE},
@@ -1189,7 +1188,7 @@ async def _get_menu_analysis_for_tenant(
             FROM product_sales ps
             CROSS JOIN sales_stats ss
             ORDER BY ps.total_revenue DESC
-            LIMIT {limit_param}
+            LIMIT $5
         """
 
         fetch_args: List[Any] = [
