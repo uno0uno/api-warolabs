@@ -18,7 +18,8 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
 async def get_orders_dashboard(
     request: Request,
     payment_method: Optional[str] = Query(None),
-    status: Optional[str] = Query(None)
+    status: Optional[str] = Query(None),
+    category_id: Optional[str] = Query(None),
 ):
     """
     Returns all /ventas dashboard metrics in a single DB query:
@@ -32,7 +33,8 @@ async def get_orders_dashboard(
     return await orders_service.get_orders_dashboard(
         request,
         payment_method=payment_method,
-        status=status
+        status=status,
+        category_id=category_id,
     )
 
 
@@ -43,12 +45,14 @@ async def get_orders_metrics(
     date_to: Optional[str] = Query(None),
     payment_method: Optional[str] = Query(None),
     payment_method_id: Optional[str] = Query(None),
-    status: Optional[str] = Query(None)
+    status: Optional[str] = Query(None),
+    category_id: Optional[str] = Query(None),
 ):
     return await orders_service.get_orders_metrics(
         request, date_from=date_from, date_to=date_to,
         payment_method=payment_method, payment_method_id=payment_method_id,
-        status=status
+        status=status,
+        category_id=category_id,
     )
 
 
@@ -58,7 +62,8 @@ async def get_sales_flow(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     payment_method: Optional[str] = Query(None),
-    status: Optional[str] = Query(None)
+    status: Optional[str] = Query(None),
+    category_id: Optional[str] = Query(None),
 ):
     """
     Get sales flow data with intelligent comparison period
@@ -78,7 +83,8 @@ async def get_sales_flow(
         date_from=date_from,
         date_to=date_to,
         payment_method=payment_method,
-        status=status
+        status=status,
+        category_id=category_id,
     )
 
 

@@ -17,7 +17,8 @@ async def get_menu_analysis(
     request: Request,
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
-    limit: int = Query(200, ge=1, le=500)
+    limit: int = Query(200, ge=1, le=500),
+    category_id: Optional[str] = Query(None),
 ):
     """
     Get menu analysis with profitability and popularity matrix
@@ -37,7 +38,8 @@ async def get_menu_analysis(
         request,
         date_from=date_from,
         date_to=date_to,
-        limit=limit
+        limit=limit,
+        category_id=category_id,
     )
 
 
@@ -45,7 +47,8 @@ async def get_menu_analysis(
 async def get_food_cost(
     request: Request,
     date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None)
+    date_to: Optional[str] = Query(None),
+    category_id: Optional[str] = Query(None),
 ):
     """
     Get food cost percentage with month-over-month comparison
@@ -57,7 +60,8 @@ async def get_food_cost(
     return await analytics_service.get_food_cost(
         request,
         date_from=date_from,
-        date_to=date_to
+        date_to=date_to,
+        category_id=category_id,
     )
 
 

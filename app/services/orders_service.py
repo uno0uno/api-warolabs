@@ -2186,7 +2186,8 @@ async def get_orders_metrics(
     date_to: Optional[str] = None,
     payment_method: Optional[str] = None,
     payment_method_id: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    category_id: Optional[str] = None,
 ) -> dict:
     """
     Get sales metrics: total sales, average ticket, orders count by status
@@ -2200,53 +2201,110 @@ async def get_orders_metrics(
 
         async with get_db_connection() as conn:
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
-            # Build WHERE clause
-            where_conditions = ["tenant_id = $1", ANALYTICS_SALES_FILTER]
-            params = [tenant_id]
-            param_count = 1
-
             parsed_date_from = parse_date(date_from)
             parsed_date_to = parse_date(date_to)
-            param_count = _append_local_date_bounds(
-                where_conditions,
-                params,
-                param_count,
-                "order_date",
-                parsed_date_from,
-                parsed_date_to,
-                timezone_name,
-            )
 
-            if payment_method:
+            if category_id:
+                where_conditions = ["o.tenant_id = $1", ANALYTICS_SALES_FILTER_ALIAS_O]
+                params = [tenant_id]
+                param_count = 1
+
+                param_count = _append_local_date_bounds(
+                    where_conditions,
+                    params,
+                    param_count,
+                    "o.order_date",
+                    parsed_date_from,
+                    parsed_date_to,
+                    timezone_name,
+                )
+
+                if payment_method:
+                    param_count += 1
+                    where_conditions.append(f"o.payment_method = ${param_count}")
+                    params.append(payment_method)
+
+                if payment_method_id:
+                    param_count += 1
+                    where_conditions.append(f"o.payment_method_id = ${param_count}::uuid")
+                    params.append(payment_method_id)
+
+                if status:
+                    param_count += 1
+                    where_conditions.append(f"o.status = ${param_count}")
+                    params.append(status)
+
                 param_count += 1
-                where_conditions.append(f"payment_method = ${param_count}")
-                params.append(payment_method)
+                where_conditions.append(f"p.category_id = ${param_count}::uuid")
+                params.append(category_id)
 
-            if payment_method_id:
-                param_count += 1
-                where_conditions.append(f"payment_method_id = ${param_count}::uuid")
-                params.append(payment_method_id)
+                where_clause = " AND ".join(where_conditions)
 
-            if status:
-                param_count += 1
-                where_conditions.append(f"status = ${param_count}")
-                params.append(status)
+                metrics_query = f"""
+                    SELECT
+                        COUNT(DISTINCT o.id) as total_orders,
+                        COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed') as completed_orders,
+                        COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'cancelled') as cancelled_orders,
+                        COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'pending') as pending_orders,
+                        COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (WHERE o.status = 'completed'), 0) as total_sales,
+                        COALESCE(
+                            SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (WHERE o.status = 'completed')
+                            / NULLIF(COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed'), 0),
+                            0
+                        ) as avg_ticket,
+                        0 as discount_count,
+                        0 as total_discount_amount
+                    FROM orders o
+                    JOIN order_items oi ON oi.order_id = o.id
+                    JOIN product p ON p.id = oi.product_id
+                    WHERE {where_clause}
+                """
+            else:
+                # Build WHERE clause
+                where_conditions = ["tenant_id = $1", ANALYTICS_SALES_FILTER]
+                params = [tenant_id]
+                param_count = 1
 
-            where_clause = " AND ".join(where_conditions)
+                param_count = _append_local_date_bounds(
+                    where_conditions,
+                    params,
+                    param_count,
+                    "order_date",
+                    parsed_date_from,
+                    parsed_date_to,
+                    timezone_name,
+                )
 
-            metrics_query = f"""
-                SELECT
-                    COUNT(*) as total_orders,
-                    COUNT(*) FILTER (WHERE status = 'completed') as completed_orders,
-                    COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled_orders,
-                    COUNT(*) FILTER (WHERE status = 'pending') as pending_orders,
-                    COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) as total_sales,
-                    COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) as avg_ticket,
-                    COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0) as discount_count,
-                    COALESCE(SUM(discount_amount) FILTER (WHERE status = 'completed' AND discount_amount > 0), 0) as total_discount_amount
-                FROM orders
-                WHERE {where_clause}
-            """
+                if payment_method:
+                    param_count += 1
+                    where_conditions.append(f"payment_method = ${param_count}")
+                    params.append(payment_method)
+
+                if payment_method_id:
+                    param_count += 1
+                    where_conditions.append(f"payment_method_id = ${param_count}::uuid")
+                    params.append(payment_method_id)
+
+                if status:
+                    param_count += 1
+                    where_conditions.append(f"status = ${param_count}")
+                    params.append(status)
+
+                where_clause = " AND ".join(where_conditions)
+
+                metrics_query = f"""
+                    SELECT
+                        COUNT(*) as total_orders,
+                        COUNT(*) FILTER (WHERE status = 'completed') as completed_orders,
+                        COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled_orders,
+                        COUNT(*) FILTER (WHERE status = 'pending') as pending_orders,
+                        COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) as total_sales,
+                        COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) as avg_ticket,
+                        COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0) as discount_count,
+                        COALESCE(SUM(discount_amount) FILTER (WHERE status = 'completed' AND discount_amount > 0), 0) as total_discount_amount
+                    FROM orders
+                    WHERE {where_clause}
+                """
 
             row = await conn.fetchrow(metrics_query, *params)
 
@@ -2278,6 +2336,10 @@ async def get_orders_metrics(
                     tax_pc += 1
                     tax_where.append(f"o.payment_method_id = ${tax_pc}::uuid")
                     tax_params.append(payment_method_id)
+                if category_id:
+                    tax_pc += 1
+                    tax_where.append(f"p.category_id = ${tax_pc}::uuid")
+                    tax_params.append(category_id)
                 tax_where_sql = " AND ".join(tax_where)
                 tax_rows = await conn.fetch(
                     f"""SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
@@ -2322,7 +2384,8 @@ async def get_orders_metrics(
 async def get_orders_dashboard(
     request: Request,
     payment_method: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    category_id: Optional[str] = None,
 ) -> dict:
     """
     Returns all metrics needed for the /ventas dashboard in a single DB query.
@@ -2343,66 +2406,136 @@ async def get_orders_dashboard(
 
         async with get_db_connection() as conn:
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
-            # Build optional filters for the main (all-time) metrics
-            main_filters = []
-            params = [tenant_id]
-            param_count = 1
 
-            if payment_method:
+            if category_id:
+                main_filters = []
+                params = [tenant_id]
+                param_count = 1
+
+                if payment_method:
+                    param_count += 1
+                    main_filters.append(f"o.payment_method = ${param_count}")
+                    params.append(payment_method)
+
+                if status:
+                    param_count += 1
+                    main_filters.append(f"o.status = ${param_count}")
+                    params.append(status)
+
                 param_count += 1
-                main_filters.append(f"payment_method = ${param_count}")
-                params.append(payment_method)
+                category_param = param_count
+                params.append(category_id)
 
-            if status:
                 param_count += 1
-                main_filters.append(f"status = ${param_count}")
-                params.append(status)
+                timezone_param = param_count
+                params.append(timezone_name)
 
-            # Build FILTER clause suffix for main metrics (e.g. "AND payment_method = $2")
-            main_filter_sql = ""
-            if main_filters:
-                main_filter_sql = " AND " + " AND ".join(main_filters)
+                main_filter_sql = ""
+                if main_filters:
+                    main_filter_sql = " AND " + " AND ".join(main_filters)
 
-            param_count += 1
-            timezone_param = param_count
-            params.append(timezone_name)
+                dashboard_query = f"""
+                    SELECT
+                        COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed'{main_filter_sql}) as main_completed,
+                        COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (WHERE o.status = 'completed'{main_filter_sql}), 0) as main_sales,
+                        COALESCE(
+                            SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (WHERE o.status = 'completed'{main_filter_sql})
+                            / NULLIF(COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed'{main_filter_sql}), 0),
+                            0
+                        ) as main_avg_ticket,
+                        0 as main_discount_count,
+                        0 as main_total_discount,
 
-            dashboard_query = f"""
-                SELECT
-                    -- Main: all-time (with optional payment/status filters)
-                    COUNT(*) FILTER (WHERE status = 'completed'{main_filter_sql}) as main_completed,
-                    COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_sales,
-                    COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_avg_ticket,
-                    COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0{main_filter_sql}) as main_discount_count,
-                    COALESCE(SUM(discount_amount) FILTER (WHERE status = 'completed' AND discount_amount > 0{main_filter_sql}), 0) as main_total_discount,
+                        COUNT(DISTINCT o.id) FILTER (
+                            WHERE o.status = 'completed'
+                            AND DATE(o.order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ) as month_completed,
+                        COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (
+                            WHERE o.status = 'completed'
+                            AND DATE(o.order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ), 0) as month_sales,
 
-                    -- Month-to-date (with optional payment/status filters)
-                    COUNT(*) FILTER (
-                        WHERE status = 'completed'
-                        AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
-                        {main_filter_sql}
-                    ) as month_completed,
-                    COALESCE(SUM(total_amount) FILTER (
-                        WHERE status = 'completed'
-                        AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
-                        {main_filter_sql}
-                    ), 0) as month_sales,
+                        COUNT(DISTINCT o.id) FILTER (
+                            WHERE o.status = 'completed'
+                            AND DATE(o.order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ) as year_completed,
+                        COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (
+                            WHERE o.status = 'completed'
+                            AND DATE(o.order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ), 0) as year_sales
 
-                    -- Year-to-date (with optional payment/status filters)
-                    COUNT(*) FILTER (
-                        WHERE status = 'completed'
-                        AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
-                        {main_filter_sql}
-                    ) as year_completed,
-                    COALESCE(SUM(total_amount) FILTER (
-                        WHERE status = 'completed'
-                        AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
-                        {main_filter_sql}
-                    ), 0) as year_sales
+                    FROM orders o
+                    JOIN order_items oi ON oi.order_id = o.id
+                    JOIN product p ON p.id = oi.product_id
+                    WHERE o.tenant_id = $1
+                      AND p.category_id = ${category_param}::uuid
+                      AND {ANALYTICS_SALES_FILTER_ALIAS_O}
+                """
+            else:
+                # Build optional filters for the main (all-time) metrics
+                main_filters = []
+                params = [tenant_id]
+                param_count = 1
 
-                FROM orders
-                WHERE tenant_id = $1 AND {ANALYTICS_SALES_FILTER}
-            """
+                if payment_method:
+                    param_count += 1
+                    main_filters.append(f"payment_method = ${param_count}")
+                    params.append(payment_method)
+
+                if status:
+                    param_count += 1
+                    main_filters.append(f"status = ${param_count}")
+                    params.append(status)
+
+                # Build FILTER clause suffix for main metrics (e.g. "AND payment_method = $2")
+                main_filter_sql = ""
+                if main_filters:
+                    main_filter_sql = " AND " + " AND ".join(main_filters)
+
+                param_count += 1
+                timezone_param = param_count
+                params.append(timezone_name)
+
+                dashboard_query = f"""
+                    SELECT
+                        -- Main: all-time (with optional payment/status filters)
+                        COUNT(*) FILTER (WHERE status = 'completed'{main_filter_sql}) as main_completed,
+                        COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_sales,
+                        COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_avg_ticket,
+                        COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0{main_filter_sql}) as main_discount_count,
+                        COALESCE(SUM(discount_amount) FILTER (WHERE status = 'completed' AND discount_amount > 0{main_filter_sql}), 0) as main_total_discount,
+
+                        -- Month-to-date (with optional payment/status filters)
+                        COUNT(*) FILTER (
+                            WHERE status = 'completed'
+                            AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ) as month_completed,
+                        COALESCE(SUM(total_amount) FILTER (
+                            WHERE status = 'completed'
+                            AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ), 0) as month_sales,
+
+                        -- Year-to-date (with optional payment/status filters)
+                        COUNT(*) FILTER (
+                            WHERE status = 'completed'
+                            AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ) as year_completed,
+                        COALESCE(SUM(total_amount) FILTER (
+                            WHERE status = 'completed'
+                            AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ), 0) as year_sales
+
+                    FROM orders
+                    WHERE tenant_id = $1 AND {ANALYTICS_SALES_FILTER}
+                """
 
             row = await conn.fetchrow(dashboard_query, *params)
 
@@ -2417,60 +2550,94 @@ async def get_orders_dashboard(
             commission_savings = round(main_sales * (commission_rate / 100))
 
             # Payment breakdown — UNION ALL: order_payments (split) + legacy orders
-            breakdown_rows = await conn.fetch(
-                f"""
-                -- Split orders: amounts from order_payments
-                SELECT
-                    COALESCE(pmg.slug, op.payment_method)  AS group_slug,
-                    COALESCE(pmg.name, op.payment_method)  AS group_name,
-                    COALESCE(SUM(op.amount), 0)             AS total,
-                    COUNT(DISTINCT op.order_id)             AS order_count
-                FROM order_payments op
-                JOIN orders o ON o.id = op.order_id
-                LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
-                LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
-                WHERE o.tenant_id = $1
-                  AND o.status = 'completed'
-                  AND {ANALYTICS_SALES_FILTER_ALIAS_O}
-                GROUP BY COALESCE(pmg.slug, op.payment_method), COALESCE(pmg.name, op.payment_method)
-
-                UNION ALL
-
-                -- Legacy orders (no rows in order_payments): use orders.total_amount
-                SELECT
-                    COALESCE(pmg.slug, o.payment_method)  AS group_slug,
-                    COALESCE(pmg.name, o.payment_method)  AS group_name,
-                    COALESCE(SUM(o.total_amount), 0)       AS total,
-                    COUNT(*)                               AS order_count
-                FROM orders o
-                LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
-                LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
-                WHERE o.tenant_id = $1
-                  AND o.status = 'completed'
-                  AND {ANALYTICS_SALES_FILTER_ALIAS_O}
-                  AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = o.id)
-                GROUP BY COALESCE(pmg.slug, o.payment_method), COALESCE(pmg.name, o.payment_method)
-                """,
-                tenant_id,
-            )
-            # Aggregate across UNION ALL branches in Python to avoid double-counting
-            bd_agg: Dict[str, Any] = {}
-            for r in breakdown_rows:
-                slug = r["group_slug"]
-                if slug is None:
-                    continue
-                if slug not in bd_agg:
-                    bd_agg[slug] = {
-                        "group_slug":  slug,
-                        "group_name":  r["group_name"],
-                        "total":       float(r["total"]),
+            if category_id:
+                breakdown_rows = await conn.fetch(
+                    f"""
+                    SELECT
+                        COALESCE(pmg.slug, o.payment_method)  AS group_slug,
+                        COALESCE(pmg.name, o.payment_method)  AS group_name,
+                        COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)), 0) AS total,
+                        COUNT(DISTINCT o.id)                    AS order_count
+                    FROM orders o
+                    JOIN order_items oi ON oi.order_id = o.id
+                    JOIN product p ON p.id = oi.product_id
+                    LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
+                    LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+                    WHERE o.tenant_id = $1
+                      AND o.status = 'completed'
+                      AND {ANALYTICS_SALES_FILTER_ALIAS_O}
+                      AND p.category_id = $2::uuid
+                    GROUP BY COALESCE(pmg.slug, o.payment_method), COALESCE(pmg.name, o.payment_method)
+                    """,
+                    tenant_id,
+                    category_id,
+                )
+                payment_breakdown = [
+                    {
+                        "group_slug": r["group_slug"],
+                        "group_name": r["group_name"],
+                        "total": float(r["total"]),
                         "order_count": int(r["order_count"]),
                     }
-                else:
-                    entry = bd_agg[slug]
-                    entry["total"] = float(entry["total"]) + float(r["total"])
-                    entry["order_count"] = int(entry["order_count"]) + int(r["order_count"])
-            payment_breakdown = sorted(bd_agg.values(), key=lambda x: x["total"], reverse=True)
+                    for r in breakdown_rows
+                    if r["group_slug"] is not None
+                ]
+                payment_breakdown.sort(key=lambda x: x["total"], reverse=True)
+            else:
+                breakdown_rows = await conn.fetch(
+                    f"""
+                    -- Split orders: amounts from order_payments
+                    SELECT
+                        COALESCE(pmg.slug, op.payment_method)  AS group_slug,
+                        COALESCE(pmg.name, op.payment_method)  AS group_name,
+                        COALESCE(SUM(op.amount), 0)             AS total,
+                        COUNT(DISTINCT op.order_id)             AS order_count
+                    FROM order_payments op
+                    JOIN orders o ON o.id = op.order_id
+                    LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
+                    LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+                    WHERE o.tenant_id = $1
+                      AND o.status = 'completed'
+                      AND {ANALYTICS_SALES_FILTER_ALIAS_O}
+                    GROUP BY COALESCE(pmg.slug, op.payment_method), COALESCE(pmg.name, op.payment_method)
+
+                    UNION ALL
+
+                    -- Legacy orders (no rows in order_payments): use orders.total_amount
+                    SELECT
+                        COALESCE(pmg.slug, o.payment_method)  AS group_slug,
+                        COALESCE(pmg.name, o.payment_method)  AS group_name,
+                        COALESCE(SUM(o.total_amount), 0)       AS total,
+                        COUNT(*)                               AS order_count
+                    FROM orders o
+                    LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
+                    LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+                    WHERE o.tenant_id = $1
+                      AND o.status = 'completed'
+                      AND {ANALYTICS_SALES_FILTER_ALIAS_O}
+                      AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = o.id)
+                    GROUP BY COALESCE(pmg.slug, o.payment_method), COALESCE(pmg.name, o.payment_method)
+                    """,
+                    tenant_id,
+                )
+                # Aggregate across UNION ALL branches in Python to avoid double-counting
+                bd_agg: Dict[str, Any] = {}
+                for r in breakdown_rows:
+                    slug = r["group_slug"]
+                    if slug is None:
+                        continue
+                    if slug not in bd_agg:
+                        bd_agg[slug] = {
+                            "group_slug":  slug,
+                            "group_name":  r["group_name"],
+                            "total":       float(r["total"]),
+                            "order_count": int(r["order_count"]),
+                        }
+                    else:
+                        entry = bd_agg[slug]
+                        entry["total"] = float(entry["total"]) + float(r["total"])
+                        entry["order_count"] = int(entry["order_count"]) + int(r["order_count"])
+                payment_breakdown = sorted(bd_agg.values(), key=lambda x: x["total"], reverse=True)
 
             # Tax aggregates — all-time, month-to-date, year-to-date
             _main_std = 0.0
@@ -2481,6 +2648,8 @@ async def get_orders_dashboard(
             _year_liq = 0.0
             _tax_label = "Impuesto"
             _base_filter = f"o.tenant_id = $1 AND o.status = 'completed' AND {ANALYTICS_SALES_FILTER_ALIAS_O}"
+            if category_id:
+                _base_filter += " AND p.category_id = $2::uuid"
             _tax_select = """
                 SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
                        COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
@@ -2493,22 +2662,43 @@ async def get_orders_dashboard(
             """
             try:
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
-                main_tax_rows = await conn.fetch(
-                    f"{_tax_select} WHERE {_base_filter}",
-                    tenant_id
-                )
-                month_tax_rows = await conn.fetch(
-                    f"""{_tax_select} WHERE {_base_filter}
-                        AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('month', NOW() AT TIME ZONE $2)::date""",
-                    tenant_id,
-                    timezone_name,
-                )
-                year_tax_rows = await conn.fetch(
-                    f"""{_tax_select} WHERE {_base_filter}
-                        AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('year', NOW() AT TIME ZONE $2)::date""",
-                    tenant_id,
-                    timezone_name,
-                )
+                if category_id:
+                    main_tax_rows = await conn.fetch(
+                        f"{_tax_select} WHERE {_base_filter}",
+                        tenant_id,
+                        category_id,
+                    )
+                    month_tax_rows = await conn.fetch(
+                        f"""{_tax_select} WHERE {_base_filter}
+                            AND DATE(o.order_date AT TIME ZONE $3) >= DATE_TRUNC('month', NOW() AT TIME ZONE $3)::date""",
+                        tenant_id,
+                        category_id,
+                        timezone_name,
+                    )
+                    year_tax_rows = await conn.fetch(
+                        f"""{_tax_select} WHERE {_base_filter}
+                            AND DATE(o.order_date AT TIME ZONE $3) >= DATE_TRUNC('year', NOW() AT TIME ZONE $3)::date""",
+                        tenant_id,
+                        category_id,
+                        timezone_name,
+                    )
+                else:
+                    main_tax_rows = await conn.fetch(
+                        f"{_tax_select} WHERE {_base_filter}",
+                        tenant_id
+                    )
+                    month_tax_rows = await conn.fetch(
+                        f"""{_tax_select} WHERE {_base_filter}
+                            AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('month', NOW() AT TIME ZONE $2)::date""",
+                        tenant_id,
+                        timezone_name,
+                    )
+                    year_tax_rows = await conn.fetch(
+                        f"""{_tax_select} WHERE {_base_filter}
+                            AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('year', NOW() AT TIME ZONE $2)::date""",
+                        tenant_id,
+                        timezone_name,
+                    )
                 _main_std, _main_liq, _tax_label = _compute_tax_breakdown(main_tax_rows, tax_config)
                 _month_std, _month_liq, _ = _compute_tax_breakdown(month_tax_rows, tax_config)
                 _year_std, _year_liq, _ = _compute_tax_breakdown(year_tax_rows, tax_config)
@@ -3418,7 +3608,8 @@ async def get_sales_flow(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     payment_method: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    category_id: Optional[str] = None,
 ) -> dict:
     """
     Get sales flow data with intelligent comparison and grouping
@@ -3467,25 +3658,56 @@ async def get_sales_flow(
             group_by = 'hour' if days_diff <= 3 else 'day'
 
             # Build WHERE conditions
-            where_conditions = ["tenant_id = $1", ANALYTICS_SALES_FILTER]
-            params = [tenant_id]
-            param_count = 1
+            if category_id:
+                where_conditions = ["o.tenant_id = $1", ANALYTICS_SALES_FILTER_ALIAS_O]
+                params = [tenant_id]
+                param_count = 1
 
-            # Add filters
-            if payment_method:
-                param_count += 1
-                where_conditions.append(f"payment_method = ${param_count}")
-                params.append(payment_method)
+                if payment_method:
+                    param_count += 1
+                    where_conditions.append(f"o.payment_method = ${param_count}")
+                    params.append(payment_method)
 
-            if status:
+                if status:
+                    param_count += 1
+                    where_conditions.append(f"o.status = ${param_count}")
+                    params.append(status)
+                else:
+                    where_conditions.append("o.status = 'completed'")
+
                 param_count += 1
-                where_conditions.append(f"status = ${param_count}")
-                params.append(status)
+                where_conditions.append(f"p.category_id = ${param_count}::uuid")
+                params.append(category_id)
+
+                where_clause = " AND ".join(where_conditions)
+                from_join = """
+                    FROM orders o
+                    JOIN order_items oi ON oi.order_id = o.id
+                    JOIN product p ON p.id = oi.product_id
+                """
+                sales_expr = "SUM(COALESCE(oi.net_total, oi.subtotal))"
+                order_date_col = "o.order_date"
             else:
-                # Default to completed if no status filter
-                where_conditions.append("status = 'completed'")
+                where_conditions = ["tenant_id = $1", ANALYTICS_SALES_FILTER]
+                params = [tenant_id]
+                param_count = 1
 
-            where_clause = " AND ".join(where_conditions)
+                if payment_method:
+                    param_count += 1
+                    where_conditions.append(f"payment_method = ${param_count}")
+                    params.append(payment_method)
+
+                if status:
+                    param_count += 1
+                    where_conditions.append(f"status = ${param_count}")
+                    params.append(status)
+                else:
+                    where_conditions.append("status = 'completed'")
+
+                where_clause = " AND ".join(where_conditions)
+                from_join = "FROM orders"
+                sales_expr = "SUM(total_amount)"
+                order_date_col = "order_date"
 
             # Build query based on grouping
             if group_by == 'hour':
@@ -3509,23 +3731,23 @@ async def get_sales_flow(
                     ),
                     current_period AS (
                         SELECT
-                            EXTRACT(HOUR FROM order_date AT TIME ZONE ${timezone_param_idx}) AS hour,
-                            SUM(total_amount) AS sales
-                        FROM orders
+                            EXTRACT(HOUR FROM {order_date_col} AT TIME ZONE ${timezone_param_idx}) AS hour,
+                            {sales_expr} AS sales
+                        {from_join}
                         WHERE {where_clause}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) >= ${date_from_param_idx}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) <= ${date_to_param_idx}
-                        GROUP BY EXTRACT(HOUR FROM order_date AT TIME ZONE ${timezone_param_idx})
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) >= ${date_from_param_idx}
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) <= ${date_to_param_idx}
+                        GROUP BY EXTRACT(HOUR FROM {order_date_col} AT TIME ZONE ${timezone_param_idx})
                     ),
                     comparison_period AS (
                         SELECT
-                            EXTRACT(HOUR FROM order_date AT TIME ZONE ${timezone_param_idx}) AS hour,
-                            SUM(total_amount) AS sales
-                        FROM orders
+                            EXTRACT(HOUR FROM {order_date_col} AT TIME ZONE ${timezone_param_idx}) AS hour,
+                            {sales_expr} AS sales
+                        {from_join}
                         WHERE {where_clause}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) >= ${comp_from_param_idx}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) <= ${comp_to_param_idx}
-                        GROUP BY EXTRACT(HOUR FROM order_date AT TIME ZONE ${timezone_param_idx})
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) >= ${comp_from_param_idx}
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) <= ${comp_to_param_idx}
+                        GROUP BY EXTRACT(HOUR FROM {order_date_col} AT TIME ZONE ${timezone_param_idx})
                     )
                     SELECT
                         h.hour,
@@ -3585,23 +3807,23 @@ async def get_sales_flow(
                     ),
                     current_period AS (
                         SELECT
-                            DATE(order_date AT TIME ZONE ${timezone_param_idx}) AS day,
-                            SUM(total_amount) AS sales
-                        FROM orders
+                            DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) AS day,
+                            {sales_expr} AS sales
+                        {from_join}
                         WHERE {where_clause}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) >= ${date_from_param_idx}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) <= ${date_to_param_idx}
-                        GROUP BY DATE(order_date AT TIME ZONE ${timezone_param_idx})
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) >= ${date_from_param_idx}
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) <= ${date_to_param_idx}
+                        GROUP BY DATE({order_date_col} AT TIME ZONE ${timezone_param_idx})
                     ),
                     comparison_period AS (
                         SELECT
-                            DATE(order_date AT TIME ZONE ${timezone_param_idx}) AS day,
-                            SUM(total_amount) AS sales
-                        FROM orders
+                            DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) AS day,
+                            {sales_expr} AS sales
+                        {from_join}
                         WHERE {where_clause}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) >= ${comp_from_param_idx}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) <= ${comp_to_param_idx}
-                        GROUP BY DATE(order_date AT TIME ZONE ${timezone_param_idx})
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) >= ${comp_from_param_idx}
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) <= ${comp_to_param_idx}
+                        GROUP BY DATE({order_date_col} AT TIME ZONE ${timezone_param_idx})
                     )
                     SELECT
                         ds.day,
