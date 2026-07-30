@@ -1465,3 +1465,42 @@ def test_manual_journal_allowed_source_modules_match_count_filter():
     )
     assert "system" not in MANUAL_JOURNAL_SOURCE_MODULES
     assert "orden" not in MANUAL_JOURNAL_SOURCE_MODULES
+
+
+# ── CRM unlimited-by-design (#1932) ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_crm_waros_rules_quota_resource_is_rejected():
+    """Waros rule growth must not be enforceable via plan quota helpers."""
+    conn = MagicMock()
+    with pytest.raises(ValueError, match="Unsupported quota resource"):
+        await billing_service.check_plan_quota_growth(conn, uuid4(), "waros_rules")
+
+
+@pytest.mark.asyncio
+async def test_crm_wallet_recharge_period_quota_resource_is_rejected():
+    conn = MagicMock()
+    with pytest.raises(ValueError, match="Unsupported period quota resource"):
+        await billing_service.check_plan_quota_period(conn, uuid4(), "wallet_recharges")
+
+
+@pytest.mark.asyncio
+async def test_crm_cartera_credit_payment_period_quota_resource_is_rejected():
+    conn = MagicMock()
+    with pytest.raises(ValueError, match="Unsupported period quota resource"):
+        await billing_service.check_plan_quota_period(conn, uuid4(), "cartera_payments")
+
+
+def test_crm_service_modules_do_not_call_plan_quota_helpers():
+    """Wallet / credit / waros services must stay off billing quota enforcement."""
+    import inspect
+
+    from app.services import credit_service, customer_wallet_service, waros_service
+
+    for mod in (customer_wallet_service, credit_service, waros_service):
+        src = inspect.getsource(mod)
+        assert "check_plan_quota_growth" not in src, mod.__name__
+        assert "check_plan_quota_period" not in src, mod.__name__
+        assert "check_plan_quota_scoped" not in src, mod.__name__
+        assert "ENFORCEABLE_QUOTA_RESOURCES" not in src, mod.__name__
