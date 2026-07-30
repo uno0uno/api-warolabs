@@ -280,3 +280,41 @@ async def test_remaining_usage_exposes_disabled_override_as_unlimited():
         "disabled": True,
         "reason": "Pilot",
     }
+
+
+# ── CRM unlimited-by-design (#1932 / epic #1930 Batch 2) ───────────────────
+# Waros rules, wallet recharges, and customer cartera (credit) payments must
+# never appear in enforceable/period/scoped quota catalogs.
+
+_CRM_UNLIMITED_RESOURCE_ALIASES = frozenset({
+    "waros",
+    "waros_rules",
+    "waro_rules",
+    "wallet",
+    "wallet_recharges",
+    "customer_wallet",
+    "cartera",
+    "cartera_payments",
+    "credit_payments",
+    "crm",
+})
+
+
+def test_crm_loyalty_wallet_cartera_not_in_quota_catalogs():
+    catalogs = (
+        billing_service.ENFORCEABLE_QUOTA_RESOURCES
+        | billing_service.PERIOD_QUOTA_RESOURCES
+        | billing_service.SCOPED_QUOTA_RESOURCES
+    )
+    overlap = _CRM_UNLIMITED_RESOURCE_ALIASES & catalogs
+    assert overlap == frozenset(), (
+        "CRM loyalty/wallet/cartera must stay unlimited; unexpected quota keys: "
+        f"{sorted(overlap)}"
+    )
+
+
+def test_supplier_payments_period_quota_is_not_customer_cartera():
+    """Regression guard: do not confuse supplier AP with customer credit pay."""
+    assert "supplier_payments_per_period" in billing_service.PERIOD_QUOTA_RESOURCES
+    assert "cartera_payments" not in billing_service.PERIOD_QUOTA_RESOURCES
+    assert "credit_payments" not in billing_service.PERIOD_QUOTA_RESOURCES
