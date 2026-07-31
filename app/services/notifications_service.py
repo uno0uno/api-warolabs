@@ -2,9 +2,7 @@
 Notifications Service
 Tenant-scoped notification management for restaurant operators.
 """
-import json
-import logging
-from datetime import datetime, timezone
+from datetime import date as date_type, datetime, timezone
 from typing import Optional
 from uuid import UUID
 from uuid import NAMESPACE_URL, uuid5
@@ -13,6 +11,8 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError
 from app.services import billing_service, legal_service
+import json
+import logging
 
 logger = logging.getLogger(__name__)
 TERMS_ACCEPTANCE_REQUIRED_TYPE = "terms_acceptance_required"
@@ -50,16 +50,66 @@ async def create_comanda_ready_notification(
 
 
 def _json_safe(value):
-    """Serialize UUID/datetime for pg_notify payloads."""
+    """Serialize UUID/datetime/Decimal/date for pg_notify payloads."""
+    from decimal import Decimal
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
     if isinstance(value, UUID):
         return str(value)
     if isinstance(value, datetime):
         return value.isoformat()
+    if isinstance(value, date_type) and not isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
     if isinstance(value, dict):
         return {str(k): _json_safe(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
-    return value
+    return str(value)
+
+
+def build_comanda_fired_print_payload(comandas: list) -> list:
+    """Slim printable snapshot — avoids dumping raw asyncpg / Decimal heavy rows."""
+    out = []
+    for c in comandas or []:
+        items = []
+        for i in (c.get("items") or []):
+            mods = i.get("modifiers_snapshot") or []
+            if isinstance(mods, str):
+                try:
+                    mods = json.loads(mods)
+                except (ValueError, TypeError):
+                    mods = []
+            items.append({
+                "kitchen_name": i.get("kitchen_name") or "",
+                "quantity": float(i.get("quantity") or 1),
+                "notes": i.get("notes"),
+                "modifiers_snapshot": [
+                    {
+                        "name": m.get("name") or "",
+                        "quantity": float(m.get("quantity") or 1) if m.get("quantity") is not None else 1,
+                    }
+                    for m in (mods if isinstance(mods, list) else [])
+                    if isinstance(m, dict)
+                ],
+            })
+        if not items:
+            continue
+        cid = c.get("id")
+        out.append({
+            "id": str(cid) if cid is not None else None,
+            "comanda_number": c.get("comanda_number"),
+            "comanda_index": c.get("comanda_index"),
+            "station_id": str(c["station_id"]) if c.get("station_id") is not None else None,
+            "station_name": c.get("station_name"),
+            "source_type": c.get("source_type"),
+            "table_display_name": c.get("table_display_name"),
+            "fired_at": _json_safe(c.get("fired_at")),
+            "items": items,
+        })
+    return out
 
 
 async def notify_comanda_fired(conn, tenant_id: UUID, payload: dict) -> None:
@@ -71,7 +121,8 @@ async def notify_comanda_fired(conn, tenant_id: UUID, payload: dict) -> None:
     """
     channel = "tenant_" + str(tenant_id).replace("-", "")
     notify_payload = {**_json_safe(payload), "type": "comanda_fired"}
-    await conn.execute("SELECT pg_notify($1, $2)", channel, json.dumps(notify_payload))
+    body = json.dumps(notify_payload, default=str)
+    await conn.execute("SELECT pg_notify($1, $2)", channel, body)
 
 
 async def mark_table_qr_notifications_read(

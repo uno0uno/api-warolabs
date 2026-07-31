@@ -500,7 +500,10 @@ async def _fire_with_conn(
         f"comandas={len(created_comandas)}"
     )
     if created_comandas:
-        from app.services.notifications_service import notify_comanda_fired
+        from app.services.notifications_service import (
+            build_comanda_fired_print_payload,
+            notify_comanda_fired,
+        )
 
         # Only mesa / barra / mostrador — not delivery/pickup auto-fire (#1971)
         if source_type in ("table", "pos"):
@@ -511,17 +514,24 @@ async def _fire_with_conn(
             else:
                 auto_print_target = "user"
 
-            await notify_comanda_fired(
-                conn,
-                tenant_id,
-                {
-                    "order_id": str(order_id),
-                    "source_type": source_type,
-                    "table_display_name": table_display_name,
-                    "auto_print_target": auto_print_target,
-                    "comandas": created_comandas,
-                },
-            )
+            # Never fail the fire transaction because of SSE/print notify
+            try:
+                await notify_comanda_fired(
+                    conn,
+                    tenant_id,
+                    {
+                        "order_id": str(order_id),
+                        "source_type": source_type,
+                        "table_display_name": table_display_name,
+                        "auto_print_target": auto_print_target,
+                        "comandas": build_comanda_fired_print_payload(created_comandas),
+                    },
+                )
+            except Exception as notify_err:
+                logger.error(
+                    "notify_comanda_fired failed after fire "
+                    f"(order={order_id}, tenant={tenant_id}): {notify_err}"
+                )
     return created_comandas
 
 
