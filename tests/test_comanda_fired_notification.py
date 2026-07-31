@@ -112,6 +112,59 @@ def test_build_comanda_fired_print_payload_strips_decimals():
     assert slim[0]["items"][0]["quantity"] == 1.0
     assert slim[0]["items"][0]["notes"] == "CON PEPINILLOS"
     assert slim[0]["items"][0]["modifiers_snapshot"][0]["name"] == "hielo"
+    assert slim[0]["print_fallback"] is False
+
+
+def test_build_comanda_fired_print_payload_puts_fallback_last():
+    station_id = uuid4()
+    slim = notifications_service.build_comanda_fired_print_payload(
+        [
+            {
+                "id": None,
+                "comanda_number": 10,
+                "station_id": None,
+                "station_name": "Sin cocina asignada",
+                "print_fallback": True,
+                "items": [{"kitchen_name": "PASSION", "quantity": 1, "notes": "CON PEPINILLOS"}],
+            },
+            {
+                "id": station_id,
+                "comanda_number": 10,
+                "station_id": station_id,
+                "station_name": "Parrilla",
+                "print_fallback": False,
+                "items": [{"kitchen_name": "Burger", "quantity": 1}],
+            },
+        ]
+    )
+    assert len(slim) == 2
+    assert slim[0]["station_name"] == "Parrilla"
+    assert slim[0]["print_fallback"] is False
+    assert slim[1]["print_fallback"] is True
+    assert slim[1]["station_id"] is None
+    assert slim[1]["station_name"] == "Sin cocina asignada"
+
+
+def test_build_comanda_fired_print_payload_all_unrouted_still_prints():
+    slim = notifications_service.build_comanda_fired_print_payload(
+        [
+            {
+                "id": None,
+                "comanda_number": 3,
+                "station_id": None,
+                "station_name": "Sin cocina asignada",
+                "print_fallback": True,
+                "items": [
+                    {"kitchen_name": "poker 330", "quantity": 2, "notes": None},
+                    {"kitchen_name": "", "product_name": "coctel PASSION", "quantity": 1, "notes": "x"},
+                ],
+            }
+        ]
+    )
+    assert len(slim) == 1
+    assert slim[0]["print_fallback"] is True
+    assert slim[0]["items"][0]["kitchen_name"] == "poker 330"
+    assert slim[0]["items"][1]["kitchen_name"] == "coctel PASSION"
 
 
 @pytest.mark.asyncio

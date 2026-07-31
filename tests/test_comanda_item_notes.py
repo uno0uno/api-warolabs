@@ -168,9 +168,13 @@ async def test_fire_comandas_returns_printable_fallback_for_item_without_station
     ]
 
     mock_conn.fetchrow.assert_not_awaited()
-    update_sql = " ".join(mock_conn.execute.await_args.args[0].split())
+    update_call = next(
+        call for call in mock_conn.execute.await_args_list
+        if "UPDATE order_items" in call.args[0]
+    )
+    update_sql = " ".join(update_call.args[0].split())
     assert "UPDATE order_items SET fulfillment_status = 'sent'" in update_sql
-    assert mock_conn.execute.await_args.args[1] == [order_item_id]
+    assert update_call.args[1] == [order_item_id]
 
 
 @pytest.mark.asyncio
@@ -279,5 +283,13 @@ async def test_fire_comandas_keeps_station_group_and_adds_unrouted_fallback():
 
     assert fallback["station_id"] is None
     assert fallback["station_name"] == "Sin cocina asignada"
+    assert fallback["print_fallback"] is True
     assert fallback["items"][0]["order_item_id"] == unrouted_item_id
     assert fallback["items"][0]["notes"] == "sin papa"
+
+    # SSE printable order: station first, fallback last (#1973)
+    from app.services.notifications_service import build_comanda_fired_print_payload
+
+    slim = build_comanda_fired_print_payload(result)
+    assert slim[0]["print_fallback"] is False
+    assert slim[-1]["print_fallback"] is True
