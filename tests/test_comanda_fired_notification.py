@@ -55,6 +55,66 @@ async def test_notify_comanda_fired_json_safe_uuid_datetime():
 
 
 @pytest.mark.asyncio
+async def test_notify_comanda_fired_handles_decimal_in_payload():
+    from decimal import Decimal
+
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    await notifications_service.notify_comanda_fired(
+        conn,
+        uuid4(),
+        {
+            "order_id": str(uuid4()),
+            "source_type": "table",
+            "auto_print_target": "caja",
+            "comandas": [
+                {
+                    "id": uuid4(),
+                    "comanda_number": 1,
+                    "items": [
+                        {
+                            "kitchen_name": "poker",
+                            "quantity": Decimal("2"),
+                            "notes": None,
+                            "modifiers_snapshot": [{"name": "x", "price": Decimal("1000.50")}],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    raw = conn.execute.await_args.args[2]
+    assert "poker" in raw
+    assert "1000.5" in raw or "1000.50" in raw
+
+
+def test_build_comanda_fired_print_payload_strips_decimals():
+    from decimal import Decimal
+
+    slim = notifications_service.build_comanda_fired_print_payload(
+        [
+            {
+                "id": uuid4(),
+                "comanda_number": 7,
+                "station_name": "Barra",
+                "items": [
+                    {
+                        "kitchen_name": "PASSION",
+                        "quantity": Decimal("1"),
+                        "notes": "CON PEPINILLOS",
+                        "modifiers_snapshot": [{"name": "hielo", "quantity": Decimal("1"), "price": Decimal("0")}],
+                    }
+                ],
+            }
+        ]
+    )
+    assert len(slim) == 1
+    assert slim[0]["items"][0]["quantity"] == 1.0
+    assert slim[0]["items"][0]["notes"] == "CON PEPINILLOS"
+    assert slim[0]["items"][0]["modifiers_snapshot"][0]["name"] == "hielo"
+
+
+@pytest.mark.asyncio
 async def test_fire_with_conn_notifies_when_comandas_created():
     """When fire creates comandas, notify_comanda_fired is called once."""
     order_id = uuid4()
