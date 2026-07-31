@@ -412,6 +412,79 @@ def require_module(module: Module) -> Callable[[Request], Awaitable[None]]:
     return dependency
 
 
+def require_any_module(*modules: Module) -> Callable[[Request], Awaitable[None]]:
+    """Like ``require_module`` but allows access when the role has *any* module.
+
+    Used for read endpoints shared across POS / Ventas / Despacho / Operaciones
+    (e.g. printer assignment GET for ticket routing).
+    """
+    if not modules:
+        raise ValueError("require_any_module needs at least one Module")
+
+    async def dependency(request: Request) -> None:
+        from app.core.middleware import get_session_context  # local import to avoid cycle
+
+        session = get_session_context(request)
+        if not session.is_valid:
+            return
+
+        tenant_id = session.tenant_id
+        if not tenant_id:
+            return
+
+        from app.services.billing_service import (
+            STARTER_PLAN_MODULE_VALUES,
+            STARTER_PLAN_SLUG,
+            get_effective_plan_slug,
+        )
+
+        async with get_db_connection() as conn:
+            plan_slug = await get_effective_plan_slug(conn, tenant_id)
+        if plan_slug == STARTER_PLAN_SLUG:
+            if not any(m.value in STARTER_PLAN_MODULE_VALUES for m in modules):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        "Módulo no disponible en el plan Starter: "
+                        + ", ".join(m.value for m in modules)
+                    ),
+                )
+
+        mode = await get_enforcement_mode(tenant_id)
+        if mode == "disabled":
+            return
+
+        path = request.url.path
+        raw_role = session.role
+        primary = modules[0]
+        if not raw_role:
+            _shadow_or_deny(
+                mode, tenant_id, session.user_id, None, primary,
+                reason="no-membership", path=path,
+            )
+            return
+
+        try:
+            normalized = normalize_role(raw_role)
+        except ValueError:
+            _shadow_or_deny(
+                mode, tenant_id, session.user_id, raw_role, primary,
+                reason="unknown-role", path=path,
+            )
+            return
+
+        allowed = await get_role_modules(tenant_id, normalized)
+        if any(module in allowed for module in modules):
+            return
+
+        _shadow_or_deny(
+            mode, tenant_id, session.user_id, normalized.value, primary,
+            reason="not-in-matrix", path=path,
+        )
+
+    return dependency
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Auto-handoff predicate for the waiter attribution family
 # (warocol.com#574 — POS session override; warocol.com#575 — order
