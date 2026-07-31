@@ -502,24 +502,26 @@ async def _fire_with_conn(
     if created_comandas:
         from app.services.notifications_service import notify_comanda_fired
 
-        label = (table_display_name or "").strip().lower()
-        # Mesa → caja; Barra (also source_type=table) + mostrador/pos → user printer
-        if source_type == "table" and label not in ("barra", "bar"):
-            auto_print_target = "caja"
-        else:
-            auto_print_target = "user"
+        # Only mesa / barra / mostrador — not delivery/pickup auto-fire (#1971)
+        if source_type in ("table", "pos"):
+            label = (table_display_name or "").strip().lower()
+            # Mesa → caja; Barra (also source_type=table) + mostrador/pos → user printer
+            if source_type == "table" and label not in ("barra", "bar"):
+                auto_print_target = "caja"
+            else:
+                auto_print_target = "user"
 
-        await notify_comanda_fired(
-            conn,
-            tenant_id,
-            {
-                "order_id": str(order_id),
-                "source_type": source_type,
-                "table_display_name": table_display_name,
-                "auto_print_target": auto_print_target,
-                "comandas": created_comandas,
-            },
-        )
+            await notify_comanda_fired(
+                conn,
+                tenant_id,
+                {
+                    "order_id": str(order_id),
+                    "source_type": source_type,
+                    "table_display_name": table_display_name,
+                    "auto_print_target": auto_print_target,
+                    "comandas": created_comandas,
+                },
+            )
     return created_comandas
 
 

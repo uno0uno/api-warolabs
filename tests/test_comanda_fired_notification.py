@@ -142,3 +142,77 @@ async def test_fire_with_conn_notifies_when_comandas_created():
     assert args[2]["order_id"] == str(order_id)
     assert args[2]["auto_print_target"] == "caja"
     assert len(args[2]["comandas"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_fire_with_conn_skips_notify_for_delivery():
+    order_id = uuid4()
+    tenant_id = uuid4()
+    station_id = uuid4()
+    item_id = uuid4()
+    item_row = {
+        "id": item_id,
+        "product_id": uuid4(),
+        "kitchen_name": "Burger",
+        "quantity": 1,
+        "notes": None,
+        "modifiers_snapshot": None,
+    }
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[item_row])
+    conn.fetchval = AsyncMock(side_effect=[10, 1, "Cocina"])
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": uuid4(),
+                "comanda_number": 10,
+                "comanda_index": 1,
+                "station_id": station_id,
+                "status": "pending",
+                "source_type": "delivery",
+                "table_display_name": "Domicilio #10",
+                "notes": None,
+                "fired_at": datetime.now(timezone.utc),
+                "ready_at": None,
+                "created_at": datetime.now(timezone.utc),
+            },
+            {
+                "id": uuid4(),
+                "order_item_id": item_id,
+                "kitchen_name": "Burger",
+                "quantity": 1,
+                "notes": None,
+                "modifiers_snapshot": None,
+                "status": "pending",
+                "ready_at": None,
+                "created_at": datetime.now(timezone.utc),
+            },
+        ]
+    )
+    conn.execute = AsyncMock()
+
+    with patch(
+        "app.services.comandas_service.get_effective_station",
+        new=AsyncMock(return_value=station_id),
+    ), patch(
+        "app.services.comandas_service._build_comanda_print_items_for_order_item",
+        new=AsyncMock(
+            return_value=[
+                {
+                    "quantity": 1,
+                    "notes": None,
+                    "modifiers_snapshot": None,
+                    "is_promo_free": False,
+                    "kitchen_name": "Burger",
+                }
+            ]
+        ),
+    ), patch(
+        "app.services.notifications_service.notify_comanda_fired",
+        new_callable=AsyncMock,
+    ) as notify:
+        await _fire_with_conn(
+            conn, order_id, tenant_id, "delivery", "Domicilio #10", None
+        )
+
+    notify.assert_not_awaited()
