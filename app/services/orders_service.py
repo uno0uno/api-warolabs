@@ -1860,7 +1860,11 @@ async def get_customers_list(
                     SELECT
                         p.id AS customer_id,
                         COALESCE(p.name, 'Sin identificar') AS name,
-                        p.phone_number AS phone
+                        p.phone_number AS phone,
+                        p.fiscal_id_type,
+                        p.fiscal_id,
+                        p.fiscal_business_name,
+                        p.fiscal_email
                     FROM profile p
                     INNER JOIN tenant_customers tc ON tc.profile_id = p.id
                     WHERE tc.tenant_id = $1
@@ -1881,6 +1885,10 @@ async def get_customers_list(
                     tcp.customer_id,
                     tcp.name,
                     tcp.phone,
+                    tcp.fiscal_id_type,
+                    tcp.fiscal_id,
+                    tcp.fiscal_business_name,
+                    tcp.fiscal_email,
                     COALESCE(oa.total_spent, 0)   AS total_spent,
                     COALESCE(oa.order_count, 0)   AS order_count,
                     COALESCE(oa.avg_ticket, 0)    AS avg_ticket,
@@ -1904,6 +1912,10 @@ async def get_customers_list(
                     "customer_id": str(row['customer_id']),
                     "name": row['name'],
                     "phone": row['phone'],
+                    "fiscal_id_type": row.get('fiscal_id_type'),
+                    "fiscal_id": row.get('fiscal_id'),
+                    "fiscal_business_name": row.get('fiscal_business_name'),
+                    "fiscal_email": row.get('fiscal_email'),
                     "total_spent": float(row['total_spent']),
                     "order_count": int(row['order_count']),
                     "avg_ticket": float(row['avg_ticket'] or 0),
@@ -1983,6 +1995,10 @@ async def get_customer_detail(
                     COALESCE(p.name, 'Sin identificar') AS name,
                     p.phone_number                       AS phone,
                     p.email                              AS email,
+                    p.fiscal_id_type,
+                    p.fiscal_id,
+                    p.fiscal_business_name,
+                    p.fiscal_email,
                     COUNT(o.id)                          AS total_orders,
                     SUM(o.total_amount)                  AS total_spent,
                     MIN(DATE(o.order_date AT TIME ZONE $3)) AS first_purchase,
@@ -1990,7 +2006,8 @@ async def get_customer_detail(
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
                 WHERE {aggregate_where_clause}
-                GROUP BY o.customer_id, p.name, p.phone_number, p.email
+                GROUP BY o.customer_id, p.name, p.phone_number, p.email,
+                         p.fiscal_id_type, p.fiscal_id, p.fiscal_business_name, p.fiscal_email
                 """,
                 *aggregate_params,
             )
@@ -2002,7 +2019,11 @@ async def get_customer_detail(
                         p.id                                 AS customer_id,
                         COALESCE(p.name, 'Sin identificar') AS name,
                         p.phone_number                       AS phone,
-                        p.email                              AS email
+                        p.email                              AS email,
+                        p.fiscal_id_type,
+                        p.fiscal_id,
+                        p.fiscal_business_name,
+                        p.fiscal_email
                     FROM profile p
                     JOIN tenant_customers tc ON tc.profile_id = p.id
                     WHERE p.id = $1
@@ -2020,6 +2041,10 @@ async def get_customer_detail(
                     "name": profile_row["name"],
                     "phone": profile_row["phone"],
                     "email": profile_row["email"],
+                    "fiscal_id_type": profile_row.get("fiscal_id_type"),
+                    "fiscal_id": profile_row.get("fiscal_id"),
+                    "fiscal_business_name": profile_row.get("fiscal_business_name"),
+                    "fiscal_email": profile_row.get("fiscal_email"),
                     "total_orders": 0,
                     "total_spent": 0,
                     "first_purchase": None,
@@ -2159,6 +2184,10 @@ async def get_customer_detail(
                     "name": customer_row['name'],
                     "phone": customer_row['phone'],
                     "email": customer_row['email'],
+                    "fiscal_id_type": customer_row.get('fiscal_id_type'),
+                    "fiscal_id": customer_row.get('fiscal_id'),
+                    "fiscal_business_name": customer_row.get('fiscal_business_name'),
+                    "fiscal_email": customer_row.get('fiscal_email'),
                     "total_orders": int(customer_row['total_orders']),
                     "total_spent": float(customer_row['total_spent']),
                     "first_purchase": _date_iso(customer_row['first_purchase']),
