@@ -49,6 +49,31 @@ async def create_comanda_ready_notification(
     await conn.execute("SELECT pg_notify($1, $2)", channel, json.dumps(notify_payload))
 
 
+def _json_safe(value):
+    """Serialize UUID/datetime for pg_notify payloads."""
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+async def notify_comanda_fired(conn, tenant_id: UUID, payload: dict) -> None:
+    """
+    SSE-only signal when comandas are fired (warocol.com#1971).
+
+    Does NOT insert a notifications row — avoids toast/bell noise. Clients with
+    PrintBridge connected may auto-print; others ignore.
+    """
+    channel = "tenant_" + str(tenant_id).replace("-", "")
+    notify_payload = {**_json_safe(payload), "type": "comanda_fired"}
+    await conn.execute("SELECT pg_notify($1, $2)", channel, json.dumps(notify_payload))
+
+
 async def mark_table_qr_notifications_read(
     conn,
     tenant_id: UUID,
