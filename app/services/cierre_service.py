@@ -336,7 +336,13 @@ async def _post_order_gl_entry(
       inc_included_in_price=False           : tax added on top — additive formula
 
     Tips: single-payment checkout posts product net on `— ingreso neto` and tip net on
-    `— propina` (#915). Split flows defer tip to _post_deferred_order_tip_gl (#912).
+    `— propina` (#915). Prefer passing tip_amount here for split checkouts too so each
+    tender debits its exact collected amount. `_post_deferred_order_tip_gl` remains as
+    an idempotent fallback when tip was not included in this call.
+
+    Split payment debits use exact `order_payments` amounts (no proportional re-scale
+    against payment_debit). If tip was omitted but tenders exceed product+tax, the
+    excess is credited as tip so the entry still balances.
 
     Idempotent: skips if an 'orden' entry already exists for this order_id.
     Caller MUST wrap in try/except — GL failure must never roll back the order.
@@ -468,12 +474,44 @@ async def _post_order_gl_entry(
     tip_settlement, tip_net_revenue, tip_tax_credit = _tip_gl_amounts(
         tip_amount, tip_tax_amount, tax_config,
     )
+    product_net_revenue = net_revenue
+    product_gross = debit_total  # product + additive tax, before tip
+
+    # Exact tender debits when splits are provided (country-agnostic; no proration).
+    split_debit_lines: List[Dict[str, Any]] = []
+    payments_sum = Decimal("0")
+    if split_debits:
+        for split in split_debits:
+            debit_amount = Decimal(str(split["amount"] or 0)).quantize(Decimal("0.01"))
+            if debit_amount <= 0:
+                continue
+            payments_sum += debit_amount
+            split_debit_lines.append(
+                {
+                    "account_id": split["account"].id,
+                    "amount": debit_amount,
+                    "payment_method": split["payment_method"],
+                }
+            )
+        # Tip omitted from args but already inside tenders (common deferred-tip callers):
+        # credit the excess as tip so DR tenders stay exact and the entry balances.
+        if tip_settlement <= 0 and payments_sum > 0:
+            advance_for_implied = min(
+                Decimal(str(advance_amount or 0)).quantize(Decimal("0.01")),
+                product_gross,
+            )
+            implied_tip = (payments_sum + advance_for_implied - product_gross).quantize(Decimal("0.01"))
+            if implied_tip > 0:
+                tip_settlement, tip_net_revenue, tip_tax_credit = _tip_gl_amounts(
+                    implied_tip, tip_tax_amount, tax_config,
+                )
+
+    if tip_settlement > 0:
+        debit_total += tip_settlement
+
     tip_tax_acct_id = None
     if tip_tax_credit > 0:
         tip_tax_acct_id = await _resolve_standard_tax_account_id(conn, tenant_id, tax_config)
-    product_net_revenue = net_revenue
-    if tip_settlement > 0:
-        debit_total += tip_settlement
 
     advance_debit = min(
         Decimal(str(advance_amount or 0)).quantize(Decimal("0.01")),
@@ -481,31 +519,12 @@ async def _post_order_gl_entry(
     )
     payment_debit = debit_total - advance_debit
     debit_acct = None
-    split_debit_lines: List[Dict[str, Any]] = []
-    if payment_debit > 0:
-        if split_debits:
-            split_total = sum(split["amount"] for split in split_debits)
-            remaining_debit = payment_debit
-            for idx, split in enumerate(split_debits):
-                if split["amount"] <= 0:
-                    continue
-                if idx == len(split_debits) - 1:
-                    debit_amount = remaining_debit
-                else:
-                    debit_amount = (payment_debit * split["amount"] / split_total).quantize(Decimal("0.01"))
-                    remaining_debit -= debit_amount
-                if debit_amount <= 0:
-                    continue
-                split_acct = split["account"]
-                split_debit_lines.append(
-                    {
-                        "account_id": split_acct.id,
-                        "amount": debit_amount,
-                        "payment_method": split["payment_method"],
-                    }
-                )
-        else:
-            debit_acct = debit_account
+    if payment_debit > 0 and not split_debit_lines:
+        debit_acct = debit_account
+
+    # Header totals follow posted lines: exact tenders (+ advance) when splits exist.
+    if split_debit_lines:
+        debit_total = advance_debit + payments_sum
     advance_acct = None
     if advance_debit > 0:
         advance_acct = await resolve_account(

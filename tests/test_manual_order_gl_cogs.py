@@ -827,6 +827,158 @@ async def test_post_order_gl_entry_splits_debits_by_payment_puc():
     assert debit_lines[1][3] == 3000.0
 
 
+@pytest.mark.asyncio
+async def test_post_order_gl_entry_keeps_exact_split_amounts_with_tip():
+    """Tip must not prorate tender debits (e.g. 10000 cash stays 10000, not 7142.86)."""
+    tenant_id = uuid4()
+    order_id = uuid4()
+    cash_method_id = uuid4()
+    credit_method_id = uuid4()
+    wallet_method_id = uuid4()
+    digital_method_id = uuid4()
+    cash_account_id = uuid4()
+    credit_account_id = uuid4()
+    wallet_account_id = uuid4()
+    digital_account_id = uuid4()
+    ingresos_account_id = uuid4()
+    entry_id = uuid4()
+
+    method_to_account = {
+        cash_method_id: cash_account_id,
+        credit_method_id: credit_account_id,
+        wallet_method_id: wallet_account_id,
+        digital_method_id: digital_account_id,
+    }
+
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=None)
+
+    async def fetchrow_side_effect(query, *args):
+        if "INSERT INTO tenant_journal_entries" in query:
+            return {"id": entry_id}
+        return None
+
+    conn.fetchrow = AsyncMock(side_effect=fetchrow_side_effect)
+    # No line items → product_gross falls back to total_amount (43000)
+    conn.fetch = AsyncMock(return_value=[])
+    conn.execute = AsyncMock()
+    conn.transaction = MagicMock(return_value=_AsyncContext())
+
+    async def resolve_payment(_conn, _tenant_id, _slug, payment_method_id=None, **_kwargs):
+        return AccountRef(
+            method_to_account[payment_method_id],
+            "PAY",
+            "Pay",
+            AccountRole.CASH,
+            "explicit_account_id",
+        )
+
+    with patch(
+        "app.services.cierre_service.resolve_payment_account",
+        new=AsyncMock(side_effect=resolve_payment),
+    ), patch(
+        "app.services.cierre_service.resolve_account",
+        new=AsyncMock(
+            return_value=AccountRef(
+                ingresos_account_id, "REVENUE", "Revenue", AccountRole.SALES_REVENUE, "localization_default"
+            )
+        ),
+    ):
+        await cierre_service._post_order_gl_entry(
+            conn=conn,
+            tenant_id=tenant_id,
+            order_id=order_id,
+            order_date=date(2026, 8, 1),
+            total_amount=Decimal("43000"),
+            payment_method="digital",
+            payment_method_id=digital_method_id,
+            tax_config={},
+            order_number=17441,
+            tip_amount=Decimal("17200"),
+            tip_tax_amount=Decimal("0"),
+            payment_splits=[
+                {"amount": Decimal("10000"), "payment_method": "cash", "payment_method_id": cash_method_id},
+                {"amount": Decimal("5000"), "payment_method": "credit", "payment_method_id": credit_method_id},
+                {"amount": Decimal("20000"), "payment_method": "customer_wallet", "payment_method_id": wallet_method_id},
+                {"amount": Decimal("25200"), "payment_method": "digital", "payment_method_id": digital_method_id},
+            ],
+        )
+
+    debit_by_account = {
+        call.args[2]: call.args[3]
+        for call in conn.execute.await_args_list
+        if "INSERT INTO tenant_journal_lines" in call.args[0] and call.args[3] and float(call.args[3]) > 0
+    }
+    assert debit_by_account[cash_account_id] == 10000.0
+    assert debit_by_account[credit_account_id] == 5000.0
+    assert debit_by_account[wallet_account_id] == 20000.0
+    assert debit_by_account[digital_account_id] == 25200.0
+
+    entry_insert = next(
+        call.args for call in conn.fetchrow.await_args_list
+        if call.args and "INSERT INTO tenant_journal_entries" in call.args[0]
+    )
+    assert entry_insert[7] == 60200.0  # total_debit
+    assert entry_insert[8] == 60200.0  # total_credit
+
+
+@pytest.mark.asyncio
+async def test_post_order_gl_entry_single_payment_includes_exact_tip_debit():
+    tenant_id = uuid4()
+    order_id = uuid4()
+    cash_method_id = uuid4()
+    cash_account_id = uuid4()
+    ingresos_account_id = uuid4()
+    entry_id = uuid4()
+
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=None)
+
+    async def fetchrow_side_effect(query, *args):
+        if "INSERT INTO tenant_journal_entries" in query:
+            return {"id": entry_id}
+        return None
+
+    conn.fetchrow = AsyncMock(side_effect=fetchrow_side_effect)
+    conn.fetch = AsyncMock(return_value=[])
+    conn.execute = AsyncMock()
+    conn.transaction = MagicMock(return_value=_AsyncContext())
+
+    with patch(
+        "app.services.cierre_service.resolve_payment_account",
+        new=AsyncMock(
+            return_value=AccountRef(cash_account_id, "CASH", "Cash", AccountRole.CASH, "explicit_account_id")
+        ),
+    ), patch(
+        "app.services.cierre_service.resolve_account",
+        new=AsyncMock(
+            return_value=AccountRef(
+                ingresos_account_id, "REVENUE", "Revenue", AccountRole.SALES_REVENUE, "localization_default"
+            )
+        ),
+    ):
+        await cierre_service._post_order_gl_entry(
+            conn=conn,
+            tenant_id=tenant_id,
+            order_id=order_id,
+            order_date=date(2026, 8, 1),
+            total_amount=Decimal("43000"),
+            payment_method="cash",
+            payment_method_id=cash_method_id,
+            tax_config={},
+            order_number=1,
+            tip_amount=Decimal("17200"),
+            tip_tax_amount=Decimal("0"),
+        )
+
+    cash_debits = [
+        call.args[3]
+        for call in conn.execute.await_args_list
+        if "INSERT INTO tenant_journal_lines" in call.args[0] and call.args[2] == cash_account_id
+    ]
+    assert cash_debits == [60200.0]
+
+
 def test_manual_order_modifier_quantity_defaults_to_one():
     modifier = ManualOrderModifier(id=str(uuid4()), name="Extra queso", price=2500)
 

@@ -1932,6 +1932,11 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                     session_row["id"],
                                 )
                                 for split_ord in split_completed_orders:
+                                    _ord_tip = Decimal("0")
+                                    _ord_tip_tax = Decimal("0")
+                                    if first_tip_order and split_ord["id"] == first_tip_order["id"]:
+                                        _ord_tip = Decimal(str(first_tip_order["tip_amount"] or 0))
+                                        _ord_tip_tax = Decimal(str(first_tip_order["tip_tax_amount"] or 0))
                                     await _post_order_gl_entry(
                                         conn=conn,
                                         tenant_id=tenant_id,
@@ -1942,6 +1947,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                         payment_method_id=split_ord["payment_method_id"],
                                         tax_config=split_tax_config,
                                         order_number=int(split_ord["order_number"]),
+                                        tip_amount=_ord_tip,
+                                        tip_tax_amount=_ord_tip_tax,
                                         payment_splits=await _order_payment_splits_for_gl(conn, split_ord["id"]),
                                     )
                                     await _post_order_cogs_gl_entry(
@@ -2450,6 +2457,11 @@ async def add_session_payment(
                     try:
                         split_tax_config = await _get_tenant_tax_config(conn, tenant_id)
                         for ord_row in order_rows:
+                            _ord_tip = Decimal("0")
+                            _ord_tip_tax = Decimal("0")
+                            if session_tip_row and ord_row["id"] == session_tip_row["id"]:
+                                _ord_tip = Decimal(str(resolved_tip_amount or 0))
+                                _ord_tip_tax = Decimal(str(resolved_tip_tax_amount or 0))
                             await _post_order_gl_entry(
                                 conn=conn,
                                 tenant_id=tenant_id,
@@ -2460,6 +2472,8 @@ async def add_session_payment(
                                 payment_method_id=ord_row["payment_method_id"],
                                 tax_config=split_tax_config,
                                 order_number=int(ord_row["order_number"]),
+                                tip_amount=_ord_tip,
+                                tip_tax_amount=_ord_tip_tax,
                                 payment_splits=await _order_payment_splits_for_gl(conn, ord_row["id"]),
                             )
                             await _post_order_cogs_gl_entry(
