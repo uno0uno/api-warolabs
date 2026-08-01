@@ -2692,7 +2692,10 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
             _promo_breakdown: List[dict] = []
             _promo_lines_by_id: Dict[str, dict] = {}
             try:
-                from app.services.hospitality_tax_engine import liquor_tax_label_for_config
+                from app.services.hospitality_tax_engine import (
+                    annotate_line_tax_amounts,
+                    liquor_tax_label_for_config,
+                )
                 from app.services.orders_service import _compute_tax_breakdown
                 from app.services.promotions_service import (
                     enrich_order_item_rows_with_promo_basis,
@@ -2718,7 +2721,9 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                             tp.promo_type AS locked_promo_type,
                             oi.promo_savings_allocated AS locked_promo_savings,
                             p.category_id,
-                            COALESCE(p.tax_category, 'standard') AS tax_category
+                            COALESCE(p.tax_category, 'standard') AS tax_category,
+                            COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                            p.tax_line_key
                         FROM order_items oi
                         JOIN orders o ON o.id = oi.order_id
                         JOIN product p ON p.id = oi.product_id
@@ -2738,14 +2743,32 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     _promo_savings = float(checkout_eval.get("promo_savings") or 0)
                     _subtotal_after_promos = float(checkout_eval.get("subtotal_after_promos") or 0)
                     _promo_breakdown = checkout_eval.get("promo_breakdown") or []
+                    tax_fields_by_id = {
+                        str(row["id"]): {
+                            "tax_category": row.get("tax_category") or "standard",
+                            "category_id": (
+                                str(row["category_id"]) if row.get("category_id") else None
+                            ),
+                            "tax_resolution": row.get("tax_resolution") or "inherit",
+                            "tax_line_key": row.get("tax_line_key"),
+                        }
+                        for row in eval_rows
+                    }
                     for line in checkout_eval["lines"]:
-                        line["tax_category"] = next(
-                            (pl["tax_category"] for pl in promo_lines if pl["id"] == line["id"]),
-                            "standard",
-                        )
-                        _promo_lines_by_id[line["id"]] = line
+                        fields = tax_fields_by_id.get(str(line["id"]), {})
+                        line["tax_category"] = fields.get("tax_category", "standard")
+                        line["category_id"] = fields.get("category_id")
+                        line["tax_resolution"] = fields.get("tax_resolution", "inherit")
+                        line["tax_line_key"] = fields.get("tax_line_key")
                     tax_rows = _tax_rows_from_evaluated_lines(checkout_eval["lines"])
                     _std_tax, _liq_tax, _tax_label = _compute_tax_breakdown(tax_rows, tax_config)
+                    annotate_line_tax_amounts(
+                        checkout_eval["lines"],
+                        tax_config,
+                        reconcile_to=(float(_std_tax), float(_liq_tax)),
+                    )
+                    for line in checkout_eval["lines"]:
+                        _promo_lines_by_id[str(line["id"])] = line
             except Exception as _e:
                 logger.warning(f"Tax breakdown failed for mesa current session (table {table_id}): {_e}")
 
@@ -2858,6 +2881,8 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     "liquor_tax": float(_liq_tax),
                     "standard_tax_label": _tax_label,
                     "liquor_tax_label": _liq_label,
+                    # Per-line tax for POS Orden / prefactura cues (#2007 mesa gap)
+                    "lines": list(_promo_lines_by_id.values()),
                     "minimum_consumption": _minimum_consumption_state(
                         session_row,
                         partial_paid_total,
@@ -2923,6 +2948,18 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                             or r["promo_type"]
                         ),
                         "promoOptOut": bool(r.get("promo_opt_out")),
+                        "taxCategory": (
+                            _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("tax_category")
+                        ),
+                        "taxLabel": (
+                            _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("tax_label")
+                        ),
+                        "taxAmount": (
+                            _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("tax_amount")
+                        ),
+                        "includedInPrice": (
+                            _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("included_in_price")
+                        ),
                         "modifiers": [
                             {
                                 "id": mod["id"],
