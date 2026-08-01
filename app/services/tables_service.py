@@ -5322,7 +5322,7 @@ async def void_table_payment(
                 # same method, same paid_at, not voided. Lock them all.
                 sibling_rows = await conn.fetch(
                     """
-                    SELECT op.id, op.order_id, op.amount
+                    SELECT op.id, op.order_id, op.amount, o.customer_id
                     FROM order_payments op
                     JOIN orders o ON o.id = op.order_id
                     WHERE o.table_session_id = $1
@@ -5346,6 +5346,27 @@ async def void_table_payment(
                     [r["id"] for r in sibling_rows],
                     normalized_reason,
                 )
+
+                # 5b. Restore wallet for each voided wallet tender portion (#2020).
+                if target["payment_method"] == "customer_wallet":
+                    from app.services.customer_wallet_service import (
+                        restore_wallet_for_order_payment_void,
+                    )
+                    from decimal import Decimal as _Dec
+
+                    for sib in sibling_rows:
+                        if not sib["customer_id"] or float(sib["amount"] or 0) <= 0:
+                            continue
+                        await restore_wallet_for_order_payment_void(
+                            conn,
+                            UUID(str(sib["customer_id"])),
+                            UUID(str(tenant_id)),
+                            _Dec(str(sib["amount"])),
+                            sib["order_id"],
+                            UUID(str(sib["id"])),
+                            UUID(str(user_id)) if user_id else None,
+                            notes=f"Anulación pago mesa: {normalized_reason}",
+                        )
 
                 # 6. Recompute session-wide paid_total / remaining.
                 session_orders = await conn.fetch(
@@ -5378,14 +5399,16 @@ async def void_table_payment(
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
 
-                # 7. Reopen if voiding flipped the session out of fully-paid.
+                # 7. Reopen if voiding flipped the session out of fully settled.
+                # Credit splits close with payment_status partial/credit (#2020).
+                from app.services.credit_service import sync_order_split_credit_status
                 was_closed = session_row["closed_at"] is not None
                 reopened = was_closed and not is_complete
-                if reopened:
-                    await conn.execute(
-                        "UPDATE orders SET payment_status = 'partial' WHERE table_session_id = $1 AND status = 'completed' AND payment_status = 'paid'",
-                        session_row["id"],
+                for oid in order_ids:
+                    await sync_order_split_credit_status(
+                        conn, oid, settlement_complete=is_complete and not reopened,
                     )
+                if reopened:
                     await conn.execute(
                         "UPDATE table_sessions SET closed_at = NULL WHERE id = $1",
                         session_row["id"],
