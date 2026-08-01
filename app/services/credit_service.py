@@ -21,6 +21,79 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+async def sync_order_split_credit_status(
+    conn,
+    order_id: UUID,
+    *,
+    settlement_complete: bool = False,
+) -> str:
+    """Derive payment_status + credit_paid_amount from active order_payments.
+
+    Split tenders that include ``credit`` must leave receivable outstanding so
+    Cartera (payment_status IN credit/partial) can show the debt. Non-credit
+    tenders (cash, wallet, card, …) seed ``credit_paid_amount``.
+
+    When there is no credit tender, ``payment_status='paid'`` is only written if
+    ``settlement_complete`` is true (avoids marking mid-split orders as paid).
+
+    Returns the payment_status written on the order.
+    """
+    order_row = await conn.fetchrow(
+        "SELECT total_amount, payment_status FROM orders WHERE id = $1",
+        order_id,
+    )
+    if not order_row:
+        return "paid"
+
+    total = round(float(order_row["total_amount"] or 0), 2)
+    payments = await conn.fetch(
+        """
+        SELECT payment_method, amount
+        FROM order_payments
+        WHERE order_id = $1 AND voided_at IS NULL
+        """,
+        order_id,
+    )
+    credit_sum = round(
+        sum(float(p["amount"]) for p in payments if p["payment_method"] == "credit"),
+        2,
+    )
+    non_credit_sum = round(
+        sum(float(p["amount"]) for p in payments if p["payment_method"] != "credit"),
+        2,
+    )
+
+    if credit_sum <= 0.01:
+        if not settlement_complete:
+            status = "partial"
+            credit_paid = 0.0
+        else:
+            status = "paid"
+            credit_paid = 0.0
+    elif non_credit_sum <= 0.01:
+        status = "credit"
+        credit_paid = 0.0
+    else:
+        status = "partial"
+        # Remaining ≈ credit tender(s), capped by order merchandise total
+        # (tips may sit in order_payments above total_amount).
+        credit_paid = max(0.0, round(total - min(credit_sum, total), 2))
+
+    await conn.execute(
+        """
+        UPDATE orders
+        SET payment_status = $2,
+            credit_paid_amount = $3
+        WHERE id = $1
+        """,
+        order_id,
+        status,
+        credit_paid,
+    )
+    return status
+
+
 async def _resolve_credit_payment_debit_account(
     conn,
     tenant_id: UUID,

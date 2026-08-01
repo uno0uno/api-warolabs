@@ -1685,7 +1685,9 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             float(_mesa_tip_tax_amount),
                         )
 
-                    if payment_method == 'customer_wallet' and customer_id:
+                    # Full-session wallet debit only for non-split closes.
+                    # In split_mode each order_payments row applies its portion (#2020).
+                    if payment_method == 'customer_wallet' and customer_id and not split_mode:
                         from app.services.customer_wallet_service import (
                             apply_wallet_for_session_orders,
                         )
@@ -1701,7 +1703,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             session_row["id"],
                         )
                         _tip_settlement = _Dec("0")
-                        if not split_mode and float(tip_amount or 0) > 0:
+                        if float(tip_amount or 0) > 0:
                             _tip_settlement = _Dec(str(tip_settlement_total(
                                 float(tip_amount), float(_mesa_tip_tax_amount),
                             )))
@@ -1863,6 +1865,25 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 )
                                 if i == 0:
                                     _split_first_payment_id_mesa = str(inserted_row["id"])
+                                if (
+                                    payment_method == "customer_wallet"
+                                    and customer_id
+                                    and float(portion) > 0
+                                ):
+                                    from app.services.customer_wallet_service import (
+                                        apply_wallet_for_order,
+                                    )
+                                    from decimal import Decimal as _Dec
+
+                                    await apply_wallet_for_order(
+                                        conn,
+                                        UUID(str(customer_id)),
+                                        UUID(str(tenant_id)),
+                                        _Dec(str(portion)),
+                                        ord_row["id"],
+                                        UUID(str(user_id)) if user_id else None,
+                                        inserted_row["id"],
+                                    )
 
                         # Split GL when first payment completes the session.
                         first_tip_order = await conn.fetchrow(
@@ -1889,6 +1910,14 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             split_tip_amount,
                             split_tip_tax_amount,
                         )
+                        from app.services.credit_service import sync_order_split_credit_status
+                        _first_split_complete = (split_amount_due - split_paid_total) <= 0.01
+                        for _sync_ord in order_rows:
+                            await sync_order_split_credit_status(
+                                conn,
+                                _sync_ord["id"],
+                                settlement_complete=_first_split_complete,
+                            )
                         if split_amount_due - split_paid_total <= 0.01:
                             try:
                                 split_tax_config = await _get_tenant_tax_config(conn, tenant_id)
@@ -2256,7 +2285,7 @@ async def add_session_payment(
                 order_rows = await conn.fetch(
                     """
                     SELECT id, order_number, total_amount, payment_method,
-                           payment_method_id, order_date
+                           payment_method_id, order_date, customer_id
                     FROM orders
                     WHERE table_session_id = $1 AND status = 'completed'
                     ORDER BY created_at
@@ -2265,6 +2294,15 @@ async def add_session_payment(
                 )
                 if not order_rows:
                     raise APIError("No split payment orders found for this session — call close with split_mode=True first", status_code=400)
+                session_customer_id = next(
+                    (r["customer_id"] for r in order_rows if r["customer_id"]),
+                    None,
+                )
+                if payment_method == "customer_wallet" and not session_customer_id:
+                    raise APIError(
+                        "La billetera requiere un cliente en la mesa",
+                        status_code=400,
+                    )
 
                 session_total = sum(float(r["total_amount"]) for r in order_rows)
                 order_ids = [r["id"] for r in order_rows]
@@ -2355,6 +2393,23 @@ async def add_session_payment(
                     )
                     if i == 0:
                         first_payment_id = str(inserted_row["id"])
+                    if (
+                        payment_method == "customer_wallet"
+                        and session_customer_id
+                        and float(portion) > 0
+                    ):
+                        from app.services.customer_wallet_service import apply_wallet_for_order
+                        from decimal import Decimal as _Dec
+
+                        await apply_wallet_for_order(
+                            conn,
+                            UUID(str(session_customer_id)),
+                            UUID(str(tenant_id)),
+                            _Dec(str(portion)),
+                            ord_row["id"],
+                            UUID(str(user_id)) if user_id else None,
+                            inserted_row["id"],
+                        )
 
                 # Recompute paid total
                 paid_row = await conn.fetchrow(
@@ -2371,11 +2426,26 @@ async def add_session_payment(
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
 
+                from app.services.credit_service import sync_order_split_credit_status
+                for _sync_ord in order_rows:
+                    await sync_order_split_credit_status(
+                        conn,
+                        _sync_ord["id"],
+                        settlement_complete=is_complete,
+                    )
+
                 if is_complete:
-                    # Mark all orders as fully paid
+                    # Session settlement complete — credit tenders stay partial/credit via sync above (#2020).
                     await conn.execute(
-                        "UPDATE orders SET payment_status = 'paid' WHERE table_session_id = $1 AND status = 'completed' AND payment_status = 'partial'",
+                        """
+                        UPDATE orders
+                        SET payment_method = $2,
+                            payment_method_id = $3::uuid
+                        WHERE table_session_id = $1 AND status = 'completed'
+                        """,
                         session_row["id"],
+                        payment_method,
+                        payment_method_id,
                     )
                     try:
                         split_tax_config = await _get_tenant_tax_config(conn, tenant_id)
@@ -5252,7 +5322,7 @@ async def void_table_payment(
                 # same method, same paid_at, not voided. Lock them all.
                 sibling_rows = await conn.fetch(
                     """
-                    SELECT op.id, op.order_id, op.amount
+                    SELECT op.id, op.order_id, op.amount, o.customer_id
                     FROM order_payments op
                     JOIN orders o ON o.id = op.order_id
                     WHERE o.table_session_id = $1
@@ -5276,6 +5346,27 @@ async def void_table_payment(
                     [r["id"] for r in sibling_rows],
                     normalized_reason,
                 )
+
+                # 5b. Restore wallet for each voided wallet tender portion (#2020).
+                if target["payment_method"] == "customer_wallet":
+                    from app.services.customer_wallet_service import (
+                        restore_wallet_for_order_payment_void,
+                    )
+                    from decimal import Decimal as _Dec
+
+                    for sib in sibling_rows:
+                        if not sib["customer_id"] or float(sib["amount"] or 0) <= 0:
+                            continue
+                        await restore_wallet_for_order_payment_void(
+                            conn,
+                            UUID(str(sib["customer_id"])),
+                            UUID(str(tenant_id)),
+                            _Dec(str(sib["amount"])),
+                            sib["order_id"],
+                            UUID(str(sib["id"])),
+                            UUID(str(user_id)) if user_id else None,
+                            notes=f"Anulación pago mesa: {normalized_reason}",
+                        )
 
                 # 6. Recompute session-wide paid_total / remaining.
                 session_orders = await conn.fetch(
@@ -5308,14 +5399,16 @@ async def void_table_payment(
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
 
-                # 7. Reopen if voiding flipped the session out of fully-paid.
+                # 7. Reopen if voiding flipped the session out of fully settled.
+                # Credit splits close with payment_status partial/credit (#2020).
+                from app.services.credit_service import sync_order_split_credit_status
                 was_closed = session_row["closed_at"] is not None
                 reopened = was_closed and not is_complete
-                if reopened:
-                    await conn.execute(
-                        "UPDATE orders SET payment_status = 'partial' WHERE table_session_id = $1 AND status = 'completed' AND payment_status = 'paid'",
-                        session_row["id"],
+                for oid in order_ids:
+                    await sync_order_split_credit_status(
+                        conn, oid, settlement_complete=is_complete and not reopened,
                     )
+                if reopened:
                     await conn.execute(
                         "UPDATE table_sessions SET closed_at = NULL WHERE id = $1",
                         session_row["id"],

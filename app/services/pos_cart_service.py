@@ -1585,6 +1585,7 @@ async def add_order_payment(
                 is_complete = remaining <= 0.01  # tolerance for rounding
 
                 # 5. Update order status
+                final_payment_status = "partial"
                 if is_complete:
                     award_customer_id = await conn.fetchval(
                         "SELECT customer_id FROM orders WHERE id = $1",
@@ -1596,12 +1597,16 @@ async def add_order_payment(
                         SET status = 'completed',
                             payment_method = $2,
                             payment_method_id = $3::uuid,
-                            payment_status = 'paid',
                             order_date = COALESCE(order_date, now())
                         WHERE id = $1
                         """,
                         order_id, payment_method,
                         payment_method_id,
+                    )
+                    # Keep credit receivable when a split tender is credit (#2020).
+                    from app.services.credit_service import sync_order_split_credit_status
+                    final_payment_status = await sync_order_split_credit_status(
+                        conn, order_id, settlement_complete=True,
                     )
                     # Mostrador: auto-deliver; barra: keep comandas open (#799).
                     _bar_order = await conn.fetchval(
@@ -1700,7 +1705,7 @@ async def add_order_payment(
                 "total_amount": total_amount,
                 "charged_amount": amount_due,
                 "payment_method": payment_method,
-                "payment_status": "paid" if is_complete else "partial",
+                "payment_status": final_payment_status if is_complete else "partial",
                 "status": "completed" if is_complete else order_row["status"],
             }
         }
@@ -1790,7 +1795,24 @@ async def void_order_payment(
                 # 3. Lock the parent order to coordinate concurrent voids.
                 await conn.execute("SELECT 1 FROM orders WHERE id = $1 FOR UPDATE", order_id)
 
-                was_paid = payment_row["payment_status"] == "paid"
+                total_amount = float(payment_row["total_amount"])
+                amount_due = split_settlement_amount_due(
+                    total_amount,
+                    float(payment_row["tip_amount"] or 0),
+                    float(payment_row["tip_tax_amount"] or 0),
+                    await _additive_tax_for_order(
+                        conn,
+                        order_id,
+                        await _get_tenant_tax_config(conn, tenant_id),
+                    ),
+                )
+                paid_before_row = await conn.fetchrow(
+                    "SELECT COALESCE(SUM(amount), 0) AS paid FROM order_payments WHERE order_id = $1 AND voided_at IS NULL",
+                    order_id,
+                )
+                paid_before = float(paid_before_row["paid"])
+                # Settled includes credit splits that stay payment_status=partial (#2020).
+                was_settled = (amount_due - paid_before) <= 0.01
 
                 # 4. Mark payment as voided (soft delete).
                 await conn.execute(
@@ -1822,26 +1844,15 @@ async def void_order_payment(
                     order_id,
                 )
                 paid_total = float(paid_row["paid"])
-                total_amount = float(payment_row["total_amount"])
-                amount_due = split_settlement_amount_due(
-                    total_amount,
-                    float(payment_row["tip_amount"] or 0),
-                    float(payment_row["tip_tax_amount"] or 0),
-                    await _additive_tax_for_order(
-                        conn,
-                        order_id,
-                        await _get_tenant_tax_config(conn, tenant_id),
-                    ),
-                )
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
 
-                # 6. If voiding flipped the order out of fully-paid, reopen.
-                reopened = was_paid and not is_complete
+                # 6. If voiding flipped the order out of fully settled, reopen.
+                from app.services.credit_service import sync_order_split_credit_status
+                reopened = was_settled and not is_complete
                 if reopened:
-                    await conn.execute(
-                        "UPDATE orders SET payment_status = 'partial' WHERE id = $1",
-                        order_id,
+                    await sync_order_split_credit_status(
+                        conn, order_id, settlement_complete=False,
                     )
                     await conn.execute(
                         "UPDATE pos_carts SET status = 'active', updated_at = NOW() WHERE id = $1",
@@ -1850,6 +1861,10 @@ async def void_order_payment(
                     # Reverse the posted GL entry — same transaction, atomic.
                     await void_order_journal_entry_in_txn(
                         conn, tenant_id, order_id, user_id, normalized_reason,
+                    )
+                else:
+                    await sync_order_split_credit_status(
+                        conn, order_id, settlement_complete=is_complete,
                     )
 
                 await record_operation_event(
@@ -2640,9 +2655,9 @@ async def complete_pos_order(
                         cart_id
                     )
                     if _split_is_complete:
-                        await conn.execute(
-                            "UPDATE orders SET payment_status = 'paid' WHERE id = $1",
-                            order_id
+                        from app.services.credit_service import sync_order_split_credit_status
+                        await sync_order_split_credit_status(
+                            conn, order_id, settlement_complete=True,
                         )
                     # Mostrador/delivery: auto-deliver after checkout. Barra: kitchen
                     # closes comandas manually (warocol.com#799).
