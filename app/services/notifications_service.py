@@ -71,7 +71,7 @@ def _json_safe(value):
 
 
 def build_comanda_fired_print_payload(comandas: list) -> list:
-    """Slim printable snapshot — avoids dumping raw asyncpg / Decimal heavy rows."""
+    """Slim printable snapshot — station groups first, print_fallback last (#1973)."""
     out = []
     for c in comandas or []:
         items = []
@@ -82,8 +82,12 @@ def build_comanda_fired_print_payload(comandas: list) -> list:
                     mods = json.loads(mods)
                 except (ValueError, TypeError):
                     mods = []
+            kitchen_name = (i.get("kitchen_name") or "").strip()
+            if not kitchen_name:
+                # Fallback rows must still print a line (#1973)
+                kitchen_name = (i.get("product_name") or i.get("name") or "Item").strip() or "Item"
             items.append({
-                "kitchen_name": i.get("kitchen_name") or "",
+                "kitchen_name": kitchen_name,
                 "quantity": float(i.get("quantity") or 1),
                 "notes": i.get("notes"),
                 "modifiers_snapshot": [
@@ -107,8 +111,11 @@ def build_comanda_fired_print_payload(comandas: list) -> list:
             "source_type": c.get("source_type"),
             "table_display_name": c.get("table_display_name"),
             "fired_at": _json_safe(c.get("fired_at")),
+            "print_fallback": bool(c.get("print_fallback")),
             "items": items,
         })
+    # Guarantee fallback tickets print after station tickets
+    out.sort(key=lambda row: 1 if row.get("print_fallback") else 0)
     return out
 
 

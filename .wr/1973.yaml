@@ -1,0 +1,41 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 1973
+title: "Always print fallback comanda last when no kitchen stations"
+repo: both
+repo_remote: uno0uno/warocol.com
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/front_nuxt
+stack: both
+branch: wr-1973-fallback-comanda-print
+
+paths:
+  - app/services/notifications_service.py
+  - tests/test_comanda_fired_notification.py
+  - tests/test_comanda_item_notes.py
+  - composables/useAutoComandaPrint.ts
+  - composables/useAutoComandaPrint.test.ts
+
+ac:
+  - No-station fire creates fallback, marks sent
+  - Fallback last in SSE printable payload
+  - Auto-print prints fallback (mesa→caja)
+  - Mixed batch: station first, fallback last
+  - Focused API + front tests
+
+out_of_scope:
+  - Multi-station printer redesign
+  - Requiring stations configured
+
+hints:
+  entry: "build_comanda_fired_print_payload + orderComandasForPrint"
+  pattern: "print_fallback last; station_id null still prints"
+  tests: "API: ./venv/bin/pytest tests/test_comanda_fired_notification.py tests/test_comanda_item_notes.py -q | Front: bunx vitest run composables/useAutoComandaPrint.test.ts"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "pair API+front; restart uvicorn for local test"
