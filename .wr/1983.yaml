@@ -1,0 +1,36 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 1983
+title: "Merge identical receipt lines; do not auto-print comanda on sale finalize"
+repo: both
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-1983-receipt-merge-no-comanda-pay
+
+paths:
+  - app/services/comandas_service.py
+  - app/services/pos_cart_service.py
+  - app/services/tables_service.py
+  - tests/test_comanda_fired_notification.py
+
+ac:
+  - notify_print=False skips comanda_fired on checkout autofire
+  - Explicit fire still notifies
+
+out_of_scope:
+  - Receipt consolidate (front)
+
+hints:
+  entry: "fire_comandas(..., notify_print=False)"
+  pattern: "pos_cart complete + tables close_session"
+  tests: "./venv/bin/pytest tests/test_comanda_fired_notification.py -q"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "pair with front PR"

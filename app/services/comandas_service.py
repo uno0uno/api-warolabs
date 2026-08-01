@@ -262,6 +262,8 @@ async def fire_comandas(
     table_display_name: str,
     item_ids: Optional[List[UUID]] = None,
     conn=None,
+    *,
+    notify_print: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Core KDS engine — delta-send pattern.
@@ -284,16 +286,19 @@ async def fire_comandas(
         item_ids: if provided, only fire these specific order_item UUIDs
         conn: optional asyncpg connection — pass when already inside a transaction
               to avoid nested BEGIN errors; if None a new connection+transaction is created
+        notify_print: when False, skip SSE comanda_fired auto-print (checkout autofire)
     """
     if conn is not None:
         return await _fire_with_conn(
-            conn, order_id, tenant_id, source_type, table_display_name, item_ids
+            conn, order_id, tenant_id, source_type, table_display_name, item_ids,
+            notify_print=notify_print,
         )
 
     async with get_db_connection() as new_conn:
         async with new_conn.transaction():
             return await _fire_with_conn(
-                new_conn, order_id, tenant_id, source_type, table_display_name, item_ids
+                new_conn, order_id, tenant_id, source_type, table_display_name, item_ids,
+                notify_print=notify_print,
             )
 
 
@@ -304,6 +309,8 @@ async def _fire_with_conn(
     source_type: str,
     table_display_name: str,
     item_ids: Optional[List[UUID]],
+    *,
+    notify_print: bool = True,
 ) -> List[Dict[str, Any]]:
     """Internal implementation — always called with an active connection."""
 
@@ -506,7 +513,9 @@ async def _fire_with_conn(
         )
 
         # Only mesa / barra / mostrador — not delivery/pickup auto-fire (#1971)
-        if source_type in ("table", "pos"):
+        # Checkout/pay autofire sets notify_print=False so kitchen tickets are not
+        # reprinted when closing the sale (#1983).
+        if notify_print and source_type in ("table", "pos"):
             label = (table_display_name or "").strip().lower()
             # Mesa → caja; Barra (also source_type=table) + mostrador/pos → user printer
             if source_type == "table" and label not in ("barra", "bar"):

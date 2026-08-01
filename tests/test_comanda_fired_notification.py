@@ -258,6 +258,89 @@ async def test_fire_with_conn_notifies_when_comandas_created():
 
 
 @pytest.mark.asyncio
+async def test_fire_with_conn_skips_notify_when_notify_print_false():
+    """Checkout autofire must not emit comanda_fired SSE (#1983)."""
+    order_id = uuid4()
+    tenant_id = uuid4()
+    station_id = uuid4()
+    item_id = uuid4()
+
+    conn = MagicMock()
+    item_row = {
+        "id": item_id,
+        "product_id": uuid4(),
+        "kitchen_name": "Burger",
+        "quantity": 1,
+        "notes": None,
+        "modifiers_snapshot": None,
+    }
+
+    async def fetch_side_effect(sql, *args):
+        if "fulfillment_status = 'new'" in sql or "fulfillment_status='new'" in sql.replace(" ", ""):
+            return [item_row]
+        return []
+
+    conn.fetch = AsyncMock(side_effect=fetch_side_effect)
+    conn.fetchval = AsyncMock(side_effect=[10, 1, "Cocina"])
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": uuid4(),
+                "comanda_number": 10,
+                "comanda_index": 1,
+                "station_id": station_id,
+                "status": "pending",
+                "source_type": "table",
+                "table_display_name": "Mesa 1",
+                "notes": None,
+                "fired_at": datetime.now(timezone.utc),
+                "ready_at": None,
+                "created_at": datetime.now(timezone.utc),
+            },
+            {
+                "id": uuid4(),
+                "order_item_id": item_id,
+                "kitchen_name": "Burger",
+                "quantity": 1,
+                "notes": None,
+                "modifiers_snapshot": None,
+                "status": "pending",
+                "ready_at": None,
+                "created_at": datetime.now(timezone.utc),
+            },
+        ]
+    )
+    conn.execute = AsyncMock()
+
+    with patch(
+        "app.services.comandas_service.get_effective_station",
+        new=AsyncMock(return_value=station_id),
+    ), patch(
+        "app.services.comandas_service._build_comanda_print_items_for_order_item",
+        new=AsyncMock(
+            return_value=[
+                {
+                    "quantity": 1,
+                    "notes": None,
+                    "modifiers_snapshot": None,
+                    "is_promo_free": False,
+                    "kitchen_name": "Burger",
+                }
+            ]
+        ),
+    ), patch(
+        "app.services.notifications_service.notify_comanda_fired",
+        new_callable=AsyncMock,
+    ) as notify:
+        result = await _fire_with_conn(
+            conn, order_id, tenant_id, "table", "Mesa 1", None, notify_print=False
+        )
+
+    assert len(result) >= 1
+    notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_fire_with_conn_skips_notify_for_delivery():
     order_id = uuid4()
     tenant_id = uuid4()
