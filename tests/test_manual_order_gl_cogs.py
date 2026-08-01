@@ -979,6 +979,71 @@ async def test_post_order_gl_entry_single_payment_includes_exact_tip_debit():
     assert cash_debits == [60200.0]
 
 
+@pytest.mark.asyncio
+async def test_post_order_gl_entry_tip_from_tender_excess_balances_lines():
+    """Mesa-style: tip not passed; each order credits only tender excess beyond product."""
+    tenant_id = uuid4()
+    order_id = uuid4()
+    cash_method_id = uuid4()
+    cash_account_id = uuid4()
+    ingresos_account_id = uuid4()
+    entry_id = uuid4()
+
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=None)
+
+    async def fetchrow_side_effect(query, *args):
+        if "INSERT INTO tenant_journal_entries" in query:
+            return {"id": entry_id}
+        return None
+
+    conn.fetchrow = AsyncMock(side_effect=fetchrow_side_effect)
+    conn.fetch = AsyncMock(return_value=[])
+    conn.execute = AsyncMock()
+    conn.transaction = MagicMock(return_value=_AsyncContext())
+
+    with patch(
+        "app.services.cierre_service.resolve_payment_account",
+        new=AsyncMock(
+            return_value=AccountRef(cash_account_id, "CASH", "Cash", AccountRole.CASH, "explicit_account_id")
+        ),
+    ), patch(
+        "app.services.cierre_service.resolve_account",
+        new=AsyncMock(
+            return_value=AccountRef(
+                ingresos_account_id, "REVENUE", "Revenue", AccountRole.SALES_REVENUE, "localization_default"
+            )
+        ),
+    ):
+        await cierre_service._post_order_gl_entry(
+            conn=conn,
+            tenant_id=tenant_id,
+            order_id=order_id,
+            order_date=date(2026, 8, 1),
+            total_amount=Decimal("20000"),
+            payment_method="cash",
+            payment_method_id=cash_method_id,
+            tax_config={},
+            order_number=2,
+            tip_amount=Decimal("0"),
+            payment_splits=[
+                {"amount": Decimal("25000"), "payment_method": "cash", "payment_method_id": cash_method_id},
+            ],
+        )
+
+    debits = credits = 0.0
+    for call in conn.execute.await_args_list:
+        if "INSERT INTO tenant_journal_lines" not in call.args[0]:
+            continue
+        # debit lines: args[3]=debit, credit lines: args[3]=0 and args[4]=credit
+        if float(call.args[3] or 0) > 0:
+            debits += float(call.args[3])
+        else:
+            credits += float(call.args[4])
+    assert debits == 25000.0
+    assert credits == 25000.0
+
+
 def test_manual_order_modifier_quantity_defaults_to_one():
     modifier = ManualOrderModifier(id=str(uuid4()), name="Extra queso", price=2500)
 

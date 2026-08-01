@@ -471,11 +471,9 @@ async def _post_order_gl_entry(
     net_revenue    = debit_total - standard_tax - liquor_tax
     # Invariant: DR debit_total = CR net_revenue + CR standard_tax + CR liquor_tax ✓
 
-    tip_settlement, tip_net_revenue, tip_tax_credit = _tip_gl_amounts(
-        tip_amount, tip_tax_amount, tax_config,
-    )
     product_net_revenue = net_revenue
     product_gross = debit_total  # product + additive tax, before tip
+    advance_raw = Decimal(str(advance_amount or 0)).quantize(Decimal("0.01"))
 
     # Exact tender debits when splits are provided (country-agnostic; no proration).
     split_debit_lines: List[Dict[str, Any]] = []
@@ -493,38 +491,50 @@ async def _post_order_gl_entry(
                     "payment_method": split["payment_method"],
                 }
             )
-        # Tip omitted from args but already inside tenders (common deferred-tip callers):
-        # credit the excess as tip so DR tenders stay exact and the entry balances.
-        if tip_settlement <= 0 and payments_sum > 0:
-            advance_for_implied = min(
-                Decimal(str(advance_amount or 0)).quantize(Decimal("0.01")),
-                product_gross,
-            )
-            implied_tip = (payments_sum + advance_for_implied - product_gross).quantize(Decimal("0.01"))
-            if implied_tip > 0:
-                tip_settlement, tip_net_revenue, tip_tax_credit = _tip_gl_amounts(
-                    implied_tip, tip_tax_amount, tax_config,
-                )
 
-    if tip_settlement > 0:
-        debit_total += tip_settlement
+    tip_settlement = Decimal("0")
+    tip_net_revenue = Decimal("0")
+    tip_tax_credit = Decimal("0")
+    debit_acct = None
+
+    if split_debit_lines:
+        # Advance applies to product first; tip is whatever tenders collect beyond product.
+        advance_debit = min(advance_raw, product_gross)
+        remaining_product = product_gross - advance_debit
+        tip_from_tenders = (payments_sum - remaining_product).quantize(Decimal("0.01"))
+        if tip_from_tenders < 0:
+            tip_from_tenders = Decimal("0")
+        explicit_settlement, explicit_net, explicit_tax = _tip_gl_amounts(
+            tip_amount, tip_tax_amount, tax_config,
+        )
+        if (
+            tip_from_tenders > 0
+            and explicit_settlement > 0
+            and abs(explicit_settlement - tip_from_tenders) <= Decimal("0.01")
+        ):
+            tip_settlement, tip_net_revenue, tip_tax_credit = (
+                explicit_settlement, explicit_net, explicit_tax,
+            )
+        elif tip_from_tenders > 0:
+            tip_settlement, tip_net_revenue, tip_tax_credit = _tip_gl_amounts(
+                tip_from_tenders, Decimal("0"), tax_config,
+            )
+        debit_total = advance_debit + payments_sum
+    else:
+        tip_settlement, tip_net_revenue, tip_tax_credit = _tip_gl_amounts(
+            tip_amount, tip_tax_amount, tax_config,
+        )
+        if tip_settlement > 0:
+            debit_total += tip_settlement
+        advance_debit = min(advance_raw, debit_total)
+        payment_debit = debit_total - advance_debit
+        if payment_debit > 0:
+            debit_acct = debit_account
 
     tip_tax_acct_id = None
     if tip_tax_credit > 0:
         tip_tax_acct_id = await _resolve_standard_tax_account_id(conn, tenant_id, tax_config)
 
-    advance_debit = min(
-        Decimal(str(advance_amount or 0)).quantize(Decimal("0.01")),
-        debit_total,
-    )
-    payment_debit = debit_total - advance_debit
-    debit_acct = None
-    if payment_debit > 0 and not split_debit_lines:
-        debit_acct = debit_account
-
-    # Header totals follow posted lines: exact tenders (+ advance) when splits exist.
-    if split_debit_lines:
-        debit_total = advance_debit + payments_sum
     advance_acct = None
     if advance_debit > 0:
         advance_acct = await resolve_account(
