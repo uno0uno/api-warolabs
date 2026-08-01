@@ -1932,6 +1932,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                     session_row["id"],
                                 )
                                 for split_ord in split_completed_orders:
+                                    # Tip credits come from tender excess per order (exact splits).
+                                    # Full session tip is not forced onto one order (avoids DR≠CR).
                                     await _post_order_gl_entry(
                                         conn=conn,
                                         tenant_id=tenant_id,
@@ -2450,6 +2452,7 @@ async def add_session_payment(
                     try:
                         split_tax_config = await _get_tenant_tax_config(conn, tenant_id)
                         for ord_row in order_rows:
+                            # Tip from tender excess per order; deferred tip below is idempotent.
                             await _post_order_gl_entry(
                                 conn=conn,
                                 tenant_id=tenant_id,
