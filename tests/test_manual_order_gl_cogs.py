@@ -1033,13 +1033,13 @@ async def test_post_order_gl_entry_tip_from_tender_excess_balances_lines():
 
     debits = credits = 0.0
     for call in conn.execute.await_args_list:
-        if "INSERT INTO tenant_journal_lines" not in call.args[0]:
+        q = call.args[0]
+        if "INSERT INTO tenant_journal_lines" not in q:
             continue
-        # debit lines: args[3]=debit, credit lines: args[3]=0 and args[4]=credit
-        if float(call.args[3] or 0) > 0:
+        if "VALUES ($1, $2, $3, 0, $4, $5)" in q:
             debits += float(call.args[3])
-        else:
-            credits += float(call.args[4])
+        elif "VALUES ($1, $2, 0, $3, $4, $5)" in q:
+            credits += float(call.args[3])
     assert debits == 25000.0
     assert credits == 25000.0
 
