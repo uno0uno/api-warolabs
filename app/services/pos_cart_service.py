@@ -2577,7 +2577,8 @@ async def complete_pos_order(
                             tenant_id=tenant_id,
                             source_type=_fire_source,
                             table_display_name=_fire_label,
-                            conn=conn
+                            conn=conn,
+                            notify_print=False,
                         )
                 except Exception as _fe:
                     logger.error(f"Auto-fire failed for POS order {order_id}: {_fe}")

@@ -2029,7 +2029,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 tenant_id=tenant_id,
                                 source_type='table',
                                 table_display_name=table_row["name"],
-                                conn=conn
+                                conn=conn,
+                                notify_print=False,
                             )
 
                         # Mesa: auto-deliver open comandas on payment. Barra: kitchen closes
