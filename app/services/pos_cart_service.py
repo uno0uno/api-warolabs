@@ -1585,6 +1585,7 @@ async def add_order_payment(
                 is_complete = remaining <= 0.01  # tolerance for rounding
 
                 # 5. Update order status
+                final_payment_status = "partial"
                 if is_complete:
                     award_customer_id = await conn.fetchval(
                         "SELECT customer_id FROM orders WHERE id = $1",
@@ -1596,12 +1597,16 @@ async def add_order_payment(
                         SET status = 'completed',
                             payment_method = $2,
                             payment_method_id = $3::uuid,
-                            payment_status = 'paid',
                             order_date = COALESCE(order_date, now())
                         WHERE id = $1
                         """,
                         order_id, payment_method,
                         payment_method_id,
+                    )
+                    # Keep credit receivable when a split tender is credit (#2020).
+                    from app.services.credit_service import sync_order_split_credit_status
+                    final_payment_status = await sync_order_split_credit_status(
+                        conn, order_id, settlement_complete=True,
                     )
                     # Mostrador: auto-deliver; barra: keep comandas open (#799).
                     _bar_order = await conn.fetchval(
@@ -1700,7 +1705,7 @@ async def add_order_payment(
                 "total_amount": total_amount,
                 "charged_amount": amount_due,
                 "payment_method": payment_method,
-                "payment_status": "paid" if is_complete else "partial",
+                "payment_status": final_payment_status if is_complete else "partial",
                 "status": "completed" if is_complete else order_row["status"],
             }
         }
@@ -2640,9 +2645,9 @@ async def complete_pos_order(
                         cart_id
                     )
                     if _split_is_complete:
-                        await conn.execute(
-                            "UPDATE orders SET payment_status = 'paid' WHERE id = $1",
-                            order_id
+                        from app.services.credit_service import sync_order_split_credit_status
+                        await sync_order_split_credit_status(
+                            conn, order_id, settlement_complete=True,
                         )
                     # Mostrador/delivery: auto-deliver after checkout. Barra: kitchen
                     # closes comandas manually (warocol.com#799).

@@ -4258,6 +4258,10 @@ async def create_manual_order(
                                 user_id,
                                 payment_row["id"],
                             )
+                    from app.services.credit_service import sync_order_split_credit_status
+                    payment_status = await sync_order_split_credit_status(
+                        conn, order_id, settlement_complete=True,
+                    )
                 elif payment_method == "customer_wallet" and customer_uuid:
                     from app.services.customer_wallet_service import apply_wallet_for_order
 
