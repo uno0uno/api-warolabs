@@ -37,6 +37,7 @@ def _enforce_db_ctx():
     async def _ctx():
         conn = MagicMock()
         conn.fetchval = AsyncMock(return_value="enforce")
+        conn.fetchrow = AsyncMock(return_value=None)
         conn.fetch = AsyncMock(return_value=[])
         yield conn
     return _ctx
@@ -244,6 +245,7 @@ def test_put_fiscal_data_applies_explicit_profile_to_fiscal_and_tax_config():
     session = _build_session()
     conn = MagicMock()
     conn.execute = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=None)
 
     @asynccontextmanager
     async def fiscal_db_ctx():
@@ -271,7 +273,9 @@ def test_put_fiscal_data_applies_explicit_profile_to_fiscal_and_tax_config():
     assert fiscal_call.args[5] == 2
     assert fiscal_call.args[7] == "non_responsible_iva_inc"
     assert "tenant_tax_config" in tax_call.args[0]
-    assert tax_call.args[2:] == (False, False)
+    assert tax_call.args[2:4] == (False, False)
+    assert "tax_lines" in tax_call.args[0]
+    assert tax_call.args[4] == "[]"
 
 
 def test_put_fiscal_data_rejects_non_responsible_inc_for_legal_entity():

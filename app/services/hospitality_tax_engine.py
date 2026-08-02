@@ -339,6 +339,91 @@ def _profile_from_co_columns(tax_config: Mapping[str, Any]) -> TaxProfile:
     return TaxProfile(lines=lines, category_map=category_map)
 
 
+def sync_co_tax_lines_for_sales_profile(
+    tax_config: Mapping[str, Any],
+    *,
+    iva_applicable: bool,
+    inc_applicable: bool,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Optional[str]], Dict[str, Optional[str]]]:
+    """Rewrite CO tax_lines/maps when Perfil de ventas flips IVA↔INC (#2031).
+
+    Preserves liquor + custom lines. Remaps menu/category map keys that pointed
+    at the old primary (iva↔inc) so POS does not keep stale IVA labels under INC.
+    """
+    cfg = dict(tax_config)
+    cfg["iva_applicable"] = bool(iva_applicable)
+    cfg["inc_applicable"] = bool(inc_applicable)
+    # Defaults when columns never set (fresh INSERT path).
+    if cfg.get("iva_rate") is None:
+        cfg["iva_rate"] = 0.19
+    if cfg.get("inc_rate") is None:
+        cfg["inc_rate"] = 0.08
+
+    profile = _profile_from_co_columns(cfg)
+    primary = profile.primary_line()
+    primary_key = primary.key if primary else None
+
+    existing = _as_mapping_list(cfg.get("tax_lines"))
+    kept: List[Dict[str, Any]] = []
+    for item in existing:
+        key = str(item.get("key") or "").strip()
+        if not key or key in ("iva", "inc"):
+            continue
+        kept.append(dict(item))
+
+    out_lines: List[Dict[str, Any]] = []
+    if primary is not None:
+        out_lines.append({
+            "key": primary.key,
+            "label": primary.label,
+            "rate": primary.rate,
+            "included_in_price": primary.included_in_price,
+            "gl_role": primary.gl_role,
+            "mode": "primary",
+            "exclusive_group": primary.exclusive_group or "vat",
+        })
+    out_lines.extend(kept)
+
+    # If columns say liquor on but tax_lines lacked it, seed from columns.
+    if cfg.get("liquor_tax_applicable") and not any(
+        str(x.get("key") or "") == "liquor" for x in out_lines
+    ):
+        liquor = profile.lines.get("liquor")
+        if liquor is not None:
+            out_lines.append({
+                "key": liquor.key,
+                "label": liquor.label,
+                "rate": liquor.rate,
+                "included_in_price": liquor.included_in_price,
+                "gl_role": liquor.gl_role,
+                "mode": "alternate",
+                "exclusive_group": liquor.exclusive_group or "vat",
+            })
+
+    category_map = {
+        "standard": primary_key,
+        "liquor": "liquor" if any(str(x.get("key") or "") == "liquor" for x in out_lines) else primary_key,
+        "exempt": None,
+    }
+    raw_map = _as_category_map(cfg.get("category_map"))
+    if raw_map.get("exempt") is not None:
+        category_map["exempt"] = raw_map.get("exempt")
+
+    menu_map = _as_menu_category_line_map(cfg.get("menu_category_line_map"))
+    remapped: Dict[str, Optional[str]] = {}
+    for cat_id, line_key in menu_map.items():
+        if line_key is None:
+            remapped[cat_id] = None
+            continue
+        if line_key in ("iva", "inc"):
+            # Flip to active primary, or clear when non-responsible (#2031).
+            remapped[cat_id] = primary_key
+        else:
+            remapped[cat_id] = line_key
+
+    return out_lines, category_map, remapped
+
+
 def resolve_applicable_tax_lines(
     profile: TaxProfile,
     *,

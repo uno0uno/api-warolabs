@@ -2,6 +2,7 @@
 Tenant configuration router - admin endpoints for managing public profiles
 Authentication required
 """
+import json
 from datetime import date as _date
 from uuid import UUID
 from asyncpg.exceptions import UniqueViolationError
@@ -412,18 +413,37 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
         )
 
         if profile_settings:
+            from app.services.hospitality_tax_engine import sync_co_tax_lines_for_sales_profile
+
+            existing = await conn.fetchrow(
+                "SELECT * FROM tenant_tax_config WHERE tenant_id = $1",
+                tenant_id,
+            )
+            cfg = dict(existing) if existing else {}
+            tax_lines, category_map, menu_map = sync_co_tax_lines_for_sales_profile(
+                cfg,
+                iva_applicable=bool(profile_settings['iva_applicable']),
+                inc_applicable=bool(profile_settings['inc_applicable']),
+            )
             await conn.execute(
                 """INSERT INTO tenant_tax_config (
-                       tenant_id, inc_applicable, iva_applicable, updated_at
+                       tenant_id, inc_applicable, iva_applicable,
+                       tax_lines, category_map, menu_category_line_map, updated_at
                    )
-                   VALUES ($1, $2, $3, now())
+                   VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, now())
                    ON CONFLICT (tenant_id) DO UPDATE SET
                        inc_applicable = EXCLUDED.inc_applicable,
                        iva_applicable = EXCLUDED.iva_applicable,
+                       tax_lines = EXCLUDED.tax_lines,
+                       category_map = EXCLUDED.category_map,
+                       menu_category_line_map = EXCLUDED.menu_category_line_map,
                        updated_at = now()""",
                 tenant_id,
                 profile_settings['inc_applicable'],
                 profile_settings['iva_applicable'],
+                json.dumps(tax_lines),
+                json.dumps(category_map),
+                json.dumps(menu_map),
             )
 
     return {'success': True, 'message': 'Datos fiscales actualizados'}
