@@ -278,6 +278,78 @@ def test_put_fiscal_data_applies_explicit_profile_to_fiscal_and_tax_config():
     assert tax_call.args[4] == "[]"
 
 
+def test_put_fiscal_data_with_tax_config_delegates_to_update_tax_config():
+    """#2033 — Facturación one-save sends tax_config on fiscal-data PUT."""
+    session = _build_session()
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=None)
+    tax_update = AsyncMock(return_value={"success": True, "data": {}})
+
+    @asynccontextmanager
+    async def fiscal_db_ctx():
+        yield conn
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch("app.database.get_db_connection", return_value=fiscal_db_ctx()), \
+         patch("app.services.tenant_config_service.update_tax_config", tax_update):
+        response = TestClient(_build_app()).put(
+            "/api/tenant/fiscal-data",
+            json={
+                "nit": "123456789",
+                "business_name": "Restaurante INC",
+                "type_organization_id": 2,
+                "tax_level_id": 5,
+                "sales_tax_profile": "inc_responsible",
+                "tax_config": {
+                    "inc_applicable": True,
+                    "inc_included_in_price": True,
+                    "iva_applicable": False,
+                    "iva_included_in_price": False,
+                    "liquor_tax_applicable": True,
+                    "liquor_tax_included_in_price": True,
+                    "iva_rate": 0.19,
+                    "inc_rate": 0.08,
+                    "liquor_tax_rate": 0.05,
+                    "tax_lines": [
+                        {
+                            "key": "inc",
+                            "label": "INC 8%",
+                            "rate": 0.08,
+                            "included_in_price": True,
+                            "gl_role": "inc",
+                            "mode": "primary",
+                            "exclusive_group": "vat",
+                        },
+                        {
+                            "key": "liquor",
+                            "label": "IVA licores 5%",
+                            "rate": 0.05,
+                            "included_in_price": True,
+                            "gl_role": "liquor",
+                            "mode": "alternate",
+                            "exclusive_group": "vat",
+                        },
+                    ],
+                    "category_map": {"standard": "inc", "liquor": "liquor", "exempt": None},
+                    "menu_category_line_map": {},
+                    "exempt_menu_category_ids": [],
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    # Full tax_config path skips profile-only sync execute #2
+    assert conn.execute.await_count == 1
+    tax_update.assert_awaited_once()
+    tax_model = tax_update.await_args.args[1]
+    assert tax_model.inc_applicable is True
+    assert tax_model.iva_applicable is False
+    assert tax_model.liquor_tax_applicable is True
+
+
 def test_put_fiscal_data_rejects_non_responsible_inc_for_legal_entity():
     session = _build_session()
 
