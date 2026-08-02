@@ -326,12 +326,14 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
     """
     Upsert fiscal data for the active tenant.
 
-    This endpoint intentionally does not mutate tenant_tax_config. A tenant can
-    update organization type or IVA responsibility without auto-enabling INC/IVA
-    on sale lines.
+    Optional body key `tax_config` (TaxConfigUpdate shape) persists Impuestos in
+    the same request (#2033). GET/PUT /tax-config remain for Menú and other
+    callers. Without `tax_config`, sales_tax_profile still syncs IVA/INC columns
+    + tax_lines (#2031).
     """
     from app.core.middleware import require_valid_session
     from app.database import get_db_connection
+    from pydantic import ValidationError
 
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -342,6 +344,9 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
     matias_company_id = _normalize_matias_company_id(data)
     electronic_invoicing_requested = bool(data.get('electronic_invoicing_requested', False))
     sales_tax_profile = _normalize_sales_tax_profile(data)
+    tax_raw = data.get('tax_config')
+    if tax_raw is not None and not isinstance(tax_raw, dict):
+        raise HTTPException(status_code=400, detail='tax_config must be an object')
 
     type_organization_id = data.get('type_organization_id', 1)
     tax_level_id = data.get('tax_level_id', 5)
@@ -412,7 +417,8 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
             show_logo,
         )
 
-        if profile_settings:
+        # Profile-only sync when Facturación did not send a full tax_config payload.
+        if profile_settings and tax_raw is None:
             from app.services.hospitality_tax_engine import sync_co_tax_lines_for_sales_profile
 
             existing = await conn.fetchrow(
@@ -445,6 +451,20 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
                 json.dumps(category_map),
                 json.dumps(menu_map),
             )
+
+    if tax_raw is not None:
+        payload = dict(tax_raw)
+        if profile_settings:
+            payload['iva_applicable'] = bool(profile_settings['iva_applicable'])
+            payload['inc_applicable'] = bool(profile_settings['inc_applicable'])
+        try:
+            tax_model = TaxConfigUpdate(**payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f'Invalid tax_config: {exc.errors()[0].get("msg", "validation error")}',
+            ) from exc
+        await tenant_config_service.update_tax_config(request, tax_model)
 
     return {'success': True, 'message': 'Datos fiscales actualizados'}
 
