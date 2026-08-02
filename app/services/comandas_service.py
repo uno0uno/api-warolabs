@@ -172,7 +172,7 @@ _UNFIRED_ORDER_ITEMS_SELECT = """
     LEFT JOIN tenant_promotions tp ON tp.id = oi.applied_promotion_id
 """
 
-# Allowed status transitions — any move not in this map is rejected with 422.
+# Allowed status transitions — illegal moves raise ValidationError (HTTP 400).
 # 'recall' (delivered → ready) is handled by recall_comanda() separately.
 ALLOWED_TRANSITIONS: Dict[str, List[str]] = {
     'pending':   ['preparing', 'ready', 'cancelled'],
@@ -181,6 +181,28 @@ ALLOWED_TRANSITIONS: Dict[str, List[str]] = {
     'delivered': [],
     'cancelled': [],
 }
+
+# Happy-path rank for stale/duplicate KDS PATCHes (#2037). Same status or
+# already further along → soft success (no-op). cancelled is terminal-only.
+STATUS_RANK: Dict[str, int] = {
+    'pending': 0,
+    'preparing': 1,
+    'ready': 2,
+    'delivered': 3,
+}
+
+
+def _is_stale_status_request(current_status: str, new_status: str) -> bool:
+    """True when KDS asks for a status the comanda already has or has passed."""
+    if current_status == new_status:
+        return True
+    if current_status == 'cancelled' or new_status == 'cancelled':
+        return False
+    cur = STATUS_RANK.get(current_status)
+    nxt = STATUS_RANK.get(new_status)
+    if cur is None or nxt is None:
+        return False
+    return cur >= nxt
 
 
 async def _notify_comanda_ready(conn, tenant_id: UUID, comanda_id: UUID) -> None:
@@ -783,7 +805,8 @@ async def update_comanda_status(
 ) -> dict:
     """
     Updates comanda status and sets appropriate timestamps.
-    Enforces allowed-transition map — raises 422 for illegal transitions.
+    Enforces allowed-transition map — raises ValidationError (400) for illegal
+    transitions. Same-status or already-past requests are idempotent no-ops (#2037).
     """
     try:
         session = require_valid_session(request)
@@ -808,6 +831,21 @@ async def update_comanda_status(
                 raise NotFoundError(f"Comanda {comanda_id} no encontrada")
 
             current_status = row['status']
+
+            # Mostrador POS only: skip 'ready' — barra uses table-like lifecycle (#799)
+            # Resolve before stale check so delivered POS cards accept ready retries.
+            effective_requested = new_status
+            if new_status == 'ready' and row['source_type'] == 'pos' and not row['is_bar']:
+                effective_requested = 'delivered'
+
+            if _is_stale_status_request(current_status, effective_requested):
+                return {
+                    "success": True,
+                    "noop": True,
+                    "message": f"Comanda ya en {current_status}",
+                    "status": current_status,
+                }
+
             allowed_next = ALLOWED_TRANSITIONS.get(current_status, [])
 
             if new_status not in allowed_next:
@@ -816,9 +854,7 @@ async def update_comanda_status(
                     f"Transiciones permitidas desde '{current_status}': {allowed_next}"
                 )
 
-            # Mostrador POS only: skip 'ready' — barra uses table-like lifecycle (#799)
-            if new_status == 'ready' and row['source_type'] == 'pos' and not row['is_bar']:
-                new_status = 'delivered'
+            new_status = effective_requested
 
             sql_updates = ["status = $1", "updated_at = NOW()"]
             params: List[Any] = [new_status, comanda_id, tenant_id]
@@ -900,15 +936,19 @@ async def bulk_update_comanda_status(
 
             for row in rows:
                 current_status = row['status']
-                allowed_next = ALLOWED_TRANSITIONS.get(current_status, [])
-                if new_status not in allowed_next:
-                    skipped += 1
-                    continue
-
                 # Mostrador POS only — barra keeps ready until expedited (#799)
                 effective_status = new_status
                 if new_status == 'ready' and row['source_type'] == 'pos' and not row['is_bar']:
                     effective_status = 'delivered'
+
+                if _is_stale_status_request(current_status, effective_status):
+                    updated += 1
+                    continue
+
+                allowed_next = ALLOWED_TRANSITIONS.get(current_status, [])
+                if new_status not in allowed_next:
+                    skipped += 1
+                    continue
 
                 sql_updates = ["status = $1", "updated_at = NOW()"]
                 params: List[Any] = [effective_status, row['id'], tenant_id]
