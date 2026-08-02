@@ -12,6 +12,7 @@ from app.services.hospitality_tax_engine import (
     resolve_effective_tax_category,
     resolve_product_tax_lines,
     resolve_tax_profile,
+    sync_co_tax_lines_for_sales_profile,
     tax_amount_decimal,
     tax_amount_float,
 )
@@ -496,3 +497,83 @@ def test_stack_mode_sums_primary_and_selected():
     assert totals["standard_tax"] == Decimal("1800")
     assert totals["standard_is_additive"] is True
     assert totals["standard_additive"] == Decimal("1800")
+
+
+def test_sync_co_tax_lines_flips_iva_to_inc_and_keeps_custom():
+    """#2031 — Perfil de ventas must rewrite tax_lines so POS is not hybrid."""
+    cat = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    cfg = {
+        "iva_applicable": True,
+        "iva_rate": 0.19,
+        "iva_included_in_price": True,
+        "inc_applicable": False,
+        "inc_rate": 0.08,
+        "inc_included_in_price": True,
+        "liquor_tax_applicable": True,
+        "liquor_tax_rate": 0.05,
+        "liquor_tax_included_in_price": True,
+        "tax_lines": [
+            {
+                "key": "iva",
+                "label": "IVA 19%",
+                "rate": 0.19,
+                "included_in_price": True,
+                "gl_role": "iva",
+                "mode": "primary",
+                "exclusive_group": "vat",
+            },
+            {
+                "key": "liquor",
+                "label": "IVA licores 5%",
+                "rate": 0.05,
+                "included_in_price": True,
+                "gl_role": "liquor",
+                "mode": "alternate",
+                "exclusive_group": "vat",
+            },
+            {
+                "key": "bebidas",
+                "label": "Bebidas 5%",
+                "rate": 0.05,
+                "included_in_price": True,
+                "gl_role": "iva",
+                "mode": "alternate",
+                "exclusive_group": "vat",
+            },
+        ],
+        "category_map": {"standard": "iva", "liquor": "liquor", "exempt": None},
+        "menu_category_line_map": {cat: "iva"},
+    }
+    lines, category_map, menu_map = sync_co_tax_lines_for_sales_profile(
+        cfg,
+        iva_applicable=False,
+        inc_applicable=True,
+    )
+    assert [x["key"] for x in lines] == ["inc", "liquor", "bebidas"]
+    assert lines[0]["label"] == "INC 8%"
+    assert lines[0]["mode"] == "primary"
+    assert category_map["standard"] == "inc"
+    assert category_map["liquor"] == "liquor"
+    assert menu_map[cat] == "inc"
+
+
+def test_sync_co_tax_lines_clears_primary_when_non_responsible():
+    lines, category_map, menu_map = sync_co_tax_lines_for_sales_profile(
+        {
+            "tax_lines": [
+                {
+                    "key": "iva",
+                    "label": "IVA 19%",
+                    "rate": 0.19,
+                    "mode": "primary",
+                    "gl_role": "iva",
+                },
+            ],
+            "menu_category_line_map": {"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa": "iva"},
+        },
+        iva_applicable=False,
+        inc_applicable=False,
+    )
+    assert lines == []
+    assert category_map["standard"] is None
+    assert menu_map["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"] is None
