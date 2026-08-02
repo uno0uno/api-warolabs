@@ -25,6 +25,10 @@ class TaxConfigResponse(BaseModel):
     liquor_tax_rate: Decimal
     liquor_tax_gl_account_code: str
     liquor_tax_gl_account_id: Optional[UUID] = None
+    liquor_tax_included_in_price: bool = Field(
+        default=False,
+        description="CO liquor column Incluido/Suma; tax_lines[].included_in_price preferred when set",
+    )
     tax_lines: Optional[List[Dict[str, Any]]] = Field(
         default=None,
         description="Optional profile tax_lines[]; when null, INC/IVA/liquor columns adapt",
@@ -59,6 +63,10 @@ class TaxConfigUpdate(BaseModel):
     iva_applicable: bool
     iva_included_in_price: bool
     liquor_tax_applicable: bool
+    liquor_tax_included_in_price: Optional[bool] = Field(
+        default=None,
+        description="Omit to leave unchanged; Incluido/Suma for CO liquor column",
+    )
     inc_gl_account_id: Optional[UUID] = None
     iva_gl_account_id: Optional[UUID] = None
     liquor_tax_gl_account_id: Optional[UUID] = None
