@@ -6,10 +6,13 @@ from app.services.hospitality_tax_engine import (
     annotate_line_tax_amounts,
     compute_category_breakdown,
     compute_gl_category_taxes,
+    compute_items_tax_totals,
     liquor_tax_label_for_config,
     resolve_applicable_tax_lines,
     resolve_effective_tax_category,
+    resolve_product_tax_lines,
     resolve_tax_profile,
+    tax_amount_decimal,
     tax_amount_float,
 )
 from app.services.hospitality_tax_packs import (
@@ -190,7 +193,8 @@ def test_annotate_line_tax_mx_exclusive_sums_to_cart():
     assert annotated[0]["included_in_price"] is False
     assert annotated[0]["tax_amount"] == round(207 * 0.16)
     assert sum(float(l["tax_amount"]) for l in annotated) == cart_tax
-    assert cart_tax == round((207 + 1740) * 0.16)
+    # Per-item rounding (#765) — not one round on the summed base.
+    assert cart_tax == round(207 * 0.16) + round(1740 * 0.16)
 
 
 def test_annotate_line_tax_exempt_is_zero():
@@ -363,3 +367,132 @@ def test_resolve_applicable_primary_selection():
     profile = resolve_tax_profile(cfg)
     applied = resolve_applicable_tax_lines(profile, selected_key="btw_reduced")
     assert [line.key for line in applied] == ["btw_reduced"]
+
+
+def test_co_liquor_included_gl_extract_not_additive():
+    """#765 — Bebidas→liquor Incluido: extract 30000@5% ≈ 1428.57, not 1500."""
+    cfg = {
+        "inc_applicable": False,
+        "iva_applicable": True,
+        "iva_rate": 0.19,
+        "iva_included_in_price": True,
+        "liquor_tax_applicable": True,
+        "liquor_tax_rate": 0.05,
+        "liquor_tax_included_in_price": True,
+        "commercial_tax_applicable": False,
+        "tax_lines": [
+            {
+                "key": "iva",
+                "label": "IVA 19%",
+                "rate": 0.19,
+                "included_in_price": True,
+                "gl_role": "iva",
+                "mode": "primary",
+                "exclusive_group": "vat",
+            },
+            {
+                "key": "liquor",
+                "label": "IVA licores 5%",
+                "rate": 0.05,
+                "included_in_price": True,
+                "gl_role": "liquor",
+                "mode": "alternate",
+                "exclusive_group": "vat",
+            },
+        ],
+        "category_map": {"standard": "iva", "liquor": "liquor", "exempt": None},
+        "menu_category_line_map": {
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb": "liquor",
+        },
+    }
+    cat = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    applied = resolve_product_tax_lines(cfg, category_id=cat)
+    assert [line.key for line in applied] == ["liquor"]
+    tax, is_additive = tax_amount_decimal(Decimal("30000"), applied[0])
+    assert is_additive is False
+    assert tax == Decimal("30000") - (Decimal("30000") / Decimal("1.05"))
+    assert abs(float(tax) - 1428.57142857) < 1e-6
+
+    totals = compute_items_tax_totals(
+        [{"category_id": cat, "subtotal": Decimal("30000")}],
+        cfg,
+    )
+    assert totals["liquor_is_additive"] is False
+    assert totals["liquor_additive"] == Decimal("0")
+    assert totals["liquor_tax"] == tax
+    assert additive_order_tax_total(0, float(tax), cfg) == 0.0
+
+    # Fallback subtotal path also honors included flag.
+    gl = compute_gl_category_taxes(Decimal("0"), Decimal("30000"), cfg)
+    assert gl["liquor_is_additive"] is False
+    assert gl["liquor_tax"] == tax
+
+
+def test_override_mapped_category_only_alternate_rate():
+    """#765 — override: mapped Bebidas use liquor only, not IVA+liquor."""
+    cfg = tax_config_from_wave1_pack(WAVE2_MULTI_TAX_PACKS["DE"])
+    cat = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    cfg["menu_category_line_map"] = {cat: "mwst_standard"}
+    applied = resolve_product_tax_lines(cfg, category_id=cat)
+    assert [line.key for line in applied] == ["mwst_standard"]
+    rows = [{"category_id": cat, "subtotal": 10000}]
+    std, liq, _ = compute_category_breakdown(rows, cfg)
+    assert std == 0.0
+    assert liq == 1900.0
+    assert resolve_effective_tax_category(cfg, category_id=cat) == "liquor"
+
+
+def test_stack_mode_sums_primary_and_selected():
+    """#765 — stack adds both primary and selected tributes."""
+    cfg = {
+        "commercial_tax_applicable": True,
+        "tax_lines": [
+            {
+                "key": "iva",
+                "label": "IVA 16%",
+                "rate": 0.16,
+                "included_in_price": False,
+                "gl_role": "iva",
+                "mode": "primary",
+                "exclusive_group": "vat",
+            },
+            {
+                "key": "tourist",
+                "label": "Tourist 2%",
+                "rate": 0.02,
+                "included_in_price": False,
+                "gl_role": "iva",
+                "mode": "stack",
+            },
+        ],
+        "category_map": {"standard": "iva", "liquor": "iva", "exempt": None},
+        "menu_category_line_map": {
+            "dddddddd-dddd-dddd-dddd-dddddddddddd": "tourist",
+        },
+    }
+    cat = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    applied = resolve_product_tax_lines(cfg, category_id=cat)
+    assert [line.key for line in applied] == ["iva", "tourist"]
+    rows = [{"category_id": cat, "subtotal": 10000}]
+    std, liq, _ = compute_category_breakdown(rows, cfg)
+    assert std == 1600.0 + 200.0
+    assert liq == 0.0
+
+    annotated = annotate_line_tax_amounts(
+        [{
+            "id": "1",
+            "category_id": cat,
+            "net_total": 10000,
+            "tax_resolution": "inherit",
+        }],
+        cfg,
+        reconcile_to=(std, liq),
+    )
+    assert annotated[0]["tax_amount"] == 1800.0
+    assert "IVA 16%" in annotated[0]["tax_label"]
+    assert "Tourist 2%" in annotated[0]["tax_label"]
+
+    totals = compute_items_tax_totals(rows, cfg)
+    assert totals["standard_tax"] == Decimal("1800")
+    assert totals["standard_is_additive"] is True
+    assert totals["standard_additive"] == Decimal("1800")
