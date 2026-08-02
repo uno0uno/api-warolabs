@@ -106,16 +106,12 @@ def resolve_product_tax_line(
 ) -> Optional[TaxLine]:
     """Epic #1881 order: override → exempt set → menu map → primary.
 
-    CO / column-only configs ignore menu maps and use legacy tax_category.
+    Works for commercial ``tax_lines`` and CO column profiles (iva|inc|liquor).
     Empty menu map + empty exempt set dual-reads legacy tax_category so
     existing standard/liquor POS keeps working until maps are configured.
     """
     profile = resolve_tax_profile(tax_config)
     legacy_category = tax_category or "standard"
-
-    # No commercial tax_lines → CO adapter; ignore menu maps.
-    if not _as_mapping_list(tax_config.get("tax_lines")):
-        return profile.line_for_category(legacy_category)
 
     # commercial_tax_applicable=false yields empty profile.lines
     if not profile.lines:

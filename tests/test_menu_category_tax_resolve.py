@@ -148,7 +148,7 @@ def test_empty_menu_map_dual_reads_legacy_tax_category():
     assert standard is not None and standard.key == "mwst"
 
 
-def test_co_ignores_menu_maps():
+def test_co_applies_menu_maps():
     cfg = {
         "inc_applicable": True,
         "inc_rate": 0.08,
@@ -156,18 +156,33 @@ def test_co_ignores_menu_maps():
         "iva_applicable": False,
         "liquor_tax_applicable": True,
         "liquor_tax_rate": 0.05,
-        "menu_category_line_map": {CAT_A: "mwst"},
-        "exempt_menu_category_ids": [CAT_A],
+        "menu_category_line_map": {CAT_A: "liquor"},
+        "exempt_menu_category_ids": [CAT_B],
     }
-    # CO path: exempt set must not apply; use tax_category
-    line = resolve_product_tax_line(
+    liquor = resolve_product_tax_line(
         cfg,
         category_id=CAT_A,
         tax_resolution="inherit",
         tax_category="standard",
     )
-    assert line is not None
-    assert line.key == "inc"
+    assert liquor is not None and liquor.key == "liquor"
+
+    exempt = resolve_product_tax_line(
+        cfg,
+        category_id=CAT_B,
+        tax_resolution="inherit",
+        tax_category="standard",
+    )
+    assert exempt is None
+
+    # Unmapped category → primary INC
+    primary = resolve_product_tax_line(
+        cfg,
+        category_id=CAT_C,
+        tax_resolution="inherit",
+        tax_category="standard",
+    )
+    assert primary is not None and primary.key == "inc"
 
 
 def test_effective_category_liquor_bucket():
