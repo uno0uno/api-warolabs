@@ -204,24 +204,24 @@ async def tenant_detection_middleware(request: Request, call_next):
         )
         kds_token = request.query_params.get('token')
         if kds_public_path and kds_token:
-            # Validate KDS token and inject tenant_id
+            # Validate KDS token and inject tenant_id (both queries inside one conn)
             try:
                 from app.database import get_db_connection as _get_conn
+                _t_row = None
                 async with _get_conn() as _conn:
                     _token_row = await _conn.fetchrow(
                         "SELECT tenant_id FROM kds_tokens WHERE token = $1 AND revoked_at IS NULL",
                         kds_token,
                     )
-                if _token_row:
-                    _tid = _token_row['tenant_id']
-                    _t_row = await _conn.fetchrow(
-                        "SELECT id AS tenant_id, name AS tenant_name, slug AS tenant_slug, slug AS tenant_email, slug AS site, name AS brand_name, true AS is_active FROM tenants WHERE id = $1",
-                        _tid,
-                    )
-                    if _t_row:
-                        request.state.tenant_context = TenantContext(dict(_t_row))
-                        response = await call_next(request)
-                        return response
+                    if _token_row:
+                        _t_row = await _conn.fetchrow(
+                            "SELECT id AS tenant_id, name AS tenant_name, slug AS tenant_slug, slug AS tenant_email, slug AS site, name AS brand_name, true AS is_active FROM tenants WHERE id = $1",
+                            _token_row['tenant_id'],
+                        )
+                if _t_row:
+                    request.state.tenant_context = TenantContext(dict(_t_row))
+                    response = await call_next(request)
+                    return response
             except Exception:
                 pass
         elif kds_public_path:
