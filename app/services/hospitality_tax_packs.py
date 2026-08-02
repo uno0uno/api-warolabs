@@ -225,6 +225,8 @@ WAVE2_MULTI_TAX_PACKS: Dict[str, Dict[str, Any]] = {
                 "rate": 0.07,
                 "included_in_price": False,
                 "gl_role": "iva",
+                "mode": "primary",
+                "exclusive_group": "vat",
             },
             {
                 "key": "mwst_standard",
@@ -232,6 +234,8 @@ WAVE2_MULTI_TAX_PACKS: Dict[str, Dict[str, Any]] = {
                 "rate": 0.19,
                 "included_in_price": False,
                 "gl_role": "iva",
+                "mode": "alternate",
+                "exclusive_group": "vat",
             },
         ],
         "category_map": {
@@ -248,6 +252,8 @@ WAVE2_MULTI_TAX_PACKS: Dict[str, Dict[str, Any]] = {
                 "rate": 0.09,
                 "included_in_price": False,
                 "gl_role": "iva",
+                "mode": "primary",
+                "exclusive_group": "vat",
             },
             {
                 "key": "btw_standard",
@@ -255,6 +261,8 @@ WAVE2_MULTI_TAX_PACKS: Dict[str, Dict[str, Any]] = {
                 "rate": 0.21,
                 "included_in_price": False,
                 "gl_role": "iva",
+                "mode": "alternate",
+                "exclusive_group": "vat",
             },
         ],
         "category_map": {

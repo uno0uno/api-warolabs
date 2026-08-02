@@ -11,6 +11,9 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import json
 
 
+TAX_LINE_MODES = frozenset({"primary", "alternate", "stack"})
+
+
 @dataclass(frozen=True)
 class TaxLine:
     key: str
@@ -20,6 +23,8 @@ class TaxLine:
     gl_role: str  # resolve_tax_account kind: inc | iva | liquor
     gl_account_id: Any = None
     gl_account_code: Optional[str] = None
+    mode: str = "primary"  # primary | alternate | stack
+    exclusive_group: Optional[str] = None  # e.g. vat — refuse stack within same group
 
 
 @dataclass(frozen=True)
@@ -34,6 +39,9 @@ class TaxProfile:
         return self.lines.get(key)
 
     def primary_line(self) -> Optional[TaxLine]:
+        for line in self.lines.values():
+            if line.mode == "primary":
+                return line
         return self.line_for_category("standard")
 
 
@@ -189,6 +197,18 @@ def liquor_tax_label_for_config(tax_config: Mapping[str, Any]) -> str:
     return "IVA licores 5%"
 
 
+def _normalize_tax_line_mode(raw: Any) -> str:
+    mode = str(raw or "primary").strip().lower()
+    return mode if mode in TAX_LINE_MODES else "primary"
+
+
+def _normalize_exclusive_group(raw: Any) -> Optional[str]:
+    if raw is None:
+        return None
+    group = str(raw).strip()
+    return group or None
+
+
 def _line_from_mapping(item: Mapping[str, Any]) -> Optional[TaxLine]:
     key = str(item.get("key") or "").strip()
     if not key:
@@ -205,6 +225,16 @@ def _line_from_mapping(item: Mapping[str, Any]) -> Optional[TaxLine]:
         gl_role=gl_role,
         gl_account_id=item.get("gl_account_id"),
         gl_account_code=item.get("gl_account_code"),
+        mode=_normalize_tax_line_mode(item.get("mode")),
+        exclusive_group=_normalize_exclusive_group(item.get("exclusive_group")),
+    )
+
+
+def _co_columns_active(tax_config: Mapping[str, Any]) -> bool:
+    return bool(
+        tax_config.get("inc_applicable")
+        or tax_config.get("iva_applicable")
+        or tax_config.get("liquor_tax_applicable")
     )
 
 
@@ -226,6 +256,8 @@ def _profile_from_co_columns(tax_config: Mapping[str, Any]) -> TaxProfile:
             gl_role="inc",
             gl_account_id=tax_config.get("inc_gl_account_id"),
             gl_account_code=tax_config.get("inc_gl_account_code"),
+            mode="primary",
+            exclusive_group="vat",
         )
         category_map["standard"] = "inc"
     elif tax_config.get("iva_applicable"):
@@ -238,6 +270,8 @@ def _profile_from_co_columns(tax_config: Mapping[str, Any]) -> TaxProfile:
             gl_role="iva",
             gl_account_id=tax_config.get("iva_gl_account_id"),
             gl_account_code=tax_config.get("iva_gl_account_code"),
+            mode="primary",
+            exclusive_group="vat",
         )
         category_map["standard"] = "iva"
 
@@ -247,22 +281,59 @@ def _profile_from_co_columns(tax_config: Mapping[str, Any]) -> TaxProfile:
             key="liquor",
             label="IVA licores 5%" if abs(rate - 0.05) < 1e-9 else f"IVA licores {round(rate * 100)}%",
             rate=rate,
-            included_in_price=False,  # CO liquor tax is always additive
+            included_in_price=bool(tax_config.get("liquor_tax_included_in_price", False)),
             gl_role="liquor",
             gl_account_id=tax_config.get("liquor_tax_gl_account_id"),
             gl_account_code=tax_config.get("liquor_tax_gl_account_code"),
+            mode="alternate",
+            exclusive_group="vat",
         )
         category_map["liquor"] = "liquor"
 
     return TaxProfile(lines=lines, category_map=category_map)
 
 
+def resolve_applicable_tax_lines(
+    profile: TaxProfile,
+    *,
+    selected_key: Optional[str] = None,
+) -> List[TaxLine]:
+    """Seed for #765: lines that apply for a mapped/selected key.
+
+    - alternate: selected replaces primary (override)
+    - stack: primary + selected when both exist
+    - primary / missing mode: selected only (or primary when no selection)
+    """
+    primary = profile.primary_line()
+    key = (selected_key or "").strip()
+    if not key:
+        return [primary] if primary else []
+    selected = profile.lines.get(key)
+    if selected is None:
+        return [primary] if primary else []
+
+    mode = selected.mode if selected.mode in TAX_LINE_MODES else "primary"
+    if mode == "alternate":
+        return [selected]
+    if mode == "stack":
+        out: List[TaxLine] = []
+        if primary is not None and primary.key != selected.key:
+            out.append(primary)
+        out.append(selected)
+        return out
+    return [selected]
+
+
 def resolve_tax_profile(tax_config: Mapping[str, Any]) -> TaxProfile:
     """Build a TaxProfile from explicit tax_lines or CO column adapter."""
     raw_lines = _as_mapping_list(tax_config.get("tax_lines"))
     if raw_lines:
-        # Commercial disable: keep stored lines in DB but apply no tax (#1868).
-        if tax_config.get("commercial_tax_applicable") is False:
+        # Commercial disable (#1868): empty profile for commercial-only tenants.
+        # CO may persist tax_lines while commercial_tax_applicable stays false.
+        if (
+            tax_config.get("commercial_tax_applicable") is False
+            and not _co_columns_active(tax_config)
+        ):
             return TaxProfile(
                 lines={},
                 category_map={"standard": None, "liquor": None, "exempt": None},

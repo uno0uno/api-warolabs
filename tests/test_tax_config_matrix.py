@@ -114,6 +114,111 @@ def test_validate_allows_null_exempt_and_zero_rate():
     )
 
 
+def test_validate_accepts_mode_and_exclusive_group():
+    validate_tax_matrix_payload(
+        [
+            {
+                "key": "iva",
+                "rate": 0.19,
+                "mode": "primary",
+                "exclusive_group": "vat",
+                "included_in_price": True,
+            },
+            {
+                "key": "liquor",
+                "rate": 0.05,
+                "mode": "alternate",
+                "exclusive_group": "vat",
+                "included_in_price": True,
+            },
+            {
+                "key": "tourist",
+                "rate": 0.02,
+                "mode": "stack",
+                "included_in_price": False,
+            },
+        ],
+        {"standard": "iva", "liquor": "liquor", "exempt": None},
+    )
+
+
+def test_validate_rejects_invalid_mode():
+    with pytest.raises(HTTPException) as exc:
+        validate_tax_matrix_payload(
+            [{"key": "iva", "rate": 0.19, "mode": "xor"}],
+            {"standard": "iva", "exempt": None},
+        )
+    assert exc.value.status_code == 400
+    assert "mode must be one of" in str(exc.value.detail)
+
+
+def test_validate_rejects_stack_inside_exclusive_group():
+    with pytest.raises(HTTPException) as exc:
+        validate_tax_matrix_payload(
+            [
+                {
+                    "key": "iva",
+                    "rate": 0.19,
+                    "mode": "primary",
+                    "exclusive_group": "vat",
+                },
+                {
+                    "key": "frontera",
+                    "rate": 0.08,
+                    "mode": "stack",
+                    "exclusive_group": "vat",
+                },
+            ],
+            {"standard": "iva", "exempt": None},
+        )
+    assert exc.value.status_code == 400
+    assert "cannot use mode=stack inside exclusive_group" in str(exc.value.detail)
+
+
+def test_mode_included_round_trip_shape():
+    """GET→PUT→GET preserves mode + included_in_price on tax_lines."""
+    lines = [
+        {
+            "key": "iva",
+            "label": "IVA 19%",
+            "rate": 0.19,
+            "included_in_price": True,
+            "gl_role": "iva",
+            "mode": "primary",
+            "exclusive_group": "vat",
+        },
+        {
+            "key": "liquor",
+            "label": "IVA licores 5%",
+            "rate": 0.05,
+            "included_in_price": True,
+            "gl_role": "liquor",
+            "mode": "alternate",
+            "exclusive_group": "vat",
+        },
+    ]
+    as_strings = {
+        "tax_lines": __import__("json").dumps(lines),
+        "category_map": __import__("json").dumps(
+            {"standard": "iva", "liquor": "liquor", "exempt": None}
+        ),
+        "liquor_tax_included_in_price": True,
+    }
+    got = decode_tax_config_jsonb(as_strings)
+    validate_tax_matrix_payload(got["tax_lines"], got["category_map"])
+    again = decode_tax_config_jsonb(
+        {
+            "tax_lines": __import__("json").dumps(got["tax_lines"]),
+            "category_map": __import__("json").dumps(got["category_map"]),
+            "liquor_tax_included_in_price": got["liquor_tax_included_in_price"],
+        }
+    )
+    assert again["tax_lines"][0]["mode"] == "primary"
+    assert again["tax_lines"][1]["mode"] == "alternate"
+    assert again["tax_lines"][1]["included_in_price"] is True
+    assert again["liquor_tax_included_in_price"] is True
+
+
 def test_co_rate_fields_on_update_model():
     body = TaxConfigUpdate(
         inc_applicable=True,

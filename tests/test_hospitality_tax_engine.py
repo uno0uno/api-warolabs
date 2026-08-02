@@ -7,11 +7,16 @@ from app.services.hospitality_tax_engine import (
     compute_category_breakdown,
     compute_gl_category_taxes,
     liquor_tax_label_for_config,
+    resolve_applicable_tax_lines,
     resolve_effective_tax_category,
     resolve_tax_profile,
     tax_amount_float,
 )
-from app.services.hospitality_tax_packs import WAVE2_SIMPLE_TAX_PACKS, tax_config_from_wave1_pack
+from app.services.hospitality_tax_packs import (
+    WAVE2_MULTI_TAX_PACKS,
+    WAVE2_SIMPLE_TAX_PACKS,
+    tax_config_from_wave1_pack,
+)
 
 
 def _inc_config(*, included: bool = True, rate: float = 0.08):
@@ -262,3 +267,99 @@ def test_co_distinct_liquor_still_buckets_liquor():
     assert label == "INC 8%"
     assert liquor_tax_label_for_config(cfg) == "IVA licores 5%"
     assert resolve_effective_tax_category(cfg, tax_category="liquor") == "liquor"
+
+
+def test_co_liquor_honors_included_in_price_column():
+    cfg = _co_full()
+    cfg["liquor_tax_included_in_price"] = True
+    profile = resolve_tax_profile(cfg)
+    liquor = profile.line_for_category("liquor")
+    assert liquor is not None
+    assert liquor.included_in_price is True
+    assert liquor.mode == "alternate"
+    assert liquor.exclusive_group == "vat"
+    # Extractive: 20000 * 0.05 / 1.05 ≈ 952
+    assert tax_amount_float(20000, liquor) == 952.0
+
+
+def test_co_tax_lines_apply_when_commercial_flag_false():
+    """#764 — CO may persist tax_lines without enabling commercial flag."""
+    cfg = {
+        "inc_applicable": False,
+        "iva_applicable": True,
+        "iva_rate": 0.19,
+        "iva_included_in_price": True,
+        "liquor_tax_applicable": True,
+        "liquor_tax_rate": 0.05,
+        "liquor_tax_included_in_price": True,
+        "commercial_tax_applicable": False,
+        "tax_lines": [
+            {
+                "key": "iva",
+                "label": "IVA 19%",
+                "rate": 0.19,
+                "included_in_price": True,
+                "gl_role": "iva",
+                "mode": "primary",
+                "exclusive_group": "vat",
+            },
+            {
+                "key": "liquor",
+                "label": "IVA licores 5%",
+                "rate": 0.05,
+                "included_in_price": True,
+                "gl_role": "liquor",
+                "mode": "alternate",
+                "exclusive_group": "vat",
+            },
+        ],
+        "category_map": {"standard": "iva", "liquor": "liquor", "exempt": None},
+    }
+    profile = resolve_tax_profile(cfg)
+    assert set(profile.lines) == {"iva", "liquor"}
+    assert profile.lines["liquor"].included_in_price is True
+    assert profile.lines["liquor"].mode == "alternate"
+
+
+def test_resolve_applicable_alternate_wins_over_primary():
+    cfg = tax_config_from_wave1_pack(WAVE2_MULTI_TAX_PACKS["DE"])
+    profile = resolve_tax_profile(cfg)
+    applied = resolve_applicable_tax_lines(profile, selected_key="mwst_standard")
+    assert [line.key for line in applied] == ["mwst_standard"]
+    assert applied[0].mode == "alternate"
+
+
+def test_resolve_applicable_stack_adds_primary_and_selected():
+    cfg = {
+        "commercial_tax_applicable": True,
+        "tax_lines": [
+            {
+                "key": "iva",
+                "label": "IVA 16%",
+                "rate": 0.16,
+                "included_in_price": False,
+                "gl_role": "iva",
+                "mode": "primary",
+                "exclusive_group": "vat",
+            },
+            {
+                "key": "tourist",
+                "label": "Tourist 2%",
+                "rate": 0.02,
+                "included_in_price": False,
+                "gl_role": "iva",
+                "mode": "stack",
+            },
+        ],
+        "category_map": {"standard": "iva", "liquor": "iva", "exempt": None},
+    }
+    profile = resolve_tax_profile(cfg)
+    applied = resolve_applicable_tax_lines(profile, selected_key="tourist")
+    assert [line.key for line in applied] == ["iva", "tourist"]
+
+
+def test_resolve_applicable_primary_selection():
+    cfg = tax_config_from_wave1_pack(WAVE2_MULTI_TAX_PACKS["NL"])
+    profile = resolve_tax_profile(cfg)
+    applied = resolve_applicable_tax_lines(profile, selected_key="btw_reduced")
+    assert [line.key for line in applied] == ["btw_reduced"]

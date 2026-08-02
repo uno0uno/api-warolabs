@@ -648,6 +648,9 @@ def decode_tax_config_jsonb(data: Mapping[str, Any]) -> Dict[str, Any]:
     return out
 
 
+_TAX_LINE_MODES = frozenset({"primary", "alternate", "stack"})
+
+
 def validate_tax_matrix_payload(
     tax_lines: Optional[List[Any]],
     category_map: Optional[Mapping[str, Any]],
@@ -674,6 +677,29 @@ def validate_tax_matrix_payload(
             if rate < 0:
                 raise HTTPException(
                     status_code=400, detail=f"tax line '{key}' rate must be >= 0"
+                )
+            mode_raw = item.get("mode", "primary")
+            mode = str(mode_raw or "primary").strip().lower()
+            if mode not in _TAX_LINE_MODES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"tax line '{key}' mode must be one of "
+                        f"primary|alternate|stack"
+                    ),
+                )
+            group_raw = item.get("exclusive_group")
+            if (
+                mode == "stack"
+                and group_raw is not None
+                and str(group_raw).strip()
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"tax line '{key}' cannot use mode=stack inside "
+                        f"exclusive_group '{str(group_raw).strip()}'"
+                    ),
                 )
             line_keys.add(key)
 
@@ -878,6 +904,7 @@ async def update_tax_config(request: Request, data) -> dict:
         iva_rate = _optional_co_rate(data, "iva_rate")
         inc_rate = _optional_co_rate(data, "inc_rate")
         liquor_tax_rate = _optional_co_rate(data, "liquor_tax_rate")
+        liquor_included = getattr(data, "liquor_tax_included_in_price", None)
         menu_map_json = _encode_menu_category_line_map(menu_category_line_map)
         exempt_ids_pg = _encode_exempt_menu_category_ids(exempt_menu_category_ids)
 
@@ -983,7 +1010,7 @@ async def update_tax_config(request: Request, data) -> dict:
                     tenant_id,
                     inc_applicable, inc_included_in_price,
                     iva_applicable, iva_included_in_price,
-                    liquor_tax_applicable,
+                    liquor_tax_applicable, liquor_tax_included_in_price,
                     inc_gl_account_id, iva_gl_account_id, liquor_tax_gl_account_id,
                     tax_lines, category_map, tax_jurisdiction_code,
                     commercial_tax_applicable,
@@ -991,11 +1018,12 @@ async def update_tax_config(request: Request, data) -> dict:
                     menu_category_line_map, exempt_menu_category_ids
                 )
                 VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12,
-                    COALESCE($13, false),
-                    COALESCE($14, 0.19), COALESCE($15, 0.08), COALESCE($16, 0.05),
-                    COALESCE($17::jsonb, '{}'::jsonb),
-                    COALESCE($18::uuid[], '{}'::uuid[])
+                    $1, $2, $3, $4, $5, $6, COALESCE($7, false),
+                    $8, $9, $10, $11::jsonb, $12::jsonb, $13,
+                    COALESCE($14, false),
+                    COALESCE($15, 0.19), COALESCE($16, 0.08), COALESCE($17, 0.05),
+                    COALESCE($18::jsonb, '{}'::jsonb),
+                    COALESCE($19::uuid[], '{}'::uuid[])
                 )
                 ON CONFLICT (tenant_id) DO UPDATE SET
                     inc_applicable        = EXCLUDED.inc_applicable,
@@ -1003,6 +1031,9 @@ async def update_tax_config(request: Request, data) -> dict:
                     iva_applicable        = EXCLUDED.iva_applicable,
                     iva_included_in_price = EXCLUDED.iva_included_in_price,
                     liquor_tax_applicable = EXCLUDED.liquor_tax_applicable,
+                    liquor_tax_included_in_price = COALESCE(
+                        $7, tenant_tax_config.liquor_tax_included_in_price
+                    ),
                     inc_gl_account_id = COALESCE(EXCLUDED.inc_gl_account_id, tenant_tax_config.inc_gl_account_id),
                     iva_gl_account_id = COALESCE(EXCLUDED.iva_gl_account_id, tenant_tax_config.iva_gl_account_id),
                     liquor_tax_gl_account_id = COALESCE(EXCLUDED.liquor_tax_gl_account_id, tenant_tax_config.liquor_tax_gl_account_id),
@@ -1016,15 +1047,15 @@ async def update_tax_config(request: Request, data) -> dict:
                         EXCLUDED.commercial_tax_applicable,
                         tenant_tax_config.commercial_tax_applicable
                     ),
-                    iva_rate = COALESCE($14, tenant_tax_config.iva_rate),
-                    inc_rate = COALESCE($15, tenant_tax_config.inc_rate),
-                    liquor_tax_rate = COALESCE($16, tenant_tax_config.liquor_tax_rate),
+                    iva_rate = COALESCE($15, tenant_tax_config.iva_rate),
+                    inc_rate = COALESCE($16, tenant_tax_config.inc_rate),
+                    liquor_tax_rate = COALESCE($17, tenant_tax_config.liquor_tax_rate),
                     menu_category_line_map = COALESCE(
-                        $17::jsonb,
+                        $18::jsonb,
                         tenant_tax_config.menu_category_line_map
                     ),
                     exempt_menu_category_ids = COALESCE(
-                        $18::uuid[],
+                        $19::uuid[],
                         tenant_tax_config.exempt_menu_category_ids
                     ),
                     updated_at            = NOW()
@@ -1036,6 +1067,7 @@ async def update_tax_config(request: Request, data) -> dict:
                 data.iva_applicable,
                 data.iva_included_in_price,
                 data.liquor_tax_applicable,
+                liquor_included,
                 data.inc_gl_account_id,
                 data.iva_gl_account_id,
                 data.liquor_tax_gl_account_id,
