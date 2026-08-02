@@ -81,6 +81,8 @@ SELECT
     ttc.iva_rate,
     ttc.iva_included_in_price,
     ttc.liquor_tax_applicable,
+    ttc.liquor_tax_rate,
+    ttc.liquor_tax_included_in_price,
     ttc.tax_lines,
     ttc.category_map,
     ttc.commercial_tax_applicable,
@@ -172,6 +174,16 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         'iva_rate': float(row['iva_rate']) if row['iva_rate'] is not None else 0.19,
         'iva_included_in_price': bool(row['iva_included_in_price']) if row['iva_included_in_price'] is not None else False,
         'liquor_tax_applicable': bool(row['liquor_tax_applicable']) if row['liquor_tax_applicable'] is not None else False,
+        'liquor_tax_rate': (
+            float(row['liquor_tax_rate'])
+            if ('liquor_tax_rate' in row.keys() and row['liquor_tax_rate'] is not None)
+            else 0.05
+        ),
+        'liquor_tax_included_in_price': (
+            bool(row['liquor_tax_included_in_price'])
+            if ('liquor_tax_included_in_price' in row.keys() and row['liquor_tax_included_in_price'] is not None)
+            else False
+        ),
         'tax_lines': row['tax_lines'] if 'tax_lines' in row.keys() else None,
         'category_map': row['category_map'] if 'category_map' in row.keys() else None,
         'commercial_tax_applicable': (

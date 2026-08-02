@@ -133,7 +133,7 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
     row = await conn.fetchrow(
         """SELECT inc_applicable, inc_rate, inc_gl_account_code, inc_gl_account_id,
                   inc_included_in_price,
-                  liquor_tax_applicable, liquor_tax_rate,
+                  liquor_tax_applicable, liquor_tax_rate, liquor_tax_included_in_price,
                   liquor_tax_gl_account_code, liquor_tax_gl_account_id,
                   iva_applicable, iva_rate, iva_gl_account_code, iva_gl_account_id,
                   iva_included_in_price,
@@ -152,6 +152,7 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
         "inc_included_in_price":      True,
         "liquor_tax_applicable":      False,
         "liquor_tax_rate":            Decimal("0.0000"),
+        "liquor_tax_included_in_price": False,
         "liquor_tax_gl_account_code": None,
         "liquor_tax_gl_account_id":   None,
         "iva_applicable":             False,
@@ -414,40 +415,26 @@ async def _post_order_gl_entry(
         order_id,
     )
 
-    # ── Accumulate subtotals per tax category ─────────────────────────────
+    # ── Calculate taxes per item (alternate/stack + included_in_price) ────
     from app.services.hospitality_tax_engine import (
         compute_gl_category_taxes,
-        resolve_effective_tax_category,
+        compute_items_tax_totals,
     )
 
-    standard_subtotal = Decimal("0")
-    liquor_subtotal   = Decimal("0")
-    for item in order_items:
-        cat = resolve_effective_tax_category(
-            tax_config,
-            category_id=item["category_id"],
-            tax_resolution=item["tax_resolution"] or "inherit",
-            tax_line_key=item["tax_line_key"],
-            tax_category=item["tax_category"] or "standard",
-        )
-        sub = Decimal(str(item["subtotal"]))
-        if cat == "liquor":
-            liquor_subtotal += sub
-        elif cat == "exempt":
-            pass  # $0 tax contribution
-        else:  # standard (or unknown — fall back to standard)
-            standard_subtotal += sub
-    # No items at all → treat total as standard (backwards-compatible fallback)
-    if not order_items:
-        standard_subtotal = total_amount
+    if order_items:
+        tax_result = compute_items_tax_totals(order_items, tax_config)
+    else:
+        # No items at all → treat total as standard (backwards-compatible fallback)
+        tax_result = compute_gl_category_taxes(total_amount, Decimal("0"), tax_config)
 
-    # ── Calculate taxes per category (profile-driven tax_lines) ───────────
-    tax_result = compute_gl_category_taxes(
-        standard_subtotal, liquor_subtotal, tax_config,
-    )
-    standard_tax = tax_result["standard_tax"]
-    liquor_tax = tax_result["liquor_tax"]
-    standard_is_additive = tax_result["standard_is_additive"]
+    standard_tax = Decimal(str(tax_result["standard_tax"] or 0))
+    liquor_tax = Decimal(str(tax_result["liquor_tax"] or 0))
+    standard_additive = Decimal(str(tax_result.get("standard_additive") or 0))
+    liquor_additive = Decimal(str(tax_result.get("liquor_additive") or 0))
+    if "standard_additive" not in tax_result and tax_result.get("standard_is_additive"):
+        standard_additive = standard_tax
+    if "liquor_additive" not in tax_result and tax_result.get("liquor_is_additive"):
+        liquor_additive = liquor_tax
     standard_acct_id = None
     liquor_acct_id = None
 
@@ -464,9 +451,9 @@ async def _post_order_gl_entry(
         liquor_acct_id = tax_account.id if tax_account else None
 
     # ── Compute debit_total and net_revenue ───────────────────────────────
-    # Additive taxes (non-included INC/IVA, liquor) increase what the customer pays.
-    # Extractive taxes are already embedded in total_amount.
-    additive_extra = (standard_tax if standard_is_additive else Decimal("0")) + liquor_tax
+    # Additive taxes (non-included INC/IVA/liquor) increase what the customer pays.
+    # Extractive taxes are already embedded in total_amount (#765 liquor Incluido).
+    additive_extra = standard_additive + liquor_additive
     debit_total    = total_amount + additive_extra
     net_revenue    = debit_total - standard_tax - liquor_tax
     # Invariant: DR debit_total = CR net_revenue + CR standard_tax + CR liquor_tax ✓
