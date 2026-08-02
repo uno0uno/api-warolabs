@@ -1,0 +1,38 @@
+# Compact plan for wr-fast #2044 (API PR)
+issue: 2044
+title: "fix(ventas): per-line tax cues on sale reprint and items table like POS checkout"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2044-order-item-tax
+companion: "front PR wr-2044-ventas-tax-cues closes issue"
+
+paths:
+  - app/services/orders_service.py
+  - tests/test_order_items_line_tax.py
+  - .wr/2044.yaml
+
+ac:
+  - GET /orders/{id}/items returns tax_category, tax_label, tax_amount, included_in_price
+  - Uses annotate_line_tax_amounts (same engine as POS)
+  - Unit test for _attach_order_items_line_tax
+
+out_of_scope:
+  - Front mapping (companion PR)
+  - Fiscal rule changes
+
+hints:
+  entry: "get_order_items + _attach_order_items_line_tax"
+  pattern: "annotate_line_tax_amounts in pos_cart_service / tables_service"
+  tests: "pytest tests/test_order_items_line_tax.py -q"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: []
+
+next:
+  after_pr: "front PR then wr-review"

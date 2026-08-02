@@ -1663,6 +1663,47 @@ async def _order_inventory_already_consumed_before_completion(
     ))
 
 
+def _attach_order_items_line_tax(
+    items: List[Dict[str, Any]],
+    tax_config: Dict[str, Any],
+    *,
+    reconcile_to: Optional[tuple] = None,
+) -> List[Dict[str, Any]]:
+    """Annotate order-item payloads with per-line tax_amount / tax_label (warocol.com#2044)."""
+    from app.services.hospitality_tax_engine import annotate_line_tax_amounts
+
+    if not items:
+        return items
+
+    tax_lines: List[Dict[str, Any]] = []
+    for item in items:
+        subtotal = float(item.get("subtotal") or 0)
+        net = item.get("net_total")
+        tax_lines.append({
+            "id": item["id"],
+            "subtotal": subtotal,
+            "net_total": float(net) if net is not None else subtotal,
+            "tax_category": item.get("tax_category") or "standard",
+            "tax_resolution": item.get("tax_resolution") or "inherit",
+            "tax_line_key": item.get("tax_line_key"),
+            "category_id": item.get("category_id"),
+        })
+
+    annotated = annotate_line_tax_amounts(
+        tax_lines,
+        tax_config,
+        reconcile_to=reconcile_to,
+    )
+    by_id = {str(row["id"]): row for row in annotated}
+    for item in items:
+        row = by_id.get(str(item["id"])) or {}
+        item["tax_amount"] = float(row.get("tax_amount") or 0)
+        item["tax_label"] = row.get("tax_label")
+        item["tax_rate"] = row.get("tax_rate")
+        item["included_in_price"] = row.get("included_in_price")
+    return items
+
+
 async def get_order_items(
     request: Request,
     order_id: UUID
@@ -1689,7 +1730,7 @@ async def get_order_items(
             if not order_exists:
                 raise APIError("Order not found", status_code=404)
 
-            # Get order items with product details
+            # Get order items with product details + tax classification (#2044)
             items_query = """
                 SELECT
                     oi.id,
@@ -1704,7 +1745,11 @@ async def get_order_items(
                     tp.promo_type AS promotion_type,
                     p.id as product_id,
                     p.name as product_name,
-                    p.description as product_description
+                    p.description as product_description,
+                    COALESCE(p.tax_category, 'standard') AS tax_category,
+                    COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                    p.tax_line_key AS tax_line_key,
+                    p.category_id::text AS category_id
                 FROM order_items oi
                 LEFT JOIN product p ON oi.product_id = p.id
                 LEFT JOIN tenant_promotions tp ON tp.id = oi.applied_promotion_id
@@ -1754,6 +1799,10 @@ async def get_order_items(
                     "promo_savings_allocated": float(item_row['promo_savings_allocated']) if item_row['promo_savings_allocated'] is not None else 0.0,
                     "promotion_name": item_row['promotion_name'],
                     "promotion_type": item_row['promotion_type'],
+                    "tax_category": item_row['tax_category'] or 'standard',
+                    "tax_resolution": item_row['tax_resolution'] or 'inherit',
+                    "tax_line_key": item_row['tax_line_key'],
+                    "category_id": item_row['category_id'],
                     "product": {
                         "id": str(item_row['product_id']) if item_row['product_id'] else None,
                         "name": item_row['product_name'],
@@ -1762,6 +1811,36 @@ async def get_order_items(
                     },
                     "modifiers": modifiers
                 })
+
+            try:
+                tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                tax_rows = [
+                    {
+                        "tax_category": item.get("tax_category") or "standard",
+                        "tax_resolution": item.get("tax_resolution") or "inherit",
+                        "tax_line_key": item.get("tax_line_key"),
+                        "category_id": item.get("category_id"),
+                        "subtotal": (
+                            float(item["net_total"])
+                            if item.get("net_total") is not None
+                            else float(item.get("subtotal") or 0)
+                        ),
+                    }
+                    for item in items
+                ]
+                std_tax, liq_tax, _ = _compute_tax_breakdown(tax_rows, tax_config)
+                _attach_order_items_line_tax(
+                    items,
+                    tax_config,
+                    reconcile_to=(float(std_tax), float(liq_tax)),
+                )
+            except Exception as tax_err:
+                logger.warning(f"Per-line tax annotate failed for order {order_id}: {tax_err}")
+                for item in items:
+                    item.setdefault("tax_amount", 0.0)
+                    item.setdefault("tax_label", None)
+                    item.setdefault("tax_rate", None)
+                    item.setdefault("included_in_price", None)
 
             return {
                 "success": True,
