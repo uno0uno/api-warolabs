@@ -2156,16 +2156,22 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
 
                 tax_config = await _get_tenant_tax_config(conn_ids, tenant_id)
                 _liq_label = liquor_tax_label_for_config(tax_config)
+                # Item-level rows (keep category_id / overrides). GROUP BY
+                # tax_category alone collapses menu-mapped liquor into INC/IVA
+                # when products still have legacy tax_category=standard
+                # (warocol.com#2035).
                 tax_rows = await conn_ids.fetch(
                     """
                     SELECT
                         COALESCE(p.tax_category, 'standard') AS tax_category,
-                        COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)), 0) AS subtotal
+                        COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                        p.tax_line_key AS tax_line_key,
+                        p.category_id::text AS category_id,
+                        COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal
                     FROM order_items oi
                     JOIN orders o ON o.id = oi.order_id
                     JOIN product p ON p.id = oi.product_id
                     WHERE o.id = ANY($1::uuid[])
-                    GROUP BY COALESCE(p.tax_category, 'standard')
                     """,
                     [r["id"] for r in order_rows],
                 )

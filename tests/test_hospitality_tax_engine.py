@@ -499,6 +499,57 @@ def test_stack_mode_sums_primary_and_selected():
     assert totals["standard_additive"] == Decimal("1800")
 
 
+def test_menu_mapped_liquor_not_lost_when_legacy_tax_category_standard():
+    """#2035 — mesa close must not GROUP BY tax_category only (INC eats liquor)."""
+    liquor_cat = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    cfg = {
+        "inc_applicable": True,
+        "inc_rate": 0.08,
+        "inc_included_in_price": True,
+        "iva_applicable": False,
+        "liquor_tax_applicable": True,
+        "liquor_tax_rate": 0.05,
+        "liquor_tax_included_in_price": True,
+        "tax_lines": [
+            {
+                "key": "inc",
+                "label": "INC 8%",
+                "rate": 0.08,
+                "included_in_price": True,
+                "gl_role": "inc",
+                "mode": "primary",
+                "exclusive_group": "vat",
+            },
+            {
+                "key": "liquor",
+                "label": "IVA licores 5%",
+                "rate": 0.05,
+                "included_in_price": True,
+                "gl_role": "liquor",
+                "mode": "alternate",
+                "exclusive_group": "vat",
+            },
+        ],
+        "category_map": {"standard": "inc", "liquor": "liquor", "exempt": None},
+        "menu_category_line_map": {liquor_cat: "liquor"},
+    }
+    # Legacy product tag is still standard — liquor comes from menu map.
+    item_rows = [
+        {"tax_category": "standard", "category_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "subtotal": 238000},
+        {"tax_category": "standard", "category_id": liquor_cat, "subtotal": 30000},
+    ]
+    std, liq, label = compute_category_breakdown(item_rows, cfg)
+    assert label == "INC 8%"
+    assert std == 17630.0  # 238000 * 0.08/1.08
+    assert liq == 1429.0   # 30000 * 0.05/1.05
+
+    # Buggy mesa-close shape: collapsed by tax_category only → liquor vanishes.
+    collapsed = [{"tax_category": "standard", "subtotal": 268000}]
+    buggy_std, buggy_liq, _ = compute_category_breakdown(collapsed, cfg)
+    assert buggy_liq == 0.0
+    assert buggy_std == 19852.0
+
+
 def test_sync_co_tax_lines_flips_iva_to_inc_and_keeps_custom():
     """#2031 — Perfil de ventas must rewrite tax_lines so POS is not hybrid."""
     cat = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
