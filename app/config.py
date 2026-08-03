@@ -161,6 +161,9 @@ class Settings(BaseSettings):
     facturador_legal_city: str = Field(default='', alias='FACTURADOR_LEGAL_CITY')
     facturador_legal_support_email: str = Field(default='', alias='FACTURADOR_LEGAL_SUPPORT_EMAIL')
 
+    # Platform operators — effective superuser on all tenants without tenant_members
+    platform_superuser_emails: str = Field(default='', alias='PLATFORM_SUPERUSER_EMAILS')
+
     class Config:
         env_file = ".env"
         extra = "ignore"  # Ignore extra environment variables

@@ -12,6 +12,7 @@ from datetime import datetime, date
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import ValidationError, NotFoundError
+from app.core.platform_superusers import platform_superuser_email_list
 from app.services.aws_s3_service import AWSS3Service
 from app.services.account_role_service import (
     AccountRole,
@@ -525,6 +526,7 @@ async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResp
         current_period = datetime.now().strftime('%Y-%m')
 
         # Get employees with salary config and last payment
+        allowlist = platform_superuser_email_list()
         query = """
             SELECT
                 tm.id,
@@ -556,10 +558,14 @@ async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResp
                 AND es.period_month = $2
             WHERE tm.tenant_id = $1
                 AND tm.role != 'customer'
+                AND (
+                  cardinality($3::text[]) = 0
+                  OR lower(trim(p.email)) <> ALL($3::text[])
+                )
             ORDER BY p.name
         """
 
-        rows = await conn.fetch(query, tenant_id, current_period)
+        rows = await conn.fetch(query, tenant_id, current_period, allowlist)
 
         employees = []
         for row in rows:
