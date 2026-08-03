@@ -301,3 +301,43 @@ def test_migration_has_database_idempotency_and_lifecycle_guards():
     assert "tenant_members_pending_owner_unique" in sql
     assert "onboarding_email_challenges" in sql
     assert "DEFAULT 'active'" in sql
+
+
+@pytest.mark.asyncio
+async def test_apply_onboarding_locales_from_country_sets_profile_and_tenant():
+    from app.services.onboarding_service import apply_onboarding_locales_from_country
+
+    conn = AsyncMock()
+    conn.execute = AsyncMock(return_value="OK")
+    user_id = uuid4()
+    tenant_id = uuid4()
+
+    locale = await apply_onboarding_locales_from_country(
+        conn,
+        tenant_id=tenant_id,
+        country_code="US",
+        user_id=user_id,
+    )
+    assert locale == "en"
+    assert conn.execute.await_count == 2
+    profile_sql, profile_user, profile_locale = conn.execute.await_args_list[0].args[:3]
+    assert "UPDATE profile" in profile_sql
+    assert "preferred_locale" in profile_sql
+    assert profile_user == user_id
+    assert profile_locale == "en"
+    tenant_sql, tenant_arg, tenant_locale = conn.execute.await_args_list[1].args[:3]
+    assert "tenant_public_profiles" in tenant_sql
+    assert "ui_locale" in tenant_sql
+    assert tenant_arg == tenant_id
+    assert tenant_locale == "en"
+
+    conn.execute.reset_mock()
+    locale_co = await apply_onboarding_locales_from_country(
+        conn,
+        tenant_id=tenant_id,
+        country_code="CO",
+        user_id=user_id,
+    )
+    assert locale_co == "es"
+    assert conn.execute.await_args_list[0].args[2] == "es"
+    assert conn.execute.await_args_list[1].args[2] == "es"
