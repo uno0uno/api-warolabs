@@ -179,7 +179,7 @@ def test_mx_pack_none_flag_still_applies_tax_lines():
 
 
 def test_co_exempt_columns_unchanged_with_commercial_false():
-    """#773 regression — CO no IVA/INC stays zero; INC path still works."""
+    """#773 regression — CO no IVA/INC stays zero; IVA column path still works."""
     exempt = {
         "inc_applicable": False,
         "iva_applicable": False,
