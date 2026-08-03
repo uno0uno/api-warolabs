@@ -738,12 +738,8 @@ async def update_onboarding_financial_profile(
                     "state": context["state"],
                 },
             )
-        await apply_onboarding_locales_from_country(
-            conn,
-            tenant_id=tenant_id,
-            country_code=country_code,
-            user_id=context.get("owner_user_id"),
-        )
+        # Locales are set on first financial apply only — do not overwrite on
+        # idempotent starter_active retries (avoids clobbering mid-onboarding edits).
         result = dict(profile)
         result["business_name"] = context["business_name"]
         result["lifecycle_status"] = "active"
