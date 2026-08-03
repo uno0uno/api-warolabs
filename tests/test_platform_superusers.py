@@ -65,11 +65,8 @@ def test_security_injects_superuser_role(monkeypatch):
     config_mod.settings = config_mod.Settings()
     clear_platform_superuser_cache()
 
-    from app.core.platform_superusers import is_platform_superuser_email
-
-    row_email = "ops@warocol.com"
     resolved_role = None
-    if is_platform_superuser_email(row_email):
+    if is_platform_superuser_email("ops@warocol.com"):
         resolved_role = "superuser"
     assert resolved_role == "superuser"
 
@@ -77,6 +74,31 @@ def test_security_injects_superuser_role(monkeypatch):
     if is_platform_superuser_email("normal@warocol.com"):
         resolved_role = "superuser"
     assert resolved_role == "admin"
+
+
+def test_platform_overrides_customer_before_denial(monkeypatch):
+    """Match get_session_data / security ordering: allowlist before customer deny."""
+    monkeypatch.setenv("PLATFORM_SUPERUSER_EMAILS", "ops@warocol.com")
+    import app.config as config_mod
+
+    config_mod.settings = config_mod.Settings()
+    clear_platform_superuser_cache()
+
+    from app.core.internal_roles import is_legacy_internal_team_role
+
+    def resolve(email: str, membership_role: str | None) -> str:
+        role = membership_role
+        if is_platform_superuser_email(email):
+            return "superuser"
+        if role is not None and not is_legacy_internal_team_role(role):
+            return "DENIED"
+        return role  # type: ignore[return-value]
+
+    assert resolve("ops@warocol.com", "customer") == "superuser"
+    assert resolve("ops@warocol.com", None) == "superuser"
+    assert resolve("normal@warocol.com", "customer") == "DENIED"
+    assert resolve("normal@warocol.com", "admin") == "admin"
+
 
 
 def test_members_exclusion_predicate():

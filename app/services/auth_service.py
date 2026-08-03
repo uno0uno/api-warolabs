@@ -120,27 +120,27 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                 )
                 if role_result:
                     user_role = role_result['role']
-                    if not is_legacy_internal_team_role(user_role):
-                        await conn.execute(
-                            """
-                            UPDATE sessions
-                            SET is_active = false,
-                                ended_at = NOW(),
-                                end_reason = 'customer_role_denied'
-                            WHERE id = $1 AND is_active = true
-                            """,
-                            session_token,
-                        )
-                        await clear_session_cookie(response, session_token)
-                        logger.warning(
-                            "Denied /auth/session for non-team role %s on session %s",
-                            user_role,
-                            session_token[:8],
-                        )
-                        raise AuthenticationError("Access denied")
 
             if is_platform_superuser_email(session_result.get('email')):
                 user_role = 'superuser'
+            elif user_role is not None and not is_legacy_internal_team_role(user_role):
+                await conn.execute(
+                    """
+                    UPDATE sessions
+                    SET is_active = false,
+                        ended_at = NOW(),
+                        end_reason = 'customer_role_denied'
+                    WHERE id = $1 AND is_active = true
+                    """,
+                    session_token,
+                )
+                await clear_session_cookie(response, session_token)
+                logger.warning(
+                    "Denied /auth/session for non-team role %s on session %s",
+                    user_role,
+                    session_token[:8],
+                )
+                raise AuthenticationError("Access denied")
 
             # Build response models
             user = ProfileUser(
