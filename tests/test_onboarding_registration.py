@@ -301,3 +301,160 @@ def test_migration_has_database_idempotency_and_lifecycle_guards():
     assert "tenant_members_pending_owner_unique" in sql
     assert "onboarding_email_challenges" in sql
     assert "DEFAULT 'active'" in sql
+
+
+@pytest.mark.asyncio
+async def test_apply_onboarding_locales_from_country_sets_profile_and_tenant():
+    from app.services.onboarding_service import apply_onboarding_locales_from_country
+
+    conn = AsyncMock()
+    conn.execute = AsyncMock(return_value="OK")
+    user_id = uuid4()
+    tenant_id = uuid4()
+
+    locale = await apply_onboarding_locales_from_country(
+        conn,
+        tenant_id=tenant_id,
+        country_code="US",
+        user_id=user_id,
+    )
+    assert locale == "en"
+    assert conn.execute.await_count == 2
+    profile_sql, profile_user, profile_locale = conn.execute.await_args_list[0].args[:3]
+    assert "UPDATE profile" in profile_sql
+    assert "preferred_locale" in profile_sql
+    assert profile_user == user_id
+    assert profile_locale == "en"
+    tenant_sql, tenant_arg, tenant_locale = conn.execute.await_args_list[1].args[:3]
+    assert "tenant_public_profiles" in tenant_sql
+    assert "ui_locale" in tenant_sql
+    assert tenant_arg == tenant_id
+    assert tenant_locale == "en"
+
+    conn.execute.reset_mock()
+    locale_co = await apply_onboarding_locales_from_country(
+        conn,
+        tenant_id=tenant_id,
+        country_code="CO",
+        user_id=user_id,
+    )
+    assert locale_co == "es"
+    assert conn.execute.await_args_list[0].args[2] == "es"
+    assert conn.execute.await_args_list[1].args[2] == "es"
+
+
+@pytest.mark.asyncio
+async def test_financial_profile_create_applies_locales_from_country():
+    """Wiring: first financial apply awaits locale helper with owner + country."""
+    from app.models.onboarding import OnboardingBusinessProfileUpdate
+    from app.services.onboarding_service import update_onboarding_financial_profile
+
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        {
+            "lifecycle_status": "pending",
+            "state": "business_profile_pending",
+            "business_name": "Negocio pendiente",
+            "owner_user_id": owner_id,
+        },
+        {
+            "profile_tenant_id": tenant_id,
+            "country_code": "CO",
+            "base_currency_code": "COP",
+            "accounting_localization": "WARO_CO_PUC_V1",
+            "document_mode": "fiscal_integrated",
+            "fiscal_provider": "matias",
+            "selection_revision": 1,
+            "profile_created_at": None,
+            "profile_updated_at": None,
+        },
+        {"state": "starter_active"},
+    ])
+    conn.execute = AsyncMock(return_value="OK")
+
+    apply_locales = AsyncMock(return_value="es")
+    with patch(
+        "app.services.onboarding_service.financial_service.seed_tenant_accounts",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.onboarding_service.ensure_wave1_tax_pack",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.onboarding_service.seed_tenant_timezone_from_country",
+        new=AsyncMock(return_value="America/Bogota"),
+    ), patch(
+        "app.services.onboarding_service.apply_onboarding_locales_from_country",
+        new=apply_locales,
+    ), patch(
+        "app.services.onboarding_service._promote_onboarding_identity",
+        new=AsyncMock(return_value="starter_active"),
+    ):
+        await update_onboarding_financial_profile(
+            conn,
+            tenant_id,
+            OnboardingBusinessProfileUpdate(
+                business_name="Cafe Central",
+                country_code="CO",
+                base_currency_code="COP",
+            ),
+        )
+
+    apply_locales.assert_awaited_once_with(
+        conn,
+        tenant_id=tenant_id,
+        country_code="CO",
+        user_id=owner_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_starter_active_idempotent_skips_locale_rewrite():
+    """Idempotent financial retry must not re-apply locales."""
+    from app.models.onboarding import OnboardingBusinessProfileUpdate
+    from app.services.onboarding_service import update_onboarding_financial_profile
+
+    tenant_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        {
+            "lifecycle_status": "active",
+            "state": "starter_active",
+            "business_name": "Cafe Central",
+            "owner_user_id": uuid4(),
+        },
+        {
+            "profile_tenant_id": tenant_id,
+            "country_code": "US",
+            "base_currency_code": "USD",
+            "accounting_localization": "WARO_HOSPITALITY_GLOBAL_V1",
+            "document_mode": "waro_commercial",
+            "fiscal_provider": None,
+            "selection_revision": 4,
+            "profile_created_at": None,
+            "profile_updated_at": None,
+        },
+        {"state": "starter_active"},
+    ])
+    conn.execute = AsyncMock(side_effect=["UPDATE 1", "UPDATE 1"])
+
+    apply_locales = AsyncMock(return_value="en")
+    with patch(
+        "app.services.onboarding_service.apply_onboarding_locales_from_country",
+        new=apply_locales,
+    ):
+        result = await update_onboarding_financial_profile(
+            conn,
+            tenant_id,
+            OnboardingBusinessProfileUpdate(
+                business_name="Cafe Central",
+                country_code="US",
+                base_currency_code="USD",
+                tax_jurisdiction_code="US-FL",
+            ),
+        )
+
+    assert result.data.profile.selection_revision == 4
+    apply_locales.assert_not_awaited()
+    assert conn.execute.await_count == 2

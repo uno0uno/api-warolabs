@@ -25,6 +25,7 @@ from app.services.hospitality_tax_jurisdictions import (
     normalize_jurisdiction_code,
 )
 from app.services.hospitality_tax_packs import ensure_wave1_tax_pack
+from app.core.country_locale import locale_from_country
 from app.core.timezones import seed_tenant_timezone_from_country
 
 MAX_EMAIL_REQUESTS = 5
@@ -653,6 +654,41 @@ async def _promote_onboarding_identity(conn, tenant_id: UUID) -> str:
     return state_row["state"]
 
 
+async def apply_onboarding_locales_from_country(
+    conn,
+    *,
+    tenant_id: UUID,
+    country_code: str,
+    user_id: Optional[UUID] = None,
+) -> str:
+    """Persist profile preferred_locale and tenant ui_locale from business country."""
+    locale = locale_from_country(country_code)
+    if user_id is not None:
+        await conn.execute(
+            """
+            UPDATE profile
+            SET preferred_locale = $2, updated_at = NOW()
+            WHERE id = $1
+            """,
+            user_id,
+            locale,
+        )
+    await conn.execute(
+        """
+        INSERT INTO tenant_public_profiles (tenant_id, slug, display_name, ui_locale)
+        SELECT t.id, t.slug, t.name, $2
+        FROM tenants t
+        WHERE t.id = $1
+        ON CONFLICT (tenant_id) DO UPDATE
+            SET ui_locale = EXCLUDED.ui_locale,
+                updated_at = now()
+        """,
+        tenant_id,
+        locale,
+    )
+    return locale
+
+
 async def update_onboarding_financial_profile(
     conn,
     tenant_id: Optional[UUID],
@@ -661,7 +697,7 @@ async def update_onboarding_financial_profile(
     tenant_id = _require_tenant_id(tenant_id)
     context = await conn.fetchrow(
         """
-        SELECT t.lifecycle_status, t.name AS business_name, o.state
+        SELECT t.lifecycle_status, t.name AS business_name, o.state, o.owner_user_id
         FROM tenants t
         JOIN tenant_onboarding o ON o.tenant_id = t.id
         WHERE t.id = $1
@@ -702,6 +738,8 @@ async def update_onboarding_financial_profile(
                     "state": context["state"],
                 },
             )
+        # Locales are set on first financial apply only — do not overwrite on
+        # idempotent starter_active retries (avoids clobbering mid-onboarding edits).
         result = dict(profile)
         result["business_name"] = context["business_name"]
         result["lifecycle_status"] = "active"
@@ -783,6 +821,12 @@ async def update_onboarding_financial_profile(
                 detail=f"Unsupported jurisdiction {jurisdiction} for {country_code}",
             )
     await seed_tenant_timezone_from_country(conn, tenant_id, country_code)
+    await apply_onboarding_locales_from_country(
+        conn,
+        tenant_id=tenant_id,
+        country_code=country_code,
+        user_id=context.get("owner_user_id"),
+    )
     state = await _promote_onboarding_identity(conn, tenant_id)
     result = dict(profile)
     result["business_name"] = data.business_name
