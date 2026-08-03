@@ -1043,8 +1043,10 @@ async def update_tax_config(request: Request, data) -> dict:
                         EXCLUDED.tax_jurisdiction_code,
                         tenant_tax_config.tax_jurisdiction_code
                     ),
+                    -- Use $14 (not EXCLUDED): VALUES COALESCE($14,false) would turn
+                    -- omitted flag into false and wipe commercial-on tenants (#773).
                     commercial_tax_applicable = COALESCE(
-                        EXCLUDED.commercial_tax_applicable,
+                        $14,
                         tenant_tax_config.commercial_tax_applicable
                     ),
                     iva_rate = COALESCE($15, tenant_tax_config.iva_rate),
