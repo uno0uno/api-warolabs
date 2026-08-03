@@ -143,6 +143,68 @@ def test_commercial_tax_disabled_keeps_lines_but_applies_zero():
     assert label_on == "IVA 16%"
 
 
+def test_mx_pack_commercial_off_returns_zero_tax():
+    """api-warolabs#773 — MX no-tax = flag false; pack lines may remain stored."""
+    cfg = _mx_config()
+    assert cfg["commercial_tax_applicable"] is True
+    rows = [{"tax_category": "standard", "subtotal": 10000}]
+    std_on, liq_on, label_on = compute_category_breakdown(rows, cfg)
+    assert std_on == 1600.0
+    assert liq_on == 0.0
+    assert label_on == "IVA 16%"
+
+    cfg["commercial_tax_applicable"] = False
+    std_off, liq_off, label_off = compute_category_breakdown(rows, cfg)
+    assert std_off == 0.0
+    assert liq_off == 0.0
+    assert label_off == "Impuesto"
+    assert resolve_tax_profile(cfg).primary_line() is None
+    assert cfg["tax_lines"][0]["label"] == "IVA 16%"
+
+    gl = compute_items_tax_totals(rows, cfg)
+    assert gl["standard_tax"] == Decimal("0")
+    assert gl["liquor_tax"] == Decimal("0")
+
+
+def test_mx_pack_none_flag_still_applies_tax_lines():
+    """#773 — None is not disable; only explicit False empties commercial profile."""
+    cfg = _mx_config()
+    cfg["commercial_tax_applicable"] = None
+    std, _, label = compute_category_breakdown(
+        [{"tax_category": "standard", "subtotal": 10000}],
+        cfg,
+    )
+    assert std == 1600.0
+    assert label == "IVA 16%"
+
+
+def test_co_exempt_columns_unchanged_with_commercial_false():
+    """#773 regression — CO no IVA/INC stays zero; IVA column path still works."""
+    exempt = {
+        "inc_applicable": False,
+        "iva_applicable": False,
+        "liquor_tax_applicable": False,
+        "commercial_tax_applicable": False,
+        "tax_lines": None,
+    }
+    std, liq, _ = compute_category_breakdown(
+        [{"tax_category": "standard", "subtotal": 10000}],
+        exempt,
+    )
+    assert std == 0.0
+    assert liq == 0.0
+
+    taxed = _iva_config(included=False, rate=0.19)
+    taxed["commercial_tax_applicable"] = False
+    taxed["tax_lines"] = None
+    std_iva, _, label = compute_category_breakdown(
+        [{"tax_category": "standard", "subtotal": 10000}],
+        taxed,
+    )
+    assert std_iva == 1900.0
+    assert label == "IVA 19%"
+
+
 def test_co_path_ignores_commercial_flag_when_tax_lines_null():
     cfg = _inc_config(included=True)
     cfg["commercial_tax_applicable"] = False
