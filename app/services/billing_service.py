@@ -1139,15 +1139,23 @@ async def _count_quota_resource_usage(
     exclude_pending_invitation_id: Optional[UUID] = None,
 ) -> int:
     if resource == "admin_users":
+        from app.core.platform_superusers import platform_superuser_email_list
+
+        allowlist = platform_superuser_email_list()
         value = await conn.fetchval(
             """
             SELECT
                 (
                     SELECT COUNT(DISTINCT tm.id)
                     FROM tenant_members tm
+                    INNER JOIN profile p ON p.id = tm.user_id
                     WHERE tm.tenant_id = $1
                       AND tm.is_active
                       AND tm.role = ANY($2::text[])
+                      AND (
+                        cardinality($4::text[]) = 0
+                        OR lower(trim(p.email)) <> ALL($4::text[])
+                      )
                 )
                 +
                 (
@@ -1157,11 +1165,16 @@ async def _count_quota_resource_usage(
                       AND ti.status = 'pending'
                       AND ti.role = ANY($2::text[])
                       AND NOT ($3::uuid IS NOT NULL AND ti.id = $3)
+                      AND (
+                        cardinality($4::text[]) = 0
+                        OR lower(trim(ti.email)) <> ALL($4::text[])
+                      )
                 )
             """,
             tenant_id,
             list(LEGACY_INTERNAL_TEAM_ROLES),
             exclude_pending_invitation_id,
+            allowlist,
         )
     elif resource == "active_kitchens":
         value = await conn.fetchval(

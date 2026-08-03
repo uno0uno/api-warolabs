@@ -14,6 +14,7 @@ from app.core.exceptions import AuthenticationError, ValidationError
 from app.core.email_utils import normalize_email
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.core.onboarding_access import next_step_for_state
+from app.core.platform_superusers import is_platform_superuser_email
 from app.models.auth import (
     MagicLinkResponse,
     RegistrationAttribution,
@@ -63,6 +64,62 @@ async def _lookup_internal_team_member(conn, email: str) -> Optional[Any]:
         email,
         list(LEGACY_INTERNAL_TEAM_ROLES),
     )
+
+
+async def _lookup_platform_superuser(conn, email: str, tenant_id: UUID) -> Optional[Any]:
+    """Resolve env allowlisted operator without a tenant_members row."""
+    if not is_platform_superuser_email(email) or not tenant_id:
+        return None
+    return await conn.fetchrow(
+        """
+        SELECT p.id as user_id, p.email, p.name,
+               'superuser'::text AS role,
+               $2::uuid AS tenant_id,
+               COALESCE(t.lifecycle_status, 'active') AS lifecycle_status,
+               o.state AS onboarding_state
+        FROM profile p
+        LEFT JOIN tenants t ON t.id = $2
+        LEFT JOIN tenant_onboarding o
+          ON o.tenant_id = t.id AND o.owner_user_id = p.id
+        WHERE lower(trim(p.email)) = $1
+        LIMIT 1
+        """,
+        email,
+        tenant_id,
+    )
+
+
+_PLATFORM_VERIFY_BY_CODE = """
+    SELECT mt.*, p.email, p.name, p.id as user_id, p.created_at as user_created_at,
+           'superuser'::text AS user_role,
+           COALESCE(t.lifecycle_status, 'active') AS lifecycle_status,
+           o.state AS onboarding_state, o.email_verified_at
+    FROM magic_tokens mt
+    JOIN profile p ON mt.user_id = p.id
+    INNER JOIN tenants t ON t.id = mt.tenant_id
+    LEFT JOIN tenant_onboarding o
+      ON o.tenant_id = t.id AND o.owner_user_id = p.id
+    WHERE lower(trim(p.email)) = $1 AND mt.verification_code = $2
+      AND mt.expires_at > NOW() AND mt.used = false
+      AND mt.purpose = 'login'
+    LIMIT 1
+"""
+
+_PLATFORM_VERIFY_BY_TOKEN = """
+    SELECT mt.*, p.email, p.name, p.id as user_id, p.created_at as user_created_at,
+           'superuser'::text AS user_role,
+           COALESCE(t.lifecycle_status, 'active') AS lifecycle_status,
+           o.state AS onboarding_state, o.email_verified_at
+    FROM magic_tokens mt
+    JOIN profile p ON mt.user_id = p.id
+    INNER JOIN tenants t ON t.id = mt.tenant_id
+    LEFT JOIN tenant_onboarding o
+      ON o.tenant_id = t.id AND o.owner_user_id = p.id
+    WHERE lower(trim(p.email)) = $1 AND mt.token = $2
+      AND mt.expires_at > NOW() AND mt.used = false
+      AND mt.purpose = 'login'
+    LIMIT 1
+"""
 
 
 async def _tenant_email_branding(conn, tenant_id: UUID) -> dict[str, str]:
@@ -255,6 +312,10 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
         async with get_db_connection() as conn:
             user_result = await _lookup_internal_team_member(conn, email)
             if not user_result:
+                user_result = await _lookup_platform_superuser(
+                    conn, email, tenant_context.tenant_id
+                )
+            if not user_result:
                 registration_draft = await get_resumable_registration_draft(conn, email)
             else:
                 registration_draft = None
@@ -407,6 +468,12 @@ async def verify_code(request: Request, response: Response, email: str, code: st
                 code,
                 list(LEGACY_INTERNAL_TEAM_ROLES),
             )
+            if not token_data and is_platform_superuser_email(email):
+                token_data = await conn.fetchrow(
+                    _PLATFORM_VERIFY_BY_CODE,
+                    email,
+                    code,
+                )
             
             if not token_data:
                 registration = await _complete_registration_login(
@@ -563,6 +630,12 @@ async def verify_token(request: Request, response: Response, email: str, token: 
                 token,
                 list(LEGACY_INTERNAL_TEAM_ROLES),
             )
+            if not token_data and is_platform_superuser_email(email):
+                token_data = await conn.fetchrow(
+                    _PLATFORM_VERIFY_BY_TOKEN,
+                    email,
+                    token,
+                )
             
             if not token_data:
                 registration = await _complete_registration_login(

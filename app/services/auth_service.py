@@ -10,6 +10,7 @@ from app.core.exceptions import AuthenticationError
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES, is_legacy_internal_team_role
 from app.core.onboarding_access import next_step_for_state
 from app.core.middleware import require_valid_session
+from app.core.platform_superusers import is_platform_superuser_email
 from app.models.auth import (
     ProfileAvatarResponse,
     ProfileUser,
@@ -119,24 +120,27 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                 )
                 if role_result:
                     user_role = role_result['role']
-                    if not is_legacy_internal_team_role(user_role):
-                        await conn.execute(
-                            """
-                            UPDATE sessions
-                            SET is_active = false,
-                                ended_at = NOW(),
-                                end_reason = 'customer_role_denied'
-                            WHERE id = $1 AND is_active = true
-                            """,
-                            session_token,
-                        )
-                        await clear_session_cookie(response, session_token)
-                        logger.warning(
-                            "Denied /auth/session for non-team role %s on session %s",
-                            user_role,
-                            session_token[:8],
-                        )
-                        raise AuthenticationError("Access denied")
+
+            if is_platform_superuser_email(session_result.get('email')):
+                user_role = 'superuser'
+            elif user_role is not None and not is_legacy_internal_team_role(user_role):
+                await conn.execute(
+                    """
+                    UPDATE sessions
+                    SET is_active = false,
+                        ended_at = NOW(),
+                        end_reason = 'customer_role_denied'
+                    WHERE id = $1 AND is_active = true
+                    """,
+                    session_token,
+                )
+                await clear_session_cookie(response, session_token)
+                logger.warning(
+                    "Denied /auth/session for non-team role %s on session %s",
+                    user_role,
+                    session_token[:8],
+                )
+                raise AuthenticationError("Access denied")
 
             # Build response models
             user = ProfileUser(
@@ -192,7 +196,8 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
         session_context = require_valid_session(request)
         current_session_token = await get_session_token(request)
         if not is_legacy_internal_team_role(session_context.role):
-            raise AuthenticationError("Access denied to this tenant")
+            if not is_platform_superuser_email(session_context.email):
+                raise AuthenticationError("Access denied to this tenant")
         
         # Get the target site from encrypted origin header
         target_site = None
@@ -255,28 +260,40 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
             # The `tm.is_active = true` filter is load-bearing: without it,
             # soft-deleted (terminated) members can switch back to a tenant
             # they were removed from. See docs/permissions-router-mapping.md §9.
-            tenant_access_query = """
-                SELECT t.id, t.name, t.slug, ts.site
-                FROM tenants t
-                INNER JOIN tenant_members tm ON t.id = tm.tenant_id
-                LEFT JOIN tenant_sites ts ON t.id = ts.tenant_id AND ts.is_active = true
-                WHERE t.slug = $1
-                  AND tm.user_id = $2
-                  AND tm.is_active = true
-                  AND tm.role = ANY($3::text[])
-                LIMIT 1
-            """
-            tenant_access_result = await conn.fetchrow(
-                tenant_access_query,
-                tenant_slug,
-                user_id,
-                list(LEGACY_INTERNAL_TEAM_ROLES),
-            )
-            
+            # Platform allowlist may switch without a membership row.
+            if is_platform_superuser_email(session_context.email):
+                tenant_access_result = await conn.fetchrow(
+                    """
+                    SELECT t.id, t.name, t.slug, ts.site
+                    FROM tenants t
+                    LEFT JOIN tenant_sites ts ON t.id = ts.tenant_id AND ts.is_active = true
+                    WHERE t.slug = $1
+                    LIMIT 1
+                    """,
+                    tenant_slug,
+                )
+            else:
+                tenant_access_result = await conn.fetchrow(
+                    """
+                    SELECT t.id, t.name, t.slug, ts.site
+                    FROM tenants t
+                    INNER JOIN tenant_members tm ON t.id = tm.tenant_id
+                    LEFT JOIN tenant_sites ts ON t.id = ts.tenant_id AND ts.is_active = true
+                    WHERE t.slug = $1
+                      AND tm.user_id = $2
+                      AND tm.is_active = true
+                      AND tm.role = ANY($3::text[])
+                    LIMIT 1
+                    """,
+                    tenant_slug,
+                    user_id,
+                    list(LEGACY_INTERNAL_TEAM_ROLES),
+                )
+
             if not tenant_access_result:
                 logger.warning(f"Access denied to tenant {tenant_slug} for user {user_id}")
                 raise AuthenticationError("Access denied to this tenant")
-            
+
             tenant_id = tenant_access_result['id']
             tenant_name = tenant_access_result['name']
             tenant_site = tenant_access_result['site']

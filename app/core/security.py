@@ -8,6 +8,7 @@ from fastapi import Request, HTTPException, Response
 from app.config import settings
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES, is_legacy_internal_team_role
 from app.core.onboarding_access import next_step_for_state
+from app.core.platform_superusers import is_platform_superuser_email
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -409,7 +410,10 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
                 return None
 
             resolved_role = session_result['role']
-            if resolved_role is not None and not is_legacy_internal_team_role(resolved_role):
+            if is_platform_superuser_email(session_result.get('email')):
+                # Env allowlist elevates without a tenant_members row.
+                resolved_role = 'superuser'
+            elif resolved_role is not None and not is_legacy_internal_team_role(resolved_role):
                 await conn.execute("""
                     UPDATE sessions
                     SET is_active = false,
