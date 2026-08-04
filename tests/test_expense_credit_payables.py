@@ -176,3 +176,47 @@ def test_expense_payments_quota_registered():
     assert "expense_payments_per_period" in billing_service.PERIOD_QUOTA_RESOURCES
     assert "expense_payments_per_period" in billing_service.QUOTA_KEYS
     assert billing_service.STARTER_OPERATIONAL_QUOTAS["expense_payments_per_period"] == 30
+
+
+@pytest.mark.asyncio
+async def test_update_expense_json_blocks_paid_credit():
+    from contextlib import asynccontextmanager
+    from app.models.expense import ExpenseUpdate
+    from app.services.expenses_service import update_expense_json
+
+    tenant_id = uuid4()
+    user_id = uuid4()
+    expense_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "id": expense_id,
+            "tenant_id": tenant_id,
+            "payment_type": "credito",
+            "paid_at": datetime.now(timezone.utc),
+        }
+    )
+    conn.execute = MagicMock()
+
+    @asynccontextmanager
+    async def _db_ctx():
+        yield conn
+
+    with patch(
+        "app.services.expenses_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=user_id),
+    ), patch(
+        "app.services.expenses_service.get_db_connection",
+        side_effect=_db_ctx,
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await update_expense_json(
+                MagicMock(),
+                MagicMock(),
+                expense_id,
+                ExpenseUpdate(description="nope"),
+            )
+
+    assert exc.value.status_code == 409
+    assert "ya pagado" in exc.value.detail
+    conn.execute.assert_not_called()

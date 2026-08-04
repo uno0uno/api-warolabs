@@ -1569,14 +1569,24 @@ async def update_expense(
                     transaction_date,
                     is_recurring,
                     frequency,
-                    recurring_end_date
+                    recurring_end_date,
+                    payment_type,
+                    paid_at
                 FROM tenant_expenses
                 WHERE id = $1 AND tenant_id = $2
             """, expense_id, tenant_id)
 
             if not old_expense:
                 raise HTTPException(status_code=404, detail="Expense not found")
-            
+
+            _old_ptype = (old_expense["payment_type"] if "payment_type" in old_expense.keys() else None) or "contado"
+            _old_paid = old_expense["paid_at"] if "paid_at" in old_expense.keys() else None
+            if _old_ptype == "credito" and _old_paid is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="No se puede editar un gasto a crédito ya pagado",
+                )
+
             # Update expense with recurring fields
             await conn.execute("""
                 UPDATE tenant_expenses
@@ -1733,6 +1743,9 @@ async def update_expense(
                     e.frequency,
                     e.recurring_end_date,
                     e.payment_method,
+                    e.payment_method_id,
+                    e.payment_type,
+                    e.paid_at,
                     c.id as cat_id,
                     c.category_code,
                     c.category_name,
@@ -1765,15 +1778,18 @@ async def update_expense(
                 frequency=full_expense['frequency'],
                 recurringEndDate=full_expense['recurring_end_date'],
                 paymentMethod=full_expense['payment_method'],
+                paymentMethodId=full_expense['payment_method_id'] if 'payment_method_id' in full_expense.keys() else None,
+                paymentType=(full_expense['payment_type'] if 'payment_type' in full_expense.keys() else None) or 'contado',
+                paidAt=full_expense['paid_at'] if 'paid_at' in full_expense.keys() else None,
                 category=category
             )
 
-            # Update GL: void old entry + post new (graceful degrade)
+            # Update GL: void old entry + post new (contado soft-degrades; credit fails closed)
+            _ptype = (full_expense['payment_type'] if 'payment_type' in full_expense.keys() else None) or 'contado'
+            _pmid = full_expense['payment_method_id'] if 'payment_method_id' in full_expense.keys() else None
             try:
                 async with conn.transaction():
                     await _void_expense_gl_entry(conn, tenant_id, expense_id, "Gasto actualizado")
-                    _ptype = (full_expense['payment_type'] if 'payment_type' in full_expense.keys() else None) or 'contado'
-                    _pmid = full_expense['payment_method_id'] if 'payment_method_id' in full_expense.keys() else None
                     await _post_expense_gl_entry(
                         conn, tenant_id, expense_id,
                         float(full_expense['amount']),
@@ -1784,11 +1800,19 @@ async def update_expense(
                         payment_type=_ptype,
                         payment_method_id=UUID(_pmid) if _pmid else None,
                     )
+            except MissingAccountRoleError:
+                raise
+            except HTTPException:
+                raise
             except Exception as _gl_err:
+                if _ptype == "credito":
+                    raise
                 logger.warning(f"[GL] GL update failed for expense {expense_id}: {_gl_err}")
 
             return ExpenseResponse(data=expense)
 
+    except MissingAccountRoleError:
+        raise
     except AuthenticationError:
         raise
     except HTTPException:
@@ -1823,6 +1847,14 @@ async def update_expense_json(
 
             if not old_expense:
                 raise HTTPException(status_code=404, detail="Expense not found")
+
+            _old_ptype = (old_expense["payment_type"] if "payment_type" in old_expense.keys() else None) or "contado"
+            _old_paid = old_expense["paid_at"] if "paid_at" in old_expense.keys() else None
+            if _old_ptype == "credito" and _old_paid is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="No se puede editar un gasto a crédito ya pagado",
+                )
 
             # Build update fields
             update_fields = []
@@ -1937,12 +1969,12 @@ async def update_expense_json(
                 category=category
             )
 
-            # Update GL: void old entry + post new (graceful degrade)
+            # Update GL: void old entry + post new (contado soft-degrades; credit fails closed)
+            _ptype = (full_expense['payment_type'] if 'payment_type' in full_expense.keys() else None) or 'contado'
+            _pmid = full_expense['payment_method_id'] if 'payment_method_id' in full_expense.keys() else None
             try:
                 async with conn.transaction():
                     await _void_expense_gl_entry(conn, tenant_id, expense_id, "Gasto actualizado")
-                    _ptype = (full_expense['payment_type'] if 'payment_type' in full_expense.keys() else None) or 'contado'
-                    _pmid = full_expense['payment_method_id'] if 'payment_method_id' in full_expense.keys() else None
                     await _post_expense_gl_entry(
                         conn, tenant_id, expense_id,
                         float(full_expense['amount']),
@@ -1953,11 +1985,19 @@ async def update_expense_json(
                         payment_type=_ptype,
                         payment_method_id=UUID(_pmid) if _pmid else None,
                     )
+            except MissingAccountRoleError:
+                raise
+            except HTTPException:
+                raise
             except Exception as _gl_err:
+                if _ptype == "credito":
+                    raise
                 logger.warning(f"[GL] GL update failed for expense {expense_id}: {_gl_err}")
 
             return ExpenseResponse(data=expense)
 
+    except MissingAccountRoleError:
+        raise
     except AuthenticationError:
         raise
     except HTTPException:
