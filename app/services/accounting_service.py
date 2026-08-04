@@ -219,7 +219,15 @@ async def create_account(request: Request, body: TenantAccountCreate) -> TenantA
                 "SELECT accounting_localization FROM tenant_financial_profiles WHERE tenant_id = $1",
                 tenant_id,
             )
-            level = _derive_level(code) if localization == "WARO_CO_PUC_V1" else body.level
+            # CO always derives from PUC code length. GLOBAL hospitality codes use the same
+            # 1/2/4/6 ladder; clients often send parent.level+1 (e.g. 5 under Bank 1010),
+            # which is not in the allowed set — prefer code-derived level when body is invalid.
+            if localization == "WARO_CO_PUC_V1":
+                level = _derive_level(code)
+            elif body.level in (1, 2, 4, 6, 8):
+                level = body.level
+            else:
+                level = _derive_level(code)
             if level not in (1, 2, 4, 6, 8):
                 raise ValidationError("Nivel contable invalido")
 
