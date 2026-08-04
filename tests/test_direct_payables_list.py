@@ -1,4 +1,4 @@
-"""Direct credit payables list scoping for Pagos (#2110 / #2111 / epic #2109)."""
+"""Direct payables list + AP settlement role coverage (#2110 / #2111 / #2112 / epic #2109)."""
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -10,7 +10,8 @@ import pytest
 from fastapi import Request
 
 from app.core.middleware import SessionContext
-from app.services.account_role_service import AccountRole
+from app.services.account_role_service import AccountRole, MissingAccountRoleError
+from app.services.direct_purchase_service import _post_purchase_gl_entry
 from app.services.purchase_tracking_service import (
     _post_supplier_payment_gl_entry,
     transition_to_paid,
@@ -251,6 +252,82 @@ async def test_supplier_payment_gl_debits_accounts_payable_role():
 
     resolve_account.assert_awaited_once()
     assert resolve_account.await_args.args[2] == AccountRole.ACCOUNTS_PAYABLE
+    assert resolve_account.await_args.kwargs.get("source") == "supplier_payment"
     assert line_args[0][1] == ap_id  # debit AP
     assert line_args[0][2] == 99.5
     assert line_args[1][1] == cash_id  # credit settlement
+
+
+@pytest.mark.asyncio
+async def test_direct_credit_create_gl_resolves_inventory_and_accounts_payable():
+    """Credit create posts Dr INVENTORY / Cr AP via AccountRole (no country hardcoding)."""
+    tenant_id = uuid4()
+    purchase_id = uuid4()
+    inv_id = uuid4()
+    ap_id = uuid4()
+    entry_id = uuid4()
+
+    conn = MagicMock()
+    tx = MagicMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=tx)
+    conn.fetchval = AsyncMock(return_value=None)  # period open
+    conn.fetchrow = AsyncMock(return_value={"id": entry_id})
+    line_args: list[tuple] = []
+
+    async def _execute(sql, *args):
+        if "INSERT INTO tenant_journal_lines" in sql:
+            line_args.append(args)
+        return "INSERT 0 1"
+
+    conn.execute = AsyncMock(side_effect=_execute)
+
+    async def _resolve(_conn, _tenant_id, role, **kwargs):
+        if role == AccountRole.INVENTORY:
+            return SimpleNamespace(id=inv_id, code="ROLE-INV")
+        if role == AccountRole.ACCOUNTS_PAYABLE:
+            return SimpleNamespace(id=ap_id, code="ROLE-AP")
+        raise AssertionError(f"unexpected role {role}")
+
+    resolve_account = AsyncMock(side_effect=_resolve)
+
+    with patch(
+        "app.services.direct_purchase_service.resolve_account",
+        resolve_account,
+    ), patch(
+        "app.services.direct_purchase_service.local_date_for_tenant",
+        return_value=datetime(2026, 8, 3).date(),
+    ):
+        await _post_purchase_gl_entry(
+            conn,
+            tenant_id,
+            purchase_id,
+            total_amount=250.0,
+            purchase_date=datetime(2026, 8, 3, tzinfo=timezone.utc),
+            description="WR-CD-2026-0100",
+            payment_method=None,
+            payment_method_id=None,
+            timezone_name="America/Bogota",
+        )
+
+    assert resolve_account.await_count == 2
+    roles = [c.args[2] for c in resolve_account.await_args_list]
+    assert roles == [AccountRole.INVENTORY, AccountRole.ACCOUNTS_PAYABLE]
+    assert line_args[0][1] == inv_id
+    assert line_args[0][2] == 250.0
+    assert line_args[1][1] == ap_id
+    assert line_args[1][2] == 250.0
+
+
+def test_missing_account_role_is_explicit_conflict_not_skip():
+    """Residual risk: tenant without role binding fails with 409 ACCOUNT_ROLE_MISSING.
+
+    Create (direct_purchase) and pay (transition_to_paid) re-raise MissingAccountRoleError
+    rather than silently skipping the journal.
+    """
+    err = MissingAccountRoleError(uuid4(), AccountRole.ACCOUNTS_PAYABLE, source="supplier_payment")
+    assert err.status_code == 409
+    assert err.details["code"] == "ACCOUNT_ROLE_MISSING"
+    assert err.details["role"] == AccountRole.ACCOUNTS_PAYABLE
+    assert "supplier_payment" in err.message or "ACCOUNTS_PAYABLE" in err.message
