@@ -1,4 +1,4 @@
-from fastapi import Depends, APIRouter, Request, Response, Query, File, UploadFile
+from fastapi import Depends, APIRouter, Request, Response, Query, File, UploadFile, Form
 from app.core.permissions import Module, require_module
 from uuid import UUID
 from typing import Optional, List
@@ -6,6 +6,8 @@ from app.services.expenses_service import (
     get_expense_categories,
     get_expenses_list,
     get_expense_by_id,
+    get_expense_credit_payables,
+    pay_expense,
     delete_expense,
     get_expense_history,
     get_recurring_instances,
@@ -35,6 +37,15 @@ async def get_categories_endpoint(
     """
     return await get_expense_categories(request, response)
 
+@router.get("/payables", response_model=ExpensesListResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
+async def get_expense_payables_endpoint(
+    request: Request,
+    response: Response,
+    limit: int = Query(default=250, ge=1, le=250),
+):
+    """Unpaid credit expenses for Pagos hub (#2113)."""
+    return await get_expense_credit_payables(request, response, limit=limit)
+
 @router.get("", response_model=ExpensesListResponse, dependencies=[Depends(require_module(Module.FINANZAS))])
 async def get_expenses_endpoint(
     request: Request,
@@ -63,6 +74,31 @@ async def get_expense_by_id_endpoint(
     Get a single expense by ID with attachments
     """
     return await get_expense_by_id(request, response, expense_id)
+
+@router.post("/{expense_id}/pay", dependencies=[Depends(require_module(Module.FINANZAS))])
+async def pay_expense_endpoint(
+    expense_id: UUID,
+    request: Request,
+    response: Response,
+    payment_method: str = Form(...),
+    payment_method_id: Optional[UUID] = Form(None),
+    payment_reference: Optional[str] = Form(None),
+    payment_amount: Optional[float] = Form(None),
+    payment_date: Optional[str] = Form(None),
+    notes: Optional[str] = Form(None),
+):
+    """Settle unpaid credit expense (Pagos)."""
+    return await pay_expense(
+        request,
+        response,
+        expense_id,
+        payment_method=payment_method,
+        payment_method_id=payment_method_id,
+        payment_reference=payment_reference,
+        payment_amount=payment_amount,
+        payment_date=payment_date,
+        notes=notes,
+    )
 
 @router.post("/{expense_id}/attachments", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def upload_expense_attachments_endpoint(

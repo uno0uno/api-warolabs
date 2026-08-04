@@ -47,6 +47,7 @@ STARTER_OPERATIONAL_QUOTAS = {
     "active_open_cash_shifts": 1,
     "expenses_per_period": 30,
     "supplier_payments_per_period": 30,
+    "expense_payments_per_period": 30,
     "payment_methods": 5,
     "api_tokens": 0,
     "tenant_promotions": 1,
@@ -76,6 +77,7 @@ QUOTA_KEYS = (
     "active_open_cash_shifts",
     "expenses_per_period",
     "supplier_payments_per_period",
+    "expense_payments_per_period",
     "payment_methods",
     "api_tokens",
     "tenant_promotions",
@@ -105,6 +107,7 @@ BASE_OPERATIONAL_QUOTAS = {
     "active_open_cash_shifts": CATALOG_UNLIMITED,
     "expenses_per_period": CATALOG_UNLIMITED,
     "supplier_payments_per_period": CATALOG_UNLIMITED,
+    "expense_payments_per_period": CATALOG_UNLIMITED,
     "payment_methods": CATALOG_UNLIMITED,
     "api_tokens": CATALOG_UNLIMITED,
     "tenant_promotions": CATALOG_UNLIMITED,
@@ -159,6 +162,7 @@ PERIOD_QUOTA_RESOURCES = {
     "cash_closes_per_period",
     "expenses_per_period",
     "supplier_payments_per_period",
+    "expense_payments_per_period",
     "accounting_period_closes_per_period",
     "manual_journal_entries_per_period",
 }
@@ -705,6 +709,21 @@ async def _count_period_quota_usage(
             FROM tenant_purchases
             WHERE tenant_id = $1
               AND paid_at IS NOT NULL
+              AND paid_at >= $2
+              AND paid_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "expense_payments_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_expenses
+            WHERE tenant_id = $1
+              AND paid_at IS NOT NULL
+              AND lower(COALESCE(payment_type, '')) = 'credito'
               AND paid_at >= $2
               AND paid_at < $3
             """,
@@ -2327,6 +2346,15 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             ) AS supplier_payments_per_period,
             (
                 SELECT COUNT(*)
+                FROM tenant_expenses te_paid
+                WHERE te_paid.tenant_id = $1
+                  AND te_paid.paid_at IS NOT NULL
+                  AND lower(COALESCE(te_paid.payment_type, '')) = 'credito'
+                  AND te_paid.paid_at >= $2
+                  AND te_paid.paid_at < $3
+            ) AS expense_payments_per_period,
+            (
+                SELECT COUNT(*)
                 FROM payment_methods pm
                 WHERE pm.tenant_id = $1
                   AND pm.is_active = TRUE
@@ -2468,6 +2496,10 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
             "supplier_payments_per_period": metric(
                 int(quota_counts["supplier_payments_per_period"] or 0),
                 effective_quotas["supplier_payments_per_period"],
+            ),
+            "expense_payments_per_period": metric(
+                int(quota_counts.get("expense_payments_per_period") or 0),
+                effective_quotas["expense_payments_per_period"],
             ),
             "payment_methods": metric(
                 int(quota_counts["payment_methods"] or 0),
