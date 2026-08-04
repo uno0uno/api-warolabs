@@ -24,6 +24,25 @@ from app.services.email_helpers import send_quotation_email
 from app.services.gemini_service import process_invoice
 from app.services.ingredients_service import match_ingredient_by_name
 
+# Unpaid direct (crédito) payables for Pagos — see warocol.com#2110 / epic #2109.
+_DIRECT_PAYABLES_SQL = """(
+                    (tp.is_direct_entry = FALSE OR tp.is_direct_entry IS NULL)
+                    OR (
+                        tp.is_direct_entry = TRUE
+                        AND tp.paid_at IS NULL
+                        AND tp.status = 'received'
+                        AND lower(COALESCE(tp.payment_type, '')) IS DISTINCT FROM 'contado'
+                    )
+                )"""
+
+_EXCLUDE_DIRECTS_SQL = "(tp.is_direct_entry = FALSE OR tp.is_direct_entry IS NULL)"
+
+
+def direct_entry_list_clause(include_direct_payables: bool) -> str:
+    """WHERE fragment after tenant_id for purchase list scoping."""
+    return _DIRECT_PAYABLES_SQL if include_direct_payables else _EXCLUDE_DIRECTS_SQL
+
+
 async def get_purchases_list(
     request: Request,
     response: Response,
@@ -34,7 +53,8 @@ async def get_purchases_list(
     status: Optional[str] = None,
     supplier_id: Optional[UUID] = None,
     payment_status: Optional[str] = None,  # pending, overdue, due_this_week
-    date_filter: Optional[str] = None  # today, yesterday, last_week, 15_days, 1_month, 3_months
+    date_filter: Optional[str] = None,  # today, yesterday, last_week, 15_days, 1_month, 3_months
+    include_direct_payables: bool = False,
 ) -> PurchasesListResponse:
     """
     Get purchases list with tenant isolation
@@ -106,7 +126,8 @@ async def get_purchases_list(
                     CASE
                         WHEN tp.paid_at IS NOT NULL OR psh_paid.id IS NOT NULL THEN true
                         ELSE false
-                    END as has_payment
+                    END as has_payment,
+                    tp.is_direct_entry
                 FROM tenant_purchases tp
                 LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
                 LEFT JOIN LATERAL (
@@ -118,7 +139,7 @@ async def get_purchases_list(
                     LIMIT 1
                 ) psh_paid ON true
                 WHERE tp.tenant_id = $1
-                AND (tp.is_direct_entry = FALSE OR tp.is_direct_entry IS NULL)
+                AND """ + direct_entry_list_clause(include_direct_payables) + """
             """
 
             count_query = """
@@ -126,7 +147,7 @@ async def get_purchases_list(
                 FROM tenant_purchases tp
                 LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
                 WHERE tp.tenant_id = $1
-                AND (tp.is_direct_entry = FALSE OR tp.is_direct_entry IS NULL)
+                AND """ + direct_entry_list_clause(include_direct_payables) + """
             """
 
             params = [tenant_id]
@@ -295,6 +316,7 @@ async def get_purchases_list(
                     received_by=row.get('received_by'),
                     verified_by=row.get('verified_by'),
                     package_condition=row.get('package_condition'),
+                    is_direct_entry=row.get('is_direct_entry') or False,
                     items=items
                 )
                 purchases.append(purchase)
