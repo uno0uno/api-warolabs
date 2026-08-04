@@ -101,3 +101,37 @@ def test_historical_bootstrap_conflicts_are_localization_aware():
     assert "at.localization_id = 'WARO_CO_PUC_V1'" in MIGRATION_025
     assert MIGRATION_029.count("ON CONFLICT (localization_id, code) DO NOTHING") == 3
     assert "WHERE localization_id = 'WARO_CO_PUC_V1'" in MIGRATION_029
+
+
+def test_payables_settlement_role_defaults_for_co_and_global():
+    """AP settlement path roles must exist on both WARO templates (epic #2109 / #2112).
+
+    Product journals resolve roles (INVENTORY, ACCOUNTS_PAYABLE, CASH/BANK) — not
+    country-specific hardcoding. Missing defaults → MissingAccountRoleError (409).
+    """
+    co_block = MIGRATION_104.split("WITH role_codes(role, code) AS (", 1)[1]
+    co_block = co_block.split("WITH role_codes(role, code) AS (", 1)[0]
+    global_block = MIGRATION_104.split("WITH role_codes(role, code) AS (", 2)[2]
+
+    co_pairs = (
+        ("CASH", "1105"),
+        ("BANK", "1110"),
+        ("INVENTORY", "1435"),
+        ("ACCOUNTS_PAYABLE", "2205"),
+    )
+    global_pairs = (
+        ("CASH", "1000"),
+        ("BANK", "1010"),
+        ("INVENTORY", "1200"),
+        ("ACCOUNTS_PAYABLE", "2000"),
+    )
+    for role, code in co_pairs:
+        assert f"('{role}', '{code}')" in co_block
+    for role, code in global_pairs:
+        assert f"('{role}', '{code}')" in global_block
+
+    assert "SELECT 'WARO_CO_PUC_V1', role_codes.role, templates.id" in MIGRATION_104
+    assert "SELECT 'WARO_HOSPITALITY_GLOBAL_V1', role_codes.role, templates.id" in MIGRATION_104
+    # No per-country journal forks in role seed — only template account codes differ.
+    assert "country_code = 'MX'" not in co_block
+    assert "country_code = 'MX'" not in global_block
