@@ -383,7 +383,7 @@ async def get_purchases_endpoint(
     date_filter: Optional[str] = Query(default=None, description="Filter by date range (today, yesterday, last_week, 15_days, 1_month, 3_months)"),
     include_direct_payables: bool = Query(
         default=False,
-        description="When true, also return unpaid direct purchases (crédito/received) for Pagos",
+        description="When true, also return direct credit purchases for Pagos (unpaid received + paid settlements; excludes contado)",
     ),
 ):
     """
