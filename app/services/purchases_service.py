@@ -43,6 +43,27 @@ def direct_entry_list_clause(include_direct_payables: bool) -> str:
     return _DIRECT_PAYABLES_SQL if include_direct_payables else _EXCLUDE_DIRECTS_SQL
 
 
+def row_matches_purchases_list_scope(
+    *,
+    is_direct_entry: bool | None,
+    paid_at,
+    status: str | None,
+    payment_type: str | None,
+    include_direct_payables: bool,
+) -> bool:
+    """Python mirror of `direct_entry_list_clause` for unit tests (keep in sync with SQL)."""
+    is_direct = bool(is_direct_entry)
+    if not include_direct_payables:
+        return not is_direct
+    if not is_direct:
+        return True
+    return (
+        paid_at is None
+        and status == "received"
+        and (payment_type or "").strip().lower() != "contado"
+    )
+
+
 async def get_purchases_list(
     request: Request,
     response: Response,
