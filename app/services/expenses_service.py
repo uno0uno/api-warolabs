@@ -1901,6 +1901,7 @@ async def update_expense_json(
                     e.amount, e.description, e.source_system, e.created_at,
                     e.transaction_date, e.is_recurring, e.frequency, e.recurring_end_date,
                     e.payment_method, e.payment_method_id::text as payment_method_id, e.expense_type,
+                    e.payment_type, e.paid_at,
                     c.id as cat_id, c.category_code, c.category_name,
                     c.description as cat_description, c.is_active as cat_active
                 FROM tenant_expenses e
@@ -1931,6 +1932,8 @@ async def update_expense_json(
                 recurringEndDate=full_expense['recurring_end_date'],
                 paymentMethod=full_expense['payment_method'],
                 paymentMethodId=full_expense['payment_method_id'],
+                paymentType=(full_expense['payment_type'] if 'payment_type' in full_expense.keys() else None) or 'contado',
+                paidAt=full_expense['paid_at'] if 'paid_at' in full_expense.keys() else None,
                 category=category
             )
 
