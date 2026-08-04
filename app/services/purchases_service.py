@@ -24,14 +24,17 @@ from app.services.email_helpers import send_quotation_email
 from app.services.gemini_service import process_invoice
 from app.services.ingredients_service import match_ingredient_by_name
 
-# Unpaid direct (crédito) payables for Pagos — see warocol.com#2110 / epic #2109.
+# Direct credit payables for Pagos — unpaid received + paid settlements (not contado).
+# See warocol.com#2110 / #2111 / epic #2109.
 _DIRECT_PAYABLES_SQL = """(
                     (tp.is_direct_entry = FALSE OR tp.is_direct_entry IS NULL)
                     OR (
                         tp.is_direct_entry = TRUE
-                        AND tp.paid_at IS NULL
-                        AND tp.status = 'received'
                         AND lower(COALESCE(tp.payment_type, '')) IS DISTINCT FROM 'contado'
+                        AND (
+                            (tp.paid_at IS NULL AND tp.status = 'received')
+                            OR tp.paid_at IS NOT NULL
+                        )
                     )
                 )"""
 
@@ -57,11 +60,11 @@ def row_matches_purchases_list_scope(
         return not is_direct
     if not is_direct:
         return True
-    return (
-        paid_at is None
-        and status == "received"
-        and (payment_type or "").strip().lower() != "contado"
-    )
+    if (payment_type or "").strip().lower() == "contado":
+        return False
+    if paid_at is None:
+        return status == "received"
+    return True
 
 
 async def get_purchases_list(
