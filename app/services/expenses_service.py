@@ -252,6 +252,12 @@ async def _post_expense_gl_entry(
         tenant_id, period_year, period_month,
     )
     if closed:
+        msg = (
+            f"[GL] Period {period_year}-{period_month:02d} is closed — "
+            f"cannot post credit expense {expense_id}"
+        )
+        if is_credit:
+            raise HTTPException(status_code=409, detail=msg)
         logger.warning(
             f"[GL] Period {period_year}-{period_month:02d} is closed — "
             f"skip GL post for expense {expense_id}"
@@ -310,10 +316,9 @@ async def _post_expense_payment_gl_entry(
         """SELECT id
              FROM tenant_journal_entries
             WHERE tenant_id = $1
-              AND source_module = 'gastos'
+              AND source_module = 'gastos_payment'
               AND source_id = $2
               AND status = 'posted'
-              AND description LIKE 'Pago gasto%'
             LIMIT 1""",
         tenant_id,
         expense_id,
@@ -335,10 +340,13 @@ async def _post_expense_payment_gl_entry(
         period_month,
     )
     if closed:
-        logger.warning(
-            f"[GL] Period {period_year}-{period_month:02d} closed — skip expense payment GL for {expense_id}"
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"[GL] Period {period_year}-{period_month:02d} is closed — "
+                f"cannot settle expense {expense_id}"
+            ),
         )
-        return
 
     debit_acct = await resolve_account(
         conn, tenant_id, AccountRole.ACCOUNTS_PAYABLE, source="expense_payment"
@@ -357,7 +365,7 @@ async def _post_expense_payment_gl_entry(
                (tenant_id, entry_date, period_year, period_month,
                 description, source_module, source_id, status,
                 total_debit, total_credit, posted_at)
-           VALUES ($1, $2, $3, $4, $5, 'gastos', $6, 'posted', $7, $8, NOW())
+           VALUES ($1, $2, $3, $4, $5, 'gastos_payment', $6, 'posted', $7, $8, NOW())
            RETURNING id""",
             tenant_id,
             entry_date,
@@ -401,76 +409,79 @@ async def _void_expense_gl_entry(
     reason: str = "Gasto modificado o eliminado",
 ) -> None:
     """
-    Find and void the most recent posted GL entry for a gastos expense.
+    Void all posted GL entries for a gastos expense (create + settlement).
     Silently skips if no entry found (pre-#377 expense) or period is closed.
     Caller must wrap in try/except for graceful degrade.
     """
-    entry = await conn.fetchrow(
+    entries = await conn.fetch(
         """SELECT id, entry_date, period_year, period_month, description,
-                  total_debit, total_credit
+                  total_debit, total_credit, source_module
            FROM tenant_journal_entries
-           WHERE tenant_id = $1 AND source_module = 'gastos' AND source_id = $2
-                 AND status = 'posted'
-           ORDER BY created_at DESC
-           LIMIT 1""",
+           WHERE tenant_id = $1
+             AND source_id = $2
+             AND source_module IN ('gastos', 'gastos_payment')
+             AND status = 'posted'
+           ORDER BY created_at ASC""",
         tenant_id, expense_id,
     )
-    if not entry:
+    if not entries:
         logger.info(f"[GL] No posted GL entry for expense {expense_id} — skip void")
         return
 
-    closed = await conn.fetchval(
-        """SELECT 1 FROM tenant_monthly_periods
-           WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
-        tenant_id, entry['period_year'], entry['period_month'],
-    )
-    if closed:
-        logger.warning(
-            f"[GL] Period {entry['period_year']}-{entry['period_month']:02d} is closed — "
-            f"skip GL void for expense {expense_id}"
+    for entry in entries:
+        closed = await conn.fetchval(
+            """SELECT 1 FROM tenant_monthly_periods
+               WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+            tenant_id, entry['period_year'], entry['period_month'],
         )
-        return
+        if closed:
+            logger.warning(
+                f"[GL] Period {entry['period_year']}-{entry['period_month']:02d} is closed — "
+                f"skip GL void for expense {expense_id} entry {entry['id']}"
+            )
+            continue
 
-    original_lines = await conn.fetch(
-        """SELECT account_id, debit, credit, description, line_order
-           FROM tenant_journal_lines
-           WHERE journal_entry_id = $1 ORDER BY line_order""",
-        entry['id'],
-    )
-
-    async with conn.transaction():
-        await conn.execute(
-            "UPDATE tenant_journal_entries SET status = 'voided', voided_at = NOW() WHERE id = $1",
+        original_lines = await conn.fetch(
+            """SELECT account_id, debit, credit, description, line_order
+               FROM tenant_journal_lines
+               WHERE journal_entry_id = $1 ORDER BY line_order""",
             entry['id'],
         )
 
-        rev_row = await conn.fetchrow(
-            """INSERT INTO tenant_journal_entries
-                   (tenant_id, entry_date, period_year, period_month,
-                    description, source_module, source_id, status,
-                    total_debit, total_credit, posted_at)
-               VALUES ($1, $2, $3, $4, $5, 'system', $6, 'posted', $7, $8, NOW())
-               RETURNING id""",
-            tenant_id, entry['entry_date'], entry['period_year'], entry['period_month'],
-            f"Reversión: {entry['description']} — {reason}",
-            entry['id'],
-            float(entry['total_debit']), float(entry['total_credit']),
-        )
-        rev_id = rev_row['id']
-
-        for line in original_lines:
+        async with conn.transaction():
             await conn.execute(
-                """INSERT INTO tenant_journal_lines
-                       (journal_entry_id, account_id, debit, credit, description, line_order)
-                   VALUES ($1, $2, $3, $4, $5, $6)""",
-                rev_id, line['account_id'],
-                float(line['credit']), float(line['debit']),
-                line['description'], line['line_order'],
+                "UPDATE tenant_journal_entries SET status = 'voided', voided_at = NOW() WHERE id = $1",
+                entry['id'],
             )
 
-    logger.info(
-        f"[GL] ✅ Voided GL entry {entry['id']} → reversing {rev_id} for expense {expense_id}"
-    )
+            rev_row = await conn.fetchrow(
+                """INSERT INTO tenant_journal_entries
+                       (tenant_id, entry_date, period_year, period_month,
+                        description, source_module, source_id, status,
+                        total_debit, total_credit, posted_at)
+                   VALUES ($1, $2, $3, $4, $5, 'system', $6, 'posted', $7, $8, NOW())
+                   RETURNING id""",
+                tenant_id, entry['entry_date'], entry['period_year'], entry['period_month'],
+                f"Reversión: {entry['description']} — {reason}",
+                entry['id'],
+                float(entry['total_debit']), float(entry['total_credit']),
+            )
+            rev_id = rev_row['id']
+
+            for line in original_lines:
+                await conn.execute(
+                    """INSERT INTO tenant_journal_lines
+                           (journal_entry_id, account_id, debit, credit, description, line_order)
+                       VALUES ($1, $2, $3, $4, $5, $6)""",
+                    rev_id, line['account_id'],
+                    float(line['credit'] or 0), float(line['debit'] or 0),
+                    line['description'], line['line_order'],
+                )
+
+        logger.info(
+            f"[GL] ✅ Voided GL entry {entry['id']} → reversing {rev_id} for expense {expense_id}"
+        )
+
 
 
 async def get_expense_categories(
@@ -1405,7 +1416,9 @@ async def pay_expense(
             payment_method,
             str(payment_method_id) if payment_method_id else None,
         )
-        amount = float(payment_amount) if payment_amount is not None else float(row["amount"])
+        amount = float(row["amount"])
+        if payment_amount is not None and abs(float(payment_amount) - amount) > 0.01:
+            raise HTTPException(status_code=400, detail="Partial expense payments are not supported")
         if payment_date:
             try:
                 payment_dt = datetime.fromisoformat(payment_date.replace("Z", "+00:00"))
@@ -1413,6 +1426,22 @@ async def pay_expense(
                 payment_dt = datetime.utcnow()
         else:
             payment_dt = datetime.utcnow()
+
+        try:
+            await _post_expense_payment_gl_entry(
+                conn=conn,
+                tenant_id=tenant_id,
+                expense_id=expense_id,
+                amount=amount,
+                payment_date=payment_dt,
+                description=f"Pago gasto {row['expense_number'] or expense_id}",
+                payment_method=method_slug,
+                payment_method_id=UUID(method_id) if method_id else None,
+            )
+        except MissingAccountRoleError:
+            raise
+        except HTTPException:
+            raise
 
         await conn.execute(
             """
@@ -1428,20 +1457,6 @@ async def pay_expense(
             method_slug,
             method_id,
         )
-
-        try:
-            await _post_expense_payment_gl_entry(
-                conn=conn,
-                tenant_id=tenant_id,
-                expense_id=expense_id,
-                amount=amount,
-                payment_date=payment_dt,
-                description=f"Pago gasto {row['expense_number'] or expense_id}",
-                payment_method=method_slug,
-                payment_method_id=UUID(method_id) if method_id else None,
-            )
-        except MissingAccountRoleError:
-            raise
 
         return {"success": True, "message": "Expense payment registered successfully"}
 
@@ -1757,6 +1772,8 @@ async def update_expense(
             try:
                 async with conn.transaction():
                     await _void_expense_gl_entry(conn, tenant_id, expense_id, "Gasto actualizado")
+                    _ptype = (full_expense['payment_type'] if 'payment_type' in full_expense.keys() else None) or 'contado'
+                    _pmid = full_expense['payment_method_id'] if 'payment_method_id' in full_expense.keys() else None
                     await _post_expense_gl_entry(
                         conn, tenant_id, expense_id,
                         float(full_expense['amount']),
@@ -1764,6 +1781,8 @@ async def update_expense(
                         full_expense['description'],
                         full_expense['category_code'],
                         full_expense['payment_method'],
+                        payment_type=_ptype,
+                        payment_method_id=UUID(_pmid) if _pmid else None,
                     )
             except Exception as _gl_err:
                 logger.warning(f"[GL] GL update failed for expense {expense_id}: {_gl_err}")
@@ -1919,6 +1938,8 @@ async def update_expense_json(
             try:
                 async with conn.transaction():
                     await _void_expense_gl_entry(conn, tenant_id, expense_id, "Gasto actualizado")
+                    _ptype = (full_expense['payment_type'] if 'payment_type' in full_expense.keys() else None) or 'contado'
+                    _pmid = full_expense['payment_method_id'] if 'payment_method_id' in full_expense.keys() else None
                     await _post_expense_gl_entry(
                         conn, tenant_id, expense_id,
                         float(full_expense['amount']),
@@ -1926,6 +1947,8 @@ async def update_expense_json(
                         full_expense['description'],
                         full_expense['category_code'],
                         full_expense['payment_method'],
+                        payment_type=_ptype,
+                        payment_method_id=UUID(_pmid) if _pmid else None,
                     )
             except Exception as _gl_err:
                 logger.warning(f"[GL] GL update failed for expense {expense_id}: {_gl_err}")
