@@ -16,6 +16,7 @@ from app.models.payment_method import (
     PatchMethodRequest,
 )
 from app.services.billing_service import check_plan_quota_growth
+from app.services.account_role_service import resolve_group_parent_account
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,10 @@ async def list_groups(request: Request) -> dict:
       - global defaults (tenant_id IS NULL)
       - tenant's own custom groups
     Includes method_count: number of active methods the tenant has per group.
+
+    glAccountCode / glAccountId are resolved for the current tenant's chart of
+    accounts (localization roles), so global CO PUC defaults do not leak to
+    non-CO tenants (api-warolabs#782).
     """
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -57,21 +62,43 @@ async def list_groups(request: Request) -> dict:
             tenant_id,
         )
 
-    data = [
-        {
-            "id": str(row["id"]),
-            "tenantId": str(row["tenant_id"]) if row["tenant_id"] else None,
-            "name": row["name"],
-            "slug": row["slug"],
-            "triggersCartera": row["triggers_cartera"],
-            "isActive": row["is_active"],
-            "sortOrder": row["sort_order"],
-            "glAccountCode": row["gl_account_code"],
-            "glAccountId": str(row["gl_account_id"]) if row["gl_account_id"] else None,
-            "methodCount": row["method_count"],
-        }
-        for row in rows
-    ]
+        data = []
+        for row in rows:
+            resolved = await resolve_group_parent_account(
+                conn,
+                tenant_id,
+                slug=row["slug"],
+                gl_account_id=row["gl_account_id"],
+                gl_account_code=row["gl_account_code"],
+                group_tenant_id=row["tenant_id"],
+            )
+            if resolved:
+                gl_code = resolved.code
+                gl_id = str(resolved.id)
+            elif row["tenant_id"] is not None:
+                # Keep tenant-customized bindings visible even if not in chart yet.
+                gl_code = row["gl_account_code"]
+                gl_id = str(row["gl_account_id"]) if row["gl_account_id"] else None
+            else:
+                # Never expose global CO-only codes when they are not in this chart.
+                gl_code = None
+                gl_id = None
+
+            data.append(
+                {
+                    "id": str(row["id"]),
+                    "tenantId": str(row["tenant_id"]) if row["tenant_id"] else None,
+                    "name": row["name"],
+                    "slug": row["slug"],
+                    "triggersCartera": row["triggers_cartera"],
+                    "isActive": row["is_active"],
+                    "sortOrder": row["sort_order"],
+                    "glAccountCode": gl_code,
+                    "glAccountId": gl_id,
+                    "methodCount": row["method_count"],
+                }
+            )
+
     return {"success": True, "data": data}
 
 

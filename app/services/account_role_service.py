@@ -206,6 +206,40 @@ def payment_role(payment_slug: Optional[str]) -> str:
     return PAYMENT_ROLE_BY_SLUG.get(payment_slug or "", AccountRole.CASH)
 
 
+async def resolve_group_parent_account(
+    conn,
+    tenant_id: UUID,
+    *,
+    slug: Optional[str],
+    gl_account_id: Optional[UUID] = None,
+    gl_account_code: Optional[str] = None,
+    group_tenant_id: Optional[UUID] = None,
+) -> Optional[AccountRef]:
+    """
+    Parent GL for a payment method group in the current tenant's chart.
+
+    Global groups (tenant_id IS NULL) ignore hardcoded CO PUC codes and resolve
+    via payment_role(slug) + localization defaults (CO → 1110 BANK, GLOBAL → 1010).
+    Tenant-owned groups still honor explicit id/code when present in the chart.
+    """
+    explicit = await resolve_account_by_id(conn, tenant_id, gl_account_id)
+    if explicit:
+        return explicit
+
+    if group_tenant_id is not None:
+        legacy = await resolve_legacy_account(conn, tenant_id, gl_account_code)
+        if legacy:
+            return legacy
+
+    return await resolve_account(
+        conn,
+        tenant_id,
+        payment_role(slug),
+        required=False,
+        source="payment_group_list",
+    )
+
+
 async def resolve_payment_account(
     conn,
     tenant_id: UUID,
