@@ -561,12 +561,14 @@ async def pay_purchase_endpoint(
     payment_amount: float = Form(...),
     payment_date: str = Form(...),
     notes: Optional[str] = Form(None),
+    from_cash_drawer: Optional[bool] = Form(None),
     files: List[UploadFile] = File(None)
 ):
     """
     Transition purchase to PAID state
     Records payment method and reference
     Accepts file attachments (payment proofs, receipts, etc.)
+    Cash payments may set from_cash_drawer=false so arqueo ignores the outflow.
     """
     return await transition_to_paid(
         request=request,
@@ -578,7 +580,8 @@ async def pay_purchase_endpoint(
         payment_amount=payment_amount,
         payment_date=payment_date,
         notes=notes,
-        files=files
+        files=files,
+        from_cash_drawer=from_cash_drawer,
     )
 
 @router.post("/{purchase_id}/cancel", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
