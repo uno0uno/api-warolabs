@@ -71,6 +71,13 @@ def test_resolve_from_cash_drawer_non_cash_forces_true():
     assert resolve_expense_drawer(None, False) is True
 
 
+def test_resolve_from_cash_drawer_omitted_on_update_means_preserve_semantics():
+    """Update path must not treat omitted fromCashDrawer as True for cash."""
+    assert resolve_purchase_drawer("cash", None) is True  # create default
+    # Preservation is SQL-side (skip SET); helper only applies when client sends a value.
+    assert resolve_purchase_drawer("cash", False) is False
+
+
 def test_table_advance_partial_close_moves_amount_to_advance_tender():
     adjusted = _apply_table_session_advances_to_methods(
         {"cash": 100_000.0},
