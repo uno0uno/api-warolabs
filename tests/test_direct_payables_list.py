@@ -190,11 +190,95 @@ async def test_transition_to_paid_direct_received_sets_paid_at_and_checks_quota(
     update_sql = next(s for s in execute_sql if "UPDATE tenant_purchases" in s)
     assert "paid_at = NOW()" in update_sql
     assert "status = 'paid'" in update_sql
+    assert "from_cash_drawer = $6" in update_sql
+    update_call = next(
+        c for c in conn.execute.await_args_list if "UPDATE tenant_purchases" in c.args[0]
+    )
+    assert update_call.args[6] is True  # default cash drawer when omitted
     quota.assert_awaited_once()
     assert quota.await_args.args[1:] == (tenant_id, "supplier_payments_per_period")
     gl.assert_awaited_once()
     assert gl.await_args.kwargs["purchase_id"] == purchase_id
     assert gl.await_args.kwargs["amount"] == 150.0
+
+
+@pytest.mark.asyncio
+async def test_transition_to_paid_cash_outside_drawer_persists_false():
+    """Cash pay with from_cash_drawer=false must persist so arqueo excludes the outflow."""
+    tenant_id = uuid4()
+    user_id = uuid4()
+    purchase_id = uuid4()
+    request = MagicMock(spec=Request)
+    response = MagicMock()
+    session = _session(tenant_id, user_id)
+
+    conn = MagicMock()
+    tx = MagicMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=tx)
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"id": purchase_id, "status": "received"},
+            {
+                "purchase_number": "WR-CD-2026-0100",
+                "supplier_name": "Proveedor MX",
+                "supplier_email": None,
+                "supplier_token": None,
+                "tenant_site": None,
+            },
+        ]
+    )
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    @asynccontextmanager
+    async def _db_ctx(*_a, **_k):
+        yield conn
+
+    with patch(
+        "app.services.purchase_tracking_service.require_valid_session",
+        return_value=session,
+    ), patch(
+        "app.services.purchase_tracking_service.get_db_connection",
+        side_effect=_db_ctx,
+    ), patch(
+        "app.services.purchase_tracking_service._resolve_purchase_payment_account",
+        AsyncMock(return_value=("cash", SimpleNamespace(id=uuid4()))),
+    ), patch(
+        "app.services.purchase_tracking_service.check_plan_quota_period",
+        AsyncMock(),
+    ), patch(
+        "app.services.purchase_tracking_service.create_status_history_entry",
+        AsyncMock(),
+    ), patch(
+        "app.services.purchase_tracking_service.upload_purchase_attachments",
+        AsyncMock(),
+    ), patch(
+        "app.services.purchase_tracking_service._post_supplier_payment_gl_entry",
+        AsyncMock(),
+    ), patch(
+        "app.services.purchase_tracking_service.discord_purchase_actions_service",
+        None,
+    ):
+        result = await transition_to_paid(
+            request,
+            response,
+            purchase_id,
+            payment_method="cash",
+            payment_method_id=None,
+            payment_reference="REF-OUT",
+            payment_amount=80.0,
+            payment_date="2026-08-03T12:00:00Z",
+            notes=None,
+            files=[],
+            from_cash_drawer=False,
+        )
+
+    assert result["success"] is True
+    update_call = next(
+        c for c in conn.execute.await_args_list if "UPDATE tenant_purchases" in c.args[0]
+    )
+    assert update_call.args[6] is False
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,6 @@ from app.services.account_role_service import (
 from app.services.billing_service import check_plan_quota_period
 import logging
 
-logger = logging.getLogger(__name__)
 from app.models.purchase import (
     PurchaseStatusHistory,
     PurchaseStatusHistoryCreate,
@@ -39,6 +38,20 @@ from app.models.purchase import (
     AttachmentsResponse,
 )
 from app.services.discord_service import discord_purchase_actions_service
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_from_cash_drawer(
+    payment_method_slug: Optional[str],
+    from_cash_drawer: Optional[bool],
+) -> bool:
+    """Non-cash always true; cash may opt out of arqueo drawer outflows (#2141)."""
+    if (payment_method_slug or "").strip().lower() != "cash":
+        return True
+    if from_cash_drawer is None:
+        return True
+    return bool(from_cash_drawer)
 
 # =============================================================================
 # STATE TRANSITION RULES
@@ -1383,7 +1396,8 @@ async def transition_to_paid(
     payment_amount: float,
     payment_date: str,
     notes: Optional[str] = None,
-    files: List[UploadFile] = []
+    files: List[UploadFile] = [],
+    from_cash_drawer: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Transition purchase to paid state with optional file attachments"""
     try:
@@ -1425,6 +1439,7 @@ async def transition_to_paid(
                     payment_method,
                     payment_method_id,
                 )
+                drawer_flag = _resolve_from_cash_drawer(payment_method, from_cash_drawer)
 
                 await check_plan_quota_period(
                     conn, tenant_id, "supplier_payments_per_period"
@@ -1440,10 +1455,11 @@ async def transition_to_paid(
                         payment_reference = $3,
                         payment_amount = $4,
                         payment_date = $5,
+                        from_cash_drawer = $6,
                         paid_at = NOW(),
                         updated_at = NOW()
-                    WHERE id = $6
-                """, payment_method, payment_method_id, payment_reference, payment_amount, payment_dt, purchase_id)
+                    WHERE id = $7
+                """, payment_method, payment_method_id, payment_reference, payment_amount, payment_dt, drawer_flag, purchase_id)
 
                 # Create history entry
                 await create_status_history_entry(
@@ -1453,7 +1469,8 @@ async def transition_to_paid(
                         "payment_method": payment_method,
                         "payment_method_id": str(payment_method_id) if payment_method_id else None,
                         "payment_amount": str(payment_amount),
-                        "payment_date": payment_dt.isoformat()
+                        "payment_date": payment_dt.isoformat(),
+                        "from_cash_drawer": drawer_flag,
                     },
                     notes
                 )
