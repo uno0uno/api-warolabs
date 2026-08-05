@@ -161,6 +161,18 @@ def assert_contado_requires_payment_method(
     raise HTTPException(status_code=400, detail=CONTADO_REQUIRES_PAYMENT_METHOD_DETAIL)
 
 
+def _resolve_from_cash_drawer(
+    payment_method_slug: Optional[str],
+    from_cash_drawer: Optional[bool],
+) -> bool:
+    """Non-cash always true; cash may opt out of arqueo drawer outflows (#786)."""
+    if (payment_method_slug or "").strip().lower() != "cash":
+        return True
+    if from_cash_drawer is None:
+        return True
+    return bool(from_cash_drawer)
+
+
 async def _normalize_direct_purchase_payment(
     conn,
     payment_method: Optional[str],
@@ -401,7 +413,8 @@ async def create_direct_purchase(
     payment_reference: Optional[str] = None,
     payment_amount: Optional[float] = None,
     payment_date: Optional[str] = None,
-    purchase_date: Optional[str] = None
+    purchase_date: Optional[str] = None,
+    from_cash_drawer: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Create a direct purchase that immediately updates inventory.
@@ -447,6 +460,7 @@ async def create_direct_purchase(
                     payment_method_id,
                 )
                 assert_contado_requires_payment_method(payment_type, payment_method)
+                drawer_flag = _resolve_from_cash_drawer(payment_method, from_cash_drawer)
 
                 # 2. Calculate totals from items
                 total_amount = _calculate_direct_purchase_total(items)
@@ -483,11 +497,13 @@ async def create_direct_purchase(
                         is_direct_entry,
                         received_at,
                         received_by,
-                        paid_at
+                        paid_at,
+                        from_cash_drawer
                     ) VALUES (
                         $1, $2, $3, COALESCE($20, NOW()), $4, 0, $5, $6, $7, $8, $9, $10,
                         $11, $12, $13, $14::uuid, $15, $16, $17, TRUE, NOW(), $18,
-                        CASE WHEN $19 THEN NOW() ELSE NULL END
+                        CASE WHEN $19 THEN NOW() ELSE NULL END,
+                        $21
                     )
                     RETURNING id, purchase_date
                 """,
@@ -510,7 +526,8 @@ async def create_direct_purchase(
                     _parse_date(payment_date),
                     user_id,
                     bool(payment_method and payment_amount),
-                    _parse_date(purchase_date)
+                    _parse_date(purchase_date),
+                    drawer_flag,
                 )
 
                 purchase_id = purchase_row['id']
@@ -747,7 +764,8 @@ async def create_direct_purchase(
                         "status": final_status,
                         "total_amount": total_amount,
                         "items_count": len(items),
-                        "inventory_updated": True
+                        "inventory_updated": True,
+                        "fromCashDrawer": bool(drawer_flag),
                     }
                 }
 
@@ -1122,7 +1140,8 @@ async def update_direct_purchase(
     payment_method_id: Optional[str] = None,
     payment_reference: Optional[str] = None,
     payment_amount: Optional[float] = None,
-    payment_date: Optional[str] = None
+    payment_date: Optional[str] = None,
+    from_cash_drawer: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Update a direct purchase.
@@ -1484,7 +1503,7 @@ async def update_direct_purchase(
                 assert_contado_requires_payment_method(effective_payment_type, payment_method)
 
                 # 9. Update purchase record
-                await conn.execute("""
+                update_sql = """
                     UPDATE tenant_purchases
                     SET
                         total_amount = $1,
@@ -1500,8 +1519,8 @@ async def update_direct_purchase(
                         updated_at = NOW(),
                         paid_at = CASE WHEN $10 THEN NOW() ELSE paid_at END,
                         purchase_date = COALESCE($12, purchase_date)
-                    WHERE id = $11
-                """,
+                """
+                update_params: list = [
                     total_amount,
                     notes,
                     invoice_number,
@@ -1515,7 +1534,25 @@ async def update_direct_purchase(
                     purchase_id,
                     _parse_date(purchase_date),
                     payment_type,
-                )
+                ]
+                drawer_flag = None
+                if from_cash_drawer is not None:
+                    drawer_flag = _resolve_from_cash_drawer(payment_method, from_cash_drawer)
+                    update_sql += ",\n                        from_cash_drawer = $14"
+                    update_params.append(drawer_flag)
+                elif payment_method and (payment_method or "").strip().lower() != "cash":
+                    # Non-cash payment forces drawer flag true (ignore stale false).
+                    drawer_flag = True
+                    update_sql += ",\n                        from_cash_drawer = $14"
+                    update_params.append(drawer_flag)
+                update_sql += "\n                    WHERE id = $11"
+                await conn.execute(update_sql, *update_params)
+
+                if drawer_flag is None:
+                    drawer_flag = await conn.fetchval(
+                        "SELECT COALESCE(from_cash_drawer, true) FROM tenant_purchases WHERE id = $1",
+                        purchase_id,
+                    )
 
                 # 10. Create status history if status changed
                 if new_status != current_status:
@@ -1538,7 +1575,8 @@ async def update_direct_purchase(
                         "status": new_status,
                         "total_amount": total_amount,
                         "items_count": len(items),
-                        "inventory_updated": True
+                        "inventory_updated": True,
+                        "fromCashDrawer": bool(drawer_flag),
                     }
                 }
 

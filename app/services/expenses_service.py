@@ -72,7 +72,27 @@ def _expense_payable_fields(row) -> Dict[str, Any]:
         "paymentMethodId": row["payment_method_id"] if _row_has(row, "payment_method_id") else None,
         "paymentType": (row["payment_type"] if _row_has(row, "payment_type") else None) or "contado",
         "paidAt": row["paid_at"] if _row_has(row, "paid_at") else None,
+        "fromCashDrawer": _from_cash_drawer_from_row(row),
     }
+
+
+def _resolve_from_cash_drawer(
+    payment_method_slug: Optional[str],
+    from_cash_drawer: Optional[bool],
+) -> bool:
+    """Non-cash always counts as drawer-neutral true; cash may opt out of arqueo (#786)."""
+    if (payment_method_slug or "").strip().lower() != "cash":
+        return True
+    if from_cash_drawer is None:
+        return True
+    return bool(from_cash_drawer)
+
+
+def _from_cash_drawer_from_row(row) -> bool:
+    if not _row_has(row, "from_cash_drawer"):
+        return True
+    val = row["from_cash_drawer"]
+    return True if val is None else bool(val)
 
 
 def _looks_like_uuid(value: Optional[str]) -> bool:
@@ -562,6 +582,7 @@ async def get_expenses_list(
                     e.recurring_end_date,
                     e.payment_method,
                     e.payment_method_id::text as payment_method_id,
+                    e.from_cash_drawer,
                     e.expense_type,
                     c.id as cat_id,
                     c.category_code,
@@ -689,6 +710,7 @@ async def get_expenses_list(
                     paymentMethod=row['payment_method'],
                     paymentMethodId=row['payment_method_id'],
                     paymentType=(row['payment_type'] if 'payment_type' in row.keys() else None) or 'contado',
+                    fromCashDrawer=_from_cash_drawer_from_row(row),
                     paidAt=row['paid_at'] if 'paid_at' in row.keys() else None,
                     expenseType=row['expense_type'],
                     category=category
@@ -746,6 +768,7 @@ async def get_expense_by_id(
                     e.recurring_end_date,
                     e.payment_method,
                     e.payment_method_id::text as payment_method_id,
+                    e.from_cash_drawer,
                     e.expense_type,
                     e.payment_type,
                     e.paid_at,
@@ -825,6 +848,7 @@ async def get_expense_by_id(
                 paymentMethod=full_expense['payment_method'],
                 paymentMethodId=full_expense['payment_method_id'],
                 paymentType=(full_expense['payment_type'] if 'payment_type' in full_expense.keys() else None) or 'contado',
+                fromCashDrawer=_from_cash_drawer_from_row(full_expense),
                 paidAt=full_expense['paid_at'] if 'paid_at' in full_expense.keys() else None,
                 expenseType=full_expense['expense_type'],
                 category=category,
@@ -1158,8 +1182,9 @@ async def create_expense_json(
                     payment_method_id,
                     expense_type,
                     payment_type,
-                    paid_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9, $10, $11, $12::uuid, $13, $14, $15)
+                    paid_at,
+                    from_cash_drawer
+                ) VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9, $10, $11, $12::uuid, $13, $14, $15, $16)
                 RETURNING id, created_at
             """,
                 tenant_id,
@@ -1177,6 +1202,10 @@ async def create_expense_json(
                 expense_data.expense_type,
                 payment_type,
                 paid_at_value,
+                _resolve_from_cash_drawer(
+                    payment_method_raw,
+                    getattr(expense_data, "from_cash_drawer", None),
+                ),
             )
 
             expense_id = row['id']
@@ -1199,6 +1228,7 @@ async def create_expense_json(
                     e.recurring_end_date,
                     e.payment_method,
                     e.payment_method_id::text as payment_method_id,
+                    e.from_cash_drawer,
                     e.expense_type,
                     e.payment_type,
                     e.paid_at,
@@ -1237,6 +1267,7 @@ async def create_expense_json(
                 paymentMethod=full_expense['payment_method'],
                 paymentMethodId=full_expense['payment_method_id'],
                 paymentType=full_expense['payment_type'] or 'contado',
+                fromCashDrawer=_from_cash_drawer_from_row(full_expense),
                 paidAt=full_expense['paid_at'],
                 expenseType=full_expense['expense_type'],
                 category=category
@@ -1355,6 +1386,7 @@ async def get_expense_credit_payables(
                     paymentMethod=row["payment_method"],
                     paymentMethodId=row["payment_method_id"],
                     paymentType=row["payment_type"] or "credito",
+                    fromCashDrawer=_from_cash_drawer_from_row(row),
                     paidAt=row["paid_at"],
                     expenseType=row["expense_type"],
                     category=category,
@@ -1381,6 +1413,7 @@ async def pay_expense(
     payment_amount: Optional[float] = None,
     payment_date: Optional[str] = None,
     notes: Optional[str] = None,
+    from_cash_drawer: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Settle an unpaid credit expense: set paid_at + AP settlement GL (#2113)."""
     session_context = require_valid_session(request)
@@ -1416,6 +1449,7 @@ async def pay_expense(
             payment_method,
             str(payment_method_id) if payment_method_id else None,
         )
+        drawer_flag = _resolve_from_cash_drawer(method_slug, from_cash_drawer)
         amount = float(row["amount"])
         if payment_amount is not None and abs(float(payment_amount) - amount) > 0.01:
             raise HTTPException(status_code=400, detail="Partial expense payments are not supported")
@@ -1448,7 +1482,8 @@ async def pay_expense(
             UPDATE tenant_expenses
             SET paid_at = $3,
                 payment_method = $4,
-                payment_method_id = $5::uuid
+                payment_method_id = $5::uuid,
+                from_cash_drawer = $6
             WHERE id = $1 AND tenant_id = $2 AND paid_at IS NULL
             """,
             expense_id,
@@ -1456,6 +1491,7 @@ async def pay_expense(
             payment_dt,
             method_slug,
             method_id,
+            drawer_flag,
         )
 
         return {"success": True, "message": "Expense payment registered successfully"}
@@ -1746,6 +1782,7 @@ async def update_expense(
                     e.payment_method_id,
                     e.payment_type,
                     e.paid_at,
+                    e.from_cash_drawer,
                     c.id as cat_id,
                     c.category_code,
                     c.category_name,
@@ -1780,6 +1817,7 @@ async def update_expense(
                 paymentMethod=full_expense['payment_method'],
                 paymentMethodId=full_expense['payment_method_id'] if 'payment_method_id' in full_expense.keys() else None,
                 paymentType=(full_expense['payment_type'] if 'payment_type' in full_expense.keys() else None) or 'contado',
+                fromCashDrawer=_from_cash_drawer_from_row(full_expense),
                 paidAt=full_expense['paid_at'] if 'paid_at' in full_expense.keys() else None,
                 category=category
             )
@@ -1912,6 +1950,26 @@ async def update_expense_json(
                 update_fields.append(f"payment_method_id = ${param_count}::uuid")
                 update_values.append(upd_payment_method_id)
                 param_count += 1
+                update_fields.append(f"from_cash_drawer = ${param_count}")
+                update_values.append(
+                    _resolve_from_cash_drawer(
+                        upd_payment_method,
+                        expense_data.from_cash_drawer,
+                    )
+                )
+                param_count += 1
+            elif expense_data.from_cash_drawer is not None:
+                # Method unchanged — resolve against existing payment_method.
+                existing_pm = await conn.fetchval(
+                    "SELECT payment_method FROM tenant_expenses WHERE id = $1 AND tenant_id = $2",
+                    expense_id,
+                    tenant_id,
+                )
+                update_fields.append(f"from_cash_drawer = ${param_count}")
+                update_values.append(
+                    _resolve_from_cash_drawer(existing_pm, expense_data.from_cash_drawer)
+                )
+                param_count += 1
 
             if expense_data.expense_type is not None:
                 update_fields.append(f"expense_type = ${param_count}")
@@ -1933,7 +1991,7 @@ async def update_expense_json(
                     e.amount, e.description, e.source_system, e.created_at,
                     e.transaction_date, e.is_recurring, e.frequency, e.recurring_end_date,
                     e.payment_method, e.payment_method_id::text as payment_method_id, e.expense_type,
-                    e.payment_type, e.paid_at,
+                    e.payment_type, e.paid_at, e.from_cash_drawer,
                     c.id as cat_id, c.category_code, c.category_name,
                     c.description as cat_description, c.is_active as cat_active
                 FROM tenant_expenses e
@@ -1965,6 +2023,7 @@ async def update_expense_json(
                 paymentMethod=full_expense['payment_method'],
                 paymentMethodId=full_expense['payment_method_id'],
                 paymentType=(full_expense['payment_type'] if 'payment_type' in full_expense.keys() else None) or 'contado',
+                fromCashDrawer=_from_cash_drawer_from_row(full_expense),
                 paidAt=full_expense['paid_at'] if 'paid_at' in full_expense.keys() else None,
                 category=category
             )

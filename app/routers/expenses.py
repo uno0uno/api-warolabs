@@ -86,6 +86,7 @@ async def pay_expense_endpoint(
     payment_amount: Optional[float] = Form(None),
     payment_date: Optional[str] = Form(None),
     notes: Optional[str] = Form(None),
+    from_cash_drawer: Optional[bool] = Form(None),
 ):
     """Settle unpaid credit expense (Pagos)."""
     return await pay_expense(
@@ -98,6 +99,7 @@ async def pay_expense_endpoint(
         payment_amount=payment_amount,
         payment_date=payment_date,
         notes=notes,
+        from_cash_drawer=from_cash_drawer,
     )
 
 @router.post("/{expense_id}/attachments", dependencies=[Depends(require_module(Module.FINANZAS))])
