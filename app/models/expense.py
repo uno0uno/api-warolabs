@@ -69,6 +69,8 @@ class ExpenseBase(BaseModel):
     payment_method_id: Optional[str] = Field(None, alias='paymentMethodId')
     payment_type: Optional[str] = Field('contado', alias='paymentType')  # contado | credito
     expense_type: Optional[ExpenseType] = Field(None, alias='expenseType')
+    # Drawer control only (#786): false = cash did not leave the till (exclude from arqueo).
+    from_cash_drawer: bool = Field(True, alias='fromCashDrawer')
 
     class Config:
         populate_by_name = True
@@ -89,6 +91,7 @@ class ExpenseUpdate(BaseModel):
     payment_method_id: Optional[str] = Field(None, alias='paymentMethodId')
     payment_type: Optional[str] = Field(None, alias='paymentType')
     expense_type: Optional[ExpenseType] = Field(None, alias='expenseType')
+    from_cash_drawer: Optional[bool] = Field(None, alias='fromCashDrawer')
 
     class Config:
         populate_by_name = True

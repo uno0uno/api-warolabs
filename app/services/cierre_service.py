@@ -1313,6 +1313,7 @@ async def _compute_method_outflow_rows(
         LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE e.tenant_id = $1
           AND COALESCE(pmg.slug, e.payment_method) IS NOT NULL
+          AND COALESCE(e.from_cash_drawer, true) = true
           {expense_filter}
         GROUP BY COALESCE(pmg.slug, e.payment_method), COALESCE(pm.name, e.payment_method)
         """,
@@ -1332,6 +1333,7 @@ async def _compute_method_outflow_rows(
           AND tp.status = 'paid'
           AND COALESCE(tp.payment_amount, 0) > 0
           AND COALESCE(pmg.slug, tp.payment_method) IS NOT NULL
+          AND COALESCE(tp.from_cash_drawer, true) = true
           {purchase_filter}
         GROUP BY COALESCE(pmg.slug, tp.payment_method), COALESCE(pm.name, tp.payment_method)
         """,
@@ -1635,6 +1637,7 @@ async def _compute_preview(
         FROM tenant_expenses
         WHERE tenant_id = $1
           AND payment_method = 'cash'
+          AND COALESCE(from_cash_drawer, true) = true
           {expense_filter}
         """,
         tenant_id, *expense_params,
@@ -1653,6 +1656,7 @@ async def _compute_preview(
           AND tp.status = 'paid'
           AND COALESCE(tp.payment_amount, 0) > 0
           AND COALESCE(pmg.slug, tp.payment_method) = 'cash'
+          AND COALESCE(tp.from_cash_drawer, true) = true
           {purchase_filter}
         """,
         tenant_id, *purchase_params,

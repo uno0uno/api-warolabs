@@ -1,9 +1,11 @@
-"""Unit tests for cierre preview cashExpected (warocol.com#948)."""
+"""Unit tests for cierre preview cashExpected (warocol.com#948 / api-warolabs#786)."""
 from app.services.cierre_service import (
     _advance_audit_totals,
     _apply_table_session_advances_to_methods,
     _compute_cash_expected,
 )
+from app.services.expenses_service import _resolve_from_cash_drawer as resolve_expense_drawer
+from app.services.direct_purchase_service import _resolve_from_cash_drawer as resolve_purchase_drawer
 
 
 def test_cash_expected_all_cash_tips_embedded_in_total_cash():
@@ -43,6 +45,30 @@ def test_cash_expected_subtracts_expenses_and_cash_purchases_once():
         cash_purchases=20_000.0,
     )
     assert result == 270_000.0
+
+
+def test_cash_expected_excludes_non_drawer_cash_outflows_when_sums_already_filtered():
+    """When SQL filters from_cash_drawer=false, those amounts are omitted from the sums."""
+    result = _compute_cash_expected(
+        opening_cash=100_000.0,
+        total_cash=200_000.0,
+        gastos_efectivo=0.0,  # outside-till cash expense excluded upstream
+        cash_purchases=0.0,   # outside-till cash purchase excluded upstream
+    )
+    assert result == 300_000.0
+
+
+def test_resolve_from_cash_drawer_cash_defaults_true():
+    assert resolve_expense_drawer("cash", None) is True
+    assert resolve_expense_drawer("cash", True) is True
+    assert resolve_expense_drawer("cash", False) is False
+    assert resolve_purchase_drawer("cash", False) is False
+
+
+def test_resolve_from_cash_drawer_non_cash_forces_true():
+    assert resolve_expense_drawer("card", False) is True
+    assert resolve_purchase_drawer("digital", False) is True
+    assert resolve_expense_drawer(None, False) is True
 
 
 def test_table_advance_partial_close_moves_amount_to_advance_tender():

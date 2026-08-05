@@ -200,7 +200,8 @@ async def create_direct_purchase_endpoint(
         payment_reference=purchase_data.payment_reference,
         payment_amount=purchase_data.payment_amount,
         payment_date=purchase_data.payment_date,
-        purchase_date=purchase_data.purchase_date
+        purchase_date=purchase_data.purchase_date,
+        from_cash_drawer=purchase_data.from_cash_drawer,
     )
 
     # Schedule anomaly check after the purchase transaction has committed
@@ -303,7 +304,8 @@ async def update_direct_purchase_endpoint(
         payment_method_id=purchase_data.payment_method_id,
         payment_reference=purchase_data.payment_reference,
         payment_amount=purchase_data.payment_amount,
-        payment_date=purchase_data.payment_date
+        payment_date=purchase_data.payment_date,
+        from_cash_drawer=purchase_data.from_cash_drawer,
     )
 
     try:

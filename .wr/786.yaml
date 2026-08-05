@@ -1,0 +1,50 @@
+# Machine contract for wr-exec — keep ≤80 lines. Refs epic #785.
+issue: 786
+title: "feat(cierre): from_cash_drawer on expenses and direct purchases for arqueo"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-786-from-cash-drawer
+parent_epic: 785
+
+paths:
+  - sql/20260805_from_cash_drawer.sql
+  - app/models/expense.py
+  - app/models/purchase.py
+  - app/routers/expenses.py
+  - app/services/expenses_service.py
+  - app/services/direct_purchase_service.py
+  - app/services/cierre_service.py
+  - tests/test_cierre_preview_cash.py
+
+ac:
+  - ADD ONLY from_cash_drawer boolean NOT NULL DEFAULT true on tenant_expenses + tenant_purchases
+  - Models/API accept/return fromCashDrawer; non-cash → default/force true
+  - create/update/pay expense + create/update direct purchase persist the flag
+  - pay_expense Form accepts fromCashDrawer when settling credit in cash
+  - cierre gastos_efectivo + cash_purchases AND COALESCE(from_cash_drawer,true)=true
+  - _compute_method_outflow_rows applies the same predicate (preview net matches cashExpected)
+  - Existing rows (default true) keep current arqueo math; false excluded from cashExpected
+  - pytest evidence in PR; no DROP/destructive ALTER; GL posting unchanged
+
+out_of_scope:
+  - Front UI (warocol.com#2135)
+  - Formal OC / supplier purchase orders
+  - New payment_method slug/group
+  - Backfill of historical cierre snapshots
+
+hints:
+  entry: "cierre_service._compute_preview gastos/cash_purchases ~L1632; _compute_method_outflow_rows ~L1289"
+  pattern: "sql/* ADD COLUMN IF NOT EXISTS … NOT NULL DEFAULT; ExpenseBase paymentMethod aliases"
+  tests: "cd api_warocol.com && ./venv/bin/pytest tests/test_cierre_preview_cash.py -q"
+
+risk:
+  sensitive: true
+  areas: [payments, cash-drawer]
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "apply sql on prod (ADD only); then /wr-research warocol.com#2135 --delta"
