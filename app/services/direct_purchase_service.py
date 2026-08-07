@@ -311,10 +311,11 @@ async def _void_direct_purchase_gl_entry(
     tenant_id: UUID,
     purchase_id: UUID,
     reason: str = "Compra directa eliminada",
-) -> None:
+) -> bool:
     """
     Void all posted inventario GL entries for a direct purchase.
     Raises HTTP 400 if any entry sits in a closed monthly period.
+    Returns True if at least one entry was voided.
     """
     entries = await conn.fetch(
         """SELECT id, entry_date, period_year, period_month, description,
@@ -330,7 +331,7 @@ async def _void_direct_purchase_gl_entry(
     )
     if not entries:
         logger.info(f"[GL] No posted inventario GL for purchase {purchase_id} — skip void")
-        return
+        return False
 
     for entry in entries:
         closed = await conn.fetchval(
@@ -396,6 +397,8 @@ async def _void_direct_purchase_gl_entry(
             f"[GL] ✅ Voided inventario entry {entry['id']} → reversing {rev_id} "
             f"for purchase {purchase_id}"
         )
+
+    return True
 
 
 def calculate_changes_summary(before: List[Dict], after: List[Dict]) -> Dict:
@@ -1892,7 +1895,7 @@ async def delete_direct_purchase(
                         user_id,
                     )
 
-                await _void_direct_purchase_gl_entry(
+                gl_voided = await _void_direct_purchase_gl_entry(
                     conn,
                     tenant_id,
                     purchase_id,
@@ -1929,7 +1932,7 @@ async def delete_direct_purchase(
                         "id": str(purchase_id),
                         "purchase_number": purchase_number,
                         "inventory_reversed": True,
-                        "gl_voided": True,
+                        "gl_voided": gl_voided,
                     },
                 }
 
@@ -1942,5 +1945,5 @@ async def delete_direct_purchase(
         logger.exception(e)
         raise HTTPException(
             status_code=500,
-            detail=f"Error eliminando compra directa: {str(e)}",
+            detail="Error interno del servidor",
         )
