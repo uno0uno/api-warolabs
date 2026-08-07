@@ -26,6 +26,7 @@ from app.services.purchase_tracking_service import (
 )
 from app.services.direct_purchase_service import (
     create_direct_purchase,
+    delete_direct_purchase,
     get_direct_purchases_list,
     get_direct_purchase_by_id,
     get_supplier_catalog_prices,
@@ -319,6 +320,23 @@ async def update_direct_purchase_endpoint(
         pass
 
     return result
+
+
+@router.delete("/direct/{purchase_id}", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
+async def delete_direct_purchase_endpoint(
+    purchase_id: UUID,
+    request: Request,
+    response: Response,
+):
+    """
+    Delete a direct purchase: reverse inventory (with movement trail), void GL,
+    then remove the purchase row.
+    """
+    return await delete_direct_purchase(
+        request=request,
+        response=response,
+        purchase_id=purchase_id,
+    )
 
 
 @router.post("/direct/{purchase_id}/attachments", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
