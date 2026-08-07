@@ -1,5 +1,6 @@
 """Grace-period access levels via get_subscription_access (#62, #363)."""
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -9,7 +10,7 @@ from app.core.exceptions import APIError
 from app.services import billing_service
 
 
-def _conn_with_subscription(status: str, period_end: datetime | None):
+def _conn_with_subscription(status: str, period_end: Optional[datetime]):
     conn = MagicMock()
     conn.fetchrow = AsyncMock(
         return_value={

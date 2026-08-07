@@ -48,10 +48,10 @@ def direct_entry_list_clause(include_direct_payables: bool) -> str:
 
 def row_matches_purchases_list_scope(
     *,
-    is_direct_entry: bool | None,
+    is_direct_entry: Optional[bool],
     paid_at,
-    status: str | None,
-    payment_type: str | None,
+    status: Optional[str],
+    payment_type: Optional[str],
     include_direct_payables: bool,
 ) -> bool:
     """Python mirror of `direct_entry_list_clause` for unit tests (keep in sync with SQL)."""
