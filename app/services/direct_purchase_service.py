@@ -306,6 +306,101 @@ async def _post_purchase_gl_entry(
     )
 
 
+async def _void_direct_purchase_gl_entry(
+    conn,
+    tenant_id: UUID,
+    purchase_id: UUID,
+    reason: str = "Compra directa eliminada",
+) -> bool:
+    """
+    Void all posted inventario GL entries for a direct purchase.
+    Raises HTTP 400 if any entry sits in a closed monthly period.
+    Returns True if at least one entry was voided.
+    """
+    entries = await conn.fetch(
+        """SELECT id, entry_date, period_year, period_month, description,
+                  total_debit, total_credit, source_module
+           FROM tenant_journal_entries
+           WHERE tenant_id = $1
+             AND source_id = $2
+             AND source_module = 'inventario'
+             AND status = 'posted'
+           ORDER BY created_at ASC""",
+        tenant_id,
+        purchase_id,
+    )
+    if not entries:
+        logger.info(f"[GL] No posted inventario GL for purchase {purchase_id} — skip void")
+        return False
+
+    for entry in entries:
+        closed = await conn.fetchval(
+            """SELECT 1 FROM tenant_monthly_periods
+               WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+            tenant_id,
+            entry["period_year"],
+            entry["period_month"],
+        )
+        if closed:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"No se puede eliminar una compra directa de un período cerrado "
+                    f"({entry['period_year']}-{entry['period_month']:02d})"
+                ),
+            )
+
+        original_lines = await conn.fetch(
+            """SELECT account_id, debit, credit, description, line_order
+               FROM tenant_journal_lines
+               WHERE journal_entry_id = $1 ORDER BY line_order""",
+            entry["id"],
+        )
+
+        await conn.execute(
+            "UPDATE tenant_journal_entries SET status = 'voided', voided_at = NOW() WHERE id = $1",
+            entry["id"],
+        )
+
+        rev_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'system', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id,
+            entry["entry_date"],
+            entry["period_year"],
+            entry["period_month"],
+            f"Reversión: {entry['description']} — {reason}",
+            entry["id"],
+            float(entry["total_debit"]),
+            float(entry["total_credit"]),
+        )
+        rev_id = rev_row["id"]
+
+        for line in original_lines:
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, $3, $4, $5, $6)""",
+                rev_id,
+                line["account_id"],
+                float(line["credit"] or 0),
+                float(line["debit"] or 0),
+                line["description"],
+                line["line_order"],
+            )
+
+        logger.info(
+            f"[GL] ✅ Voided inventario entry {entry['id']} → reversing {rev_id} "
+            f"for purchase {purchase_id}"
+        )
+
+    return True
+
+
 def calculate_changes_summary(before: List[Dict], after: List[Dict]) -> Dict:
     """
     Genera resumen legible de cambios entre items antes y después de una edición.
@@ -1667,3 +1762,188 @@ async def upload_direct_purchase_attachments(
         logger.error(f"Error in upload_direct_purchase_attachments: {str(e)}")
         logger.exception(e)
         raise HTTPException(status_code=500, detail="Error subiendo archivos")
+
+
+async def delete_direct_purchase(
+    request: Request,
+    response: Response,
+    purchase_id: UUID,
+) -> Dict[str, Any]:
+    """
+    Delete a direct purchase: reverse inventory with movement trail, void GL,
+    then hard-delete the purchase and child rows.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                purchase = await conn.fetchrow(
+                    """SELECT id, purchase_number, purchase_date, status
+                       FROM tenant_purchases
+                       WHERE id = $1 AND tenant_id = $2 AND is_direct_entry = TRUE
+                       FOR UPDATE""",
+                    purchase_id,
+                    tenant_id,
+                )
+                if not purchase:
+                    raise HTTPException(status_code=404, detail="Compra directa no encontrada")
+
+                purchase_date = purchase["purchase_date"]
+                if hasattr(purchase_date, "year"):
+                    period_year = purchase_date.year
+                    period_month = purchase_date.month
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="La compra directa no tiene fecha válida para validar el período",
+                    )
+
+                closed = await conn.fetchval(
+                    """SELECT 1 FROM tenant_monthly_periods
+                       WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+                    tenant_id,
+                    period_year,
+                    period_month,
+                )
+                if closed:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"No se puede eliminar una compra directa de un período cerrado "
+                            f"({period_year}-{period_month:02d})"
+                        ),
+                    )
+
+                items = await conn.fetch(
+                    """SELECT ingredient_id, quantity, unit
+                       FROM tenant_purchase_items
+                       WHERE purchase_id = $1""",
+                    purchase_id,
+                )
+
+                purchase_number = purchase["purchase_number"]
+                for item in items:
+                    ingredient_id = item["ingredient_id"]
+                    qty = _direct_purchase_decimal(item["quantity"])
+                    if qty <= 0:
+                        continue
+
+                    inventory_row = await conn.fetchrow(
+                        """SELECT id, current_stock
+                           FROM tenant_inventory
+                           WHERE tenant_id = $1 AND ingredient_id = $2
+                           FOR UPDATE""",
+                        tenant_id,
+                        ingredient_id,
+                    )
+                    if not inventory_row:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "No se puede eliminar: no hay inventario registrado para "
+                                "revertir uno o más artículos de la compra"
+                            ),
+                        )
+
+                    current_stock = _direct_purchase_decimal(inventory_row["current_stock"])
+                    if current_stock < qty:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "No se puede eliminar: el stock actual es insuficiente para "
+                                "revertir la compra (parte del inventario ya fue consumido)"
+                            ),
+                        )
+
+                    new_stock = current_stock - qty
+                    await conn.execute(
+                        """UPDATE tenant_inventory
+                           SET current_stock = $1, last_updated = NOW()
+                           WHERE tenant_id = $2 AND ingredient_id = $3""",
+                        new_stock,
+                        tenant_id,
+                        ingredient_id,
+                    )
+                    await conn.execute(
+                        """INSERT INTO tenant_ingredient_movements (
+                               tenant_id,
+                               ingredient_id,
+                               movement_type,
+                               quantity_change,
+                               unit,
+                               previous_stock,
+                               new_stock,
+                               reference_table,
+                               reference_id,
+                               notes,
+                               created_by
+                           ) VALUES ($1, $2, 'adjustment', $3, $4, $5, $6, 'tenant_purchases', $7, $8, $9)""",
+                        tenant_id,
+                        ingredient_id,
+                        -qty,
+                        item["unit"],
+                        current_stock,
+                        new_stock,
+                        purchase_id,
+                        f"Eliminación compra directa - {purchase_number}",
+                        user_id,
+                    )
+
+                gl_voided = await _void_direct_purchase_gl_entry(
+                    conn,
+                    tenant_id,
+                    purchase_id,
+                    reason="Compra directa eliminada",
+                )
+
+                await conn.execute(
+                    "DELETE FROM purchase_attachments WHERE purchase_id = $1 AND tenant_id = $2",
+                    purchase_id,
+                    tenant_id,
+                )
+                await conn.execute(
+                    "DELETE FROM purchase_status_history WHERE purchase_id = $1 AND tenant_id = $2",
+                    purchase_id,
+                    tenant_id,
+                )
+                await conn.execute(
+                    "DELETE FROM tenant_purchase_items WHERE purchase_id = $1",
+                    purchase_id,
+                )
+                result = await conn.execute(
+                    """DELETE FROM tenant_purchases
+                       WHERE id = $1 AND tenant_id = $2 AND is_direct_entry = TRUE""",
+                    purchase_id,
+                    tenant_id,
+                )
+                if result == "DELETE 0":
+                    raise HTTPException(status_code=404, detail="Compra directa no encontrada")
+
+                return {
+                    "success": True,
+                    "message": "Compra directa eliminada exitosamente",
+                    "data": {
+                        "id": str(purchase_id),
+                        "purchase_number": purchase_number,
+                        "inventory_reversed": True,
+                        "gl_voided": gl_voided,
+                    },
+                }
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in delete_direct_purchase: {str(e)}")
+        logger.exception(e)
+        raise HTTPException(
+            status_code=500,
+            detail="Error interno del servidor",
+        )
