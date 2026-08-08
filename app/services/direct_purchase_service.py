@@ -313,7 +313,10 @@ async def _void_direct_purchase_gl_entry(
     reason: str = "Compra directa eliminada",
 ) -> bool:
     """
-    Void all posted inventario GL entries for a direct purchase.
+    Void posted GL for a direct purchase:
+      - inventario entries (Dr inventory / Cr cash|AP)
+      - supplier-payment entries (system + "Pago proveedor%", same source_id)
+
     Raises HTTP 400 if any entry sits in a closed monthly period.
     Returns True if at least one entry was voided.
     """
@@ -323,14 +326,20 @@ async def _void_direct_purchase_gl_entry(
            FROM tenant_journal_entries
            WHERE tenant_id = $1
              AND source_id = $2
-             AND source_module = 'inventario'
              AND status = 'posted'
+             AND (
+                   source_module = 'inventario'
+                   OR (
+                     source_module = 'system'
+                     AND description LIKE 'Pago proveedor%'
+                   )
+             )
            ORDER BY created_at ASC""",
         tenant_id,
         purchase_id,
     )
     if not entries:
-        logger.info(f"[GL] No posted inventario GL for purchase {purchase_id} — skip void")
+        logger.info(f"[GL] No posted purchase/payment GL for purchase {purchase_id} — skip void")
         return False
 
     for entry in entries:
@@ -394,7 +403,7 @@ async def _void_direct_purchase_gl_entry(
             )
 
         logger.info(
-            f"[GL] ✅ Voided inventario entry {entry['id']} → reversing {rev_id} "
+            f"[GL] ✅ Voided {entry['source_module']} entry {entry['id']} → reversing {rev_id} "
             f"for purchase {purchase_id}"
         )
 
@@ -1770,8 +1779,9 @@ async def delete_direct_purchase(
     purchase_id: UUID,
 ) -> Dict[str, Any]:
     """
-    Delete a direct purchase: reverse inventory with movement trail, void GL,
-    then hard-delete the purchase and child rows.
+    Delete a direct purchase: reverse inventory with movement trail (stock may
+    go negative), void inventario + supplier-payment GL, then hard-delete the
+    purchase and child rows.
     """
     try:
         session_context = require_valid_session(request)
@@ -1851,16 +1861,9 @@ async def delete_direct_purchase(
                             ),
                         )
 
+                    # Allow negative stock: sales may already have consumed part of
+                    # this purchase; tenant owns physical reconciliation (#791).
                     current_stock = _direct_purchase_decimal(inventory_row["current_stock"])
-                    if current_stock < qty:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=(
-                                "No se puede eliminar: el stock actual es insuficiente para "
-                                "revertir la compra (parte del inventario ya fue consumido)"
-                            ),
-                        )
-
                     new_stock = current_stock - qty
                     await conn.execute(
                         """UPDATE tenant_inventory
@@ -1902,6 +1905,11 @@ async def delete_direct_purchase(
                     reason="Compra directa eliminada",
                 )
 
+                await conn.execute(
+                    "DELETE FROM purchase_payments WHERE purchase_id = $1 AND tenant_id = $2",
+                    purchase_id,
+                    tenant_id,
+                )
                 await conn.execute(
                     "DELETE FROM purchase_attachments WHERE purchase_id = $1 AND tenant_id = $2",
                     purchase_id,
