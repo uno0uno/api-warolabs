@@ -114,6 +114,8 @@ async def subscribe(body: SubscribeBody, request: Request):
                 plan_id=body.plan_id,
                 amount_in_cents=offer.annual_amount_minor,
                 provider_environment=provider_environment,
+                currency=offer.currency,
+                provider="paddle",
             )
         else:
             paddle_result = await paddle_service.create_checkout(

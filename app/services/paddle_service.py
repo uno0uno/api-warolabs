@@ -77,6 +77,7 @@ def verify_paddle_signature(
     raw_body: bytes,
     signature_header: Optional[str],
     environment: ProviderEnvironment,
+    max_skew_seconds: int = 300,
 ) -> None:
     """Verify Paddle-Signature (ts + h1 HMAC-SHA256). Raises 401 on failure."""
     secret = _webhook_secret(environment)
@@ -95,6 +96,15 @@ def verify_paddle_signature(
     h1 = parts.get("h1")
     if not ts or not h1:
         raise HTTPException(status_code=401, detail="Invalid Paddle-Signature format")
+
+    try:
+        ts_int = int(ts)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid Paddle-Signature timestamp") from exc
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    if abs(now - ts_int) > max_skew_seconds:
+        raise HTTPException(status_code=401, detail="Paddle-Signature timestamp skew too large")
 
     payload = f"{ts}:".encode("utf-8") + raw_body
     expected = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
@@ -254,10 +264,10 @@ async def handle_verified_webhook(
     status = parsed["status"]
     txn_id = parsed["transaction_id"]
 
+    # Rely on transaction.completed/paid — subscription.activated uses sub_* ids.
     success_events = {
         "transaction.completed",
         "transaction.paid",
-        "subscription.activated",
     }
     failed_events = {
         "transaction.payment_failed",
@@ -273,22 +283,51 @@ async def handle_verified_webhook(
         logger.info("Paddle event ignored event=%s status=%s", event_type, status)
         return {"ok": True, "activated": False, "reason": "ignored_event"}
 
-    if not txn_id or not parsed["tenant_id"]:
-        logger.warning("Paddle webhook missing txn/tenant: %s", parsed)
+    if not txn_id:
+        logger.warning("Paddle webhook missing txn: %s", parsed)
         return {"ok": True, "activated": False, "reason": "missing_ids"}
-
-    try:
-        tenant_id = _UUID(str(parsed["tenant_id"]))
-    except ValueError:
-        return {"ok": True, "activated": False, "reason": "bad_tenant_id"}
 
     amount = (parsed["amount_minor"] or 0) / 100.0
     async with get_db_connection() as conn:
-        await billing_service.activate_subscription_by_gateway_ref(
+        if parsed.get("attempt_id"):
+            try:
+                attempt_id = _UUID(str(parsed["attempt_id"]))
+            except ValueError:
+                return {"ok": True, "activated": False, "reason": "bad_attempt_id"}
+            result = await billing_service.process_paddle_onboarding_payment(
+                conn,
+                attempt_id=attempt_id,
+                transaction_id=str(txn_id),
+                amount_minor=int(parsed["amount_minor"] or 0),
+                currency=parsed["currency"],
+                period_anchor=parsed["period_anchor"],
+                provider_environment=environment,
+                paddle_subscription_id=(
+                    str(parsed["subscription_id"]) if parsed.get("subscription_id") else None
+                ),
+            )
+            return {
+                "ok": True,
+                "activated": bool(result.get("activated")),
+                "transaction_id": txn_id,
+                "reason": result.get("reason"),
+                "onboarding": True,
+            }
+
+        if not parsed["tenant_id"]:
+            logger.warning("Paddle webhook missing tenant: %s", parsed)
+            return {"ok": True, "activated": False, "reason": "missing_ids"}
+
+        try:
+            tenant_id = _UUID(str(parsed["tenant_id"]))
+        except ValueError:
+            return {"ok": True, "activated": False, "reason": "bad_tenant_id"}
+
+        activated = await billing_service.activate_subscription_by_gateway_ref(
             conn,
             tenant_id=tenant_id,
             gateway_reference=str(txn_id),
-            wompi_transaction_id="",  # unused when paddle id set
+            wompi_transaction_id="",
             amount=amount,
             period_anchor=parsed["period_anchor"],
             currency=parsed["currency"],
@@ -299,4 +338,9 @@ async def handle_verified_webhook(
             provider="paddle",
             provider_environment=environment,
         )
-    return {"ok": True, "activated": True, "transaction_id": txn_id}
+    return {
+        "ok": True,
+        "activated": bool(activated),
+        "transaction_id": txn_id,
+        "reason": None if activated else "not_activated",
+    }

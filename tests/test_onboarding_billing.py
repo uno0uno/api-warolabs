@@ -124,7 +124,9 @@ async def test_each_retry_inserts_a_new_payment_attempt():
     for call in conn.fetchrow.await_args_list:
         assert "INSERT INTO billing_payment_attempts" in call.args[0]
         assert "ON CONFLICT" not in call.args[0]
-        assert call.args[4] == "prod"
+        assert call.args[3] == "wompi"
+        assert call.args[5] == "COP"
+        assert call.args[6] == "prod"
 
 
 @pytest.mark.asyncio
