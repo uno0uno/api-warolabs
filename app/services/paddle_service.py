@@ -279,8 +279,12 @@ async def handle_verified_webhook(
         logger.info("Paddle payment not successful event=%s status=%s txn=%s", event_type, status, txn_id)
         return {"ok": True, "activated": False, "reason": "failed_or_cancelled"}
 
-    if event_type not in success_events and status not in {"completed", "paid", "billed"}:
+    if event_type not in success_events:
         logger.info("Paddle event ignored event=%s status=%s", event_type, status)
+        return {"ok": True, "activated": False, "reason": "ignored_event"}
+
+    if status and status not in {"completed", "paid", "billed"}:
+        logger.info("Paddle txn status not success event=%s status=%s", event_type, status)
         return {"ok": True, "activated": False, "reason": "ignored_event"}
 
     if not txn_id:
