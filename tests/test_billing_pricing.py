@@ -3,10 +3,12 @@ from app.core.billing_pricing import (
     ANNUAL_MULTIPLIER,
     EUROZONE_COUNTRIES,
     INTL_USD_30_ALLOWLIST,
+    PADDLE_SANDBOX_TENANT_SLUGS,
     grandfather_active_annual,
     resolve_price_offer,
     resolve_price_segment,
     resolve_provider_environment,
+    should_skip_mid_period_rebill,
 )
 
 
@@ -55,13 +57,23 @@ def test_paddle_price_id_by_environment():
 
 
 def test_provider_environment_sandbox_slugs_and_flag():
+    assert PADDLE_SANDBOX_TENANT_SLUGS == frozenset({"waro-colombia", "warocolombia"})
     assert resolve_provider_environment(tenant_slug="warocolombia") == "test"
     assert resolve_provider_environment(tenant_slug="waro-colombia") == "test"
+    assert resolve_provider_environment(tenant_slug="waro") == "prod"
     assert resolve_provider_environment(billing_test=True) == "test"
     assert resolve_provider_environment(tenant_slug="bubablue") == "prod"
     assert resolve_provider_environment(tenant_slug="bubablue", billing_test=False) == "prod"
 
 
+def test_blank_country_defaults_to_co_usd_9():
+    assert resolve_price_segment(None) == "usd_9"
+    assert resolve_price_segment("") == "usd_9"
+    assert resolve_price_offer(None).annual_amount_minor == 9000
+
+
 def test_grandfather_active_annual():
+    assert should_skip_mid_period_rebill(current_period_end_in_future=True) is True
+    assert should_skip_mid_period_rebill(current_period_end_in_future=False) is False
     assert grandfather_active_annual(current_period_end_in_future=True) is True
     assert grandfather_active_annual(current_period_end_in_future=False) is False

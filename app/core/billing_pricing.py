@@ -32,7 +32,6 @@ PADDLE_SANDBOX_TENANT_SLUGS = frozenset(
     {
         "waro-colombia",
         "warocolombia",
-        "waro",
     }
 )
 
@@ -82,6 +81,7 @@ SEGMENT_OFFERS: dict[PriceSegment, PriceOffer] = {
 
 
 def normalize_country_code(country_code: Optional[str]) -> str:
+    """Blank/missing country defaults to CO (usd_9) — documented in paddle-pricing-policy.md."""
     if not country_code or not str(country_code).strip():
         return "CO"
     return str(country_code).strip().upper()
@@ -119,6 +119,13 @@ def resolve_provider_environment(
     return "prod"
 
 
-def grandfather_active_annual(*, current_period_end_in_future: bool) -> bool:
-    """True when mid-period annual must not be rebilled / repriced (#797 enforces)."""
+def should_skip_mid_period_rebill(*, current_period_end_in_future: bool) -> bool:
+    """True when period end is still ahead — skip mid-cycle rebill/reprice.
+
+    Callers in #797 must also require status=active and billing_cycle=annual.
+    """
     return bool(current_period_end_in_future)
+
+
+# Back-compat alias for early docs/tests.
+grandfather_active_annual = should_skip_mid_period_rebill

@@ -37,7 +37,12 @@ If `tenant_subscriptions.status = active` and `billing_cycle = annual` and `curr
 - **Do not** rebill or force the new Paddle list mid-period.
 - At period end / renew → Paddle + regional list ([#797](https://github.com/uno0uno/api-warolabs/issues/797)).
 
-Helper: `grandfather_active_annual(current_period_end_in_future=...)`.
+Helper: `should_skip_mid_period_rebill(current_period_end_in_future=...)`  
+(Callers must also require `status=active` and `billing_cycle=annual` — [#797](https://github.com/uno0uno/api-warolabs/issues/797).)
+
+## Missing country
+
+Blank/missing `country_code` defaults to **CO** → `usd_9` (WARO Colombia product default).
 
 ## Out of scope here
 
