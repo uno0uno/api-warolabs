@@ -2044,6 +2044,23 @@ async def activate_subscription_by_gateway_ref(
     )
 
 
+async def get_tenant_billing_context(conn, tenant_id: UUID) -> Dict[str, Any]:
+    """Country + slug for Paddle pricing/env resolution (#794/#796)."""
+    row = await conn.fetchrow(
+        """
+        SELECT t.slug,
+               COALESCE(tfp.country_code, 'CO') AS country_code
+        FROM tenants t
+        LEFT JOIN tenant_financial_profiles tfp ON tfp.tenant_id = t.id
+        WHERE t.id = $1
+        """,
+        tenant_id,
+    )
+    if not row:
+        return {"slug": None, "country_code": "CO"}
+    return {"slug": row["slug"], "country_code": row["country_code"] or "CO"}
+
+
 async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
     """
     Return the tenant's current subscription with plan details and current

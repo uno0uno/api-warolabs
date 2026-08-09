@@ -57,13 +57,28 @@ class SubscribeBody(BaseModel):
     dependencies=[Depends(require_module(Module.MI_PLAN))],
 )
 async def tenant_list_plans(request: Request):
-    """List active subscription plans (tenant-facing, read-only)."""
+    """List active subscription plans plus regional Paddle price_offer (#796)."""
     session = require_valid_session(request)
+    from app.core.billing_pricing import resolve_price_offer
+
     async with get_db_connection(use_transaction=False) as conn:
         if session.lifecycle_status == "pending":
             await onboarding_service.ensure_onboarding_payment_ready(conn, session)
         plans = await billing_service.list_plans(conn)
-        return [p for p in plans if p["is_active"]]
+        ctx = await billing_service.get_tenant_billing_context(conn, session.tenant_id)
+
+    offer = resolve_price_offer(ctx.get("country_code"))
+    return {
+        "plans": [p for p in plans if p["is_active"]],
+        "price_offer": {
+            "segment": offer.segment,
+            "currency": offer.currency,
+            "monthly_amount_minor": offer.monthly_amount_minor,
+            "annual_amount_minor": offer.annual_amount_minor,
+            "monthly_amount": offer.monthly_amount_minor / 100.0,
+            "annual_amount": offer.annual_amount_minor / 100.0,
+        },
+    }
 
 
 @tenant_router.post(
