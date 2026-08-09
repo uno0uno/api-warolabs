@@ -30,6 +30,7 @@ from app.services import (
     billing_webhook_service,
     legal_service,
     onboarding_service,
+    paddle_service,
     wompi_service,
     wompi_colombia_webhook_service,
 )
@@ -73,14 +74,9 @@ async def tenant_list_plans(request: Request):
 )
 async def subscribe(body: SubscribeBody, request: Request):
     """
-    Subscribe the authenticated tenant to a plan via Wompi Payment Link.
+    Subscribe the authenticated tenant to a plan via Paddle checkout (#795).
 
-    1. Valida que el plan exista y esté activo
-    2. Crea un Payment Link en Wompi
-    3. Guarda wompi_link_id y status='pending' en DB
-    4. Retorna checkout_url para redirigir al checkout de Wompi
-
-    billing_cycle debe ser 'annual' para nuevas suscripciones (#877).
+    billing_cycle must be 'annual' for new subscriptions (#877).
     """
     if body.billing_cycle != "annual":
         from fastapi import HTTPException
@@ -93,6 +89,13 @@ async def subscribe(body: SubscribeBody, request: Request):
     tenant_id = session.tenant_id
     is_pending_onboarding = session.lifecycle_status == "pending"
 
+    from urllib.parse import urlparse
+    from app.core.billing_pricing import resolve_price_offer, resolve_provider_environment
+
+    parsed = urlparse(settings.frontend_url)
+    frontend_host = f"{parsed.scheme}://{parsed.netloc}"
+    redirect_url = f"{frontend_host}/billing/confirmacion"
+
     async with get_db_connection() as conn:
         if is_pending_onboarding:
             await onboarding_service.ensure_onboarding_payment_ready(conn, session)
@@ -100,66 +103,65 @@ async def subscribe(body: SubscribeBody, request: Request):
         if not is_pending_onboarding:
             await legal_service.ensure_current_terms_accepted(conn, tenant_id)
 
-        amount_in_cents = plan.get("amount_in_cents")
-        if amount_in_cents is None:
-            amount_in_cents = billing_service.annual_price_in_cents(plan["price_annual"])
-
-        # Strip any base path from frontend_url to get the root host
-        # e.g. "http://localhost:8080/waro-colombia" → "http://localhost:8080"
-        from urllib.parse import urlparse
-        parsed = urlparse(settings.frontend_url)
-        frontend_host = f"{parsed.scheme}://{parsed.netloc}"
-        redirect_url = f"{frontend_host}/billing/confirmacion"
+        ctx = await billing_service.get_tenant_billing_context(conn, tenant_id)
+        offer = resolve_price_offer(ctx["country_code"])
+        provider_environment = resolve_provider_environment(tenant_slug=ctx.get("slug"))
 
         if is_pending_onboarding:
             attempt_id = await billing_service.create_onboarding_payment_attempt(
                 conn,
                 tenant_id=tenant_id,
                 plan_id=body.plan_id,
-                amount_in_cents=amount_in_cents,
-                provider_environment=wompi_service.configured_event_environment(),
+                amount_in_cents=offer.annual_amount_minor,
+                provider_environment=provider_environment,
             )
         else:
-            wompi_result = await wompi_service.create_payment_link(
-                plan_name=plan["name"],
-                amount_in_cents=amount_in_cents,
+            paddle_result = await paddle_service.create_checkout(
+                offer=offer,
+                environment=provider_environment,
+                tenant_id=tenant_id,
+                plan_id=body.plan_id,
                 billing_cycle=body.billing_cycle,
-                sku=tenant_id,
                 redirect_url=redirect_url,
+                customer_email=body.payer_email,
             )
             return await billing_service.subscribe_tenant(
                 conn,
                 tenant_id=tenant_id,
                 plan_id=body.plan_id,
                 billing_cycle=body.billing_cycle,
-                checkout_url=wompi_result["checkout_url"],
-                gateway_reference=wompi_result["wompi_link_id"],
+                checkout_url=paddle_result["checkout_url"],
+                gateway_reference=paddle_result["gateway_reference"],
             )
 
-    wompi_result = await wompi_service.create_payment_link(
-        plan_name=plan["name"],
-        amount_in_cents=amount_in_cents,
+    paddle_result = await paddle_service.create_checkout(
+        offer=offer,
+        environment=provider_environment,
+        tenant_id=tenant_id,
+        plan_id=body.plan_id,
         billing_cycle=body.billing_cycle,
-        sku=attempt_id,
         redirect_url=redirect_url,
+        customer_email=body.payer_email,
+        attempt_id=attempt_id,
     )
     async with get_db_connection() as conn:
         await billing_service.attach_onboarding_payment_link(
             conn,
             attempt_id=attempt_id,
             tenant_id=tenant_id,
-            provider_reference=wompi_result["wompi_link_id"],
-            checkout_url=wompi_result["checkout_url"],
+            provider_reference=paddle_result["gateway_reference"],
+            checkout_url=paddle_result["checkout_url"],
         )
     return {
         "attempt_id": str(attempt_id),
         "plan_id": str(body.plan_id),
-        "checkout_url": wompi_result["checkout_url"],
-        "gateway_reference": wompi_result["wompi_link_id"],
-        "amount_in_cents": amount_in_cents,
-        "currency": "COP",
+        "checkout_url": paddle_result["checkout_url"],
+        "gateway_reference": paddle_result["gateway_reference"],
+        "amount_in_cents": offer.annual_amount_minor,
+        "currency": offer.currency,
         "billing_cycle": "annual",
         "status": "pending",
+        "provider": "paddle",
     }
 
 

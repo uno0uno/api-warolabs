@@ -1919,9 +1919,24 @@ def parse_wompi_period_anchor(transaction: Dict[str, Any]) -> datetime:
 async def payment_approved_exists(
     conn,
     subscription_id: UUID,
-    wompi_transaction_id: str,
+    wompi_transaction_id: str = "",
+    *,
+    paddle_transaction_id: Optional[str] = None,
 ) -> bool:
-    """True if this Wompi transaction already recorded as payment_approved."""
+    """True if this provider transaction already recorded as payment_approved."""
+    if paddle_transaction_id:
+        row = await conn.fetchval(
+            """
+            SELECT 1 FROM billing_events
+            WHERE subscription_id = $1
+              AND event_type = 'payment_approved'
+              AND metadata->>'paddle_transaction_id' = $2
+            LIMIT 1
+            """,
+            subscription_id,
+            paddle_transaction_id,
+        )
+        return row is not None
     if not wompi_transaction_id:
         return False
     row = await conn.fetchval(
@@ -1983,13 +1998,19 @@ async def activate_subscription_by_gateway_ref(
     conn,
     tenant_id: UUID,
     gateway_reference: str,
-    wompi_transaction_id: str,
-    amount: float,
+    wompi_transaction_id: str = "",
+    amount: float = 0.0,
     period_anchor: Optional[datetime] = None,
+    *,
+    currency: str = "COP",
+    paddle_transaction_id: Optional[str] = None,
+    paddle_subscription_id: Optional[str] = None,
+    provider: str = "wompi",
+    provider_environment: Optional[str] = None,
 ) -> None:
     """
-    Activa la suscripción del tenant cuando Wompi confirma el pago (verify-payment).
-    Extiende el período según billing_cycle para filas pending o past_due.
+    Activate tenant subscription when payment provider confirms payment.
+    Extends the period for pending or past_due rows (Wompi or Paddle).
     """
     row = await conn.fetchrow(
         """SELECT id, status, billing_cycle
@@ -2015,13 +2036,30 @@ async def activate_subscription_by_gateway_ref(
         )
         return
 
-    if await payment_approved_exists(conn, row["id"], wompi_transaction_id):
+    if await payment_approved_exists(
+        conn,
+        row["id"],
+        wompi_transaction_id,
+        paddle_transaction_id=paddle_transaction_id,
+    ):
         logger.info(
-            "activate_subscription: duplicate wompi_transaction_id=%s tenant=%s — skipped",
-            wompi_transaction_id,
+            "activate_subscription: duplicate provider txn tenant=%s — skipped",
             tenant_id,
         )
         return
+
+    metadata: Dict[str, Any] = {
+        "gateway_reference": gateway_reference,
+        "provider": provider,
+    }
+    if wompi_transaction_id:
+        metadata["wompi_transaction_id"] = wompi_transaction_id
+    if paddle_transaction_id:
+        metadata["paddle_transaction_id"] = paddle_transaction_id
+    if paddle_subscription_id:
+        metadata["paddle_subscription_id"] = paddle_subscription_id
+    if provider_environment:
+        metadata["provider_environment"] = provider_environment
 
     period_end = await _activate_subscription_with_period(
         conn,
@@ -2029,19 +2067,37 @@ async def activate_subscription_by_gateway_ref(
         tenant_id=tenant_id,
         billing_cycle=row["billing_cycle"],
         amount=amount,
-        currency="COP",
-        metadata={
-            "wompi_transaction_id": wompi_transaction_id,
-            "gateway_reference": gateway_reference,
-        },
+        currency=currency,
+        metadata=metadata,
         period_anchor=period_anchor,
     )
     await onboarding_service.activate_paid_onboarding_identity(conn, tenant_id)
 
     logger.info(
-        "Subscription activated: tenant=%s transaction=%s amount=%s period_end=%s",
-        tenant_id, wompi_transaction_id, amount, period_end,
+        "Subscription activated: tenant=%s provider=%s txn=%s amount=%s period_end=%s",
+        tenant_id,
+        provider,
+        paddle_transaction_id or wompi_transaction_id,
+        amount,
+        period_end,
     )
+
+
+async def get_tenant_billing_context(conn, tenant_id: UUID) -> Dict[str, Any]:
+    """Country + slug for Paddle pricing/env resolution."""
+    row = await conn.fetchrow(
+        """
+        SELECT t.slug,
+               COALESCE(tfp.country_code, 'CO') AS country_code
+        FROM tenants t
+        LEFT JOIN tenant_financial_profiles tfp ON tfp.tenant_id = t.id
+        WHERE t.id = $1
+        """,
+        tenant_id,
+    )
+    if not row:
+        return {"slug": None, "country_code": "CO"}
+    return {"slug": row["slug"], "country_code": row["country_code"] or "CO"}
 
 
 async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
