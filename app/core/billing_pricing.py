@@ -1,6 +1,7 @@
-"""Paddle regional pricing policy (epic #793 / batch #794).
+"""Paddle regional pricing policy (epic #805 / batch #806).
 
-List prices are monthly; WARO subscribe is annual today — charge annual = 10× monthly.
+List prices and default Paddle charge for new checkouts are monthly
+(USD 9 / USD 30 / EUR 30). Annual 10× from #793 is legacy/display only.
 Do not use subscription_plans.price_* for Paddle charge amounts.
 """
 from __future__ import annotations
@@ -52,31 +53,31 @@ class PriceOffer:
         return self.paddle_price_id_test if environment == "test" else self.paddle_price_id_live
 
 
-# Placeholders until Paddle catalog is created in #795.
+# Placeholders until env PADDLE_PRICE_*_MONTHLY_* is set (prefer env via paddle_service).
 SEGMENT_OFFERS: dict[PriceSegment, PriceOffer] = {
     "usd_9": PriceOffer(
         segment="usd_9",
         currency="USD",
         monthly_amount_minor=900,
         annual_amount_minor=900 * ANNUAL_MULTIPLIER,
-        paddle_price_id_test="TODO_PADDLE_PRICE_USD_9_ANNUAL_TEST",
-        paddle_price_id_live="TODO_PADDLE_PRICE_USD_9_ANNUAL_LIVE",
+        paddle_price_id_test="TODO_PADDLE_PRICE_USD_9_MONTHLY_TEST",
+        paddle_price_id_live="TODO_PADDLE_PRICE_USD_9_MONTHLY_LIVE",
     ),
     "usd_30": PriceOffer(
         segment="usd_30",
         currency="USD",
         monthly_amount_minor=3000,
         annual_amount_minor=3000 * ANNUAL_MULTIPLIER,
-        paddle_price_id_test="TODO_PADDLE_PRICE_USD_30_ANNUAL_TEST",
-        paddle_price_id_live="TODO_PADDLE_PRICE_USD_30_ANNUAL_LIVE",
+        paddle_price_id_test="TODO_PADDLE_PRICE_USD_30_MONTHLY_TEST",
+        paddle_price_id_live="TODO_PADDLE_PRICE_USD_30_MONTHLY_LIVE",
     ),
     "eur_30": PriceOffer(
         segment="eur_30",
         currency="EUR",
         monthly_amount_minor=3000,
         annual_amount_minor=3000 * ANNUAL_MULTIPLIER,
-        paddle_price_id_test="TODO_PADDLE_PRICE_EUR_30_ANNUAL_TEST",
-        paddle_price_id_live="TODO_PADDLE_PRICE_EUR_30_ANNUAL_LIVE",
+        paddle_price_id_test="TODO_PADDLE_PRICE_EUR_30_MONTHLY_TEST",
+        paddle_price_id_live="TODO_PADDLE_PRICE_EUR_30_MONTHLY_LIVE",
     ),
 }
 

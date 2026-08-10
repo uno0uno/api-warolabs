@@ -108,6 +108,26 @@ class Settings(BaseSettings):
     paddle_webhook_secret_sandbox: Optional[str] = Field(
         default=None, alias='PADDLE_WEBHOOK_SECRET_SANDBOX'
     )
+    # Monthly Paddle price IDs — default charge cycle for new checkouts (#806 / epic #805)
+    paddle_price_usd_9_monthly_live: Optional[str] = Field(
+        default=None, alias='PADDLE_PRICE_USD_9_MONTHLY_LIVE'
+    )
+    paddle_price_usd_9_monthly_test: Optional[str] = Field(
+        default=None, alias='PADDLE_PRICE_USD_9_MONTHLY_TEST'
+    )
+    paddle_price_usd_30_monthly_live: Optional[str] = Field(
+        default=None, alias='PADDLE_PRICE_USD_30_MONTHLY_LIVE'
+    )
+    paddle_price_usd_30_monthly_test: Optional[str] = Field(
+        default=None, alias='PADDLE_PRICE_USD_30_MONTHLY_TEST'
+    )
+    paddle_price_eur_30_monthly_live: Optional[str] = Field(
+        default=None, alias='PADDLE_PRICE_EUR_30_MONTHLY_LIVE'
+    )
+    paddle_price_eur_30_monthly_test: Optional[str] = Field(
+        default=None, alias='PADDLE_PRICE_EUR_30_MONTHLY_TEST'
+    )
+    # Annual price IDs — optional legacy only (not required for new checkout)
     paddle_price_usd_9_annual_live: Optional[str] = Field(
         default=None, alias='PADDLE_PRICE_USD_9_ANNUAL_LIVE'
     )

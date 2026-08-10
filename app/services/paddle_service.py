@@ -1,8 +1,8 @@
 """
-Paddle Billing — WARO SaaS checkout + webhooks (epic #793 / batch #795).
+Paddle Billing — WARO SaaS checkout + webhooks (epic #793 / #805).
 
-Creates annual checkouts from billing_pricing segments. Verifies Paddle-Signature
-webhooks and activates subscriptions via billing_service.
+Resolves monthly Paddle price IDs from billing_pricing segments (#806).
+Verifies Paddle-Signature webhooks and activates subscriptions via billing_service.
 """
 from __future__ import annotations
 
@@ -46,8 +46,16 @@ def _webhook_secret(environment: ProviderEnvironment) -> Optional[str]:
 
 
 def configured_price_id(offer: PriceOffer, environment: ProviderEnvironment) -> str:
-    """Prefer env-configured Paddle price IDs; fall back to segment placeholders."""
-    mapping = {
+    """Prefer monthly env price IDs; annual env only if monthly unset; else placeholders."""
+    monthly_mapping = {
+        ("usd_9", "test"): settings.paddle_price_usd_9_monthly_test,
+        ("usd_9", "prod"): settings.paddle_price_usd_9_monthly_live,
+        ("usd_30", "test"): settings.paddle_price_usd_30_monthly_test,
+        ("usd_30", "prod"): settings.paddle_price_usd_30_monthly_live,
+        ("eur_30", "test"): settings.paddle_price_eur_30_monthly_test,
+        ("eur_30", "prod"): settings.paddle_price_eur_30_monthly_live,
+    }
+    annual_mapping = {
         ("usd_9", "test"): settings.paddle_price_usd_9_annual_test,
         ("usd_9", "prod"): settings.paddle_price_usd_9_annual_live,
         ("usd_30", "test"): settings.paddle_price_usd_30_annual_test,
@@ -55,9 +63,13 @@ def configured_price_id(offer: PriceOffer, environment: ProviderEnvironment) -> 
         ("eur_30", "test"): settings.paddle_price_eur_30_annual_test,
         ("eur_30", "prod"): settings.paddle_price_eur_30_annual_live,
     }
-    configured = mapping.get((offer.segment, environment))
-    if configured and str(configured).strip():
-        return str(configured).strip()
+    key = (offer.segment, environment)
+    monthly = monthly_mapping.get(key)
+    if monthly and str(monthly).strip():
+        return str(monthly).strip()
+    annual = annual_mapping.get(key)
+    if annual and str(annual).strip():
+        return str(annual).strip()
     return offer.paddle_price_id(environment)
 
 

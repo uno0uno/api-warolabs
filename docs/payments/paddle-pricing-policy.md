@@ -1,19 +1,30 @@
-# Paddle pricing policy (epic #793 / batch #794)
+# Paddle pricing policy (epic #805 / batch #806)
 
-**Status:** Config + policy. Checkout/webhooks land in [#795](https://github.com/uno0uno/api-warolabs/issues/795).  
-**Code:** `app/core/billing_pricing.py`
+**Status:** Monthly is the **default charge cycle** for new checkouts.  
+**Code:** `app/core/billing_pricing.py`, `app/services/paddle_service.py` (`configured_price_id`)  
+**Related:** Epic [#805](https://github.com/uno0uno/api-warolabs/issues/805); annual 10× from [#793](https://github.com/uno0uno/api-warolabs/issues/793) is **legacy** only.
 
-## List prices (monthly)
+## List prices (monthly = charge basis)
 
-| Segment | Monthly | Annual (10×) | Who |
-|---------|---------|--------------|-----|
-| `usd_9` | USD 9 | **USD 90** | Non-dollarized (CO, MX, PE, …) except allowlist |
-| `usd_30` | USD 30 | **USD 300** | US, PA; allowlist GB, CA, AU, NZ, SG, AE |
-| `eur_30` | EUR 30 | **EUR 300** | Eurozone ES, DE, FR, NL |
+| Segment | Monthly (charge) | Annual 10× (legacy display) | Who |
+|---------|------------------|-----------------------------|-----|
+| `usd_9` | **USD 9** | USD 90 | Non-dollarized (CO, MX, PE, …) except allowlist |
+| `usd_30` | **USD 30** | USD 300 | US, PA; allowlist GB, CA, AU, NZ, SG, AE |
+| `eur_30` | **EUR 30** | EUR 300 | Eurozone ES, DE, FR, NL |
 
-Annual multiplier **10×** matches “~2 months free” psychology (subscribe API is annual-only today).
+Charge amounts use `monthly_amount_minor` (900 / 3000 / 3000). Do **not** charge from `subscription_plans.price_*` (legacy COP display).
 
-**Do not** charge from `subscription_plans.price_monthly` / `price_annual` (legacy COP display). Paddle uses segment → `paddle_price_id_*` (placeholders `TODO_PADDLE_PRICE_*` until catalog exists).
+## Env price IDs
+
+Prefer monthly (required for new checkout once #807 unlocks the cycle):
+
+- `PADDLE_PRICE_USD_9_MONTHLY_{TEST,LIVE}`
+- `PADDLE_PRICE_USD_30_MONTHLY_{TEST,LIVE}`
+- `PADDLE_PRICE_EUR_30_MONTHLY_{TEST,LIVE}`
+
+Annual `PADDLE_PRICE_*_ANNUAL_*` is optional fallback only if monthly is unset. Segment placeholders are `TODO_PADDLE_PRICE_*_MONTHLY_*`.
+
+**Deploy note:** Do not set monthly env in **prod** until subscribe defaults to monthly (#807); otherwise checkout may bill a monthly Paddle price while the API still labels the cycle annual.
 
 ## Country → segment
 
@@ -28,27 +39,18 @@ Annual multiplier **10×** matches “~2 months free” psychology (subscribe AP
 | `test` | `billing_test=True` **or** tenant slug in `PADDLE_SANDBOX_TENANT_SLUGS` (e.g. `warocolombia`) |
 | `prod` | All other tenants (including Colombian customers like Bubablue) |
 
-Mirrors the intent of Wompi sandbox-for-WARO-CO / live-elsewhere without putting every `CO` tenant in sandbox.
-
 ## Grandfather (active annuals)
 
 If `tenant_subscriptions.status = active` and `billing_cycle = annual` and `current_period_end` is still in the future:
 
-- **Do not** rebill or force the new Paddle list mid-period.
-- At period end / renew → Paddle + regional list ([#797](https://github.com/uno0uno/api-warolabs/issues/797)).
+- **Do not** rebill or force monthly mid-period.
+- At period end / renew → monthly Paddle list ([#809](https://github.com/uno0uno/api-warolabs/issues/809)).
 
-Helpers (wired in #797):
+Helpers:
 
 - `is_grandfathered_annual(status=..., billing_cycle=..., current_period_end=...)`
 - `should_skip_mid_period_rebill(current_period_end_in_future=...)` (period flag only)
 
-Call sites: `ensure_subscribe_allowed` / `subscribe_tenant` (409 `grandfather_active_period`);
-`activate_subscription_by_gateway_ref` skips mid-period and renews via tenant lookup when Paddle `gateway_reference` rotates.
-
 ## Missing country
 
 Blank/missing `country_code` defaults to **CO** → `usd_9` (WARO Colombia product default).
-
-## Out of scope here
-
-Paddle SDK, webhooks, front CTA, Wompi removal.

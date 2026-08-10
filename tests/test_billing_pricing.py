@@ -1,4 +1,6 @@
-"""Tests for Paddle pricing matrix (#794)."""
+"""Tests for Paddle pricing matrix (#794 / #806)."""
+from unittest.mock import patch
+
 from app.core.billing_pricing import (
     ANNUAL_MULTIPLIER,
     EUROZONE_COUNTRIES,
@@ -10,6 +12,7 @@ from app.core.billing_pricing import (
     resolve_provider_environment,
     should_skip_mid_period_rebill,
 )
+from app.services.paddle_service import configured_price_id
 
 
 def test_eurozone_maps_to_eur_30():
@@ -52,8 +55,32 @@ def test_in_cn_stay_usd_9():
 
 def test_paddle_price_id_by_environment():
     offer = resolve_price_offer("CO")
-    assert "TEST" in offer.paddle_price_id("test")
-    assert "LIVE" in offer.paddle_price_id("prod")
+    assert "MONTHLY_TEST" in offer.paddle_price_id("test")
+    assert "MONTHLY_LIVE" in offer.paddle_price_id("prod")
+
+
+def test_charge_basis_is_monthly_minors():
+    assert resolve_price_offer("CO").monthly_amount_minor == 900
+    assert resolve_price_offer("US").monthly_amount_minor == 3000
+    assert resolve_price_offer("ES").monthly_amount_minor == 3000
+
+
+def test_configured_price_id_prefers_monthly_over_annual():
+    offer = resolve_price_offer("CO")
+    with patch("app.services.paddle_service.settings") as mock_settings:
+        mock_settings.paddle_price_usd_9_monthly_test = "pri_monthly_test"
+        mock_settings.paddle_price_usd_9_annual_test = "pri_annual_test"
+        assert configured_price_id(offer, "test") == "pri_monthly_test"
+
+
+def test_configured_price_id_falls_back_to_annual_then_placeholder():
+    offer = resolve_price_offer("CO")
+    with patch("app.services.paddle_service.settings") as mock_settings:
+        mock_settings.paddle_price_usd_9_monthly_test = None
+        mock_settings.paddle_price_usd_9_annual_test = "pri_annual_only"
+        assert configured_price_id(offer, "test") == "pri_annual_only"
+        mock_settings.paddle_price_usd_9_annual_test = None
+        assert configured_price_id(offer, "test").startswith("TODO_PADDLE_PRICE_USD_9_MONTHLY")
 
 
 def test_provider_environment_sandbox_slugs_and_flag():
