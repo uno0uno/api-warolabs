@@ -2186,6 +2186,38 @@ async def activate_subscription_by_gateway_ref(
     return True
 
 
+async def get_tenant_notify_info_after_activate(
+    conn,
+    *,
+    tenant_id: UUID,
+) -> Optional[Dict[str, Any]]:
+    """Tenant + plan fields for renewal email / outbound webhook after Paddle activate."""
+    row = await conn.fetchrow(
+        """
+        SELECT ts.id AS subscription_id,
+               ts.current_period_end,
+               t.name AS tenant_name,
+               t.email AS tenant_email,
+               sp.name AS plan_name
+        FROM tenant_subscriptions ts
+        JOIN tenants t ON t.id = ts.tenant_id
+        JOIN subscription_plans sp ON sp.id = ts.plan_id
+        WHERE ts.tenant_id = $1
+        """,
+        tenant_id,
+    )
+    if row is None:
+        return None
+    period_end = row["current_period_end"]
+    return {
+        "tenant_id": str(tenant_id),
+        "subscription_id": str(row["subscription_id"]),
+        "tenant_name": row["tenant_name"] or "",
+        "tenant_email": row["tenant_email"],
+        "plan_name": row["plan_name"] or "",
+        "next_period_end": period_end.isoformat() if period_end else "",
+    }
+
 
 async def get_tenant_billing_context(conn, tenant_id: UUID) -> Dict[str, Any]:
     """Country + slug for Paddle pricing/env resolution."""

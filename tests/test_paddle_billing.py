@@ -119,6 +119,17 @@ async def test_handle_webhook_activates_on_completed():
     tenant_id = uuid4()
     payload = _completed_payload(tenant_id=tenant_id)
     activate = AsyncMock(return_value=True)
+    notify_info = AsyncMock(
+        return_value={
+            "tenant_id": str(tenant_id),
+            "subscription_id": str(uuid4()),
+            "tenant_name": "T",
+            "tenant_email": "t@example.com",
+            "plan_name": "Pro",
+            "next_period_end": "2027-01-01T00:00:00+00:00",
+        }
+    )
+    notify = AsyncMock()
 
     @asynccontextmanager
     async def _db():
@@ -127,11 +138,15 @@ async def test_handle_webhook_activates_on_completed():
     with patch("app.database.get_db_connection", side_effect=_db), patch(
         "app.services.billing_service.activate_subscription_by_gateway_ref",
         activate,
-    ):
+    ), patch(
+        "app.services.billing_service.get_tenant_notify_info_after_activate",
+        notify_info,
+    ), patch.object(paddle_service, "_notify_payment_approved", notify):
         out = await paddle_service.handle_verified_webhook(payload, environment="test")
 
     assert out["activated"] is True
     activate.assert_awaited_once()
+    notify.assert_awaited_once()
     kwargs = activate.await_args.kwargs
     assert kwargs["provider"] == "paddle"
     assert kwargs["paddle_transaction_id"] == "txn_paddle_1"

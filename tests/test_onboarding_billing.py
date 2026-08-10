@@ -407,22 +407,28 @@ async def test_paid_identity_activation_accepts_promoted_admin_and_updates_once(
 
 
 @pytest.mark.asyncio
-async def test_colombia_wompi_handler_is_noop():
+async def test_colombia_wompi_handler_is_noop(caplog):
     """#798 — verified Colombia events must not activate/renew."""
+    import logging
+
     from app.services import wompi_colombia_webhook_service
 
-    await wompi_colombia_webhook_service.handle_transaction_updated(
-        {
-            "data": {
-                "transaction": {
-                    "id": "tx-approved",
-                    "status": "APPROVED",
-                    "payment_link_id": "link-onboarding",
+    with caplog.at_level(logging.WARNING):
+        await wompi_colombia_webhook_service.handle_transaction_updated(
+            {
+                "data": {
+                    "transaction": {
+                        "id": "tx-approved",
+                        "status": "APPROVED",
+                        "payment_link_id": "link-onboarding",
+                    }
                 }
-            }
-        },
-        MagicMock(),
-    )
+            },
+            MagicMock(),
+        )
+
+    assert any("deprecated (#798)" in r.message for r in caplog.records)
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
 @pytest.mark.asyncio

@@ -25,10 +25,13 @@ async def handle_transaction_updated(
     Historical payment_event / metadata rows are left untouched.
     """
     transaction = body.get("data", {}).get("transaction", {}) or {}
-    logger.info(
+    status = str(transaction.get("status", "")).upper()
+    level = logging.WARNING if status == "APPROVED" else logging.INFO
+    logger.log(
+        level,
         "Wompi Colombia billing deprecated (#798): no-op env=%s status=%s tx=%s link=%s",
         provider_environment,
-        str(transaction.get("status", "")).upper(),
+        status,
         transaction.get("id"),
         transaction.get("payment_link_id"),
     )

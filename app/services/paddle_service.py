@@ -248,6 +248,31 @@ def extract_transaction_event(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+async def _notify_payment_approved(tenant_info: Dict[str, Any], *, amount: float, currency: str, gateway_reference: str, transaction_id: str) -> None:
+    """Fire renewal email + outbound approved webhook after a successful activate."""
+    from app.services import billing_email_service, billing_webhook_service
+
+    if not tenant_info:
+        return
+    await billing_email_service.send_payment_renewed_email(
+        tenant_name=tenant_info.get("tenant_name") or "",
+        tenant_email=tenant_info.get("tenant_email"),
+        next_period_end=tenant_info.get("next_period_end") or "",
+    )
+    await billing_webhook_service.send_payment_approved_webhook(
+        tenant_id=tenant_info["tenant_id"],
+        subscription_id=tenant_info["subscription_id"],
+        tenant_name=tenant_info.get("tenant_name") or "",
+        tenant_email=tenant_info.get("tenant_email"),
+        plan_name=tenant_info.get("plan_name") or "",
+        amount=amount,
+        currency=currency,
+        next_period_end=tenant_info.get("next_period_end"),
+        gateway_reference=gateway_reference,
+        transaction_id=transaction_id,
+    )
+
+
 async def handle_verified_webhook(
     payload: Dict[str, Any],
     *,
@@ -256,8 +281,9 @@ async def handle_verified_webhook(
     """Process a signature-verified Paddle event. Returns summary dict."""
     from uuid import UUID as _UUID
 
+    from app.config import settings
     from app.database import get_db_connection
-    from app.services import billing_service
+    from app.services import billing_email_service, billing_service
 
     parsed = extract_transaction_event(payload)
     event_type = parsed["event_type"]
@@ -277,6 +303,17 @@ async def handle_verified_webhook(
 
     if event_type in failed_events or status in {"failed", "canceled", "cancelled"}:
         logger.info("Paddle payment not successful event=%s status=%s txn=%s", event_type, status, txn_id)
+        if txn_id:
+            async with get_db_connection() as conn:
+                tenant_info = await billing_service.mark_subscription_past_due(
+                    conn, str(txn_id), "payment_rejected"
+                )
+            if tenant_info and tenant_info.get("tenant_email"):
+                await billing_email_service.send_payment_rejected_email(
+                    tenant_name=tenant_info.get("tenant_name") or "",
+                    tenant_email=tenant_info.get("tenant_email"),
+                    billing_url=f"{settings.frontend_url}/gestion/billing",
+                )
         return {"ok": True, "activated": False, "reason": "failed_or_cancelled"}
 
     if event_type not in success_events:
@@ -292,6 +329,12 @@ async def handle_verified_webhook(
         return {"ok": True, "activated": False, "reason": "missing_ids"}
 
     amount = (parsed["amount_minor"] or 0) / 100.0
+    currency = str(parsed.get("currency") or "USD").upper()
+    activated = False
+    tenant_info = None
+    onboarding = False
+    reason = None
+
     async with get_db_connection() as conn:
         if parsed.get("attempt_id"):
             try:
@@ -310,41 +353,57 @@ async def handle_verified_webhook(
                     str(parsed["subscription_id"]) if parsed.get("subscription_id") else None
                 ),
             )
-            return {
-                "ok": True,
-                "activated": bool(result.get("activated")),
-                "transaction_id": txn_id,
-                "reason": result.get("reason"),
-                "onboarding": True,
-            }
+            activated = bool(result.get("activated"))
+            tenant_info = result.get("tenant_info")
+            onboarding = True
+            reason = result.get("reason")
+        else:
+            if not parsed["tenant_id"]:
+                logger.warning("Paddle webhook missing tenant: %s", parsed)
+                return {"ok": True, "activated": False, "reason": "missing_ids"}
 
-        if not parsed["tenant_id"]:
-            logger.warning("Paddle webhook missing tenant: %s", parsed)
-            return {"ok": True, "activated": False, "reason": "missing_ids"}
+            try:
+                tenant_id = _UUID(str(parsed["tenant_id"]))
+            except ValueError:
+                return {"ok": True, "activated": False, "reason": "bad_tenant_id"}
 
-        try:
-            tenant_id = _UUID(str(parsed["tenant_id"]))
-        except ValueError:
-            return {"ok": True, "activated": False, "reason": "bad_tenant_id"}
+            activated = await billing_service.activate_subscription_by_gateway_ref(
+                conn,
+                tenant_id=tenant_id,
+                gateway_reference=str(txn_id),
+                wompi_transaction_id="",
+                amount=amount,
+                period_anchor=parsed["period_anchor"],
+                currency=parsed["currency"],
+                paddle_transaction_id=str(txn_id),
+                paddle_subscription_id=(
+                    str(parsed["subscription_id"]) if parsed.get("subscription_id") else None
+                ),
+                provider="paddle",
+                provider_environment=environment,
+            )
+            if activated:
+                tenant_info = await billing_service.get_tenant_notify_info_after_activate(
+                    conn, tenant_id=tenant_id
+                )
+            reason = None if activated else "not_activated"
 
-        activated = await billing_service.activate_subscription_by_gateway_ref(
-            conn,
-            tenant_id=tenant_id,
-            gateway_reference=str(txn_id),
-            wompi_transaction_id="",
+    if activated and tenant_info:
+        await _notify_payment_approved(
+            tenant_info,
             amount=amount,
-            period_anchor=parsed["period_anchor"],
-            currency=parsed["currency"],
-            paddle_transaction_id=str(txn_id),
-            paddle_subscription_id=(
-                str(parsed["subscription_id"]) if parsed.get("subscription_id") else None
-            ),
-            provider="paddle",
-            provider_environment=environment,
+            currency=currency,
+            gateway_reference=str(txn_id),
+            transaction_id=str(txn_id),
         )
-    return {
+
+    out: Dict[str, Any] = {
         "ok": True,
         "activated": bool(activated),
         "transaction_id": txn_id,
-        "reason": None if activated else "not_activated",
+        "reason": reason,
     }
+    if onboarding:
+        out["onboarding"] = True
+    return out
+
