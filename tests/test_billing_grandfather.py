@@ -1,8 +1,7 @@
-"""Grandfather mid-period gate + Paddle renew (#797)."""
+"""Grandfather mid-period gate + post-end monthly renew (#797 / #809)."""
 import json
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -79,7 +78,7 @@ async def test_subscribe_tenant_refuses_grandfathered_overwrite():
             conn,
             tenant_id=tenant_id,
             plan_id=uuid4(),
-            billing_cycle="annual",
+            billing_cycle="monthly",
             checkout_url="https://checkout.test",
             gateway_reference="txn_new",
         )
@@ -89,11 +88,11 @@ async def test_subscribe_tenant_refuses_grandfathered_overwrite():
 
 
 @pytest.mark.asyncio
-async def test_paddle_renew_by_tenant_extends_when_period_ended():
+async def test_paddle_renew_by_tenant_converts_ended_annual_to_monthly():
     tenant_id = uuid4()
     sub_id = uuid4()
     past = datetime.now(timezone.utc) - timedelta(days=3)
-    new_end = datetime.now(timezone.utc) + timedelta(days=365)
+    new_end = datetime.now(timezone.utc) + timedelta(days=30)
     conn = MagicMock()
     tenant_row = {
         "id": sub_id,
@@ -108,6 +107,8 @@ async def test_paddle_renew_by_tenant_extends_when_period_ended():
         if "AND gateway_reference" in sql:
             return None
         if "UPDATE tenant_subscriptions" in sql and "current_period_end" in sql:
+            assert "billing_cycle" in sql
+            assert args[1] == "monthly"
             return {"current_period_end": new_end}
         if "FROM tenant_subscriptions" in sql:
             return tenant_row
@@ -121,7 +122,7 @@ async def test_paddle_renew_by_tenant_extends_when_period_ended():
         conn,
         tenant_id=tenant_id,
         gateway_reference="txn_new_paddle",
-        amount=90.0,
+        amount=9.0,
         currency="USD",
         paddle_transaction_id="txn_new_paddle",
         provider="paddle",
@@ -140,6 +141,50 @@ async def test_paddle_renew_by_tenant_extends_when_period_ended():
     assert metadata["paddle_transaction_id"] == "txn_new_paddle"
     assert metadata["renewal"] is True
     assert metadata["previous_gateway_reference"] == "txn_old"
+    assert metadata["converted_from_annual"] is True
+
+
+@pytest.mark.asyncio
+async def test_paddle_renew_past_due_annual_converts_to_monthly():
+    tenant_id = uuid4()
+    sub_id = uuid4()
+    past = datetime.now(timezone.utc) - timedelta(days=10)
+    new_end = datetime.now(timezone.utc) + timedelta(days=30)
+    conn = MagicMock()
+    sub_row = {
+        "id": sub_id,
+        "status": "past_due",
+        "billing_cycle": "annual",
+        "current_period_end": past,
+        "gateway_reference": "txn_past_due",
+    }
+
+    async def fetchrow_side_effect(query, *args):
+        sql = " ".join(query.split())
+        if "FROM tenant_subscriptions" in sql and "gateway_reference" in sql:
+            return sub_row
+        if "UPDATE tenant_subscriptions" in sql and "current_period_end" in sql:
+            assert args[1] == "monthly"
+            return {"current_period_end": new_end}
+        return None
+
+    conn.fetchrow = AsyncMock(side_effect=fetchrow_side_effect)
+    conn.fetchval = AsyncMock(return_value=None)
+    conn.execute = AsyncMock()
+
+    activated = await billing_service.activate_subscription_by_gateway_ref(
+        conn,
+        tenant_id=tenant_id,
+        gateway_reference="txn_past_due",
+        amount=9.0,
+        currency="USD",
+        paddle_transaction_id="txn_past_due_pay",
+        provider="paddle",
+    )
+
+    assert activated is True
+    metadata = json.loads(conn.execute.call_args[0][5])
+    assert metadata["converted_from_annual"] is True
 
 
 @pytest.mark.asyncio
