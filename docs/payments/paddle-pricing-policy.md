@@ -44,7 +44,7 @@ Annual `PADDLE_PRICE_*_ANNUAL_*` is optional fallback only if monthly is unset. 
 If `tenant_subscriptions.status = active` and `billing_cycle = annual` and `current_period_end` is still in the future:
 
 - **Do not** rebill or force monthly mid-period.
-- At period end / renew → monthly Paddle list ([#809](https://github.com/uno0uno/api-warolabs/issues/809)).
+- At period end / renew → monthly Paddle list and **`billing_cycle` flips to `monthly`** (+1 month) ([#809](https://github.com/uno0uno/api-warolabs/issues/809)).
 
 Helpers:
 

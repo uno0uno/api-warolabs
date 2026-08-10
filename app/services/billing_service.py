@@ -2023,15 +2023,16 @@ async def _activate_subscription_with_period(
     metadata: Dict[str, Any],
     period_anchor: Optional[datetime] = None,
 ) -> Optional[datetime]:
-    """Set subscription active, extend billing period, record payment_approved."""
+    """Set subscription active, persist billing_cycle, extend period, record payment_approved."""
     # Interval literals stay in SQL — asyncpg cannot bind '1 year' strings as interval.
-    cycle = billing_cycle if billing_cycle in ("monthly", "annual") else "annual"
+    cycle = billing_cycle if billing_cycle in ("monthly", "annual") else "monthly"
     anchor = period_anchor or datetime.now(timezone.utc)
     if anchor.tzinfo is None:
         anchor = anchor.replace(tzinfo=timezone.utc)
     updated = await conn.fetchrow("""
         UPDATE tenant_subscriptions
         SET status               = 'active',
+            billing_cycle        = $2::text,
             current_period_start = $3::timestamptz,
             current_period_end   = $3::timestamptz + CASE
                 WHEN $2::text = 'monthly' THEN interval '1 month'
@@ -2163,11 +2164,19 @@ async def activate_subscription_by_gateway_ref(
                 gateway_reference,
             )
 
+    # Post-grandfather renew (#809): non-grandfathered annual → monthly period + catalog.
+    cycle = str(row["billing_cycle"] or "monthly").lower()
+    if cycle == "annual":
+        cycle = "monthly"
+        metadata["converted_from_annual"] = True
+    elif cycle not in ("monthly", "annual"):
+        cycle = "monthly"
+
     period_end = await _activate_subscription_with_period(
         conn,
         subscription_id=row["id"],
         tenant_id=tenant_id,
-        billing_cycle=row["billing_cycle"] or "monthly",
+        billing_cycle=cycle,
         amount=amount,
         currency=currency,
         metadata=metadata,
