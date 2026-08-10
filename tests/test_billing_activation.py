@@ -237,6 +237,60 @@ async def test_activate_tenant_subscription_rejects_return_amount_mismatch():
     conn.execute.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_activate_by_gateway_ref_monthly_past_due_extends_period():
+    tenant_id = uuid4()
+    sub_id = uuid4()
+    sub_row = {"id": sub_id, "status": "past_due", "billing_cycle": "monthly"}
+    conn, _ = _conn_with_activation(sub_row=sub_row)
+
+    await billing_service.activate_subscription_by_gateway_ref(
+        conn,
+        tenant_id=tenant_id,
+        gateway_reference="txn_monthly_1",
+        amount=9.0,
+        currency="USD",
+        paddle_transaction_id="txn_monthly_1",
+        provider="paddle",
+    )
+
+    update_call = None
+    for call in conn.fetchrow.await_args_list:
+        sql = " ".join(str(call.args[0]).split())
+        if "UPDATE tenant_subscriptions" in sql:
+            update_call = call
+            break
+    assert update_call is not None
+    assert update_call.args[2] == "monthly"
+    metadata = json.loads(conn.execute.call_args[0][5])
+    assert metadata["paddle_transaction_id"] == "txn_monthly_1"
+
+
+@pytest.mark.asyncio
+async def test_activate_by_gateway_ref_monthly_pending_activates():
+    tenant_id = uuid4()
+    sub_row = {"id": uuid4(), "status": "pending", "billing_cycle": "monthly"}
+    conn, _ = _conn_with_activation(sub_row=sub_row)
+
+    activated = await billing_service.activate_subscription_by_gateway_ref(
+        conn,
+        tenant_id=tenant_id,
+        gateway_reference="txn_monthly_pending",
+        amount=9.0,
+        currency="USD",
+        paddle_transaction_id="txn_monthly_pending",
+        provider="paddle",
+    )
+
+    assert activated is True
+    update_args = [
+        c.args for c in conn.fetchrow.await_args_list
+        if "UPDATE tenant_subscriptions" in " ".join(str(c.args[0]).split())
+    ]
+    assert update_args
+    assert update_args[0][2] == "monthly"
+
+
 def test_parse_wompi_period_anchor_prefers_finalized_at():
     anchor = billing_service.parse_wompi_period_anchor({
         "finalized_at": "2025-05-31T18:00:00.000Z",

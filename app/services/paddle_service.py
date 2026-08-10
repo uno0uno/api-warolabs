@@ -136,7 +136,7 @@ async def create_checkout(
     attempt_id: Optional[UUID] = None,
 ) -> Dict[str, Any]:
     """
-    Create a Paddle Billing transaction checkout for the annual price.
+    Create a Paddle Billing transaction checkout for the monthly price (#807).
 
     Returns: checkout_url, paddle_transaction_id, gateway_reference, currency, amount_minor
     """
@@ -163,7 +163,7 @@ async def create_checkout(
             "paddle_transaction_id": fake_id,
             "gateway_reference": fake_id,
             "currency": offer.currency,
-            "amount_minor": offer.annual_amount_minor,
+            "amount_minor": offer.monthly_amount_minor,
             "price_id": price_id,
             "mock": True,
         }
@@ -206,7 +206,7 @@ async def create_checkout(
         "paddle_transaction_id": txn_id,
         "gateway_reference": txn_id,
         "currency": offer.currency,
-        "amount_minor": offer.annual_amount_minor,
+        "amount_minor": offer.monthly_amount_minor,
         "price_id": price_id,
         "mock": False,
     }
@@ -250,7 +250,7 @@ def extract_transaction_event(payload: Dict[str, Any]) -> Dict[str, Any]:
         "status": str(data.get("status") or "").lower(),
         "tenant_id": custom.get("tenant_id"),
         "plan_id": custom.get("plan_id"),
-        "billing_cycle": custom.get("billing_cycle") or "annual",
+        "billing_cycle": custom.get("billing_cycle") or "monthly",
         "attempt_id": custom.get("attempt_id"),
         "provider_environment": custom.get("provider_environment") or "prod",
         "amount_minor": amount_minor_int,

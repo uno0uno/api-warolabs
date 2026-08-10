@@ -1741,7 +1741,7 @@ async def create_onboarding_payment_attempt(
             tenant_id, plan_id, provider, expected_amount_in_cents,
             currency, billing_cycle, status, provider_environment
         )
-        VALUES ($1, $2, $3, $4, $5, 'annual', 'created', $6)
+        VALUES ($1, $2, $3, $4, $5, 'monthly', 'created', $6)
         RETURNING id
     """, tenant_id, plan_id, provider_norm, amount_in_cents, currency_norm, provider_environment)
     return row["id"]
@@ -2167,7 +2167,7 @@ async def activate_subscription_by_gateway_ref(
         conn,
         subscription_id=row["id"],
         tenant_id=tenant_id,
-        billing_cycle=row["billing_cycle"] or "annual",
+        billing_cycle=row["billing_cycle"] or "monthly",
         amount=amount,
         currency=currency,
         metadata=metadata,
@@ -3149,10 +3149,10 @@ async def process_paddle_onboarding_payment(
             tenant_id, plan_id, billing_cycle, status, gateway_reference,
             current_period_start, current_period_end
         )
-        VALUES ($1, $2, 'annual', 'active', $3, $4, $4 + interval '1 year')
+        VALUES ($1, $2, 'monthly', 'active', $3, $4, $4 + interval '1 month')
         ON CONFLICT (tenant_id) DO UPDATE SET
             plan_id = EXCLUDED.plan_id,
-            billing_cycle = 'annual',
+            billing_cycle = 'monthly',
             status = 'active',
             gateway_reference = EXCLUDED.gateway_reference,
             current_period_start = EXCLUDED.current_period_start,

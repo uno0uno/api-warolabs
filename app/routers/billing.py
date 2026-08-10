@@ -45,7 +45,7 @@ tenant_router = APIRouter(prefix="/billing", tags=["Billing"])
 class SubscribeBody(BaseModel):
     """Body for POST /billing/subscribe"""
     plan_id: UUID
-    billing_cycle: str = "annual"  # new subscriptions: annual only (#877)
+    billing_cycle: str = "monthly"  # new subscriptions: monthly only (#807)
     payer_email: Optional[str] = None
 
 
@@ -88,16 +88,16 @@ async def tenant_list_plans(request: Request):
 )
 async def subscribe(body: SubscribeBody, request: Request):
     """
-    Subscribe the authenticated tenant to a plan via Paddle checkout (#795).
+    Subscribe the authenticated tenant to a plan via Paddle checkout (#807).
 
-    billing_cycle must be 'annual' for new subscriptions (#877).
+    billing_cycle must be 'monthly' for new subscriptions.
     Active annuals with a future period end are blocked mid-period (#797).
     """
-    if body.billing_cycle != "annual":
+    if body.billing_cycle != "monthly":
         from fastapi import HTTPException
         raise HTTPException(
             status_code=422,
-            detail="Las suscripciones nuevas solo están disponibles con ciclo anual (billing_cycle='annual').",
+            detail="Las suscripciones nuevas solo estan disponibles con ciclo mensual (billing_cycle='monthly').",
         )
 
     session = require_valid_session(request)
@@ -128,7 +128,7 @@ async def subscribe(body: SubscribeBody, request: Request):
                 conn,
                 tenant_id=tenant_id,
                 plan_id=body.plan_id,
-                amount_in_cents=offer.annual_amount_minor,
+                amount_in_cents=offer.monthly_amount_minor,
                 provider_environment=provider_environment,
                 currency=offer.currency,
                 provider="paddle",
@@ -175,9 +175,9 @@ async def subscribe(body: SubscribeBody, request: Request):
         "plan_id": str(body.plan_id),
         "checkout_url": paddle_result["checkout_url"],
         "gateway_reference": paddle_result["gateway_reference"],
-        "amount_in_cents": offer.annual_amount_minor,
+        "amount_in_cents": offer.monthly_amount_minor,
         "currency": offer.currency,
-        "billing_cycle": "annual",
+        "billing_cycle": "monthly",
         "status": "pending",
         "provider": "paddle",
     }
