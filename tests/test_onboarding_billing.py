@@ -435,7 +435,6 @@ async def test_colombia_wompi_handler_is_noop(caplog):
 async def test_browser_verify_payment_is_read_only_for_approved_transaction():
     tenant_id = uuid4()
     session = SimpleNamespace(tenant_id=tenant_id)
-    background_tasks = BackgroundTasks()
     transaction = {
         "id": "tx-approved",
         "status": "APPROVED",
@@ -462,14 +461,12 @@ async def test_browser_verify_payment_is_read_only_for_approved_transaction():
     ) as activate:
         result = await billing.verify_payment(
             object(),
-            background_tasks,
             transaction_id="tx-approved",
         )
 
     assert result["status"] == "active"
     assert result["activation"] == "deprecated"
     activate.assert_not_awaited()
-    assert len(background_tasks.tasks) == 0
 
 
 @pytest.mark.asyncio
@@ -501,7 +498,6 @@ async def test_browser_verify_payment_does_not_activate_pending_transaction():
     ) as activate:
         result = await billing.verify_payment(
             object(),
-            BackgroundTasks(),
             transaction_id="tx-pending",
         )
 
