@@ -67,9 +67,11 @@ async def tenant_list_plans(request: Request):
         plans = await billing_service.list_plans(conn)
         ctx = await billing_service.get_tenant_billing_context(conn, session.tenant_id)
 
-    offer = resolve_price_offer(ctx.get("country_code"))
+    country_code = ctx.get("country_code")
+    offer = resolve_price_offer(country_code)
+    active = [p for p in plans if p["is_active"]]
     return {
-        "plans": [p for p in plans if p["is_active"]],
+        "plans": billing_service.filter_plans_for_country(active, country_code),
         "price_offer": {
             "segment": offer.segment,
             "currency": offer.currency,
@@ -120,6 +122,10 @@ async def subscribe(body: SubscribeBody, request: Request):
             await billing_service.ensure_subscribe_allowed(conn, tenant_id)
 
         ctx = await billing_service.get_tenant_billing_context(conn, tenant_id)
+        billing_service.assert_plan_available_for_country(
+            plan["slug"],
+            ctx.get("country_code"),
+        )
         offer = resolve_price_offer(ctx["country_code"])
         provider_environment = resolve_provider_environment(tenant_slug=ctx.get("slug"))
 

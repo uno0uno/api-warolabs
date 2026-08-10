@@ -1506,6 +1506,32 @@ async def list_plans(conn) -> List[Dict[str, Any]]:
     return [_serialize_plan(r) for r in rows]
 
 
+def is_colombia_country(country_code: Optional[str]) -> bool:
+    return (country_code or "").strip().upper() == "CO"
+
+
+def filter_plans_for_country(
+    plans: List[Dict[str, Any]],
+    country_code: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Hide Colombia-only electronic invoicing plan outside CO (#2201)."""
+    if is_colombia_country(country_code):
+        return plans
+    return [p for p in plans if p.get("slug") != ELECTRONIC_INVOICE_PLAN_SLUG]
+
+
+def assert_plan_available_for_country(
+    plan_slug: str,
+    country_code: Optional[str],
+) -> None:
+    """Raise 422 when a country-restricted plan is requested outside CO."""
+    if plan_slug == ELECTRONIC_INVOICE_PLAN_SLUG and not is_colombia_country(country_code):
+        raise HTTPException(
+            status_code=422,
+            detail="El plan de Facturación electrónica solo está disponible para Colombia.",
+        )
+
+
 def _serialize_billing_events(rows, total: int, limit: int, offset: int) -> Dict[str, Any]:
     events = []
     for r in rows:
