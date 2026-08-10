@@ -45,7 +45,7 @@ async def wompi_sandbox_webhook(
 
 
 @router.post("/paddle", status_code=200)
-async def paddle_live_webhook(request: Request):
+async def paddle_live_webhook(request: Request, background_tasks: BackgroundTasks):
     """Paddle Billing live webhook — signature verified with live secret (#795)."""
     raw = await request.body()
     paddle_service.verify_paddle_signature(
@@ -54,11 +54,13 @@ async def paddle_live_webhook(request: Request):
         environment="prod",
     )
     payload = json.loads(raw.decode("utf-8"))
-    return await paddle_service.handle_verified_webhook(payload, environment="prod")
+    return await paddle_service.handle_verified_webhook(
+        payload, environment="prod", background_tasks=background_tasks
+    )
 
 
 @router.post("/paddle/sandbox", status_code=200)
-async def paddle_sandbox_webhook(request: Request):
+async def paddle_sandbox_webhook(request: Request, background_tasks: BackgroundTasks):
     """Paddle Billing sandbox webhook — signature verified with sandbox secret (#795)."""
     raw = await request.body()
     paddle_service.verify_paddle_signature(
@@ -67,4 +69,6 @@ async def paddle_sandbox_webhook(request: Request):
         environment="test",
     )
     payload = json.loads(raw.decode("utf-8"))
-    return await paddle_service.handle_verified_webhook(payload, environment="test")
+    return await paddle_service.handle_verified_webhook(
+        payload, environment="test", background_tasks=background_tasks
+    )

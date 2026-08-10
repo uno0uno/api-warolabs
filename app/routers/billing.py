@@ -211,7 +211,6 @@ async def get_my_remaining_usage(request: Request):
 )
 async def verify_payment(
     request: Request,
-    background_tasks: BackgroundTasks,
     transaction_id: str = Query(...),
 ):
     """

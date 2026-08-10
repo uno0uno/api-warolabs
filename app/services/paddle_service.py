@@ -273,17 +273,38 @@ async def _notify_payment_approved(tenant_info: Dict[str, Any], *, amount: float
     )
 
 
+async def _notify_payment_rejected(tenant_info: Dict[str, Any]) -> None:
+    from app.config import settings
+    from app.services import billing_email_service
+
+    if not tenant_info or not tenant_info.get("tenant_email"):
+        return
+    await billing_email_service.send_payment_rejected_email(
+        tenant_name=tenant_info.get("tenant_name") or "",
+        tenant_email=tenant_info.get("tenant_email"),
+        billing_url=f"{settings.frontend_url}/gestion/billing",
+    )
+
+
+def _schedule_background(background_tasks, coro_fn, *args, **kwargs) -> None:
+    """Queue notify work after the webhook HTTP response (Paddle retry-safe)."""
+    if background_tasks is None:
+        logger.warning("Paddle notify skipped: BackgroundTasks missing for %s", coro_fn.__name__)
+        return
+    background_tasks.add_task(coro_fn, *args, **kwargs)
+
+
 async def handle_verified_webhook(
     payload: Dict[str, Any],
     *,
     environment: ProviderEnvironment,
+    background_tasks=None,
 ) -> Dict[str, Any]:
     """Process a signature-verified Paddle event. Returns summary dict."""
     from uuid import UUID as _UUID
 
-    from app.config import settings
     from app.database import get_db_connection
-    from app.services import billing_email_service, billing_service
+    from app.services import billing_service
 
     parsed = extract_transaction_event(payload)
     event_type = parsed["event_type"]
@@ -303,17 +324,31 @@ async def handle_verified_webhook(
 
     if event_type in failed_events or status in {"failed", "canceled", "cancelled"}:
         logger.info("Paddle payment not successful event=%s status=%s txn=%s", event_type, status, txn_id)
-        if txn_id:
-            async with get_db_connection() as conn:
-                tenant_info = await billing_service.mark_subscription_past_due(
-                    conn, str(txn_id), "payment_rejected"
-                )
-            if tenant_info and tenant_info.get("tenant_email"):
-                await billing_email_service.send_payment_rejected_email(
-                    tenant_name=tenant_info.get("tenant_name") or "",
-                    tenant_email=tenant_info.get("tenant_email"),
-                    billing_url=f"{settings.frontend_url}/gestion/billing",
-                )
+        tenant_raw = parsed.get("tenant_id")
+        if not tenant_raw:
+            logger.warning(
+                "Paddle failure missing tenant_id txn=%s sub=%s — cannot mark past_due",
+                txn_id,
+                parsed.get("subscription_id"),
+            )
+            return {"ok": True, "activated": False, "reason": "failed_or_cancelled"}
+        try:
+            tenant_id = _UUID(str(tenant_raw))
+        except ValueError:
+            return {"ok": True, "activated": False, "reason": "failed_or_cancelled"}
+
+        async with get_db_connection() as conn:
+            tenant_info = await billing_service.mark_subscription_past_due_by_tenant(
+                conn,
+                tenant_id,
+                "payment_rejected",
+                paddle_transaction_id=str(txn_id) if txn_id else None,
+                paddle_subscription_id=(
+                    str(parsed["subscription_id"]) if parsed.get("subscription_id") else None
+                ),
+            )
+        if tenant_info:
+            _schedule_background(background_tasks, _notify_payment_rejected, tenant_info)
         return {"ok": True, "activated": False, "reason": "failed_or_cancelled"}
 
     if event_type not in success_events:
@@ -388,8 +423,11 @@ async def handle_verified_webhook(
                 )
             reason = None if activated else "not_activated"
 
-    if activated and tenant_info:
-        await _notify_payment_approved(
+    # Renewals only — onboarding first payment should not get "renovada" copy.
+    if activated and tenant_info and not onboarding:
+        _schedule_background(
+            background_tasks,
+            _notify_payment_approved,
             tenant_info,
             amount=amount,
             currency=currency,

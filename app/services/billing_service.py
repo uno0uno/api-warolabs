@@ -3529,6 +3529,65 @@ async def mark_subscription_past_due(
         )
         return None
 
+    return await _apply_past_due_from_row(
+        conn,
+        row,
+        event_type=event_type,
+        metadata={"gateway_reference": gateway_reference},
+    )
+
+
+async def mark_subscription_past_due_by_tenant(
+    conn,
+    tenant_id: UUID,
+    event_type: str,
+    *,
+    paddle_transaction_id: Optional[str] = None,
+    paddle_subscription_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Paddle failure path (#798): resolve subscription by tenant_id.
+
+    Failed Paddle txns use a new transaction id that is not yet stored as
+    gateway_reference, so lookup-by-txn would always miss.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT ts.id AS subscription_id, ts.tenant_id, ts.status,
+               ts.current_period_end
+        FROM tenant_subscriptions ts
+        WHERE ts.tenant_id = $1
+        """,
+        tenant_id,
+    )
+    if row is None:
+        logger.warning(
+            "mark_subscription_past_due_by_tenant: no subscription tenant=%s",
+            tenant_id,
+        )
+        return None
+
+    metadata: Dict[str, Any] = {"provider": "paddle", "tenant_id": str(tenant_id)}
+    if paddle_transaction_id:
+        metadata["paddle_transaction_id"] = paddle_transaction_id
+    if paddle_subscription_id:
+        metadata["paddle_subscription_id"] = paddle_subscription_id
+
+    return await _apply_past_due_from_row(
+        conn,
+        row,
+        event_type=event_type,
+        metadata=metadata,
+    )
+
+
+async def _apply_past_due_from_row(
+    conn,
+    row,
+    *,
+    event_type: str,
+    metadata: Dict[str, Any],
+) -> Dict[str, Any]:
     sub_id = row["subscription_id"]
     tenant_id = row["tenant_id"]
     status = row["status"]
@@ -3547,13 +3606,12 @@ async def mark_subscription_past_due(
         """, sub_id)
     else:
         logger.info(
-            "mark_subscription_past_due: skipped past_due status=%s period_end=%s ref=%s",
+            "mark_subscription_past_due: skipped past_due status=%s period_end=%s tenant=%s",
             status,
             period_end,
-            gateway_reference,
+            tenant_id,
         )
 
-    # Fetch tenant info for email
     tenant = await conn.fetchrow(
         "SELECT name, email FROM tenants WHERE id = $1", tenant_id
     )
@@ -3561,12 +3619,9 @@ async def mark_subscription_past_due(
     await conn.execute("""
         INSERT INTO billing_events (tenant_id, subscription_id, event_type, metadata)
         VALUES ($1, $2, $3, $4)
-    """, tenant_id, sub_id, event_type, {"gateway_reference": gateway_reference})
+    """, tenant_id, sub_id, event_type, metadata)
 
-    logger.info(
-        "%s: tenant=%s preapproval=%s",
-        event_type, tenant_id, gateway_reference,
-    )
+    logger.info("%s: tenant=%s metadata=%s", event_type, tenant_id, metadata)
 
     return {
         "tenant_id": str(tenant_id),
