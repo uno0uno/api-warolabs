@@ -121,7 +121,10 @@ async def subscribe(body: SubscribeBody, request: Request):
 
         ctx = await billing_service.get_tenant_billing_context(conn, tenant_id)
         offer = resolve_price_offer(ctx["country_code"])
-        provider_environment = resolve_provider_environment(tenant_slug=ctx.get("slug"))
+        provider_environment = resolve_provider_environment(
+            tenant_slug=ctx.get("slug"),
+            tenant_id=str(tenant_id) if tenant_id else None,
+        )
 
         if is_pending_onboarding:
             attempt_id = await billing_service.create_onboarding_payment_attempt(

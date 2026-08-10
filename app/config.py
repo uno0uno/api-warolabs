@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     )
 
     # Paddle Billing — regional SaaS checkout (epic #793 / batch #795)
+    # sandbox|production — default sandbox (local/dev); prod must set production (#813)
+    paddle_environment: str = Field(default='sandbox', alias='PADDLE_ENVIRONMENT')
+    # CSV of tenant slugs and/or ids routed to Paddle Test when paddle_environment=production
+    paddle_sandbox_tenant_slugs: str = Field(default='', alias='PADDLE_SANDBOX_TENANT_SLUGS')
     paddle_api_key_live: Optional[str] = Field(default=None, alias='PADDLE_API_KEY_LIVE')
     paddle_api_key_sandbox: Optional[str] = Field(default=None, alias='PADDLE_API_KEY_SANDBOX')
     paddle_webhook_secret_live: Optional[str] = Field(

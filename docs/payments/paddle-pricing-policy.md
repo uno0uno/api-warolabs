@@ -34,10 +34,17 @@ Annual `PADDLE_PRICE_*_ANNUAL_*` is optional fallback only if monthly is unset. 
 
 ## Sandbox vs live (`provider_environment`)
 
-| Value | When |
-|-------|------|
-| `test` | `billing_test=True` **or** tenant slug in `PADDLE_SANDBOX_TENANT_SLUGS` (e.g. `warocolombia`) |
-| `prod` | All other tenants (including Colombian customers like Bubablue) |
+Driven by env (Wompi / Matías pattern) — not hardcoded QA slugs alone ([#813](https://github.com/uno0uno/api-warolabs/issues/813)):
+
+| Env | Role |
+|-----|------|
+| `PADDLE_ENVIRONMENT` | `sandbox` (default) or `production`. Local/dev → leave default or set `sandbox` so **any** tenant uses Paddle Test. **Production deploys must set `production`.** |
+| `PADDLE_SANDBOX_TENANT_SLUGS` | Optional CSV of tenant slugs and/or ids that stay on Test when `PADDLE_ENVIRONMENT=production`. Empty → fallback `warocolombia,waro-colombia`. |
+
+| `provider_environment` | When |
+|------------------------|------|
+| `test` | `billing_test=True`, **or** `PADDLE_ENVIRONMENT` is `sandbox`/`test`, **or** (production mode and tenant on allowlist) |
+| `prod` | `PADDLE_ENVIRONMENT=production` and tenant **not** on allowlist (e.g. Bubablue) |
 
 ## Grandfather (active annuals)
 

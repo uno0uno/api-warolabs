@@ -1,0 +1,37 @@
+issue: 813
+title: "chore(billing): drive Paddle sandbox/live from env (no hardcoded QA slugs)"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-813-paddle-env-sandbox
+
+paths:
+  - app/config.py
+  - app/core/billing_pricing.py
+  - app/routers/billing.py
+  - docs/payments/paddle-pricing-policy.md
+  - tests/test_billing_pricing.py
+
+ac:
+  - PADDLE_ENVIRONMENT=sandbox|production in config (default sandbox for local ergonomics like WOMPI_ENVIRONMENT)
+  - PADDLE_SANDBOX_TENANT_SLUGS CSV optional; empty → fallback warocolombia,waro-colombia
+  - resolve_provider_environment: billing_test OR paddle_environment sandbox OR slug/id in allowlist → test; else prod
+  - Docs describe local vs prod
+  - Tests: sandbox env forces test for arbitrary slug; prod+allowlist; prod without match → live
+
+out_of_scope:
+  - country segments, front, live catalog, paddle_service URLs
+
+hints:
+  pattern: "WOMPI_ENVIRONMENT + MATIAS_SANDBOX_TENANT_IDS CSV split"
+  entry: "resolve_provider_environment in billing_pricing.py"
+  tests: "venv/bin/python -m pytest tests/test_billing_pricing.py -q"
+
+risk:
+  sensitive: true
+  areas: [payments]
+  note: "Default PADDLE_ENVIRONMENT=sandbox matches WOMPI; prod deploys must set production"
+
+skip:
+  audits: [ux, color, typography]
