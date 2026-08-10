@@ -39,7 +39,7 @@ def _completed_payload(
     custom = {
         "tenant_id": str(tenant_id),
         "plan_id": str(uuid4()),
-        "billing_cycle": "annual",
+        "billing_cycle": "monthly",
         "provider_environment": "test",
     }
     if attempt_id is not None:
@@ -52,7 +52,7 @@ def _completed_payload(
             "currency_code": "USD",
             "billed_at": "2026-08-01T12:00:00Z",
             "custom_data": custom,
-            "details": {"totals": {"grand_total": "9000", "currency_code": "USD"}},
+            "details": {"totals": {"grand_total": "900", "currency_code": "USD"}},
             "subscription_id": "sub_paddle_1",
         },
     }
@@ -104,12 +104,12 @@ async def test_create_checkout_uses_offer_not_plan_cop(monkeypatch):
         environment="test",
         tenant_id=uuid4(),
         plan_id=uuid4(),
-        billing_cycle="annual",
+        billing_cycle="monthly",
         redirect_url="https://example.test/billing/confirmacion",
     )
 
     assert result["currency"] == "USD"
-    assert result["amount_minor"] == 9000  # $90 annual, not COP plan price
+    assert result["amount_minor"] == 900  # $9 monthly, not COP plan price
     assert result["mock"] is True
     assert "paddle_txn=" in result["checkout_url"]
 
@@ -155,7 +155,7 @@ async def test_handle_webhook_activates_on_completed():
     assert kwargs["paddle_transaction_id"] == "txn_paddle_1"
     assert kwargs["paddle_subscription_id"] == "sub_paddle_1"
     assert kwargs["currency"] == "USD"
-    assert kwargs["amount"] == 90.0
+    assert kwargs["amount"] == 9.0
 
 
 @pytest.mark.asyncio
@@ -295,7 +295,7 @@ async def test_handle_webhook_failed_marks_past_due_by_tenant():
 @pytest.mark.asyncio
 async def test_activate_paddle_duplicate_skips():
     tenant_id = uuid4()
-    sub_row = {"id": uuid4(), "status": "pending", "billing_cycle": "annual"}
+    sub_row = {"id": uuid4(), "status": "pending", "billing_cycle": "monthly"}
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=sub_row)
     conn.fetchval = AsyncMock(return_value=1)  # duplicate paddle txn
@@ -305,7 +305,7 @@ async def test_activate_paddle_duplicate_skips():
         conn,
         tenant_id=tenant_id,
         gateway_reference="txn_paddle_1",
-        amount=90.0,
+        amount=9.0,
         currency="USD",
         paddle_transaction_id="txn_paddle_1",
         provider="paddle",
@@ -327,7 +327,7 @@ async def test_process_paddle_onboarding_payment_activates():
         "tenant_id": tenant_id,
         "plan_id": plan_id,
         "provider_reference": "txn_onboard_1",
-        "expected_amount_in_cents": 9000,
+        "expected_amount_in_cents": 900,
         "currency": "USD",
         "status": "pending",
         "provider_transaction_id": None,
@@ -354,7 +354,7 @@ async def test_process_paddle_onboarding_payment_activates():
             conn,
             attempt_id=attempt_id,
             transaction_id="txn_onboard_1",
-            amount_minor=9000,
+            amount_minor=900,
             currency="USD",
             provider_environment="test",
             paddle_subscription_id="sub_1",
