@@ -9,6 +9,7 @@ branch: wr-813-paddle-env-sandbox
 paths:
   - app/config.py
   - app/core/billing_pricing.py
+  - app/routers/billing.py
   - docs/payments/paddle-pricing-policy.md
   - tests/test_billing_pricing.py
 
