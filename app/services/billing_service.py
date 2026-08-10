@@ -1719,18 +1719,26 @@ async def create_onboarding_payment_attempt(
     plan_id: UUID,
     amount_in_cents: int,
     provider_environment: str = "prod",
+    currency: str = "COP",
+    provider: str = "wompi",
 ) -> UUID:
-    """Create immutable attempt evidence before requesting a Wompi link."""
+    """Create immutable attempt evidence before requesting a checkout link."""
     if provider_environment not in ("prod", "test"):
-        raise HTTPException(status_code=422, detail="Invalid Wompi environment")
+        raise HTTPException(status_code=422, detail="Invalid payment provider environment")
+    currency_norm = str(currency or "COP").strip().upper()
+    provider_norm = str(provider or "wompi").strip().lower()
+    if provider_norm not in ("wompi", "paddle"):
+        raise HTTPException(status_code=422, detail="Invalid payment provider")
+    if currency_norm not in ("COP", "USD", "EUR"):
+        raise HTTPException(status_code=422, detail="Invalid payment currency")
     row = await conn.fetchrow("""
         INSERT INTO billing_payment_attempts (
-            tenant_id, plan_id, expected_amount_in_cents,
+            tenant_id, plan_id, provider, expected_amount_in_cents,
             currency, billing_cycle, status, provider_environment
         )
-        VALUES ($1, $2, $3, 'COP', 'annual', 'created', $4)
+        VALUES ($1, $2, $3, $4, $5, 'annual', 'created', $6)
         RETURNING id
-    """, tenant_id, plan_id, amount_in_cents, provider_environment)
+    """, tenant_id, plan_id, provider_norm, amount_in_cents, currency_norm, provider_environment)
     return row["id"]
 
 
@@ -1919,9 +1927,24 @@ def parse_wompi_period_anchor(transaction: Dict[str, Any]) -> datetime:
 async def payment_approved_exists(
     conn,
     subscription_id: UUID,
-    wompi_transaction_id: str,
+    wompi_transaction_id: str = "",
+    *,
+    paddle_transaction_id: Optional[str] = None,
 ) -> bool:
-    """True if this Wompi transaction already recorded as payment_approved."""
+    """True if this provider transaction already recorded as payment_approved."""
+    if paddle_transaction_id:
+        row = await conn.fetchval(
+            """
+            SELECT 1 FROM billing_events
+            WHERE subscription_id = $1
+              AND event_type = 'payment_approved'
+              AND metadata->>'paddle_transaction_id' = $2
+            LIMIT 1
+            """,
+            subscription_id,
+            paddle_transaction_id,
+        )
+        return row is not None
     if not wompi_transaction_id:
         return False
     row = await conn.fetchval(
@@ -1983,13 +2006,20 @@ async def activate_subscription_by_gateway_ref(
     conn,
     tenant_id: UUID,
     gateway_reference: str,
-    wompi_transaction_id: str,
-    amount: float,
+    wompi_transaction_id: str = "",
+    amount: float = 0.0,
     period_anchor: Optional[datetime] = None,
-) -> None:
+    *,
+    currency: str = "COP",
+    paddle_transaction_id: Optional[str] = None,
+    paddle_subscription_id: Optional[str] = None,
+    provider: str = "wompi",
+    provider_environment: Optional[str] = None,
+) -> bool:
     """
-    Activa la suscripción del tenant cuando Wompi confirma el pago (verify-payment).
-    Extiende el período según billing_cycle para filas pending o past_due.
+    Activate tenant subscription when payment provider confirms payment.
+    Extends the period for pending or past_due rows (Wompi or Paddle).
+    Returns True only when a payment_approved event was written.
     """
     row = await conn.fetchrow(
         """SELECT id, status, billing_cycle
@@ -2002,26 +2032,43 @@ async def activate_subscription_by_gateway_ref(
             "activate_subscription: no subscription found for tenant=%s gateway_ref=%s",
             tenant_id, gateway_reference,
         )
-        return
+        return False
 
     if row["status"] == "active":
         logger.info("activate_subscription: already active tenant=%s", tenant_id)
-        return
+        return False
 
     if row["status"] not in _ACTIVATABLE_STATUSES:
         logger.warning(
             "activate_subscription: status=%s not activatable tenant=%s gateway_ref=%s",
             row["status"], tenant_id, gateway_reference,
         )
-        return
+        return False
 
-    if await payment_approved_exists(conn, row["id"], wompi_transaction_id):
+    if await payment_approved_exists(
+        conn,
+        row["id"],
+        wompi_transaction_id,
+        paddle_transaction_id=paddle_transaction_id,
+    ):
         logger.info(
-            "activate_subscription: duplicate wompi_transaction_id=%s tenant=%s — skipped",
-            wompi_transaction_id,
+            "activate_subscription: duplicate provider txn tenant=%s — skipped",
             tenant_id,
         )
-        return
+        return False
+
+    metadata: Dict[str, Any] = {
+        "gateway_reference": gateway_reference,
+        "provider": provider,
+    }
+    if wompi_transaction_id:
+        metadata["wompi_transaction_id"] = wompi_transaction_id
+    if paddle_transaction_id:
+        metadata["paddle_transaction_id"] = paddle_transaction_id
+    if paddle_subscription_id:
+        metadata["paddle_subscription_id"] = paddle_subscription_id
+    if provider_environment:
+        metadata["provider_environment"] = provider_environment
 
     period_end = await _activate_subscription_with_period(
         conn,
@@ -2029,19 +2076,38 @@ async def activate_subscription_by_gateway_ref(
         tenant_id=tenant_id,
         billing_cycle=row["billing_cycle"],
         amount=amount,
-        currency="COP",
-        metadata={
-            "wompi_transaction_id": wompi_transaction_id,
-            "gateway_reference": gateway_reference,
-        },
+        currency=currency,
+        metadata=metadata,
         period_anchor=period_anchor,
     )
     await onboarding_service.activate_paid_onboarding_identity(conn, tenant_id)
 
     logger.info(
-        "Subscription activated: tenant=%s transaction=%s amount=%s period_end=%s",
-        tenant_id, wompi_transaction_id, amount, period_end,
+        "Subscription activated: tenant=%s provider=%s txn=%s amount=%s period_end=%s",
+        tenant_id,
+        provider,
+        paddle_transaction_id or wompi_transaction_id,
+        amount,
+        period_end,
     )
+    return True
+
+
+async def get_tenant_billing_context(conn, tenant_id: UUID) -> Dict[str, Any]:
+    """Country + slug for Paddle pricing/env resolution."""
+    row = await conn.fetchrow(
+        """
+        SELECT t.slug,
+               COALESCE(tfp.country_code, 'CO') AS country_code
+        FROM tenants t
+        LEFT JOIN tenant_financial_profiles tfp ON tfp.tenant_id = t.id
+        WHERE t.id = $1
+        """,
+        tenant_id,
+    )
+    if not row:
+        return {"slug": None, "country_code": "CO"}
+    return {"slug": row["slug"], "country_code": row["country_code"] or "CO"}
 
 
 async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
@@ -2813,6 +2879,192 @@ async def process_onboarding_payment_transaction(
 
     return {
         "handled": True,
+        "tenant_info": {
+            "tenant_id": str(attempt["tenant_id"]),
+            "subscription_id": str(subscription["id"]),
+            "tenant_name": identity["tenant_name"],
+            "tenant_email": identity["tenant_email"],
+            "plan_name": attempt["plan_name"],
+            "next_period_end": subscription["current_period_end"].isoformat(),
+        },
+    }
+
+
+async def process_paddle_onboarding_payment(
+    conn,
+    *,
+    attempt_id: UUID,
+    transaction_id: str,
+    amount_minor: int,
+    currency: str,
+    period_anchor: Optional[datetime] = None,
+    provider_environment: str = "prod",
+    paddle_subscription_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Activate paid onboarding from a verified Paddle transaction (#795).
+
+    Looks up billing_payment_attempts by attempt_id + provider=paddle.
+    """
+    txn_id = str(transaction_id or "").strip()
+    if not txn_id:
+        return {"handled": False, "activated": False, "reason": "missing_txn"}
+
+    attempt = await conn.fetchrow(
+        """
+        SELECT a.id, a.tenant_id, a.plan_id, a.provider_reference,
+               a.expected_amount_in_cents, a.currency, a.status,
+               a.provider_transaction_id, a.provider_environment,
+               p.name AS plan_name, p.is_active AS plan_is_active
+        FROM billing_payment_attempts a
+        JOIN subscription_plans p ON p.id = a.plan_id
+        WHERE a.id = $1
+          AND a.provider = 'paddle'
+        FOR UPDATE OF a
+        """,
+        attempt_id,
+    )
+    if attempt is None:
+        return {"handled": False, "activated": False, "reason": "attempt_not_found"}
+    if attempt["provider_environment"] != provider_environment:
+        raise HTTPException(status_code=409, detail="Paddle environment mismatch")
+
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", txn_id)
+    duplicate_attempt_id = await conn.fetchval(
+        """
+        SELECT id
+        FROM billing_payment_attempts
+        WHERE provider_transaction_id = $1
+          AND provider_environment = $2
+          AND id <> $3
+        LIMIT 1
+        """,
+        txn_id,
+        provider_environment,
+        attempt["id"],
+    )
+    if duplicate_attempt_id is not None:
+        raise HTTPException(status_code=409, detail="Paddle transaction ID mismatch")
+
+    if attempt["status"] == "approved":
+        if attempt["provider_transaction_id"] != txn_id:
+            raise HTTPException(status_code=409, detail="Paddle transaction ID mismatch")
+        return {"handled": True, "activated": False, "reason": "already_approved"}
+
+    expected_currency = str(attempt["currency"]).strip().upper()
+    currency_norm = str(currency or "").strip().upper()
+    expected_amount = int(attempt["expected_amount_in_cents"])
+    if (
+        currency_norm != expected_currency
+        or int(amount_minor) != expected_amount
+        or not attempt["plan_is_active"]
+    ):
+        raise HTTPException(status_code=409, detail="Paddle payment evidence mismatch")
+
+    existing_subscription = await conn.fetchrow(
+        """
+        SELECT id, status
+        FROM tenant_subscriptions
+        WHERE tenant_id = $1
+        FOR UPDATE
+        """,
+        attempt["tenant_id"],
+    )
+    identity = await onboarding_service.activate_paid_onboarding_identity(
+        conn, attempt["tenant_id"]
+    )
+    if identity is None:
+        await conn.execute(
+            """
+            UPDATE billing_payment_attempts
+            SET status = 'approved', provider_transaction_id = $2,
+                resolved_at = now(), updated_at = now()
+            WHERE id = $1
+            """,
+            attempt["id"],
+            txn_id,
+        )
+        logger.error(
+            "Paddle onboarding payment requires reconciliation: tenant=%s attempt=%s txn=%s",
+            attempt["tenant_id"],
+            attempt["id"],
+            txn_id,
+        )
+        return {"handled": True, "activated": False, "reason": "reconciliation_required"}
+
+    if existing_subscription is not None and existing_subscription["status"] != "pending":
+        raise HTTPException(status_code=409, detail="Tenant subscription activation conflict")
+
+    anchor = period_anchor or datetime.now(timezone.utc)
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+    gateway_reference = str(attempt["provider_reference"] or txn_id)
+
+    subscription = await conn.fetchrow(
+        """
+        INSERT INTO tenant_subscriptions (
+            tenant_id, plan_id, billing_cycle, status, gateway_reference,
+            current_period_start, current_period_end
+        )
+        VALUES ($1, $2, 'annual', 'active', $3, $4, $4 + interval '1 year')
+        ON CONFLICT (tenant_id) DO UPDATE SET
+            plan_id = EXCLUDED.plan_id,
+            billing_cycle = 'annual',
+            status = 'active',
+            gateway_reference = EXCLUDED.gateway_reference,
+            current_period_start = EXCLUDED.current_period_start,
+            current_period_end = EXCLUDED.current_period_end,
+            cancelled_at = NULL,
+            updated_at = now()
+        WHERE tenant_subscriptions.status = 'pending'
+        RETURNING id, current_period_end
+        """,
+        attempt["tenant_id"],
+        attempt["plan_id"],
+        gateway_reference,
+        anchor,
+    )
+    if subscription is None:
+        raise HTTPException(status_code=409, detail="Tenant subscription activation conflict")
+
+    metadata = {
+        "payment_attempt_id": str(attempt["id"]),
+        "paddle_transaction_id": txn_id,
+        "gateway_reference": gateway_reference,
+        "plan_id": str(attempt["plan_id"]),
+        "provider": "paddle",
+        "provider_environment": provider_environment,
+    }
+    if paddle_subscription_id:
+        metadata["paddle_subscription_id"] = paddle_subscription_id
+
+    await conn.execute(
+        """
+        INSERT INTO billing_events (
+            tenant_id, subscription_id, event_type, amount, currency, metadata
+        )
+        VALUES ($1, $2, 'payment_approved', $3, $4, $5)
+        """,
+        attempt["tenant_id"],
+        subscription["id"],
+        Decimal(amount_minor) / Decimal("100"),
+        expected_currency,
+        json.dumps(metadata),
+    )
+    await conn.execute(
+        """
+        UPDATE billing_payment_attempts
+        SET status = 'approved', provider_transaction_id = $2,
+            resolved_at = now(), updated_at = now()
+        WHERE id = $1
+        """,
+        attempt["id"],
+        txn_id,
+    )
+
+    return {
+        "handled": True,
+        "activated": True,
         "tenant_info": {
             "tenant_id": str(attempt["tenant_id"]),
             "subscription_id": str(subscription["id"]),

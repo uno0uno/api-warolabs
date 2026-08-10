@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     discord_purchase_actions_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_PURCHASE_ACTIONS_WEBHOOK_URL')
     discord_leads_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_LEADS_WEBHOOK_URL')
 
-    # Wompi — pasarela de pagos Colombia (issue #60)
+    # Wompi — pasarela de pagos Colombia (issue #60); legacy until #798
     wompi_public_key: Optional[str] = Field(default=None, alias='WOMPI_PUBLIC_KEY')
     wompi_private_key: Optional[str] = Field(default=None, alias='WOMPI_PRIVATE_KEY')
     wompi_events_secret: Optional[str] = Field(default=None, alias='WOMPI_EVENTS_SECRET')
@@ -97,6 +97,34 @@ class Settings(BaseSettings):
     )
     wompi_webhook_forward_secret: Optional[str] = Field(
         default=None, alias='WOMPI_WEBHOOK_FORWARD_SECRET'
+    )
+
+    # Paddle Billing — regional SaaS checkout (epic #793 / batch #795)
+    paddle_api_key_live: Optional[str] = Field(default=None, alias='PADDLE_API_KEY_LIVE')
+    paddle_api_key_sandbox: Optional[str] = Field(default=None, alias='PADDLE_API_KEY_SANDBOX')
+    paddle_webhook_secret_live: Optional[str] = Field(
+        default=None, alias='PADDLE_WEBHOOK_SECRET_LIVE'
+    )
+    paddle_webhook_secret_sandbox: Optional[str] = Field(
+        default=None, alias='PADDLE_WEBHOOK_SECRET_SANDBOX'
+    )
+    paddle_price_usd_9_annual_live: Optional[str] = Field(
+        default=None, alias='PADDLE_PRICE_USD_9_ANNUAL_LIVE'
+    )
+    paddle_price_usd_9_annual_test: Optional[str] = Field(
+        default=None, alias='PADDLE_PRICE_USD_9_ANNUAL_TEST'
+    )
+    paddle_price_usd_30_annual_live: Optional[str] = Field(
+        default=None, alias='PADDLE_PRICE_USD_30_ANNUAL_LIVE'
+    )
+    paddle_price_usd_30_annual_test: Optional[str] = Field(
+        default=None, alias='PADDLE_PRICE_USD_30_ANNUAL_TEST'
+    )
+    paddle_price_eur_30_annual_live: Optional[str] = Field(
+        default=None, alias='PADDLE_PRICE_EUR_30_ANNUAL_LIVE'
+    )
+    paddle_price_eur_30_annual_test: Optional[str] = Field(
+        default=None, alias='PADDLE_PRICE_EUR_30_ANNUAL_TEST'
     )
 
     # Cron secret — grace period reminders (issue #62)

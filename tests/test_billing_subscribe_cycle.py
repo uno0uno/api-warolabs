@@ -65,7 +65,7 @@ def test_subscribe_rejects_monthly_billing_cycle():
     assert "anual" in res.json()["detail"].lower()
 
 
-def test_subscribe_requires_current_terms_before_wompi_link():
+def test_subscribe_requires_current_terms_before_paddle_checkout():
     app, session = _build_app()
     plan_id = uuid4()
 
@@ -103,7 +103,7 @@ def test_subscribe_requires_current_terms_before_wompi_link():
              "price_annual": 1200000.0,
          })), \
          patch("app.routers.billing.legal_service.ensure_current_terms_accepted", new=AsyncMock(side_effect=terms_error)), \
-         patch("app.routers.billing.wompi_service.create_payment_link", new=AsyncMock()) as wompi_mock:
+         patch("app.routers.billing.paddle_service.create_checkout", new=AsyncMock()) as paddle_mock:
         client = TestClient(app)
         res = client.post(
             "/billing/subscribe",
@@ -112,7 +112,7 @@ def test_subscribe_requires_current_terms_before_wompi_link():
 
     assert res.status_code == 409
     assert res.json()["detail"]["code"] == "terms_acceptance_required"
-    wompi_mock.assert_not_awaited()
+    paddle_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -145,7 +145,7 @@ async def test_active_promoted_tenant_uses_normal_subscription_flow():
     }
     checkout = {
         "checkout_url": "https://checkout.example.test",
-        "wompi_link_id": "link-normal",
+        "gateway_reference": "txn_paddle_normal",
     }
     subscribed = {"status": "pending", "checkout_url": checkout["checkout_url"]}
 
@@ -160,8 +160,12 @@ async def test_active_promoted_tenant_uses_normal_subscription_flow():
         "ensure_current_terms_accepted",
         new=AsyncMock(),
     ) as terms, patch.object(
-        billing.wompi_service,
-        "create_payment_link",
+        billing.billing_service,
+        "get_tenant_billing_context",
+        new=AsyncMock(return_value={"slug": "demo", "country_code": "CO"}),
+    ), patch.object(
+        billing.paddle_service,
+        "create_checkout",
         new=AsyncMock(return_value=checkout),
     ), patch.object(
         billing.billing_service,
