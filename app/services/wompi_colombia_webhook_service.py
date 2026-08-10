@@ -1,17 +1,14 @@
 """
 Colombia billing — Wompi transaction.updated handler (api-warolabs #353).
 
-Extracted from billing.wompi_webhook so the central router and legacy
-POST /billing/webhook share the same activation logic.
+Deprecated for new billing activations (#798). Signature-verified callers
+should no-op with 200 so Wompi does not retry; Tickets routing is unchanged
+in wompi_webhook_router_service.
 """
 import logging
 from typing import Any, Dict
 
 from fastapi import BackgroundTasks
-
-from app.config import settings
-from app.database import get_db_connection
-from app.services import billing_email_service, billing_service, billing_webhook_service
 
 logger = logging.getLogger(__name__)
 
@@ -22,104 +19,17 @@ async def handle_transaction_updated(
     provider_environment: str = "prod",
 ) -> None:
     """
-    Process a verified Wompi transaction.updated event for Colombia billing.
+    No-op for Colombia billing after Paddle-only (#798).
 
-    Caller must verify the signature and filter non-transaction events first.
+    Caller must still verify the webhook signature before invoking this.
+    Historical payment_event / metadata rows are left untouched.
     """
-    transaction = body.get("data", {}).get("transaction", {})
-    wompi_status = transaction.get("status", "").upper()
-    payment_link_id = transaction.get("payment_link_id", "")
-    transaction_id = str(transaction.get("id", ""))
-    amount_cents = transaction.get("amount_in_cents", 0)
-
+    transaction = body.get("data", {}).get("transaction", {}) or {}
     logger.info(
-        "Wompi Colombia transaction: link=%s status=%s tx=%s",
-        payment_link_id,
-        wompi_status,
-        transaction_id,
+        "Wompi Colombia billing deprecated (#798): no-op env=%s status=%s tx=%s link=%s",
+        provider_environment,
+        str(transaction.get("status", "")).upper(),
+        transaction.get("id"),
+        transaction.get("payment_link_id"),
     )
-
-    if not payment_link_id:
-        return
-
-    async with get_db_connection() as conn:
-        onboarding_result = await billing_service.process_onboarding_payment_transaction(
-            conn,
-            transaction,
-            provider_environment=provider_environment,
-        )
-    if onboarding_result["handled"]:
-        tenant_info = onboarding_result["tenant_info"]
-        if tenant_info:
-            background_tasks.add_task(
-                billing_email_service.send_payment_renewed_email,
-                tenant_name=tenant_info["tenant_name"],
-                tenant_email=tenant_info["tenant_email"],
-                next_period_end=tenant_info["next_period_end"],
-            )
-            background_tasks.add_task(
-                billing_webhook_service.send_payment_approved_webhook,
-                tenant_id=tenant_info["tenant_id"],
-                subscription_id=tenant_info["subscription_id"],
-                tenant_name=tenant_info["tenant_name"],
-                tenant_email=tenant_info["tenant_email"],
-                plan_name=tenant_info["plan_name"],
-                amount=amount_cents / 100,
-                currency="COP",
-                next_period_end=tenant_info["next_period_end"],
-                gateway_reference=payment_link_id,
-                transaction_id=transaction_id,
-            )
-        return
-
-    if provider_environment != "prod":
-        logger.warning(
-            "Wompi sandbox event has no matching onboarding attempt; "
-            "legacy subscription handling skipped"
-        )
-        return
-
-    if wompi_status == "APPROVED":
-        period_anchor = billing_service.parse_wompi_period_anchor(transaction)
-        async with get_db_connection() as conn:
-            tenant_info = await billing_service.activate_tenant_subscription(
-                conn,
-                gateway_reference=payment_link_id,
-                payment_id=transaction_id,
-                amount=amount_cents / 100,
-                currency="COP",
-                period_anchor=period_anchor,
-            )
-        if tenant_info:
-            background_tasks.add_task(
-                billing_email_service.send_payment_renewed_email,
-                tenant_name=tenant_info["tenant_name"],
-                tenant_email=tenant_info["tenant_email"],
-                next_period_end=tenant_info["next_period_end"],
-            )
-            background_tasks.add_task(
-                billing_webhook_service.send_payment_approved_webhook,
-                tenant_id=tenant_info["tenant_id"],
-                subscription_id=tenant_info["subscription_id"],
-                tenant_name=tenant_info["tenant_name"],
-                tenant_email=tenant_info["tenant_email"],
-                plan_name=tenant_info["plan_name"],
-                amount=amount_cents / 100,
-                currency="COP",
-                next_period_end=tenant_info["next_period_end"],
-                gateway_reference=payment_link_id,
-                transaction_id=transaction_id,
-            )
-
-    elif wompi_status in ("DECLINED", "VOIDED", "ERROR"):
-        async with get_db_connection() as conn:
-            tenant_info = await billing_service.mark_subscription_past_due(
-                conn, payment_link_id, "payment_rejected"
-            )
-        if tenant_info:
-            background_tasks.add_task(
-                billing_email_service.send_payment_rejected_email,
-                tenant_name=tenant_info["tenant_name"],
-                tenant_email=tenant_info["tenant_email"],
-                billing_url=f"{settings.frontend_url}/gestion/billing",
-            )
+    return

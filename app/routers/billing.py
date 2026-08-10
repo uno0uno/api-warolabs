@@ -27,7 +27,6 @@ from app.database import get_db_connection
 from app.services import (
     billing_service,
     billing_email_service,
-    billing_webhook_service,
     legal_service,
     onboarding_service,
     paddle_service,
@@ -201,11 +200,10 @@ async def verify_payment(
     transaction_id: str = Query(...),
 ):
     """
-    Consulta el estado de una transacción al regresar del checkout de Wompi
-    y reconcilia una aprobación si el webhook todavía no fue procesado.
+    Read-only status for a legacy Wompi transaction (#798).
 
-    La activación usa exclusivamente el resultado consultado por el servidor
-    en Wompi y exige que la referencia pertenezca al tenant autenticado.
+    Does not activate or renew subscriptions — new billing is Paddle-only.
+    Still requires the payment link to belong to the authenticated tenant.
     """
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -229,49 +227,17 @@ async def verify_payment(
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Payment transaction not found")
 
-    if wompi_status == "APPROVED":
-        amount_in_cents = billing_service._webhook_amount_in_cents(
-            transaction.get("amount_in_cents")
-        )
-        currency = str(transaction.get("currency") or "").strip().upper()
-        period_anchor = billing_service.parse_wompi_period_anchor(transaction)
-        async with get_db_connection() as conn:
-            tenant_info = await billing_service.activate_tenant_subscription(
-                conn,
-                gateway_reference=payment_link_id,
-                payment_id=transaction_id,
-                amount=amount_in_cents / 100,
-                currency=currency,
-                period_anchor=period_anchor,
-                expected_tenant_id=tenant_id,
-                amount_in_cents=amount_in_cents,
-            )
-        if tenant_info:
-            background_tasks.add_task(
-                billing_email_service.send_payment_renewed_email,
-                tenant_name=tenant_info["tenant_name"],
-                tenant_email=tenant_info["tenant_email"],
-                next_period_end=tenant_info["next_period_end"],
-            )
-            background_tasks.add_task(
-                billing_webhook_service.send_payment_approved_webhook,
-                tenant_id=tenant_info["tenant_id"],
-                subscription_id=tenant_info["subscription_id"],
-                tenant_name=tenant_info["tenant_name"],
-                tenant_email=tenant_info["tenant_email"],
-                plan_name=tenant_info["plan_name"],
-                amount=amount_in_cents / 100,
-                currency=currency,
-                next_period_end=tenant_info["next_period_end"],
-                gateway_reference=payment_link_id,
-                transaction_id=transaction_id,
-            )
-
+    logger.info(
+        "verify-payment read-only (#798): no Wompi activate tx=%s status=%s",
+        transaction_id,
+        wompi_status,
+    )
     return {
         "status": internal_status,
         "wompi_status": wompi_status,
         "transaction_id": transaction_id,
         "payment_link_id": payment_link_id,
+        "activation": "deprecated",
     }
 
 
@@ -311,7 +277,7 @@ async def get_my_billing_events(
 async def cancel_my_subscription(request: Request):
     """
     Cancela la suscripción activa del tenant en la DB.
-    Wompi Payment Links no requieren cancelación en la API.
+    Provider cancel (Paddle) is handled separately when wired; DB status is source of access.
     """
     session = require_valid_session(request)
 
@@ -324,25 +290,21 @@ async def cancel_my_subscription(request: Request):
 
 
 # NOTE: Authenticated by Wompi signature verification, not session.
-# Do NOT add require_module() here — it would break payment confirmations.
+# Do NOT add require_module() here — legacy URL still receives retries.
 @tenant_router.post("/webhook", status_code=200)
 async def wompi_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
 ):
     """
-    Wompi webhook endpoint — llamado por Wompi al completar una transacción.
+    Legacy Wompi webhook — signature verified, Colombia billing no-op (#798).
 
-    Evento: transaction.updated
-    - status APPROVED → activa la suscripción
-    - status DECLINED/VOIDED/ERROR → marca como cancelled + email
-
-    Verifica la firma incluida en el body del evento.
+    Prefer POST /payments/webhooks/wompi for central routing (Tickets forward).
     """
     body = await request.json()
     event = body.get("event", "")
 
-    logger.info("Wompi webhook received: event=%s", event)
+    logger.info("Wompi webhook received (deprecated billing): event=%s", event)
 
     if not wompi_service.verify_event_signature(body):
         logger.warning("Wompi webhook: firma inválida — rechazando")
@@ -355,7 +317,7 @@ async def wompi_webhook(
     await wompi_colombia_webhook_service.handle_transaction_updated(
         body, background_tasks
     )
-    return {"received": True}
+    return {"received": True, "deprecated": True}
 
 
 # ── Grace period & access control — issue #62 ────────────────────────────────

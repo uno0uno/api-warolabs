@@ -1720,14 +1720,19 @@ async def create_onboarding_payment_attempt(
     amount_in_cents: int,
     provider_environment: str = "prod",
     currency: str = "COP",
-    provider: str = "wompi",
+    provider: str = "paddle",
 ) -> UUID:
     """Create immutable attempt evidence before requesting a checkout link."""
     if provider_environment not in ("prod", "test"):
         raise HTTPException(status_code=422, detail="Invalid payment provider environment")
     currency_norm = str(currency or "COP").strip().upper()
-    provider_norm = str(provider or "wompi").strip().lower()
-    if provider_norm not in ("wompi", "paddle"):
+    provider_norm = str(provider or "paddle").strip().lower()
+    if provider_norm == "wompi":
+        raise HTTPException(
+            status_code=422,
+            detail="Wompi is deprecated for new billing payments; use Paddle",
+        )
+    if provider_norm not in ("paddle",):
         raise HTTPException(status_code=422, detail="Invalid payment provider")
     if currency_norm not in ("COP", "USD", "EUR"):
         raise HTTPException(status_code=422, detail="Invalid payment currency")
@@ -2059,7 +2064,7 @@ async def activate_subscription_by_gateway_ref(
     currency: str = "COP",
     paddle_transaction_id: Optional[str] = None,
     paddle_subscription_id: Optional[str] = None,
-    provider: str = "wompi",
+    provider: str = "paddle",
     provider_environment: Optional[str] = None,
 ) -> bool:
     """

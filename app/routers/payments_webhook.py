@@ -2,10 +2,10 @@
 Payment provider webhook ingress.
 
 Public URLs:
-  POST /payments/webhooks/wompi[+sandbox]
+  POST /payments/webhooks/wompi[+sandbox]   — Tickets forward; Colombia billing no-op (#798)
   POST /payments/webhooks/paddle[+sandbox]
 
-Legacy Colombia Wompi URL remains: POST /billing/webhook
+Legacy Colombia Wompi URL remains: POST /billing/webhook (also no-op for billing activate)
 """
 import json
 

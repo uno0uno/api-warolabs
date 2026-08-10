@@ -91,7 +91,8 @@ def _capabilities(country_code: str) -> FinancialCapabilities:
         colombia_payroll=colombia,
         matias_dian=colombia,
         cop_wallet=colombia,
-        wompi=colombia,
+        # Wompi pay capability retired; Paddle-only checkout (#798)
+        wompi=False,
         fixed_cop_discounts=colombia,
     )
 
