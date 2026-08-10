@@ -83,14 +83,34 @@ def test_configured_price_id_falls_back_to_annual_then_placeholder():
         assert configured_price_id(offer, "test").startswith("TODO_PADDLE_PRICE_USD_9_MONTHLY")
 
 
-def test_provider_environment_sandbox_slugs_and_flag():
+def test_provider_environment_sandbox_env_forces_test_for_any_slug():
+    """PADDLE_ENVIRONMENT=sandbox → test for arbitrary tenants (#813)."""
+    with patch("app.config.settings") as mock_settings:
+        mock_settings.paddle_environment = "sandbox"
+        mock_settings.paddle_sandbox_tenant_slugs = ""
+        assert resolve_provider_environment(tenant_slug="bubablue") == "test"
+        assert resolve_provider_environment(tenant_slug="any-tenant") == "test"
+
+
+def test_provider_environment_production_allowlist_and_live():
+    """Production mode: allowlist → test; others → prod (#813)."""
     assert PADDLE_SANDBOX_TENANT_SLUGS == frozenset({"waro-colombia", "warocolombia"})
-    assert resolve_provider_environment(tenant_slug="warocolombia") == "test"
-    assert resolve_provider_environment(tenant_slug="waro-colombia") == "test"
-    assert resolve_provider_environment(tenant_slug="waro") == "prod"
-    assert resolve_provider_environment(billing_test=True) == "test"
-    assert resolve_provider_environment(tenant_slug="bubablue") == "prod"
-    assert resolve_provider_environment(tenant_slug="bubablue", billing_test=False) == "prod"
+    with patch("app.config.settings") as mock_settings:
+        mock_settings.paddle_environment = "production"
+        mock_settings.paddle_sandbox_tenant_slugs = ""
+        assert resolve_provider_environment(tenant_slug="warocolombia") == "test"
+        assert resolve_provider_environment(tenant_slug="waro-colombia") == "test"
+        assert resolve_provider_environment(tenant_slug="waro") == "prod"
+        assert resolve_provider_environment(tenant_slug="bubablue") == "prod"
+        assert resolve_provider_environment(billing_test=True) == "test"
+
+        mock_settings.paddle_sandbox_tenant_slugs = "qa-slug,11111111-1111-1111-1111-111111111111"
+        assert resolve_provider_environment(tenant_slug="qa-slug") == "test"
+        assert (
+            resolve_provider_environment(tenant_id="11111111-1111-1111-1111-111111111111")
+            == "test"
+        )
+        assert resolve_provider_environment(tenant_slug="bubablue") == "prod"
 
 
 def test_blank_country_defaults_to_co_usd_9():

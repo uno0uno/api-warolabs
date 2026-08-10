@@ -28,14 +28,15 @@ USD_CHARGE_COUNTRIES = frozenset(
 # Strong-currency / intl allowlist → USD 30 (not USD 9).
 INTL_USD_30_ALLOWLIST = frozenset({"GB", "CA", "AU", "NZ", "SG", "AE"})
 
-# Tenants that always use Paddle sandbox (WARO Colombia internal / QA).
-# Extend via settings later in #795 if needed.
-PADDLE_SANDBOX_TENANT_SLUGS = frozenset(
+# Fallback QA allowlist when PADDLE_SANDBOX_TENANT_SLUGS env is unset (#813).
+DEFAULT_PADDLE_SANDBOX_TENANT_SLUGS = frozenset(
     {
         "waro-colombia",
         "warocolombia",
     }
 )
+# Back-compat alias (prefer resolve_paddle_sandbox_tenant_keys() / env).
+PADDLE_SANDBOX_TENANT_SLUGS = DEFAULT_PADDLE_SANDBOX_TENANT_SLUGS
 
 ANNUAL_MULTIPLIER = 10
 
@@ -103,20 +104,47 @@ def resolve_price_offer(country_code: Optional[str]) -> PriceOffer:
     return SEGMENT_OFFERS[resolve_price_segment(country_code)]
 
 
+def resolve_paddle_sandbox_tenant_keys() -> frozenset[str]:
+    """CSV from PADDLE_SANDBOX_TENANT_SLUGS, or DEFAULT_PADDLE_SANDBOX_TENANT_SLUGS."""
+    from app.config import settings
+
+    raw = (settings.paddle_sandbox_tenant_slugs or "").strip()
+    if not raw:
+        return DEFAULT_PADDLE_SANDBOX_TENANT_SLUGS
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
 def resolve_provider_environment(
     *,
     tenant_slug: Optional[str] = None,
+    tenant_id: Optional[str] = None,
     billing_test: bool = False,
 ) -> ProviderEnvironment:
-    """Paddle sandbox vs live.
+    """Paddle sandbox vs live (#813).
 
-    test: explicit billing_test OR WARO Colombia sandbox tenant slug.
-    prod: everyone else (including Bubablue and other CO customers).
+    test when:
+    - billing_test=True, or
+    - PADDLE_ENVIRONMENT is sandbox|test (default sandbox for local/dev), or
+    - production mode and tenant slug/id is in PADDLE_SANDBOX_TENANT_SLUGS
+      (empty env → DEFAULT_PADDLE_SANDBOX_TENANT_SLUGS).
+
+    prod: PADDLE_ENVIRONMENT=production and tenant not on allowlist.
     """
     if billing_test:
         return "test"
+
+    from app.config import settings
+
+    mode = (settings.paddle_environment or "sandbox").strip().lower()
+    if mode in ("sandbox", "test"):
+        return "test"
+
+    keys = resolve_paddle_sandbox_tenant_keys()
     slug = (tenant_slug or "").strip().lower()
-    if slug in PADDLE_SANDBOX_TENANT_SLUGS:
+    if slug and slug in keys:
+        return "test"
+    tid = str(tenant_id).strip().lower() if tenant_id else ""
+    if tid and tid in keys:
         return "test"
     return "prod"
 
