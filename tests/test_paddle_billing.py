@@ -10,7 +10,7 @@ from typing import Optional
 from uuid import uuid4
 
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.core.billing_pricing import resolve_price_offer
@@ -119,6 +119,17 @@ async def test_handle_webhook_activates_on_completed():
     tenant_id = uuid4()
     payload = _completed_payload(tenant_id=tenant_id)
     activate = AsyncMock(return_value=True)
+    notify_info = AsyncMock(
+        return_value={
+            "tenant_id": str(tenant_id),
+            "subscription_id": str(uuid4()),
+            "tenant_name": "T",
+            "tenant_email": "t@example.com",
+            "plan_name": "Pro",
+            "next_period_end": "2027-01-01T00:00:00+00:00",
+        }
+    )
+    background = BackgroundTasks()
 
     @asynccontextmanager
     async def _db():
@@ -127,11 +138,18 @@ async def test_handle_webhook_activates_on_completed():
     with patch("app.database.get_db_connection", side_effect=_db), patch(
         "app.services.billing_service.activate_subscription_by_gateway_ref",
         activate,
+    ), patch(
+        "app.services.billing_service.get_tenant_notify_info_after_activate",
+        notify_info,
     ):
-        out = await paddle_service.handle_verified_webhook(payload, environment="test")
+        out = await paddle_service.handle_verified_webhook(
+            payload, environment="test", background_tasks=background
+        )
 
     assert out["activated"] is True
     activate.assert_awaited_once()
+    assert len(background.tasks) == 1
+    assert background.tasks[0].func is paddle_service._notify_payment_approved
     kwargs = activate.await_args.kwargs
     assert kwargs["provider"] == "paddle"
     assert kwargs["paddle_transaction_id"] == "txn_paddle_1"
@@ -165,7 +183,21 @@ async def test_handle_webhook_routes_onboarding_attempt():
     tenant_id = uuid4()
     attempt_id = uuid4()
     payload = _completed_payload(tenant_id=tenant_id, attempt_id=attempt_id)
-    onboard = AsyncMock(return_value={"handled": True, "activated": True})
+    onboard = AsyncMock(
+        return_value={
+            "handled": True,
+            "activated": True,
+            "tenant_info": {
+                "tenant_id": str(tenant_id),
+                "subscription_id": str(uuid4()),
+                "tenant_name": "T",
+                "tenant_email": "t@example.com",
+                "plan_name": "Pro",
+                "next_period_end": "2027-01-01T00:00:00+00:00",
+            },
+        }
+    )
+    background = BackgroundTasks()
 
     @asynccontextmanager
     async def _db():
@@ -178,13 +210,17 @@ async def test_handle_webhook_routes_onboarding_attempt():
         "app.services.billing_service.activate_subscription_by_gateway_ref",
         new=AsyncMock(),
     ) as activate:
-        out = await paddle_service.handle_verified_webhook(payload, environment="test")
+        out = await paddle_service.handle_verified_webhook(
+            payload, environment="test", background_tasks=background
+        )
 
     assert out["activated"] is True
     assert out["onboarding"] is True
     onboard.assert_awaited_once()
     assert onboard.await_args.kwargs["attempt_id"] == attempt_id
     activate.assert_not_awaited()
+    # First onboarding payment must not queue "renovada" email
+    assert len(background.tasks) == 0
 
 
 @pytest.mark.asyncio
@@ -207,23 +243,53 @@ async def test_subscription_activated_event_ignored():
 
 
 @pytest.mark.asyncio
-async def test_handle_webhook_failed_does_not_activate():
+async def test_handle_webhook_failed_marks_past_due_by_tenant():
     tenant_id = uuid4()
     payload = {
         "event_type": "transaction.payment_failed",
         "data": {
             "id": "txn_fail",
             "status": "failed",
+            "subscription_id": "sub_paddle_fail",
             "custom_data": {"tenant_id": str(tenant_id)},
         },
     }
+    past_due = AsyncMock(
+        return_value={
+            "tenant_id": str(tenant_id),
+            "subscription_id": str(uuid4()),
+            "tenant_name": "T",
+            "tenant_email": "t@example.com",
+        }
+    )
     activate = AsyncMock()
-    with patch("app.services.billing_service.activate_subscription_by_gateway_ref", activate):
-        out = await paddle_service.handle_verified_webhook(payload, environment="test")
+    background = BackgroundTasks()
+
+    @asynccontextmanager
+    async def _db():
+        yield MagicMock()
+
+    with patch("app.database.get_db_connection", side_effect=_db), patch(
+        "app.services.billing_service.mark_subscription_past_due_by_tenant",
+        past_due,
+    ), patch(
+        "app.services.billing_service.activate_subscription_by_gateway_ref",
+        activate,
+    ):
+        out = await paddle_service.handle_verified_webhook(
+            payload, environment="test", background_tasks=background
+        )
 
     assert out["activated"] is False
     assert out["reason"] == "failed_or_cancelled"
     activate.assert_not_awaited()
+    past_due.assert_awaited_once()
+    kwargs = past_due.await_args.kwargs
+    assert past_due.await_args.args[1] == tenant_id
+    assert kwargs["paddle_transaction_id"] == "txn_fail"
+    assert kwargs["paddle_subscription_id"] == "sub_paddle_fail"
+    assert len(background.tasks) == 1
+    assert background.tasks[0].func is paddle_service._notify_payment_rejected
 
 
 @pytest.mark.asyncio

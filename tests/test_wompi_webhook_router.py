@@ -130,7 +130,7 @@ async def test_dispatch_gateway_reference_calls_colombia_not_tickets(background_
     ):
         result = await dispatch_verified_event(body, background_tasks)
 
-    assert result == {"received": True}
+    assert result == {"received": True, "deprecated": True}
     colombia.assert_awaited_once_with(
         body, background_tasks, provider_environment="prod"
     )
@@ -159,7 +159,7 @@ async def test_dispatch_billing_redirect_calls_colombia_not_tickets(background_t
     ):
         result = await dispatch_verified_event(body, background_tasks)
 
-    assert result == {"received": True}
+    assert result == {"received": True, "deprecated": True}
     colombia.assert_awaited_once_with(
         body, background_tasks, provider_environment="prod"
     )
