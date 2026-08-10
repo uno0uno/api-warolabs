@@ -37,8 +37,13 @@ If `tenant_subscriptions.status = active` and `billing_cycle = annual` and `curr
 - **Do not** rebill or force the new Paddle list mid-period.
 - At period end / renew → Paddle + regional list ([#797](https://github.com/uno0uno/api-warolabs/issues/797)).
 
-Helper: `should_skip_mid_period_rebill(current_period_end_in_future=...)`  
-(Callers must also require `status=active` and `billing_cycle=annual` — [#797](https://github.com/uno0uno/api-warolabs/issues/797).)
+Helpers (wired in #797):
+
+- `is_grandfathered_annual(status=..., billing_cycle=..., current_period_end=...)`
+- `should_skip_mid_period_rebill(current_period_end_in_future=...)` (period flag only)
+
+Call sites: `ensure_subscribe_allowed` / `subscribe_tenant` (409 `grandfather_active_period`);
+`activate_subscription_by_gateway_ref` skips mid-period and renews via tenant lookup when Paddle `gateway_reference` rotates.
 
 ## Missing country
 

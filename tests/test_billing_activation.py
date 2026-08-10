@@ -56,7 +56,7 @@ async def test_activate_by_gateway_ref_past_due_extends_period():
         amount=99.0,
     )
 
-    conn.execute.assert_called_once()
+    assert conn.execute.await_count >= 1
     metadata = json.loads(conn.execute.call_args[0][5])
     assert metadata["wompi_transaction_id"] == "txn-123"
     assert metadata["gateway_reference"] == "SD7wnV"
@@ -96,7 +96,7 @@ async def test_activate_by_gateway_ref_uses_period_anchor():
         period_anchor=anchor,
     )
 
-    conn.execute.assert_called_once()
+    assert conn.execute.await_count >= 1
 
 
 @pytest.mark.asyncio
