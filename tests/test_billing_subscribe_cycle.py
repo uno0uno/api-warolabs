@@ -161,6 +161,10 @@ async def test_active_promoted_tenant_uses_normal_subscription_flow():
         new=AsyncMock(),
     ) as terms, patch.object(
         billing.billing_service,
+        "ensure_subscribe_allowed",
+        new=AsyncMock(),
+    ), patch.object(
+        billing.billing_service,
         "get_tenant_billing_context",
         new=AsyncMock(return_value={"slug": "demo", "country_code": "CO"}),
     ), patch.object(

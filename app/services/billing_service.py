@@ -1828,6 +1828,36 @@ async def payment_reference_belongs_to_tenant(
     return row is not None
 
 
+async def ensure_subscribe_allowed(conn, tenant_id: UUID) -> None:
+    """Block mid-period rebill for active annuals still inside current_period_end (#797)."""
+    from app.core.billing_pricing import is_grandfathered_annual
+
+    row = await conn.fetchrow(
+        """
+        SELECT status, billing_cycle, current_period_end
+        FROM tenant_subscriptions
+        WHERE tenant_id = $1
+        """,
+        tenant_id,
+    )
+    if row is None:
+        return
+    if is_grandfathered_annual(
+        status=row["status"],
+        billing_cycle=row["billing_cycle"],
+        current_period_end=row["current_period_end"],
+    ):
+        period_end = row["current_period_end"]
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "grandfather_active_period",
+                "message": "Active annual subscription is already paid through the current period.",
+                "current_period_end": period_end.isoformat() if period_end else None,
+            },
+        )
+
+
 async def subscribe_tenant(
     conn,
     tenant_id: UUID,
@@ -1838,12 +1868,12 @@ async def subscribe_tenant(
 ) -> Dict[str, Any]:
     """
     Update (or insert) the tenant's subscription row with the new plan and
-    MP preapproval ID, setting status='pending' until the webhook confirms.
-    Also inserts a billing_events row for auditability.
+    checkout reference, setting status='pending' until the webhook confirms.
 
-    Uses INSERT ... ON CONFLICT (tenant_id) DO UPDATE to handle both
-    first-time tenants (no seed row) and existing ones.
+    Defense in depth: refuses to overwrite a grandfathered active annual (#797).
     """
+    await ensure_subscribe_allowed(conn, tenant_id)
+
     row = await conn.fetchrow("""
         INSERT INTO tenant_subscriptions
             (tenant_id, plan_id, billing_cycle, status,
@@ -1864,9 +1894,20 @@ async def subscribe_tenant(
             current_period_end   = EXCLUDED.current_period_end,
             cancelled_at         = NULL,
             updated_at           = now()
+        WHERE NOT (
+            tenant_subscriptions.status = 'active'
+            AND tenant_subscriptions.billing_cycle = 'annual'
+            AND tenant_subscriptions.current_period_end IS NOT NULL
+            AND tenant_subscriptions.current_period_end > now()
+        )
         RETURNING id, tenant_id, plan_id, billing_cycle, status,
                   gateway_reference, current_period_start, current_period_end
     """, tenant_id, plan_id, billing_cycle, gateway_reference)
+
+    if row is None:
+        # Concurrent race: still grandfathered after ensure_subscribe_allowed.
+        await ensure_subscribe_allowed(conn, tenant_id)
+        raise HTTPException(status_code=409, detail="Unable to start subscription checkout")
 
     sub_id = row["id"]
 
@@ -1874,10 +1915,14 @@ async def subscribe_tenant(
         INSERT INTO billing_events
             (tenant_id, subscription_id, event_type, metadata)
         VALUES ($1, $2, 'subscribe_initiated', $3)
-    """, tenant_id, sub_id, json.dumps({"checkout_url": checkout_url, "plan_id": str(plan_id)}))
+    """, tenant_id, sub_id, json.dumps({
+        "checkout_url": checkout_url,
+        "plan_id": str(plan_id),
+        "provider": "paddle",
+    }))
 
     logger.info(
-        "subscribe_initiated: tenant=%s plan=%s cycle=%s preapproval=%s",
+        "subscribe_initiated: tenant=%s plan=%s cycle=%s gateway_ref=%s",
         tenant_id, plan_id, billing_cycle, gateway_reference,
     )
 
@@ -1889,7 +1934,8 @@ async def subscribe_tenant(
     }
 
 
-_ACTIVATABLE_STATUSES = frozenset({"pending", "past_due"})
+_ACTIVATABLE_STATUSES = frozenset({"pending", "past_due", "expired"})
+_RENEWABLE_STATUSES = frozenset({"pending", "past_due", "expired", "active"})
 
 # Tenant-facing Mi Plan history (GET /billing/events) — excludes cron/ops noise.
 CUSTOMER_VISIBLE_BILLING_EVENT_TYPES = (
@@ -2017,16 +2063,33 @@ async def activate_subscription_by_gateway_ref(
     provider_environment: Optional[str] = None,
 ) -> bool:
     """
-    Activate tenant subscription when payment provider confirms payment.
-    Extends the period for pending or past_due rows (Wompi or Paddle).
-    Returns True only when a payment_approved event was written.
+    Activate or renew tenant subscription when payment provider confirms payment.
+
+    Lookup order (#797):
+      1) tenant_id + gateway_reference (pending checkout / past_due)
+      2) tenant_id only for Paddle renew when gateway_ref rotated to a new txn
+
+    Skips grandfathered active annuals (mid-period). Returns True only when a
+    payment_approved event was written.
     """
+    from app.core.billing_pricing import is_grandfathered_annual
+
     row = await conn.fetchrow(
-        """SELECT id, status, billing_cycle
+        """SELECT id, status, billing_cycle, current_period_end, gateway_reference
            FROM tenant_subscriptions
            WHERE tenant_id = $1 AND gateway_reference = $2""",
         tenant_id, gateway_reference,
     )
+    matched_gateway = row is not None
+
+    if row is None and provider == "paddle":
+        row = await conn.fetchrow(
+            """SELECT id, status, billing_cycle, current_period_end, gateway_reference
+               FROM tenant_subscriptions
+               WHERE tenant_id = $1""",
+            tenant_id,
+        )
+
     if not row:
         logger.warning(
             "activate_subscription: no subscription found for tenant=%s gateway_ref=%s",
@@ -2034,15 +2097,27 @@ async def activate_subscription_by_gateway_ref(
         )
         return False
 
-    if row["status"] == "active":
-        logger.info("activate_subscription: already active tenant=%s", tenant_id)
+    if is_grandfathered_annual(
+        status=row["status"],
+        billing_cycle=row["billing_cycle"],
+        current_period_end=row.get("current_period_end"),
+    ):
+        logger.info(
+            "activate_subscription: grandfathered active annual tenant=%s — skipped",
+            tenant_id,
+        )
         return False
 
-    if row["status"] not in _ACTIVATABLE_STATUSES:
+    if row["status"] not in _RENEWABLE_STATUSES:
         logger.warning(
-            "activate_subscription: status=%s not activatable tenant=%s gateway_ref=%s",
+            "activate_subscription: status=%s not renewable tenant=%s gateway_ref=%s",
             row["status"], tenant_id, gateway_reference,
         )
+        return False
+
+    # Same gateway_ref on already-active row: duplicate webhook / no-op.
+    if row["status"] == "active" and matched_gateway:
+        logger.info("activate_subscription: already active tenant=%s", tenant_id)
         return False
 
     if await payment_approved_exists(
@@ -2069,12 +2144,25 @@ async def activate_subscription_by_gateway_ref(
         metadata["paddle_subscription_id"] = paddle_subscription_id
     if provider_environment:
         metadata["provider_environment"] = provider_environment
+    if not matched_gateway:
+        metadata["renewal"] = True
+        metadata["previous_gateway_reference"] = row.get("gateway_reference")
+        if row.get("gateway_reference") != gateway_reference:
+            await conn.execute(
+                """
+                UPDATE tenant_subscriptions
+                SET gateway_reference = $2, updated_at = now()
+                WHERE id = $1
+                """,
+                row["id"],
+                gateway_reference,
+            )
 
     period_end = await _activate_subscription_with_period(
         conn,
         subscription_id=row["id"],
         tenant_id=tenant_id,
-        billing_cycle=row["billing_cycle"],
+        billing_cycle=row["billing_cycle"] or "annual",
         amount=amount,
         currency=currency,
         metadata=metadata,
@@ -2083,7 +2171,7 @@ async def activate_subscription_by_gateway_ref(
     await onboarding_service.activate_paid_onboarding_identity(conn, tenant_id)
 
     logger.info(
-        "Subscription activated: tenant=%s provider=%s txn=%s amount=%s period_end=%s",
+        "Subscription activated/renewed: tenant=%s provider=%s txn=%s amount=%s period_end=%s",
         tenant_id,
         provider,
         paddle_transaction_id or wompi_transaction_id,
@@ -2091,6 +2179,7 @@ async def activate_subscription_by_gateway_ref(
         period_end,
     )
     return True
+
 
 
 async def get_tenant_billing_context(conn, tenant_id: UUID) -> Dict[str, Any]:

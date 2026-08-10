@@ -6,6 +6,7 @@ Do not use subscription_plans.price_* for Paddle charge amounts.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from app.core.tenant_prefs import COUNTRY_CURRENCY_PAIRS
@@ -122,9 +123,32 @@ def resolve_provider_environment(
 def should_skip_mid_period_rebill(*, current_period_end_in_future: bool) -> bool:
     """True when period end is still ahead — skip mid-cycle rebill/reprice.
 
-    Callers in #797 must also require status=active and billing_cycle=annual.
+    Prefer `is_grandfathered_annual(...)` which also checks status + cycle.
     """
     return bool(current_period_end_in_future)
+
+
+def is_grandfathered_annual(
+    *,
+    status: Optional[str],
+    billing_cycle: Optional[str],
+    current_period_end: Optional[datetime],
+    now: Optional[datetime] = None,
+) -> bool:
+    """Active annual with future current_period_end — do not rebill mid-period (#797)."""
+    if str(status or "").lower() != "active":
+        return False
+    if str(billing_cycle or "").lower() != "annual":
+        return False
+    if current_period_end is None:
+        return False
+    end = current_period_end
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    anchor = now or datetime.now(timezone.utc)
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+    return should_skip_mid_period_rebill(current_period_end_in_future=end > anchor)
 
 
 # Back-compat alias for early docs/tests.

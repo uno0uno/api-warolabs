@@ -77,6 +77,7 @@ async def subscribe(body: SubscribeBody, request: Request):
     Subscribe the authenticated tenant to a plan via Paddle checkout (#795).
 
     billing_cycle must be 'annual' for new subscriptions (#877).
+    Active annuals with a future period end are blocked mid-period (#797).
     """
     if body.billing_cycle != "annual":
         from fastapi import HTTPException
@@ -102,6 +103,7 @@ async def subscribe(body: SubscribeBody, request: Request):
         plan = await billing_service.get_plan_for_subscribe(conn, body.plan_id)
         if not is_pending_onboarding:
             await legal_service.ensure_current_terms_accepted(conn, tenant_id)
+            await billing_service.ensure_subscribe_allowed(conn, tenant_id)
 
         ctx = await billing_service.get_tenant_billing_context(conn, tenant_id)
         offer = resolve_price_offer(ctx["country_code"])
