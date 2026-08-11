@@ -47,6 +47,7 @@ def test_pending_allowlist_is_exact():
     assert is_pending_session_route_allowed("GET", "/billing/plans")
     assert is_pending_session_route_allowed("POST", "/billing/subscribe")
     assert is_pending_session_route_allowed("GET", "/billing/verify-payment")
+    assert is_pending_session_route_allowed("GET", "/billing/paddle/transaction-status")
     assert not is_pending_session_route_allowed("GET", "/onboarding/financial-profile")
     assert not is_pending_session_route_allowed("PUT", "/onboarding/financial-profile")
     assert not is_pending_session_route_allowed("GET", "/onboarding/plans")

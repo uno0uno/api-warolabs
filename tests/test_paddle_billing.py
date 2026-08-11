@@ -521,3 +521,113 @@ def test_paddle_webhook_route_verifies_and_handles():
     assert res.status_code == 200
     assert res.json()["activated"] is True
     handler.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_transaction_status_activates_when_paddle_completed():
+    tenant_id = uuid4()
+    txn_id = "txn_poll_1"
+    paddle_data = {
+        "id": txn_id,
+        "status": "completed",
+        "currency_code": "USD",
+        "billed_at": "2026-08-11T12:00:00Z",
+        "custom_data": {
+            "tenant_id": str(tenant_id),
+            "plan_id": str(uuid4()),
+            "billing_cycle": "monthly",
+            "provider_environment": "test",
+        },
+        "details": {"totals": {"grand_total": "900", "currency_code": "USD"}},
+        "subscription_id": "sub_paddle_1",
+    }
+
+    access = MagicMock(level="full", grace_days_remaining=0, subscription_status="active",
+                       next_payment_date=None, message="ok")
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"status": "active", "gateway_reference": txn_id})
+
+    @asynccontextmanager
+    async def _conn(*_a, **_k):
+        yield conn
+
+    with patch.object(
+        paddle_service, "fetch_paddle_transaction", new=AsyncMock(return_value=paddle_data)
+    ), patch.object(
+        paddle_service, "handle_verified_webhook", new=AsyncMock(
+            return_value={"ok": True, "activated": True, "reason": None}
+        )
+    ) as activate, patch(
+        "app.database.get_db_connection", _conn
+    ), patch.object(
+        billing_service, "get_subscription_access", new=AsyncMock(return_value=access)
+    ):
+        result = await paddle_service.reconcile_transaction_status_for_tenant(
+            tenant_id=tenant_id,
+            transaction_id=txn_id,
+            environment="test",
+        )
+
+    assert result["waro_ready"] is True
+    assert result["activated"] is True
+    assert result["paddle_status"] == "completed"
+    activate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_transaction_status_rejects_other_tenant():
+    tenant_id = uuid4()
+    paddle_data = {
+        "id": "txn_other",
+        "status": "completed",
+        "custom_data": {"tenant_id": str(uuid4())},
+    }
+    with patch.object(
+        paddle_service, "fetch_paddle_transaction", new=AsyncMock(return_value=paddle_data)
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await paddle_service.reconcile_transaction_status_for_tenant(
+                tenant_id=tenant_id,
+                transaction_id="txn_other",
+                environment="test",
+            )
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_reconcile_transaction_status_waits_when_not_paid():
+    tenant_id = uuid4()
+    txn_id = "txn_draft_1"
+    paddle_data = {
+        "id": txn_id,
+        "status": "draft",
+        "custom_data": {"tenant_id": str(tenant_id)},
+    }
+    access = MagicMock(level="starter", grace_days_remaining=0, subscription_status="pending",
+                       next_payment_date=None, message="ok")
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"status": "pending", "gateway_reference": txn_id})
+
+    @asynccontextmanager
+    async def _conn(*_a, **_k):
+        yield conn
+
+    with patch.object(
+        paddle_service, "fetch_paddle_transaction", new=AsyncMock(return_value=paddle_data)
+    ), patch.object(
+        paddle_service, "handle_verified_webhook", new=AsyncMock()
+    ) as activate, patch(
+        "app.database.get_db_connection", _conn
+    ), patch.object(
+        billing_service, "get_subscription_access", new=AsyncMock(return_value=access)
+    ):
+        result = await paddle_service.reconcile_transaction_status_for_tenant(
+            tenant_id=tenant_id,
+            transaction_id=txn_id,
+            environment="test",
+        )
+
+    assert result["waro_ready"] is False
+    assert result["activated"] is False
+    assert result["reason"] == "awaiting_payment"
+    activate.assert_not_awaited()
