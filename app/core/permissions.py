@@ -339,11 +339,15 @@ def require_module(module: Module) -> Callable[[Request], Awaitable[None]]:
       * `enforce`  → if the user lacks the module, raise 403.
 
     Owner short-circuit happens inside `get_role_modules`. Sessions without
-    a valid role (no membership row, KDS tokens, API keys without role
-    plumbing) are treated as "no staff modules" — denied or shadow-logged.
+    a valid role (no membership row, KDS tokens) are treated as "no staff
+    modules" — denied or shadow-logged.
     Sessions that aren't valid at all return early so `require_valid_session`
     (still called inside handlers) can raise 401 with its own message —
     keeps responsibilities split.
+
+    Valid API-key callers bypass this staff-module gate entirely. Middleware
+    builds a role-less pseudo-session for API keys; authorization for those
+    requests stays in `validate_api_key_auth` / token scopes.
 
     Usage:
         from fastapi import Depends
@@ -354,7 +358,12 @@ def require_module(module: Module) -> Callable[[Request], Awaitable[None]]:
             ...
     """
     async def dependency(request: Request) -> None:
-        from app.core.middleware import get_session_context  # local import to avoid cycle
+        # local import to avoid cycle
+        from app.core.middleware import get_api_key_context, get_session_context
+
+        # API keys authenticate via token scopes in handlers — not staff modules.
+        if get_api_key_context(request).is_valid:
+            return
 
         session = get_session_context(request)
         if not session.is_valid:
@@ -422,7 +431,11 @@ def require_any_module(*modules: Module) -> Callable[[Request], Awaitable[None]]
         raise ValueError("require_any_module needs at least one Module")
 
     async def dependency(request: Request) -> None:
-        from app.core.middleware import get_session_context  # local import to avoid cycle
+        # local import to avoid cycle
+        from app.core.middleware import get_api_key_context, get_session_context
+
+        if get_api_key_context(request).is_valid:
+            return
 
         session = get_session_context(request)
         if not session.is_valid:
