@@ -115,6 +115,136 @@ async def test_create_checkout_uses_offer_not_plan_cop(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_create_checkout_omits_checkout_url_for_localhost(monkeypatch):
+    """#2208 — localhost checkout.url is rejected by Paddle; omit override."""
+    offer = resolve_price_offer("CO")
+    monkeypatch.setattr(
+        paddle_service.settings,
+        "paddle_api_key_sandbox",
+        "pdl_sdbx_test_key",
+    )
+    monkeypatch.setattr(
+        paddle_service,
+        "configured_price_id",
+        lambda _offer, _env: "pri_test_usd_9",
+    )
+    monkeypatch.setattr(
+        paddle_service,
+        "require_usable_price_id",
+        lambda price_id, _env: price_id,
+    )
+
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "data": {
+                    "id": "txn_local_1",
+                    "checkout": {
+                        "url": "http://localhost:8080/billing/confirmacion?_ptxn=txn_local_1",
+                    },
+                }
+            }
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            return _Resp()
+
+    with patch("app.services.paddle_service.httpx.AsyncClient", _Client):
+        result = await paddle_service.create_checkout(
+            offer=offer,
+            environment="test",
+            tenant_id=uuid4(),
+            plan_id=uuid4(),
+            billing_cycle="monthly",
+            redirect_url="http://localhost:8080/billing/confirmacion",
+        )
+
+    assert "checkout" not in captured["json"]
+    assert result["paddle_transaction_id"] == "txn_local_1"
+    assert "_ptxn=txn_local_1" in result["checkout_url"]
+
+
+@pytest.mark.asyncio
+async def test_create_checkout_passes_checkout_url_for_production_host(monkeypatch):
+    """#2208 — non-local redirect still sets checkout.url override."""
+    offer = resolve_price_offer("US")
+    monkeypatch.setattr(
+        paddle_service.settings,
+        "paddle_api_key_sandbox",
+        "pdl_sdbx_test_key",
+    )
+    monkeypatch.setattr(
+        paddle_service,
+        "configured_price_id",
+        lambda _offer, _env: "pri_test_usd_9",
+    )
+    monkeypatch.setattr(
+        paddle_service,
+        "require_usable_price_id",
+        lambda price_id, _env: price_id,
+    )
+
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "data": {
+                    "id": "txn_prod_1",
+                    "checkout": {
+                        "url": "https://warocol.com/billing/confirmacion?_ptxn=txn_prod_1",
+                    },
+                }
+            }
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured["json"] = json
+            return _Resp()
+
+    with patch("app.services.paddle_service.httpx.AsyncClient", _Client):
+        result = await paddle_service.create_checkout(
+            offer=offer,
+            environment="test",
+            tenant_id=uuid4(),
+            plan_id=uuid4(),
+            billing_cycle="monthly",
+            redirect_url="https://warocol.com/billing/confirmacion",
+        )
+
+    assert captured["json"]["checkout"] == {
+        "url": "https://warocol.com/billing/confirmacion",
+    }
+    assert result["paddle_transaction_id"] == "txn_prod_1"
+
+
+@pytest.mark.asyncio
 async def test_handle_webhook_activates_on_completed():
     tenant_id = uuid4()
     payload = _completed_payload(tenant_id=tenant_id)

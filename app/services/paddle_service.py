@@ -12,6 +12,7 @@ import logging
 import secrets
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
@@ -136,7 +137,17 @@ async def create_checkout(
     attempt_id: Optional[UUID] = None,
 ) -> Dict[str, Any]:
     """
-    Create a Paddle Billing transaction checkout for the monthly price (#807).
+    Create a Paddle Billing transaction checkout for the monthly price (#807 / #2208).
+
+    Contract (Hosted Checkout pay.paddle.io is not available via Transactions API):
+    - ``checkout_url`` is a **transaction payment link**: merchant default payment
+      link (or approved ``checkout.url`` override) + ``?_ptxn=txn_…``.
+    - Activation remains Paddle webhooks, not the return page.
+    - Return/success page for WARO is ``{FRONTEND_URL}/billing/confirmacion``
+      (passed as ``redirect_url`` / ``checkout.url`` when the host is not local).
+
+    Localhost / 127.0.0.1: omit ``checkout.url`` so Paddle uses the dashboard
+    default payment link (passing localhost is rejected as domain_not_approved).
 
     Returns: checkout_url, paddle_transaction_id, gateway_reference, currency, amount_minor
     """
@@ -171,8 +182,13 @@ async def create_checkout(
     body: Dict[str, Any] = {
         "items": [{"price_id": price_id, "quantity": 1}],
         "custom_data": custom_data,
-        "checkout": {"url": redirect_url},
     }
+    # Sandbox default payment link can be localhost; passing checkout.url with
+    # localhost is rejected (domain_is_not_approved) even in Test mode. Omit
+    # override so Paddle uses the dashboard default payment link.
+    redirect_host = (urlparse(redirect_url).hostname or "").lower()
+    if redirect_host not in {"localhost", "127.0.0.1"}:
+        body["checkout"] = {"url": redirect_url}
     if customer_email:
         body["customer"] = {"email": customer_email}
 
