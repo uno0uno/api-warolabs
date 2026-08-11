@@ -473,3 +473,105 @@ async def handle_verified_webhook(
         out["onboarding"] = True
     return out
 
+
+async def fetch_paddle_transaction(
+    transaction_id: str,
+    *,
+    environment: ProviderEnvironment,
+) -> Dict[str, Any]:
+    """GET /transactions/{id} from Paddle Billing API."""
+    if not transaction_id or not str(transaction_id).startswith("txn_"):
+        raise HTTPException(status_code=422, detail="Invalid Paddle transaction id")
+    api_key = _api_key(environment)
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Paddle API key not configured")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{_api_base(environment)}/transactions/{transaction_id}",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+    except httpx.HTTPError as exc:
+        logger.exception("Paddle get transaction failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Error contactando Paddle") from exc
+
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail="Paddle transaction not found")
+    if response.status_code >= 400:
+        logger.error(
+            "Paddle get transaction error %s: %s",
+            response.status_code,
+            response.text[:500],
+        )
+        raise HTTPException(status_code=502, detail="Paddle rechazó la consulta de transacción")
+
+    data = response.json().get("data") or {}
+    if not data.get("id"):
+        raise HTTPException(status_code=502, detail="Respuesta incompleta de Paddle")
+    return data
+
+
+async def reconcile_transaction_status_for_tenant(
+    *,
+    tenant_id: UUID,
+    transaction_id: str,
+    environment: ProviderEnvironment,
+    background_tasks=None,
+) -> Dict[str, Any]:
+    """
+    Thank-you / poll backup (#2219): read txn from Paddle; if paid/completed,
+    run the same activation path as the webhook (idempotent). Never trust the browser alone.
+    """
+    from app.database import get_db_connection
+    from app.services import billing_service
+
+    txn = await fetch_paddle_transaction(transaction_id, environment=environment)
+    custom = txn.get("custom_data") or {}
+    custom_tenant = str(custom.get("tenant_id") or "")
+    if custom_tenant != str(tenant_id):
+        raise HTTPException(status_code=404, detail="Paddle transaction not found")
+
+    paddle_status = str(txn.get("status") or "").lower()
+    activated = False
+    reason = None
+
+    if paddle_status in {"completed", "paid", "billed"}:
+        event_type = (
+            "transaction.completed" if paddle_status == "completed" else "transaction.paid"
+        )
+        result = await handle_verified_webhook(
+            {"event_type": event_type, "data": txn},
+            environment=environment,
+            background_tasks=background_tasks,
+        )
+        activated = bool(result.get("activated"))
+        reason = result.get("reason")
+    else:
+        reason = "awaiting_payment"
+
+    async with get_db_connection(use_transaction=False) as conn:
+        access = await billing_service.get_subscription_access(tenant_id, conn)
+        sub = await conn.fetchrow(
+            """
+            SELECT status, gateway_reference
+            FROM tenant_subscriptions
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+
+    return {
+        "transaction_id": transaction_id,
+        "paddle_status": paddle_status or None,
+        "activated": activated,
+        "reason": reason,
+        "subscription_status": (sub["status"] if sub else None),
+        "gateway_reference": (sub["gateway_reference"] if sub else None),
+        "access_level": access.level,
+        "waro_ready": access.level in {"full", "full_with_warning"},
+    }
+

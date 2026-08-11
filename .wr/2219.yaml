@@ -1,0 +1,40 @@
+issue: 2219
+title: "Paddle thank-you page after checkout.completed (webhook-safe)"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2219-paddle-thank-you
+
+paths:
+  - app/services/paddle_service.py
+  - app/routers/billing.py
+  - app/core/onboarding_access.py
+  - tests/test_paddle_billing.py
+  - tests/test_onboarding_access.py
+  - .wr/2219.yaml
+
+ac:
+  - "GET /billing/paddle/transaction-status for txn_ belonging to session tenant"
+  - "If Paddle paid/completed → same idempotent activate as webhook"
+  - "Other tenant txn → 404; unpaid → awaiting_payment without activate"
+  - "Pending allowlist includes the route"
+
+out_of_scope:
+  - Wompi verify-payment removal
+  - Hosted Checkout rewrite
+
+hints:
+  entry: "reconcile_transaction_status_for_tenant"
+  pattern: "handle_verified_webhook reuse"
+  tests: "pytest tests/test_paddle_billing.py tests/test_onboarding_access.py -q"
+
+risk:
+  sensitive: true
+  areas: [payments]
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "Companion front PR; human /wr-review recommended"

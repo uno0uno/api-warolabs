@@ -266,6 +266,40 @@ async def verify_payment(
     }
 
 
+@tenant_router.get("/paddle/transaction-status")
+async def paddle_transaction_status(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    transaction_id: str = Query(..., min_length=8, max_length=64),
+):
+    """
+    Post-checkout thank-you poll (#2219).
+
+    Asks Paddle for the transaction; if already paid/completed, runs the same
+    idempotent activation as the webhook. Client events never activate alone.
+    """
+    from fastapi import HTTPException
+
+    session = require_valid_session(request)
+    if not transaction_id.startswith("txn_"):
+        raise HTTPException(status_code=422, detail="Invalid Paddle transaction id")
+
+    from app.core.billing_pricing import resolve_provider_environment
+
+    async with get_db_connection(use_transaction=False) as conn:
+        ctx = await billing_service.get_tenant_billing_context(conn, session.tenant_id)
+    environment = resolve_provider_environment(
+        tenant_slug=ctx.get("slug"),
+        tenant_id=str(session.tenant_id),
+    )
+    return await paddle_service.reconcile_transaction_status_for_tenant(
+        tenant_id=session.tenant_id,
+        transaction_id=transaction_id,
+        environment=environment,
+        background_tasks=background_tasks,
+    )
+
+
 @tenant_router.get(
     "/usage-history",
     dependencies=[Depends(require_module(Module.MI_PLAN))],
