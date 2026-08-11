@@ -1971,6 +1971,7 @@ _RENEWABLE_STATUSES = frozenset({"pending", "past_due", "expired", "active"})
 # Tenant-facing Mi Plan history (GET /billing/events) — excludes cron/ops noise.
 CUSTOMER_VISIBLE_BILLING_EVENT_TYPES = (
     "subscribe_initiated",
+    "checkout_abandoned",
     "payment_approved",
     "payment_rejected",
     "payment_failed",
