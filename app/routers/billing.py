@@ -314,6 +314,22 @@ async def cancel_my_subscription(request: Request):
     return {"status": "cancelled", "gateway_reference": gateway_reference or None}
 
 
+@tenant_router.post(
+    "/subscription/abandon-checkout",
+    dependencies=[Depends(require_module(Module.MI_PLAN))],
+)
+async def abandon_pending_checkout(request: Request):
+    """
+    Abandon a pending checkout so the tenant returns to Starter (#2210).
+
+    Distinct from DELETE /subscription (active/pending → cancelled + blocked).
+    """
+    session = require_valid_session(request)
+
+    async with get_db_connection() as conn:
+        return await billing_service.abandon_pending_checkout(conn, session.tenant_id)
+
+
 # NOTE: Authenticated by Wompi signature verification, not session.
 # Do NOT add require_module() here — legacy URL still receives retries.
 @tenant_router.post("/webhook", status_code=200)

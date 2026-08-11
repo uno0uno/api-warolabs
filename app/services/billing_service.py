@@ -1971,6 +1971,7 @@ _RENEWABLE_STATUSES = frozenset({"pending", "past_due", "expired", "active"})
 # Tenant-facing Mi Plan history (GET /billing/events) — excludes cron/ops noise.
 CUSTOMER_VISIBLE_BILLING_EVENT_TYPES = (
     "subscribe_initiated",
+    "checkout_abandoned",
     "payment_approved",
     "payment_rejected",
     "payment_failed",
@@ -2819,6 +2820,76 @@ async def cancel_tenant_subscription(conn, tenant_id: UUID) -> str:
     logger.info("subscription_cancelled: tenant=%s preapproval=%s", tenant_id, gateway_reference)
 
     return gateway_reference or ""
+
+
+async def abandon_pending_checkout(conn, tenant_id: UUID) -> Dict[str, Any]:
+    """
+    Drop a pending checkout attempt so the tenant returns to Starter (#2210).
+
+    Only ``status='pending'`` is allowed. Deletes the subscription row (billing_events
+    keep history via ON DELETE SET NULL). Stale Paddle webhooks then no-op when no row.
+    """
+    status_row = await conn.fetchrow(
+        """
+        SELECT id, status, gateway_reference, plan_id
+        FROM tenant_subscriptions
+        WHERE tenant_id = $1
+        """,
+        tenant_id,
+    )
+    if status_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay suscripción pendiente para abandonar",
+        )
+    if status_row["status"] != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail="Solo se puede abandonar un checkout pendiente",
+        )
+
+    sub_id = status_row["id"]
+    gateway_reference = status_row["gateway_reference"] or ""
+    plan_id = status_row["plan_id"]
+
+    await conn.execute(
+        """
+        INSERT INTO billing_events
+            (tenant_id, subscription_id, event_type, metadata)
+        VALUES ($1, $2, 'checkout_abandoned', $3)
+        """,
+        tenant_id,
+        sub_id,
+        json.dumps({
+            "gateway_reference": gateway_reference,
+            "plan_id": str(plan_id) if plan_id else None,
+            "provider": "paddle",
+        }),
+    )
+
+    deleted = await conn.fetchrow(
+        """
+        DELETE FROM tenant_subscriptions
+        WHERE tenant_id = $1 AND status = 'pending'
+        RETURNING id
+        """,
+        tenant_id,
+    )
+    if deleted is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Solo se puede abandonar un checkout pendiente",
+        )
+
+    logger.info(
+        "checkout_abandoned: tenant=%s gateway_ref=%s",
+        tenant_id,
+        gateway_reference,
+    )
+    return {
+        "status": "abandoned",
+        "gateway_reference": gateway_reference or None,
+    }
 
 
 def _webhook_amount_in_cents(value: Any) -> int:
