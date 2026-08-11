@@ -109,6 +109,8 @@ async def subscribe(body: SubscribeBody, request: Request):
     from urllib.parse import urlparse
     from app.core.billing_pricing import resolve_price_offer, resolve_provider_environment
 
+    # Return page after Paddle pay (#2208): transaction payment links use this as
+    # checkout.url when not localhost; activation still comes from webhooks.
     parsed = urlparse(settings.frontend_url)
     frontend_host = f"{parsed.scheme}://{parsed.netloc}"
     redirect_url = f"{frontend_host}/billing/confirmacion"
