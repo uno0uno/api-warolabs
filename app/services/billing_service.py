@@ -3442,6 +3442,9 @@ async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
     Returns the access level for a tenant based on their subscription status
     and how many days past_due they are.
 
+    Pending checkout without a prior payment_approved keeps Starter access
+    (first upgrade). Pending after a prior paid period stays blocked.
+
     Uses timezone.utc (Python 3.9 safe — NOT datetime.UTC which requires 3.11+).
     """
     sub = await conn.fetchrow("""
@@ -3487,12 +3490,34 @@ async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
         )
 
     if status == "pending":
+        # First Pro checkout (trial/Starter → pending): keep Starter access until paid.
+        # Renew / re-checkout after a prior successful payment: stay blocked.
+        prior_paid = await conn.fetchval(
+            """
+            SELECT 1 FROM billing_events
+            WHERE tenant_id = $1
+              AND event_type = 'payment_approved'
+            LIMIT 1
+            """,
+            tenant_id,
+        )
+        if prior_paid:
+            return SubscriptionAccess(
+                level="blocked",
+                grace_days_remaining=0,
+                subscription_status=status,
+                next_payment_date=None,
+                message="Completa el pago pendiente para reactivar tu suscripción.",
+            )
         return SubscriptionAccess(
-            level="blocked",
+            level="starter",
             grace_days_remaining=0,
             subscription_status=status,
             next_payment_date=None,
-            message="Completa el pago pendiente para activar tu suscripción.",
+            message=(
+                "Completa el pago pendiente para activar Pro. "
+                "Mientras tanto sigues en el plan Starter."
+            ),
         )
 
     if status == "past_due":
