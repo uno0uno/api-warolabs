@@ -10,7 +10,12 @@ from app.core.exceptions import APIError
 from app.services import billing_service
 
 
-def _conn_with_subscription(status: str, period_end: Optional[datetime]):
+def _conn_with_subscription(
+    status: str,
+    period_end: Optional[datetime],
+    *,
+    prior_payment_approved: bool = False,
+):
     conn = MagicMock()
     conn.fetchrow = AsyncMock(
         return_value={
@@ -19,6 +24,8 @@ def _conn_with_subscription(status: str, period_end: Optional[datetime]):
             "plan_id": uuid4(),
         }
     )
+    # Used by pending first-vs-renew check (payment_approved history).
+    conn.fetchval = AsyncMock(return_value=1 if prior_payment_approved else None)
     return conn
 
 
@@ -72,10 +79,25 @@ async def test_active_subscription_returns_full():
 
 
 @pytest.mark.asyncio
-async def test_pending_checkout_returns_blocked():
+async def test_pending_first_checkout_returns_starter():
     tenant_id = uuid4()
     period_end = datetime.now(timezone.utc) + timedelta(days=20)
-    conn = _conn_with_subscription("pending", period_end)
+    conn = _conn_with_subscription("pending", period_end, prior_payment_approved=False)
+
+    access = await billing_service.get_subscription_access(tenant_id, conn)
+
+    assert access.level == "starter"
+    assert access.subscription_status == "pending"
+    assert access.grace_days_remaining == 0
+    assert access.next_payment_date is None
+    assert "Starter" in access.message
+
+
+@pytest.mark.asyncio
+async def test_pending_renew_after_prior_payment_returns_blocked():
+    tenant_id = uuid4()
+    period_end = datetime.now(timezone.utc) + timedelta(days=20)
+    conn = _conn_with_subscription("pending", period_end, prior_payment_approved=True)
 
     access = await billing_service.get_subscription_access(tenant_id, conn)
 

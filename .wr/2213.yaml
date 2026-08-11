@@ -1,0 +1,40 @@
+# Compact Codex plan for wr-fast #2213 (API companion).
+issue: 2213
+title: "Keep Starter access while first Pro checkout is pending"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2213-pending-starter-access
+
+paths:
+  - app/services/billing_service.py
+  - tests/test_billing_subscription_access.py
+  - .wr/2213.yaml
+
+ac:
+  - "pending + no prior payment_approved → level=starter"
+  - "pending + prior payment_approved → level=blocked"
+  - "past_due grace rules unchanged"
+  - "tests cover first-pending vs renew-pending"
+
+out_of_scope:
+  - abandon-checkout (#2210)
+  - inline Paddle (#2209)
+  - Hosted Checkout
+  - grace day thresholds
+
+hints:
+  entry: "get_subscription_access pending branch"
+  pattern: "billing_events event_type=payment_approved as prior-paid signal"
+  tests: "pytest tests/test_billing_subscription_access.py -q"
+
+risk:
+  sensitive: true
+  areas: [payments, access]
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "Companion front PR on warocol.com; human /wr-review recommended"
