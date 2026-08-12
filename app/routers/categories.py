@@ -12,7 +12,9 @@ from app.models.category import (
     CategoryCreate,
     CategoryResponse,
     CategoryUpdate,
+    OnlineMenuProductsListResponse,
     ReorderOnlineMenuCategoriesRequest,
+    ReorderOnlineMenuProductsRequest,
 )
 from app.services import categories_service
 from app.services.billing_service import check_plan_quota_growth
@@ -126,6 +128,35 @@ async def reorder_online_menu_categories_endpoint(
 ):
     """Persist drag order for public online menu category chips."""
     return await categories_service.reorder_online_menu_categories(request, body.category_ids)
+
+
+@router.get(
+    "/online-menu/products",
+    response_model=OnlineMenuProductsListResponse,
+    dependencies=[Depends(require_module(Module.MI_NEGOCIO))],
+)
+async def get_online_menu_products_endpoint(
+    request: Request,
+    category_id: UUID = Query(..., description="Category to list eligible online/QR products for"),
+):
+    """Eligible products in a category, in saved online-menu product order."""
+    return await categories_service.list_online_menu_products(request, category_id)
+
+
+@router.patch(
+    "/online-menu/products/reorder",
+    dependencies=[Depends(require_module(Module.MI_NEGOCIO))],
+)
+async def reorder_online_menu_products_endpoint(
+    request: Request,
+    body: ReorderOnlineMenuProductsRequest,
+):
+    """Persist drag order for products within one online-menu category."""
+    return await categories_service.reorder_online_menu_products(
+        request,
+        body.category_id,
+        body.product_ids,
+    )
 
 
 async def _load_owned_category(conn, category_id: UUID, tenant_id: UUID):

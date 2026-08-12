@@ -15,7 +15,7 @@ from fastapi import HTTPException, Request
 
 from app.core.exceptions import NotFoundError
 from app.database import get_db_connection
-from app.services import notifications_service, payment_method_service
+from app.services import categories_service, notifications_service, payment_method_service
 from app.services.online_cart_service import (
     validate_modifiers_for_item,
     validate_products_belong_to_tenant,
@@ -187,18 +187,10 @@ async def get_menu_for_token(
 
     tenant_id = ctx["tenant_id"]
     async with get_db_connection(use_transaction=False) as conn:
-        categories_query = """
-            SELECT DISTINCT c.id, c.name, c.description
-            FROM categories c
-            JOIN product p ON p.category_id = c.id
-            WHERE p.tenant_id = $1
-              AND p.is_available = true
-              AND p.is_available_table_qr = true
-            ORDER BY c.name
-        """
+        categories_query = categories_service.table_qr_categories_select_sql()
         categories = [dict(r) for r in await conn.fetch(categories_query, tenant_id)]
 
-        products_query = """
+        products_query = f"""
             SELECT
                 p.id, p.name, p.description, p.price, p.image_url,
                 p.category_id, c.name AS category_name,
@@ -210,6 +202,9 @@ async def get_menu_for_token(
                 ) AS has_modifiers
             FROM product p
             JOIN categories c ON p.category_id = c.id
+            LEFT JOIN tenant_online_menu_category_orders o
+                ON o.category_id = c.id AND o.tenant_id = $1
+            {categories_service.online_menu_product_order_join_sql()}
             WHERE p.tenant_id = $1
               AND p.is_available = true
               AND p.is_available_table_qr = true
@@ -218,7 +213,7 @@ async def get_menu_for_token(
         if category_id:
             products_query += " AND p.category_id = $2"
             params.append(category_id)
-        products_query += " ORDER BY c.name, p.name"
+        products_query += f" ORDER BY {categories_service.online_menu_products_order_by_sql()}"
 
         products = [dict(r) for r in await conn.fetch(products_query, *params)]
         for p in products:

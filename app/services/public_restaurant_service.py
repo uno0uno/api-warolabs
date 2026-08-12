@@ -189,6 +189,7 @@ async def get_menu_by_slug(
                 JOIN categories c ON p.category_id = c.id
                 LEFT JOIN tenant_online_menu_category_orders o
                     ON o.category_id = c.id AND o.tenant_id = $1
+                {categories_service.online_menu_product_order_join_sql()}
                 WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
             """
 
@@ -360,6 +361,7 @@ async def get_menu_by_tenant_id(
                 JOIN categories c ON p.category_id = c.id
                 LEFT JOIN tenant_online_menu_category_orders o
                     ON o.category_id = c.id AND o.tenant_id = $1
+                {categories_service.online_menu_product_order_join_sql()}
                 WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
             """
 
