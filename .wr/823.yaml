@@ -14,6 +14,8 @@ paths:
   - app/services/auth_service.py
   - tests/test_session_idle_and_cap.py
   - tests/test_session_token.py
+  - tests/test_customer_internal_access.py
+  - tests/test_customer_team_migration_regression.py
   - .wr/823.yaml
 
 ac:
@@ -31,7 +33,7 @@ out_of_scope:
 hints:
   entry: "get_session_from_request / replace_active_admin_sessions"
   pattern: "security.py:INTERNAL_SESSION_HOURS + auth_service.replace_active_admin_sessions"
-  tests: "pytest tests/test_session_idle_and_cap.py tests/test_session_token.py -q"
+  tests: "pytest tests/test_session_idle_and_cap.py tests/test_session_token.py tests/test_customer_internal_access.py tests/test_customer_team_migration_regression.py -q"
 
 risk:
   sensitive: true
