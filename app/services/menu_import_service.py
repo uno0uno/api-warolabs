@@ -17,7 +17,11 @@ from app.core.middleware import require_valid_session
 from app.database import get_db_connection
 from app.models.ingredient import PurchaseUnitInput, TenantIngredientCreate
 from app.services.aws_s3_service import AWSS3Service
-from app.services.billing_service import check_plan_quota_growth, check_plan_quota_scoped
+from app.services.billing_service import (
+    check_plan_quota_growth,
+    check_plan_quota_scoped,
+    preview_plan_quota_growth,
+)
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 from app.services.ingredients_service import create_tenant_ingredient
 
@@ -411,11 +415,35 @@ async def dry_run_warehouse_import(request: Request, job_id: UUID) -> Dict[str, 
                 ok["menu_category_id"] = str(cat_id)
             valid.append(ok)
 
+        will_create_product_count = sum(1 for v in valid if v.get("will_create_product"))
+        quota_hits: List[Dict[str, Any]] = []
+        for resource, additional in (
+            ("tenant_ingredients", len(valid)),
+            ("menu_products", will_create_product_count),
+        ):
+            hit = await preview_plan_quota_growth(
+                conn, tenant_id, resource, additional=additional
+            )
+            if hit:
+                quota_hits.append(hit)
+                errors.append(
+                    {
+                        "row": None,
+                        "field": "quota",
+                        "error": (
+                            f"{resource}: projected {hit['projected']} exceeds limit "
+                            f"{hit['limit']} (used {hit['used']} + {hit['additional']})"
+                        ),
+                    }
+                )
+
         report = {
             "valid": valid,
             "errors": errors,
             "needs_product_count": sum(1 for v in valid if v.get("needs_product")),
-            "will_create_product_count": sum(1 for v in valid if v.get("will_create_product")),
+            "will_create_product_count": will_create_product_count,
+            "quota_hits": quota_hits,
+            "quota_exceeded": bool(quota_hits),
         }
 
         await conn.execute(
@@ -477,6 +505,11 @@ async def commit_warehouse_import(request: Request, job_id: UUID) -> Dict[str, A
             report = job["dry_run_report"]
             if isinstance(report, str):
                 report = json.loads(report)
+            if report.get("quota_exceeded"):
+                raise HTTPException(
+                    status_code=429,
+                    detail="Plan quota exceeded for this import; re-run dry-run after reducing rows",
+                )
             valid_rows = report.get("valid") or []
             if not valid_rows:
                 raise HTTPException(status_code=422, detail="No valid rows to commit")
