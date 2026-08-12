@@ -116,6 +116,7 @@ async def test_verify_token_replaces_previous_active_admin_sessions():
     )
     conn.fetch = AsyncMock(return_value=[])
     conn.execute = AsyncMock(return_value="UPDATE 1")
+    conn.fetchval = AsyncMock(side_effect=["admin@example.com", None])
 
     @asynccontextmanager
     async def db_ctx():
@@ -141,7 +142,8 @@ async def test_verify_token_replaces_previous_active_admin_sessions():
         if "replaced_by_new_login" in call.args[0]
     ]
     assert len(replacement_calls) == 1
-    assert replacement_calls[0][1:] == (user_id, session_id)
+    # user_id, keep_session_id, keep_others (cap 1 → 0), idle hours
+    assert replacement_calls[0][1:] == (user_id, session_id, 0, 4)
 
 
 @pytest.mark.asyncio
@@ -160,7 +162,8 @@ async def test_auth_session_reports_internal_access_for_promotor():
     ])
 
     with patch("app.services.auth_service.get_db_connection", side_effect=db_ctx), \
-         patch("app.services.auth_service.get_session_token", new=AsyncMock(return_value=session_token)):
+         patch("app.services.auth_service.get_session_token", new=AsyncMock(return_value=session_token)), \
+         patch("app.core.security.touch_session_activity", new=AsyncMock()):
         result = await get_session_data(_request(), MagicMock())
 
     assert result.has_internal_access is True
@@ -206,7 +209,13 @@ async def test_session_resolver_invalidates_customer_internal_session():
     user_id = uuid4()
     expires_at = datetime.now(timezone.utc) + timedelta(days=1)
     db_ctx, conn = _build_db_mock(fetchrow_side_effect=[
-        {"id": session_token, "expires_at": expires_at, "is_active": True, "ended_at": None},
+        {
+            "id": session_token,
+            "expires_at": expires_at,
+            "last_activity_at": expires_at,
+            "is_active": True,
+            "ended_at": None,
+        },
         {
             "user_id": user_id,
             "tenant_id": tenant_id,
@@ -220,7 +229,8 @@ async def test_session_resolver_invalidates_customer_internal_session():
 
     with patch("app.database.get_db_connection", side_effect=db_ctx), \
          patch("app.core.security.get_session_token", new=AsyncMock(return_value=session_token)), \
-         patch("app.core.security.cleanup_zombie_sessions", new=AsyncMock()):
+         patch("app.core.security.cleanup_zombie_sessions", new=AsyncMock()), \
+         patch("app.core.security.touch_session_activity", new=AsyncMock()):
         result = await get_session_from_request(_request())
 
     assert result is None
@@ -239,6 +249,7 @@ async def test_session_resolver_replaced_session_returns_invalid_without_overwri
         {
             "id": session_token,
             "expires_at": expires_at,
+            "last_activity_at": expires_at,
             "is_active": False,
             "ended_at": datetime.now(timezone.utc),
         },

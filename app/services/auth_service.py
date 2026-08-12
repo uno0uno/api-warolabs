@@ -127,9 +127,6 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                 await clear_session_cookie(response, session_token)
                 raise AuthenticationError("Session expired")
 
-            from app.core.security import touch_session_activity
-            await touch_session_activity(conn, session_token)
-
             # Get tenant info if tenant_id exists (exact logic from warolabs.com)
             current_tenant = None
             user_role = None
@@ -197,6 +194,9 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                     session_token[:8],
                 )
                 raise AuthenticationError("Access denied")
+
+            from app.core.security import touch_session_activity
+            await touch_session_activity(conn, session_token)
 
             # Build response models
             user = ProfileUser(

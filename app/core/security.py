@@ -380,9 +380,8 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
             if session_check:
                 now = datetime.now(session_check['expires_at'].tzinfo)
                 is_expired = session_check['expires_at'] < now
-                is_idle = session_check['last_activity_at'] < (
-                    now - timedelta(hours=IDLE_SESSION_HOURS)
-                )
+                last_activity = session_check.get('last_activity_at') or session_check['expires_at']
+                is_idle = last_activity < (now - timedelta(hours=IDLE_SESSION_HOURS))
                 is_inactive = not session_check['is_active']
 
                 if is_expired or is_idle or is_inactive:

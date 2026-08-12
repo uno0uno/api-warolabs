@@ -137,7 +137,13 @@ async def test_karen_tijuana_admin_customer_session_resolves_internal_role():
     conn = MagicMock()
     conn.fetchrow = AsyncMock(
         side_effect=[
-            {"id": session_token, "expires_at": expires_at, "is_active": True, "ended_at": None},
+            {
+                "id": session_token,
+                "expires_at": expires_at,
+                "last_activity_at": expires_at,
+                "is_active": True,
+                "ended_at": None,
+            },
             {
                 "user_id": profile_id,
                 "tenant_id": tenant_id,
@@ -155,7 +161,7 @@ async def test_karen_tijuana_admin_customer_session_resolves_internal_role():
     with patch("app.database.get_db_connection", side_effect=_db_context(conn)), patch(
         "app.core.security.get_session_token",
         new=AsyncMock(return_value=session_token),
-    ):
+    ), patch("app.core.security.touch_session_activity", new=AsyncMock()):
         result = await get_session_from_request(_request())
 
     assert result["role"] == "admin"
@@ -184,7 +190,13 @@ async def test_karen_tijuana_legacy_customer_role_session_is_denied_after_migrat
     conn = MagicMock()
     conn.fetchrow = AsyncMock(
         side_effect=[
-            {"id": session_token, "expires_at": expires_at, "is_active": True, "ended_at": None},
+            {
+                "id": session_token,
+                "expires_at": expires_at,
+                "last_activity_at": expires_at,
+                "is_active": True,
+                "ended_at": None,
+            },
             {
                 "user_id": profile_id,
                 "tenant_id": tenant_id,
@@ -202,7 +214,7 @@ async def test_karen_tijuana_legacy_customer_role_session_is_denied_after_migrat
     with patch("app.database.get_db_connection", side_effect=_db_context(conn)), patch(
         "app.core.security.get_session_token",
         new=AsyncMock(return_value=session_token),
-    ):
+    ), patch("app.core.security.touch_session_activity", new=AsyncMock()):
         result = await get_session_from_request(_request())
 
     assert result is None
