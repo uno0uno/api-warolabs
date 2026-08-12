@@ -1,0 +1,51 @@
+# Compact plan for wr-plan/exec #2237. Keep <=80 lines.
+issue: 2237
+title: "API: tenant_online_menu_product_orders + ORDER BY for delivery/QR"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+issue_remote: uno0uno/warocol.com
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2237-online-menu-product-orders
+risk: low
+
+paths:
+  - sql/YYYYMMDD_tenant_online_menu_product_orders.sql
+  - app/services/categories_service.py
+  - app/routers/categories.py
+  - app/models/category.py
+  - app/services/public_restaurant_service.py
+  - app/services/public_table_qr_service.py
+  - tests/test_online_menu_product_order.py
+
+ac:
+  - ADD-only CREATE tenant_online_menu_product_orders (tenant_id, product_id PK, display_order) + index
+  - GET online-menu products by category_id (eligible online|qr) in saved order
+  - PATCH reorder body {category_id, product_ids} exact set for that category
+  - online_menu_products_order_by_sql joins product orders; delivery uses it
+  - QR categories+products use same category/product order helpers (not name-only)
+  - pytest: reject dup/partial/wrong-category; persist order; helper SQL contains po.display_order
+
+out_of_scope:
+  - Negocio UI (#2238)
+  - Change category-order table/API
+  - Uncategorized products; POS lists
+  - product.sort_order column
+
+hints:
+  entry: "categories_service.reorder_online_menu_categories + online_menu_products_order_by_sql:49"
+  pattern: "sql/20260722_tenant_online_menu_category_orders.sql; tests/test_categories_online_menu_order.py"
+  routes: "GET/PATCH under /menu/categories/online-menu/products (+ /reorder); Module.MI_NEGOCIO"
+  eligibility_admin: "is_available AND (is_available_online OR is_available_table_qr) AND category_id"
+  public_flags: "delivery keeps is_available_online; QR keeps is_available_table_qr"
+  qr: "public_table_qr_service.py:197 and :221 — replace ORDER BY c.name*"
+  delivery: "public_restaurant_service.py:190-202 and :361-372 — add LEFT JOIN product orders"
+  fk: "REFERENCES product(id) ON DELETE CASCADE"
+  tests: "pytest tests/test_online_menu_product_order.py -q"
+  closes: "Closes uno0uno/warocol.com#2237 on api-warolabs PR"
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "comment epic #2236 with api PR URL; then /wr-next #2236 → #2238"

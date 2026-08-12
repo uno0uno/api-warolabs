@@ -55,3 +55,24 @@ class CategoryResponse(BaseModel):
 class ReorderOnlineMenuCategoriesRequest(BaseModel):
     """Payload for PATCH /menu/categories/online-menu/reorder."""
     category_ids: List[UUID] = Field(..., min_length=1)
+
+
+class ReorderOnlineMenuProductsRequest(BaseModel):
+    """Payload for PATCH /menu/categories/online-menu/products/reorder."""
+    category_id: UUID
+    product_ids: List[UUID] = Field(..., min_length=1)
+
+
+class OnlineMenuProductSummary(BaseModel):
+    """Product row for Negocio online-menu product ordering."""
+    id: UUID
+    name: str
+    category_id: UUID
+    is_available_online: bool = False
+    is_available_table_qr: bool = False
+
+
+class OnlineMenuProductsListResponse(BaseModel):
+    success: bool = True
+    total: int
+    data: List[OnlineMenuProductSummary]
