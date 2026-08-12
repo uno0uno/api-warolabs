@@ -17,7 +17,8 @@ from app.core.middleware import require_valid_session
 from app.database import get_db_connection
 from app.models.ingredient import PurchaseUnitInput, TenantIngredientCreate
 from app.services.aws_s3_service import AWSS3Service
-from app.services.billing_service import check_plan_quota_growth
+from app.services.billing_service import check_plan_quota_growth, check_plan_quota_scoped
+from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 from app.services.ingredients_service import create_tenant_ingredient
 
 logger = logging.getLogger(__name__)
@@ -168,13 +169,23 @@ async def create_resale_product_for_ingredient(
         tenant_id,
     )
     product_id = product_result["id"]
+    await check_plan_quota_scoped(
+        conn,
+        tenant_id,
+        "recipe_lines_per_product",
+        product_id,
+        projected_count=1,
+    )
+    base_qty, base_unit = await resolve_to_base_unit(conn, ingredient_id, 1, "und")
     await conn.execute(
         """
         INSERT INTO product_recipes (product_id, ingredient_id, quantity, unit, tenant_id)
-        VALUES ($1, $2, 1, 'und', $3)
+        VALUES ($1, $2, $3, $4, $5)
         """,
         product_id,
         ingredient_id,
+        base_qty,
+        base_unit,
         tenant_id,
     )
     return product_id
@@ -474,46 +485,48 @@ async def commit_warehouse_import(request: Request, job_id: UUID) -> Dict[str, A
             failed = []
             for item in valid_rows:
                 try:
-                    await check_plan_quota_growth(conn, tenant_id, "tenant_ingredients")
-                    purchase_units = []
-                    if item["is_resale"]:
-                        purchase_units = [PurchaseUnitInput(purchase_unit="und", is_default=True)]
-                    ing = await create_tenant_ingredient(
-                        conn,
-                        tenant_id,
-                        TenantIngredientCreate(
-                            name=item["name"],
-                            unit=item["unit"],
-                            type=item["type"],
-                            category=item.get("category"),
-                            costo_unitario=item.get("costo_unitario"),
-                            is_resale=item["is_resale"],
-                            unit_weight_gr=item.get("unit_weight_gr"),
-                            unit_weight_unit=item.get("unit_weight_unit") or "gr",
-                            purchase_units=purchase_units,
-                        ),
-                    )
-                    product_id = None
-                    if item.get("will_create_product"):
-                        cat_id = UUID(item["menu_category_id"])
-                        product_id = await create_resale_product_for_ingredient(
+                    async with conn.transaction():
+                        purchase_units = []
+                        if item["is_resale"]:
+                            purchase_units = [
+                                PurchaseUnitInput(purchase_unit="und", is_default=True)
+                            ]
+                        ing = await create_tenant_ingredient(
                             conn,
                             tenant_id,
-                            ingredient_id=UUID(ing["id"]),
-                            name=item["name"],
-                            price=Decimal(str(item["price"])),
-                            category_id=cat_id,
-                            is_available=True,
+                            TenantIngredientCreate(
+                                name=item["name"],
+                                unit=item["unit"],
+                                type=item["type"],
+                                category=item.get("category"),
+                                costo_unitario=item.get("costo_unitario"),
+                                is_resale=item["is_resale"],
+                                unit_weight_gr=item.get("unit_weight_gr"),
+                                unit_weight_unit=item.get("unit_weight_unit") or "gr",
+                                purchase_units=purchase_units,
+                            ),
                         )
-                    committed.append(
-                        {
-                            "row": item["row"],
-                            "name": item["name"],
-                            "ingredient_id": ing["id"],
-                            "product_id": str(product_id) if product_id else None,
-                            "needs_product": bool(item.get("needs_product")),
-                        }
-                    )
+                        product_id = None
+                        if item.get("will_create_product"):
+                            cat_id = UUID(item["menu_category_id"])
+                            product_id = await create_resale_product_for_ingredient(
+                                conn,
+                                tenant_id,
+                                ingredient_id=UUID(ing["id"]),
+                                name=item["name"],
+                                price=Decimal(str(item["price"])),
+                                category_id=cat_id,
+                                is_available=True,
+                            )
+                        committed.append(
+                            {
+                                "row": item["row"],
+                                "name": item["name"],
+                                "ingredient_id": ing["id"],
+                                "product_id": str(product_id) if product_id else None,
+                                "needs_product": bool(item.get("needs_product")),
+                            }
+                        )
                 except HTTPException as exc:
                     failed.append(
                         {
