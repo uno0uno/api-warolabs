@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
 from app.models.ingredient import PurchaseUnitInput, TenantIngredientCreate
+from app.models.recipe_base import RecipeBaseIngredientCreate, RecipeBaseTypeCreate
 from app.services.aws_s3_service import AWSS3Service
 from app.services.billing_service import (
     check_plan_quota_growth,
@@ -24,6 +25,7 @@ from app.services.billing_service import (
 )
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 from app.services.ingredients_service import create_tenant_ingredient
+from app.services.recipe_bases_service import create_recipe_base_on_conn
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,15 @@ WAREHOUSE_TEMPLATE_HEADERS = [
     "create_product",
     "price",
     "menu_category",
+]
+
+RECIPE_BASES_TEMPLATE_HEADERS = [
+    "recipe_name",
+    "ingredient",
+    "quantity",
+    "unit",
+    "notes",
+    "description",
 ]
 
 RETENTION_DAYS = 90
@@ -76,6 +87,33 @@ def warehouse_csv_template_bytes() -> bytes:
             "create_product": "false",
             "price": "",
             "menu_category": "",
+        }
+    )
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def recipe_bases_csv_template_bytes() -> bytes:
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=RECIPE_BASES_TEMPLATE_HEADERS)
+    writer.writeheader()
+    writer.writerow(
+        {
+            "recipe_name": "Salsa tomate",
+            "ingredient": "Tomate",
+            "quantity": "0.5",
+            "unit": "kg",
+            "notes": "",
+            "description": "Base para pastas",
+        }
+    )
+    writer.writerow(
+        {
+            "recipe_name": "Salsa tomate",
+            "ingredient": "Cebolla",
+            "quantity": "0.1",
+            "unit": "kg",
+            "notes": "picada",
+            "description": "Base para pastas",
         }
     )
     return buf.getvalue().encode("utf-8-sig")
@@ -134,6 +172,54 @@ async def _ingredient_name_exists(conn, tenant_id: UUID, name: str) -> bool:
         name,
     )
     return bool(row)
+
+
+async def _find_ingredient_by_name(conn, tenant_id: UUID, name: str) -> Optional[Dict[str, Any]]:
+    row = await conn.fetchrow(
+        """
+        SELECT id, name, unit
+        FROM ingredients
+        WHERE tenant_id = $1 AND LOWER(TRIM(name)) = LOWER(TRIM($2))
+          AND COALESCE(is_active, true) = true
+        LIMIT 1
+        """,
+        tenant_id,
+        name,
+    )
+    return dict(row) if row else None
+
+
+async def _recipe_base_name_exists(conn, tenant_id: UUID, name: str) -> bool:
+    row = await conn.fetchrow(
+        """
+        SELECT 1 FROM product_base_types
+        WHERE tenant_id = $1 AND LOWER(TRIM(name)) = LOWER(TRIM($2))
+        LIMIT 1
+        """,
+        tenant_id,
+        name,
+    )
+    return bool(row)
+
+
+async def _unit_resolves_via_create_path(
+    conn, ingredient_id: UUID, quantity: float, unit: str
+) -> Tuple[bool, Optional[str]]:
+    """
+    Use resolve_to_base_unit (same as create). Fail when unit differs from base
+    and the resolver could not convert (silent fallback would leave unit unchanged).
+    """
+    unit = (unit or "").strip()
+    if not unit:
+        return False, "unit is required"
+    ing = await conn.fetchrow("SELECT unit FROM ingredients WHERE id = $1", ingredient_id)
+    if not ing:
+        return False, "ingredient not found"
+    base_unit = ing["unit"]
+    _qty, out_unit = await resolve_to_base_unit(conn, ingredient_id, quantity, unit)
+    if unit != base_unit and out_unit == unit:
+        return False, f"unit '{unit}' not resolvable for ingredient (base '{base_unit}')"
+    return True, None
 
 
 async def create_resale_product_for_ingredient(
@@ -281,6 +367,41 @@ def parse_warehouse_csv(content: bytes) -> List[Dict[str, str]]:
     for raw in reader:
         rows.append(_normalize_row(raw))
     return rows
+
+
+def parse_recipe_bases_csv(content: bytes) -> List[Dict[str, str]]:
+    return parse_warehouse_csv(content)
+
+
+def validate_recipe_base_line(row: Dict[str, Any], row_num: int) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    recipe_name = (row.get("recipe_name") or "").strip()
+    if not recipe_name:
+        return None, {"row": row_num, "field": "recipe_name", "error": "recipe_name is required"}
+
+    ingredient = (row.get("ingredient") or row.get("ingredient_name") or "").strip()
+    if not ingredient:
+        return None, {"row": row_num, "field": "ingredient", "error": "ingredient is required"}
+
+    qty = _parse_float(row.get("quantity"))
+    if qty is None or qty <= 0:
+        return None, {"row": row_num, "field": "quantity", "error": "quantity must be a positive number"}
+
+    unit = (row.get("unit") or "").strip()
+    if not unit:
+        return None, {"row": row_num, "field": "unit", "error": "unit is required"}
+
+    notes = (row.get("notes") or "").strip() or None
+    description = (row.get("description") or "").strip() or None
+
+    return {
+        "row": row_num,
+        "recipe_name": recipe_name,
+        "ingredient": ingredient,
+        "quantity": qty,
+        "unit": unit,
+        "notes": notes,
+        "description": description,
+    }, None
 
 
 async def upload_warehouse_import(
@@ -608,25 +729,464 @@ async def commit_warehouse_import(request: Request, job_id: UUID) -> Dict[str, A
     }
 
 
-async def list_import_jobs(request: Request, limit: int = 20) -> Dict[str, Any]:
+async def upload_recipe_bases_import(
+    request: Request,
+    file: UploadFile,
+) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    user_id = session.user_id
+    if not tenant_id or not user_id:
+        raise HTTPException(status_code=401, detail="Tenant session required")
+
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=422, detail="Only .csv files are supported in v1")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=422, detail="Empty file")
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="File too large (max 5MB)")
+
+    try:
+        parse_recipe_bases_csv(raw)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid CSV: {exc}") from exc
+
+    s3 = AWSS3Service()
+    s3_key = await s3.upload_file(
+        file_content=io.BytesIO(raw),
+        filename=file.filename,
+        folder=f"menu/imports/{tenant_id}",
+        content_type=file.content_type or "text/csv",
+    )
+    if not s3_key:
+        raise HTTPException(status_code=500, detail="Failed to store import file")
+
+    async with get_db_connection() as conn:
+        job = await conn.fetchrow(
+            """
+            INSERT INTO menu_import_jobs (
+                tenant_id, uploaded_by, entity_type, status,
+                file_name, mime_type, file_size, s3_key
+            )
+            VALUES ($1, $2, 'recipe_bases', 'uploaded', $3, $4, $5, $6)
+            RETURNING id, status, file_name, created_at
+            """,
+            tenant_id,
+            user_id,
+            file.filename,
+            file.content_type or "text/csv",
+            len(raw),
+            s3_key,
+        )
+
+    return {
+        "success": True,
+        "data": {
+            "id": str(job["id"]),
+            "status": job["status"],
+            "file_name": job["file_name"],
+            "entity_type": "recipe_bases",
+            "created_at": job["created_at"].isoformat() if job["created_at"] else None,
+        },
+    }
+
+
+async def dry_run_recipe_bases_import(request: Request, job_id: UUID) -> Dict[str, Any]:
     session = require_valid_session(request)
     tenant_id = session.tenant_id
     if not tenant_id:
         raise HTTPException(status_code=401, detail="Tenant session required")
 
     async with get_db_connection() as conn:
-        rows = await conn.fetch(
+        job = await conn.fetchrow(
             """
-            SELECT id, entity_type, status, file_name, row_total, row_valid, row_invalid,
-                   row_committed, created_at, updated_at
-            FROM menu_import_jobs
-            WHERE tenant_id = $1
-            ORDER BY created_at DESC
-            LIMIT $2
+            SELECT * FROM menu_import_jobs
+            WHERE id = $1 AND tenant_id = $2 AND entity_type = 'recipe_bases'
             """,
+            job_id,
             tenant_id,
-            limit,
         )
+        if not job:
+            raise HTTPException(status_code=404, detail="Import job not found")
+        if job["status"] == "committed":
+            raise HTTPException(status_code=409, detail="Job already committed")
+
+        raw = await _load_job_bytes(conn, dict(job))
+        rows = parse_recipe_bases_csv(raw)
+
+        errors: List[Dict[str, Any]] = []
+        # recipe_name_lower -> accumulating group
+        groups: Dict[str, Dict[str, Any]] = {}
+        group_order: List[str] = []
+        failed_groups: set = set()
+
+        for idx, row in enumerate(rows, start=2):
+            ok, err = validate_recipe_base_line(row, idx)
+            if err:
+                errors.append(err)
+                # if we know recipe_name, mark group failed
+                rn = (row.get("recipe_name") or "").strip().lower()
+                if rn:
+                    failed_groups.add(rn)
+                continue
+            assert ok is not None
+            key = ok["recipe_name"].lower()
+            if key in failed_groups:
+                errors.append(
+                    {
+                        "row": idx,
+                        "field": "recipe_name",
+                        "error": "recipe skipped due to earlier line errors",
+                    }
+                )
+                continue
+
+            ing = await _find_ingredient_by_name(conn, tenant_id, ok["ingredient"])
+            if not ing:
+                errors.append(
+                    {
+                        "row": idx,
+                        "field": "ingredient",
+                        "error": f"ingredient '{ok['ingredient']}' not found in bodega",
+                    }
+                )
+                failed_groups.add(key)
+                groups.pop(key, None)
+                continue
+
+            resolvable, unit_err = await _unit_resolves_via_create_path(
+                conn, ing["id"], ok["quantity"], ok["unit"]
+            )
+            if not resolvable:
+                errors.append({"row": idx, "field": "unit", "error": unit_err})
+                failed_groups.add(key)
+                groups.pop(key, None)
+                continue
+
+            if key not in groups:
+                if await _recipe_base_name_exists(conn, tenant_id, ok["recipe_name"]):
+                    errors.append(
+                        {
+                            "row": idx,
+                            "field": "recipe_name",
+                            "error": "recipe already exists",
+                        }
+                    )
+                    failed_groups.add(key)
+                    continue
+                groups[key] = {
+                    "recipe_name": ok["recipe_name"],
+                    "description": ok.get("description"),
+                    "ingredients": [],
+                    "rows": [],
+                    "_seen_ingredient_ids": set(),
+                }
+                group_order.append(key)
+
+            group = groups[key]
+            if ok.get("description") and not group.get("description"):
+                group["description"] = ok["description"]
+            iid = str(ing["id"])
+            if iid in group["_seen_ingredient_ids"]:
+                errors.append(
+                    {
+                        "row": idx,
+                        "field": "ingredient",
+                        "error": "duplicate ingredient in recipe",
+                    }
+                )
+                failed_groups.add(key)
+                groups.pop(key, None)
+                continue
+            group["_seen_ingredient_ids"].add(iid)
+            group["ingredients"].append(
+                {
+                    "ingredient_id": iid,
+                    "ingredient_name": ing["name"],
+                    "base_quantity": ok["quantity"],
+                    "unit": ok["unit"],
+                    "notes": ok.get("notes"),
+                    "row": ok["row"],
+                }
+            )
+            group["rows"].append(ok["row"])
+
+        # Drop any groups that later failed
+        for key in list(groups.keys()):
+            if key in failed_groups:
+                groups.pop(key, None)
+
+        valid = []
+        for key in group_order:
+            if key not in groups:
+                continue
+            g = groups[key]
+            if not g["ingredients"]:
+                continue
+            g.pop("_seen_ingredient_ids", None)
+            valid.append(g)
+
+        # Also mark duplicate recipe names that appeared after first valid start — already handled via failed_groups
+
+        quota_hits: List[Dict[str, Any]] = []
+        hit = await preview_plan_quota_growth(
+            conn, tenant_id, "recipe_bases", additional=len(valid)
+        )
+        if hit:
+            quota_hits.append(hit)
+            errors.append(
+                {
+                    "row": None,
+                    "field": "quota",
+                    "error": (
+                        f"recipe_bases: projected {hit['projected']} exceeds limit "
+                        f"{hit['limit']} (used {hit['used']} + {hit['additional']})"
+                    ),
+                }
+            )
+
+        report = {
+            "valid": valid,
+            "errors": errors,
+            "recipe_count": len(valid),
+            "line_total": len(rows),
+            "quota_hits": quota_hits,
+            "quota_exceeded": bool(quota_hits),
+        }
+
+        await conn.execute(
+            """
+            UPDATE menu_import_jobs
+            SET status = 'dry_run',
+                row_total = $2,
+                row_valid = $3,
+                row_invalid = $4,
+                dry_run_report = $5::jsonb,
+                updated_at = NOW(),
+                error_message = NULL
+            WHERE id = $1
+            """,
+            job_id,
+            len(rows),
+            len(valid),
+            len(errors),
+            json.dumps(report),
+        )
+
+    return {
+        "success": True,
+        "data": {
+            "id": str(job_id),
+            "status": "dry_run",
+            "row_total": len(rows),
+            "row_valid": len(valid),
+            "row_invalid": len(errors),
+            "report": report,
+        },
+    }
+
+
+async def commit_recipe_bases_import(request: Request, job_id: UUID) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    user_id = session.user_id
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant session required")
+
+    async with get_db_connection() as conn:
+        async with conn.transaction():
+            job = await conn.fetchrow(
+                """
+                SELECT * FROM menu_import_jobs
+                WHERE id = $1 AND tenant_id = $2 AND entity_type = 'recipe_bases'
+                FOR UPDATE
+                """,
+                job_id,
+                tenant_id,
+            )
+            if not job:
+                raise HTTPException(status_code=404, detail="Import job not found")
+            if job["status"] == "committed":
+                raise HTTPException(status_code=409, detail="Job already committed")
+            if job["status"] != "dry_run" or not job["dry_run_report"]:
+                raise HTTPException(status_code=409, detail="Run dry-run before commit")
+
+            report = job["dry_run_report"]
+            if isinstance(report, str):
+                report = json.loads(report)
+            if report.get("quota_exceeded"):
+                raise HTTPException(
+                    status_code=429,
+                    detail="Plan quota exceeded for this import; re-run dry-run after reducing rows",
+                )
+            valid_recipes = report.get("valid") or []
+            if not valid_recipes:
+                raise HTTPException(status_code=422, detail="No valid recipes to commit")
+
+            committed = []
+            failed = []
+            for item in valid_recipes:
+                try:
+                    async with conn.transaction():
+                        ingredients = [
+                            RecipeBaseIngredientCreate(
+                                ingredient_id=UUID(line["ingredient_id"]),
+                                base_quantity=float(line["base_quantity"]),
+                                unit=line["unit"],
+                                is_required=True,
+                                notes=line.get("notes"),
+                            )
+                            for line in item["ingredients"]
+                        ]
+                        recipe_id = await create_recipe_base_on_conn(
+                            conn,
+                            tenant_id,
+                            RecipeBaseTypeCreate(
+                                name=item["recipe_name"],
+                                description=item.get("description"),
+                                is_active=True,
+                                ingredients=ingredients,
+                            ),
+                            user_id=user_id,
+                            record_history=True,
+                        )
+                        committed.append(
+                            {
+                                "recipe_name": item["recipe_name"],
+                                "recipe_base_id": str(recipe_id),
+                                "ingredient_count": len(ingredients),
+                            }
+                        )
+                except HTTPException as exc:
+                    failed.append(
+                        {
+                            "recipe_name": item.get("recipe_name"),
+                            "error": exc.detail,
+                        }
+                    )
+                except Exception as exc:
+                    logger.exception("recipe_bases import commit failed")
+                    failed.append(
+                        {
+                            "recipe_name": item.get("recipe_name"),
+                            "error": str(exc),
+                        }
+                    )
+
+            commit_report = {"committed": committed, "failed": failed}
+            status = "committed" if committed else "failed"
+            await conn.execute(
+                """
+                UPDATE menu_import_jobs
+                SET status = $2,
+                    row_committed = $3,
+                    commit_report = $4::jsonb,
+                    updated_at = NOW(),
+                    error_message = $5
+                WHERE id = $1
+                """,
+                job_id,
+                status,
+                len(committed),
+                json.dumps(commit_report),
+                None if committed else "No recipes committed",
+            )
+
+    return {
+        "success": True,
+        "data": {
+            "id": str(job_id),
+            "status": status,
+            "row_committed": len(committed),
+            "report": commit_report,
+        },
+    }
+
+
+async def dry_run_import(request: Request, job_id: UUID) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant session required")
+    async with get_db_connection() as conn:
+        job = await conn.fetchrow(
+            "SELECT entity_type FROM menu_import_jobs WHERE id = $1 AND tenant_id = $2",
+            job_id,
+            tenant_id,
+        )
+    if not job:
+        raise HTTPException(status_code=404, detail="Import job not found")
+    entity = job["entity_type"]
+    if entity == "warehouse":
+        return await dry_run_warehouse_import(request, job_id)
+    if entity == "recipe_bases":
+        return await dry_run_recipe_bases_import(request, job_id)
+    raise HTTPException(status_code=422, detail=f"Unsupported entity_type: {entity}")
+
+
+async def commit_import(request: Request, job_id: UUID) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant session required")
+    async with get_db_connection() as conn:
+        job = await conn.fetchrow(
+            "SELECT entity_type FROM menu_import_jobs WHERE id = $1 AND tenant_id = $2",
+            job_id,
+            tenant_id,
+        )
+    if not job:
+        raise HTTPException(status_code=404, detail="Import job not found")
+    entity = job["entity_type"]
+    if entity == "warehouse":
+        return await commit_warehouse_import(request, job_id)
+    if entity == "recipe_bases":
+        return await commit_recipe_bases_import(request, job_id)
+    raise HTTPException(status_code=422, detail=f"Unsupported entity_type: {entity}")
+
+
+async def list_import_jobs(
+    request: Request,
+    limit: int = 20,
+    entity_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant session required")
+
+    async with get_db_connection() as conn:
+        if entity_type:
+            rows = await conn.fetch(
+                """
+                SELECT id, entity_type, status, file_name, row_total, row_valid, row_invalid,
+                       row_committed, created_at, updated_at
+                FROM menu_import_jobs
+                WHERE tenant_id = $1 AND entity_type = $2
+                ORDER BY created_at DESC
+                LIMIT $3
+                """,
+                tenant_id,
+                entity_type,
+                limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT id, entity_type, status, file_name, row_total, row_valid, row_invalid,
+                       row_committed, created_at, updated_at
+                FROM menu_import_jobs
+                WHERE tenant_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                tenant_id,
+                limit,
+            )
     return {
         "success": True,
         "data": [
@@ -695,11 +1255,15 @@ async def get_import_job(request: Request, job_id: UUID) -> Dict[str, Any]:
     }
 
 
-def template_streaming_response() -> StreamingResponse:
+def template_streaming_response(entity: str = "warehouse") -> StreamingResponse:
+    if entity == "recipe_bases":
+        payload = recipe_bases_csv_template_bytes()
+        filename = "waro-recipe-bases-import-template.csv"
+    else:
+        payload = warehouse_csv_template_bytes()
+        filename = "waro-bodega-import-template.csv"
     return StreamingResponse(
-        io.BytesIO(warehouse_csv_template_bytes()),
+        io.BytesIO(payload),
         media_type="text/csv",
-        headers={
-            "Content-Disposition": 'attachment; filename="waro-bodega-import-template.csv"'
-        },
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
