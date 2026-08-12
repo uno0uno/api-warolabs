@@ -34,6 +34,34 @@ def test_validate_none_option_happy():
     assert ok["price"] == Decimal("0")
 
 
+def test_validate_empty_price_defaults_zero():
+    ok, err = validate_modifier_line(
+        {
+            "group_name": "G",
+            "option_name": "O",
+            "price": "",
+            "option_type": "NONE",
+        },
+        2,
+    )
+    assert err is None
+    assert ok["price"] == Decimal("0")
+
+
+def test_validate_invalid_price_errors():
+    ok, err = validate_modifier_line(
+        {
+            "group_name": "G",
+            "option_name": "O",
+            "price": "abc",
+            "option_type": "NONE",
+        },
+        2,
+    )
+    assert ok is None
+    assert err["field"] == "price"
+
+
 def test_validate_ingredient_requires_fields():
     ok, err = validate_modifier_line(
         {

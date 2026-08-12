@@ -1775,9 +1775,13 @@ def validate_modifier_line(
     if not option_name:
         return None, {"row": row_num, "field": "option_name", "error": "option_name is required"}
 
-    price = _parse_decimal(row.get("price"))
-    if price is None:
+    price_raw = str(row.get("price") or "").strip()
+    if price_raw == "":
         price = Decimal("0")
+    else:
+        price = _parse_decimal(row.get("price"))
+        if price is None:
+            return None, {"row": row_num, "field": "price", "error": "invalid price"}
 
     min_qty = 0
     max_qty = 1
@@ -1990,6 +1994,22 @@ async def dry_run_modifiers_import(request: Request, job_id: UUID) -> Dict[str, 
                 group_order.append(key)
 
             group = groups[key]
+            if (
+                group["min_qty"] != ok["min_qty"]
+                or group["max_qty"] != ok["max_qty"]
+                or group["is_required"] != ok["is_required"]
+            ):
+                errors.append(
+                    {
+                        "row": idx,
+                        "field": "group_name",
+                        "error": "min_qty/max_qty/is_required must match other rows in the group",
+                    }
+                )
+                failed_groups.add(key)
+                groups.pop(key, None)
+                continue
+
             opt_key = ok["option_name"].lower()
             if opt_key in group["_seen_options"]:
                 errors.append(
