@@ -1,14 +1,47 @@
 """Menu / bodega / recipe-bases bulk import API (#2254, #2255)."""
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 
-from app.core.permissions import Module, require_any_module, require_module
+from app.core.middleware import require_valid_session
+from app.core.permissions import Module, require_module
+from app.database import get_db_connection
 from app.services import menu_import_service as svc
 
 router = APIRouter()
 
-_IMPORT_READ = Depends(require_any_module(Module.ABASTECIMIENTO, Module.MENU))
+
+async def _assert_job_module(request: Request, job_id: UUID) -> str:
+    """Enforce ABASTECIMIENTO for warehouse jobs, MENU for recipe_bases jobs."""
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant session required")
+    async with get_db_connection() as conn:
+        job = await conn.fetchrow(
+            "SELECT entity_type FROM menu_import_jobs WHERE id = $1 AND tenant_id = $2",
+            job_id,
+            tenant_id,
+        )
+    if not job:
+        raise HTTPException(status_code=404, detail="Import job not found")
+    entity = job["entity_type"]
+    if entity == "warehouse":
+        await require_module(Module.ABASTECIMIENTO)(request)
+    elif entity == "recipe_bases":
+        await require_module(Module.MENU)(request)
+    else:
+        raise HTTPException(status_code=422, detail=f"Unsupported entity_type: {entity}")
+    return entity
+
+
+async def _assert_list_module(request: Request, entity_type: str) -> None:
+    if entity_type == "warehouse":
+        await require_module(Module.ABASTECIMIENTO)(request)
+    elif entity_type == "recipe_bases":
+        await require_module(Module.MENU)(request)
+    else:
+        raise HTTPException(status_code=422, detail=f"Unsupported entity_type: {entity_type}")
 
 
 @router.get(
@@ -27,17 +60,19 @@ async def download_recipe_bases_template():
     return svc.template_streaming_response("recipe_bases")
 
 
-@router.get("/jobs", dependencies=[_IMPORT_READ])
+@router.get("/jobs")
 async def list_jobs(
     request: Request,
     limit: int = Query(default=20, ge=1, le=100),
-    entity_type: str | None = Query(default=None),
+    entity_type: str = Query(..., description="warehouse | recipe_bases"),
 ):
+    await _assert_list_module(request, entity_type)
     return await svc.list_import_jobs(request, limit=limit, entity_type=entity_type)
 
 
-@router.get("/jobs/{job_id}", dependencies=[_IMPORT_READ])
+@router.get("/jobs/{job_id}")
 async def get_job(request: Request, job_id: UUID):
+    await _assert_job_module(request, job_id)
     return await svc.get_import_job(request, job_id)
 
 
@@ -59,11 +94,13 @@ async def upload_recipe_bases(request: Request, file: UploadFile = File(...)):
     return await svc.upload_recipe_bases_import(request, file)
 
 
-@router.post("/jobs/{job_id}/dry-run", dependencies=[_IMPORT_READ])
+@router.post("/jobs/{job_id}/dry-run")
 async def dry_run(request: Request, job_id: UUID):
+    await _assert_job_module(request, job_id)
     return await svc.dry_run_import(request, job_id)
 
 
-@router.post("/jobs/{job_id}/commit", dependencies=[_IMPORT_READ])
+@router.post("/jobs/{job_id}/commit")
 async def commit(request: Request, job_id: UUID):
+    await _assert_job_module(request, job_id)
     return await svc.commit_import(request, job_id)

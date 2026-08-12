@@ -202,8 +202,13 @@ async def _recipe_base_name_exists(conn, tenant_id: UUID, name: str) -> bool:
     return bool(row)
 
 
-async def _unit_is_resolvable(conn, ingredient_id: UUID, unit: str) -> Tuple[bool, Optional[str]]:
-    """True when unit matches base or has an active purchase-unit conversion (same as create path)."""
+async def _unit_resolves_via_create_path(
+    conn, ingredient_id: UUID, quantity: float, unit: str
+) -> Tuple[bool, Optional[str]]:
+    """
+    Use resolve_to_base_unit (same as create). Fail when unit differs from base
+    and the resolver could not convert (silent fallback would leave unit unchanged).
+    """
     unit = (unit or "").strip()
     if not unit:
         return False, "unit is required"
@@ -211,23 +216,10 @@ async def _unit_is_resolvable(conn, ingredient_id: UUID, unit: str) -> Tuple[boo
     if not ing:
         return False, "ingredient not found"
     base_unit = ing["unit"]
-    if unit == base_unit:
-        return True, None
-    conv = await conn.fetchrow(
-        """
-        SELECT 1
-        FROM ingredient_purchase_units
-        WHERE ingredient_id = $1
-          AND (purchase_unit_label = $2 OR purchase_unit = $2)
-          AND is_active = TRUE
-        LIMIT 1
-        """,
-        ingredient_id,
-        unit,
-    )
-    if conv:
-        return True, None
-    return False, f"unit '{unit}' not resolvable for ingredient (base '{base_unit}')"
+    _qty, out_unit = await resolve_to_base_unit(conn, ingredient_id, quantity, unit)
+    if unit != base_unit and out_unit == unit:
+        return False, f"unit '{unit}' not resolvable for ingredient (base '{base_unit}')"
+    return True, None
 
 
 async def create_resale_product_for_ingredient(
@@ -866,7 +858,9 @@ async def dry_run_recipe_bases_import(request: Request, job_id: UUID) -> Dict[st
                 groups.pop(key, None)
                 continue
 
-            resolvable, unit_err = await _unit_is_resolvable(conn, ing["id"], ok["unit"])
+            resolvable, unit_err = await _unit_resolves_via_create_path(
+                conn, ing["id"], ok["quantity"], ok["unit"]
+            )
             if not resolvable:
                 errors.append({"row": idx, "field": "unit", "error": unit_err})
                 failed_groups.add(key)
