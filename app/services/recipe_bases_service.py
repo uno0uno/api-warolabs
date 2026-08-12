@@ -78,6 +78,89 @@ def _recipe_base_ingredient_from_row(ing_row) -> RecipeBaseIngredient:
     data.setdefault("controla_inventario", False)
     return RecipeBaseIngredient(**data)
 
+async def create_recipe_base_on_conn(
+    conn,
+    tenant_id: UUID,
+    recipe_data: RecipeBaseTypeCreate,
+    *,
+    user_id: Optional[UUID] = None,
+    record_history: bool = True,
+) -> UUID:
+    """
+    Shared create path for UI and CSV import: quotas + resolve_to_base_unit + inserts.
+    Caller owns the connection/transaction.
+    """
+    if recipe_data.ingredients:
+        ingredient_ids = [ing.ingredient_id for ing in recipe_data.ingredients]
+        if len(ingredient_ids) != len(set(ingredient_ids)):
+            raise HTTPException(
+                status_code=400,
+                detail="No se puede agregar el mismo ingrediente más de una vez en la misma receta",
+            )
+
+    await check_plan_quota_growth(conn, tenant_id, "recipe_bases")
+    base_type_row = await conn.fetchrow(
+        """
+        INSERT INTO product_base_types (name, description, is_active, tenant_id)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id
+        """,
+        recipe_data.name,
+        recipe_data.description,
+        recipe_data.is_active,
+        tenant_id,
+    )
+    base_type_id = base_type_row["id"]
+
+    if recipe_data.ingredients:
+        await check_plan_quota_scoped(
+            conn,
+            tenant_id,
+            "recipe_base_template_lines",
+            base_type_id,
+            projected_count=len(recipe_data.ingredients),
+        )
+        for ingredient_data in recipe_data.ingredients:
+            base_qty, base_unit = await resolve_to_base_unit(
+                conn,
+                ingredient_data.ingredient_id,
+                ingredient_data.base_quantity,
+                ingredient_data.unit,
+            )
+            await conn.execute(
+                """
+                INSERT INTO base_recipe_templates (
+                    product_base_type_id,
+                    ingredient_id,
+                    base_quantity,
+                    unit,
+                    is_required,
+                    notes,
+                    tenant_id
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                base_type_id,
+                ingredient_data.ingredient_id,
+                base_qty,
+                base_unit,
+                ingredient_data.is_required,
+                ingredient_data.notes,
+                tenant_id,
+            )
+
+    if record_history:
+        recipe_snapshot = await menu_history_service.get_recipe_base_snapshot(
+            conn, base_type_id, tenant_id
+        )
+        if recipe_snapshot:
+            await menu_history_service.record_recipe_base_create(
+                conn, tenant_id, base_type_id, recipe_data.name, recipe_snapshot, user_id
+            )
+
+    return base_type_id
+
+
 async def create_recipe_base_type(
     request: Request,
     recipe_data: RecipeBaseTypeCreate
@@ -104,142 +187,29 @@ async def create_recipe_base_type(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
-        # Validate no duplicate ingredients
-        if recipe_data.ingredients:
-            ingredient_ids = [ing.ingredient_id for ing in recipe_data.ingredients]
-            if len(ingredient_ids) != len(set(ingredient_ids)):
-                raise HTTPException(
-                    status_code=400,
-                    detail="No se puede agregar el mismo ingrediente más de una vez en la misma receta"
-                )
-
         async with get_db_connection() as conn:
-            await check_plan_quota_growth(conn, tenant_id, "recipe_bases")
-            # Insert product_base_type
-            insert_base_query = """
-                INSERT INTO product_base_types (name, description, is_active, tenant_id)
-                VALUES ($1, $2, $3, $4)
-                RETURNING id, name, description, is_active, created_at, updated_at
-            """
-
-            base_type_row = await conn.fetchrow(
-                insert_base_query,
-                recipe_data.name,
-                recipe_data.description,
-                recipe_data.is_active,
-                tenant_id
-            )
-
-            base_type_id = base_type_row['id']
-
-            if recipe_data.ingredients:
-                await check_plan_quota_scoped(
+            user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
+            try:
+                base_type_id = await create_recipe_base_on_conn(
                     conn,
                     tenant_id,
-                    "recipe_base_template_lines",
-                    base_type_id,
-                    projected_count=len(recipe_data.ingredients),
+                    recipe_data,
+                    user_id=user_id,
+                    record_history=True,
+                )
+            except asyncpg.UniqueViolationError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ya existe una receta base con ese nombre",
                 )
 
-            # Insert ingredients into base_recipe_templates
-            ingredients = []
-            if recipe_data.ingredients:
-                for ingredient_data in recipe_data.ingredients:
-                    insert_ingredient_query = """
-                        INSERT INTO base_recipe_templates (
-                            product_base_type_id,
-                            ingredient_id,
-                            base_quantity,
-                            unit,
-                            is_required,
-                            notes,
-                            tenant_id
-                        )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
-                        RETURNING id, product_base_type_id, ingredient_id,
-                                  base_quantity, unit, is_required, notes,
-                                  tenant_id, created_at, updated_at
-                    """
-
-                    base_qty, base_unit = await resolve_to_base_unit(
-                        conn,
-                        ingredient_data.ingredient_id,
-                        ingredient_data.base_quantity,
-                        ingredient_data.unit
-                    )
-                    ingredient_row = await conn.fetchrow(
-                        insert_ingredient_query,
-                        base_type_id,
-                        ingredient_data.ingredient_id,
-                        base_qty,
-                        base_unit,
-                        ingredient_data.is_required,
-                        ingredient_data.notes,
-                        tenant_id
-                    )
-
-                    # Fetch ingredient cost/stock metadata for the response
-                    meta_query = """
-                        SELECT
-                            name,
-                            unit as stock_unit,
-                            CAST(unit_weight_gr AS float) as unit_weight_gr,
-                            unit_weight_unit,
-                            COALESCE(costo_unitario, 0) as costo_unitario,
-                            COALESCE(controla_inventario, false) as controla_inventario
-                        FROM ingredients WHERE id = $1
-                    """
-                    meta_row = await conn.fetchrow(meta_query, ingredient_data.ingredient_id)
-
-                    ingredient_dict = dict(ingredient_row)
-                    if meta_row:
-                        ingredient_dict['ingredient_name'] = meta_row['name']
-                        ingredient_dict['stock_unit'] = meta_row['stock_unit']
-                        ingredient_dict['unit_weight_gr'] = meta_row['unit_weight_gr']
-                        ingredient_dict['unit_weight_unit'] = meta_row['unit_weight_unit']
-                        ingredient_dict['costo_unitario'] = float(meta_row['costo_unitario'] or 0)
-                        ingredient_dict['controla_inventario'] = meta_row['controla_inventario']
-                    else:
-                        ingredient_dict['ingredient_name'] = None
-
-                    ingredients.append(_recipe_base_ingredient_from_row(ingredient_dict))
-
-            # Build response
-            recipe_base_type = RecipeBaseType(
-                id=base_type_row['id'],
-                name=base_type_row['name'],
-                description=base_type_row['description'],
-                is_active=base_type_row['is_active'],
-                created_at=base_type_row['created_at'],
-                updated_at=base_type_row['updated_at'],
-                ingredients=ingredients
-            )
-
-            # Registrar en historial
-            user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
-            recipe_snapshot = await menu_history_service.get_recipe_base_snapshot(conn, base_type_id, tenant_id)
-            if recipe_snapshot:
-                await menu_history_service.record_recipe_base_create(
-                    conn, tenant_id, base_type_id, recipe_data.name,
-                    recipe_snapshot, user_id
-                )
-
-            logger.info(f"Created recipe base type: {base_type_id} for tenant: {tenant_id}")
-
-            return RecipeBaseTypeResponse(
-                success=True,
-                data=recipe_base_type
-            )
+            # Re-load for response shape (ingredients + meta)
+            return await get_recipe_base_type_by_id(request, base_type_id)
 
     except AuthenticationError:
         raise
     except HTTPException:
         raise
-    except asyncpg.UniqueViolationError:
-        raise HTTPException(
-            status_code=400,
-            detail="Ya existe una receta base con ese nombre"
-        )
     except Exception as e:
         logger.error(f"Error creating recipe base type: {str(e)}")
         raise APIError(f"Error creating recipe base type: {str(e)}", status_code=500)
