@@ -10,13 +10,14 @@ branch: wr-2237-online-menu-product-orders
 risk: low
 
 paths:
-  - sql/YYYYMMDD_tenant_online_menu_product_orders.sql
+  - sql/20260811_tenant_online_menu_product_orders.sql
   - app/services/categories_service.py
   - app/routers/categories.py
   - app/models/category.py
   - app/services/public_restaurant_service.py
   - app/services/public_table_qr_service.py
   - tests/test_online_menu_product_order.py
+  - tests/test_categories_online_menu_order.py
 
 ac:
   - ADD-only CREATE tenant_online_menu_product_orders (tenant_id, product_id PK, display_order) + index
