@@ -68,8 +68,10 @@ async def test_get_session_token_picks_newest_valid_among_duplicates():
 
     assert token == fresh
     conn.fetchrow.assert_awaited_once()
-    _sql, bound_ids = conn.fetchrow.await_args.args
+    _sql, bound_ids, idle_hours = conn.fetchrow.await_args.args
     assert bound_ids == [UUID(stale), UUID(fresh)]
+    assert idle_hours == 4
+    assert "last_activity_at" in _sql
     assert conn.execute.await_count == 1
     _deactivate_sql, stale_uuid = conn.execute.await_args.args
     assert stale_uuid == UUID(stale)
