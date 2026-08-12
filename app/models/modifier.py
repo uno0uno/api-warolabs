@@ -134,9 +134,13 @@ class ModifierGroupBase(BaseModel):
 
 class ModifierGroupCreate(ModifierGroupBase):
     """Create modifier group with modifiers"""
-    product_ids: List[UUID] = Field(..., min_length=1, description="Product IDs to associate")
+    # Empty allowed for CSV import / unassigned groups (matrix attach is separate UX).
+    product_ids: List[UUID] = Field(
+        default_factory=list,
+        description="Product IDs to associate (optional; can be empty)",
+    )
     modifiers: List[ModifierCreate] = Field(default=[], description="Modifiers in this group")
-    tenant_id: UUID = Field(..., description="Tenant ID")
+    tenant_id: Optional[UUID] = Field(None, description="Tenant ID (session preferred)")
 
 
 class ModifierGroupUpdate(BaseModel):

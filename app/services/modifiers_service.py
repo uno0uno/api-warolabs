@@ -228,6 +228,73 @@ async def _insert_modifier(conn, group_id: UUID, modifier, *, skip_quota_check: 
         await _replace_modifier_recipes(conn, modifier_id, modifier.recipe_lines)
     return modifier_id
 
+
+async def create_modifier_group_on_conn(
+    conn,
+    tenant_id: UUID,
+    group_data: ModifierGroupCreate,
+    *,
+    user_id: Optional[UUID] = None,
+    record_history: bool = True,
+) -> UUID:
+    """
+    Shared create path for UI and CSV import. Caller owns the connection/transaction.
+    product_ids may be empty (import v1 — no product↔matrix).
+    """
+    await check_plan_quota_growth(conn, tenant_id, "modifier_groups")
+    group_result = await conn.fetchrow(
+        """
+        INSERT INTO modifier_groups (
+            tenant_id, name, min_qty, max_qty,
+            is_required, sort_order
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id
+        """,
+        tenant_id,
+        group_data.name,
+        group_data.min_qty,
+        group_data.max_qty,
+        group_data.is_required,
+        group_data.sort_order,
+    )
+    group_id = group_result["id"]
+
+    for product_id in group_data.product_ids or []:
+        await conn.execute(
+            """
+            INSERT INTO product_modifier_groups (
+                product_id, modifier_group_id, tenant_id
+            )
+            VALUES ($1, $2, $3)
+            """,
+            product_id,
+            group_id,
+            tenant_id,
+        )
+
+    if group_data.modifiers:
+        await check_plan_quota_scoped(
+            conn,
+            tenant_id,
+            "modifier_options_per_group",
+            group_id,
+            projected_count=len(group_data.modifiers),
+        )
+        for modifier in group_data.modifiers:
+            await _insert_modifier(conn, group_id, modifier, skip_quota_check=True)
+
+    if record_history:
+        group_snapshot = await menu_history_service.get_modifier_group_snapshot(
+            conn, group_id, tenant_id
+        )
+        if group_snapshot:
+            await menu_history_service.record_modifier_group_create(
+                conn, tenant_id, group_id, group_data.name, group_snapshot, user_id
+            )
+    return group_id
+
+
 async def create_modifier_group(
     request: Request,
     group_data: ModifierGroupCreate
@@ -245,71 +312,22 @@ async def create_modifier_group(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
-                await check_plan_quota_growth(conn, tenant_id, "modifier_groups")
-                # 1. Insert modifier group (without product_id)
-                group_query = """
-                    INSERT INTO modifier_groups (
-                        tenant_id, name, min_qty, max_qty,
-                        is_required, sort_order
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    RETURNING id, created_at, updated_at
-                """
-                group_result = await conn.fetchrow(
-                    group_query,
+                user_id = session_context.user_id if hasattr(session_context, "user_id") else None
+                group_id = await create_modifier_group_on_conn(
+                    conn,
                     tenant_id,
-                    group_data.name,
-                    group_data.min_qty,
-                    group_data.max_qty,
-                    group_data.is_required,
-                    group_data.sort_order
+                    group_data,
+                    user_id=user_id,
+                    record_history=True,
                 )
-
-                group_id = group_result['id']
-
-                # 2. Insert product associations in junction table
-                product_assoc_query = """
-                    INSERT INTO product_modifier_groups (
-                        product_id, modifier_group_id, tenant_id
-                    )
-                    VALUES ($1, $2, $3)
-                """
-                for product_id in group_data.product_ids:
-                    await conn.execute(
-                        product_assoc_query,
-                        product_id,
-                        group_id,
-                        tenant_id
-                    )
-
-                # 3. Insert modifiers (option types + optional modifier_recipes)
-                if group_data.modifiers:
-                    await check_plan_quota_scoped(
-                        conn,
-                        tenant_id,
-                        "modifier_options_per_group",
-                        group_id,
-                        projected_count=len(group_data.modifiers),
-                    )
-                    for modifier in group_data.modifiers:
-                        await _insert_modifier(conn, group_id, modifier, skip_quota_check=True)
-
-                # 4. Registrar en historial
-                user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
-                group_snapshot = await menu_history_service.get_modifier_group_snapshot(conn, group_id, tenant_id)
-                if group_snapshot:
-                    await menu_history_service.record_modifier_group_create(
-                        conn, tenant_id, group_id, group_data.name,
-                        group_snapshot, user_id
-                    )
-
-                # 5. Get complete group with modifiers and products
                 return await get_modifier_group_by_id(request, group_id, conn)
 
     except AuthenticationError as e:
         raise e
     except ValueError as e:
         raise APIError(str(e), status_code=400)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating modifier group: {str(e)}")
         raise APIError(f"Error creating modifier group: {str(e)}", status_code=500)
