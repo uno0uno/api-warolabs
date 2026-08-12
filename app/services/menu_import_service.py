@@ -12,6 +12,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
+import asyncpg
 
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
@@ -26,6 +27,7 @@ from app.services.billing_service import (
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 from app.services.ingredients_service import create_tenant_ingredient
 from app.services.recipe_bases_service import create_recipe_base_on_conn
+from app.services import cost_resolution_service
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,15 @@ RECIPE_BASES_TEMPLATE_HEADERS = [
     "unit",
     "notes",
     "description",
+]
+
+PRODUCTS_TEMPLATE_HEADERS = [
+    "name",
+    "price",
+    "menu_category",
+    "is_available",
+    "recipe_bases",
+    "finish_resale",
 ]
 
 RETENTION_DAYS = 90
@@ -114,6 +125,33 @@ def recipe_bases_csv_template_bytes() -> bytes:
             "unit": "kg",
             "notes": "picada",
             "description": "Base para pastas",
+        }
+    )
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def products_csv_template_bytes() -> bytes:
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=PRODUCTS_TEMPLATE_HEADERS)
+    writer.writeheader()
+    writer.writerow(
+        {
+            "name": "Pasta bolognesa",
+            "price": "18000",
+            "menu_category": "Platos",
+            "is_available": "true",
+            "recipe_bases": "Salsa tomate",
+            "finish_resale": "false",
+        }
+    )
+    writer.writerow(
+        {
+            "name": "Coca-Cola 350ml",
+            "price": "3500",
+            "menu_category": "Bebidas",
+            "is_available": "true",
+            "recipe_bases": "",
+            "finish_resale": "true",
         }
     )
     return buf.getvalue().encode("utf-8-sig")
@@ -1107,6 +1145,549 @@ async def commit_recipe_bases_import(request: Request, job_id: UUID) -> Dict[str
     }
 
 
+def parse_products_csv(content: bytes) -> List[Dict[str, str]]:
+    return parse_warehouse_csv(content)
+
+
+def validate_product_row(
+    row: Dict[str, Any], row_num: int
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    name = (row.get("name") or "").strip()
+    if not name:
+        return None, {"row": row_num, "field": "name", "error": "name is required"}
+
+    finish_resale = _truthy(row.get("finish_resale"))
+    price = _parse_decimal(row.get("price"))
+    if price is None or price <= 0:
+        return None, {"row": row_num, "field": "price", "error": "price must be a positive number"}
+
+    menu_category = (row.get("menu_category") or "").strip()
+    if not menu_category:
+        return None, {"row": row_num, "field": "menu_category", "error": "menu_category is required"}
+
+    recipe_bases_raw = (row.get("recipe_bases") or "").strip()
+    recipe_base_names = [
+        p.strip() for p in recipe_bases_raw.replace("|", ";").split(";") if p.strip()
+    ]
+    if finish_resale and recipe_base_names:
+        return None, {
+            "row": row_num,
+            "field": "recipe_bases",
+            "error": "finish_resale cannot be combined with recipe_bases",
+        }
+
+    is_available = True
+    if row.get("is_available") is not None and str(row.get("is_available")).strip() != "":
+        is_available = _truthy(row.get("is_available"))
+
+    return {
+        "row": row_num,
+        "name": name,
+        "price": price,
+        "menu_category": menu_category,
+        "is_available": is_available,
+        "recipe_base_names": recipe_base_names,
+        "finish_resale": finish_resale,
+    }, None
+
+
+async def _product_name_exists(conn, tenant_id: UUID, name: str) -> bool:
+    row = await conn.fetchrow(
+        """
+        SELECT 1 FROM product
+        WHERE tenant_id = $1 AND LOWER(TRIM(name)) = LOWER(TRIM($2))
+        LIMIT 1
+        """,
+        tenant_id,
+        name,
+    )
+    return bool(row)
+
+
+async def _find_recipe_base_by_name(conn, tenant_id: UUID, name: str) -> Optional[UUID]:
+    row = await conn.fetchrow(
+        """
+        SELECT id FROM product_base_types
+        WHERE tenant_id = $1 AND LOWER(TRIM(name)) = LOWER(TRIM($2))
+        LIMIT 1
+        """,
+        tenant_id,
+        name,
+    )
+    return row["id"] if row else None
+
+
+async def _find_incomplete_resale_ingredient(
+    conn, tenant_id: UUID, name: str
+) -> Optional[Dict[str, Any]]:
+    """is_resale ingredient with no linked resale product."""
+    row = await conn.fetchrow(
+        """
+        SELECT i.id, i.name, i.unit, i.is_resale
+        FROM ingredients i
+        WHERE i.tenant_id = $1
+          AND LOWER(TRIM(i.name)) = LOWER(TRIM($2))
+          AND COALESCE(i.is_active, true) = true
+          AND COALESCE(i.is_resale, false) = true
+          AND NOT EXISTS (
+            SELECT 1
+            FROM product_recipes pr
+            INNER JOIN product p ON p.id = pr.product_id AND p.tenant_id = i.tenant_id
+            WHERE pr.ingredient_id = i.id AND COALESCE(p.is_resale, false) = true
+          )
+        LIMIT 1
+        """,
+        tenant_id,
+        name,
+    )
+    return dict(row) if row else None
+
+
+async def create_menu_product_on_conn(
+    conn,
+    tenant_id: UUID,
+    *,
+    name: str,
+    price: Decimal,
+    category_id: UUID,
+    is_available: bool = True,
+    recipe_base_ids: Optional[List[UUID]] = None,
+) -> UUID:
+    """Menu product create subset for CSV (no auto_resale; use create_resale_product_for_ingredient)."""
+    await check_plan_quota_growth(conn, tenant_id, "menu_products")
+    product_result = await conn.fetchrow(
+        """
+        INSERT INTO product (
+            name, description, price, category_id, product_base_type_id, preparation_time,
+            controla_stock, is_available, is_available_online, is_available_table_qr,
+            is_combo, is_resale, open_priced, allow_modifiers,
+            tax_category, tax_resolution, tax_line_key,
+            tenant_id, station_id, kitchen_name, image_url, costo_percibido
+        )
+        VALUES (
+            $1, NULL, $2, $3, NULL, NULL,
+            true, $4, true, false,
+            false, false, false, true,
+            'standard', 'inherit', NULL,
+            $5, NULL, NULL, NULL, NULL
+        )
+        RETURNING id
+        """,
+        name,
+        price,
+        category_id,
+        is_available,
+        tenant_id,
+    )
+    product_id = product_result["id"]
+    for rb_id in recipe_base_ids or []:
+        # v1: qty=1 per base; CSV has no qty column yet
+        await conn.execute(
+            """
+            INSERT INTO product_base_recipes (
+                product_id, product_base_type_id, tenant_id, quantity
+            )
+            VALUES ($1, $2, $3, 1)
+            """,
+            product_id,
+            rb_id,
+            tenant_id,
+        )
+    tracks = bool(recipe_base_ids)
+    await cost_resolution_service.persist_product_costo_calculado(
+        product_id,
+        tenant_id,
+        conn,
+        tracks_inventory=tracks,
+    )
+    return product_id
+
+
+async def upload_products_import(request: Request, file: UploadFile) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    user_id = session.user_id
+    if not tenant_id or not user_id:
+        raise HTTPException(status_code=401, detail="Tenant session required")
+
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=422, detail="Only .csv files are supported in v1")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=422, detail="Empty file")
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="File too large (max 5MB)")
+
+    try:
+        parse_products_csv(raw)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid CSV: {exc}") from exc
+
+    s3 = AWSS3Service()
+    s3_key = await s3.upload_file(
+        file_content=io.BytesIO(raw),
+        filename=file.filename,
+        folder=f"menu/imports/{tenant_id}",
+        content_type=file.content_type or "text/csv",
+    )
+    if not s3_key:
+        raise HTTPException(status_code=500, detail="Failed to store import file")
+
+    async with get_db_connection() as conn:
+        job = await conn.fetchrow(
+            """
+            INSERT INTO menu_import_jobs (
+                tenant_id, uploaded_by, entity_type, status,
+                file_name, mime_type, file_size, s3_key
+            )
+            VALUES ($1, $2, 'products', 'uploaded', $3, $4, $5, $6)
+            RETURNING id, status, file_name, created_at
+            """,
+            tenant_id,
+            user_id,
+            file.filename,
+            file.content_type or "text/csv",
+            len(raw),
+            s3_key,
+        )
+
+    return {
+        "success": True,
+        "data": {
+            "id": str(job["id"]),
+            "status": job["status"],
+            "file_name": job["file_name"],
+            "entity_type": "products",
+            "created_at": job["created_at"].isoformat() if job["created_at"] else None,
+        },
+    }
+
+
+async def dry_run_products_import(request: Request, job_id: UUID) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant session required")
+
+    async with get_db_connection() as conn:
+        job = await conn.fetchrow(
+            """
+            SELECT * FROM menu_import_jobs
+            WHERE id = $1 AND tenant_id = $2 AND entity_type = 'products'
+            """,
+            job_id,
+            tenant_id,
+        )
+        if not job:
+            raise HTTPException(status_code=404, detail="Import job not found")
+        if job["status"] == "committed":
+            raise HTTPException(status_code=409, detail="Job already committed")
+
+        raw = await _load_job_bytes(conn, dict(job))
+        rows = parse_products_csv(raw)
+        valid: List[Dict[str, Any]] = []
+        errors: List[Dict[str, Any]] = []
+        seen_names = set()
+
+        for idx, row in enumerate(rows, start=2):
+            ok, err = validate_product_row(row, idx)
+            if err:
+                errors.append(err)
+                continue
+            assert ok is not None
+            key = ok["name"].lower()
+            if key in seen_names:
+                errors.append({"row": idx, "field": "name", "error": "duplicate name in file"})
+                continue
+            seen_names.add(key)
+
+            cat_id = await _resolve_menu_category_id(conn, tenant_id, ok["menu_category"])
+            if not cat_id:
+                errors.append(
+                    {
+                        "row": idx,
+                        "field": "menu_category",
+                        "error": f"menu category '{ok['menu_category']}' not found",
+                    }
+                )
+                continue
+            ok["menu_category_id"] = str(cat_id)
+
+            if ok["finish_resale"]:
+                ing = await _find_incomplete_resale_ingredient(conn, tenant_id, ok["name"])
+                if not ing:
+                    errors.append(
+                        {
+                            "row": idx,
+                            "field": "name",
+                            "error": (
+                                f"no incomplete resale ingredient named '{ok['name']}' "
+                                "(need is_resale und without linked product)"
+                            ),
+                        }
+                    )
+                    continue
+                if await _product_name_exists(conn, tenant_id, ok["name"]):
+                    errors.append(
+                        {"row": idx, "field": "name", "error": "product already exists"}
+                    )
+                    continue
+                ok["ingredient_id"] = str(ing["id"])
+            else:
+                if await _product_name_exists(conn, tenant_id, ok["name"]):
+                    errors.append(
+                        {"row": idx, "field": "name", "error": "product already exists"}
+                    )
+                    continue
+                rb_ids = []
+                rb_fail = False
+                for rb_name in ok["recipe_base_names"]:
+                    rb_id = await _find_recipe_base_by_name(conn, tenant_id, rb_name)
+                    if not rb_id:
+                        errors.append(
+                            {
+                                "row": idx,
+                                "field": "recipe_bases",
+                                "error": f"recipe base '{rb_name}' not found",
+                            }
+                        )
+                        rb_fail = True
+                        break
+                    rb_ids.append(str(rb_id))
+                if rb_fail:
+                    continue
+                ok["recipe_base_ids"] = rb_ids
+
+            # serialize Decimal
+            ok["price"] = str(ok["price"])
+            valid.append(ok)
+
+        create_count = sum(1 for v in valid if not v.get("finish_resale"))
+        finish_count = sum(1 for v in valid if v.get("finish_resale"))
+        quota_hits: List[Dict[str, Any]] = []
+        hit = await preview_plan_quota_growth(
+            conn, tenant_id, "menu_products", additional=len(valid)
+        )
+        if hit:
+            quota_hits.append(hit)
+            errors.append(
+                {
+                    "row": None,
+                    "field": "quota",
+                    "error": (
+                        f"menu_products: projected {hit['projected']} exceeds limit "
+                        f"{hit['limit']} (used {hit['used']} + {hit['additional']})"
+                    ),
+                }
+            )
+
+        report = {
+            "valid": valid,
+            "errors": errors,
+            "create_count": create_count,
+            "finish_resale_count": finish_count,
+            "quota_hits": quota_hits,
+            "quota_exceeded": bool(quota_hits),
+        }
+
+        await conn.execute(
+            """
+            UPDATE menu_import_jobs
+            SET status = 'dry_run',
+                row_total = $2,
+                row_valid = $3,
+                row_invalid = $4,
+                dry_run_report = $5::jsonb,
+                updated_at = NOW(),
+                error_message = NULL
+            WHERE id = $1
+            """,
+            job_id,
+            len(rows),
+            len(valid),
+            len(errors),
+            json.dumps(report),
+        )
+
+    return {
+        "success": True,
+        "data": {
+            "id": str(job_id),
+            "status": "dry_run",
+            "row_total": len(rows),
+            "row_valid": len(valid),
+            "row_invalid": len(errors),
+            "report": report,
+        },
+    }
+
+
+async def commit_products_import(request: Request, job_id: UUID) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant session required")
+
+    async with get_db_connection() as conn:
+        async with conn.transaction():
+            job = await conn.fetchrow(
+                """
+                SELECT * FROM menu_import_jobs
+                WHERE id = $1 AND tenant_id = $2 AND entity_type = 'products'
+                FOR UPDATE
+                """,
+                job_id,
+                tenant_id,
+            )
+            if not job:
+                raise HTTPException(status_code=404, detail="Import job not found")
+            if job["status"] == "committed":
+                raise HTTPException(status_code=409, detail="Job already committed")
+            if job["status"] != "dry_run" or not job["dry_run_report"]:
+                raise HTTPException(status_code=409, detail="Run dry-run before commit")
+
+            report = job["dry_run_report"]
+            if isinstance(report, str):
+                report = json.loads(report)
+            if report.get("quota_exceeded"):
+                raise HTTPException(
+                    status_code=429,
+                    detail="Plan quota exceeded for this import; re-run dry-run after reducing rows",
+                )
+            valid_rows = report.get("valid") or []
+            if not valid_rows:
+                raise HTTPException(status_code=422, detail="No valid rows to commit")
+
+            committed = []
+            failed = []
+            for item in valid_rows:
+                try:
+                    async with conn.transaction():
+                        price = Decimal(str(item["price"]))
+                        cat_id = UUID(item["menu_category_id"])
+                        if item.get("finish_resale"):
+                            product_id = await create_resale_product_for_ingredient(
+                                conn,
+                                tenant_id,
+                                ingredient_id=UUID(item["ingredient_id"]),
+                                name=item["name"],
+                                price=price,
+                                category_id=cat_id,
+                                is_available=bool(item.get("is_available", True)),
+                            )
+                            committed.append(
+                                {
+                                    "row": item["row"],
+                                    "name": item["name"],
+                                    "product_id": str(product_id),
+                                    "finish_resale": True,
+                                }
+                            )
+                        else:
+                            rb_ids = [UUID(x) for x in (item.get("recipe_base_ids") or [])]
+                            product_id = await create_menu_product_on_conn(
+                                conn,
+                                tenant_id,
+                                name=item["name"],
+                                price=price,
+                                category_id=cat_id,
+                                is_available=bool(item.get("is_available", True)),
+                                recipe_base_ids=rb_ids,
+                            )
+                            committed.append(
+                                {
+                                    "row": item["row"],
+                                    "name": item["name"],
+                                    "product_id": str(product_id),
+                                    "finish_resale": False,
+                                }
+                            )
+                except HTTPException as exc:
+                    failed.append(
+                        {"row": item.get("row"), "name": item.get("name"), "error": exc.detail}
+                    )
+                except asyncpg.UniqueViolationError:
+                    failed.append(
+                        {
+                            "row": item.get("row"),
+                            "name": item.get("name"),
+                            "error": "product name already exists",
+                        }
+                    )
+                except Exception as exc:
+                    logger.exception("products import commit row failed")
+                    failed.append(
+                        {"row": item.get("row"), "name": item.get("name"), "error": str(exc)}
+                    )
+
+            commit_report = {"committed": committed, "failed": failed}
+            status = "committed" if committed else "failed"
+            await conn.execute(
+                """
+                UPDATE menu_import_jobs
+                SET status = $2,
+                    row_committed = $3,
+                    commit_report = $4::jsonb,
+                    updated_at = NOW(),
+                    error_message = $5
+                WHERE id = $1
+                """,
+                job_id,
+                status,
+                len(committed),
+                json.dumps(commit_report),
+                None if committed else "No rows committed",
+            )
+
+    return {
+        "success": True,
+        "data": {
+            "id": str(job_id),
+            "status": status,
+            "row_committed": len(committed),
+            "report": commit_report,
+        },
+    }
+
+
+async def list_incomplete_resale_ingredients(request: Request) -> Dict[str, Any]:
+    """Resale warehouse articles waiting for sell fields / linked product (Decision A)."""
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant session required")
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT i.id, i.name, i.unit
+            FROM ingredients i
+            WHERE i.tenant_id = $1
+              AND COALESCE(i.is_active, true) = true
+              AND COALESCE(i.is_resale, false) = true
+              AND NOT EXISTS (
+                SELECT 1
+                FROM product_recipes pr
+                INNER JOIN product p ON p.id = pr.product_id AND p.tenant_id = i.tenant_id
+                WHERE pr.ingredient_id = i.id AND COALESCE(p.is_resale, false) = true
+              )
+            ORDER BY i.name ASC
+            LIMIT 500
+            """,
+            tenant_id,
+        )
+    return {
+        "success": True,
+        "data": [
+            {"id": str(r["id"]), "name": r["name"], "unit": r["unit"], "needs_product": True}
+            for r in rows
+        ],
+    }
+
+
 async def dry_run_import(request: Request, job_id: UUID) -> Dict[str, Any]:
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -1125,6 +1706,8 @@ async def dry_run_import(request: Request, job_id: UUID) -> Dict[str, Any]:
         return await dry_run_warehouse_import(request, job_id)
     if entity == "recipe_bases":
         return await dry_run_recipe_bases_import(request, job_id)
+    if entity == "products":
+        return await dry_run_products_import(request, job_id)
     raise HTTPException(status_code=422, detail=f"Unsupported entity_type: {entity}")
 
 
@@ -1146,6 +1729,8 @@ async def commit_import(request: Request, job_id: UUID) -> Dict[str, Any]:
         return await commit_warehouse_import(request, job_id)
     if entity == "recipe_bases":
         return await commit_recipe_bases_import(request, job_id)
+    if entity == "products":
+        return await commit_products_import(request, job_id)
     raise HTTPException(status_code=422, detail=f"Unsupported entity_type: {entity}")
 
 
@@ -1259,6 +1844,9 @@ def template_streaming_response(entity: str = "warehouse") -> StreamingResponse:
     if entity == "recipe_bases":
         payload = recipe_bases_csv_template_bytes()
         filename = "waro-recipe-bases-import-template.csv"
+    elif entity == "products":
+        payload = products_csv_template_bytes()
+        filename = "waro-products-import-template.csv"
     else:
         payload = warehouse_csv_template_bytes()
         filename = "waro-bodega-import-template.csv"
