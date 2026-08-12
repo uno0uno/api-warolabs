@@ -456,6 +456,55 @@ async def _fetch_plan_quota_context(conn, tenant_id: UUID, resource: str):
     )
 
 
+async def preview_plan_quota_growth(
+    conn,
+    tenant_id: UUID,
+    resource: str,
+    additional: int,
+    *,
+    exclude_pending_invitation_id: Optional[UUID] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Project whether adding `additional` resources would exceed the plan quota.
+
+    Returns None when unlimited / under limit / additional <= 0.
+    Otherwise returns a dict with used, limit, additional, projected.
+    """
+    if additional <= 0:
+        return None
+    if resource not in ENFORCEABLE_QUOTA_RESOURCES:
+        raise ValueError(f"Unsupported quota resource: {resource}")
+
+    plan = await _fetch_plan_quota_context(conn, tenant_id, resource)
+    if not plan:
+        return None
+
+    quotas = _normalize_plan_quotas(plan["plan_slug"], plan["plan_features"])
+    quota = _effective_quota_from_row(resource, quotas.get(resource, 0), plan)
+    if quota.limit is None:
+        return None
+
+    used = await _count_quota_resource_usage(
+        conn,
+        tenant_id,
+        resource,
+        exclude_pending_invitation_id=exclude_pending_invitation_id,
+    )
+    projected = used + additional
+    if projected <= quota.limit:
+        return None
+
+    return {
+        "resource": resource,
+        "used": used,
+        "limit": quota.limit,
+        "additional": additional,
+        "projected": projected,
+        "plan_slug": plan["plan_slug"],
+        "remaining": max(quota.limit - used, 0),
+    }
+
+
 async def check_plan_quota_growth(
     conn,
     tenant_id: UUID,
