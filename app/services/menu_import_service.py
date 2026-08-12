@@ -18,6 +18,7 @@ from app.core.middleware import require_valid_session
 from app.database import get_db_connection
 from app.models.ingredient import PurchaseUnitInput, TenantIngredientCreate
 from app.models.recipe_base import RecipeBaseIngredientCreate, RecipeBaseTypeCreate
+from app.models.modifier import ModifierCreate, ModifierGroupCreate
 from app.services.aws_s3_service import AWSS3Service
 from app.services.billing_service import (
     check_plan_quota_growth,
@@ -27,6 +28,7 @@ from app.services.billing_service import (
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 from app.services.ingredients_service import create_tenant_ingredient
 from app.services.recipe_bases_service import create_recipe_base_on_conn
+from app.services.modifiers_service import create_modifier_group_on_conn
 from app.services import cost_resolution_service
 
 logger = logging.getLogger(__name__)
@@ -61,6 +63,21 @@ PRODUCTS_TEMPLATE_HEADERS = [
     "is_available",
     "recipe_bases",
     "finish_resale",
+]
+
+MODIFIERS_TEMPLATE_HEADERS = [
+    "group_name",
+    "option_name",
+    "price",
+    "min_qty",
+    "max_qty",
+    "is_required",
+    "option_type",
+    "ingredient",
+    "ingredient_quantity",
+    "ingredient_unit",
+    "recipe_base",
+    "recipe_base_quantity",
 ]
 
 RETENTION_DAYS = 90
@@ -152,6 +169,61 @@ def products_csv_template_bytes() -> bytes:
             "is_available": "true",
             "recipe_bases": "",
             "finish_resale": "true",
+        }
+    )
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def modifiers_csv_template_bytes() -> bytes:
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=MODIFIERS_TEMPLATE_HEADERS)
+    writer.writeheader()
+    writer.writerow(
+        {
+            "group_name": "Punto de cocción",
+            "option_name": "Término medio",
+            "price": "0",
+            "min_qty": "0",
+            "max_qty": "1",
+            "is_required": "false",
+            "option_type": "NONE",
+            "ingredient": "",
+            "ingredient_quantity": "",
+            "ingredient_unit": "",
+            "recipe_base": "",
+            "recipe_base_quantity": "",
+        }
+    )
+    writer.writerow(
+        {
+            "group_name": "Punto de cocción",
+            "option_name": "Bien asado",
+            "price": "0",
+            "min_qty": "0",
+            "max_qty": "1",
+            "is_required": "false",
+            "option_type": "NONE",
+            "ingredient": "",
+            "ingredient_quantity": "",
+            "ingredient_unit": "",
+            "recipe_base": "",
+            "recipe_base_quantity": "",
+        }
+    )
+    writer.writerow(
+        {
+            "group_name": "Extras",
+            "option_name": "Queso extra",
+            "price": "2000",
+            "min_qty": "0",
+            "max_qty": "3",
+            "is_required": "false",
+            "option_type": "INGREDIENT",
+            "ingredient": "Queso mozzarella",
+            "ingredient_quantity": "0.05",
+            "ingredient_unit": "kg",
+            "recipe_base": "",
+            "recipe_base_quantity": "",
         }
     )
     return buf.getvalue().encode("utf-8-sig")
@@ -1688,6 +1760,523 @@ async def list_incomplete_resale_ingredients(request: Request) -> Dict[str, Any]
     }
 
 
+def parse_modifiers_csv(content: bytes) -> List[Dict[str, str]]:
+    return parse_warehouse_csv(content)
+
+
+def validate_modifier_line(
+    row: Dict[str, Any], row_num: int
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    group_name = (row.get("group_name") or "").strip()
+    if not group_name:
+        return None, {"row": row_num, "field": "group_name", "error": "group_name is required"}
+
+    option_name = (row.get("option_name") or "").strip()
+    if not option_name:
+        return None, {"row": row_num, "field": "option_name", "error": "option_name is required"}
+
+    price_raw = str(row.get("price") or "").strip()
+    if price_raw == "":
+        price = Decimal("0")
+    else:
+        price = _parse_decimal(row.get("price"))
+        if price is None:
+            return None, {"row": row_num, "field": "price", "error": "invalid price"}
+
+    min_qty = 0
+    max_qty = 1
+    if str(row.get("min_qty") or "").strip() != "":
+        try:
+            min_qty = int(float(str(row.get("min_qty")).strip().replace(",", ".")))
+        except ValueError:
+            return None, {"row": row_num, "field": "min_qty", "error": "min_qty must be an integer"}
+    if str(row.get("max_qty") or "").strip() != "":
+        try:
+            max_qty = int(float(str(row.get("max_qty")).strip().replace(",", ".")))
+        except ValueError:
+            return None, {"row": row_num, "field": "max_qty", "error": "max_qty must be an integer"}
+    if max_qty < 1:
+        return None, {"row": row_num, "field": "max_qty", "error": "max_qty must be >= 1"}
+    if max_qty < min_qty:
+        return None, {"row": row_num, "field": "max_qty", "error": "max_qty must be >= min_qty"}
+
+    is_required = _truthy(row.get("is_required"))
+    option_type = (row.get("option_type") or "NONE").strip().upper() or "NONE"
+    if option_type not in {"NONE", "INGREDIENT", "RECIPE", "PRODUCT"}:
+        return None, {"row": row_num, "field": "option_type", "error": "invalid option_type"}
+
+    ingredient = (row.get("ingredient") or "").strip() or None
+    recipe_base = (row.get("recipe_base") or "").strip() or None
+    ing_qty = _parse_decimal(row.get("ingredient_quantity"))
+    ing_unit = (row.get("ingredient_unit") or "").strip() or None
+    rb_qty = _parse_decimal(row.get("recipe_base_quantity")) or Decimal("1")
+
+    if option_type == "INGREDIENT" and not ingredient:
+        return None, {"row": row_num, "field": "ingredient", "error": "ingredient required for INGREDIENT"}
+    if option_type == "INGREDIENT" and (ing_qty is None or ing_qty <= 0):
+        return None, {
+            "row": row_num,
+            "field": "ingredient_quantity",
+            "error": "ingredient_quantity must be positive",
+        }
+    if option_type == "INGREDIENT" and not ing_unit:
+        return None, {"row": row_num, "field": "ingredient_unit", "error": "ingredient_unit required"}
+    if option_type == "RECIPE" and not recipe_base:
+        return None, {"row": row_num, "field": "recipe_base", "error": "recipe_base required for RECIPE"}
+    if option_type == "PRODUCT":
+        return None, {
+            "row": row_num,
+            "field": "option_type",
+            "error": "PRODUCT option_type not supported in CSV v1",
+        }
+    if option_type == "NONE" and (ingredient or recipe_base):
+        return None, {
+            "row": row_num,
+            "field": "option_type",
+            "error": "NONE option must not set ingredient/recipe_base",
+        }
+
+    return {
+        "row": row_num,
+        "group_name": group_name,
+        "option_name": option_name,
+        "price": price,
+        "min_qty": min_qty,
+        "max_qty": max_qty,
+        "is_required": is_required,
+        "option_type": option_type,
+        "ingredient": ingredient,
+        "ingredient_quantity": ing_qty,
+        "ingredient_unit": ing_unit,
+        "recipe_base": recipe_base,
+        "recipe_base_quantity": rb_qty,
+    }, None
+
+
+async def _modifier_group_name_exists(conn, tenant_id: UUID, name: str) -> bool:
+    row = await conn.fetchrow(
+        """
+        SELECT 1 FROM modifier_groups
+        WHERE tenant_id = $1 AND LOWER(TRIM(name)) = LOWER(TRIM($2))
+        LIMIT 1
+        """,
+        tenant_id,
+        name,
+    )
+    return bool(row)
+
+
+async def upload_modifiers_import(request: Request, file: UploadFile) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    user_id = session.user_id
+    if not tenant_id or not user_id:
+        raise HTTPException(status_code=401, detail="Tenant session required")
+
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=422, detail="Only .csv files are supported in v1")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=422, detail="Empty file")
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="File too large (max 5MB)")
+
+    try:
+        parse_modifiers_csv(raw)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid CSV: {exc}") from exc
+
+    s3 = AWSS3Service()
+    s3_key = await s3.upload_file(
+        file_content=io.BytesIO(raw),
+        filename=file.filename,
+        folder=f"menu/imports/{tenant_id}",
+        content_type=file.content_type or "text/csv",
+    )
+    if not s3_key:
+        raise HTTPException(status_code=500, detail="Failed to store import file")
+
+    async with get_db_connection() as conn:
+        job = await conn.fetchrow(
+            """
+            INSERT INTO menu_import_jobs (
+                tenant_id, uploaded_by, entity_type, status,
+                file_name, mime_type, file_size, s3_key
+            )
+            VALUES ($1, $2, 'modifiers', 'uploaded', $3, $4, $5, $6)
+            RETURNING id, status, file_name, created_at
+            """,
+            tenant_id,
+            user_id,
+            file.filename,
+            file.content_type or "text/csv",
+            len(raw),
+            s3_key,
+        )
+
+    return {
+        "success": True,
+        "data": {
+            "id": str(job["id"]),
+            "status": job["status"],
+            "file_name": job["file_name"],
+            "entity_type": "modifiers",
+            "created_at": job["created_at"].isoformat() if job["created_at"] else None,
+        },
+    }
+
+
+async def dry_run_modifiers_import(request: Request, job_id: UUID) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant session required")
+
+    async with get_db_connection() as conn:
+        job = await conn.fetchrow(
+            """
+            SELECT * FROM menu_import_jobs
+            WHERE id = $1 AND tenant_id = $2 AND entity_type = 'modifiers'
+            """,
+            job_id,
+            tenant_id,
+        )
+        if not job:
+            raise HTTPException(status_code=404, detail="Import job not found")
+        if job["status"] == "committed":
+            raise HTTPException(status_code=409, detail="Job already committed")
+
+        raw = await _load_job_bytes(conn, dict(job))
+        rows = parse_modifiers_csv(raw)
+        errors: List[Dict[str, Any]] = []
+        groups: Dict[str, Dict[str, Any]] = {}
+        group_order: List[str] = []
+        failed_groups: set = set()
+
+        for idx, row in enumerate(rows, start=2):
+            ok, err = validate_modifier_line(row, idx)
+            if err:
+                errors.append(err)
+                rn = (row.get("group_name") or "").strip().lower()
+                if rn:
+                    failed_groups.add(rn)
+                continue
+            assert ok is not None
+            key = ok["group_name"].lower()
+            if key in failed_groups:
+                errors.append(
+                    {
+                        "row": idx,
+                        "field": "group_name",
+                        "error": "group skipped due to earlier line errors",
+                    }
+                )
+                continue
+
+            if key not in groups:
+                if await _modifier_group_name_exists(conn, tenant_id, ok["group_name"]):
+                    errors.append(
+                        {"row": idx, "field": "group_name", "error": "modifier group already exists"}
+                    )
+                    failed_groups.add(key)
+                    continue
+                groups[key] = {
+                    "group_name": ok["group_name"],
+                    "min_qty": ok["min_qty"],
+                    "max_qty": ok["max_qty"],
+                    "is_required": ok["is_required"],
+                    "options": [],
+                    "_seen_options": set(),
+                }
+                group_order.append(key)
+
+            group = groups[key]
+            if (
+                group["min_qty"] != ok["min_qty"]
+                or group["max_qty"] != ok["max_qty"]
+                or group["is_required"] != ok["is_required"]
+            ):
+                errors.append(
+                    {
+                        "row": idx,
+                        "field": "group_name",
+                        "error": "min_qty/max_qty/is_required must match other rows in the group",
+                    }
+                )
+                failed_groups.add(key)
+                groups.pop(key, None)
+                continue
+
+            opt_key = ok["option_name"].lower()
+            if opt_key in group["_seen_options"]:
+                errors.append(
+                    {"row": idx, "field": "option_name", "error": "duplicate option in group"}
+                )
+                failed_groups.add(key)
+                groups.pop(key, None)
+                continue
+
+            option_payload: Dict[str, Any] = {
+                "row": ok["row"],
+                "name": ok["option_name"],
+                "price": str(ok["price"]),
+                "option_type": ok["option_type"],
+            }
+
+            if ok["option_type"] == "INGREDIENT":
+                ing = await _find_ingredient_by_name(conn, tenant_id, ok["ingredient"])
+                if not ing:
+                    errors.append(
+                        {
+                            "row": idx,
+                            "field": "ingredient",
+                            "error": f"ingredient '{ok['ingredient']}' not found",
+                        }
+                    )
+                    failed_groups.add(key)
+                    groups.pop(key, None)
+                    continue
+                resolvable, unit_err = await _unit_resolves_via_create_path(
+                    conn, ing["id"], float(ok["ingredient_quantity"]), ok["ingredient_unit"]
+                )
+                if not resolvable:
+                    errors.append({"row": idx, "field": "ingredient_unit", "error": unit_err})
+                    failed_groups.add(key)
+                    groups.pop(key, None)
+                    continue
+                option_payload["ingredient_id"] = str(ing["id"])
+                option_payload["ingredient_quantity"] = str(ok["ingredient_quantity"])
+                option_payload["ingredient_unit"] = ok["ingredient_unit"]
+
+            if ok["option_type"] == "RECIPE":
+                rb_id = await _find_recipe_base_by_name(conn, tenant_id, ok["recipe_base"])
+                if not rb_id:
+                    errors.append(
+                        {
+                            "row": idx,
+                            "field": "recipe_base",
+                            "error": f"recipe base '{ok['recipe_base']}' not found",
+                        }
+                    )
+                    failed_groups.add(key)
+                    groups.pop(key, None)
+                    continue
+                option_payload["recipe_base_type_id"] = str(rb_id)
+                option_payload["recipe_base_quantity"] = str(ok["recipe_base_quantity"])
+
+            group["_seen_options"].add(opt_key)
+            group["options"].append(option_payload)
+
+        for key in list(groups.keys()):
+            if key in failed_groups:
+                groups.pop(key, None)
+
+        valid = []
+        for key in group_order:
+            if key not in groups:
+                continue
+            g = groups[key]
+            if not g["options"]:
+                continue
+            g.pop("_seen_options", None)
+            valid.append(g)
+
+        quota_hits: List[Dict[str, Any]] = []
+        hit = await preview_plan_quota_growth(
+            conn, tenant_id, "modifier_groups", additional=len(valid)
+        )
+        if hit:
+            quota_hits.append(hit)
+            errors.append(
+                {
+                    "row": None,
+                    "field": "quota",
+                    "error": (
+                        f"modifier_groups: projected {hit['projected']} exceeds limit "
+                        f"{hit['limit']} (used {hit['used']} + {hit['additional']})"
+                    ),
+                }
+            )
+
+        report = {
+            "valid": valid,
+            "errors": errors,
+            "group_count": len(valid),
+            "line_total": len(rows),
+            "quota_hits": quota_hits,
+            "quota_exceeded": bool(quota_hits),
+        }
+
+        await conn.execute(
+            """
+            UPDATE menu_import_jobs
+            SET status = 'dry_run',
+                row_total = $2,
+                row_valid = $3,
+                row_invalid = $4,
+                dry_run_report = $5::jsonb,
+                updated_at = NOW(),
+                error_message = NULL
+            WHERE id = $1
+            """,
+            job_id,
+            len(rows),
+            len(valid),
+            len(errors),
+            json.dumps(report),
+        )
+
+    return {
+        "success": True,
+        "data": {
+            "id": str(job_id),
+            "status": "dry_run",
+            "row_total": len(rows),
+            "row_valid": len(valid),
+            "row_invalid": len(errors),
+            "report": report,
+        },
+    }
+
+
+async def commit_modifiers_import(request: Request, job_id: UUID) -> Dict[str, Any]:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    user_id = session.user_id
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant session required")
+
+    async with get_db_connection() as conn:
+        async with conn.transaction():
+            job = await conn.fetchrow(
+                """
+                SELECT * FROM menu_import_jobs
+                WHERE id = $1 AND tenant_id = $2 AND entity_type = 'modifiers'
+                FOR UPDATE
+                """,
+                job_id,
+                tenant_id,
+            )
+            if not job:
+                raise HTTPException(status_code=404, detail="Import job not found")
+            if job["status"] == "committed":
+                raise HTTPException(status_code=409, detail="Job already committed")
+            if job["status"] != "dry_run" or not job["dry_run_report"]:
+                raise HTTPException(status_code=409, detail="Run dry-run before commit")
+
+            report = job["dry_run_report"]
+            if isinstance(report, str):
+                report = json.loads(report)
+            if report.get("quota_exceeded"):
+                raise HTTPException(
+                    status_code=429,
+                    detail="Plan quota exceeded for this import; re-run dry-run after reducing rows",
+                )
+            valid_groups = report.get("valid") or []
+            if not valid_groups:
+                raise HTTPException(status_code=422, detail="No valid groups to commit")
+
+            committed = []
+            failed = []
+            for item in valid_groups:
+                try:
+                    async with conn.transaction():
+                        modifiers = []
+                        for opt in item["options"]:
+                            modifiers.append(
+                                ModifierCreate(
+                                    name=opt["name"],
+                                    price=Decimal(str(opt["price"])),
+                                    option_type=opt["option_type"],
+                                    ingredient_id=(
+                                        UUID(opt["ingredient_id"])
+                                        if opt.get("ingredient_id")
+                                        else None
+                                    ),
+                                    ingredient_quantity=(
+                                        Decimal(str(opt["ingredient_quantity"]))
+                                        if opt.get("ingredient_quantity") is not None
+                                        else None
+                                    ),
+                                    ingredient_unit=opt.get("ingredient_unit"),
+                                    recipe_base_type_id=(
+                                        UUID(opt["recipe_base_type_id"])
+                                        if opt.get("recipe_base_type_id")
+                                        else None
+                                    ),
+                                    recipe_base_quantity=Decimal(
+                                        str(opt.get("recipe_base_quantity") or "1")
+                                    ),
+                                )
+                            )
+                        group_id = await create_modifier_group_on_conn(
+                            conn,
+                            tenant_id,
+                            ModifierGroupCreate(
+                                name=item["group_name"],
+                                min_qty=int(item.get("min_qty") or 0),
+                                max_qty=int(item.get("max_qty") or 1),
+                                is_required=bool(item.get("is_required")),
+                                product_ids=[],
+                                modifiers=modifiers,
+                            ),
+                            user_id=user_id,
+                            record_history=True,
+                        )
+                        committed.append(
+                            {
+                                "group_name": item["group_name"],
+                                "modifier_group_id": str(group_id),
+                                "option_count": len(modifiers),
+                            }
+                        )
+                except HTTPException as exc:
+                    failed.append(
+                        {"group_name": item.get("group_name"), "error": exc.detail}
+                    )
+                except ValueError as exc:
+                    failed.append(
+                        {"group_name": item.get("group_name"), "error": str(exc)}
+                    )
+                except Exception as exc:
+                    logger.exception("modifiers import commit failed")
+                    failed.append(
+                        {"group_name": item.get("group_name"), "error": str(exc)}
+                    )
+
+            commit_report = {"committed": committed, "failed": failed}
+            status = "committed" if committed else "failed"
+            await conn.execute(
+                """
+                UPDATE menu_import_jobs
+                SET status = $2,
+                    row_committed = $3,
+                    commit_report = $4::jsonb,
+                    updated_at = NOW(),
+                    error_message = $5
+                WHERE id = $1
+                """,
+                job_id,
+                status,
+                len(committed),
+                json.dumps(commit_report),
+                None if committed else "No groups committed",
+            )
+
+    return {
+        "success": True,
+        "data": {
+            "id": str(job_id),
+            "status": status,
+            "row_committed": len(committed),
+            "report": commit_report,
+        },
+    }
+
+
 async def dry_run_import(request: Request, job_id: UUID) -> Dict[str, Any]:
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -1708,6 +2297,8 @@ async def dry_run_import(request: Request, job_id: UUID) -> Dict[str, Any]:
         return await dry_run_recipe_bases_import(request, job_id)
     if entity == "products":
         return await dry_run_products_import(request, job_id)
+    if entity == "modifiers":
+        return await dry_run_modifiers_import(request, job_id)
     raise HTTPException(status_code=422, detail=f"Unsupported entity_type: {entity}")
 
 
@@ -1731,6 +2322,8 @@ async def commit_import(request: Request, job_id: UUID) -> Dict[str, Any]:
         return await commit_recipe_bases_import(request, job_id)
     if entity == "products":
         return await commit_products_import(request, job_id)
+    if entity == "modifiers":
+        return await commit_modifiers_import(request, job_id)
     raise HTTPException(status_code=422, detail=f"Unsupported entity_type: {entity}")
 
 
@@ -1847,6 +2440,9 @@ def template_streaming_response(entity: str = "warehouse") -> StreamingResponse:
     elif entity == "products":
         payload = products_csv_template_bytes()
         filename = "waro-products-import-template.csv"
+    elif entity == "modifiers":
+        payload = modifiers_csv_template_bytes()
+        filename = "waro-modifiers-import-template.csv"
     else:
         payload = warehouse_csv_template_bytes()
         filename = "waro-bodega-import-template.csv"
