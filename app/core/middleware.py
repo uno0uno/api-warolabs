@@ -301,6 +301,7 @@ async def tenant_detection_middleware(request: Request, call_next):
                 logger.info(f"🔍 No origin header, attempting tenant inference from session: {session_token}")
                 try:
                     async with get_db_connection(use_transaction=False) as conn:
+                        from app.core.security import IDLE_SESSION_HOURS
                         session_tenant_query = """
                             SELECT ts.site, ts.tenant_id, ts.brand_name, ts.is_active,
                                    t.name as tenant_name, t.slug as tenant_slug, t.email as tenant_email
@@ -308,10 +309,13 @@ async def tenant_detection_middleware(request: Request, call_next):
                             JOIN tenant_sites ts ON s.tenant_id = ts.tenant_id
                             JOIN tenants t ON ts.tenant_id = t.id
                             WHERE s.id = $1 AND s.expires_at > NOW() AND s.is_active = true
+                              AND s.last_activity_at > NOW() - ($2::int * INTERVAL '1 hour')
                               AND ts.is_active = true
                             LIMIT 1
                         """
-                        session_tenant_result = await conn.fetchrow(session_tenant_query, session_token)
+                        session_tenant_result = await conn.fetchrow(
+                            session_tenant_query, session_token, IDLE_SESSION_HOURS
+                        )
                         if session_tenant_result:
                             logger.info(f"✅ Inferred tenant from session: {session_tenant_result['tenant_name']}")
                             requesting_site = session_tenant_result['site']

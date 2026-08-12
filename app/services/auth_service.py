@@ -5,7 +5,15 @@ from typing import Optional, Set
 from fastapi import HTTPException, Request, Response
 from app.config import settings
 from app.database import get_db_connection
-from app.core.security import INTERNAL_SESSION_HOURS, collect_session_tokens, get_session_token, clear_session_cookie, set_session_cookie, get_client_ip
+from app.core.security import (
+    INTERNAL_SESSION_HOURS,
+    IDLE_SESSION_HOURS,
+    collect_session_tokens,
+    get_session_token,
+    clear_session_cookie,
+    set_session_cookie,
+    get_client_ip,
+)
 from app.core.exceptions import AuthenticationError
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES, is_legacy_internal_team_role
 from app.core.onboarding_access import next_step_for_state
@@ -25,24 +33,66 @@ from app.services.aws_s3_service import AWSS3Service
 logger = logging.getLogger(__name__)
 
 
+async def session_cap_for_user(conn, user_id) -> int:
+    """Max concurrent active sessions: 2 for superuser (tenant or platform), else 1."""
+    email = await conn.fetchval("SELECT email FROM profile WHERE id = $1", user_id)
+    if is_platform_superuser_email(email):
+        return 2
+    has_superuser = await conn.fetchval(
+        """
+        SELECT 1
+        FROM tenant_members
+        WHERE user_id = $1
+          AND is_active = true
+          AND role = 'superuser'
+        LIMIT 1
+        """,
+        user_id,
+    )
+    return 2 if has_superuser else 1
+
+
 async def replace_active_admin_sessions(conn, user_id, keep_session_id=None) -> int:
+    """
+    Enforce concurrent session cap for this user.
+    Keeps keep_session_id plus up to (cap - 1) newest other active sessions.
+    """
+    max_sessions = await session_cap_for_user(conn, user_id)
+    # Other active sessions allowed besides keep_session_id
+    keep_others = max(max_sessions - 1, 0)
     result = await conn.execute(
         """
-        UPDATE sessions
+        WITH ranked AS (
+            SELECT id,
+                   ROW_NUMBER() OVER (ORDER BY created_at DESC) AS rn
+            FROM sessions
+            WHERE user_id = $1
+              AND is_active = true
+              AND expires_at > NOW()
+              AND last_activity_at > NOW() - ($4::int * INTERVAL '1 hour')
+              AND ($2::uuid IS NULL OR id <> $2::uuid)
+        )
+        UPDATE sessions s
         SET is_active = false,
             ended_at = NOW(),
             end_reason = 'replaced_by_new_login'
-        WHERE user_id = $1
-          AND is_active = true
-          AND expires_at > NOW()
-          AND ($2::uuid IS NULL OR id <> $2::uuid)
+        FROM ranked r
+        WHERE s.id = r.id
+          AND r.rn > $3
         """,
         user_id,
         keep_session_id,
+        keep_others,
+        IDLE_SESSION_HOURS,
     )
     count = int(result.split()[-1]) if result else 0
     if count:
-        logger.info("Ended %s previous active admin sessions for user %s", count, user_id)
+        logger.info(
+            "Ended %s previous active admin sessions for user %s (cap=%s)",
+            count,
+            user_id,
+            max_sessions,
+        )
     return count
 
 
@@ -65,14 +115,20 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                 WHERE s.id = $1 
                   AND s.expires_at > NOW()
                   AND s.is_active = true
+                  AND s.last_activity_at > NOW() - ($2::int * INTERVAL '1 hour')
                 LIMIT 1
             """
-            session_result = await conn.fetchrow(session_query, session_token)
+            session_result = await conn.fetchrow(
+                session_query, session_token, IDLE_SESSION_HOURS
+            )
             
             if not session_result:
                 logger.warning("Invalid or expired session")
                 await clear_session_cookie(response, session_token)
                 raise AuthenticationError("Session expired")
+
+            from app.core.security import touch_session_activity
+            await touch_session_activity(conn, session_token)
 
             # Get tenant info if tenant_id exists (exact logic from warolabs.com)
             current_tenant = None
