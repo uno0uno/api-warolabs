@@ -12,6 +12,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
+import asyncpg
 
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
@@ -1280,6 +1281,7 @@ async def create_menu_product_on_conn(
     )
     product_id = product_result["id"]
     for rb_id in recipe_base_ids or []:
+        # v1: qty=1 per base; CSV has no qty column yet
         await conn.execute(
             """
             INSERT INTO product_base_recipes (
@@ -1606,6 +1608,14 @@ async def commit_products_import(request: Request, job_id: UUID) -> Dict[str, An
                 except HTTPException as exc:
                     failed.append(
                         {"row": item.get("row"), "name": item.get("name"), "error": exc.detail}
+                    )
+                except asyncpg.UniqueViolationError:
+                    failed.append(
+                        {
+                            "row": item.get("row"),
+                            "name": item.get("name"),
+                            "error": "product name already exists",
+                        }
                     )
                 except Exception as exc:
                     logger.exception("products import commit row failed")
