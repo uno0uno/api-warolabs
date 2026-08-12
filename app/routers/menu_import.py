@@ -1,4 +1,4 @@
-"""Menu / bodega / recipe-bases bulk import API (#2254, #2255)."""
+"""Menu / bodega / recipe-bases / products bulk import API (#2254–#2256)."""
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
@@ -12,7 +12,7 @@ router = APIRouter()
 
 
 async def _assert_job_module(request: Request, job_id: UUID) -> str:
-    """Enforce ABASTECIMIENTO for warehouse jobs, MENU for recipe_bases jobs."""
+    """Enforce ABASTECIMIENTO for warehouse; MENU for recipe_bases/products."""
     session = require_valid_session(request)
     tenant_id = session.tenant_id
     if not tenant_id:
@@ -28,7 +28,7 @@ async def _assert_job_module(request: Request, job_id: UUID) -> str:
     entity = job["entity_type"]
     if entity == "warehouse":
         await require_module(Module.ABASTECIMIENTO)(request)
-    elif entity == "recipe_bases":
+    elif entity in ("recipe_bases", "products"):
         await require_module(Module.MENU)(request)
     else:
         raise HTTPException(status_code=422, detail=f"Unsupported entity_type: {entity}")
@@ -38,7 +38,7 @@ async def _assert_job_module(request: Request, job_id: UUID) -> str:
 async def _assert_list_module(request: Request, entity_type: str) -> None:
     if entity_type == "warehouse":
         await require_module(Module.ABASTECIMIENTO)(request)
-    elif entity_type == "recipe_bases":
+    elif entity_type in ("recipe_bases", "products"):
         await require_module(Module.MENU)(request)
     else:
         raise HTTPException(status_code=422, detail=f"Unsupported entity_type: {entity_type}")
@@ -60,11 +60,27 @@ async def download_recipe_bases_template():
     return svc.template_streaming_response("recipe_bases")
 
 
+@router.get(
+    "/template/products",
+    dependencies=[Depends(require_module(Module.MENU))],
+)
+async def download_products_template():
+    return svc.template_streaming_response("products")
+
+
+@router.get(
+    "/incomplete-resale",
+    dependencies=[Depends(require_module(Module.ABASTECIMIENTO))],
+)
+async def incomplete_resale(request: Request):
+    return await svc.list_incomplete_resale_ingredients(request)
+
+
 @router.get("/jobs")
 async def list_jobs(
     request: Request,
     limit: int = Query(default=20, ge=1, le=100),
-    entity_type: str = Query(..., description="warehouse | recipe_bases"),
+    entity_type: str = Query(..., description="warehouse | recipe_bases | products"),
 ):
     await _assert_list_module(request, entity_type)
     return await svc.list_import_jobs(request, limit=limit, entity_type=entity_type)
@@ -92,6 +108,15 @@ async def upload_warehouse(request: Request, file: UploadFile = File(...)):
 )
 async def upload_recipe_bases(request: Request, file: UploadFile = File(...)):
     return await svc.upload_recipe_bases_import(request, file)
+
+
+@router.post(
+    "/products/upload",
+    status_code=201,
+    dependencies=[Depends(require_module(Module.MENU))],
+)
+async def upload_products(request: Request, file: UploadFile = File(...)):
+    return await svc.upload_products_import(request, file)
 
 
 @router.post("/jobs/{job_id}/dry-run")
