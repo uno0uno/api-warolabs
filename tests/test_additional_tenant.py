@@ -8,7 +8,6 @@ from fastapi import HTTPException
 
 from app.core.exceptions import AuthorizationError
 from app.models.onboarding import OnboardingBusinessProfileUpdate
-from app.services import onboarding_service
 from app.services.onboarding_service import (
     MAX_ADDITIONAL_TENANT_CREATES_PER_HOUR,
     bootstrap_additional_tenant,
@@ -164,10 +163,12 @@ async def test_creates_when_existing_starter_has_terms():
     assert result.data.slug == "second-cafe"
     assert result.data.state == "starter_active"
     apply_financial.assert_awaited_once()
+    assert apply_financial.await_args.args[1] == new_tenant_id
     insert_sql = " ".join(call.args[0] for call in conn.execute.await_args_list)
     assert "INSERT INTO tenants" in insert_sql
     assert "INSERT INTO tenant_onboarding" in insert_sql
     assert "INSERT INTO tenant_members" in insert_sql
+    assert "pg_advisory_xact_lock" in insert_sql
 
 
 @pytest.mark.asyncio

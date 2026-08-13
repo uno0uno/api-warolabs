@@ -1150,11 +1150,15 @@ async def _find_incomplete_owned_onboarding(conn, owner_user_id: UUID):
     return None
 
 
-async def _enforce_additional_tenant_rate_limit(conn, owner_user_id: UUID) -> None:
+async def _lock_additional_tenant_owner(conn, owner_user_id: UUID) -> None:
     await conn.execute(
         "SELECT pg_advisory_xact_lock(hashtext($1))",
         f"additional-tenant:{owner_user_id}",
     )
+
+
+async def _enforce_additional_tenant_rate_limit(conn, owner_user_id: UUID) -> None:
+    """Caller must hold the additional-tenant owner advisory lock."""
     count = await conn.fetchval(
         """
         SELECT COUNT(*)
@@ -1190,6 +1194,10 @@ async def bootstrap_additional_tenant(
     email = (getattr(session, "email", None) or "").strip()
     if not email:
         raise HTTPException(status_code=400, detail="Session email is required")
+
+    # Serialize resume + create for one owner so concurrent POSTs cannot spawn
+    # parallel incomplete tenants (mirror complete_registration email lock).
+    await _lock_additional_tenant_owner(conn, owner_user_id)
 
     incomplete = await _find_incomplete_owned_onboarding(conn, owner_user_id)
     if incomplete:
