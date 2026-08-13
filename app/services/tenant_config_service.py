@@ -43,6 +43,32 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+async def _tenant_financial_country_code(conn, tenant_id) -> str:
+    row = await conn.fetchrow(
+        "SELECT country_code FROM tenant_financial_profiles WHERE tenant_id = $1",
+        tenant_id,
+    )
+    return str((row["country_code"] if row else "") or "").strip().upper()
+
+
+async def apply_city_slug_policy(country_code: str, data_dict: dict) -> None:
+    """CO keeps public_cities slugs. Non-CO must not join the CO directory."""
+    slug = data_dict.get("city_slug")
+    if country_code and country_code != "CO":
+        if slug:
+            data_dict["city_slug"] = None
+        return
+    if not slug:
+        return
+    known = await public_restaurant_service.is_city_slug_known(slug)
+    if not known:
+        raise HTTPException(
+            status_code=400,
+            detail=f"city_slug '{slug}' is not in the catalog. "
+                   "Pick a city from /public/cities.",
+        )
+
+
 def _profile_from_row(row) -> TenantPublicProfile:
     profile_data = dict(row)
     if isinstance(profile_data.get('business_hours'), str):
@@ -245,18 +271,8 @@ async def update_public_profile(
                 data_dict = profile_data.model_dump(exclude_unset=True)
                 display_name = data_dict.get('display_name') or tenant_row['name']
 
-                # Validate city_slug against the curated catalog before INSERT
-                # (warocol.com#615). Same gate as the UPDATE path below.
-                if data_dict.get('city_slug'):
-                    known = await public_restaurant_service.is_city_slug_known(
-                        data_dict['city_slug']
-                    )
-                    if not known:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"city_slug '{data_dict['city_slug']}' is not in the catalog. "
-                                   "Pick a city from /public/cities.",
-                        )
+                country_code = await _tenant_financial_country_code(conn, tenant_id)
+                await apply_city_slug_policy(country_code, data_dict)
 
                 insert_query = """
                     INSERT INTO tenant_public_profiles (
@@ -358,19 +374,8 @@ async def update_public_profile(
                         detail=f"Slug '{data_dict['slug']}' is already taken"
                     )
 
-            # Validate city_slug against the curated catalog (warocol.com#615).
-            # Operators can only pick from public_cities — free text is rejected
-            # at the API boundary so the directory routing stays consistent.
-            if data_dict.get('city_slug'):
-                known = await public_restaurant_service.is_city_slug_known(
-                    data_dict['city_slug']
-                )
-                if not known:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"city_slug '{data_dict['city_slug']}' is not in the catalog. "
-                               "Pick a city from /public/cities.",
-                    )
+            country_code = await _tenant_financial_country_code(conn, tenant_id)
+            await apply_city_slug_policy(country_code, data_dict)
 
             if 'timezone' in data_dict:
                 data_dict['timezone'] = validate_timezone(data_dict['timezone'])
