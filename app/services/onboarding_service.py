@@ -1123,8 +1123,10 @@ async def _require_session_superuser(conn, session) -> None:
 
 async def _find_incomplete_owned_onboarding(conn, owner_user_id: UUID):
     """
-    Resume mid-alta tenants. Permanent Starter (starter_active + terms accepted)
-    is NOT incomplete — otherwise users could never create a second business.
+    Resume mid-alta tenants only (profile / terms / payment pending).
+
+    Starter and active tenants are complete enough to create another business,
+    even if terms are not accepted yet (api-warolabs#836).
     """
     rows = await conn.fetch(
         """
@@ -1138,15 +1140,8 @@ async def _find_incomplete_owned_onboarding(conn, owner_user_id: UUID):
         owner_user_id,
     )
     for row in rows:
-        state = row.get("state")
-        if state in RESUME_PIPELINE_STATES:
+        if row.get("state") in RESUME_PIPELINE_STATES:
             return row
-        if state in {"starter_active", "active"}:
-            accepted = await legal_service.has_current_terms_acceptance(
-                conn, row["tenant_id"]
-            )
-            if not accepted:
-                return row
     return None
 
 

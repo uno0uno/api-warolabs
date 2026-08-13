@@ -87,15 +87,16 @@ async def test_resumes_incomplete_pipeline_state():
 
 
 @pytest.mark.asyncio
-async def test_resumes_starter_without_terms_acceptance():
+async def test_creates_when_existing_starter_lacks_terms():
     owner = uuid4()
-    incomplete_id = uuid4()
+    existing_id = uuid4()
+    new_tenant_id = uuid4()
     conn = AsyncMock()
-    conn.fetchval = AsyncMock(return_value="superuser")
+    conn.fetchval = AsyncMock(side_effect=["superuser", 0])
     conn.fetch = AsyncMock(
         return_value=[
             {
-                "tenant_id": incomplete_id,
+                "tenant_id": existing_id,
                 "name": "No Terms Yet",
                 "slug": "no-terms-yet",
                 "lifecycle_status": "active",
@@ -103,16 +104,33 @@ async def test_resumes_starter_without_terms_acceptance():
             }
         ]
     )
+    conn.execute = AsyncMock(return_value="OK")
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "slug": "second-cafe",
+            "name": "Second Cafe",
+            "lifecycle_status": "active",
+        }
+    )
+    financial = SimpleNamespace(
+        data=SimpleNamespace(business_name="Second Cafe", state="starter_active")
+    )
 
     with patch(
         "app.services.onboarding_service.legal_service.has_current_terms_acceptance",
         AsyncMock(return_value=False),
+    ), patch(
+        "app.services.onboarding_service.uuid4",
+        return_value=new_tenant_id,
+    ), patch(
+        "app.services.onboarding_service.update_onboarding_financial_profile",
+        AsyncMock(return_value=financial),
     ):
         result = await bootstrap_additional_tenant(conn, _session(user_id=owner), _payload())
 
-    assert result.data.resumed is True
-    assert result.data.tenant_id == incomplete_id
-    assert result.data.next_step == "setup"
+    assert result.data.resumed is False
+    assert result.data.tenant_id == new_tenant_id
+    assert result.data.slug == "second-cafe"
 
 
 @pytest.mark.asyncio
