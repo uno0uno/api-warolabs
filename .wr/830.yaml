@@ -1,0 +1,42 @@
+# Compact plan for wr-fast. Keep <=80 lines.
+issue: 830
+title: "fix(onboarding): sync public profile country/currency from selected country"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-830-onboarding-public-country
+
+paths:
+  - app/core/country_locale.py
+  - app/services/onboarding_service.py
+  - tests/test_onboarding_geo_defaults.py
+  - tests/test_onboarding_registration.py
+  - .wr/830.yaml
+
+ac:
+  - Onboarding sets tenant_public_profiles.country from selected country
+  - currency_code matches validated base currency
+  - ui_locale/locale/timezone seeding still works
+  - Tests cover US and CO/PA public profile fields
+  - Registration path covered via update_onboarding_financial_profile
+
+out_of_scope:
+  - bulk historical backfill
+  - My Negocio country dropdown redesign
+  - FX
+
+hints:
+  entry: "apply_onboarding_locales_from_country"
+  pattern: "update_onboarding_financial_profile → locales helper"
+  tests: "pytest tests/test_onboarding_geo_defaults.py tests/test_onboarding_registration.py -q"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: []
+
+next:
+  after_pr: ""

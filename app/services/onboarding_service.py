@@ -25,7 +25,11 @@ from app.services.hospitality_tax_jurisdictions import (
     normalize_jurisdiction_code,
 )
 from app.services.hospitality_tax_packs import ensure_wave1_tax_pack
-from app.core.country_locale import locale_from_country
+from app.core.country_locale import (
+    locale_from_country,
+    public_country_name,
+    resolve_public_currency,
+)
 from app.core.timezones import seed_tenant_timezone_from_country
 
 MAX_EMAIL_REQUESTS = 5
@@ -659,10 +663,15 @@ async def apply_onboarding_locales_from_country(
     *,
     tenant_id: UUID,
     country_code: str,
+    currency_code: Optional[str] = None,
     user_id: Optional[UUID] = None,
 ) -> str:
-    """Persist profile preferred_locale and tenant ui_locale from business country."""
+    """Persist locales + public country/currency from the selected business country."""
     locale = locale_from_country(country_code)
+    # tenant_public_profiles.locale is es|en; clamp extended ui locales.
+    receipt_locale = locale if locale in {"es", "en"} else "es"
+    country_label = public_country_name(country_code)
+    public_currency = resolve_public_currency(country_code, currency_code)
     if user_id is not None:
         await conn.execute(
             """
@@ -675,16 +684,24 @@ async def apply_onboarding_locales_from_country(
         )
     await conn.execute(
         """
-        INSERT INTO tenant_public_profiles (tenant_id, slug, display_name, ui_locale)
-        SELECT t.id, t.slug, t.name, $2
+        INSERT INTO tenant_public_profiles (
+            tenant_id, slug, display_name, ui_locale, locale, country, currency_code
+        )
+        SELECT t.id, t.slug, t.name, $2, $3, $4, $5
         FROM tenants t
         WHERE t.id = $1
         ON CONFLICT (tenant_id) DO UPDATE
             SET ui_locale = EXCLUDED.ui_locale,
+                locale = EXCLUDED.locale,
+                country = EXCLUDED.country,
+                currency_code = EXCLUDED.currency_code,
                 updated_at = now()
         """,
         tenant_id,
         locale,
+        receipt_locale,
+        country_label,
+        public_currency,
     )
     return locale
 
@@ -825,6 +842,7 @@ async def update_onboarding_financial_profile(
         conn,
         tenant_id=tenant_id,
         country_code=country_code,
+        currency_code=currency_code,
         user_id=context.get("owner_user_id"),
     )
     state = await _promote_onboarding_identity(conn, tenant_id)

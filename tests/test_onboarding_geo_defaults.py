@@ -1,10 +1,15 @@
-"""Geo defaults at onboarding — warocol.com#1854."""
+"""Geo defaults at onboarding — warocol.com#1854 / api-warolabs#830."""
 from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+from app.core.country_locale import (
+    default_currency_for_country,
+    public_country_name,
+    resolve_public_currency,
+)
 from app.core.timezones import (
     DEFAULT_TENANT_TIMEZONE,
     default_timezone_for_country,
@@ -22,6 +27,17 @@ def test_default_timezone_for_country_map():
     assert default_timezone_for_country("US") == "America/New_York"
     assert default_timezone_for_country("CA") == "America/Toronto"
     assert default_timezone_for_country("xx") == DEFAULT_TENANT_TIMEZONE
+
+
+def test_public_country_and_currency_helpers():
+    assert public_country_name("US") == "United States"
+    assert public_country_name("CO") == "Colombia"
+    assert public_country_name("PA") == "Panama"
+    assert default_currency_for_country("US") == "USD"
+    assert default_currency_for_country("CO") == "COP"
+    assert resolve_public_currency("PA", "PAB") == "PAB"
+    assert resolve_public_currency("PA", None) == "USD"
+    assert resolve_public_currency("US", "USD") == "USD"
 
 
 def test_registration_requires_jurisdiction_for_us():
@@ -196,7 +212,11 @@ async def test_onboarding_us_requires_and_seeds_jurisdiction(monkeypatch):
     assert result.data.profile.country_code == "US"
     assert conn.tax["tax_jurisdiction_code"] == "TX"
     assert any(
-        "tenant_public_profiles" in q for kind, q, _ in conn.queries if kind == "execute"
+        "tenant_public_profiles" in q
+        and "United States" in str(args)
+        and "USD" in str(args)
+        for kind, q, args in conn.queries
+        if kind == "execute"
     )
 
 
@@ -231,6 +251,14 @@ async def test_onboarding_pa_seeds_wave1_and_timezone(monkeypatch):
     assert conn.tax["tax_lines"] is not None
     assert any(
         "tenant_public_profiles" in q and "America/Panama" in str(args)
+        for kind, q, args in conn.queries
+        if kind == "execute"
+    )
+    assert any(
+        "tenant_public_profiles" in q
+        and "Panama" in str(args)
+        and "USD" in str(args)
+        and "country" in q
         for kind, q, args in conn.queries
         if kind == "execute"
     )
