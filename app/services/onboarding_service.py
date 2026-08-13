@@ -365,7 +365,9 @@ async def complete_registration(
         identity = dict(active)
         identity["next_step"] = None
     else:
-        pending = await conn.fetchrow(
+        # Mid-alta first, else any non-cancelled owned tenant. Public /registro
+        # must not INSERT a second business; that is Crear only (#839).
+        owned = await conn.fetchrow(
             """
             SELECT p.id AS user_id, p.email, p.name,
                    p.created_at AS user_created_at,
@@ -376,14 +378,23 @@ async def complete_registration(
             JOIN tenant_onboarding o ON o.owner_user_id = p.id
             JOIN tenants t ON t.id = o.tenant_id
             WHERE lower(trim(p.email)) = $1
-              AND t.lifecycle_status = 'pending'
-              AND o.state NOT IN ('setup_complete', 'cancelled')
+              AND o.state <> 'cancelled'
+            ORDER BY
+              CASE WHEN o.state IN (
+                'email_verified',
+                'business_profile_pending',
+                'terms_pending',
+                'payment_pending',
+                'paid'
+              ) THEN 0 ELSE 1 END,
+              o.created_at DESC NULLS LAST,
+              t.created_at DESC NULLS LAST
             LIMIT 1
             """,
             email,
         )
-        if pending:
-            identity = dict(pending)
+        if owned:
+            identity = dict(owned)
             identity["next_step"] = next_step_for_state(identity.get("onboarding_state"))
         else:
             profile = await conn.fetchrow(
@@ -1145,19 +1156,6 @@ async def _find_incomplete_owned_onboarding(conn, owner_user_id: UUID):
     return None
 
 
-async def _close_starter_onboarding_for_new_business(conn, owner_user_id: UUID) -> None:
-    """Free the one-in-progress unique slot. Only called from additional-tenant create."""
-    await conn.execute(
-        """
-        UPDATE tenant_onboarding
-        SET state = 'setup_complete', updated_at = NOW()
-        WHERE owner_user_id = $1
-          AND state IN ('starter_active', 'active')
-        """,
-        owner_user_id,
-    )
-
-
 async def _lock_additional_tenant_owner(conn, owner_user_id: UUID) -> None:
     await conn.execute(
         "SELECT pg_advisory_xact_lock(hashtext($1))",
@@ -1219,7 +1217,6 @@ async def bootstrap_additional_tenant(
         )
 
     await _enforce_additional_tenant_rate_limit(conn, owner_user_id)
-    await _close_starter_onboarding_for_new_business(conn, owner_user_id)
 
     tenant_id = uuid4()
     provisional_slug = f"onboarding-{tenant_id.hex[:16]}"

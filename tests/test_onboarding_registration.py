@@ -239,6 +239,71 @@ async def test_superseded_challenge_cannot_provision_identity():
 
 
 @pytest.mark.asyncio
+async def test_existing_starter_owner_does_not_create_second_tenant_via_registro():
+    challenge_id = uuid4()
+    user_id = uuid4()
+    existing_tenant_id = uuid4()
+    created_at = datetime.now(timezone.utc)
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        {
+            "id": challenge_id,
+            "normalized_email": "owner@example.com",
+            "consumed_at": None,
+            "completed_user_id": None,
+            "completed_tenant_id": None,
+            "phone_country_code": None,
+            "phone_number": None,
+            "business_name": "Otro Cafe",
+            "country_code": "CO",
+            "base_currency_code": "COP",
+            "tax_jurisdiction_code": None,
+            "first_source": None,
+            "first_content": None,
+            "first_campaign": None,
+            "first_variant": None,
+            "last_source": None,
+            "last_content": None,
+            "last_campaign": None,
+            "last_variant": None,
+        },
+        None,
+        {
+            "user_id": user_id,
+            "email": "owner@example.com",
+            "name": None,
+            "user_created_at": created_at,
+            "tenant_id": existing_tenant_id,
+            "tenant_name": "TEST-EEUU",
+            "tenant_slug": "test-eeuu",
+            "lifecycle_status": "active",
+            "onboarding_state": "starter_active",
+            "email_verified_at": created_at,
+        },
+        {"id": uuid4()},
+        None,
+    ])
+    conn.execute = AsyncMock(return_value="OK")
+
+    with patch("app.services.onboarding_service.settings.auth_secret", "test-secret"):
+        identity = await complete_registration(
+            conn,
+            email="owner@example.com",
+            credential="raw-token",
+            kind="token",
+        )
+
+    assert identity["tenant_id"] == existing_tenant_id
+    assert identity["onboarding_state"] == "starter_active"
+    writes = "\n".join(call.args[0] for call in conn.execute.await_args_list)
+    assert "INSERT INTO tenants" not in writes
+    assert "INSERT INTO tenant_onboarding" not in writes
+    owned_sql = conn.fetchrow.await_args_list[2].args[0]
+    assert "o.state <> 'cancelled'" in owned_sql
+    assert "starter_active" not in owned_sql
+
+
+@pytest.mark.asyncio
 async def test_magic_token_verification_returns_pending_session_contract():
     from app.services.magic_link_service import verify_token
 
