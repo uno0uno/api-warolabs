@@ -31,6 +31,7 @@ from app.core.country_locale import (
     resolve_public_currency,
 )
 from app.core.timezones import seed_tenant_timezone_from_country
+from app.services.public_slug_service import assign_name_based_storefront_slug
 
 MAX_EMAIL_REQUESTS = 5
 MAX_IP_REQUESTS = 20
@@ -450,6 +451,20 @@ async def complete_registration(
         identity["onboarding_state"] = financial.data.state
         identity["next_step"] = financial.data.next_step
         identity["lifecycle_status"] = "active"
+        slug_row = await conn.fetchrow(
+            "SELECT slug FROM tenants WHERE id = $1",
+            identity["tenant_id"],
+        )
+        new_slug = None
+        if isinstance(slug_row, dict):
+            new_slug = slug_row.get("slug")
+        elif slug_row is not None:
+            try:
+                new_slug = slug_row["slug"]
+            except (KeyError, TypeError):
+                new_slug = None
+        if new_slug:
+            identity["tenant_slug"] = new_slug
 
     notification = None
     if is_self_service_onboarding:
@@ -695,6 +710,8 @@ async def apply_onboarding_locales_from_country(
                 locale = EXCLUDED.locale,
                 country = EXCLUDED.country,
                 currency_code = EXCLUDED.currency_code,
+                slug = EXCLUDED.slug,
+                display_name = EXCLUDED.display_name,
                 updated_at = now()
         """,
         tenant_id,
@@ -763,15 +780,11 @@ async def update_onboarding_financial_profile(
         result["state"] = await _promote_onboarding_identity(conn, tenant_id)
         return _financial_response(result)
 
-    await conn.execute(
-        """
-        UPDATE tenants
-        SET name = $2
-        WHERE id = $1
-          AND name IS DISTINCT FROM $2
-        """,
-        tenant_id,
-        data.business_name,
+    # Name-based storefront slug (replaces provisional onboarding-{uuid}).
+    await assign_name_based_storefront_slug(
+        conn,
+        tenant_id=tenant_id,
+        business_name=data.business_name,
     )
     accounting_localization, document_mode, fiscal_provider = (
         financial_service._financial_mode(country_code)
