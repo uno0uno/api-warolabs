@@ -1145,6 +1145,19 @@ async def _find_incomplete_owned_onboarding(conn, owner_user_id: UUID):
     return None
 
 
+async def _close_starter_onboarding_for_new_business(conn, owner_user_id: UUID) -> None:
+    """Free the one-in-progress unique slot. Only called from additional-tenant create."""
+    await conn.execute(
+        """
+        UPDATE tenant_onboarding
+        SET state = 'setup_complete', updated_at = NOW()
+        WHERE owner_user_id = $1
+          AND state IN ('starter_active', 'active')
+        """,
+        owner_user_id,
+    )
+
+
 async def _lock_additional_tenant_owner(conn, owner_user_id: UUID) -> None:
     await conn.execute(
         "SELECT pg_advisory_xact_lock(hashtext($1))",
@@ -1206,6 +1219,7 @@ async def bootstrap_additional_tenant(
         )
 
     await _enforce_additional_tenant_rate_limit(conn, owner_user_id)
+    await _close_starter_onboarding_for_new_business(conn, owner_user_id)
 
     tenant_id = uuid4()
     provisional_slug = f"onboarding-{tenant_id.hex[:16]}"

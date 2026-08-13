@@ -84,6 +84,10 @@ async def test_resumes_incomplete_pipeline_state():
         "INSERT INTO tenants" in str(call.args[0])
         for call in conn.execute.await_args_list
     )
+    assert not any(
+        "setup_complete" in str(call.args[0])
+        for call in conn.execute.await_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -131,6 +135,8 @@ async def test_creates_when_existing_starter_lacks_terms():
     assert result.data.resumed is False
     assert result.data.tenant_id == new_tenant_id
     assert result.data.slug == "second-cafe"
+    insert_sql = " ".join(call.args[0] for call in conn.execute.await_args_list)
+    assert "setup_complete" in insert_sql
 
 
 @pytest.mark.asyncio
@@ -187,6 +193,7 @@ async def test_creates_when_existing_starter_has_terms():
     assert "INSERT INTO tenant_onboarding" in insert_sql
     assert "INSERT INTO tenant_members" in insert_sql
     assert "pg_advisory_xact_lock" in insert_sql
+    assert "setup_complete" in insert_sql
 
 
 @pytest.mark.asyncio
