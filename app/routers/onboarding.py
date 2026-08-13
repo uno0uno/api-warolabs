@@ -6,9 +6,16 @@ from fastapi import APIRouter, Query, Request
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
 from app.models.billing import OnboardingPaymentStatusResponse
-from app.models.onboarding import OnboardingStatusResponse
+from app.models.onboarding import (
+    AdditionalTenantBootstrapResponse,
+    OnboardingBusinessProfileUpdate,
+    OnboardingStatusResponse,
+)
 from app.services import billing_service
-from app.services.onboarding_service import get_status_for_tenant
+from app.services.onboarding_service import (
+    bootstrap_additional_tenant,
+    get_status_for_tenant,
+)
 
 
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
@@ -33,3 +40,17 @@ async def get_payment_status(
             tenant_id=session.tenant_id,
             attempt_id=attempt_id,
         )
+
+
+@router.post(
+    "/additional-tenant",
+    response_model=AdditionalTenantBootstrapResponse,
+)
+async def create_additional_tenant(
+    request: Request,
+    payload: OnboardingBusinessProfileUpdate,
+):
+    """Create or resume another business for the logged-in superuser (no OTP)."""
+    session = require_valid_session(request)
+    async with get_db_connection() as conn:
+        return await bootstrap_additional_tenant(conn, session, payload)
