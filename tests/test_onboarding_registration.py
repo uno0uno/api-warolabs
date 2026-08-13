@@ -316,6 +316,7 @@ async def test_apply_onboarding_locales_from_country_sets_profile_and_tenant():
         conn,
         tenant_id=tenant_id,
         country_code="US",
+        currency_code="USD",
         user_id=user_id,
     )
     assert locale == "en"
@@ -325,22 +326,32 @@ async def test_apply_onboarding_locales_from_country_sets_profile_and_tenant():
     assert "preferred_locale" in profile_sql
     assert profile_user == user_id
     assert profile_locale == "en"
-    tenant_sql, tenant_arg, tenant_locale = conn.execute.await_args_list[1].args[:3]
+    tenant_sql, tenant_arg, ui_locale, receipt_locale, country, currency = (
+        conn.execute.await_args_list[1].args[:6]
+    )
     assert "tenant_public_profiles" in tenant_sql
     assert "ui_locale" in tenant_sql
+    assert "country" in tenant_sql
+    assert "currency_code" in tenant_sql
     assert tenant_arg == tenant_id
-    assert tenant_locale == "en"
+    assert ui_locale == "en"
+    assert receipt_locale == "en"
+    assert country == "United States"
+    assert currency == "USD"
 
     conn.execute.reset_mock()
     locale_co = await apply_onboarding_locales_from_country(
         conn,
         tenant_id=tenant_id,
         country_code="CO",
+        currency_code="COP",
         user_id=user_id,
     )
     assert locale_co == "es"
     assert conn.execute.await_args_list[0].args[2] == "es"
     assert conn.execute.await_args_list[1].args[2] == "es"
+    assert conn.execute.await_args_list[1].args[4] == "Colombia"
+    assert conn.execute.await_args_list[1].args[5] == "COP"
 
 
 @pytest.mark.asyncio
@@ -405,6 +416,7 @@ async def test_financial_profile_create_applies_locales_from_country():
         conn,
         tenant_id=tenant_id,
         country_code="CO",
+        currency_code="COP",
         user_id=owner_id,
     )
 
