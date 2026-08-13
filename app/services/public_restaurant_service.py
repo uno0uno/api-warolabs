@@ -673,15 +673,36 @@ async def validate_slug_available(slug: str, exclude_tenant_id: Optional[UUID] =
     try:
         async with get_db_connection() as conn:
             query = "SELECT id FROM tenant_public_profiles WHERE slug = $1"
-            params = [slug]
+            params: list = [slug]
 
             if exclude_tenant_id:
                 query += " AND tenant_id != $2"
                 params.append(exclude_tenant_id)
 
             result = await conn.fetchrow(query, *params)
+            if result is not None:
+                return False
 
-            return result is None  # Available if not found
+            tenant_q = "SELECT id FROM tenants WHERE slug = $1"
+            tenant_params: list = [slug]
+            if exclude_tenant_id:
+                tenant_q += " AND id != $2"
+                tenant_params.append(exclude_tenant_id)
+            if await conn.fetchrow(tenant_q, *tenant_params):
+                return False
+
+            try:
+                alias_q = "SELECT tenant_id FROM tenant_public_slug_aliases WHERE alias_slug = $1"
+                alias_params: list = [slug]
+                if exclude_tenant_id:
+                    alias_q += " AND tenant_id != $2"
+                    alias_params.append(exclude_tenant_id)
+                if await conn.fetchrow(alias_q, *alias_params):
+                    return False
+            except Exception:
+                pass
+
+            return True
 
     except Exception as e:
         logger.error(f"Error validating slug '{slug}': {e}")

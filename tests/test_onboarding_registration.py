@@ -130,6 +130,7 @@ async def test_verified_challenge_atomically_creates_pending_owner():
         {"state": "business_profile_pending", "email_verified_at": verified_at},
         {"id": uuid4()},
         {"id": uuid4()},
+        {"slug": "restaurante-nuevo"},
     ])
     conn.execute = AsyncMock(return_value="OK")
 
@@ -155,6 +156,8 @@ async def test_verified_challenge_atomically_creates_pending_owner():
     assert identity["lifecycle_status"] == "active"
     assert identity["tenant_name"] == "Restaurante Nuevo"
     assert identity["onboarding_state"] == "starter_active"
+    # financial mock owns name→slug assignment; identity may keep provisional until real apply
+    assert identity["tenant_slug"].startswith("onboarding-") or identity["tenant_slug"] == "restaurante-nuevo"
     assert identity["next_step"] == "setup"
     financial.assert_awaited_once()
     assert identity["registration_notification"]["source"] == "blog"
@@ -398,6 +401,9 @@ async def test_financial_profile_create_applies_locales_from_country():
     ), patch(
         "app.services.onboarding_service.apply_onboarding_locales_from_country",
         new=apply_locales,
+    ), patch(
+        "app.services.onboarding_service.assign_name_based_storefront_slug",
+        new=AsyncMock(return_value="cafe-central"),
     ), patch(
         "app.services.onboarding_service._promote_onboarding_identity",
         new=AsyncMock(return_value="starter_active"),

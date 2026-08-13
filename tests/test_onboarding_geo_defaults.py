@@ -122,9 +122,10 @@ async def test_seed_timezone_only_replaces_default():
 
 
 class _OnboardingConn:
-    def __init__(self):
+    def __init__(self, *, tenant_slug="onboarding-abc123def45678"):
         self.queries = []
         self.tax = {"tax_lines": None, "tax_jurisdiction_code": None}
+        self.tenant_slug = tenant_slug
 
     async def fetchrow(self, query, *args):
         self.queries.append(("fetchrow", query, args))
@@ -133,7 +134,18 @@ class _OnboardingConn:
                 "lifecycle_status": "pending",
                 "business_name": "Cafe",
                 "state": "business_profile_pending",
+                "owner_user_id": None,
             }
+        if "FROM tenants" in query and "lower(trim(name))" in query:
+            return None
+        if "FROM tenants" in query and "WHERE slug = $1" in query and "FOR UPDATE" not in query:
+            return None
+        if "FROM tenant_public_profiles" in query and "WHERE slug = $1" in query:
+            return None
+        if "FROM tenant_public_slug_aliases" in query:
+            return None
+        if "SELECT slug FROM tenants WHERE id" in query:
+            return {"slug": self.tenant_slug}
         if "SELECT slug, name FROM tenants" in query:
             return {"slug": "cafe-test", "name": "Cafe"}
         if "INSERT INTO tenant_financial_profiles" in query:
@@ -217,6 +229,16 @@ async def test_onboarding_us_requires_and_seeds_jurisdiction(monkeypatch):
         and "USD" in str(args)
         for kind, q, args in conn.queries
         if kind == "execute"
+    )
+    assert any(
+        kind == "execute"
+        and "UPDATE tenants" in q
+        and "cafe-us" in str(args).lower()
+        for kind, q, args in conn.queries
+    )
+    assert any(
+        kind == "execute" and "tenant_public_slug_aliases" in q
+        for kind, q, args in conn.queries
     )
 
 
