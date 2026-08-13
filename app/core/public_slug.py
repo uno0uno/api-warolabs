@@ -18,6 +18,9 @@ OPAQUE_IDENTITY_CONFLICT = {
     "message": "Choose a different business name.",
 }
 
+# Must not collide with static /api/public/restaurant/* routes.
+RESERVED_STOREFRONT_SLUGS = frozenset({"list", "cities"})
+
 
 def slugify_business_name(name: str) -> str:
     """Lowercase, spaces/separators → `-`, strip unsafe chars."""
@@ -27,7 +30,7 @@ def slugify_business_name(name: str) -> str:
     lowered = re.sub(r"[\s_]+", "-", lowered)
     lowered = re.sub(r"[^a-z0-9-]", "", lowered)
     lowered = re.sub(r"-{2,}", "-", lowered).strip("-")
-    if not lowered:
+    if not lowered or lowered in RESERVED_STOREFRONT_SLUGS:
         raise HTTPException(
             status_code=422,
             detail={

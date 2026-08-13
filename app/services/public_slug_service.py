@@ -106,30 +106,37 @@ async def assign_name_based_storefront_slug(
     )
     previous_slug = previous["slug"] if previous else None
 
-    await conn.execute(
-        """
-        UPDATE tenants
-        SET name = $2,
-            slug = $3
-        WHERE id = $1
-        """,
-        tenant_id,
-        business_name,
-        slug,
-    )
-    await conn.execute(
-        """
-        INSERT INTO tenant_public_profiles (tenant_id, slug, display_name)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (tenant_id) DO UPDATE
-            SET slug = EXCLUDED.slug,
-                display_name = EXCLUDED.display_name,
-                updated_at = now()
-        """,
-        tenant_id,
-        slug,
-        business_name,
-    )
+    try:
+        await conn.execute(
+            """
+            UPDATE tenants
+            SET name = $2,
+                slug = $3
+            WHERE id = $1
+            """,
+            tenant_id,
+            business_name,
+            slug,
+        )
+        await conn.execute(
+            """
+            INSERT INTO tenant_public_profiles (tenant_id, slug, display_name)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (tenant_id) DO UPDATE
+                SET slug = EXCLUDED.slug,
+                    display_name = EXCLUDED.display_name,
+                    updated_at = now()
+            """,
+            tenant_id,
+            slug,
+            business_name,
+        )
+    except Exception as exc:
+        # Unique violations under concurrency → same opaque conflict.
+        name = type(exc).__name__
+        if "Unique" in name or "Integrity" in name:
+            raise_opaque_identity_conflict()
+        raise
 
     if (
         is_onboarding_provisional_slug(previous_slug)

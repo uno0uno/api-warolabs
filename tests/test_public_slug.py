@@ -122,9 +122,18 @@ async def test_slug_moved_response_uses_canonical():
         "app.routers.public_restaurant.get_canonical_slug_if_alias",
         new=AsyncMock(return_value="cafe-central"),
     ):
-        resp = await _slug_moved_response("onboarding-aaaaaaaaaaaaaaaa")
+        resp = await _slug_moved_response(
+            "onboarding-aaaaaaaaaaaaaaaa",
+            suffix="/menu",
+        )
     assert resp is not None
     assert resp.status_code == 307
-    assert resp.body  # JSON body
     assert b"SLUG_MOVED" in resp.body
     assert b"cafe-central" in resp.body
+    assert resp.headers["location"] == "/api/public/restaurant/cafe-central/menu"
+
+
+def test_slugify_rejects_reserved():
+    with pytest.raises(HTTPException) as exc:
+        slugify_business_name("list")
+    assert exc.value.status_code == 422

@@ -22,11 +22,16 @@ def _mark_dynamic_public_response(response: Response) -> None:
     response.headers["Pragma"] = "no-cache"
 
 
-async def _slug_moved_response(requested_slug: str) -> Optional[JSONResponse]:
+async def _slug_moved_response(
+    requested_slug: str,
+    *,
+    suffix: str = "",
+) -> Optional[JSONResponse]:
     """Contingency: onboarding-* alias → canonical storefront slug."""
     canonical = await get_canonical_slug_if_alias(requested_slug)
     if not canonical or canonical == requested_slug:
         return None
+    location = f"/api/public/restaurant/{canonical}{suffix}"
     return JSONResponse(
         status_code=307,
         content={
@@ -34,7 +39,7 @@ async def _slug_moved_response(requested_slug: str) -> Optional[JSONResponse]:
             "code": "SLUG_MOVED",
             "canonical_slug": canonical,
         },
-        headers={"Location": f"/api/public/restaurant/{canonical}"},
+        headers={"Location": location},
     )
 
 
@@ -115,7 +120,7 @@ async def list_public_payment_methods(response: Response, tenant_slug: str) -> D
     groups (anonymous customers cannot accrue cartera).
     """
     _mark_dynamic_public_response(response)
-    moved = await _slug_moved_response(tenant_slug)
+    moved = await _slug_moved_response(tenant_slug, suffix="/payment-methods")
     if moved:
         return moved  # type: ignore[return-value]
     try:
@@ -183,26 +188,9 @@ async def get_public_menu(
 ) -> Dict[str, Any]:
     logger.info(f"🔍 [get_public_menu] Request for slug: {tenant_slug}, category: {category_id}")
     _mark_dynamic_public_response(response)
-    moved = await _slug_moved_response(tenant_slug)
+    moved = await _slug_moved_response(tenant_slug, suffix="/menu")
     if moved:
         return moved  # type: ignore[return-value]
-    """
-    Get public menu for a restaurant
-
-    Returns:
-    - restaurant_name: Display name of the restaurant
-    - categories: List of available categories
-    - products: List of products with:
-      - id, name, description, price
-      - category_id, category_name
-      - is_available, preparation_time
-      - has_modifiers (boolean)
-
-    **Public endpoint - no authentication required**
-
-    Example: GET /api/public/restaurant/la-hamburgueseria/menu
-    Example with filter: GET /api/public/restaurant/la-hamburgueseria/menu?category_id=...
-    """
     menu = await public_restaurant_service.get_menu_by_slug(
         tenant_slug,
         category_id=category_id
@@ -237,7 +225,10 @@ async def get_public_product_detail(
     Example: GET /api/public/restaurant/la-hamburgueseria/product/uuid-here
     """
     _mark_dynamic_public_response(response)
-    moved = await _slug_moved_response(tenant_slug)
+    moved = await _slug_moved_response(
+        tenant_slug,
+        suffix=f"/product/{product_id}",
+    )
     if moved:
         return moved  # type: ignore[return-value]
     product = await public_restaurant_service.get_product_detail(
