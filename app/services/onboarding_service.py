@@ -10,12 +10,15 @@ from app.config import settings
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.core.onboarding_access import next_step_for_state
 from app.models.onboarding import (
+    AdditionalTenantBootstrapData,
+    AdditionalTenantBootstrapResponse,
     OnboardingBusinessProfileUpdate,
     OnboardingFinancialData,
     OnboardingFinancialResponse,
     OnboardingStatus,
     OnboardingStatusResponse,
 )
+from app.core.exceptions import AuthorizationError
 from app.models.tenant_financial_profile import TenantFinancialProfile
 from app.services import legal_service
 from app.services import tenant_financial_profile_service as financial_service
@@ -42,6 +45,15 @@ PRE_PAYMENT_FINANCIAL_STATES = frozenset({
     "starter_active",
     "payment_pending",
 })
+# Mid-alta states that must be resumed instead of spawning another tenant.
+RESUME_PIPELINE_STATES = frozenset({
+    "email_verified",
+    "business_profile_pending",
+    "terms_pending",
+    "payment_pending",
+    "paid",
+})
+MAX_ADDITIONAL_TENANT_CREATES_PER_HOUR = 5
 
 
 def _credential_hash(email: str, kind: str, value: str) -> str:
@@ -1061,4 +1073,187 @@ async def get_status_for_tenant(conn, tenant_id: UUID) -> OnboardingStatusRespon
             termsAccepted=acceptance is not None,
             termsVersion=current["version"] if current else None,
         )
+    )
+
+
+def _bootstrap_response(
+    *,
+    tenant_id: UUID,
+    slug: str,
+    name: str,
+    resumed: bool,
+    lifecycle_status: str,
+    state: Optional[str],
+) -> AdditionalTenantBootstrapResponse:
+    return AdditionalTenantBootstrapResponse(
+        data=AdditionalTenantBootstrapData(
+            tenantId=tenant_id,
+            slug=slug,
+            name=name,
+            resumed=resumed,
+            lifecycleStatus=lifecycle_status,
+            state=state,
+            nextStep=next_step_for_state(state),
+        )
+    )
+
+
+async def _require_session_superuser(conn, session) -> None:
+    if getattr(session, "role", None) != "superuser":
+        raise AuthorizationError("Only superuser can create an additional business")
+    user_id = getattr(session, "user_id", None)
+    tenant_id = getattr(session, "tenant_id", None)
+    if not user_id or not tenant_id:
+        raise AuthorizationError("Only superuser can create an additional business")
+    role = await conn.fetchval(
+        """
+        SELECT role
+        FROM tenant_members
+        WHERE user_id = $1
+          AND tenant_id = $2
+          AND is_active = true
+        LIMIT 1
+        """,
+        user_id,
+        tenant_id,
+    )
+    if role != "superuser":
+        raise AuthorizationError("Only superuser can create an additional business")
+
+
+async def _find_incomplete_owned_onboarding(conn, owner_user_id: UUID):
+    """
+    Resume mid-alta tenants. Permanent Starter (starter_active + terms accepted)
+    is NOT incomplete — otherwise users could never create a second business.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT t.id AS tenant_id, t.name, t.slug, t.lifecycle_status, o.state
+        FROM tenant_onboarding o
+        JOIN tenants t ON t.id = o.tenant_id
+        WHERE o.owner_user_id = $1
+          AND o.state NOT IN ('setup_complete', 'cancelled')
+        ORDER BY o.created_at DESC NULLS LAST, t.created_at DESC NULLS LAST
+        """,
+        owner_user_id,
+    )
+    for row in rows:
+        state = row.get("state")
+        if state in RESUME_PIPELINE_STATES:
+            return row
+        if state in {"starter_active", "active"}:
+            accepted = await legal_service.has_current_terms_acceptance(
+                conn, row["tenant_id"]
+            )
+            if not accepted:
+                return row
+    return None
+
+
+async def _lock_additional_tenant_owner(conn, owner_user_id: UUID) -> None:
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        f"additional-tenant:{owner_user_id}",
+    )
+
+
+async def _enforce_additional_tenant_rate_limit(conn, owner_user_id: UUID) -> None:
+    """Caller must hold the additional-tenant owner advisory lock."""
+    count = await conn.fetchval(
+        """
+        SELECT COUNT(*)
+        FROM tenant_onboarding
+        WHERE owner_user_id = $1
+          AND created_at > NOW() - INTERVAL '1 hour'
+        """,
+        owner_user_id,
+    )
+    if int(count or 0) >= MAX_ADDITIONAL_TENANT_CREATES_PER_HOUR:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "ADDITIONAL_TENANT_RATE_LIMITED",
+                "message": "Too many business create attempts. Try again later.",
+            },
+        )
+
+
+async def bootstrap_additional_tenant(
+    conn,
+    session,
+    data: OnboardingBusinessProfileUpdate,
+) -> AdditionalTenantBootstrapResponse:
+    """
+    Authenticated second (Nth) business for the same profile — no email OTP.
+
+    Atomically creates tenant/member/onboarding and applies financial+slug so
+    the membership is active and switch-tenant works (api-warolabs#834).
+    """
+    await _require_session_superuser(conn, session)
+    owner_user_id = session.user_id
+    email = (getattr(session, "email", None) or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="Session email is required")
+
+    # Serialize resume + create for one owner so concurrent POSTs cannot spawn
+    # parallel incomplete tenants (mirror complete_registration email lock).
+    await _lock_additional_tenant_owner(conn, owner_user_id)
+
+    incomplete = await _find_incomplete_owned_onboarding(conn, owner_user_id)
+    if incomplete:
+        return _bootstrap_response(
+            tenant_id=incomplete["tenant_id"],
+            slug=incomplete["slug"],
+            name=incomplete["name"],
+            resumed=True,
+            lifecycle_status=incomplete["lifecycle_status"],
+            state=incomplete.get("state"),
+        )
+
+    await _enforce_additional_tenant_rate_limit(conn, owner_user_id)
+
+    tenant_id = uuid4()
+    provisional_slug = f"onboarding-{tenant_id.hex[:16]}"
+    await conn.execute(
+        """
+        INSERT INTO tenants (id, name, slug, email, lifecycle_status, created_at)
+        VALUES ($1, 'Negocio pendiente', $2, $3, 'pending', NOW())
+        """,
+        tenant_id,
+        provisional_slug,
+        email,
+    )
+    await conn.execute(
+        """
+        INSERT INTO tenant_onboarding (
+            tenant_id, owner_user_id, verified_email, state,
+            email_verified_at, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, 'business_profile_pending', NOW(), NOW(), NOW())
+        """,
+        tenant_id,
+        owner_user_id,
+        email,
+    )
+    await conn.execute(
+        """
+        INSERT INTO tenant_members (id, tenant_id, user_id, role, is_active)
+        VALUES (gen_random_uuid(), $1, $2, 'superuser', false)
+        """,
+        tenant_id,
+        owner_user_id,
+    )
+
+    financial = await update_onboarding_financial_profile(conn, tenant_id, data)
+    slug_row = await conn.fetchrow(
+        "SELECT slug, name, lifecycle_status FROM tenants WHERE id = $1",
+        tenant_id,
+    )
+    return _bootstrap_response(
+        tenant_id=tenant_id,
+        slug=slug_row["slug"],
+        name=slug_row["name"] or financial.data.business_name,
+        resumed=False,
+        lifecycle_status=slug_row["lifecycle_status"] or "active",
+        state=financial.data.state,
     )

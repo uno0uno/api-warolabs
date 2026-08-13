@@ -1,0 +1,49 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 834
+title: "feat(onboarding): authenticated additional-tenant bootstrap (same email)"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-834-additional-tenant-bootstrap
+
+paths:
+  - app/routers/onboarding.py
+  - app/services/onboarding_service.py
+  - app/models/onboarding.py
+  - tests/test_additional_tenant.py
+  - .wr/834.yaml
+
+ac:
+  - POST authenticated bootstrap (no email OTP); session role must be superuser
+  - Reuse profile; create tenant + superuser member + onboarding; apply businessName/country/currency/jurisdiction + name-based slug
+  - Atomic financial apply + promote so tm.is_active=true (switch/user-tenants work)
+  - Resume if owner has incomplete onboarding (state NOT IN setup_complete,cancelled) — no parallel half-tenant
+  - Opaque BUSINESS_IDENTITY_UNAVAILABLE on slug/name conflict
+  - Soft rate-limit creates (429); no hard tenant-count cap
+  - Response includes tenant id/slug, resumed flag, state, next_step for billing handoff
+  - pytest for create, forbid non-superuser, resume, opaque conflict
+
+out_of_scope:
+  - Front slide-over / selectors (warocol.com#2274/#2275)
+  - Public /registro login_required changes
+  - Paddle/terms UI
+  - migrate_provisional bulk for legacy onboarding-*
+
+hints:
+  entry: "POST /onboarding/additional-tenant (or similar) on onboarding router"
+  pattern: "complete_registration shell + update_onboarding_financial_profile (onboarding_service.py:389-450, :726); resume query owner_user_id + state NOT IN setup_complete/cancelled (:364-368); promote _promote_onboarding_identity (:627) for is_active; opaque via assign_name_based_storefront_slug; rate-limit style HTTP 429 like onboarding_service.py:107"
+  body: "OnboardingBusinessProfileUpdate fields (businessName, country_code, base_currency_code, tax_jurisdiction_code)"
+  authz: "require_valid_session + current tenant membership role == superuser (not only front gate)"
+  tests: "pytest tests/test_additional_tenant.py -q"
+  epic: "warocol.com#2273 — slide-over is front-only; API returns switch-ready tenant"
+
+risk:
+  sensitive: true
+  areas: [auth, onboarding, billing-handoff]
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "warocol.com#2274 slide-over + switch; human /wr-review (sensitive)"
