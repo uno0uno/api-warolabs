@@ -10,7 +10,9 @@ from app.core.country_locale import (
     public_country_name,
     resolve_public_currency,
 )
+from app.core.tenant_prefs import SUPPORTED_COUNTRY_CODES
 from app.core.timezones import (
+    COUNTRY_DEFAULT_TIMEZONES,
     DEFAULT_TENANT_TIMEZONE,
     default_timezone_for_country,
     seed_tenant_timezone_from_country,
@@ -26,7 +28,11 @@ def test_default_timezone_for_country_map():
     assert default_timezone_for_country("PA") == "America/Panama"
     assert default_timezone_for_country("US") == "America/New_York"
     assert default_timezone_for_country("CA") == "America/Toronto"
+    assert default_timezone_for_country("AR") == "America/Argentina/Buenos_Aires"
+    assert default_timezone_for_country("MX") == "America/Mexico_City"
     assert default_timezone_for_country("xx") == DEFAULT_TENANT_TIMEZONE
+    missing = SUPPORTED_COUNTRY_CODES - set(COUNTRY_DEFAULT_TIMEZONES)
+    assert not missing, f"timezone map missing catalog countries: {sorted(missing)}"
 
 
 def test_public_country_and_currency_helpers():
