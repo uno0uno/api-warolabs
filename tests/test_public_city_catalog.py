@@ -115,6 +115,61 @@ async def test_is_city_slug_known_checks_active_catalog():
     assert conn.fetchval.await_count == 2
 
 
+@pytest.mark.asyncio
+async def test_apply_city_slug_policy_drops_slug_for_non_co():
+    from app.services.tenant_config_service import apply_city_slug_policy
+
+    data = {"city_slug": "bogota", "city": "Buenos Aires"}
+    await apply_city_slug_policy("AR", data)
+    assert data["city_slug"] is None
+    assert data["city"] == "Buenos Aires"
+
+    unknown = {"city_slug": "buenos-aires"}
+    await apply_city_slug_policy("MX", unknown)
+    assert unknown["city_slug"] is None
+
+
+@pytest.mark.asyncio
+async def test_apply_city_slug_policy_co_unknown_slug_still_400():
+    from app.services.tenant_config_service import apply_city_slug_policy
+    from fastapi import HTTPException
+
+    with patch(
+        "app.services.tenant_config_service.public_restaurant_service.is_city_slug_known",
+        new=AsyncMock(return_value=False),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await apply_city_slug_policy("CO", {"city_slug": "no-existe"})
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_apply_city_slug_policy_co_keeps_known_slug():
+    from app.services.tenant_config_service import apply_city_slug_policy
+
+    data = {"city_slug": "bogota"}
+    with patch(
+        "app.services.tenant_config_service.public_restaurant_service.is_city_slug_known",
+        new=AsyncMock(return_value=True),
+    ):
+        await apply_city_slug_policy("CO", data)
+    assert data["city_slug"] == "bogota"
+
+
+@pytest.mark.asyncio
+async def test_apply_city_slug_policy_missing_country_keeps_catalog_gate():
+    from app.services.tenant_config_service import apply_city_slug_policy
+    from fastapi import HTTPException
+
+    with patch(
+        "app.services.tenant_config_service.public_restaurant_service.is_city_slug_known",
+        new=AsyncMock(return_value=False),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await apply_city_slug_policy("", {"city_slug": "no-existe"})
+    assert exc.value.status_code == 400
+
+
 def test_cities_endpoint_passes_include_empty_flag():
     app = FastAPI()
     app.include_router(public_restaurant_router.router, prefix="/public/restaurant")
