@@ -190,8 +190,26 @@ async def test_apply_city_slug_policy_drops_slug_outside_catalog_countries():
     from app.services.tenant_config_service import apply_city_slug_policy
 
     data = {"city_slug": "bogota"}
-    await apply_city_slug_policy("PE", data)
+    with patch(
+        "app.services.tenant_config_service.public_restaurant_service.is_city_slug_known",
+        new=AsyncMock(return_value=False),
+    ):
+        await apply_city_slug_policy("PE", data)
     assert data["city_slug"] is None
+
+
+@pytest.mark.asyncio
+async def test_apply_city_slug_policy_keeps_known_pe_slug():
+    from app.services.tenant_config_service import apply_city_slug_policy
+
+    data = {"city_slug": "lima-pe", "city": "Lima"}
+    with patch(
+        "app.services.tenant_config_service.public_restaurant_service.is_city_slug_known",
+        new=AsyncMock(return_value=True),
+    ) as known:
+        await apply_city_slug_policy("PE", data)
+    assert data["city_slug"] == "lima-pe"
+    known.assert_awaited_once_with("lima-pe", country_code="PE")
 
 
 @pytest.mark.asyncio

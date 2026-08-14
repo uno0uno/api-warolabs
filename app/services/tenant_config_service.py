@@ -12,7 +12,12 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
 from app.core.sales_tax_profile import settings_for_sales_tax_profile
-from app.core.timezones import DEFAULT_TENANT_TIMEZONE, normalize_timezone, validate_timezone
+from app.core.timezones import (
+    COUNTRY_DEFAULT_TIMEZONES,
+    DEFAULT_TENANT_TIMEZONE,
+    normalize_timezone,
+    validate_timezone,
+)
 from app.services.hospitality_tax_packs import ensure_wave1_tax_pack
 from app.services.hospitality_tax_jurisdictions import (
     JURISDICTION_COUNTRIES,
@@ -51,7 +56,7 @@ async def _tenant_financial_country_code(conn, tenant_id) -> str:
     return str((row["country_code"] if row else "") or "").strip().upper()
 
 
-CITY_CATALOG_COUNTRIES = frozenset({"CO", "AR", "MX", "US"})
+CITY_CATALOG_COUNTRIES = frozenset(COUNTRY_DEFAULT_TIMEZONES)
 
 
 async def apply_city_slug_policy(country_code: str, data_dict: dict) -> None:
