@@ -54,6 +54,11 @@ async def list_public_restaurants(
         default=None,
         description="Preferred: filter by normalized slug (e.g. 'bogota', 'mosquera')."
     ),
+    country_code: Optional[str] = Query(
+        default=None,
+        description="Optional ISO country on tenant_financial_profiles "
+                    "(e.g. 'AR'). Omit for CO slug-only directories.",
+    ),
 ) -> Dict[str, Any]:
     """
     List all active public restaurant profiles.
@@ -61,6 +66,8 @@ async def list_public_restaurants(
     Optional filters:
     - city_slug: preferred (matches `tenant_public_profiles.city_slug`)
     - city: deprecated alias kept for one release; logs a warning when used.
+    - country_code: financial-profile country (warocol.com#2296). Extra-country
+      magazines pass this so listings do not mix countries.
 
     Returns list of restaurants with basic info plus `country` and `city_slug`.
 
@@ -68,15 +75,16 @@ async def list_public_restaurants(
 
     Example: GET /api/public/restaurant/list
     Example: GET /api/public/restaurant/list?city_slug=bogota
+    Example: GET /api/public/restaurant/list?city_slug=buenos-aires&country_code=AR
     """
     logger.info(
-        "🔍 [list_public_restaurants] Request city=%r city_slug=%r",
-        city, city_slug,
+        "🔍 [list_public_restaurants] Request city=%r city_slug=%r country_code=%r",
+        city, city_slug, country_code,
     )
     _mark_dynamic_public_response(response)
 
     restaurants = await public_restaurant_service.list_restaurants(
-        city=city, city_slug=city_slug,
+        city=city, city_slug=city_slug, country_code=country_code,
     )
 
     logger.info(f"🔍 [list_public_restaurants] Found {len(restaurants)} restaurants")

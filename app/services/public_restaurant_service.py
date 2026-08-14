@@ -712,6 +712,7 @@ async def validate_slug_available(slug: str, exclude_tenant_id: Optional[UUID] =
 async def list_restaurants(
     city: Optional[str] = None,
     city_slug: Optional[str] = None,
+    country_code: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     List all active public restaurant profiles.
@@ -722,12 +723,23 @@ async def list_restaurants(
         city_slug: Preferred filter (warocol.com#615). Matches the
               normalized slug stored on tenant_public_profiles.city_slug,
               which mirrors public_cities.city_slug.
+        country_code: Optional ISO code on tenant_financial_profiles
+              (warocol.com#2296). Omit for CO slug-only directories and
+              unfiltered sitemap restaurant URLs. When set, JOIN financial
+              profiles so an AR magazine cannot list a CO tenant.
 
     Returns:
         List of restaurant profiles with basic information.
     """
+    list_country = str(country_code or "").strip().upper() or None
     try:
         async with get_db_connection() as conn:
+            from_sql = "FROM tenant_public_profiles tpp"
+            if list_country:
+                from_sql += (
+                    "\n                JOIN tenant_financial_profiles tfp"
+                    " ON tfp.tenant_id = tpp.tenant_id"
+                )
             # Paid subscription or permanent Starter (same predicate as profile/menu).
             query = f"""
                 SELECT
@@ -739,7 +751,7 @@ async def list_restaurants(
                     tpp.is_manually_open, tpp.business_hours,
                     tpp.accepts_online_orders,
                     tpp.created_at, tpp.updated_at
-                FROM tenant_public_profiles tpp
+                {from_sql}
                 WHERE tpp.is_active = true
                   AND {_PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL}
             """
@@ -757,6 +769,10 @@ async def list_restaurants(
                     "list_restaurants: deprecated 'city' param used "
                     "(value=%r). Migrate caller to 'city_slug'.", city,
                 )
+
+            if list_country:
+                params.append(list_country)
+                query += f" AND tfp.country_code = ${len(params)}"
 
             query += " ORDER BY display_name ASC"
 
@@ -808,8 +824,8 @@ async def list_restaurants(
 
     except Exception as e:
         logger.error(
-            "Error listing restaurants (city=%r, city_slug=%r): %s",
-            city, city_slug, e,
+            "Error listing restaurants (city=%r, city_slug=%r, country_code=%r): %s",
+            city, city_slug, list_country, e,
         )
         raise HTTPException(
             status_code=500,

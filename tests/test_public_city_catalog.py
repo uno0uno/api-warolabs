@@ -275,3 +275,60 @@ def test_cities_endpoint_passes_country_code():
 
     assert response.status_code == 200
     list_cities.assert_awaited_once_with(include_empty=True, country_code="AR")
+
+
+@pytest.mark.asyncio
+async def test_list_restaurants_omits_country_join_without_country_code():
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    with patch(
+        "app.services.public_restaurant_service.get_db_connection",
+        return_value=_mock_db(conn),
+    ):
+        await public_restaurant_service.list_restaurants(city_slug="bogota")
+
+    sql = conn.fetch.await_args.args[0]
+    assert "tenant_financial_profiles" not in sql
+    assert "tpp.city_slug = $1" in sql
+    assert conn.fetch.await_args.args[1] == "bogota"
+
+
+@pytest.mark.asyncio
+async def test_list_restaurants_filters_financial_country_code():
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    with patch(
+        "app.services.public_restaurant_service.get_db_connection",
+        return_value=_mock_db(conn),
+    ):
+        await public_restaurant_service.list_restaurants(
+            city_slug="buenos-aires",
+            country_code="ar",
+        )
+
+    sql = conn.fetch.await_args.args[0]
+    assert "JOIN tenant_financial_profiles tfp" in sql
+    assert "tfp.country_code = $2" in sql
+    assert conn.fetch.await_args.args[1] == "buenos-aires"
+    assert conn.fetch.await_args.args[2] == "AR"
+
+
+def test_list_endpoint_passes_country_code():
+    app = FastAPI()
+    app.include_router(public_restaurant_router.router, prefix="/public/restaurant")
+
+    with patch(
+        "app.routers.public_restaurant.public_restaurant_service.list_restaurants",
+        new=AsyncMock(return_value=[]),
+    ) as list_restaurants:
+        client = TestClient(app)
+        response = client.get(
+            "/public/restaurant/list?city_slug=buenos-aires&country_code=AR"
+        )
+
+    assert response.status_code == 200
+    list_restaurants.assert_awaited_once_with(
+        city=None, city_slug="buenos-aires", country_code="AR",
+    )
