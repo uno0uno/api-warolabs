@@ -93,6 +93,7 @@ async def capture_lead(
     ip_address: Optional[str],
     user_agent: Optional[str],
     button_source: str,
+    visitor_key: Optional[str] = None,
 ) -> dict:
     """
     Capture a lead from the homepage.
@@ -146,17 +147,19 @@ async def capture_lead(
     # 3. INSERT lead_interaction — type differs for duplicate vs new
     interaction_type = "duplicate_submit" if is_duplicate else "homepage_cta"
     metadata = json.dumps({"button": button_source, "duplicate": is_duplicate})
+    stored_visitor_key = (visitor_key or "").strip() or None
     await conn.execute(
         """
         INSERT INTO lead_interactions
-            (lead_id, interaction_type, source, ip_address, user_agent, metadata)
-        VALUES ($1, $2, 'homepage', $3, $4, $5::jsonb)
+            (lead_id, interaction_type, source, ip_address, user_agent, metadata, visitor_key)
+        VALUES ($1, $2, 'homepage', $3, $4, $5::jsonb, $6)
         """,
         lead_id,
         interaction_type,
         ip_address,
         user_agent,
         metadata,
+        stored_visitor_key,
     )
     logger.info(f"📥 [capture_lead] Interaction '{interaction_type}' recorded for lead {lead_id}")
 
@@ -173,6 +176,7 @@ async def capture_access_request(
     ip_address: Optional[str],
     user_agent: Optional[str],
     button_source: str = "access_request",
+    visitor_key: Optional[str] = None,
 ) -> dict:
     """
     Capture an access request from the login page.
@@ -237,16 +241,18 @@ async def capture_access_request(
     # 3. INSERT lead_interaction for every access request
     import json as _json
     metadata = _json.dumps({"button": button_source})
+    stored_visitor_key = (visitor_key or "").strip() or None
     await conn.execute(
         """
         INSERT INTO lead_interactions
-            (lead_id, interaction_type, source, ip_address, user_agent, metadata)
-        VALUES ($1, 'access_request', 'login_page', $2, $3, $4::jsonb)
+            (lead_id, interaction_type, source, ip_address, user_agent, metadata, visitor_key)
+        VALUES ($1, 'access_request', 'login_page', $2, $3, $4::jsonb, $5)
         """,
         lead_id,
         ip_address,
         user_agent,
         metadata,
+        stored_visitor_key,
     )
     logger.info(f"📥 [capture_access_request] Interaction recorded for lead {lead_id}")
 

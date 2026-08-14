@@ -6,7 +6,7 @@ import logging
 import re
 from typing import Optional
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from app.database import get_db_connection
 from app.services import leads_service
 from app.core.email_utils import normalize_email
@@ -16,10 +16,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _optional_visitor_key(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    return None
+
+
 class AccessRequestBody(BaseModel):
     email: EmailStr
     phone: Optional[str] = None
     button_source: str = "access_request"
+    visitor_key: Optional[str] = Field(default=None, max_length=128)
 
     @field_validator("email", mode="before")
     @classmethod
@@ -36,11 +46,17 @@ class AccessRequestBody(BaseModel):
             raise ValueError("El teléfono debe tener entre 7 y 10 dígitos")
         return digits
 
+    @field_validator("visitor_key", mode="before")
+    @classmethod
+    def _strip_visitor_key(cls, v: object) -> Optional[str]:
+        return _optional_visitor_key(v)
+
 
 class LeadCaptureRequest(BaseModel):
     email: EmailStr
     phone: str
     button_source: str = "comenzar"
+    visitor_key: Optional[str] = Field(default=None, max_length=128)
 
     @field_validator("email", mode="before")
     @classmethod
@@ -54,6 +70,11 @@ class LeadCaptureRequest(BaseModel):
         if len(digits) < 7 or len(digits) > 10:
             raise ValueError("El teléfono debe tener entre 7 y 10 dígitos")
         return digits
+
+    @field_validator("visitor_key", mode="before")
+    @classmethod
+    def _strip_visitor_key(cls, v: object) -> Optional[str]:
+        return _optional_visitor_key(v)
 
 
 @router.post("/capture")
@@ -81,6 +102,7 @@ async def capture_lead(body: LeadCaptureRequest, request: Request):
             ip_address=ip_address,
             user_agent=user_agent,
             button_source=body.button_source,
+            visitor_key=body.visitor_key,
         )
 
     return {
@@ -114,6 +136,7 @@ async def capture_access_request(body: AccessRequestBody, request: Request):
             ip_address=ip_address,
             user_agent=user_agent,
             button_source=body.button_source,
+            visitor_key=body.visitor_key,
         )
 
     return {"success": True, "message": "¡Solicitud enviada! Nos pondremos en contacto contigo pronto."}
