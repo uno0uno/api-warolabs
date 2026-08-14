@@ -51,22 +51,29 @@ async def _tenant_financial_country_code(conn, tenant_id) -> str:
     return str((row["country_code"] if row else "") or "").strip().upper()
 
 
+CITY_CATALOG_COUNTRIES = frozenset({"CO", "AR", "MX", "US"})
+
+
 async def apply_city_slug_policy(country_code: str, data_dict: dict) -> None:
-    """CO keeps public_cities slugs. Non-CO must not join the CO directory."""
+    """Keep city_slug only when it belongs to the tenant's catalog country."""
     slug = data_dict.get("city_slug")
-    if country_code and country_code != "CO":
-        if slug:
-            data_dict["city_slug"] = None
-        return
+    code = str(country_code or "").strip().upper() or "CO"
     if not slug:
         return
-    known = await public_restaurant_service.is_city_slug_known(slug)
-    if not known:
-        raise HTTPException(
-            status_code=400,
-            detail=f"city_slug '{slug}' is not in the catalog. "
-                   "Pick a city from /public/cities.",
-        )
+    if code not in CITY_CATALOG_COUNTRIES:
+        data_dict["city_slug"] = None
+        return
+    known = await public_restaurant_service.is_city_slug_known(slug, country_code=code)
+    if known:
+        return
+    if code != "CO":
+        data_dict["city_slug"] = None
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=f"city_slug '{slug}' is not in the catalog. "
+               "Pick a city from /public/cities.",
+    )
 
 
 def _profile_from_row(row) -> TenantPublicProfile:

@@ -21,6 +21,7 @@ async def test_list_cities_include_empty_returns_catalog_metadata():
     conn.fetch = AsyncMock(return_value=[
         {
             "country": "Colombia",
+            "country_code": "CO",
             "city": "Bogotá",
             "city_slug": "bogota",
             "department_code": "11",
@@ -34,6 +35,7 @@ async def test_list_cities_include_empty_returns_catalog_metadata():
         },
         {
             "country": "Colombia",
+            "country_code": "CO",
             "city": "Mosquera",
             "city_slug": "mosquera",
             "department_code": "25",
@@ -65,6 +67,7 @@ async def test_list_cities_default_hides_empty_catalog_rows():
     conn.fetch = AsyncMock(return_value=[
         {
             "country": "Colombia",
+            "country_code": "CO",
             "city": "La Unión",
             "city_slug": "la-union-antioquia",
             "department_code": "05",
@@ -78,6 +81,7 @@ async def test_list_cities_default_hides_empty_catalog_rows():
         },
         {
             "country": "Colombia",
+            "country_code": "CO",
             "city": "Mosquera",
             "city_slug": "mosquera",
             "department_code": "25",
@@ -116,17 +120,78 @@ async def test_is_city_slug_known_checks_active_catalog():
 
 
 @pytest.mark.asyncio
+async def test_list_cities_defaults_country_filter_to_co():
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    with patch(
+        "app.services.public_restaurant_service.get_db_connection",
+        return_value=_mock_db(conn),
+    ):
+        await public_restaurant_service.list_cities(include_empty=True)
+
+    sql = conn.fetch.await_args.args[0]
+    assert "pc.country_code = $1" in sql
+    assert conn.fetch.await_args.args[1] == "CO"
+
+
+@pytest.mark.asyncio
+async def test_list_cities_filters_requested_country():
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    with patch(
+        "app.services.public_restaurant_service.get_db_connection",
+        return_value=_mock_db(conn),
+    ):
+        await public_restaurant_service.list_cities(include_empty=True, country_code="AR")
+
+    assert conn.fetch.await_args.args[1] == "AR"
+
+
+@pytest.mark.asyncio
 async def test_apply_city_slug_policy_drops_slug_for_non_co():
     from app.services.tenant_config_service import apply_city_slug_policy
 
     data = {"city_slug": "bogota", "city": "Buenos Aires"}
-    await apply_city_slug_policy("AR", data)
+    with patch(
+        "app.services.tenant_config_service.public_restaurant_service.is_city_slug_known",
+        new=AsyncMock(return_value=False),
+    ):
+        await apply_city_slug_policy("AR", data)
     assert data["city_slug"] is None
     assert data["city"] == "Buenos Aires"
 
     unknown = {"city_slug": "buenos-aires"}
-    await apply_city_slug_policy("MX", unknown)
+    with patch(
+        "app.services.tenant_config_service.public_restaurant_service.is_city_slug_known",
+        new=AsyncMock(return_value=False),
+    ):
+        await apply_city_slug_policy("MX", unknown)
     assert unknown["city_slug"] is None
+
+
+@pytest.mark.asyncio
+async def test_apply_city_slug_policy_keeps_matching_extra_country_slug():
+    from app.services.tenant_config_service import apply_city_slug_policy
+
+    data = {"city_slug": "buenos-aires", "city": "Buenos Aires"}
+    with patch(
+        "app.services.tenant_config_service.public_restaurant_service.is_city_slug_known",
+        new=AsyncMock(return_value=True),
+    ) as known:
+        await apply_city_slug_policy("AR", data)
+    assert data["city_slug"] == "buenos-aires"
+    known.assert_awaited_once_with("buenos-aires", country_code="AR")
+
+
+@pytest.mark.asyncio
+async def test_apply_city_slug_policy_drops_slug_outside_catalog_countries():
+    from app.services.tenant_config_service import apply_city_slug_policy
+
+    data = {"city_slug": "bogota"}
+    await apply_city_slug_policy("PE", data)
+    assert data["city_slug"] is None
 
 
 @pytest.mark.asyncio
@@ -194,4 +259,19 @@ def test_cities_endpoint_passes_include_empty_flag():
 
     assert response.status_code == 200
     assert response.json()["data"][0]["municipality_code"] == "25473"
-    list_cities.assert_awaited_once_with(include_empty=True)
+    list_cities.assert_awaited_once_with(include_empty=True, country_code=None)
+
+
+def test_cities_endpoint_passes_country_code():
+    app = FastAPI()
+    app.include_router(public_restaurant_router.router, prefix="/public/restaurant")
+
+    with patch(
+        "app.routers.public_restaurant.public_restaurant_service.list_cities",
+        new=AsyncMock(return_value=[]),
+    ) as list_cities:
+        client = TestClient(app)
+        response = client.get("/public/restaurant/cities?include_empty=true&country_code=AR")
+
+    assert response.status_code == 200
+    list_cities.assert_awaited_once_with(include_empty=True, country_code="AR")
