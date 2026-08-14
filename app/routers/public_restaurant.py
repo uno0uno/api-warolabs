@@ -95,9 +95,14 @@ async def list_public_cities(
                     "True for the operator selector on /negocio; "
                     "False (default) for the discovery section on /."
     ),
+    country_code: Optional[str] = Query(
+        default=None,
+        description="ISO country filter. Omitted/blank defaults to CO so "
+                    "SSR city dispatch and /ciudades stay Colombia-only."
+    ),
 ) -> Dict[str, Any]:
     """
-    Return the city/municipality catalog (warocol.com#615, #1477).
+    Return the city/municipality catalog (warocol.com#615, #1477, #2295).
 
     Public — no auth required. Used by the operator-facing city selector
     on /negocio and the customer-facing discovery section on the root
@@ -105,6 +110,7 @@ async def list_public_cities(
     """
     cities = await public_restaurant_service.list_cities(
         include_empty=include_empty,
+        country_code=country_code,
     )
     return {"success": True, "data": cities}
 

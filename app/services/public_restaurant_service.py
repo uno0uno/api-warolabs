@@ -817,9 +817,18 @@ async def list_restaurants(
         )
 
 
-async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
+def _normalize_city_country_code(country_code: Optional[str]) -> str:
+    """Omitted/blank country_code defaults to CO so SSR dispatch stays Colombia-only."""
+    code = str(country_code or "").strip().upper()
+    return code or "CO"
+
+
+async def list_cities(
+    include_empty: bool = False,
+    country_code: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
-    Return the curated city catalog (warocol.com#615).
+    Return the curated city catalog (warocol.com#615, #2295).
 
     Used by the `/negocio` city selector (include_empty=True so operators
     see every city even before someone in that city signs up) and by the
@@ -829,17 +838,21 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
     Args:
         include_empty: When False (default), filter out cities with zero
             active tenants. When True, return every active catalog entry.
+        country_code: ISO country filter. Omitted/blank → CO (SSR /ciudades
+            must not receive AR/MX/US rows).
 
     Returns:
-        List of dicts with country, city, city_slug, DIVIPOLA metadata, and tenant_count.
-        Sorted by sort_order then city name.
+        List of dicts with country, country_code, city, city_slug, DIVIPOLA
+        metadata, and tenant_count. Sorted by sort_order then city name.
     """
+    code = _normalize_city_country_code(country_code)
     try:
         async with get_db_connection() as conn:
             rows = await conn.fetch(
                 f"""
                 SELECT
                     pc.country,
+                    pc.country_code,
                     pc.city,
                     pc.city_slug,
                     pc.department_code,
@@ -857,8 +870,10 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
                 LEFT JOIN tenant_public_profiles tpp
                        ON tpp.city_slug = pc.city_slug
                 WHERE pc.is_active = true
+                  AND pc.country_code = $1
                 GROUP BY
                     pc.country,
+                    pc.country_code,
                     pc.city,
                     pc.city_slug,
                     pc.department_code,
@@ -870,10 +885,12 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
                     pc.sort_order
                 ORDER BY pc.sort_order ASC, pc.city ASC
                 """,
+                code,
             )
             cities = [
                 {
                     "country": r["country"],
+                    "country_code": r["country_code"],
                     "city": r["city"],
                     "city_slug": r["city_slug"],
                     "department_code": r["department_code"],
@@ -896,20 +913,31 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
         )
 
 
-async def is_city_slug_known(city_slug: str) -> bool:
+async def is_city_slug_known(
+    city_slug: str,
+    country_code: Optional[str] = None,
+) -> bool:
     """
     Check whether `city_slug` is a recognised active entry in the
-    public_cities catalog (warocol.com#615).
+    public_cities catalog (warocol.com#615, #2295).
 
-    Used by the profile update endpoint to validate operator input and by
-    the tenant slug generator to avoid collisions.
+    When country_code is set, the slug must belong to that country so an
+    AR tenant cannot store a CO directory slug.
     """
     try:
         async with get_db_connection() as conn:
-            hit = await conn.fetchval(
-                "SELECT 1 FROM public_cities WHERE city_slug = $1 AND is_active = true",
-                city_slug,
-            )
+            if country_code:
+                hit = await conn.fetchval(
+                    "SELECT 1 FROM public_cities "
+                    "WHERE city_slug = $1 AND is_active = true AND country_code = $2",
+                    city_slug,
+                    str(country_code).strip().upper(),
+                )
+            else:
+                hit = await conn.fetchval(
+                    "SELECT 1 FROM public_cities WHERE city_slug = $1 AND is_active = true",
+                    city_slug,
+                )
             return hit is not None
     except Exception as e:
         logger.error("Error checking city slug %r: %s", city_slug, e)
