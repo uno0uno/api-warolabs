@@ -19,6 +19,8 @@ google-genai>=1.0.0
 tzdata
 cachetools==5.5.0
 Babel==2.17.0
+# Private repo: Docker/local pip needs GitHub SSH or GH_TOKEN.
+waro-trail @ git+https://github.com/uno0uno/waro-trail.git@main
 
 # Testing
 pytest==8.3.4

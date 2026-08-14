@@ -201,6 +201,8 @@ async def get_article_by_slug(
                     "UPDATE articles SET views = COALESCE(views, 0) + 1 WHERE id = $1",
                     row['id']
                 )
+                from app.routers.trail import schedule_crawler_page_view
+                schedule_crawler_page_view(request, slug)
 
             # Build author info
             author_info = AuthorInfo(
