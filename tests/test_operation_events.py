@@ -250,6 +250,44 @@ async def test_record_operation_event_accepts_promotion_deleted():
     assert args[4] == "promotion_deleted"
 
 
+@pytest.mark.asyncio
+async def test_record_operation_event_accepts_tab_item_edited():
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    tenant_id = uuid4()
+
+    await operation_events_service.record_operation_event(
+        conn,
+        tenant_id,
+        domain="pos",
+        channel="mesa",
+        action="tab_item_edited",
+        payload={"product_name": "Hamburguesa"},
+    )
+
+    conn.execute.assert_called_once()
+    assert conn.execute.call_args[0][4] == "tab_item_edited"
+
+
+@pytest.mark.asyncio
+async def test_record_operation_event_accepts_tab_item_edit_blocked():
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    tenant_id = uuid4()
+
+    await operation_events_service.record_operation_event(
+        conn,
+        tenant_id,
+        domain="pos",
+        channel="barra",
+        action="tab_item_edit_blocked",
+        payload={"product_name": "Hamburguesa"},
+    )
+
+    conn.execute.assert_called_once()
+    assert conn.execute.call_args[0][4] == "tab_item_edit_blocked"
+
+
 def test_supervisor_passes_list_operation_events_under_enforce():
     session = _build_session(role="supervisor")
     app = FastAPI()

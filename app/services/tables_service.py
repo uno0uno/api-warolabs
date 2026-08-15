@@ -4329,29 +4329,6 @@ async def _add_tab_items_core(
                 f"[tab] modifier inventory deduction failed for item {order_item_id}: {_mod_inv_exc}"
             )
 
-        await _record_tab_operation_event(
-            conn,
-            tenant_id,
-            user_id=user_id,
-            table_id=table_id,
-            tab_ctx=tab_ctx,
-            action="tab_item_added",
-            order_id=order_id,
-            order_item_id=order_item_id,
-            payload=_build_tab_item_payload(
-                product_id=item["product_id"],
-                product_name=product_names.get(str(item["product_id"])),
-                quantity=item["quantity"],
-                unit_price=item["unit_price"],
-                subtotal=subtotal,
-                modifiers=_modifiers_from_request_item(item),
-                notes=item_notes,
-                table_id=table_id,
-                table_name=tab_ctx["table_name"],
-                order_number=order_number,
-            ),
-        )
-
         try:
             await _capture_order_item_ingredients(
                 conn, order_item_id, item["product_id"],

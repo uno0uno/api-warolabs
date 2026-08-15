@@ -34,6 +34,8 @@ ACTIONS: FrozenSet[str] = frozenset({
     "tab_item_added",
     "tab_item_removed",
     "tab_item_qty_changed",
+    "tab_item_edited",
+    "tab_item_edit_blocked",
     "tab_cleared",
     "cart_line_removed",
     "cart_cleared",

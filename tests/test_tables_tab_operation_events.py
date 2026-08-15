@@ -10,7 +10,7 @@ from app.services import tables_service
 
 
 @pytest.mark.asyncio
-async def test_add_tab_items_core_records_tab_item_added_per_line():
+async def test_add_tab_items_core_does_not_record_tab_item_added():
     tenant_id = uuid4()
     user_id = uuid4()
     table_id = uuid4()
@@ -85,12 +85,7 @@ async def test_add_tab_items_core_records_tab_item_added_per_line():
 
     assert result["session_id"] == session_id
     assert result["created_order_item_ids"] == [order_item_id]
-    assert len(recorded) == 1
-    assert recorded[0]["action"] == "tab_item_added"
-    assert recorded[0]["tab_ctx"]["channel"] == "mesa"
-    assert recorded[0]["tab_ctx"]["table_session_id"] == session_id
-    assert recorded[0]["payload"]["product_name"] == "Hamburguesa"
-    assert recorded[0]["payload"]["order_number"] == 42
+    assert recorded == []
 
 
 @pytest.mark.asyncio
@@ -270,11 +265,9 @@ async def test_add_then_remove_shares_table_session_id():
             MagicMock(), table_id, order_item_id,
         )
 
-    assert len(recorded) == 2
-    assert recorded[0]["action"] == "tab_item_added"
-    assert recorded[1]["action"] == "tab_item_removed"
+    assert len(recorded) == 1
+    assert recorded[0]["action"] == "tab_item_removed"
     assert recorded[0]["tab_ctx"]["table_session_id"] == session_id
-    assert recorded[1]["tab_ctx"]["table_session_id"] == session_id
 
 
 @pytest.mark.asyncio
