@@ -60,6 +60,8 @@ def test_accepts_page_view_via_library():
     assert payload["path"] == "/blog/demo"
     assert payload["site_key"] == "warocol.com"
     assert payload["event_type"] == "page_view"
+    assert payload.get("client_ip")
+    assert "device_type" not in payload
     assert "email" not in payload
 
 
@@ -117,6 +119,29 @@ def test_rejects_unknown_event_type_and_bad_scroll():
     )
     assert unknown.status_code == 422
     assert bad_scroll.status_code == 422
+
+
+def test_injects_client_ip_and_ignores_body_device_type():
+    session_id = uuid4()
+    client = _client()
+    with patch(
+        "app.routers.trail.ingest_event",
+        return_value={"session_id": session_id, "is_bot": False, "bot_family": None},
+    ) as ingest:
+        response = client.post(
+            "/public/trail/events",
+            json={
+                "visitor_key": "opaque-id",
+                "path": "/blog/demo",
+                "device_type": "mobile",
+                "client_ip": "203.0.113.44",
+            },
+        )
+    assert response.status_code == 200
+    payload = ingest.call_args.args[1]
+    assert payload["client_ip"] != "203.0.113.44"
+    assert payload.get("client_ip")
+    assert "device_type" not in payload
 
 
 def test_rate_limit_returns_429():

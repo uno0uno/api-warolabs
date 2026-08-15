@@ -79,9 +79,14 @@ def _enforce_rate_limit(client_ip: Optional[str]) -> None:
     bucket.append(now)
 
 
-def _payload_from_body(body: TrailEventBody, user_agent: Optional[str]) -> dict:
+def _payload_from_body(
+    body: TrailEventBody,
+    user_agent: Optional[str],
+    client_ip: Optional[str],
+) -> dict:
     payload = body.model_dump()
     payload["user_agent"] = user_agent
+    payload["client_ip"] = client_ip
     return payload
 
 
@@ -100,6 +105,7 @@ def schedule_crawler_page_view(request: Request, slug: str) -> None:
         "event_type": "page_view",
         "referrer": request.headers.get("referer"),
         "user_agent": ua or None,
+        "client_ip": request.client.host if request.client else None,
     }
     asyncio.create_task(_ingest_crawler(payload))
 
@@ -117,11 +123,12 @@ async def post_trail_event(request: Request, body: TrailEventBody):
     if len(encoded.encode("utf-8")) > MAX_BODY_BYTES:
         raise HTTPException(status_code=413, detail="Payload too large")
 
-    _enforce_rate_limit(request.client.host if request.client else None)
+    client_ip = request.client.host if request.client else None
+    _enforce_rate_limit(client_ip)
 
     user_agent = request.headers.get("user-agent")
     try:
-        result = await _ingest(_payload_from_body(body, user_agent))
+        result = await _ingest(_payload_from_body(body, user_agent, client_ip))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except HTTPException:
