@@ -23,6 +23,7 @@ from app.models.purchase import (
 from app.services.email_helpers import send_quotation_email
 from app.services.gemini_service import process_invoice
 from app.services.ingredients_service import match_ingredient_by_name
+from app.services.operation_events_service import DOMAIN_ABASTECIMIENTO, record_module_event
 
 # Direct credit payables for Pagos — unpaid received + paid settlements (not contado).
 # See warocol.com#2110 / #2111 / epic #2109.
@@ -808,6 +809,17 @@ async def create_purchase(
                     # Log error but don't fail
                     print(f"Failed to send Discord notification: {e}")
 
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_ABASTECIMIENTO,
+                    action="purchase_created",
+                    actor_user_id=user_id,
+                    entity_type="purchase",
+                    entity_id=new_purchase["id"],
+                    label=new_purchase["purchase_number"],
+                )
+
                 return PurchaseResponse(data=purchase)
 
     except AuthenticationError:
@@ -829,6 +841,7 @@ async def update_purchase(
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
@@ -930,6 +943,15 @@ async def update_purchase(
                         )
 
                 # Fetch updated purchase
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_ABASTECIMIENTO,
+                    action="purchase_updated",
+                    actor_user_id=user_id,
+                    entity_type="purchase",
+                    entity_id=purchase_id,
+                )
                 return await get_purchase_by_id(request, response, purchase_id)
 
     except AuthenticationError:

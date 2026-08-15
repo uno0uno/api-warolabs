@@ -17,6 +17,7 @@ from app.services.modifier_option_service import (
     validate_modifier_option_fields,
 )
 from app.services.billing_service import check_plan_quota_growth, check_plan_quota_scoped
+from app.services.operation_events_service import DOMAIN_MENU, record_module_event
 import logging
 
 logger = logging.getLogger(__name__)
@@ -319,6 +320,16 @@ async def create_modifier_group(
                     group_data,
                     user_id=user_id,
                     record_history=True,
+                )
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MENU,
+                    action="modifier_group_created",
+                    actor_user_id=user_id,
+                    entity_type="modifier_group",
+                    entity_id=group_id,
+                    label=group_data.name,
                 )
                 return await get_modifier_group_by_id(request, group_id, conn)
 
@@ -744,6 +755,17 @@ async def update_modifier_group(
                             old_snapshot, new_snapshot, user_id
                         )
 
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MENU,
+                    action="modifier_group_updated",
+                    actor_user_id=user_id,
+                    entity_type="modifier_group",
+                    entity_id=group_id,
+                    label=group_name,
+                )
+
                 # 5. Get complete updated group
                 return await get_modifier_group_by_id(request, group_id, conn)
 
@@ -803,6 +825,17 @@ async def delete_modifier_group(
                 # 4. Delete group
                 delete_group_query = "DELETE FROM modifier_groups WHERE id = $1 AND tenant_id = $2"
                 await conn.execute(delete_group_query, group_id, tenant_id)
+
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MENU,
+                    action="modifier_group_deleted",
+                    actor_user_id=user_id,
+                    entity_type="modifier_group",
+                    entity_id=group_id,
+                    label=group_name,
+                )
 
                 return {
                     "success": True,

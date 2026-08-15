@@ -288,6 +288,46 @@ async def test_record_operation_event_accepts_tab_item_edit_blocked():
     assert conn.execute.call_args[0][4] == "tab_item_edit_blocked"
 
 
+@pytest.mark.parametrize(
+    "domain,action",
+    [
+        ("menu", "product_created"),
+        ("menu", "product_deleted"),
+        ("menu", "modifier_group_updated"),
+        ("menu", "recipe_deleted"),
+        ("menu", "menu_reordered"),
+        ("abastecimiento", "purchase_confirmed"),
+        ("abastecimiento", "stock_adjusted"),
+        ("abastecimiento", "direct_purchase_deleted"),
+        ("abastecimiento", "warehouse_category_archived"),
+        ("equipo", "member_role_updated"),
+        ("equipo", "invitation_sent"),
+        ("integraciones", "api_token_revoked"),
+        ("mi_negocio", "public_profile_updated"),
+        ("mi_negocio", "tax_config_updated"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_record_operation_event_accepts_menu_supply_actions(domain, action):
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    tenant_id = uuid4()
+
+    await operation_events_service.record_operation_event(
+        conn,
+        tenant_id,
+        domain=domain,
+        channel=None,
+        action=action,
+        payload={"entity_type": "test", "label": "x"},
+    )
+
+    conn.execute.assert_called_once()
+    args = conn.execute.call_args[0]
+    assert args[2] == domain
+    assert args[4] == action
+
+
 def test_supervisor_passes_list_operation_events_under_enforce():
     session = _build_session(role="supervisor")
     app = FastAPI()

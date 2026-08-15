@@ -16,6 +16,7 @@ from app.models.tenant import (
     DeleteMemberResponse, UpdateMemberRoleResponse, PendingInvitation,
 )
 from app.core.tenant_prefs import normalize_ui_locale
+from app.services.operation_events_service import DOMAIN_EQUIPO, record_module_event
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +283,16 @@ async def delete_tenant_member(request: Request, member_id: str) -> DeleteMember
             )
 
             member_name = member_info['name'] or member_info['email']
+            await record_module_event(
+                conn,
+                current_tenant_id,
+                domain=DOMAIN_EQUIPO,
+                action="member_deleted",
+                actor_user_id=current_user_id,
+                entity_type="member",
+                entity_id=member_id,
+                label=member_name,
+            )
             logger.info(f"🗑️ Member {member_name} removed from tenant {current_tenant_id}")
 
             return DeleteMemberResponse(
@@ -401,6 +412,17 @@ async def update_member_role(request: Request, member_id: str, new_role: str) ->
 
             member_name = member_info['name'] or member_info['email']
             old_role = member_info['role']
+            await record_module_event(
+                conn,
+                current_tenant_id,
+                domain=DOMAIN_EQUIPO,
+                action="member_role_updated",
+                actor_user_id=current_user_id,
+                entity_type="member",
+                entity_id=member_id,
+                label=member_name,
+                extra={"role": new_role, "previous_role": old_role},
+            )
             logger.info(f"🔄 Role updated for {member_name}: {old_role} → {new_role}")
 
             return UpdateMemberRoleResponse(

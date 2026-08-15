@@ -21,6 +21,7 @@ from app.services import menu_history_service
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 from app.services.billing_service import check_plan_quota_growth, check_plan_quota_scoped
 from app.services.cost_resolution_service import recipe_qty_to_stock_units
+from app.services.operation_events_service import DOMAIN_MENU, record_module_event
 from decimal import Decimal
 
 logger = logging.getLogger(__name__)
@@ -202,6 +203,17 @@ async def create_recipe_base_type(
                     status_code=400,
                     detail="Ya existe una receta base con ese nombre",
                 )
+
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_MENU,
+                action="recipe_created",
+                actor_user_id=user_id,
+                entity_type="recipe_base",
+                entity_id=base_type_id,
+                label=recipe_data.name,
+            )
 
             # Re-load for response shape (ingredients + meta)
             return await get_recipe_base_type_by_id(request, base_type_id)
@@ -545,6 +557,17 @@ async def update_recipe_base_type(
 
             logger.info(f"Updated recipe base type: {recipe_base_id}")
 
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_MENU,
+                action="recipe_updated",
+                actor_user_id=user_id,
+                entity_type="recipe_base",
+                entity_id=recipe_base_id,
+                label=row["name"] if row else None,
+            )
+
             return RecipeBaseTypeResponse(
                 success=True,
                 data=RecipeBaseType(**recipe_dict)
@@ -625,6 +648,17 @@ async def delete_recipe_base_type(
             await conn.execute(delete_query, recipe_base_id, tenant_id)
 
             logger.info(f"Deleted recipe base type: {recipe_base_id}")
+
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_MENU,
+                action="recipe_deleted",
+                actor_user_id=user_id,
+                entity_type="recipe_base",
+                entity_id=recipe_base_id,
+                label=recipe_name,
+            )
 
             return {
                 "success": True,

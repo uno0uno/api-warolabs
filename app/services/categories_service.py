@@ -11,6 +11,7 @@ from app.core.exceptions import APIError
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
 from app.models.category import Category
+from app.services.operation_events_service import DOMAIN_MENU, record_module_event
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +253,18 @@ async def reorder_online_menu_categories(request: Request, category_ids: List[UU
                 unique_ids,
             )
 
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_MENU,
+                action="menu_reordered",
+                actor_user_id=getattr(session_context, "user_id", None),
+                entity_type="online_menu",
+                entity_id=tenant_id,
+                label="categories",
+                extra={"count": len(unique_ids)},
+            )
+
     return {
         "success": True,
         "message": "Orden de categorías del menú en línea actualizado",
@@ -330,6 +343,18 @@ async def reorder_online_menu_products(
                 """,
                 tenant_id,
                 unique_ids,
+            )
+
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_MENU,
+                action="menu_reordered",
+                actor_user_id=getattr(session_context, "user_id", None),
+                entity_type="online_menu",
+                entity_id=category_id,
+                label="products",
+                extra={"count": len(unique_ids)},
             )
 
     return {

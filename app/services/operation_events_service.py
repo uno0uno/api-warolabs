@@ -16,6 +16,11 @@ from app.database import get_db_connection
 logger = logging.getLogger(__name__)
 
 DOMAIN_POS = "pos"
+DOMAIN_MENU = "menu"
+DOMAIN_ABASTECIMIENTO = "abastecimiento"
+DOMAIN_EQUIPO = "equipo"
+DOMAIN_INTEGRACIONES = "integraciones"
+DOMAIN_MI_NEGOCIO = "mi_negocio"
 DOMAINS: FrozenSet[str] = frozenset({
     "pos",
     "ventas",
@@ -42,6 +47,44 @@ ACTIONS: FrozenSet[str] = frozenset({
     "payment_voided",
     "comanda_line_cancelled",
     "promotion_deleted",
+    "product_created",
+    "product_updated",
+    "product_deleted",
+    "modifier_group_created",
+    "modifier_group_updated",
+    "modifier_group_deleted",
+    "recipe_created",
+    "recipe_updated",
+    "recipe_deleted",
+    "menu_reordered",
+    "purchase_created",
+    "purchase_updated",
+    "purchase_confirmed",
+    "purchase_shipped",
+    "purchase_received",
+    "purchase_invoiced",
+    "purchase_paid",
+    "purchase_cancelled",
+    "direct_purchase_created",
+    "direct_purchase_updated",
+    "direct_purchase_deleted",
+    "stock_adjusted",
+    "warehouse_category_created",
+    "warehouse_category_updated",
+    "warehouse_category_archived",
+    "member_deleted",
+    "member_role_updated",
+    "invitation_sent",
+    "invitation_cancelled",
+    "role_override_updated",
+    "role_override_deleted",
+    "api_token_created",
+    "api_token_updated",
+    "api_token_revoked",
+    "api_token_deleted",
+    "public_profile_updated",
+    "tax_config_updated",
+    "financial_profile_updated",
 })
 
 
@@ -146,6 +189,39 @@ async def record_operation_event(
         )
     except Exception as exc:
         logger.error("record_operation_event failed: %s", exc)
+
+
+async def record_module_event(
+    conn,
+    tenant_id: UUID,
+    *,
+    domain: str,
+    action: str,
+    actor_user_id: Optional[UUID] = None,
+    entity_type: str,
+    entity_id: Any = None,
+    label: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    reason: Optional[str] = None,
+) -> None:
+    """CUD helper: channel=None, payload entity_type/entity_id/label. Never raises."""
+    payload: Dict[str, Any] = {
+        "entity_type": entity_type,
+        "entity_id": str(entity_id) if entity_id is not None else None,
+        "label": label,
+    }
+    if extra:
+        payload.update(extra)
+    await record_operation_event(
+        conn,
+        tenant_id,
+        domain=domain,
+        channel=None,
+        action=action,
+        actor_user_id=actor_user_id,
+        payload=payload,
+        reason=reason,
+    )
 
 
 def _row_to_event(row) -> Dict[str, Any]:

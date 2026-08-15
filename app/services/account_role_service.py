@@ -9,6 +9,7 @@ from fastapi import Request
 from app.core.exceptions import APIError
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
+from app.services.operation_events_service import DOMAIN_EQUIPO, record_module_event
 
 
 class AccountRole:
@@ -476,6 +477,15 @@ async def set_role_override(
         role,
         account_id,
     )
+    await record_module_event(
+        conn,
+        tenant_id,
+        domain=DOMAIN_EQUIPO,
+        action="role_override_updated",
+        entity_type="account_role",
+        entity_id=role,
+        label=role,
+    )
 
 
 async def delete_role_override(conn, tenant_id: UUID, role: str) -> None:
@@ -483,4 +493,13 @@ async def delete_role_override(conn, tenant_id: UUID, role: str) -> None:
         "DELETE FROM tenant_account_role_overrides WHERE tenant_id = $1 AND role = $2",
         tenant_id,
         role,
+    )
+    await record_module_event(
+        conn,
+        tenant_id,
+        domain=DOMAIN_EQUIPO,
+        action="role_override_deleted",
+        entity_type="account_role",
+        entity_id=role,
+        label=role,
     )
