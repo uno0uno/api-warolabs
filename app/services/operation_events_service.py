@@ -1,4 +1,4 @@
-"""Append-only POS operation audit events (warocol.com#782)."""
+"""Append-only operation audit events for Bitácora (warocol.com#782 / #2323)."""
 import json
 import logging
 from datetime import date, datetime
@@ -16,6 +16,19 @@ from app.database import get_db_connection
 logger = logging.getLogger(__name__)
 
 DOMAIN_POS = "pos"
+DOMAINS: FrozenSet[str] = frozenset({
+    "pos",
+    "ventas",
+    "despacho",
+    "crm",
+    "finanzas",
+    "facturacion",
+    "menu",
+    "abastecimiento",
+    "equipo",
+    "integraciones",
+    "mi_negocio",
+})
 CHANNELS: FrozenSet[str] = frozenset({"mesa", "barra", "mostrador"})
 ACTIONS: FrozenSet[str] = frozenset({
     "tab_item_added",
@@ -73,7 +86,7 @@ async def record_operation_event(
     tenant_id: UUID,
     *,
     domain: str,
-    channel: str,
+    channel: Optional[str] = None,
     action: str,
     actor_user_id: Optional[UUID] = None,
     actor_member_id: Optional[UUID] = None,
@@ -87,10 +100,10 @@ async def record_operation_event(
     reason: Optional[str] = None,
 ) -> None:
     """Append one event in the caller's transaction. Never raises to the caller."""
-    if domain not in (DOMAIN_POS,):
+    if domain not in DOMAINS:
         logger.error("record_operation_event: invalid domain %s", domain)
         return
-    if channel not in CHANNELS:
+    if channel is not None and channel not in CHANNELS:
         logger.error("record_operation_event: invalid channel %s", channel)
         return
     if action not in ACTIONS:
@@ -159,7 +172,7 @@ def _row_to_event(row) -> Dict[str, Any]:
 async def list_operation_events(
     request: Request,
     *,
-    domain: str = DOMAIN_POS,
+    domain: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     channel: Optional[str] = None,
@@ -174,21 +187,14 @@ async def list_operation_events(
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
 
-    if domain != DOMAIN_POS:
-        return {
-            "success": True,
-            "data": [],
-            "pagination": {
-                "total": 0,
-                "limit": limit,
-                "offset": offset,
-                "has_more": False,
-            },
-        }
+    where_conditions = ["e.tenant_id = $1"]
+    params: List[Any] = [tenant_id]
+    param_count = 1
 
-    where_conditions = ["e.tenant_id = $1", "e.domain = $2"]
-    params: List[Any] = [tenant_id, domain]
-    param_count = 2
+    if domain:
+        param_count += 1
+        where_conditions.append(f"e.domain = ${param_count}")
+        params.append(domain)
 
     parsed_date_from = _parse_date(date_from)
     parsed_date_to = _parse_date(date_to)

@@ -1,4 +1,4 @@
-"""Bitácora de operaciones — list POS audit events (warocol.com#782)."""
+"""Bitácora de operaciones — list audit events (warocol.com#782 / #2323)."""
 from typing import Optional
 from uuid import UUID
 
@@ -16,10 +16,10 @@ router = APIRouter(prefix="/operaciones", tags=["Operaciones Bitácora"])
 )
 async def list_operation_events_endpoint(
     request: Request,
-    domain: str = Query("pos", description="Event domain (MVP: pos)"),
+    domain: Optional[str] = Query(None, description="Module key (pos, ventas, …). Omit for all."),
     date_from: Optional[str] = Query(None, description="ISO date YYYY-MM-DD (inclusive, tenant local day)"),
     date_to: Optional[str] = Query(None, description="ISO date YYYY-MM-DD (inclusive, tenant local day)"),
-    channel: Optional[str] = Query(None, description="mesa | barra | mostrador"),
+    channel: Optional[str] = Query(None, description="mesa | barra | mostrador (POS); omit for all"),
     action: Optional[str] = Query(None, description="Action filter (see epic catalog)"),
     actor_user_id: Optional[UUID] = Query(None),
     q: Optional[str] = Query(None, description="Text search on payload JSON"),
