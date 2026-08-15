@@ -19,6 +19,7 @@ from app.core.localization import (
 )
 from app.services.aws_ses_service import ses_service
 from app.services.waros_service import evaluate_and_award
+from app.services.operation_events_service import DOMAIN_VENTAS, record_operation_event
 from app.services.cierre_service import (
     assert_order_not_in_closed_monthly_period,
     _get_tenant_tax_config,
@@ -1525,6 +1526,24 @@ async def update_order_status(
                         )
                 except Exception as _fe:
                     logger.error(f"Auto-fire failed for manual order {order_id} (preparing): {_fe}")
+
+            if old_status != status:
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_VENTAS,
+                    channel=None,
+                    action="order_status_changed",
+                    actor_user_id=user_id,
+                    order_id=order_id,
+                    payload={
+                        "entity_type": "order",
+                        "entity_id": str(order_id),
+                        "order_number": order_number,
+                        "old_status": old_status,
+                        "new_status": status,
+                    },
+                )
 
         if waros_award_order_id and waros_award_customer_id:
             try:
@@ -3397,6 +3416,24 @@ async def delete_order_item(
 
                 logger.info(f"Order item deleted and inventory restored for Order #{order_number}")
 
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_VENTAS,
+                    channel=None,
+                    action="order_item_deleted",
+                    actor_user_id=user_id,
+                    order_id=order_id,
+                    order_item_id=item_id,
+                    payload={
+                        "entity_type": "order_item",
+                        "entity_id": str(item_id),
+                        "order_number": int(order_number),
+                        "product_name": product_name,
+                        "quantity": item_quantity,
+                    },
+                )
+
                 return {
                     "success": True,
                     "message": "Item eliminado y stock actualizado",
@@ -3694,6 +3731,24 @@ async def delete_order_item_modifier(
                 )
 
                 logger.info(f"Modifier {modifier_name} deleted from Order #{order_number}")
+
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_VENTAS,
+                    channel=None,
+                    action="order_item_modifier_deleted",
+                    actor_user_id=user_id,
+                    order_id=order_id,
+                    order_item_id=item_id,
+                    payload={
+                        "entity_type": "order_item_modifier",
+                        "entity_id": str(modifier_id),
+                        "order_number": int(order_number),
+                        "product_name": product_name,
+                        "modifier_name": modifier_name,
+                    },
+                )
 
                 return {
                     "success": True,
