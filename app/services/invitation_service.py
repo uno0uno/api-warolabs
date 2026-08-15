@@ -21,6 +21,7 @@ from app.models.invitation import (
     InvitationData,
     InvitationUser
 )
+from app.services.operation_events_service import DOMAIN_EQUIPO, record_module_event
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,17 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
             else:
                 logger.error(f"❌ Failed to send invitation email to {payload.email}")
                 logger.info(f"🔗 FALLBACK: Invitation URL: {invitation_url}")
+
+            await record_module_event(
+                conn,
+                session_tenant_id,
+                domain=DOMAIN_EQUIPO,
+                action="invitation_sent",
+                actor_user_id=current_user_id,
+                entity_type="invitation",
+                entity_id=invitation["id"],
+                label=payload.email,
+            )
 
             return SendInvitationResponse(
                 success=True,
@@ -506,6 +518,16 @@ async def cancel_invitation(request: Request, invitation_id: str) -> CancelInvit
                 raise ValidationError("Invitation not found or already processed")
 
             logger.info(f"🚫 Invitation cancelled: {invitation_id}")
+
+            await record_module_event(
+                conn,
+                session_tenant_id,
+                domain=DOMAIN_EQUIPO,
+                action="invitation_cancelled",
+                actor_user_id=current_user_id,
+                entity_type="invitation",
+                entity_id=invitation_id,
+            )
 
             return CancelInvitationResponse(
                 success=True,

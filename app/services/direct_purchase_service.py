@@ -141,6 +141,7 @@ from app.services.account_role_service import (
 import logging
 import json
 from uuid import uuid4
+from app.services.operation_events_service import DOMAIN_ABASTECIMIENTO, record_module_event
 
 logger = logging.getLogger(__name__)
 
@@ -858,6 +859,17 @@ async def create_direct_purchase(
 
                 # 7. Attachments are now uploaded via separate endpoint
                 # POST /suppliers/purchases/{purchase_id}/attachments
+
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_ABASTECIMIENTO,
+                    action="direct_purchase_created",
+                    actor_user_id=user_id,
+                    entity_type="direct_purchase",
+                    entity_id=purchase_id,
+                    label=purchase_number,
+                )
 
                 return {
                     "success": True,
@@ -1670,6 +1682,17 @@ async def update_direct_purchase(
                 # 11. Attachments are now uploaded via separate endpoint
                 # POST /suppliers/purchases/{purchase_id}/attachments
 
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_ABASTECIMIENTO,
+                    action="direct_purchase_updated",
+                    actor_user_id=user_id,
+                    entity_type="direct_purchase",
+                    entity_id=purchase_id,
+                    label=purchase_number,
+                )
+
                 return {
                     "success": True,
                     "message": "Compra directa actualizada exitosamente",
@@ -1932,6 +1955,17 @@ async def delete_direct_purchase(
                 )
                 if result == "DELETE 0":
                     raise HTTPException(status_code=404, detail="Compra directa no encontrada")
+
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_ABASTECIMIENTO,
+                    action="direct_purchase_deleted",
+                    actor_user_id=user_id,
+                    entity_type="direct_purchase",
+                    entity_id=purchase_id,
+                    label=purchase_number,
+                )
 
                 return {
                     "success": True,

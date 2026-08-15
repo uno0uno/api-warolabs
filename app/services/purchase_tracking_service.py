@@ -38,8 +38,22 @@ from app.models.purchase import (
     AttachmentsResponse,
 )
 from app.services.discord_service import discord_purchase_actions_service
+from app.services.operation_events_service import DOMAIN_ABASTECIMIENTO, record_module_event
 
 logger = logging.getLogger(__name__)
+
+
+async def _record_purchase_transition(conn, tenant_id, *, action, actor_user_id, purchase_id, label=None):
+    await record_module_event(
+        conn,
+        tenant_id,
+        domain=DOMAIN_ABASTECIMIENTO,
+        action=action,
+        actor_user_id=actor_user_id,
+        entity_type="purchase",
+        entity_id=purchase_id,
+        label=label,
+    )
 
 
 def _resolve_from_cash_drawer(
@@ -779,6 +793,12 @@ async def transition_to_confirmed(
                     except Exception as discord_error:
                         logger.error(f"Failed to send Discord notification for purchase confirmation: {discord_error}")
 
+                await _record_purchase_transition(
+                    conn, tenant_id,
+                    action="purchase_confirmed",
+                    actor_user_id=user_id,
+                    purchase_id=purchase_id,
+                )
                 return {"success": True, "message": "Purchase confirmed successfully"}
 
     except AuthenticationError:
@@ -916,6 +936,10 @@ async def transition_to_shipped(
                     except Exception as discord_error:
                         logger.error(f"Failed to send Discord notification for purchase shipment: {discord_error}")
 
+                await _record_purchase_transition(
+                    conn, tenant_id, action="purchase_shipped",
+                    actor_user_id=user_id, purchase_id=purchase_id,
+                )
                 return {"success": True, "message": "Purchase marked as shipped"}
 
     except AuthenticationError:
@@ -1212,6 +1236,10 @@ async def transition_to_received(
                         f"[GL] purchase GL post failed for {purchase_id}: {_gl_err}"
                     )
 
+                await _record_purchase_transition(
+                    conn, tenant_id, action="purchase_received",
+                    actor_user_id=user_id, purchase_id=purchase_id,
+                )
                 return {"success": True, "message": f"Purchase {target_status}"}
 
     except MissingAccountRoleError:
@@ -1376,6 +1404,10 @@ async def transition_to_invoiced(
                     except Exception as discord_error:
                         logger.error(f"Failed to send Discord notification for purchase invoice: {discord_error}")
 
+                await _record_purchase_transition(
+                    conn, tenant_id, action="purchase_invoiced",
+                    actor_user_id=user_id, purchase_id=purchase_id,
+                )
                 return {"success": True, "message": "Invoice registered successfully"}
 
     except AuthenticationError:
@@ -1536,6 +1568,10 @@ async def transition_to_paid(
                     except Exception as discord_error:
                         logger.error(f"Failed to send Discord notification for purchase payment: {discord_error}")
 
+                await _record_purchase_transition(
+                    conn, tenant_id, action="purchase_paid",
+                    actor_user_id=user_id, purchase_id=purchase_id,
+                )
                 return {"success": True, "message": "Payment registered successfully"}
 
     except MissingAccountRoleError:
@@ -1643,6 +1679,10 @@ async def cancel_purchase(
                     except Exception as discord_error:
                         logger.error(f"Failed to send Discord notification for purchase cancellation: {discord_error}")
 
+                await _record_purchase_transition(
+                    conn, tenant_id, action="purchase_cancelled",
+                    actor_user_id=user_id, purchase_id=purchase_id,
+                )
                 return {"success": True, "message": "Purchase cancelled successfully"}
 
     except AuthenticationError:

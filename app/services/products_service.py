@@ -16,6 +16,7 @@ from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 from app.services.open_priced_service import assert_single_open_priced_per_tenant
 from app.services.ingredients_service import create_tenant_ingredient
 from app.services.billing_service import check_plan_quota_growth, check_plan_quota_scoped
+from app.services.operation_events_service import DOMAIN_MENU, record_module_event
 from app.models.ingredient import TenantIngredientCreate, PurchaseUnitInput
 import asyncpg
 import logging
@@ -327,6 +328,17 @@ async def create_product_with_recipe(
                         conn, tenant_id, product_id, product_data.name,
                         product_snapshot, user_id
                     )
+
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MENU,
+                    action="product_created",
+                    actor_user_id=user_id,
+                    entity_type="product",
+                    entity_id=product_id,
+                    label=product_data.name,
+                )
 
                 # 6. Get complete product with recipe
                 response = await get_product_by_id(request, product_id, conn)
@@ -1347,6 +1359,17 @@ async def update_product_with_recipe(
                             old_snapshot, new_snapshot, user_id
                         )
 
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MENU,
+                    action="product_updated",
+                    actor_user_id=user_id,
+                    entity_type="product",
+                    entity_id=product_id,
+                    label=product_name,
+                )
+
                 # 6. Get complete updated product
                 return await get_product_by_id(request, product_id, conn)
 
@@ -1431,6 +1454,18 @@ async def delete_product(
                             user_id, archive_reason,
                         )
 
+                    await record_module_event(
+                        conn,
+                        tenant_id,
+                        domain=DOMAIN_MENU,
+                        action="product_deleted",
+                        actor_user_id=user_id,
+                        entity_type="product",
+                        entity_id=product_id,
+                        label=product_name,
+                        extra={"archived": True},
+                    )
+
                     return {
                         "success": True,
                         "archived": True,
@@ -1453,6 +1488,18 @@ async def delete_product(
                 await conn.execute(
                     "DELETE FROM product WHERE id = $1 AND tenant_id = $2",
                     product_id, tenant_id,
+                )
+
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MENU,
+                    action="product_deleted",
+                    actor_user_id=user_id,
+                    entity_type="product",
+                    entity_id=product_id,
+                    label=product_name,
+                    extra={"archived": False},
                 )
 
                 return {

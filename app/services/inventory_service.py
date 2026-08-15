@@ -10,6 +10,7 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
 from app.services.billing_service import check_plan_quota_period
+from app.services.operation_events_service import DOMAIN_ABASTECIMIENTO, record_module_event
 import logging
 
 logger = logging.getLogger(__name__)
@@ -792,6 +793,18 @@ async def create_adjustment(
                     f"Adjustment created: {ingredient_id} - "
                     f"{quantity_change}{unit_for_movement} ({quantity_in_base_unit}{base_unit}) "
                     f"@ ${cost_per_unit}/{unit_for_movement if cost_per_unit else 'N/A'}"
+                )
+
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_ABASTECIMIENTO,
+                    action="stock_adjusted",
+                    actor_user_id=user_id,
+                    entity_type="ingredient",
+                    entity_id=ingredient_id,
+                    reason=reason,
+                    extra={"quantity_change": float(quantity_in_base_unit)},
                 )
 
                 return {

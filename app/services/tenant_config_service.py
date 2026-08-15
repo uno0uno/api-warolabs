@@ -43,6 +43,7 @@ from app.models.tenant_public_profile import (
 from app.services import public_restaurant_service
 from app.services import tenant_financial_profile_service
 from app.services.aws_s3_service import AWSS3Service
+from app.services.operation_events_service import DOMAIN_MI_NEGOCIO, record_module_event
 import logging
 
 logger = logging.getLogger(__name__)
@@ -344,6 +345,16 @@ async def update_public_profile(
 
                 profile = _profile_from_row(result)
                 logger.info(f"Created new public profile for tenant {tenant_id} via PATCH upsert")
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MI_NEGOCIO,
+                    action="public_profile_updated",
+                    actor_user_id=getattr(session_context, "user_id", None),
+                    entity_type="public_profile",
+                    entity_id=tenant_id,
+                    label=profile.display_name if hasattr(profile, "display_name") else None,
+                )
                 return TenantPublicProfileResponse(success=True, data=profile)
 
             # Build dynamic update query
@@ -441,6 +452,17 @@ async def update_public_profile(
             profile = _profile_from_row(result)
 
             logger.info(f"Updated public profile for tenant {tenant_id}")
+
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_MI_NEGOCIO,
+                action="public_profile_updated",
+                actor_user_id=getattr(session_context, "user_id", None),
+                entity_type="public_profile",
+                entity_id=tenant_id,
+                label=profile.display_name if hasattr(profile, "display_name") else None,
+            )
 
             return TenantPublicProfileResponse(
                 success=True,
@@ -1018,6 +1040,15 @@ async def update_tax_config(request: Request, data) -> dict:
                         tenant_id,
                         data.commercial_tax_applicable,
                     )
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MI_NEGOCIO,
+                    action="tax_config_updated",
+                    actor_user_id=getattr(session, "user_id", None),
+                    entity_type="tax_config",
+                    entity_id=tenant_id,
+                )
                 return {"success": True, "data": decode_tax_config_jsonb(dict(row))}
 
             commercial_flag = getattr(data, "commercial_tax_applicable", None)
@@ -1101,6 +1132,15 @@ async def update_tax_config(request: Request, data) -> dict:
                 exempt_ids_pg,
             )
 
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_MI_NEGOCIO,
+                action="tax_config_updated",
+                actor_user_id=getattr(session, "user_id", None),
+                entity_type="tax_config",
+                entity_id=tenant_id,
+            )
             return {"success": True, "data": decode_tax_config_jsonb(dict(row))}
 
     except AuthenticationError as e:

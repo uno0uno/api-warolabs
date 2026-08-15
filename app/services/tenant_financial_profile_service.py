@@ -26,6 +26,7 @@ from app.services.hospitality_tax_jurisdictions import (
     apply_jurisdiction_pack,
     normalize_jurisdiction_code,
 )
+from app.services.operation_events_service import DOMAIN_MI_NEGOCIO, record_module_event
 
 PERMANENT_REASON = "PERMANENT_FINANCIAL_ACTIVITY"
 TEMPORARY_REASON = "TEMPORARY_OPERATIONAL_ACTIVITY"
@@ -225,6 +226,16 @@ async def update_financial_profile(
                         )
                     await seed_tenant_timezone_from_country(
                         conn, tenant_id, country_code
+                    )
+                    await record_module_event(
+                        conn,
+                        tenant_id,
+                        domain=DOMAIN_MI_NEGOCIO,
+                        action="financial_profile_updated",
+                        actor_user_id=getattr(session, "user_id", None),
+                        entity_type="financial_profile",
+                        entity_id=tenant_id,
+                        label=country_code,
                     )
                     return await build_financial_response(conn, tenant_id)
                 return current

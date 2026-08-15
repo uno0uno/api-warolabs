@@ -5,6 +5,7 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import HTTPException
+from app.services.operation_events_service import DOMAIN_ABASTECIMIENTO, record_module_event
 
 
 def clean_warehouse_category_name(value: str) -> str:
@@ -151,6 +152,15 @@ async def create_warehouse_category(
             status_code=409,
             detail="Ya existe una categoría de bodega con ese nombre.",
         )
+    await record_module_event(
+        conn,
+        tenant_id,
+        domain=DOMAIN_ABASTECIMIENTO,
+        action="warehouse_category_created",
+        entity_type="warehouse_category",
+        entity_id=row["id"],
+        label=display_name,
+    )
     return _category_dict(row, tenant_id)
 
 
@@ -203,6 +213,15 @@ async def rename_warehouse_category(
             status_code=409,
             detail="Ya existe una categoría de bodega con ese nombre.",
         )
+    await record_module_event(
+        conn,
+        tenant_id,
+        domain=DOMAIN_ABASTECIMIENTO,
+        action="warehouse_category_updated",
+        entity_type="warehouse_category",
+        entity_id=category_id,
+        label=display_name,
+    )
     return _category_dict(
         await _load_visible_category(conn, tenant_id, category_id),
         tenant_id,
@@ -223,6 +242,14 @@ async def archive_warehouse_category(
         """,
         tenant_id,
         category_id,
+    )
+    await record_module_event(
+        conn,
+        tenant_id,
+        domain=DOMAIN_ABASTECIMIENTO,
+        action="warehouse_category_archived",
+        entity_type="warehouse_category",
+        entity_id=category_id,
     )
     return _category_dict(
         await _load_visible_category(conn, tenant_id, category_id),

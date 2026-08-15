@@ -15,6 +15,7 @@ from app.models.api_token import (
     AVAILABLE_SCOPES
 )
 from app.services.billing_service import check_plan_quota_growth
+from app.services.operation_events_service import DOMAIN_INTEGRACIONES, record_module_event
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,17 @@ async def create_api_token(request: Request, token_data: ApiTokenCreate) -> dict
 
         logger.info(f"API token created: {key_prefix}... for tenant {tenant_id}")
 
+        await record_module_event(
+            conn,
+            to_uuid(tenant_id),
+            domain=DOMAIN_INTEGRACIONES,
+            action="api_token_created",
+            actor_user_id=to_uuid(user_id) if user_id else None,
+            entity_type="api_token",
+            entity_id=result["id"],
+            label=token_data.name,
+        )
+
         return {
             "success": True,
             "message": "API token created successfully. Save the secret key - it won't be shown again!",
@@ -226,6 +238,16 @@ async def revoke_api_token(request: Request, token_id: str) -> dict:
 
         logger.info(f"API token revoked: {token_id} by user {user_id}")
 
+        await record_module_event(
+            conn,
+            to_uuid(tenant_id),
+            domain=DOMAIN_INTEGRACIONES,
+            action="api_token_revoked",
+            actor_user_id=to_uuid(user_id) if user_id else None,
+            entity_type="api_token",
+            entity_id=token_id,
+        )
+
         return {
             "success": True,
             "message": "API token revoked successfully"
@@ -269,6 +291,16 @@ async def delete_api_token(request: Request, token_id: str) -> dict:
             raise HTTPException(status_code=404, detail="Token not found")
 
         logger.info(f"API token deleted: {token_id} by user {user_id}")
+
+        await record_module_event(
+            conn,
+            to_uuid(tenant_id),
+            domain=DOMAIN_INTEGRACIONES,
+            action="api_token_deleted",
+            actor_user_id=to_uuid(user_id) if user_id else None,
+            entity_type="api_token",
+            entity_id=token_id,
+        )
 
         return {
             "success": True,
@@ -408,6 +440,17 @@ async def update_api_token(request: Request, token_id: str, name: Optional[str] 
         """, to_uuid(token_id))
 
         logger.info(f"API token updated: {token_id} by user {user_id}")
+
+        await record_module_event(
+            conn,
+            to_uuid(tenant_id),
+            domain=DOMAIN_INTEGRACIONES,
+            action="api_token_updated",
+            actor_user_id=to_uuid(user_id) if user_id else None,
+            entity_type="api_token",
+            entity_id=token_id,
+            label=result["name"],
+        )
 
         return {
             "success": True,
