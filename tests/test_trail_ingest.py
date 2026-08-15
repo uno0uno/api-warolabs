@@ -59,7 +59,64 @@ def test_accepts_page_view_via_library():
     assert payload["visitor_key"] == "opaque-id"
     assert payload["path"] == "/blog/demo"
     assert payload["site_key"] == "warocol.com"
+    assert payload["event_type"] == "page_view"
     assert "email" not in payload
+
+
+def test_forwards_scroll_depth_and_page_leave():
+    session_id = uuid4()
+    client = _client()
+    with patch(
+        "app.routers.trail.ingest_event",
+        return_value={"session_id": session_id, "is_bot": False, "bot_family": None},
+    ) as ingest:
+        scroll = client.post(
+            "/public/trail/events",
+            json={
+                "visitor_key": "opaque-id",
+                "path": "/blog/demo",
+                "event_type": "scroll_depth",
+                "scroll_pct": 75,
+            },
+        )
+        leave = client.post(
+            "/public/trail/events",
+            json={
+                "visitor_key": "opaque-id",
+                "path": "/blog/demo",
+                "event_type": "page_leave",
+                "scroll_pct": 100,
+                "dwell_ms": 12000,
+            },
+        )
+    assert scroll.status_code == 200
+    assert leave.status_code == 200
+    scroll_payload = ingest.call_args_list[0].args[1]
+    leave_payload = ingest.call_args_list[1].args[1]
+    assert scroll_payload["event_type"] == "scroll_depth"
+    assert scroll_payload["scroll_pct"] == 75
+    assert leave_payload["event_type"] == "page_leave"
+    assert leave_payload["scroll_pct"] == 100
+    assert leave_payload["dwell_ms"] == 12000
+
+
+def test_rejects_unknown_event_type_and_bad_scroll():
+    client = _client()
+    unknown = client.post(
+        "/public/trail/events",
+        json={"visitor_key": "a", "path": "/blog/demo", "event_type": "heartbeat"},
+    )
+    bad_scroll = client.post(
+        "/public/trail/events",
+        json={
+            "visitor_key": "a",
+            "path": "/blog/demo",
+            "event_type": "scroll_depth",
+            "scroll_pct": 101,
+        },
+    )
+    assert unknown.status_code == 422
+    assert bad_scroll.status_code == 422
 
 
 def test_rate_limit_returns_429():
