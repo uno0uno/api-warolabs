@@ -288,6 +288,13 @@ async def record_module_event(
 
 
 def _row_to_event(row) -> Dict[str, Any]:
+    payload = _parse_payload(row["payload"])
+    live_number = row["live_order_number"] if "live_order_number" in row.keys() else None
+    if payload.get("order_number") is None and live_number is not None:
+        try:
+            payload["order_number"] = int(live_number)
+        except (TypeError, ValueError):
+            payload["order_number"] = live_number
     return {
         "id": str(row["id"]),
         "tenant_id": str(row["tenant_id"]),
@@ -305,7 +312,7 @@ def _row_to_event(row) -> Dict[str, Any]:
         "order_id": str(row["order_id"]) if row["order_id"] else None,
         "order_item_id": str(row["order_item_id"]) if row["order_item_id"] else None,
         "comanda_item_id": str(row["comanda_item_id"]) if row["comanda_item_id"] else None,
-        "payload": _parse_payload(row["payload"]),
+        "payload": payload,
         "reason": row["reason"],
     }
 
@@ -404,9 +411,11 @@ async def list_operation_events(
                 e.table_id, e.table_session_id, e.pos_cart_id,
                 e.order_id, e.order_item_id, e.comanda_item_id,
                 e.payload, e.reason,
+                o.order_number AS live_order_number,
                 pu.name AS actor_user_name,
                 pm.name AS actor_member_name
             FROM tenant_operation_events e
+            LEFT JOIN orders o ON o.id = e.order_id AND o.tenant_id = e.tenant_id
             LEFT JOIN profile pu ON pu.id = e.actor_user_id
             LEFT JOIN tenant_members tm ON tm.id = e.actor_member_id
             LEFT JOIN profile pm ON pm.id = tm.user_id
