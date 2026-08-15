@@ -13,6 +13,7 @@ from app.core.exceptions import AuthenticationError, APIError, NotFoundError, Va
 from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
 from app.services.email_helpers import send_order_accepted_email
 from app.services.waros_service import evaluate_and_award
+from app.services.operation_events_service import DOMAIN_DESPACHO, record_operation_event
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas
@@ -443,7 +444,7 @@ async def update_order_status(
             # 1. Fetch current order (tenant-scoped, online orders only)
             row = await conn.fetchrow(
                 """
-                SELECT id, status, customer_id, payment_method, payment_method_id
+                SELECT id, status, customer_id, payment_method, payment_method_id, order_number
                 FROM orders
                 WHERE id = $1
                   AND tenant_id = $2
@@ -687,6 +688,25 @@ async def update_order_status(
                     except Exception as _waros_err:
                         logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
 
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_DESPACHO,
+                    channel=None,
+                    action="order_status_changed",
+                    actor_user_id=changed_by,
+                    order_id=order_id,
+                    reason=reason,
+                    payload={
+                        "entity_type": "order",
+                        "entity_id": str(order_id),
+                        "order_number": int(row["order_number"]) if row["order_number"] is not None else None,
+                        "old_status": old_status,
+                        "new_status": "completed",
+                        "auto_completed": True,
+                    },
+                )
+
                 # Override the return payload to reflect the final completed state
                 return {
                     "success": True,
@@ -789,6 +809,24 @@ async def update_order_status(
                         )
                 except Exception as _fe:
                     logger.error(f"Auto-fire failed for online order {order_id} (preparing): {_fe}")
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_DESPACHO,
+                channel=None,
+                action="order_status_changed",
+                actor_user_id=changed_by,
+                order_id=order_id,
+                reason=reason,
+                payload={
+                    "entity_type": "order",
+                    "entity_id": str(order_id),
+                    "order_number": int(row["order_number"]) if row["order_number"] is not None else None,
+                    "old_status": old_status,
+                    "new_status": new_status,
+                },
+            )
 
             return {
                 "success": True,

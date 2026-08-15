@@ -23,6 +23,7 @@ from app.models.expense import (
     InstanceStatus
 )
 from app.services.billing_service import check_plan_quota_period
+from app.services.operation_events_service import DOMAIN_FINANZAS, record_operation_event
 from app.services.purchase_tracking_service import upload_purchase_attachments
 from app.services.aws_s3_service import AWSS3Service
 from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
@@ -34,6 +35,20 @@ from app.services.account_role_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _record_finanzas_event(conn, tenant_id, *, action, actor_user_id=None, payload=None, reason=None):
+    await record_operation_event(
+        conn,
+        tenant_id,
+        domain=DOMAIN_FINANZAS,
+        channel=None,
+        action=action,
+        actor_user_id=actor_user_id,
+        payload=payload,
+        reason=reason,
+    )
+
 
 CONTADO_REQUIRES_PAYMENT_METHOD = (
     "Contado requires a payment method. Use credito when payment is not registered yet."
@@ -1085,6 +1100,19 @@ async def create_expense(
             except Exception as _gl_err:
                 logger.warning(f"[GL] GL post failed for expense {expense_id}: {_gl_err}")
 
+            await _record_finanzas_event(
+                conn,
+                tenant_id,
+                action="expense_created",
+                actor_user_id=user_id,
+                payload={
+                    "entity_type": "expense",
+                    "entity_id": str(expense_id),
+                    "label": full_expense["expense_number"] or full_expense["description"],
+                    "amount": float(full_expense["amount"]),
+                },
+            )
+
             return ExpenseResponse(data=expense)
 
     except AuthenticationError:
@@ -1293,6 +1321,19 @@ async def create_expense_json(
                     raise
                 logger.warning(f"[GL] GL post failed for expense {expense_id}: {_gl_err}")
 
+            await _record_finanzas_event(
+                conn,
+                tenant_id,
+                action="expense_created",
+                actor_user_id=user_id,
+                payload={
+                    "entity_type": "expense",
+                    "entity_id": str(expense_id),
+                    "label": full_expense["expense_number"] or full_expense["description"],
+                    "amount": float(full_expense["amount"]),
+                },
+            )
+
             return ExpenseResponse(data=expense)
 
     except MissingAccountRoleError:
@@ -1492,6 +1533,19 @@ async def pay_expense(
             method_slug,
             method_id,
             drawer_flag,
+        )
+
+        await _record_finanzas_event(
+            conn,
+            tenant_id,
+            action="expense_paid",
+            actor_user_id=session_context.user_id,
+            payload={
+                "entity_type": "expense",
+                "entity_id": str(expense_id),
+                "label": row["expense_number"] or row["description"],
+                "amount": float(payment_amount) if payment_amount is not None else float(row["amount"]),
+            },
         )
 
         return {"success": True, "message": "Expense payment registered successfully"}
@@ -1847,6 +1901,19 @@ async def update_expense(
                     raise
                 logger.warning(f"[GL] GL update failed for expense {expense_id}: {_gl_err}")
 
+            await _record_finanzas_event(
+                conn,
+                tenant_id,
+                action="expense_updated",
+                actor_user_id=user_id,
+                payload={
+                    "entity_type": "expense",
+                    "entity_id": str(expense_id),
+                    "label": full_expense["expense_number"] or full_expense["description"],
+                    "amount": float(full_expense["amount"]),
+                },
+            )
+
             return ExpenseResponse(data=expense)
 
     except MissingAccountRoleError:
@@ -2053,6 +2120,19 @@ async def update_expense_json(
                     raise
                 logger.warning(f"[GL] GL update failed for expense {expense_id}: {_gl_err}")
 
+            await _record_finanzas_event(
+                conn,
+                tenant_id,
+                action="expense_updated",
+                actor_user_id=user_id,
+                payload={
+                    "entity_type": "expense",
+                    "entity_id": str(expense_id),
+                    "label": full_expense["expense_number"] or full_expense["description"],
+                    "amount": float(full_expense["amount"]),
+                },
+            )
+
             return ExpenseResponse(data=expense)
 
     except MissingAccountRoleError:
@@ -2121,6 +2201,17 @@ async def delete_expense(
             )
             if result == "DELETE 0":
                 raise HTTPException(status_code=404, detail="Expense not found")
+
+            await _record_finanzas_event(
+                conn,
+                tenant_id,
+                action="expense_deleted",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "expense",
+                    "entity_id": str(expense_id),
+                },
+            )
 
             return {"success": True, "message": "Expense deleted successfully"}
 
@@ -2679,6 +2770,18 @@ async def create_recurring_instance(
                 SELECT * FROM recurring_expense_instances WHERE id = $1
             """, instance_id)
 
+            await _record_finanzas_event(
+                conn,
+                tenant_id,
+                action="expense_instance_created",
+                actor_user_id=user_id,
+                payload={
+                    "entity_type": "expense_instance",
+                    "entity_id": str(instance_id),
+                    "expense_id": str(instance_row["expense_id"]),
+                },
+            )
+
             return {
                 'id': str(instance_row['id']),
                 'tenantId': str(instance_row['tenant_id']),
@@ -2818,6 +2921,18 @@ async def update_recurring_instance(
                         att_dict['s3Url'] = None
                 attachments.append(att_dict)
 
+            await _record_finanzas_event(
+                conn,
+                tenant_id,
+                action="expense_instance_updated",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "expense_instance",
+                    "entity_id": str(instance_id),
+                    "expense_id": str(updated_instance["expense_id"]),
+                },
+            )
+
             return {
                 'id': str(updated_instance['id']),
                 'tenantId': str(updated_instance['tenant_id']),
@@ -2925,6 +3040,18 @@ async def create_recurring_instance_json(
             instance_row = await conn.fetchrow("""
                 SELECT * FROM recurring_expense_instances WHERE id = $1
             """, instance_id)
+
+            await _record_finanzas_event(
+                conn,
+                tenant_id,
+                action="expense_instance_created",
+                actor_user_id=user_id,
+                payload={
+                    "entity_type": "expense_instance",
+                    "entity_id": str(instance_id),
+                    "expense_id": str(instance_row["expense_id"]),
+                },
+            )
 
             return _format_recurring_instance_response(instance_row)
 
@@ -3047,6 +3174,18 @@ async def update_recurring_instance_json(
                         logger.error(f"Error generating presigned URL: {e}")
                         att_dict['s3Url'] = None
                 attachments.append(att_dict)
+
+            await _record_finanzas_event(
+                conn,
+                tenant_id,
+                action="expense_instance_updated",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "expense_instance",
+                    "entity_id": str(instance_id),
+                    "expense_id": str(updated_instance["expense_id"]),
+                },
+            )
 
             return {
                 'success': True,

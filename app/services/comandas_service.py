@@ -20,6 +20,7 @@ from app.services.stations_service import get_effective_station
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError, ValidationError
 from app.core.timezones import local_day_utc_range, resolve_tenant_timezone, tenant_today
+from app.services.operation_events_service import DOMAIN_DESPACHO, record_operation_event
 from fastapi import Request
 
 logger = logging.getLogger(__name__)
@@ -818,7 +819,7 @@ async def update_comanda_status(
             # Fetch current comanda (verify ownership)
             row = await conn.fetchrow(
                 """
-                SELECT c.id, c.status, c.source_type, COALESCE(t.is_bar, false) AS is_bar
+                SELECT c.id, c.status, c.source_type, c.order_id, COALESCE(t.is_bar, false) AS is_bar
                   FROM comandas c
                   LEFT JOIN orders o ON o.id = c.order_id
                   LEFT JOIN table_sessions ts ON ts.id = o.table_session_id
@@ -891,6 +892,22 @@ async def update_comanda_status(
             if new_status == "ready":
                 await _notify_comanda_ready(conn, tenant_id, comanda_id)
 
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_DESPACHO,
+                channel=None,
+                action="comanda_status_changed",
+                actor_user_id=getattr(session, "user_id", None),
+                order_id=row["order_id"],
+                payload={
+                    "entity_type": "comanda",
+                    "entity_id": str(comanda_id),
+                    "old_status": current_status,
+                    "new_status": new_status,
+                },
+            )
+
             return {"success": True, "message": f"Comanda actualizada a {new_status}"}
 
     except (AuthenticationError, NotFoundError, ValidationError, APIError) as e:
@@ -920,7 +937,7 @@ async def bulk_update_comanda_status(
 
             rows = await conn.fetch(
                 """
-                SELECT c.id, c.status, c.source_type, COALESCE(t.is_bar, false) AS is_bar
+                SELECT c.id, c.status, c.source_type, c.order_id, COALESCE(t.is_bar, false) AS is_bar
                   FROM comandas c
                   LEFT JOIN orders o ON o.id = c.order_id
                   LEFT JOIN table_sessions ts ON ts.id = o.table_session_id
@@ -981,6 +998,22 @@ async def bulk_update_comanda_status(
                 if effective_status == "ready":
                     ready_notify_ids.append(row["id"])
 
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_DESPACHO,
+                    channel=None,
+                    action="comanda_status_changed",
+                    actor_user_id=getattr(session, "user_id", None),
+                    order_id=row["order_id"],
+                    payload={
+                        "entity_type": "comanda",
+                        "entity_id": str(row["id"]),
+                        "old_status": current_status,
+                        "new_status": effective_status,
+                    },
+                )
+
                 updated += 1
 
             for cid in ready_notify_ids:
@@ -1015,7 +1048,7 @@ async def recall_comanda(
             await _check_comandas_enabled(conn, tenant_id)
 
             row = await conn.fetchrow("""
-                SELECT id, status, delivered_at
+                SELECT id, status, delivered_at, order_id
                 FROM comandas
                 WHERE id = $1 AND tenant_id = $2
             """, comanda_id, tenant_id)
@@ -1034,6 +1067,22 @@ async def recall_comanda(
                 SET status = 'ready', delivered_at = NULL, updated_at = NOW()
                 WHERE id = $1 AND tenant_id = $2
             """, comanda_id, tenant_id)
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_DESPACHO,
+                channel=None,
+                action="comanda_recalled",
+                actor_user_id=getattr(session, "user_id", None),
+                order_id=row["order_id"],
+                payload={
+                    "entity_type": "comanda",
+                    "entity_id": str(comanda_id),
+                    "old_status": "delivered",
+                    "new_status": "ready",
+                },
+            )
 
             return {"success": True, "message": "Comanda recuperada y marcada como lista"}
 
@@ -1082,7 +1131,8 @@ async def update_comanda_item_status(
 
             # Verify item belongs to this comanda and tenant owns it
             item_row = await conn.fetchrow("""
-                SELECT ci.id, ci.comanda_id, ci.order_item_id, ci.status AS current_status
+                SELECT ci.id, ci.comanda_id, ci.order_item_id, ci.status AS current_status,
+                       c.order_id
                 FROM comanda_items ci
                 JOIN comandas c ON c.id = ci.comanda_id
                 WHERE ci.id = $1
@@ -1171,6 +1221,24 @@ async def update_comanda_item_status(
                             f"update_comanda_item_status: all items cancelled — "
                             f"auto-cancelled comanda {comanda_id}"
                         )
+
+                    await record_operation_event(
+                        conn,
+                        tenant_id,
+                        domain=DOMAIN_DESPACHO,
+                        channel=None,
+                        action="comanda_line_cancelled",
+                        actor_user_id=getattr(session, "user_id", None),
+                        order_id=item_row["order_id"],
+                        order_item_id=order_item_id,
+                        comanda_item_id=item_id,
+                        payload={
+                            "entity_type": "comanda_item",
+                            "entity_id": str(item_id),
+                            "old_status": item_row["current_status"],
+                            "new_status": "cancelled",
+                        },
+                    )
 
             return {
                 "success": True,
