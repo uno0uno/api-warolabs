@@ -12,6 +12,7 @@ from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
+from app.services.operation_events_service import DOMAIN_FINANZAS, record_operation_event
 from app.services.account_role_service import (
     AccountRole,
     resolve_account,
@@ -378,6 +379,22 @@ async def register_credit_payment(
                     f"[register_credit_payment] order={order_id} "
                     f"amount={amount} new_status={new_status} "
                     f"new_paid={new_paid}/{total}"
+                )
+
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_FINANZAS,
+                    channel=None,
+                    action="credit_payment_registered",
+                    actor_user_id=user_id,
+                    order_id=order_id,
+                    payload={
+                        "entity_type": "credit_payment",
+                        "entity_id": str(payment_row["id"]),
+                        "amount": float(amount),
+                        "new_payment_status": new_status,
+                    },
                 )
 
                 return {

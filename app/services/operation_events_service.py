@@ -16,6 +16,9 @@ from app.database import get_db_connection
 logger = logging.getLogger(__name__)
 
 DOMAIN_POS = "pos"
+DOMAIN_CRM = "crm"
+DOMAIN_FINANZAS = "finanzas"
+DOMAIN_FACTURACION = "facturacion"
 DOMAINS: FrozenSet[str] = frozenset({
     "pos",
     "ventas",
@@ -42,6 +45,24 @@ ACTIONS: FrozenSet[str] = frozenset({
     "payment_voided",
     "comanda_line_cancelled",
     "promotion_deleted",
+    "customer_created",
+    "customer_updated",
+    "expense_created",
+    "expense_updated",
+    "expense_deleted",
+    "expense_paid",
+    "expense_instance_created",
+    "expense_instance_updated",
+    "shift_opened",
+    "cierre_created",
+    "cierre_deleted",
+    "shift_deleted",
+    "period_closed",
+    "credit_payment_registered",
+    "journal_entry_created",
+    "journal_entry_posted",
+    "journal_entry_voided",
+    "invoice_emitted",
 })
 
 

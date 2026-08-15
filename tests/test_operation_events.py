@@ -251,6 +251,39 @@ async def test_record_operation_event_accepts_promotion_deleted():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "domain,action",
+    [
+        ("crm", "customer_created"),
+        ("crm", "customer_updated"),
+        ("finanzas", "expense_created"),
+        ("finanzas", "expense_deleted"),
+        ("finanzas", "journal_entry_posted"),
+        ("finanzas", "journal_entry_voided"),
+        ("finanzas", "credit_payment_registered"),
+        ("facturacion", "invoice_emitted"),
+    ],
+)
+async def test_record_operation_event_accepts_crm_finanzas_facturacion_actions(domain, action):
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    tenant_id = uuid4()
+
+    await operation_events_service.record_operation_event(
+        conn,
+        tenant_id,
+        domain=domain,
+        channel=None,
+        action=action,
+        payload={"entity_type": "test", "entity_id": str(uuid4())},
+    )
+
+    conn.execute.assert_called_once()
+    assert conn.execute.call_args[0][2] == domain
+    assert conn.execute.call_args[0][4] == action
+
+
+@pytest.mark.asyncio
 async def test_record_operation_event_accepts_tab_item_edited():
     conn = MagicMock()
     conn.execute = AsyncMock()
