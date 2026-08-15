@@ -10,7 +10,7 @@ import json
 import logging
 import time
 from collections import defaultdict
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
@@ -35,6 +35,9 @@ class TrailEventBody(BaseModel):
     visitor_key: str = Field(min_length=1, max_length=128)
     path: str = Field(min_length=1, max_length=10000)
     site_key: str = Field(default=SITE_KEY, max_length=253)
+    event_type: Literal["page_view", "scroll_depth", "page_leave"] = "page_view"
+    scroll_pct: Optional[int] = Field(default=None, ge=0, le=100)
+    dwell_ms: Optional[int] = Field(default=None, ge=0)
     referrer: Optional[str] = Field(default=None, max_length=2048)
     utm_source: Optional[str] = Field(default=None, max_length=200)
     utm_medium: Optional[str] = Field(default=None, max_length=200)
@@ -78,7 +81,6 @@ def _enforce_rate_limit(client_ip: Optional[str]) -> None:
 
 def _payload_from_body(body: TrailEventBody, user_agent: Optional[str]) -> dict:
     payload = body.model_dump()
-    payload["event_type"] = "page_view"
     payload["user_agent"] = user_agent
     return payload
 
