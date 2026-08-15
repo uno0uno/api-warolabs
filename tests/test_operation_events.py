@@ -43,6 +43,7 @@ def _enforce_db_ctx():
         conn = MagicMock()
         conn.fetchval = AsyncMock(return_value="enforce")
         conn.fetch = AsyncMock(return_value=[])
+        conn.fetchrow = AsyncMock(return_value=None)
         yield conn
 
     return _ctx
@@ -106,6 +107,124 @@ async def test_record_operation_event_inserts_on_valid_input():
     args = conn.execute.call_args[0]
     assert args[1] == tenant_id
     assert args[4] == "cart_line_removed"
+
+
+@pytest.mark.asyncio
+async def test_record_operation_event_invalid_domain_does_not_execute():
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+
+    await operation_events_service.record_operation_event(
+        conn,
+        uuid4(),
+        domain="analitica",
+        channel=None,
+        action="cart_line_removed",
+    )
+
+    conn.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_record_operation_event_rejects_unknown_channel():
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+
+    await operation_events_service.record_operation_event(
+        conn,
+        uuid4(),
+        domain="pos",
+        channel="cocina",
+        action="cart_line_removed",
+    )
+
+    conn.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_record_operation_event_accepts_non_pos_domain_without_channel():
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    tenant_id = uuid4()
+
+    await operation_events_service.record_operation_event(
+        conn,
+        tenant_id,
+        domain="ventas",
+        channel=None,
+        action="cart_line_removed",
+        payload={"entity_type": "order", "label": "1001"},
+    )
+
+    conn.execute.assert_called_once()
+    args = conn.execute.call_args[0]
+    assert args[1] == tenant_id
+    assert args[2] == "ventas"
+    assert args[3] is None
+
+
+@pytest.mark.asyncio
+async def test_list_operation_events_omitted_domain_does_not_filter_domain():
+    session = _build_session("owner")
+    request = MagicMock()
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=0)
+    conn.fetch = AsyncMock(return_value=[])
+
+    @asynccontextmanager
+    async def _db(**_kwargs):
+        yield conn
+
+    with patch.object(operation_events_service, "require_valid_session", return_value=session), \
+         patch.object(operation_events_service, "get_db_connection", _db), \
+         patch.object(
+             operation_events_service,
+             "resolve_tenant_timezone",
+             new=AsyncMock(return_value="America/Bogota"),
+         ):
+        result = await operation_events_service.list_operation_events(request, domain=None)
+
+    assert result["success"] is True
+    sql = conn.fetchval.call_args[0][0]
+    assert "e.domain =" not in sql
+
+
+@pytest.mark.asyncio
+async def test_list_operation_events_pos_domain_still_filters():
+    session = _build_session("owner")
+    request = MagicMock()
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=0)
+    conn.fetch = AsyncMock(return_value=[])
+
+    @asynccontextmanager
+    async def _db(**_kwargs):
+        yield conn
+
+    with patch.object(operation_events_service, "require_valid_session", return_value=session), \
+         patch.object(operation_events_service, "get_db_connection", _db), \
+         patch.object(
+             operation_events_service,
+             "resolve_tenant_timezone",
+             new=AsyncMock(return_value="America/Bogota"),
+         ):
+        result = await operation_events_service.list_operation_events(request, domain="pos")
+
+    assert result["success"] is True
+    sql = conn.fetchval.call_args[0][0]
+    assert "e.domain =" in sql
+    assert conn.fetchval.call_args[0][2] == "pos"
+
+
+def test_relax_checks_sql_drops_closed_enums():
+    from pathlib import Path
+
+    sql = Path("sql/20260815_operation_events_relax_checks.sql").read_text()
+    assert "DROP CONSTRAINT IF EXISTS tenant_operation_events_domain_check" in sql
+    assert "DROP CONSTRAINT IF EXISTS tenant_operation_events_channel_check" in sql
+    assert "DROP CONSTRAINT IF EXISTS tenant_operation_events_action_check" in sql
+    assert "DROP NOT NULL" in sql
+    assert "idx_tenant_operation_events_tenant_domain" in sql
 
 
 @pytest.mark.asyncio
