@@ -21,6 +21,7 @@ from app.core.timezones import (
     resolve_tenant_timezone,
     tenant_today,
 )
+from app.services.operation_events_service import DOMAIN_FINANZAS, record_operation_event
 from app.models.cierre import (
     CierreCashSettingsUpdate,
     CierreCreate,
@@ -2260,6 +2261,20 @@ async def open_shift(request: Request, body: OpenShiftCreate) -> dict:
                 session_context.user_id,
             )
 
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="shift_opened",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "shift_opening",
+                    "entity_id": str(row["id"]),
+                    "label": str(resolved.period_start),
+                },
+            )
+
         return {"success": True, "data": _open_shift_row_to_dict(row)}
 
     except (AuthenticationError, APIError):
@@ -2711,6 +2726,20 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             # Posting again here (source_module='ventas') would double-count
             # income in the SALES_REVENUE role. The cierre is a cash reconciliation
             # report, not as the GL trigger for revenue recognition.
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="cierre_created",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "cierre",
+                    "entity_id": str(summary_row["id"]),
+                    "label": f"{period_start.isoformat()}–{period_end.isoformat()}",
+                },
+            )
 
         return {
             "success": True,
@@ -3329,6 +3358,19 @@ async def delete_cierre(request: Request, cierre_id: UUID) -> dict:
                 row["ap_id"], tenant_id,
             )
 
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="cierre_deleted",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "cierre",
+                    "entity_id": str(cierre_id),
+                },
+            )
+
         return {"success": True, "data": None}
 
     except (AuthenticationError, APIError):
@@ -3369,6 +3411,19 @@ async def delete_open_shift(request: Request, opening_id: UUID) -> dict:
             await conn.execute(
                 "DELETE FROM cash_shift_openings WHERE id = $1 AND tenant_id = $2",
                 opening_id, tenant_id,
+            )
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="shift_deleted",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "shift_opening",
+                    "entity_id": str(opening_id),
+                },
             )
 
         return {"success": True, "data": None}
@@ -3637,6 +3692,20 @@ async def close_monthly_period(
                     """,
                     tenant_id, year, month, user_id, notes,
                 )
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="period_closed",
+                actor_user_id=user_id,
+                payload={
+                    "entity_type": "monthly_period",
+                    "entity_id": str(row["id"]),
+                    "label": f"{year}-{month:02d}",
+                },
+            )
 
         return {"success": True, "data": _monthly_period_to_dict(row)}
 

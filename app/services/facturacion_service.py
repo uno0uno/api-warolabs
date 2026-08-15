@@ -27,6 +27,7 @@ from app.config import settings
 from app.database import get_db_connection
 from app.services.aws_s3_service import AWSS3Service
 from app.services.invoicing_presentation import build_invoice_presentation
+from app.services.operation_events_service import DOMAIN_FACTURACION, record_operation_event
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +192,21 @@ async def emit_invoice(
         raise HTTPException(status_code=resp.status_code, detail=str(detail))
 
     logger.info(f"Invoice emitted for order {order_id}: status={data.get('status')} cufe={(data.get('cufe') or '')[:16]}...")
+    async with get_db_connection() as conn:
+        await record_operation_event(
+            conn,
+            UUID(tenant_id),
+            domain=DOMAIN_FACTURACION,
+            channel=None,
+            action="invoice_emitted",
+            order_id=UUID(order_id),
+            payload={
+                "entity_type": "invoice",
+                "entity_id": str(data.get("id") or data.get("invoice_id") or order_id),
+                "label": data.get("invoice_number") or data.get("cufe"),
+                "status": data.get("status"),
+            },
+        )
     return data
 
 

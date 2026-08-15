@@ -7,6 +7,7 @@ from app.core.middleware import require_valid_session
 from app.core.exceptions import APIError
 from app.core.email_utils import normalize_email
 from app.services.customer_relationship_service import upsert_tenant_customer
+from app.services.operation_events_service import DOMAIN_CRM, record_operation_event
 from app.models.customer import (
     Customer,
     CustomerSearchOrCreate,
@@ -289,6 +290,20 @@ async def search_or_create_customer(
                 await upsert_tenant_customer(conn, new_customer['id'], tenant_id)
 
                 logger.info(f"✅ Customer created and associated with tenant: {new_customer['id']}")
+
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_CRM,
+                    channel=None,
+                    action="customer_created",
+                    actor_user_id=session_context.user_id,
+                    payload={
+                        "entity_type": "customer",
+                        "entity_id": str(new_customer["id"]),
+                        "label": new_customer.get("name") or phone_number,
+                    },
+                )
 
                 customer = Customer(
                     id=new_customer['id'],
@@ -688,6 +703,21 @@ async def update_customer(
                           created_at, updated_at
             """
             row = await conn.fetchrow(query, customer_id, *values)
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_CRM,
+                channel=None,
+                action="customer_updated",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "customer",
+                    "entity_id": str(customer_id),
+                    "label": row["name"] if row else None,
+                    "fields": list(fields.keys()),
+                },
+            )
 
         updated = Customer(
             id=row['id'],

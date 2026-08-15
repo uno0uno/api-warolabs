@@ -7,6 +7,7 @@ from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import APIError, AuthenticationError, AuthorizationError, ValidationError
+from app.services.operation_events_service import DOMAIN_FINANZAS, record_operation_event
 from app.models.accounting import (
     TenantAccount,
     TenantAccountCreate,
@@ -655,6 +656,20 @@ async def create_journal_entry(request: Request, body: JournalEntryCreate) -> Jo
                     )
                     line_rows.append(lr)
 
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_FINANZAS,
+                    channel=None,
+                    action="journal_entry_created",
+                    actor_user_id=user_id,
+                    payload={
+                        "entity_type": "journal_entry",
+                        "entity_id": str(entry_id),
+                        "label": body.description,
+                    },
+                )
+
         entry = _row_to_journal_entry(entry_row)
         lines = [_row_to_journal_line(r) for r in line_rows]
         entry_with_lines = JournalEntryWithLines(**entry.dict(), lines=lines)
@@ -908,6 +923,19 @@ async def post_journal_entry(request: Request, entry_id: UUID) -> JournalEntryRe
                 entry_id,
             )
 
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="journal_entry_posted",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "journal_entry",
+                    "entity_id": str(entry_id),
+                },
+            )
+
         entry = _row_to_journal_entry(updated)
         lines = [_row_to_journal_line(r) for r in full_lines]
         entry_with_lines = JournalEntryWithLines(**entry.dict(), lines=lines)
@@ -1022,6 +1050,21 @@ async def void_journal_entry(
                         line['line_order'],
                     )
                     rev_line_rows.append(rl)
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="journal_entry_voided",
+                actor_user_id=user_id,
+                reason=reason.strip(),
+                payload={
+                    "entity_type": "journal_entry",
+                    "entity_id": str(entry_id),
+                    "reversing_entry_id": str(rev_entry_id),
+                },
+            )
 
         rev_entry = _row_to_journal_entry(rev_row)
         rev_lines = [_row_to_journal_line(r) for r in rev_line_rows]
