@@ -183,6 +183,8 @@ async def record_operation_event(
         logger.error("record_operation_event: invalid action %s", action)
         return
 
+    payload = await _snapshot_order_number(conn, tenant_id, order_id, payload)
+
     try:
         await conn.execute(
             """
@@ -217,6 +219,39 @@ async def record_operation_event(
         )
     except Exception as exc:
         logger.error("record_operation_event failed: %s", exc)
+
+
+async def _snapshot_order_number(
+    conn,
+    tenant_id: UUID,
+    order_id: Optional[UUID],
+    payload: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Copy orders.order_number into payload so Bitácora keeps #N after the sale is gone."""
+    data = dict(payload) if isinstance(payload, dict) else ({} if payload is None else payload)
+    if order_id is None or not isinstance(data, dict):
+        return payload
+    if data.get("order_number") is not None:
+        return data
+    try:
+        number = await conn.fetchval(
+            """
+            SELECT order_number
+            FROM orders
+            WHERE id = $1 AND tenant_id = $2
+            """,
+            order_id,
+            tenant_id,
+        )
+    except Exception:
+        return data
+    if number is None:
+        return data
+    try:
+        data["order_number"] = int(number)
+    except (TypeError, ValueError):
+        data["order_number"] = number
+    return data
 
 
 async def record_module_event(

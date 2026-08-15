@@ -109,6 +109,95 @@ async def test_record_operation_event_inserts_on_valid_input():
     assert args[4] == "cart_line_removed"
 
 
+def _inserted_payload(conn) -> dict:
+    raw = conn.execute.call_args[0][13]
+    return json.loads(raw)
+
+
+@pytest.mark.asyncio
+async def test_record_operation_event_snapshots_order_number_when_missing():
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=18020)
+    order_id = uuid4()
+    tenant_id = uuid4()
+
+    await operation_events_service.record_operation_event(
+        conn,
+        tenant_id,
+        domain="pos",
+        channel="mesa",
+        action="tab_item_removed",
+        order_id=order_id,
+        payload={"product_name": "Agua"},
+    )
+
+    conn.fetchval.assert_awaited_once()
+    fetch_args = conn.fetchval.call_args[0]
+    assert fetch_args[1] == order_id
+    assert fetch_args[2] == tenant_id
+    assert _inserted_payload(conn)["order_number"] == 18020
+    assert _inserted_payload(conn)["product_name"] == "Agua"
+
+
+@pytest.mark.asyncio
+async def test_record_operation_event_does_not_overwrite_order_number():
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=99)
+
+    await operation_events_service.record_operation_event(
+        conn,
+        uuid4(),
+        domain="ventas",
+        action="order_status_changed",
+        order_id=uuid4(),
+        payload={"order_number": 18020, "entity_type": "order"},
+    )
+
+    conn.fetchval.assert_not_called()
+    assert _inserted_payload(conn)["order_number"] == 18020
+
+
+@pytest.mark.asyncio
+async def test_record_operation_event_skips_lookup_without_order_id():
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=18020)
+
+    await operation_events_service.record_operation_event(
+        conn,
+        uuid4(),
+        domain="pos",
+        channel="mostrador",
+        action="cart_cleared",
+        payload={"items_count": 2},
+    )
+
+    conn.fetchval.assert_not_called()
+    assert "order_number" not in _inserted_payload(conn)
+
+
+@pytest.mark.asyncio
+async def test_record_operation_event_inserts_when_order_number_lookup_fails():
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    conn.fetchval = AsyncMock(side_effect=RuntimeError("missing"))
+
+    await operation_events_service.record_operation_event(
+        conn,
+        uuid4(),
+        domain="pos",
+        channel="mesa",
+        action="tab_cleared",
+        order_id=uuid4(),
+        payload={"items_count": 1},
+    )
+
+    conn.execute.assert_called_once()
+    assert "order_number" not in _inserted_payload(conn)
+
+
 @pytest.mark.asyncio
 async def test_record_operation_event_invalid_domain_does_not_execute():
     conn = MagicMock()
