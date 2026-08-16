@@ -5,11 +5,31 @@ import asyncio
 import logging
 import json
 from typing import Optional
+from uuid import UUID
 
 from app.core.email_utils import normalize_email
 from app.services.email_sender import resolve_sender_email_value
 
 logger = logging.getLogger(__name__)
+
+# WARO Colombia owner profile — campaigns for other brands share this DB.
+WAROCOL_CAMPAIGN_PROFILE_ID = UUID("7fe92b2c-d99e-4c70-b0cb-74af6326da5a")
+
+_PUBLIC_CAMPAIGN_SQL = """
+SELECT id, slug, name
+FROM campaign
+WHERE lower(slug) = lower($1)
+  AND profile_id = $2
+  AND coalesce(is_deleted, false) = false
+  AND lower(status) = 'active'
+  AND (start_date IS NULL OR start_date <= now())
+  AND (end_date IS NULL OR end_date >= now())
+LIMIT 1
+"""
+
+
+class PublicCampaignNotFound(Exception):
+    """No active WARO Colombia campaign for this public slug."""
 
 
 _FOOTER = (
@@ -86,6 +106,27 @@ def _build_duplicate_email(email: str) -> str:
     )
 
 
+def _blank_to_none(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = value.strip()
+    return text or None
+
+
+async def get_public_campaign(conn, slug: str) -> Optional[dict]:
+    cleaned = (slug or "").strip()
+    if not cleaned:
+        return None
+    row = await conn.fetchrow(
+        _PUBLIC_CAMPAIGN_SQL,
+        cleaned,
+        WAROCOL_CAMPAIGN_PROFILE_ID,
+    )
+    if row is None:
+        return None
+    return {"id": row["id"], "slug": row["slug"], "name": row["name"]}
+
+
 async def capture_lead(
     conn,
     email: str,
@@ -94,6 +135,12 @@ async def capture_lead(
     user_agent: Optional[str],
     button_source: str,
     visitor_key: Optional[str] = None,
+    campaign_slug: Optional[str] = None,
+    utm_source: Optional[str] = None,
+    utm_medium: Optional[str] = None,
+    utm_campaign: Optional[str] = None,
+    utm_term: Optional[str] = None,
+    utm_content: Optional[str] = None,
 ) -> dict:
     """
     Capture a lead from the homepage.
@@ -121,47 +168,113 @@ async def capture_lead(
     profile_id = profile["id"]
     logger.info(f"📥 [capture_lead] Profile upserted: {profile_id}")
 
-    # 2. Check if lead already exists for this profile (only homepage_cta counts as duplicate;
-    #    an access_request lead means the user is filling the full form for the first time)
+    campaign = None
+    campaign_slug = _blank_to_none(campaign_slug)
+    if campaign_slug:
+        campaign = await get_public_campaign(conn, campaign_slug)
+        if campaign is None:
+            raise PublicCampaignNotFound(campaign_slug)
+
+    utm_source = _blank_to_none(utm_source)
+    utm_medium = _blank_to_none(utm_medium)
+    utm_campaign = _blank_to_none(utm_campaign)
+    utm_term = _blank_to_none(utm_term)
+    utm_content = _blank_to_none(utm_content)
+    lead_source = "landing" if campaign else "homepage_cta"
+
+    # 2. Check if lead already exists for this profile (homepage_cta and landing share
+    #    one row; an access_request-only profile still gets a new capture row)
     existing_lead = await conn.fetchrow(
-        "SELECT id FROM leads WHERE profile_id = $1 AND source = 'homepage_cta' ORDER BY created_at ASC LIMIT 1",
+        """
+        SELECT id FROM leads
+        WHERE profile_id = $1 AND source IN ('homepage_cta', 'landing')
+        ORDER BY created_at ASC
+        LIMIT 1
+        """,
         profile_id,
     )
     is_duplicate = existing_lead is not None
 
     if is_duplicate:
         lead_id = existing_lead["id"]
+        if any((utm_source, utm_medium, utm_campaign, utm_term, utm_content)):
+            await conn.execute(
+                """
+                UPDATE leads SET
+                    utm_source = coalesce(utm_source, $2),
+                    utm_medium = coalesce(utm_medium, $3),
+                    utm_campaign = coalesce(utm_campaign, $4),
+                    utm_term = coalesce(utm_term, $5),
+                    utm_content = coalesce(utm_content, $6)
+                WHERE id = $1
+                """,
+                lead_id,
+                utm_source,
+                utm_medium,
+                utm_campaign,
+                utm_term,
+                utm_content,
+            )
     else:
         new_lead = await conn.fetchrow(
             """
-            INSERT INTO leads (profile_id, email, source, status)
-            VALUES ($1, $2, 'homepage_cta', 'active')
+            INSERT INTO leads (
+                profile_id, email, source, status,
+                utm_source, utm_medium, utm_campaign, utm_term, utm_content
+            )
+            VALUES ($1, $2, $3, 'active', $4, $5, $6, $7, $8)
             RETURNING id
             """,
             profile_id,
             email,
+            lead_source,
+            utm_source,
+            utm_medium,
+            utm_campaign,
+            utm_term,
+            utm_content,
         )
         lead_id = new_lead["id"]
     logger.info(f"📥 [capture_lead] Lead id: {lead_id} (duplicate={is_duplicate})")
 
     # 3. INSERT lead_interaction — type differs for duplicate vs new
-    interaction_type = "duplicate_submit" if is_duplicate else "homepage_cta"
+    interaction_type = "duplicate_submit" if is_duplicate else lead_source
+    interaction_source = "landing" if campaign else "homepage"
     metadata = json.dumps({"button": button_source, "duplicate": is_duplicate})
     stored_visitor_key = (visitor_key or "").strip() or None
+    campaign_id = campaign["id"] if campaign else None
     await conn.execute(
         """
         INSERT INTO lead_interactions
-            (lead_id, interaction_type, source, ip_address, user_agent, metadata, visitor_key)
-        VALUES ($1, $2, 'homepage', $3, $4, $5::jsonb, $6)
+            (lead_id, interaction_type, source, ip_address, user_agent, metadata,
+             visitor_key, campaign_id, medium, campaign, term, content)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12)
         """,
         lead_id,
         interaction_type,
+        interaction_source,
         ip_address,
         user_agent,
         metadata,
         stored_visitor_key,
+        campaign_id,
+        utm_medium,
+        utm_campaign,
+        utm_term,
+        utm_content,
     )
     logger.info(f"📥 [capture_lead] Interaction '{interaction_type}' recorded for lead {lead_id}")
+
+    if campaign_id is not None:
+        await conn.execute(
+            """
+            INSERT INTO campaign_leads (campaign_id, lead_id)
+            VALUES ($1, $2)
+            ON CONFLICT (campaign_id, lead_id) DO NOTHING
+            """,
+            campaign_id,
+            lead_id,
+        )
 
     # Fire-and-forget: Discord notification + email (non-blocking, always fires)
     asyncio.create_task(_send_notifications(email, phone, button_source, ip_address, is_duplicate))
