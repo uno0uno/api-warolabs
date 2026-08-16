@@ -5,6 +5,7 @@ import asyncio
 import logging
 import json
 from typing import Optional
+from urllib.parse import urlparse
 from uuid import UUID
 
 from app.core.email_utils import normalize_email
@@ -16,16 +17,38 @@ logger = logging.getLogger(__name__)
 WAROCOL_CAMPAIGN_PROFILE_ID = UUID("7fe92b2c-d99e-4c70-b0cb-74af6326da5a")
 
 _PUBLIC_CAMPAIGN_SQL = """
-SELECT id, slug, name
-FROM campaign
-WHERE lower(slug) = lower($1)
-  AND profile_id = $2
-  AND coalesce(is_deleted, false) = false
-  AND lower(status) = 'active'
-  AND (start_date IS NULL OR start_date <= now())
-  AND (end_date IS NULL OR end_date >= now())
+SELECT c.id, c.slug, c.name, landing.content AS landing_content
+FROM campaign c
+LEFT JOIN LATERAL (
+  SELECT tv.content
+  FROM campaign_template_versions ctv
+  JOIN template_versions tv ON tv.id = ctv.template_version_id
+  JOIN templates t ON t.id = tv.template_id
+  WHERE ctv.campaign_id = c.id
+    AND coalesce(ctv.is_active, true) = true
+    AND t.template_type = 'landing'
+    AND coalesce(t.is_deleted, false) = false
+  ORDER BY tv.created_at DESC NULLS LAST, tv.version_number DESC
+  LIMIT 1
+) landing ON true
+WHERE lower(c.slug) = lower($1)
+  AND c.profile_id = $2
+  AND coalesce(c.is_deleted, false) = false
+  AND lower(c.status) = 'active'
+  AND (c.start_date IS NULL OR c.start_date <= now())
+  AND (c.end_date IS NULL OR c.end_date >= now())
 LIMIT 1
 """
+
+_BLOCKED_MEDIA_HOSTS = frozenset({
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "youtu.be",
+    "www.youtu.be",
+    "youtube-nocookie.com",
+    "www.youtube-nocookie.com",
+})
 
 
 class PublicCampaignNotFound(Exception):
@@ -113,6 +136,77 @@ def _blank_to_none(value: Optional[str]) -> Optional[str]:
     return text or None
 
 
+def _optional_text(value) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    return _blank_to_none(value)
+
+
+def _parse_landing_content(raw) -> dict:
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        raw = bytes(raw).decode("utf-8")
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _safe_public_media_url(value: Optional[str]) -> Optional[str]:
+    if not value or not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    parsed = urlparse(text)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not host:
+        return None
+    if host in _BLOCKED_MEDIA_HOSTS or host.endswith(".youtube.com"):
+        return None
+    return text
+
+
+def _extract_image_url(parsed: dict) -> Optional[str]:
+    image_url = parsed.get("image_url")
+    if isinstance(image_url, str):
+        return _blank_to_none(image_url)
+    image = parsed.get("image")
+    if isinstance(image, dict):
+        content = image.get("content")
+        if isinstance(content, str):
+            return _blank_to_none(content)
+    if isinstance(image, str):
+        return _blank_to_none(image)
+    return None
+
+
+def _public_campaign_from_row(row) -> dict:
+    name = row["name"]
+    raw = row["landing_content"] if "landing_content" in row else None
+    parsed = _parse_landing_content(raw)
+    return {
+        "id": row["id"],
+        "slug": row["slug"],
+        "name": name,
+        "title": _optional_text(parsed.get("title")) or name,
+        "description": _optional_text(parsed.get("description")),
+        "cta_label": _optional_text(parsed.get("cta_label")),
+        "microcopy": _optional_text(parsed.get("microcopy")),
+        "image_url": _safe_public_media_url(_extract_image_url(parsed)),
+        "video_url": _safe_public_media_url(_optional_text(parsed.get("video_url"))),
+    }
+
+
 async def get_public_campaign(conn, slug: str) -> Optional[dict]:
     cleaned = (slug or "").strip()
     if not cleaned:
@@ -124,7 +218,7 @@ async def get_public_campaign(conn, slug: str) -> Optional[dict]:
     )
     if row is None:
         return None
-    return {"id": row["id"], "slug": row["slug"], "name": row["name"]}
+    return _public_campaign_from_row(row)
 
 
 async def capture_lead(

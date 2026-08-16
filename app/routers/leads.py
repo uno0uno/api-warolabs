@@ -151,7 +151,16 @@ async def get_public_campaign(slug: str):
         campaign = await leads_service.get_public_campaign(conn, slug)
     if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    return {"slug": campaign["slug"], "name": campaign["name"]}
+    return {
+        "slug": campaign["slug"],
+        "name": campaign["name"],
+        "title": campaign["title"],
+        "description": campaign["description"],
+        "cta_label": campaign["cta_label"],
+        "microcopy": campaign["microcopy"],
+        "image_url": campaign["image_url"],
+        "video_url": campaign["video_url"],
+    }
 
 
 @router.post("/access-request")
