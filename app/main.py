@@ -2,7 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, me, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, pos_products, pos_customers, pos_orders, categories, recipe_bases, modifiers, ingredient_purchase_units, warehouse_categories, customers, pos_cart, pos_context, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, public_table_qr, table_qr_requests, tenant_config, promotions, online_cart, online_verification, address_profile, analytics, online_orders, notifications, ai_agents, customer_portal, leads, waros, billing, legal, onboarding, payments_webhook, admin_ingredients, menu, menu_import, tables, credit, cartera, cierre, payment_methods, accounting, stations, comandas, operaciones_context, operaciones_shifts, operaciones_operation_events, operaciones_printers, invoices as invoices_router, support_documents, documents as documents_router, facturacion as facturacion_router, webhooks as webhooks_router, email_tracking, trail
+from app.routers import auth, me, tenants, financial, suppliers, ingredients, purchases, supplier_portal, products, pos_products, pos_customers, pos_orders, categories, recipe_bases, modifiers, ingredient_purchase_units, warehouse_categories, customers, pos_cart, pos_context, orders, inventory, articles, invitations, api_tokens, public_api, v1_ordering, salaries, expenses, public_restaurant, public_table_qr, table_qr_requests, tenant_config, promotions, online_cart, online_verification, address_profile, analytics, online_orders, notifications, ai_agents, customer_portal, leads, waros, billing, legal, onboarding, payments_webhook, admin_ingredients, menu, menu_import, tables, credit, cartera, cierre, payment_methods, accounting, stations, comandas, operaciones_context, operaciones_shifts, operaciones_operation_events, operaciones_printers, invoices as invoices_router, support_documents, documents as documents_router, facturacion as facturacion_router, webhooks as webhooks_router, email_tracking, trail, wompi_collections
 from app.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import api_exception_handler, general_exception_handler, APIError
@@ -196,6 +196,9 @@ app.include_router(waros.router)
 app.include_router(billing.tenant_router)
 app.include_router(legal.router)
 app.include_router(payments_webhook.router)
+app.include_router(wompi_collections.staff_router)
+app.include_router(wompi_collections.session_router)
+app.include_router(wompi_collections.webhook_router)
 app.include_router(articles.router, prefix="/blog", tags=["blog"])
 app.include_router(invitations.router, prefix="/invitations", tags=["invitations"])
 app.include_router(api_tokens.router, prefix="/api-tokens", tags=["api-tokens"])

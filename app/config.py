@@ -99,6 +99,13 @@ class Settings(BaseSettings):
         default=None, alias='WOMPI_WEBHOOK_FORWARD_SECRET'
     )
 
+    # OpenBao Transit — restaurant Wompi key envelope (#862). Secrets from env or files.
+    openbao_addr: str = Field(default='http://openbao:8200', alias='OPENBAO_ADDR')
+    openbao_role_id: Optional[str] = Field(default=None, alias='OPENBAO_ROLE_ID')
+    openbao_secret_id: Optional[str] = Field(default=None, alias='OPENBAO_SECRET_ID')
+    openbao_role_id_file: Optional[str] = Field(default=None, alias='OPENBAO_ROLE_ID_FILE')
+    openbao_secret_id_file: Optional[str] = Field(default=None, alias='OPENBAO_SECRET_ID_FILE')
+
     # Paddle Billing — regional SaaS checkout (epic #793 / batch #795)
     # sandbox|production — default sandbox (local/dev); prod must set production (#813)
     paddle_environment: str = Field(default='sandbox', alias='PADDLE_ENVIRONMENT')
