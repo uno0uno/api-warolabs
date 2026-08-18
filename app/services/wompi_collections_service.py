@@ -20,6 +20,7 @@ from app.core.middleware import require_valid_session
 from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
 from app.database import get_db_connection
 from app.services import openbao_transit
+from asyncpg import UniqueViolationError
 from app.services.cierre_service import (
     _get_tenant_tax_config,
     _post_order_cogs_gl_entry,
@@ -410,6 +411,36 @@ async def _pending_session_for_order(conn, tenant_id: UUID, order_id: UUID):
     )
 
 
+async def _create_or_reuse_session_row(
+    conn,
+    *,
+    tenant_id: UUID,
+    order_id: UUID,
+    amount: Decimal,
+    customer_id: UUID,
+    link_email: Optional[str],
+    redirect_url: Optional[str],
+) -> dict:
+    pending = await _pending_session_for_order(conn, tenant_id, order_id)
+    if pending:
+        return _session_reuse_payload(pending)
+    try:
+        return await _create_session_row(
+            conn,
+            tenant_id=tenant_id,
+            order_id=order_id,
+            amount=amount,
+            customer_id=customer_id,
+            link_email=link_email,
+            redirect_url=redirect_url,
+        )
+    except UniqueViolationError:
+        pending = await _pending_session_for_order(conn, tenant_id, order_id)
+        if pending:
+            return _session_reuse_payload(pending)
+        raise
+
+
 async def staff_session_for_order(request: Request, order_id: UUID) -> dict:
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -584,6 +615,7 @@ async def create_collection_session(
             SELECT id, customer_id, total_amount
             FROM orders
             WHERE id = $1 AND tenant_id = $2
+            FOR UPDATE
             """,
             order_id,
             tenant_id,
@@ -599,10 +631,7 @@ async def create_collection_session(
                 order_id,
                 customer_id,
             )
-        pending = await _pending_session_for_order(conn, tenant_id, order_id)
-        if pending:
-            return _session_reuse_payload(pending)
-        return await _create_session_row(
+        return await _create_or_reuse_session_row(
             conn,
             tenant_id=tenant_id,
             order_id=order_id,
@@ -628,6 +657,7 @@ async def create_online_collection_session(
                    o.total_amount, COALESCE(o.tip_amount, 0) AS tip_amount
             FROM orders o
             WHERE o.id = $1
+            FOR UPDATE
             """,
             order_id,
         )
@@ -650,10 +680,7 @@ async def create_online_collection_session(
         customer_id = await resolve_collection_customer(
             conn, order["tenant_id"], order["customer_id"]
         )
-        pending = await _pending_session_for_order(conn, order["tenant_id"], order_id)
-        if pending:
-            return _session_reuse_payload(pending)
-        return await _create_session_row(
+        return await _create_or_reuse_session_row(
             conn,
             tenant_id=order["tenant_id"],
             order_id=order_id,
@@ -688,6 +715,27 @@ async def apply_approved_payment(
         session_row["order_id"],
     )
     if already_paid:
+        await conn.execute(
+            """
+            UPDATE tenant_wompi_collection_sessions
+            SET status = 'approved',
+                updated_at = NOW()
+            WHERE id = $1 AND status = 'pending'
+            """,
+            session_row["id"],
+        )
+        await conn.execute(
+            """
+            UPDATE tenant_wompi_collection_sessions
+            SET status = 'voided',
+                updated_at = NOW()
+            WHERE order_id = $2
+              AND id <> $1
+              AND status = 'pending'
+            """,
+            session_row["id"],
+            session_row["order_id"],
+        )
         return {
             "applied": False,
             "idempotent": True,

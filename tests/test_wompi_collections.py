@@ -13,6 +13,7 @@ from app.services.account_role_service import AccountRef, AccountRole
 
 
 SQL = Path("sql/20260817_wompi_collections.sql")
+PENDING_SQL = Path("sql/20260818_wompi_one_pending_session.sql")
 
 
 class _AsyncContext:
@@ -41,6 +42,14 @@ def test_sql_is_additive_create_only():
     sql = SQL.read_text()
     assert "CREATE TABLE IF NOT EXISTS tenant_wompi_merchants" in sql
     assert "CREATE TABLE IF NOT EXISTS tenant_wompi_collection_sessions" in sql
+    assert "DROP TABLE" not in sql.upper()
+    assert "DROP COLUMN" not in sql.upper()
+
+
+def test_pending_session_unique_index_is_additive():
+    sql = PENDING_SQL.read_text()
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS tenant_wompi_collection_sessions_pending_order_uidx" in sql
+    assert "WHERE status = 'pending'" in sql
     assert "DROP TABLE" not in sql.upper()
     assert "DROP COLUMN" not in sql.upper()
 
@@ -341,6 +350,7 @@ async def test_apply_skips_when_order_already_paid(tenant_id):
     }
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value=1)
+    conn.execute = AsyncMock()
     result = await svc.apply_approved_payment(
         conn,
         tenant_id=tenant_id,
@@ -349,6 +359,7 @@ async def test_apply_skips_when_order_already_paid(tenant_id):
     )
     assert result["idempotent"] is True
     conn.fetchrow.assert_not_called()
+    assert conn.execute.await_count == 2
 
 
 def test_pick_referenced_transaction_prefers_approved():
