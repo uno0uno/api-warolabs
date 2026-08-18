@@ -3,10 +3,10 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.permissions import Module, require_module
+from app.core.permissions import Module, require_any_module, require_module
 from app.services import wompi_collections_service
 
 staff_router = APIRouter(prefix="/integraciones/pasarela", tags=["wompi-collections"])
@@ -86,6 +86,14 @@ async def create_online_session(body: OnlineSessionRequest):
         link_email=body.link_email,
         redirect_url=body.redirect_url,
     )
+
+
+@session_router.get("/sessions", dependencies=[Depends(require_any_module(Module.POS, Module.VENTAS))])
+async def staff_session_for_order(
+    request: Request,
+    order_id: UUID = Query(alias="orderId"),
+):
+    return await wompi_collections_service.staff_session_for_order(request, order_id)
 
 
 @session_router.get("/sessions/{session_id}")

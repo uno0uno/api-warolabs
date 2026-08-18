@@ -69,6 +69,7 @@ def test_collections_never_call_server_wompi_headers():
     assert "payments_webhook" not in router
     assert '@session_router.get("/sessions/{session_id}")' in router
     assert "require_module" not in router.split('@session_router.get("/sessions/{session_id}")', 1)[1].split("@session_router.post")[0]
+    assert '@session_router.get("/sessions", dependencies=[Depends(require_any_module(Module.POS, Module.VENTAS))])' in router
     assert '@session_router.post("/sessions/online")' in router
     online_block = router.split('@session_router.post("/sessions/online")', 1)[1].split("@session_router.", 1)[0]
     assert "require_module" not in online_block
@@ -233,12 +234,14 @@ async def test_idempotent_apply_webhook_then_get(tenant_id):
     conn.fetchval = AsyncMock(return_value=None)
     conn.execute = AsyncMock()
 
-    first = await svc.apply_approved_payment(
-        conn,
-        tenant_id=tenant_id,
-        session_row=session_row,
-        provider_tx_id="tx-1",
-    )
+    with patch.object(svc, "_post_approved_collection_gl", new=AsyncMock()) as gl:
+        first = await svc.apply_approved_payment(
+            conn,
+            tenant_id=tenant_id,
+            session_row=session_row,
+            provider_tx_id="tx-1",
+        )
+    gl.assert_awaited_once()
     assert first["applied"] is True
     assert first["idempotent"] is False
 
@@ -346,3 +349,110 @@ async def test_apply_skips_when_order_already_paid(tenant_id):
     )
     assert result["idempotent"] is True
     conn.fetchrow.assert_not_called()
+
+
+def test_pick_referenced_transaction_prefers_approved():
+    rows = [
+        {"id": "tx-declined", "status": "DECLINED"},
+        {"id": "tx-ok", "status": "APPROVED"},
+    ]
+    picked = svc._pick_referenced_transaction(rows)
+    assert picked["id"] == "tx-ok"
+    assert svc._pick_referenced_transaction([]) is None
+
+
+@pytest.mark.asyncio
+async def test_staff_session_returns_only_id_and_status(tenant_id):
+    req, _ = _request(tenant_id)
+    order_id = uuid4()
+    session_id = uuid4()
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=1)
+    conn.fetchrow = AsyncMock(return_value={"id": session_id, "status": "pending"})
+    with patch(
+        "app.services.wompi_collections_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id),
+    ), patch(
+        "app.services.wompi_collections_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ):
+        result = await svc.staff_session_for_order(req, order_id)
+    assert set(result["data"].keys()) == {"id", "status"}
+    assert result["data"]["id"] == str(session_id)
+    assert "checkout" not in str(result).lower()
+    assert "key" not in str(result["data"]).lower()
+
+
+@pytest.mark.asyncio
+async def test_create_session_reuses_pending(tenant_id):
+    req, _ = _request(tenant_id)
+    order_id = uuid4()
+    session_id = uuid4()
+    customer_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"id": order_id, "customer_id": customer_id, "total_amount": Decimal("10")},
+            {"id": session_id, "status": "pending", "customer_id": customer_id},
+        ]
+    )
+    with patch(
+        "app.services.wompi_collections_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id),
+    ), patch(
+        "app.services.wompi_collections_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.wompi_collections_service.resolve_collection_customer",
+        new=AsyncMock(return_value=customer_id),
+    ), patch.object(
+        svc, "_create_session_row", new=AsyncMock()
+    ) as create_row:
+        result = await svc.create_collection_session(
+            req, order_id=order_id, amount=Decimal("10")
+        )
+    create_row.assert_not_called()
+    assert result["data"]["id"] == str(session_id)
+    assert result["data"]["status"] == "pending"
+    assert "checkoutUrl" not in result["data"]
+
+
+@pytest.mark.asyncio
+async def test_verify_looks_up_transaction_by_reference(tenant_id):
+    session_id = uuid4()
+    session_row = {
+        "id": session_id,
+        "tenant_id": tenant_id,
+        "order_id": uuid4(),
+        "status": "pending",
+        "provider_tx_id": None,
+        "order_payment_id": None,
+        "amount": Decimal("5000"),
+    }
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            session_row,
+            {
+                "tenant_id": tenant_id,
+                "payment_method_id": uuid4(),
+                "is_active": True,
+                "private_key_ciphertext": "ct",
+                "events_secret_ciphertext": "evt",
+                "environment": "test",
+            },
+        ]
+    )
+    with patch.object(svc, "get_db_connection", return_value=_AsyncContext(conn)), patch(
+        "app.services.wompi_collections_service.openbao_transit.decrypt_ciphertext",
+        new=AsyncMock(return_value="prv"),
+    ), patch.object(
+        svc, "fetch_transaction_by_reference", new=AsyncMock(return_value=None)
+    ) as lookup, patch.object(
+        svc, "fetch_transaction", new=AsyncMock()
+    ) as by_id:
+        result = await svc.verify_session(session_id)
+    by_id.assert_not_called()
+    lookup.assert_awaited_once()
+    assert result["data"]["applied"] is False
+    assert result["data"]["status"] == "pending"

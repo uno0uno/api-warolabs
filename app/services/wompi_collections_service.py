@@ -17,8 +17,14 @@ from fastapi import Request
 from app.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.middleware import require_valid_session
+from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
 from app.database import get_db_connection
 from app.services import openbao_transit
+from app.services.cierre_service import (
+    _get_tenant_tax_config,
+    _post_order_cogs_gl_entry,
+    _post_order_gl_entry,
+)
 from app.services.account_role_service import resolve_group_parent_account
 from app.services.customers_service import ANONYMOUS_PHONE, GENERIC_CUSTOMER_EMAIL
 from app.services.wompi_service import WOMPI_PRODUCTION_URL, WOMPI_SANDBOX_URL
@@ -379,6 +385,111 @@ async def public_collection_session(session_id: UUID) -> dict:
     }
 
 
+def _session_reuse_payload(row: Any) -> dict:
+    return {
+        "success": True,
+        "data": {
+            "id": str(row["id"]),
+            "status": row["status"],
+            "customerId": str(row["customer_id"]) if row["customer_id"] else None,
+        },
+    }
+
+
+async def _pending_session_for_order(conn, tenant_id: UUID, order_id: UUID):
+    return await conn.fetchrow(
+        """
+        SELECT id, status, customer_id
+        FROM tenant_wompi_collection_sessions
+        WHERE tenant_id = $1 AND order_id = $2 AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        tenant_id,
+        order_id,
+    )
+
+
+async def staff_session_for_order(request: Request, order_id: UUID) -> dict:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    async with get_db_connection() as conn:
+        order = await conn.fetchval(
+            "SELECT 1 FROM orders WHERE id = $1 AND tenant_id = $2",
+            order_id,
+            tenant_id,
+        )
+        if not order:
+            raise NotFoundError("Orden no encontrada")
+        row = await conn.fetchrow(
+            """
+            SELECT id, status
+            FROM tenant_wompi_collection_sessions
+            WHERE tenant_id = $1 AND order_id = $2
+            ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, created_at DESC
+            LIMIT 1
+            """,
+            tenant_id,
+            order_id,
+        )
+        if not row:
+            raise NotFoundError("Sesión de cobro no encontrada")
+        return {
+            "success": True,
+            "data": {
+                "id": str(row["id"]),
+                "status": row["status"],
+            },
+        }
+
+
+async def _post_approved_collection_gl(
+    conn,
+    *,
+    tenant_id: UUID,
+    order_id: UUID,
+    payment_method: str,
+    payment_method_id: Optional[UUID],
+) -> None:
+    order = await conn.fetchrow(
+        """
+        SELECT id, order_number, total_amount,
+               COALESCE(tip_amount, 0) AS tip_amount,
+               COALESCE(tip_tax_amount, 0) AS tip_tax_amount,
+               order_date
+        FROM orders
+        WHERE id = $1 AND tenant_id = $2
+        """,
+        order_id,
+        tenant_id,
+    )
+    if not order:
+        return
+    timezone_name = await resolve_tenant_timezone(conn, tenant_id)
+    tax_config = await _get_tenant_tax_config(conn, tenant_id)
+    gl_date = local_date_for_tenant(order["order_date"], timezone_name)
+    await _post_order_gl_entry(
+        conn=conn,
+        tenant_id=tenant_id,
+        order_id=order_id,
+        order_date=gl_date,
+        total_amount=Decimal(str(order["total_amount"])),
+        payment_method=payment_method,
+        payment_method_id=payment_method_id,
+        tax_config=tax_config,
+        order_number=int(order["order_number"]),
+        tip_amount=Decimal(str(order["tip_amount"] or 0)),
+        tip_tax_amount=Decimal(str(order["tip_tax_amount"] or 0)),
+    )
+    await _post_order_cogs_gl_entry(
+        conn=conn,
+        tenant_id=tenant_id,
+        order_id=order_id,
+        order_date=gl_date,
+        order_number=int(order["order_number"]),
+    )
+
+
 async def _create_session_row(
     conn,
     *,
@@ -488,6 +599,9 @@ async def create_collection_session(
                 order_id,
                 customer_id,
             )
+        pending = await _pending_session_for_order(conn, tenant_id, order_id)
+        if pending:
+            return _session_reuse_payload(pending)
         return await _create_session_row(
             conn,
             tenant_id=tenant_id,
@@ -536,6 +650,9 @@ async def create_online_collection_session(
         customer_id = await resolve_collection_customer(
             conn, order["tenant_id"], order["customer_id"]
         )
+        pending = await _pending_session_for_order(conn, order["tenant_id"], order_id)
+        if pending:
+            return _session_reuse_payload(pending)
         return await _create_session_row(
             conn,
             tenant_id=order["tenant_id"],
@@ -617,6 +734,20 @@ async def apply_approved_payment(
         DIGITAL_SLUG,
         merchant["payment_method_id"],
     )
+    try:
+        await _post_approved_collection_gl(
+            conn,
+            tenant_id=tenant_id,
+            order_id=session_row["order_id"],
+            payment_method=DIGITAL_SLUG,
+            payment_method_id=merchant["payment_method_id"],
+        )
+    except Exception as exc:
+        logger.error(
+            "GL entry failed for Wompi collection order %s: %s",
+            session_row["order_id"],
+            exc,
+        )
     channel = "tenant_" + str(tenant_id).replace("-", "")
     notify_payload = {
         "type": NOTIFY_TYPE,
@@ -679,6 +810,33 @@ async def fetch_transaction(private_key: str, environment: str, transaction_id: 
     return (response.json() or {}).get("data") or {}
 
 
+def _pick_referenced_transaction(rows: Any) -> Optional[dict]:
+    items = list(rows or [])
+    for row in items:
+        if str(row.get("status") or "").upper() == "APPROVED":
+            return row
+    return items[0] if items else None
+
+
+async def fetch_transaction_by_reference(
+    private_key: str, environment: str, reference: str
+) -> Optional[dict]:
+    url = f"{_wompi_base_url(environment)}/transactions"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                url,
+                headers=restaurant_headers(private_key),
+                params={"reference": reference},
+            )
+    except httpx.RequestError as exc:
+        logger.error("Wompi list_transactions connection error")
+        raise ValidationError("No se pudo consultar la transacción en Wompi") from exc
+    if response.status_code >= 400:
+        raise ValidationError("Wompi no encontró la transacción")
+    return _pick_referenced_transaction((response.json() or {}).get("data") or [])
+
+
 async def verify_session(session_id: UUID, transaction_id: Optional[str] = None) -> dict:
     async with get_db_connection(use_transaction=True) as conn:
         session_row = await conn.fetchrow(
@@ -696,14 +854,19 @@ async def verify_session(session_id: UUID, transaction_id: Optional[str] = None)
             merchant["private_key_ciphertext"]
         )
         tx_id = transaction_id or session_row["provider_tx_id"]
-        if not tx_id:
-            return {
-                "success": True,
-                "data": {"status": session_row["status"], "applied": False},
-            }
-        transaction = await fetch_transaction(
-            private_key, merchant["environment"], tx_id
-        )
+        if tx_id:
+            transaction = await fetch_transaction(
+                private_key, merchant["environment"], tx_id
+            )
+        else:
+            transaction = await fetch_transaction_by_reference(
+                private_key, merchant["environment"], str(session_id)
+            )
+            if not transaction:
+                return {
+                    "success": True,
+                    "data": {"status": session_row["status"], "applied": False},
+                }
         result = await apply_from_transaction(
             conn,
             tenant_id=tenant_id,
