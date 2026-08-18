@@ -2026,6 +2026,7 @@ async def complete_pos_order(
     tip_taxable: bool = False,
     waros_to_redeem: Optional[int] = None,
     waro_reward_id: Optional[UUID] = None,
+    wompi_collection: bool = False,
 ) -> dict:
     """
     Complete a POS order.
@@ -2097,9 +2098,12 @@ async def complete_pos_order(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
-                pending_without_payment = payment_method is None
+                pending_without_payment = payment_method is None or wompi_collection
+                if wompi_collection:
+                    payment_method = None
+                    payment_method_id = None
                 if pending_without_payment:
-                    if delivery_address_id is None:
+                    if delivery_address_id is None and not wompi_collection:
                         raise APIError("payment_method es requerido para ventas que no son domicilio", status_code=400)
                     if split_mode:
                         raise APIError("El cobro dividido requiere método de pago", status_code=400)
