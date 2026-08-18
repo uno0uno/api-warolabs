@@ -230,6 +230,7 @@ async def test_idempotent_apply_webhook_then_get(tenant_id):
             {"id": payment_id},
         ]
     )
+    conn.fetchval = AsyncMock(return_value=None)
     conn.execute = AsyncMock()
 
     first = await svc.apply_approved_payment(
@@ -312,5 +313,36 @@ async def test_online_session_rejects_mismatched_cart():
             await svc.create_online_collection_session(
                 order_id=uuid4(),
                 cart_id=uuid4(),
-                amount=Decimal("15000"),
+                amount=Decimal("1"),
             )
+
+
+def test_safe_thank_you_url_allowlist():
+    session_id = uuid4()
+    default = f"https://warocol.com/cobro/{session_id}/gracias"
+    assert svc._safe_thank_you_url(None, session_id) == default
+    assert svc._safe_thank_you_url(
+        "https://warocol.com/cobro/{sessionId}/gracias", session_id
+    ) == default
+    assert svc._safe_thank_you_url("https://evil.example/phish", session_id) == default
+
+
+@pytest.mark.asyncio
+async def test_apply_skips_when_order_already_paid(tenant_id):
+    session_row = {
+        "id": uuid4(),
+        "order_id": uuid4(),
+        "amount": Decimal("15000"),
+        "status": "pending",
+        "order_payment_id": None,
+    }
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=1)
+    result = await svc.apply_approved_payment(
+        conn,
+        tenant_id=tenant_id,
+        session_row=session_row,
+        provider_tx_id="tx-dup",
+    )
+    assert result["idempotent"] is True
+    conn.fetchrow.assert_not_called()

@@ -4406,7 +4406,7 @@ async def create_manual_order(
                     payment_status = await sync_order_split_credit_status(
                         conn, order_id, settlement_complete=True,
                     )
-                elif payment_method == "customer_wallet" and customer_uuid:
+                elif not wompi_collection and payment_method == "customer_wallet" and customer_uuid:
                     from app.services.customer_wallet_service import apply_wallet_for_order
 
                     await apply_wallet_for_order(
