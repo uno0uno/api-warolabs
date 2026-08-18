@@ -1279,6 +1279,28 @@ async def bulk_update_order_status(
         raise APIError(f"Error al actualizar órdenes: {str(e)}", status_code=500)
 
 
+async def assert_order_invoice_allows_mutation(conn, tenant_id, order_id) -> None:
+    """Raise 409 when the latest electronic invoice is pending or accepted."""
+    status = await conn.fetchval(
+        """
+        SELECT status
+        FROM electronic_invoices
+        WHERE order_id = $1 AND tenant_id = $2
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        order_id,
+        tenant_id,
+    )
+    if status in ("pending", "accepted"):
+        raise APIError(
+            "No se puede modificar una venta con factura electrónica pendiente o aceptada. "
+            "Use una nota crédito.",
+            status_code=409,
+            details={"code": "electronic_invoice_blocks_mutation"},
+        )
+
+
 async def update_order_status(
     request: Request,
     order_id: UUID,
@@ -1315,6 +1337,7 @@ async def update_order_status(
 
             # Guard: block mutation if order falls in a closed monthly accounting period (#362)
             await assert_order_not_in_closed_monthly_period(conn, tenant_id, row['order_date'])
+            await assert_order_invoice_allows_mutation(conn, tenant_id, order_id)
 
             old_status = row['status']
             order_number = int(row['order_number'])
@@ -3308,6 +3331,7 @@ async def delete_order_item(
 
                 # Guard: block mutation if order falls in a closed monthly accounting period (#362)
                 await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_row['order_date'])
+                await assert_order_invoice_allows_mutation(conn, tenant_id, order_id)
 
                 order_number = order_row['order_number']
 
@@ -3624,6 +3648,7 @@ async def delete_order_item_modifier(
 
                 # Guard: block mutation if order falls in a closed monthly accounting period (#362)
                 await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_row['order_date'])
+                await assert_order_invoice_allows_mutation(conn, tenant_id, order_id)
 
                 order_number = order_row['order_number']
 
