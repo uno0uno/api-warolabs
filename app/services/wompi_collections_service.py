@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import httpx
@@ -27,6 +28,24 @@ logger = logging.getLogger(__name__)
 WOMPI_METHOD_NAME = "Wompi"
 DIGITAL_SLUG = "digital"
 NOTIFY_TYPE = "order_payment_approved"
+_THANK_YOU_HOSTS = {"warocol.com", "www.warocol.com", "localhost"}
+
+
+def _safe_thank_you_url(redirect_url: Optional[str], session_id: UUID) -> str:
+    default = f"https://warocol.com/cobro/{session_id}/gracias"
+    if not redirect_url:
+        return default
+    resolved = redirect_url.replace("{sessionId}", str(session_id)).strip()
+    parsed = urlparse(resolved)
+    host = (parsed.hostname or "").lower()
+    path = (parsed.path or "").rstrip("/")
+    if parsed.scheme not in ("https", "http"):
+        return default
+    if host not in _THANK_YOU_HOSTS:
+        return default
+    if path != f"/cobro/{session_id}/gracias":
+        return default
+    return resolved
 
 
 def _wompi_base_url(environment: str) -> str:
@@ -339,6 +358,103 @@ async def _load_merchant(conn, tenant_id: UUID) -> Any:
     return row
 
 
+async def public_collection_session(session_id: UUID) -> dict:
+    async with get_db_connection(use_transaction=False) as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT checkout_url, status
+            FROM tenant_wompi_collection_sessions
+            WHERE id = $1
+            """,
+            session_id,
+        )
+    if not row:
+        raise NotFoundError("Sesión de cobro no encontrada")
+    return {
+        "success": True,
+        "data": {
+            "checkoutUrl": row["checkout_url"],
+            "status": row["status"],
+        },
+    }
+
+
+async def _create_session_row(
+    conn,
+    *,
+    tenant_id: UUID,
+    order_id: UUID,
+    amount: Decimal,
+    customer_id: UUID,
+    link_email: Optional[str],
+    redirect_url: Optional[str],
+) -> dict:
+    merchant = await _load_merchant(conn, tenant_id)
+    private_key = await openbao_transit.decrypt_ciphertext(
+        merchant["private_key_ciphertext"]
+    )
+    session_id = uuid4()
+    amount_cents = int((amount * 100).quantize(Decimal("1")))
+    expiration = datetime.now(timezone.utc) + timedelta(hours=2)
+    thank_you_url = _safe_thank_you_url(redirect_url, session_id)
+    payload = {
+        "name": f"WARO cobro {order_id}",
+        "description": "Cobro al comensal (restaurante)",
+        "single_use": True,
+        "collect_shipping": False,
+        "currency": "COP",
+        "amount_in_cents": amount_cents,
+        "expires_at": expiration.isoformat(),
+        "redirect_url": thank_you_url,
+        "reference": str(session_id),
+    }
+    if link_email:
+        payload["customer_data"] = {"email": link_email}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                f"{_wompi_base_url(merchant['environment'])}/payment_links",
+                headers=restaurant_headers(private_key),
+                json=payload,
+            )
+    except httpx.RequestError as exc:
+        logger.error("Wompi payment_links connection error")
+        raise ValidationError("Wompi no respondió al crear el link") from exc
+    if response.status_code >= 400:
+        raise ValidationError("Wompi rechazó la creación del link de cobro")
+    data = (response.json() or {}).get("data") or {}
+    link_id = data.get("id")
+    if not link_id:
+        raise ValidationError("Wompi no devolvió link de cobro")
+    checkout_url = f"https://checkout.wompi.co/l/{link_id}"
+    await conn.execute(
+        """
+        INSERT INTO tenant_wompi_collection_sessions (
+            id, tenant_id, order_id, amount, customer_id, link_email,
+            provider_link_id, checkout_url, status
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
+        """,
+        session_id,
+        tenant_id,
+        order_id,
+        amount,
+        customer_id,
+        link_email,
+        str(link_id),
+        checkout_url,
+    )
+    return {
+        "success": True,
+        "data": {
+            "id": str(session_id),
+            "checkoutUrl": checkout_url,
+            "status": "pending",
+            "customerId": str(customer_id),
+        },
+    }
+
+
 async def create_collection_session(
     request: Request,
     order_id: UUID,
@@ -352,7 +468,6 @@ async def create_collection_session(
     if amount <= 0:
         raise ValidationError("El monto debe ser positivo")
     async with get_db_connection(use_transaction=True) as conn:
-        merchant = await _load_merchant(conn, tenant_id)
         order = await conn.fetchrow(
             """
             SELECT id, customer_id, total_amount
@@ -373,68 +488,63 @@ async def create_collection_session(
                 order_id,
                 customer_id,
             )
-        session_id = uuid4()
-        private_key = await openbao_transit.decrypt_ciphertext(
-            merchant["private_key_ciphertext"]
+        return await _create_session_row(
+            conn,
+            tenant_id=tenant_id,
+            order_id=order_id,
+            amount=amount,
+            customer_id=customer_id,
+            link_email=link_email,
+            redirect_url=redirect_url,
         )
-        amount_cents = int((amount * 100).quantize(Decimal("1")))
-        expiration = datetime.now(timezone.utc) + timedelta(hours=2)
-        payload = {
-            "name": f"WARO cobro {order_id}",
-            "description": "Cobro al comensal (restaurante)",
-            "single_use": True,
-            "collect_shipping": False,
-            "currency": "COP",
-            "amount_in_cents": amount_cents,
-            "expires_at": expiration.isoformat(),
-            "redirect_url": redirect_url or "https://warocol.com",
-            "reference": str(session_id),
-        }
-        if link_email:
-            payload["customer_data"] = {"email": link_email}
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(
-                    f"{_wompi_base_url(merchant['environment'])}/payment_links",
-                    headers=restaurant_headers(private_key),
-                    json=payload,
-                )
-        except httpx.RequestError as exc:
-            logger.error("Wompi payment_links connection error")
-            raise ValidationError("Wompi no respondió al crear el link") from exc
-        if response.status_code >= 400:
-            raise ValidationError("Wompi rechazó la creación del link de cobro")
-        data = (response.json() or {}).get("data") or {}
-        link_id = data.get("id")
-        if not link_id:
-            raise ValidationError("Wompi no devolvió link de cobro")
-        checkout_url = f"https://checkout.wompi.co/l/{link_id}"
-        await conn.execute(
+
+
+async def create_online_collection_session(
+    *,
+    order_id: UUID,
+    cart_id: UUID,
+    amount: Decimal,
+    link_email: Optional[str] = None,
+    redirect_url: Optional[str] = None,
+) -> dict:
+    async with get_db_connection(use_transaction=True) as conn:
+        order = await conn.fetchrow(
             """
-            INSERT INTO tenant_wompi_collection_sessions (
-                id, tenant_id, order_id, amount, customer_id, link_email,
-                provider_link_id, checkout_url, status
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
+            SELECT o.id, o.tenant_id, o.customer_id, o.online_cart_id,
+                   o.total_amount, COALESCE(o.tip_amount, 0) AS tip_amount
+            FROM orders o
+            WHERE o.id = $1
             """,
-            session_id,
-            tenant_id,
             order_id,
-            amount,
-            customer_id,
-            link_email,
-            str(link_id),
-            checkout_url,
         )
-    return {
-        "success": True,
-        "data": {
-            "id": str(session_id),
-            "checkoutUrl": checkout_url,
-            "status": "pending",
-            "customerId": str(customer_id),
-        },
-    }
+        if not order or order["online_cart_id"] != cart_id:
+            raise NotFoundError("Orden no encontrada")
+        paid = await conn.fetchval(
+            """
+            SELECT 1
+            FROM order_payments
+            WHERE order_id = $1 AND voided_at IS NULL
+            LIMIT 1
+            """,
+            order_id,
+        )
+        if paid:
+            raise ValidationError("La orden ya tiene un pago")
+        due = Decimal(str(order["total_amount"])) + Decimal(str(order["tip_amount"] or 0))
+        if due <= 0:
+            raise ValidationError("El monto debe ser positivo")
+        customer_id = await resolve_collection_customer(
+            conn, order["tenant_id"], order["customer_id"]
+        )
+        return await _create_session_row(
+            conn,
+            tenant_id=order["tenant_id"],
+            order_id=order_id,
+            amount=due,
+            customer_id=customer_id,
+            link_email=link_email,
+            redirect_url=redirect_url,
+        )
 
 
 async def apply_approved_payment(
@@ -450,6 +560,21 @@ async def apply_approved_payment(
             "applied": False,
             "idempotent": True,
             "orderPaymentId": str(session_row["order_payment_id"]),
+        }
+    already_paid = await conn.fetchval(
+        """
+        SELECT 1
+        FROM order_payments
+        WHERE order_id = $1 AND voided_at IS NULL
+        LIMIT 1
+        """,
+        session_row["order_id"],
+    )
+    if already_paid:
+        return {
+            "applied": False,
+            "idempotent": True,
+            "orderPaymentId": str(session_row["order_payment_id"]) if session_row["order_payment_id"] else None,
         }
     merchant = await _load_merchant(conn, tenant_id)
     pay_amount = amount if amount is not None else Decimal(str(session_row["amount"]))
@@ -478,6 +603,19 @@ async def apply_approved_payment(
         session_row["id"],
         provider_tx_id,
         payment["id"],
+    )
+    await conn.execute(
+        """
+        UPDATE orders
+        SET status = 'completed',
+            payment_status = 'paid',
+            payment_method = $2,
+            payment_method_id = $3
+        WHERE id = $1
+        """,
+        session_row["order_id"],
+        DIGITAL_SLUG,
+        merchant["payment_method_id"],
     )
     channel = "tenant_" + str(tenant_id).replace("-", "")
     notify_payload = {

@@ -252,6 +252,7 @@ class CreateManualOrderRequest(BaseModel):
     discount_value: Optional[float] = None
     payments: Optional[List[ManualOrderPayment]] = None
     items: List[ManualOrderItem] = Field(min_length=1)
+    wompi_collection: bool = False
 
 
 @router.post("/manual", dependencies=[Depends(require_module(Module.VENTAS))])
@@ -273,6 +274,7 @@ async def create_manual_order(
         discount_type=data.discount_type,
         discount_value=data.discount_value,
         payments=[payment.model_dump() for payment in data.payments] if data.payments else None,
+        wompi_collection=data.wompi_collection,
     )
 
 

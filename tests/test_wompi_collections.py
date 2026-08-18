@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.core.exceptions import ValidationError
+from app.core.exceptions import NotFoundError, ValidationError
 from app.services import wompi_collections_service as svc
 from app.services.account_role_service import AccountRef, AccountRole
 
@@ -67,6 +67,11 @@ def test_collections_never_call_server_wompi_headers():
     assert "settings.wompi_private_key" in src  # only to reject match
     router = Path("app/routers/wompi_collections.py").read_text()
     assert "payments_webhook" not in router
+    assert '@session_router.get("/sessions/{session_id}")' in router
+    assert "require_module" not in router.split('@session_router.get("/sessions/{session_id}")', 1)[1].split("@session_router.post")[0]
+    assert '@session_router.post("/sessions/online")' in router
+    online_block = router.split('@session_router.post("/sessions/online")', 1)[1].split("@session_router.", 1)[0]
+    assert "require_module" not in online_block
 
 
 @pytest.mark.asyncio
@@ -225,6 +230,7 @@ async def test_idempotent_apply_webhook_then_get(tenant_id):
             {"id": payment_id},
         ]
     )
+    conn.fetchval = AsyncMock(return_value=None)
     conn.execute = AsyncMock()
 
     first = await svc.apply_approved_payment(
@@ -268,6 +274,75 @@ async def test_idempotent_apply_get_then_webhook(tenant_id):
         tenant_id=tenant_id,
         session_row=session_row,
         provider_tx_id="tx-2",
+    )
+    assert result["idempotent"] is True
+    conn.fetchrow.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_public_session_returns_only_checkout_url_and_status():
+    session_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "checkout_url": "https://checkout.wompi.co/l/abc",
+            "status": "pending",
+        }
+    )
+    with patch.object(svc, "get_db_connection", return_value=_AsyncContext(conn)):
+        result = await svc.public_collection_session(session_id)
+    assert set(result["data"].keys()) == {"checkoutUrl", "status"}
+    assert result["data"]["checkoutUrl"] == "https://checkout.wompi.co/l/abc"
+    assert "key" not in str(result["data"]).lower()
+    assert "secret" not in str(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_online_session_rejects_mismatched_cart():
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "id": uuid4(),
+            "tenant_id": uuid4(),
+            "customer_id": uuid4(),
+            "online_cart_id": uuid4(),
+        }
+    )
+    with patch.object(svc, "get_db_connection", return_value=_AsyncContext(conn)):
+        with pytest.raises(NotFoundError, match="Orden no encontrada"):
+            await svc.create_online_collection_session(
+                order_id=uuid4(),
+                cart_id=uuid4(),
+                amount=Decimal("1"),
+            )
+
+
+def test_safe_thank_you_url_allowlist():
+    session_id = uuid4()
+    default = f"https://warocol.com/cobro/{session_id}/gracias"
+    assert svc._safe_thank_you_url(None, session_id) == default
+    assert svc._safe_thank_you_url(
+        "https://warocol.com/cobro/{sessionId}/gracias", session_id
+    ) == default
+    assert svc._safe_thank_you_url("https://evil.example/phish", session_id) == default
+
+
+@pytest.mark.asyncio
+async def test_apply_skips_when_order_already_paid(tenant_id):
+    session_row = {
+        "id": uuid4(),
+        "order_id": uuid4(),
+        "amount": Decimal("15000"),
+        "status": "pending",
+        "order_payment_id": None,
+    }
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=1)
+    result = await svc.apply_approved_payment(
+        conn,
+        tenant_id=tenant_id,
+        session_row=session_row,
+        provider_tx_id="tx-dup",
     )
     assert result["idempotent"] is True
     conn.fetchrow.assert_not_called()

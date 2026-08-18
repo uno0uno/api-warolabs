@@ -55,6 +55,16 @@ async def pasarela_status(request: Request):
     return await wompi_collections_service.merchant_status(request)
 
 
+class OnlineSessionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    order_id: UUID = Field(alias="orderId")
+    cart_id: UUID = Field(alias="cartId")
+    amount: Decimal
+    link_email: Optional[str] = Field(default=None, alias="linkEmail")
+    redirect_url: Optional[str] = Field(default=None, alias="redirectUrl")
+
+
 @session_router.post("/sessions", dependencies=[Depends(require_module(Module.POS))])
 async def create_session(request: Request, body: CreateSessionRequest):
     return await wompi_collections_service.create_collection_session(
@@ -65,6 +75,22 @@ async def create_session(request: Request, body: CreateSessionRequest):
         link_email=body.link_email,
         redirect_url=body.redirect_url,
     )
+
+
+@session_router.post("/sessions/online")
+async def create_online_session(body: OnlineSessionRequest):
+    return await wompi_collections_service.create_online_collection_session(
+        order_id=body.order_id,
+        cart_id=body.cart_id,
+        amount=body.amount,
+        link_email=body.link_email,
+        redirect_url=body.redirect_url,
+    )
+
+
+@session_router.get("/sessions/{session_id}")
+async def public_session(session_id: UUID):
+    return await wompi_collections_service.public_collection_session(session_id)
 
 
 @session_router.post("/sessions/{session_id}/verify")

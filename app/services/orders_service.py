@@ -4052,6 +4052,7 @@ async def create_manual_order(
     discount_type: Optional[str] = None,
     discount_value: Optional[float] = None,
     payments: Optional[List[dict]] = None,
+    wompi_collection: bool = False,
 ) -> dict:
     """
     Create an order manually with a custom date, bypassing the POS cart.
@@ -4195,11 +4196,19 @@ async def create_manual_order(
                             status_code=400,
                         )
 
+                if wompi_collection and split_payments:
+                    raise APIError("Wompi no admite cobro dividido", status_code=400)
+
                 payment_status = (
+                    None
+                    if wompi_collection
+                    else (
                     "paid"
                     if split_payments
                     else ("credit" if payment_method == "credit" else "paid")
+                    )
                 )
+                order_status = "pending" if wompi_collection else "completed"
 
                 order_row = await conn.fetchrow(
                     """
@@ -4208,20 +4217,21 @@ async def create_manual_order(
                         order_date, total_amount, status, payment_status,
                         discount_type, discount_value, discount_amount, extra_attributes
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8, $9, $10, $11)
+                    VALUES ($1, $2, $3, $4, $5, $6, $12, $7, $8, $9, $10, $11)
                     RETURNING id, order_number, order_date, created_at
                     """,
                     tenant_id,
                     customer_uuid,
-                    payment_method,
-                    payment_method_uuid,
+                    None if wompi_collection else payment_method,
+                    None if wompi_collection else payment_method_uuid,
                     order_datetime,
                     total_amount,
                     payment_status,
                     normalized_discount_type,
                     normalized_discount_value,
                     discount_amount or None,
-                    json.dumps({"source": "manual"})
+                    json.dumps({"source": "manual"}),
+                    order_status,
                 )
 
                 order_id = order_row["id"]
@@ -4357,7 +4367,7 @@ async def create_manual_order(
                         str(tenant_id),
                     )
 
-                if split_payments:
+                if not wompi_collection and split_payments:
                     from app.services.customer_wallet_service import apply_wallet_for_order
 
                     for payment in split_payments:
@@ -4396,7 +4406,7 @@ async def create_manual_order(
                     payment_status = await sync_order_split_credit_status(
                         conn, order_id, settlement_complete=True,
                     )
-                elif payment_method == "customer_wallet" and customer_uuid:
+                elif not wompi_collection and payment_method == "customer_wallet" and customer_uuid:
                     from app.services.customer_wallet_service import apply_wallet_for_order
 
                     await apply_wallet_for_order(
@@ -4411,40 +4421,41 @@ async def create_manual_order(
                 gl_order_date = local_date_for_tenant(order_datetime, timezone_name)
                 gl_payment_method_id = payment_method_uuid
 
-                try:
-                    tax_config = await _get_tenant_tax_config(conn, tenant_id)
-                    await _post_order_gl_entry(
-                        conn=conn,
-                        tenant_id=tenant_id,
-                        order_id=order_id,
-                        order_date=gl_order_date,
-                        total_amount=Decimal(str(total_amount)),
-                        payment_method=payment_method,
-                        payment_method_id=gl_payment_method_id,
-                        tax_config=tax_config,
-                        order_number=int(order_row["order_number"]),
-                        payment_splits=split_payments or None,
-                    )
-                except MissingAccountRoleError:
-                    raise
-                except Exception as e:
-                    logger.error(f"GL entry failed for manual order {order_id}: {e}")
+                if not wompi_collection:
+                    try:
+                        tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        await _post_order_gl_entry(
+                            conn=conn,
+                            tenant_id=tenant_id,
+                            order_id=order_id,
+                            order_date=gl_order_date,
+                            total_amount=Decimal(str(total_amount)),
+                            payment_method=payment_method,
+                            payment_method_id=gl_payment_method_id,
+                            tax_config=tax_config,
+                            order_number=int(order_row["order_number"]),
+                            payment_splits=split_payments or None,
+                        )
+                    except MissingAccountRoleError:
+                        raise
+                    except Exception as e:
+                        logger.error(f"GL entry failed for manual order {order_id}: {e}")
 
-                try:
-                    await _post_order_cogs_gl_entry(
-                        conn=conn,
-                        tenant_id=tenant_id,
-                        order_id=order_id,
-                        order_date=gl_order_date,
-                        order_number=int(order_row["order_number"]),
-                    )
-                except MissingAccountRoleError:
-                    raise
-                except Exception as e:
-                    logger.error(f"COGS GL entry failed for manual order {order_id}: {e}")
+                    try:
+                        await _post_order_cogs_gl_entry(
+                            conn=conn,
+                            tenant_id=tenant_id,
+                            order_id=order_id,
+                            order_date=gl_order_date,
+                            order_number=int(order_row["order_number"]),
+                        )
+                    except MissingAccountRoleError:
+                        raise
+                    except Exception as e:
+                        logger.error(f"COGS GL entry failed for manual order {order_id}: {e}")
 
         # Award waros for completed manual order (fire-and-forget — never blocks)
-        if customer_id:
+        if customer_id and not wompi_collection:
             try:
                 asyncio.create_task(
                     evaluate_and_award(order_row["id"], UUID(customer_id), tenant_id)
@@ -4459,9 +4470,9 @@ async def create_manual_order(
                 "order_number": int(order_row["order_number"]),
                 "order_date": order_row["order_date"].isoformat(),
                 "total_amount": float(total_amount),
-                "status": "completed",
-                "payment_method": payment_method,
-                "payment_method_id": str(payment_method_uuid) if payment_method_uuid else None,
+                "status": "pending" if wompi_collection else "completed",
+                "payment_method": None if wompi_collection else payment_method,
+                "payment_method_id": None if wompi_collection else (str(payment_method_uuid) if payment_method_uuid else None),
                 "payment_status": payment_status,
                 "discount_type": normalized_discount_type,
                 "discount_value": normalized_discount_value,

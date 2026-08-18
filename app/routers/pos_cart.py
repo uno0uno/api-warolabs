@@ -250,6 +250,7 @@ class CompleteOrderRequest(BaseModel):
     tip_taxable: bool = Field(False, description="warocol.com#740 — when true, standard consumption tax is applied to tip_amount (gravada).")
     waros_to_redeem: Optional[int] = Field(None, ge=0, description="B1 WaRos points to redeem for COP discount (api#370)")
     waro_reward_id: Optional[UUID] = Field(None, description="B2 catalog reward UUID (api#370)")
+    wompi_collection: bool = Field(False, description="Leave the order unpaid until restaurant Wompi APPROVED (#864)")
 
 
 @router.post("/{cart_id}/complete", dependencies=[Depends(require_module(Module.POS))])
@@ -291,6 +292,7 @@ async def complete_order(
         tip_taxable=order_data.tip_taxable,
         waros_to_redeem=order_data.waros_to_redeem,
         waro_reward_id=order_data.waro_reward_id,
+        wompi_collection=order_data.wompi_collection,
     )
 
 
