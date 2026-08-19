@@ -37,6 +37,8 @@ class _SeqConnCtx:
         conn = MagicMock()
         conn.fetchrow = AsyncMock(side_effect=lambda *a, **k: next(self._frows))
         conn.fetch = AsyncMock(side_effect=lambda *a, **k: next(self._fetch))
+        conn.fetchval = AsyncMock(return_value=5462)
+        conn.execute = AsyncMock()
         return conn
 
     async def __aexit__(self, *_):
@@ -200,6 +202,46 @@ async def test_send_invoice_email_happy_path():
     assert kwargs['order_date'].day == 13
     assert kwargs['promo_savings'] == 0.0
     assert kwargs['promo_breakdown'] == []
+
+
+@pytest.mark.asyncio
+async def test_send_invoice_email_records_ventas_event():
+    request = MagicMock()
+    user_id = uuid4()
+    recorded = []
+
+    async def capture_record(conn, tid, **kwargs):
+        recorded.append({"tenant_id": tid, **kwargs})
+
+    fetchrow = [_order_row(), _invoice_row(), _waro_inferred_row(), _profile_row(), _resolution_row()]
+    fetch = [
+        [],
+        [],
+        [],
+        [{'id': uuid4(), 'quantity': 1, 'subtotal': 200.0, 'product_name': 'tomate barranca'}],
+        [],
+    ]
+    session = MagicMock()
+    session.tenant_id = _TENANT_ID
+    session.user_id = user_id
+
+    with patch("app.services.orders_service.require_valid_session", return_value=session), \
+         _patch_db(fetchrow=fetchrow, fetch=fetch), _patch_tax(), patch(
+        "app.services.orders_service.send_pos_receipt_email",
+        new=AsyncMock(return_value=True),
+    ), patch("app.services.orders_service.record_operation_event", new=capture_record):
+        await orders_service.send_invoice_email(request, _ORDER_ID, _RECIPIENT)
+
+    assert len(recorded) == 1
+    event = recorded[0]
+    assert event["domain"] == "ventas"
+    assert event["channel"] is None
+    assert event["action"] == "order_email_sent"
+    assert event["order_id"] == _ORDER_ID
+    assert event["actor_user_id"] == user_id
+    assert event["payload"]["recipient_email"] == _RECIPIENT
+    assert event["payload"]["email_kind"] == "invoice"
+    assert event["payload"]["order_number"] == 5462
 
 
 # ── Cross-tenant guard ───────────────────────────────────────────────────────

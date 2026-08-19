@@ -53,6 +53,8 @@ ACTIONS: FrozenSet[str] = frozenset({
     "comanda_line_cancelled",
     "promotion_deleted",
     "order_status_changed",
+    "order_customer_changed",
+    "order_email_sent",
     "order_item_deleted",
     "order_item_modifier_deleted",
     "comanda_status_changed",
