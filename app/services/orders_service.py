@@ -1100,13 +1100,13 @@ async def bulk_update_order_status(
                 ids, tenant_id
             )
 
-            # Block completed → pending for POS orders in bulk
             if status == 'pending':
-                blocked = [str(r['id']) for r in order_rows if r['status'] == 'completed' and r['pos_cart_id']]
+                blocked = [str(r['id']) for r in order_rows if r['status'] == 'completed']
                 if blocked:
                     raise APIError(
-                        "Las órdenes completadas del POS no pueden volver a pendiente. Use 'Cancelar' en su lugar.",
-                        status_code=400
+                        "Las órdenes completadas no pueden volver a pendiente. Use 'Cancelar' en su lugar.",
+                        status_code=400,
+                        details={"code": "completed_cannot_return_to_pending"},
                     )
 
             from uuid import UUID as _UUID2
@@ -1301,6 +1301,24 @@ async def assert_order_invoice_allows_mutation(conn, tenant_id, order_id) -> Non
         )
 
 
+def _assert_not_completed_to_pending(old_status: str, new_status: str) -> None:
+    if old_status == "completed" and new_status == "pending":
+        raise APIError(
+            "Las órdenes completadas no pueden volver a pendiente. Use 'Cancelar' en su lugar.",
+            status_code=400,
+            details={"code": "completed_cannot_return_to_pending"},
+        )
+
+
+def _assert_order_status_allows_line_edit(status: Optional[str]) -> None:
+    if status != "pending":
+        raise APIError(
+            "Solo se puede editar una venta pendiente.",
+            status_code=409,
+            details={"code": "sale_not_editable"},
+        )
+
+
 async def update_order_status(
     request: Request,
     order_id: UUID,
@@ -1342,12 +1360,7 @@ async def update_order_status(
             old_status = row['status']
             order_number = int(row['order_number'])
 
-            # Block completed → pending for POS orders (no active table session to restore)
-            if old_status == 'completed' and status == 'pending' and row['pos_cart_id']:
-                raise APIError(
-                    "Las órdenes completadas del POS no pueden volver a pendiente. Use 'Cancelar' en su lugar.",
-                    status_code=400
-                )
+            _assert_not_completed_to_pending(old_status, status)
 
             try:
                 pmid = UUID(payment_method_id) if payment_method_id else None
@@ -3321,7 +3334,7 @@ async def delete_order_item(
             async with conn.transaction():
                 # Verify order exists and get order number
                 order_query = """
-                    SELECT id, order_number, order_date FROM orders
+                    SELECT id, order_number, order_date, status FROM orders
                     WHERE id = $1 AND tenant_id = $2 AND pos_cart_id IS NOT NULL
                 """
                 order_row = await conn.fetchrow(order_query, order_id, tenant_id)
@@ -3332,6 +3345,7 @@ async def delete_order_item(
                 # Guard: block mutation if order falls in a closed monthly accounting period (#362)
                 await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_row['order_date'])
                 await assert_order_invoice_allows_mutation(conn, tenant_id, order_id)
+                _assert_order_status_allows_line_edit(order_row['status'])
 
                 order_number = order_row['order_number']
 
@@ -3638,7 +3652,7 @@ async def delete_order_item_modifier(
             async with conn.transaction():
                 # Verify order exists and get order number
                 order_query = """
-                    SELECT id, order_number, order_date FROM orders
+                    SELECT id, order_number, order_date, status FROM orders
                     WHERE id = $1 AND tenant_id = $2 AND pos_cart_id IS NOT NULL
                 """
                 order_row = await conn.fetchrow(order_query, order_id, tenant_id)
@@ -3649,6 +3663,7 @@ async def delete_order_item_modifier(
                 # Guard: block mutation if order falls in a closed monthly accounting period (#362)
                 await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_row['order_date'])
                 await assert_order_invoice_allows_mutation(conn, tenant_id, order_id)
+                _assert_order_status_allows_line_edit(order_row['status'])
 
                 order_number = order_row['order_number']
 

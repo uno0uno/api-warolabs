@@ -1,0 +1,34 @@
+# Compact plan for wr-exec. Keep <=80 lines. Mirror of front_nuxt/.wr/2347.yaml
+issue: 2347
+issue_ref: uno0uno/warocol.com#2347
+title: "Block completed→pending; edit sale lines only while pending"
+repo: both
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+front_cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/front_nuxt
+stack: fastapi
+branch: wr-2347-block-completed-pending
+parent_epic: uno0uno/warocol.com#2346
+closes: "Closes uno0uno/warocol.com#2347"
+risk: low
+
+paths:
+  - app/services/orders_service.py
+  - tests/test_order_status_completed_pending.py
+
+ac:
+  - Reject completed → pending for all sources (detail + bulk), not only POS
+  - Line deletes reject when order status is completed
+  - Pending → completed and pending → cancelled still allowed
+  - FE lock #2344 unchanged
+
+out_of_scope:
+  - Journal void (#2348)
+  - Bitácora (#2349)
+
+hints:
+  pattern: "orders_service.py:1346 and :1105 drop pos_cart_id condition"
+  tests: "./venv/bin/pytest tests/test_order_status_completed_pending.py tests/test_order_invoice_mutation_lock.py tests/test_orders_despacho_operation_events.py -q"
+
+skip:
+  audits: [ux, color, typography]

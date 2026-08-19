@@ -117,7 +117,7 @@ async def test_delete_order_item_records_event():
     conn = AsyncMock()
     conn.transaction = MagicMock(return_value=_AsyncContext())
     conn.fetchrow = AsyncMock(side_effect=[
-        {"id": order_id, "order_number": 42, "order_date": datetime(2026, 8, 15)},
+        {"id": order_id, "order_number": 42, "order_date": datetime(2026, 8, 15), "status": "pending"},
         {"id": item_id, "product_id": uuid4(), "quantity": 2, "product_name": "Bandeja"},
         {"count": 2},
         {"new_total": 10000},
@@ -157,7 +157,7 @@ async def test_delete_order_item_modifier_records_event():
     conn = AsyncMock()
     conn.transaction = MagicMock(return_value=_AsyncContext())
     conn.fetchrow = AsyncMock(side_effect=[
-        {"id": order_id, "order_number": 42, "order_date": datetime(2026, 8, 15)},
+        {"id": order_id, "order_number": 42, "order_date": datetime(2026, 8, 15), "status": "pending"},
         {"id": item_id, "quantity": 1, "product_name": "Hamburguesa"},
         {
             "id": modifier_id,
