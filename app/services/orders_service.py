@@ -18,7 +18,8 @@ from app.core.localization import (
     resolve_tenant_locale_settings,
 )
 from app.services.aws_ses_service import ses_service
-from app.services.waros_service import evaluate_and_award
+from app.services.waros_service import evaluate_and_award, revoke_waros_awarded_for_order
+from app.services.customer_wallet_service import restore_wallet_for_cancelled_order
 from app.services.operation_events_service import DOMAIN_VENTAS, record_operation_event
 from app.services.cierre_service import (
     assert_order_not_in_closed_monthly_period,
@@ -1101,6 +1102,12 @@ async def bulk_update_order_status(
                 ids, tenant_id
             )
 
+            if status == "cancelled":
+                for row in order_rows:
+                    await assert_order_invoice_allows_mutation(conn, tenant_id, row["id"])
+                    if row["status"] == "completed":
+                        await assert_order_has_no_credit_payments(conn, row["id"])
+
             if status == 'pending':
                 blocked = [str(r['id']) for r in order_rows if r['status'] == 'completed']
                 if blocked:
@@ -1207,6 +1214,15 @@ async def bulk_update_order_status(
                         await _deduct_stock_for_status_update(conn, order_id_row, tenant_id, user_id, order_number)
                     newly_completed_order_ids.append(order_id_row)
                 elif old_status == 'completed' and status in ('cancelled', 'pending'):
+                    if status == 'cancelled':
+                        await restore_wallet_for_cancelled_order(
+                            conn,
+                            tenant_id,
+                            order_id_row,
+                            user_id,
+                            notes=f"Cancelación venta #{order_number}",
+                        )
+                        await revoke_waros_awarded_for_order(conn, order_id_row, tenant_id)
                     await _return_stock_for_order_cancellation(conn, order_id_row, tenant_id, user_id, order_number)
                     if status == 'cancelled':
                         try:
@@ -1320,6 +1336,21 @@ async def assert_order_invoice_allows_mutation(conn, tenant_id, order_id) -> Non
         )
 
 
+async def assert_order_has_no_credit_payments(conn, order_id) -> None:
+    """Raise 409 when the sale already has cartera abonos."""
+    count = await conn.fetchval(
+        "SELECT COUNT(*) FROM credit_payments WHERE order_id = $1",
+        order_id,
+    )
+    if count:
+        raise APIError(
+            "No se puede cancelar una venta con abonos en cartera. "
+            "El cobro ya está registrado.",
+            status_code=409,
+            details={"code": "sale_has_credit_payments"},
+        )
+
+
 def _assert_not_completed_to_pending(old_status: str, new_status: str) -> None:
     if old_status == "completed" and new_status == "pending":
         raise APIError(
@@ -1396,6 +1427,8 @@ async def update_order_status(
                     status_code=400,
                     details={"code": "cancel_reason_required"},
                 )
+            if status == "cancelled" and old_status == "completed":
+                await assert_order_has_no_credit_payments(conn, order_id)
 
             try:
                 pmid = UUID(payment_method_id) if payment_method_id else None
@@ -1562,6 +1595,15 @@ async def update_order_status(
                     except Exception as gl_exc:
                         logger.error(f"GL entries failed for order status update: {gl_exc}")
                 elif old_status == 'completed' and status in ('cancelled', 'pending'):
+                    if status == 'cancelled':
+                        await restore_wallet_for_cancelled_order(
+                            conn,
+                            tenant_id,
+                            order_id,
+                            user_id,
+                            notes=f"Cancelación venta #{order_number}",
+                        )
+                        await revoke_waros_awarded_for_order(conn, order_id, tenant_id)
                     await _return_stock_for_order_cancellation(conn, order_id, tenant_id, user_id, order_number)
                     if status == 'cancelled':
                         try:
