@@ -1384,6 +1384,9 @@ async def update_order_status(
     payment_method_id: Optional[str] = None,
     customer_id: Optional[str] = None,
     reason: Optional[str] = None,
+    cash_received: Optional[float] = None,
+    credit_due_date: Optional[date] = None,
+    served_by_member_id: Optional[UUID] = None,
 ) -> dict:
     """Update the status of an order (mesa orders only)."""
     allowed = {"completed", "cancelled", "pending", "preparing"}
@@ -1504,6 +1507,57 @@ async def update_order_status(
 
                     await assert_wallet_customer_identified(conn, cid)
 
+                if status == "completed" and payment_method == "credit" and not cid:
+                    raise APIError(
+                        "El pago a crédito requiere un cliente identificado",
+                        status_code=400,
+                        details={"code": "customer_required"},
+                    )
+
+                if status == "completed" and credit_due_date is not None and payment_method != "credit":
+                    raise APIError(
+                        "credit_due_date solo aplica al pago a crédito",
+                        status_code=400,
+                        details={"code": "credit_due_date_invalid"},
+                    )
+
+                if status == "completed" and cash_received is not None and payment_method != "cash":
+                    raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
+
+                if status == "completed" and payment_method == "cash":
+                    if cash_received is None:
+                        raise APIError(
+                            "Indica el efectivo recibido",
+                            status_code=400,
+                            details={"code": "cash_received_required"},
+                        )
+                    amount_due = Decimal(str(row["total_amount"] or 0))
+                    received = Decimal(str(cash_received))
+                    if received < amount_due:
+                        raise APIError(
+                            f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total a cobrar ({amount_due})",
+                            status_code=400,
+                            details={"code": "cash_received_short"},
+                        )
+
+            if status == "completed" and served_by_member_id is not None:
+                member_check = await conn.fetchval(
+                    """
+                    SELECT id FROM tenant_members
+                    WHERE id = $1 AND tenant_id = $2 AND is_active = true AND terminated_at IS NULL
+                    """,
+                    served_by_member_id,
+                    tenant_id,
+                )
+                if member_check is None:
+                    raise APIError("Member not found", status_code=404)
+
+            cash_received_value = None
+            if status == "completed" and payment_method == "cash" and cash_received is not None:
+                cash_received_value = Decimal(str(cash_received))
+            credit_due_value = credit_due_date if status == "completed" and payment_method == "credit" else None
+            served_by_value = served_by_member_id if status == "completed" else None
+
             payment_status_update = None
             if status == "completed" and payment_method:
                 payment_status_update = "credit" if payment_method == "credit" else "paid"
@@ -1514,9 +1568,13 @@ async def update_order_status(
                        payment_method = COALESCE($2, payment_method),
                        payment_method_id = CASE WHEN $2::text IS NULL THEN payment_method_id ELSE $4::uuid END,
                        customer_id = COALESCE($5, customer_id),
-                       payment_status = COALESCE($6, payment_status)
+                       payment_status = COALESCE($6, payment_status),
+                       cash_received = CASE WHEN $7::numeric IS NULL THEN cash_received ELSE $7 END,
+                       credit_due_date = CASE WHEN $8::date IS NULL THEN credit_due_date ELSE $8 END,
+                       served_by_member_id = CASE WHEN $9::uuid IS NULL THEN served_by_member_id ELSE $9 END
                    WHERE id = $3""",
-                status, payment_method, order_id, pmid, cid, payment_status_update
+                status, payment_method, order_id, pmid, cid, payment_status_update,
+                cash_received_value, credit_due_value, served_by_value,
             )
 
             if status == "completed" and payment_method == "customer_wallet" and cid:

@@ -3,6 +3,7 @@ Orders Router
 Endpoints for listing and managing orders
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from datetime import date
 from typing import Optional, List
 from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field
@@ -368,6 +369,9 @@ class UpdateOrderStatusRequest(BaseModel):
     payment_method_id: Optional[str] = Field(None, description="UUID of the selected payment_methods row")
     customer_id: Optional[str] = Field(None, description="UUID of customer to associate when required by payment method")
     reason: Optional[str] = Field(None, description="Required when cancelling")
+    cash_received: Optional[float] = Field(None, ge=0, description="Cash handed over when completing with cash")
+    credit_due_date: Optional[date] = Field(None, description="Due date when completing with credit")
+    served_by_member_id: Optional[UUID] = Field(None, description="Waiter member UUID at complete")
 
 
 class AssociateOrderCustomerRequest(BaseModel):
@@ -415,6 +419,9 @@ async def update_order_status(
         body.payment_method_id,
         body.customer_id,
         body.reason,
+        cash_received=body.cash_received,
+        credit_due_date=body.credit_due_date,
+        served_by_member_id=body.served_by_member_id,
     )
 
 
