@@ -11,6 +11,7 @@ WARO = technology. Tenant = issuer. Matias = facturador técnico.
 WARO's NIT.
 """
 from app.services.invoicing_presentation.factory import build_invoice_presentation
+from app.services.invoicing_presentation.public_error import public_invoice_error_message
 from app.services.invoicing_presentation.resolve_issuer import (
     commercial_header_name,
     format_issuer_label,
@@ -21,5 +22,6 @@ __all__ = [
     "build_invoice_presentation",
     "commercial_header_name",
     "format_issuer_label",
+    "public_invoice_error_message",
     "resolve_tenant_issuer",
 ]
