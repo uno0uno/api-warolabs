@@ -1,0 +1,37 @@
+# Compact Codex plan. Keep <=80 lines.
+issue: 2356
+title: "Lock cancelled sales: header matches status; no customer assign"
+repo: both
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-2356-lock-cancelled-sale
+
+paths:
+  - app/services/orders_service.py
+  - tests/test_order_customer_association.py
+
+ac:
+  - PATCH associate-customer on cancelled sale returns 400 sale_cancelled
+  - pending/completed associate still allowed when no FE
+
+out_of_scope:
+  - emit FE on cancelled
+  - waiter assign
+  - bulk
+  - email copy
+
+hints:
+  entry: "associate_order_customer"
+  pattern: "invoice_exists 409 before customer lookup"
+  tests: "pytest tests/test_order_customer_association.py -q"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: []
+
+next:
+  after_pr: "Companion front PR Closes uno0uno/warocol.com#2356"
