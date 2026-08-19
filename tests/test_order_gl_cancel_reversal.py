@@ -137,7 +137,12 @@ async def test_update_order_status_cancel_voids_gl_not_on_pending():
          patch("app.services.orders_service._void_order_gl_entries", new=void), \
          patch("app.services.orders_service.record_operation_event", new=AsyncMock()):
         from fastapi import Request
-        await orders_service.update_order_status(Request({"type": "http"}), order_id, "cancelled")
+        await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "cancelled",
+            reason="Cancelación de prueba",
+        )
 
     void.assert_awaited_once()
     assert void.await_args.kwargs["reason"] == "Cancelación venta #18401"
@@ -172,8 +177,10 @@ async def test_update_order_status_pending_does_not_void_gl():
          patch("app.services.orders_service._void_order_gl_entries", new=void), \
          patch("app.services.orders_service.record_operation_event", new=AsyncMock()):
         from fastapi import Request
-        await orders_service.update_order_status(Request({"type": "http"}), order_id, "pending")
+        with pytest.raises(APIError) as exc:
+            await orders_service.update_order_status(Request({"type": "http"}), order_id, "pending")
 
+    assert exc.value.status_code == 400
     void.assert_not_called()
 
 
@@ -207,7 +214,12 @@ async def test_update_order_status_cancel_gl_void_failure_raises():
          patch("app.services.orders_service.record_operation_event", new=AsyncMock()):
         from fastapi import Request
         with pytest.raises(APIError) as exc:
-            await orders_service.update_order_status(Request({"type": "http"}), order_id, "cancelled")
+            await orders_service.update_order_status(
+                Request({"type": "http"}),
+                order_id,
+                "cancelled",
+                reason="Cancelación de prueba",
+            )
 
     assert exc.value.status_code == 500
     assert exc.value.details["code"] == "sale_gl_void_failed"
