@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 from fastapi import Request
 
+from app.core.exceptions import APIError
 from app.services import comandas_service, online_orders_service, orders_service
 
 
@@ -63,15 +64,17 @@ async def test_update_order_status_cancel_records_ventas_event():
             Request({"type": "http"}),
             order_id,
             "cancelled",
+            reason="Cliente se retiró",
         )
 
     assert result["success"] is True
     assert len(recorded) == 1
     event = recorded[0]
     assert event["domain"] == "ventas"
-    assert event["channel"] is None
+    assert event["channel"] == "mostrador"
     assert event["action"] == "order_status_changed"
     assert event["order_id"] == order_id
+    assert event["reason"] == "Cliente se retiró"
     assert event["payload"]["old_status"] == "pending"
     assert event["payload"]["new_status"] == "cancelled"
     assert event["payload"]["order_number"] == 1001
@@ -105,6 +108,80 @@ async def test_update_order_status_same_status_does_not_record():
         await orders_service.update_order_status(Request({"type": "http"}), order_id, "pending")
 
     assert recorded == []
+
+
+@pytest.mark.asyncio
+async def test_update_order_status_cancel_requires_reason():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    recorded, capture_record = _capture()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "id": order_id,
+        "status": "completed",
+        "order_number": 1001,
+        "table_session_id": uuid4(),
+        "pos_cart_id": None,
+        "payment_status": None,
+        "order_date": datetime(2026, 8, 15),
+        "total_amount": 15000,
+        "customer_id": None,
+    })
+    conn.execute = AsyncMock()
+
+    with patch("app.services.orders_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
+         patch("app.services.orders_service.get_db_connection", return_value=_AsyncContext(conn)), \
+         patch("app.services.orders_service.resolve_tenant_timezone", new=AsyncMock(return_value="America/Bogota")), \
+         patch("app.services.orders_service.assert_order_not_in_closed_monthly_period", new=AsyncMock()), \
+         patch("app.services.orders_service.assert_order_invoice_allows_mutation", new=AsyncMock()), \
+         patch("app.services.orders_service.record_operation_event", new=capture_record):
+        with pytest.raises(APIError) as exc:
+            await orders_service.update_order_status(Request({"type": "http"}), order_id, "cancelled")
+
+    assert exc.value.status_code == 400
+    assert exc.value.details["code"] == "cancel_reason_required"
+    assert recorded == []
+    conn.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_update_order_status_cancel_mesa_uses_mesa_channel():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    recorded, capture_record = _capture()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "id": order_id,
+        "status": "completed",
+        "order_number": 18401,
+        "table_session_id": uuid4(),
+        "pos_cart_id": None,
+        "payment_status": None,
+        "order_date": datetime(2026, 8, 15),
+        "total_amount": 15000,
+        "customer_id": None,
+    })
+    conn.execute = AsyncMock()
+
+    with patch("app.services.orders_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
+         patch("app.services.orders_service.get_db_connection", return_value=_AsyncContext(conn)), \
+         patch("app.services.orders_service.resolve_tenant_timezone", new=AsyncMock(return_value="America/Bogota")), \
+         patch("app.services.orders_service.assert_order_not_in_closed_monthly_period", new=AsyncMock()), \
+         patch("app.services.orders_service.assert_order_invoice_allows_mutation", new=AsyncMock()), \
+         patch("app.services.orders_service._return_stock_for_order_cancellation", new=AsyncMock()), \
+         patch("app.services.orders_service._void_order_gl_entries", new=AsyncMock()), \
+         patch("app.services.orders_service.record_operation_event", new=capture_record):
+        await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "cancelled",
+            reason="Error de cobro",
+        )
+
+    assert recorded[0]["channel"] == "mesa"
+    assert recorded[0]["reason"] == "Error de cobro"
 
 
 @pytest.mark.asyncio

@@ -367,6 +367,7 @@ class UpdateOrderStatusRequest(BaseModel):
     payment_method: Optional[str] = Field(None, description="Payment method group slug")
     payment_method_id: Optional[str] = Field(None, description="UUID of the selected payment_methods row")
     customer_id: Optional[str] = Field(None, description="UUID of customer to associate when required by payment method")
+    reason: Optional[str] = Field(None, description="Required when cancelling")
 
 
 class AssociateOrderCustomerRequest(BaseModel):
@@ -413,6 +414,7 @@ async def update_order_status(
         body.payment_method,
         body.payment_method_id,
         body.customer_id,
+        body.reason,
     )
 
 

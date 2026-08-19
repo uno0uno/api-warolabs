@@ -1338,6 +1338,13 @@ def _assert_order_status_allows_line_edit(status: Optional[str]) -> None:
         )
 
 
+def _ventas_event_channel(row) -> str:
+    """Bitácora channel. Never null while prod still has NOT NULL on tenant_operation_events.channel."""
+    if row.get("table_session_id"):
+        return "mesa"
+    return "mostrador"
+
+
 async def update_order_status(
     request: Request,
     order_id: UUID,
@@ -1345,6 +1352,7 @@ async def update_order_status(
     payment_method: Optional[str] = None,
     payment_method_id: Optional[str] = None,
     customer_id: Optional[str] = None,
+    reason: Optional[str] = None,
 ) -> dict:
     """Update the status of an order (mesa orders only)."""
     allowed = {"completed", "cancelled", "pending", "preparing"}
@@ -1380,6 +1388,14 @@ async def update_order_status(
             order_number = int(row['order_number'])
 
             _assert_not_completed_to_pending(old_status, status)
+
+            reason_text = (reason or "").strip()
+            if status == "cancelled" and not reason_text:
+                raise APIError(
+                    "Indica el motivo de la cancelación.",
+                    status_code=400,
+                    details={"code": "cancel_reason_required"},
+                )
 
             try:
                 pmid = UUID(payment_method_id) if payment_method_id else None
@@ -1605,7 +1621,7 @@ async def update_order_status(
                     conn,
                     tenant_id,
                     domain=DOMAIN_VENTAS,
-                    channel=None,
+                    channel=_ventas_event_channel(row),
                     action="order_status_changed",
                     actor_user_id=user_id,
                     order_id=order_id,
@@ -1616,6 +1632,7 @@ async def update_order_status(
                         "old_status": old_status,
                         "new_status": status,
                     },
+                    reason=reason_text or None,
                 )
 
         if waros_award_order_id and waros_award_customer_id:
