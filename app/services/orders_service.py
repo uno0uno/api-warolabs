@@ -1669,7 +1669,7 @@ async def associate_order_customer(
         async with get_db_connection() as conn:
             order_row = await conn.fetchrow(
                 """
-                SELECT id, customer_id, order_number
+                SELECT id, customer_id, order_number, status
                 FROM orders
                 WHERE id = $1
                   AND tenant_id = $2
@@ -1680,6 +1680,13 @@ async def associate_order_customer(
             )
             if not order_row:
                 raise APIError("Order not found", status_code=404)
+
+            if order_row["status"] == "cancelled":
+                raise APIError(
+                    "No se puede asociar un cliente a una venta cancelada.",
+                    status_code=400,
+                    details={"code": "sale_cancelled"},
+                )
 
             invoice_row = await conn.fetchrow(
                 """

@@ -54,7 +54,7 @@ def _patch_event(new=None):
 async def test_associate_order_customer_updates_when_no_invoice_exists():
     request = MagicMock()
     ctx = _ConnCtx([
-        {"id": _ORDER_ID, "customer_id": None, "order_number": 18401},
+        {"id": _ORDER_ID, "customer_id": None, "order_number": 18401, "status": "completed"},
         None,
         {"id": _CUSTOMER_ID},
     ])
@@ -79,7 +79,7 @@ async def test_associate_order_customer_updates_when_no_invoice_exists():
 async def test_associate_order_customer_blocks_when_invoice_exists():
     request = MagicMock()
     ctx = _ConnCtx([
-        {"id": _ORDER_ID},
+        {"id": _ORDER_ID, "status": "completed"},
         {"id": uuid4()},
     ])
 
@@ -100,7 +100,7 @@ async def test_associate_order_customer_blocks_when_invoice_exists():
 async def test_associate_order_customer_requires_tenant_customer():
     request = MagicMock()
     ctx = _ConnCtx([
-        {"id": _ORDER_ID},
+        {"id": _ORDER_ID, "status": "pending"},
         None,
         None,
     ])
@@ -129,7 +129,7 @@ async def test_associate_order_customer_records_ventas_event():
         recorded.append({"tenant_id": tid, **kwargs})
 
     ctx = _ConnCtx([
-        {"id": _ORDER_ID, "customer_id": previous_customer, "order_number": 18401},
+        {"id": _ORDER_ID, "customer_id": previous_customer, "order_number": 18401, "status": "pending"},
         None,
         {"id": _CUSTOMER_ID},
     ])
@@ -152,3 +152,23 @@ async def test_associate_order_customer_records_ventas_event():
     assert event["payload"]["old_customer_id"] == str(previous_customer)
     assert event["payload"]["new_customer_id"] == str(_CUSTOMER_ID)
     assert event["payload"]["order_number"] == 18401
+
+
+@pytest.mark.asyncio
+async def test_associate_order_customer_rejects_cancelled_sale():
+    request = MagicMock()
+    ctx = _ConnCtx([
+        {"id": _ORDER_ID, "customer_id": None, "order_number": 18401, "status": "cancelled"},
+    ])
+
+    with _patch_session(), _patch_db(ctx), _patch_event():
+        with pytest.raises(APIError) as exc_info:
+            await orders_service.associate_order_customer(
+                request,
+                _ORDER_ID,
+                _CUSTOMER_ID,
+            )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.details == {"code": "sale_cancelled"}
+    ctx.conn.execute.assert_not_awaited()
