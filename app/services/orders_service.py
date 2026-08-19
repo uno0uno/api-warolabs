@@ -25,6 +25,7 @@ from app.services.cierre_service import (
     _get_tenant_tax_config,
     _post_order_cogs_gl_entry,
     _post_order_gl_entry,
+    _void_order_gl_entries,
 )
 from app.services.account_role_service import (
     AccountRole,
@@ -1207,6 +1208,16 @@ async def bulk_update_order_status(
                     newly_completed_order_ids.append(order_id_row)
                 elif old_status == 'completed' and status in ('cancelled', 'pending'):
                     await _return_stock_for_order_cancellation(conn, order_id_row, tenant_id, user_id, order_number)
+                    if status == 'cancelled':
+                        try:
+                            await _void_order_gl_entries(
+                                conn,
+                                tenant_id,
+                                order_id_row,
+                                reason=f"Cancelación venta #{order_number}",
+                            )
+                        except Exception as gl_exc:
+                            logger.error(f"GL void failed for bulk order cancel {order_id_row}: {gl_exc}")
 
                 # If cancelling a credit order, clear payment_status so it leaves cartera
                 if status == 'cancelled' and row['payment_status'] in ('credit', 'partial'):
@@ -1515,6 +1526,16 @@ async def update_order_status(
                         logger.error(f"GL entries failed for order status update: {gl_exc}")
                 elif old_status == 'completed' and status in ('cancelled', 'pending'):
                     await _return_stock_for_order_cancellation(conn, order_id, tenant_id, user_id, order_number)
+                    if status == 'cancelled':
+                        try:
+                            await _void_order_gl_entries(
+                                conn,
+                                tenant_id,
+                                order_id,
+                                reason=f"Cancelación venta #{order_number}",
+                            )
+                        except Exception as gl_exc:
+                            logger.error(f"GL void failed for order cancel {order_id}: {gl_exc}")
 
             # Release the table session if this is a mesa order being closed
             if status in ("completed", "cancelled") and row['table_session_id']:

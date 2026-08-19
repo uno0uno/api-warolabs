@@ -1,0 +1,35 @@
+# Compact plan for wr-exec. Keep <=80 lines.
+issue: 2348
+issue_ref: uno0uno/warocol.com#2348
+title: "Reverse completed-sale journal entries on cancel"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2348-reverse-sale-gl-on-cancel
+parent_epic: uno0uno/warocol.com#2346
+closes: "Closes uno0uno/warocol.com#2348"
+risk: high
+
+paths:
+  - app/services/cierre_service.py
+  - app/services/orders_service.py
+  - tests/test_order_gl_cancel_reversal.py
+
+ac:
+  - Original sale asientos remain visible and are marked voided
+  - A reversal asiento is posted
+  - Posted balances net to zero after cancel
+  - Period-closed sales still cannot be cancelled
+  - Completing again after cancel can post (idempotency ignores voided)
+
+out_of_scope:
+  - Front UI
+  - Bitácora
+  - Wallet reverse
+
+hints:
+  tests: "./venv/bin/pytest tests/test_order_gl_cancel_reversal.py tests/test_bulk_order_status_gl_cogs.py -q"
+
+skip:
+  audits: [ux, color, typography]
