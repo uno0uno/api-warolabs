@@ -1594,6 +1594,7 @@ async def associate_order_customer(
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = getattr(session_context, "user_id", None)
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
@@ -1601,7 +1602,7 @@ async def associate_order_customer(
         async with get_db_connection() as conn:
             order_row = await conn.fetchrow(
                 """
-                SELECT id
+                SELECT id, customer_id, order_number
                 FROM orders
                 WHERE id = $1
                   AND tenant_id = $2
@@ -1657,6 +1658,24 @@ async def associate_order_customer(
                 customer_id,
                 order_id,
                 tenant_id,
+            )
+
+            old_customer_id = order_row["customer_id"]
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_VENTAS,
+                channel=None,
+                action="order_customer_changed",
+                actor_user_id=user_id,
+                order_id=order_id,
+                payload={
+                    "entity_type": "order",
+                    "entity_id": str(order_id),
+                    "order_number": int(order_row["order_number"]) if order_row["order_number"] is not None else None,
+                    "old_customer_id": str(old_customer_id) if old_customer_id else None,
+                    "new_customer_id": str(customer_id),
+                },
             )
 
         return {
@@ -4754,6 +4773,7 @@ async def send_invoice_email(
     """
     session_context = require_valid_session(request)
     tenant_id = session_context.tenant_id
+    user_id = getattr(session_context, "user_id", None)
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
 
@@ -4976,6 +4996,24 @@ async def send_invoice_email(
 
     if delivery_id is not None:
         await invoice_email_tracking_service.mark_delivery_sent(delivery_id)
+
+    async with get_db_connection() as conn:
+        await record_operation_event(
+            conn,
+            tenant_id,
+            domain=DOMAIN_VENTAS,
+            channel=None,
+            action="order_email_sent",
+            actor_user_id=user_id,
+            order_id=order_id,
+            payload={
+                "entity_type": "order",
+                "entity_id": str(order_id),
+                "order_number": int(order_row["order_number"]) if order_row["order_number"] is not None else None,
+                "recipient_email": recipient_email,
+                "email_kind": "invoice" if include_invoice else "receipt",
+            },
+        )
 
     return {
         'success': True,
