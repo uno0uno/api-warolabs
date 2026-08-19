@@ -962,27 +962,27 @@ async def _void_order_gl_entries(
         logger.info(f"[GL] No posted sale GL for order {order_id} — skip void")
         return
 
-    for entry in entries:
-        closed = await conn.fetchval(
-            """SELECT 1 FROM tenant_monthly_periods
-               WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
-            tenant_id, entry["period_year"], entry["period_month"],
-        )
-        if closed:
-            logger.warning(
-                f"[GL] Period {entry['period_year']}-{entry['period_month']:02d} closed — "
-                f"skip GL void for order {order_id} entry {entry['id']}"
+    async with conn.transaction():
+        for entry in entries:
+            closed = await conn.fetchval(
+                """SELECT 1 FROM tenant_monthly_periods
+                   WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+                tenant_id, entry["period_year"], entry["period_month"],
             )
-            continue
+            if closed:
+                logger.warning(
+                    f"[GL] Period {entry['period_year']}-{entry['period_month']:02d} closed — "
+                    f"skip GL void for order {order_id} entry {entry['id']}"
+                )
+                continue
 
-        original_lines = await conn.fetch(
-            """SELECT account_id, debit, credit, description, line_order
-               FROM tenant_journal_lines
-               WHERE journal_entry_id = $1 ORDER BY line_order""",
-            entry["id"],
-        )
+            original_lines = await conn.fetch(
+                """SELECT account_id, debit, credit, description, line_order
+                   FROM tenant_journal_lines
+                   WHERE journal_entry_id = $1 ORDER BY line_order""",
+                entry["id"],
+            )
 
-        async with conn.transaction():
             await conn.execute(
                 "UPDATE tenant_journal_entries SET status = 'voided', voided_at = NOW() WHERE id = $1",
                 entry["id"],
@@ -1010,10 +1010,10 @@ async def _void_order_gl_entries(
                     line["description"], line["line_order"],
                 )
 
-        logger.info(
-            f"[GL] ✅ Voided {entry['source_module']} entry {entry['id']} → reversing {rev_id} "
-            f"for order {order_id}"
-        )
+            logger.info(
+                f"[GL] ✅ Voided {entry['source_module']} entry {entry['id']} → reversing {rev_id} "
+                f"for order {order_id}"
+            )
 
 
 # ---------------------------------------------------------------------------

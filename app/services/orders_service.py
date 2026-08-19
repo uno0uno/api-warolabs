@@ -1216,8 +1216,16 @@ async def bulk_update_order_status(
                                 order_id_row,
                                 reason=f"Cancelación venta #{order_number}",
                             )
+                        except APIError:
+                            raise
                         except Exception as gl_exc:
                             logger.error(f"GL void failed for bulk order cancel {order_id_row}: {gl_exc}")
+                            raise APIError(
+                                "No se pudo reversar el asiento contable de la venta. "
+                                "Intenta de nuevo o contacta a soporte.",
+                                status_code=500,
+                                details={"code": "sale_gl_void_failed"},
+                            )
 
                 # If cancelling a credit order, clear payment_status so it leaves cartera
                 if status == 'cancelled' and row['payment_status'] in ('credit', 'partial'):
@@ -1534,8 +1542,16 @@ async def update_order_status(
                                 order_id,
                                 reason=f"Cancelación venta #{order_number}",
                             )
+                        except APIError:
+                            raise
                         except Exception as gl_exc:
                             logger.error(f"GL void failed for order cancel {order_id}: {gl_exc}")
+                            raise APIError(
+                                "No se pudo reversar el asiento contable de la venta. "
+                                "Intenta de nuevo o contacta a soporte.",
+                                status_code=500,
+                                details={"code": "sale_gl_void_failed"},
+                            )
 
             # Release the table session if this is a mesa order being closed
             if status in ("completed", "cancelled") and row['table_session_id']:
