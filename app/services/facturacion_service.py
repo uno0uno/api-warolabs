@@ -26,7 +26,10 @@ from fastapi import HTTPException
 from app.config import settings
 from app.database import get_db_connection
 from app.services.aws_s3_service import AWSS3Service
-from app.services.invoicing_presentation import build_invoice_presentation
+from app.services.invoicing_presentation import (
+    build_invoice_presentation,
+    public_invoice_error_message,
+)
 from app.services.operation_events_service import DOMAIN_FACTURACION, record_operation_event
 
 logger = logging.getLogger(__name__)
@@ -189,7 +192,13 @@ async def emit_invoice(
     if not resp.is_success:
         detail = data.get('detail') or data.get('message') or resp.text[:300]
         logger.error(f"api-facturacion error {resp.status_code} for order {order_id}: {detail}")
-        raise HTTPException(status_code=resp.status_code, detail=str(detail))
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=public_invoice_error_message(str(detail)) or str(detail),
+        )
+
+    if data.get('error_message'):
+        data['error_message'] = public_invoice_error_message(data['error_message'])
 
     logger.info(f"Invoice emitted for order {order_id}: status={data.get('status')} cufe={(data.get('cufe') or '')[:16]}...")
     async with get_db_connection() as conn:
@@ -288,7 +297,7 @@ async def get_dian_status(
         'prefix': row['prefix'],
         'cufe': row['cufe'],
         'status': row['status'],
-        'error_message': row['error_message'],
+        'error_message': public_invoice_error_message(row['error_message']),
         'emitted_at': row['emitted_at'].isoformat() if row['emitted_at'] else None,
         'created_at': row['created_at'].isoformat() if row['created_at'] else None,
     }
@@ -361,7 +370,7 @@ async def get_documents_list(
             'prefix': r['prefix'],
             'cufe': r['cufe'],
             'status': r['status'],
-            'error_message': r['error_message'],
+            'error_message': public_invoice_error_message(r['error_message']),
             'emitted_at': r['emitted_at'].isoformat() if r['emitted_at'] else None,
             'created_at': r['created_at'].isoformat() if r['created_at'] else None,
         }
@@ -542,7 +551,7 @@ async def get_order_invoice(
         'status': row['status'],
         'pdf_presigned_url': pdf_presigned_url,
         'pdf_enabled': True,
-        'error_message': row['error_message'],
+        'error_message': public_invoice_error_message(row['error_message']),
         'emitted_at': row['emitted_at'].isoformat() if row['emitted_at'] else None,
         'created_at': row['created_at'].isoformat() if row['created_at'] else None,
         'dian_url': presentation.get('dian_url'),
