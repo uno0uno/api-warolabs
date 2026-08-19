@@ -410,7 +410,8 @@ async def restore_wallet_for_cancelled_order(
               COALESCE(SUM(CASE WHEN movement_type = 'apply' THEN -amount_cop ELSE 0 END), 0)
               - COALESCE(SUM(CASE WHEN movement_type = 'void_apply' THEN amount_cop ELSE 0 END), 0)
             ) AS net_applied,
-            MAX(order_payment_id) AS order_payment_id
+            (ARRAY_AGG(order_payment_id) FILTER (WHERE order_payment_id IS NOT NULL))[1]
+              AS order_payment_id
         FROM customer_wallet_movements
         WHERE tenant_id = $1 AND order_id = $2
         GROUP BY profile_id

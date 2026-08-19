@@ -1,6 +1,8 @@
 """Cancel completed sales: block abonos, restore wallet, revoke Waros."""
+import inspect
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -10,7 +12,10 @@ from fastapi import Request
 
 from app.core.exceptions import APIError
 from app.services import orders_service
-from app.services.customer_wallet_service import restore_wallet_for_cancelled_order
+from app.services.customer_wallet_service import (
+    restore_wallet_for_cancelled_order,
+    restore_wallet_for_order_payment_void,
+)
 from app.services.waros_service import evaluate_and_award, revoke_waros_awarded_for_order
 
 
@@ -275,3 +280,17 @@ async def test_evaluate_and_award_skips_when_order_not_completed():
 
     assert awarded == 0
     conn.fetch.assert_not_called()
+
+
+def test_restore_wallet_sql_does_not_max_uuid():
+    src = inspect.getsource(restore_wallet_for_cancelled_order)
+    assert "MAX(order_payment_id)" not in src
+    assert "ARRAY_AGG(order_payment_id)" in src
+
+
+def test_wallet_void_apply_is_allowed_movement_type():
+    sql = Path("sql/20260819_wallet_void_apply.sql").read_text()
+    assert "void_apply" in sql
+    assert "chk_customer_wallet_movement_type" in sql
+    void_src = inspect.getsource(restore_wallet_for_order_payment_void)
+    assert 'movement_type="void_apply"' in void_src
