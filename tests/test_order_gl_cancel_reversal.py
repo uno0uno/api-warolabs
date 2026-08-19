@@ -234,6 +234,7 @@ async def test_bulk_update_order_status_cancel_voids_gl():
     void = AsyncMock()
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value=None)
+    conn.fetchval = AsyncMock(return_value=None)
     conn.fetch = AsyncMock(return_value=[{
         "id": order_id,
         "status": "completed",

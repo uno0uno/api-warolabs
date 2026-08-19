@@ -1370,7 +1370,7 @@ async def evaluate_and_award(
             # 2. Fetch order totals for eligible earn base
             order_row = await conn.fetchrow(
                 """
-                SELECT total_amount, waro_redeemed_amount_cop, payment_method
+                SELECT status, total_amount, waro_redeemed_amount_cop, payment_method
                 FROM orders
                 WHERE id = $1 AND tenant_id = $2
                 """,
@@ -1379,6 +1379,8 @@ async def evaluate_and_award(
             )
             if not order_row:
                 logger.warning(f"evaluate_and_award: order {order_id} not found")
+                return 0
+            if order_row["status"] != "completed":
                 return 0
 
             total_amount = float(order_row["total_amount"])
@@ -1596,6 +1598,93 @@ async def evaluate_and_award(
             f"evaluate_and_award error (order={order_id}, customer={customer_id}): {e}"
         )
         return 0
+
+
+async def revoke_waros_awarded_for_order(
+    conn,
+    order_id: Any,
+    tenant_id: Any,
+) -> int:
+    """Remove Waros earned for this order. Idempotent. Clamps at zero balance."""
+    rows = await conn.fetch(
+        """
+        SELECT
+            profile_id,
+            COALESCE(SUM(CASE WHEN waros_amount > 0 THEN waros_amount ELSE 0 END), 0)
+              - COALESCE(SUM(CASE WHEN waros_amount < 0 THEN -waros_amount ELSE 0 END), 0)
+              AS net_awarded
+        FROM waros_transactions
+        WHERE tenant_id = $1
+          AND related_entity_type = 'order'
+          AND related_entity_id = $2
+          AND transaction_type = 'earned'
+        GROUP BY profile_id
+        """,
+        tenant_id,
+        str(order_id),
+    )
+    if not isinstance(rows, (list, tuple)):
+        return 0
+
+    total_revoked = 0
+    for row in rows:
+        try:
+            profile_id = row["profile_id"]
+            net_awarded = int(row["net_awarded"] or 0)
+        except (KeyError, TypeError):
+            continue
+        if not profile_id or net_awarded <= 0:
+            continue
+
+        wallet_row = await conn.fetchrow(
+            """
+            SELECT current_balance
+            FROM waros_wallets
+            WHERE profile_id = $1 AND tenant_id = $2
+            FOR UPDATE
+            """,
+            profile_id,
+            tenant_id,
+        )
+        current_balance = int(wallet_row["current_balance"]) if wallet_row else 0
+        deduct = min(net_awarded, max(current_balance, 0))
+        if deduct <= 0:
+            continue
+
+        new_balance = current_balance - deduct
+        await conn.execute(
+            """
+            UPDATE waros_wallets SET
+                current_balance = current_balance - $3,
+                lifetime_spent = lifetime_spent + $3,
+                last_activity_date = CURRENT_DATE,
+                updated_at = now()
+            WHERE profile_id = $1 AND tenant_id = $2
+            """,
+            profile_id,
+            tenant_id,
+            deduct,
+        )
+        await conn.execute(
+            """
+            INSERT INTO waros_transactions (
+                profile_id, tenant_id, transaction_type, waros_amount,
+                balance_after, description, related_entity_type, related_entity_id
+            )
+            VALUES (
+                $1, $2, 'earned', $3, $4,
+                'Reverso Waros por cancelación de venta', 'order', $5
+            )
+            """,
+            profile_id,
+            tenant_id,
+            -deduct,
+            new_balance,
+            str(order_id),
+        )
+        total_revoked += deduct
+
+    return total_revoked
 
 
 # ── Public API read functions (auth-agnostic) ────────────────────────────────

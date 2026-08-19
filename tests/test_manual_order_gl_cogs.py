@@ -202,6 +202,9 @@ async def test_update_order_status_finalizes_pending_table_with_gl_cogs_without_
         "app.services.orders_service.assert_order_not_in_closed_monthly_period",
         new=AsyncMock(),
     ), patch(
+        "app.services.orders_service.assert_order_invoice_allows_mutation",
+        new=AsyncMock(),
+    ), patch(
         "app.services.orders_service._deduct_stock_for_status_update",
         new=deduct_stock,
     ), patch(
@@ -295,6 +298,9 @@ async def test_update_order_status_deducts_stock_for_pending_table_without_consu
         return_value=_AsyncContext(conn),
     ), patch(
         "app.services.orders_service.assert_order_not_in_closed_monthly_period",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.orders_service.assert_order_invoice_allows_mutation",
         new=AsyncMock(),
     ), patch(
         "app.services.orders_service._deduct_stock_for_status_update",

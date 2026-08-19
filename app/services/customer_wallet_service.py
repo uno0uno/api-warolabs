@@ -368,7 +368,7 @@ async def restore_wallet_for_order_payment_void(
     tenant_id: UUID,
     amount_cop: Decimal,
     order_id: UUID,
-    order_payment_id: UUID,
+    order_payment_id: Optional[UUID],
     created_by_user_id: Optional[UUID],
     notes: Optional[str] = None,
 ) -> UUID:
@@ -392,6 +392,56 @@ async def restore_wallet_for_order_payment_void(
     )
     await _upsert_balance(conn, profile_id, tenant_id, new_balance)
     return movement_id
+
+
+async def restore_wallet_for_cancelled_order(
+    conn,
+    tenant_id: UUID,
+    order_id: UUID,
+    created_by_user_id: Optional[UUID],
+    notes: Optional[str] = None,
+) -> List[UUID]:
+    """Restore remaining wallet apply for a cancelled sale (idempotent)."""
+    rows = await conn.fetch(
+        """
+        SELECT
+            profile_id,
+            (
+              COALESCE(SUM(CASE WHEN movement_type = 'apply' THEN -amount_cop ELSE 0 END), 0)
+              - COALESCE(SUM(CASE WHEN movement_type = 'void_apply' THEN amount_cop ELSE 0 END), 0)
+            ) AS net_applied,
+            MAX(order_payment_id) AS order_payment_id
+        FROM customer_wallet_movements
+        WHERE tenant_id = $1 AND order_id = $2
+        GROUP BY profile_id
+        """,
+        tenant_id,
+        order_id,
+    )
+    if not isinstance(rows, (list, tuple)):
+        return []
+    restored: List[UUID] = []
+    for row in rows:
+        try:
+            net_applied = Decimal(str(row["net_applied"] or 0))
+            profile_id = row["profile_id"]
+            order_payment_id = row["order_payment_id"]
+        except (KeyError, TypeError):
+            continue
+        if not profile_id or net_applied <= 0:
+            continue
+        movement_id = await restore_wallet_for_order_payment_void(
+            conn,
+            profile_id,
+            tenant_id,
+            net_applied,
+            order_id,
+            order_payment_id,
+            created_by_user_id,
+            notes=notes,
+        )
+        restored.append(movement_id)
+    return restored
 
 
 async def apply_wallet_for_session_orders(

@@ -164,6 +164,7 @@ async def test_update_order_status_cancel_mesa_uses_mesa_channel():
         "customer_id": None,
     })
     conn.execute = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=None)
 
     with patch("app.services.orders_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
          patch("app.services.orders_service.get_db_connection", return_value=_AsyncContext(conn)), \
