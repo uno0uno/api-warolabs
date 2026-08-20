@@ -1013,3 +1013,140 @@ async def test_void_tender_by_order_id_allows_mesa_row():
     assert void_sql
 
 
+@pytest.mark.asyncio
+async def test_complete_wompi_collection_stays_pending_unpaid():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=_pending_row(order_id, total_amount=20000))
+    conn.execute = AsyncMock()
+
+    patches = _complete_patches(conn, tenant_id, user_id)
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        result = await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "digital",
+            wompi_collection=True,
+        )
+
+    assert result["success"] is True
+    assert "pending" in result["message"]
+    first_update = conn.execute.await_args_list[0].args
+    assert first_update[1] == "pending"
+    clear_sql = conn.execute.await_args_list[1].args[0]
+    assert "payment_method = NULL" in clear_sql
+    assert conn.execute.await_args_list[0].args[1] != "completed"
+
+
+@pytest.mark.asyncio
+async def test_complete_wompi_split_is_400():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=_pending_row(order_id, total_amount=20000))
+    conn.execute = AsyncMock()
+    wompi_method_id = uuid4()
+    conn.fetchval = AsyncMock(return_value="Wompi")
+
+    with patch("app.services.orders_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
+         patch("app.services.orders_service.get_db_connection", return_value=_AsyncContext(conn)), \
+         patch("app.services.orders_service.resolve_tenant_timezone", new=AsyncMock(return_value="America/Bogota")), \
+         patch("app.services.orders_service.assert_order_not_in_closed_monthly_period", new=AsyncMock()), \
+         patch("app.services.orders_service.assert_order_invoice_allows_mutation", new=AsyncMock()):
+        with pytest.raises(APIError) as exc:
+            await orders_service.update_order_status(
+                Request({"type": "http"}),
+                order_id,
+                "completed",
+                "digital",
+                payment_method_id=str(wompi_method_id),
+                payments=[
+                    {"amount": 10000, "payment_method": "digital", "payment_method_id": str(wompi_method_id)},
+                    {"amount": 10000, "payment_method": "cash", "cash_received": 10000},
+                ],
+            )
+
+    assert exc.value.status_code == 400
+    assert "Wompi" in exc.value.message
+    conn.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_complete_mesa_advance_reduces_cash_due():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    session_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            _pending_row(order_id, total_amount=20000, table_session_id=session_id),
+            {
+                "minimum_consumption_enabled_snapshot": False,
+                "minimum_consumption_amount_snapshot": 0,
+                "minimum_consumption_restrictive_snapshot": False,
+            },
+            {"id": uuid4()},
+            _completed_gl_row(order_id, total_amount=20000, payment_method="cash"),
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=True)
+    conn.execute = AsyncMock()
+
+    patches = list(_complete_patches(conn, tenant_id, user_id))
+    post_gl = AsyncMock()
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+         patches[6], patch("app.services.orders_service._post_order_gl_entry", new=post_gl), \
+         patches[8], patches[9], patches[10], patches[11], \
+         patch("app.services.orders_service.get_available_advance_total", new=AsyncMock(return_value=Decimal("8000"))), \
+         patch("app.services.orders_service.apply_session_advances_for_close", new=AsyncMock(return_value=Decimal("8000"))):
+        result = await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "cash",
+            cash_received=12000,
+        )
+
+    assert result["success"] is True
+    assert post_gl.await_args.kwargs.get("advance_amount") == Decimal("8000")
+
+
+@pytest.mark.asyncio
+async def test_complete_mostrador_skips_advance():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            _pending_row(order_id, total_amount=20000, table_session_id=None),
+            {"id": uuid4()},
+            _completed_gl_row(order_id, total_amount=20000, payment_method="cash"),
+        ]
+    )
+    conn.execute = AsyncMock()
+    apply_advances = AsyncMock(return_value=Decimal("0"))
+
+    patches = list(_complete_patches(conn, tenant_id, user_id))
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+         patches[6], patches[7], patches[8], patches[9], patches[10], patches[11], \
+         patch("app.services.orders_service.get_available_advance_total", new=AsyncMock()) as get_advance, \
+         patch("app.services.orders_service.apply_session_advances_for_close", new=apply_advances):
+        result = await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "cash",
+            cash_received=20000,
+        )
+
+    assert result["success"] is True
+    get_advance.assert_not_called()
+    apply_advances.assert_not_called()
+
+

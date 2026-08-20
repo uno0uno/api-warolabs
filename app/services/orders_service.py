@@ -20,6 +20,10 @@ from app.core.localization import (
 from app.services.aws_ses_service import ses_service
 from app.services.waros_service import evaluate_and_award, revoke_waros_awarded_for_order
 from app.services.customer_wallet_service import restore_wallet_for_cancelled_order
+from app.services.table_session_advances_service import (
+    apply_session_advances_for_close,
+    get_available_advance_total,
+)
 from app.services.operation_events_service import DOMAIN_VENTAS, record_operation_event
 from app.services.cierre_service import (
     assert_order_not_in_closed_monthly_period,
@@ -966,6 +970,15 @@ async def get_order_by_id(
                     if advance_direct_row else 0.0
                 )
             _advance_applied = min(_settlement_amount, _advance_applied)
+            _available_advance = 0.0
+            if order_row["table_session_id"] and order_row["status"] != "completed":
+                _available_advance = float(
+                    await get_available_advance_total(
+                        conn,
+                        tenant_id,
+                        order_row["table_session_id"],
+                    )
+                )
             _charged_amount = None
             if _tip_amount > 0 or _advance_applied > 0:
                 _charged_amount = max(
@@ -1007,6 +1020,7 @@ async def get_order_by_id(
                     "discount_type": order_row['discount_type'],
                     "discount_value": float(order_row['discount_value']) if order_row['discount_value'] is not None else None,
                     "pos_cart_id": str(order_row['pos_cart_id']) if order_row['pos_cart_id'] else None,
+                    "table_session_id": str(order_row['table_session_id']) if order_row['table_session_id'] else None,
                     "source": (
                         "barra" if order_row['table_session_id'] and order_row['is_bar'] else
                         "mesa" if order_row['table_session_id'] else
@@ -1029,6 +1043,7 @@ async def get_order_by_id(
                     "tip_source": order_row['tip_source'] or 'none',
                     "tip_tax_amount": _tip_tax_amount,
                     "advance_applied": _advance_applied,
+                    "available_advance": _available_advance,
                     "charged_amount": _charged_amount,
                     "items_count": order_row['items_count'],
                     "split_payments": split_payments,
@@ -1576,6 +1591,31 @@ async def _apply_complete_waro_redemption(
     return new_total
 
 
+_WOMPI_METHOD_NAME = "wompi"
+
+
+def _looks_like_wompi_slug_or_name(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() == _WOMPI_METHOD_NAME
+
+
+async def _payment_tender_is_wompi(
+    conn,
+    tenant_id: UUID,
+    payment_method: Optional[str],
+    payment_method_id: Optional[UUID],
+) -> bool:
+    if _looks_like_wompi_slug_or_name(payment_method):
+        return True
+    if not payment_method_id:
+        return False
+    name = await conn.fetchval(
+        "SELECT name FROM payment_methods WHERE id = $1 AND tenant_id = $2",
+        payment_method_id,
+        tenant_id,
+    )
+    return _looks_like_wompi_slug_or_name(name)
+
+
 async def update_order_status(
     request: Request,
     order_id: UUID,
@@ -1598,6 +1638,7 @@ async def update_order_status(
     split_first_cash_received: Optional[float] = None,
     waros_to_redeem: Optional[int] = None,
     waro_reward_id: Optional[UUID] = None,
+    wompi_collection: bool = False,
 ) -> dict:
     """Update the status of an order (mesa orders only)."""
     allowed = {"completed", "cancelled", "pending", "preparing"}
@@ -1679,6 +1720,25 @@ async def update_order_status(
             using_one_shot_split = len(split_payments) > 0
             using_split = using_one_shot_split or using_sequential_split
             settlement_complete = True
+            is_wompi_collection = bool(wompi_collection)
+            if not is_wompi_collection:
+                is_wompi_collection = await _payment_tender_is_wompi(
+                    conn, tenant_id, payment_method, pmid
+                )
+            if not is_wompi_collection:
+                for split_payment in split_payments:
+                    split_pmid = None
+                    raw_split_pmid = split_payment.get("payment_method_id")
+                    if raw_split_pmid:
+                        try:
+                            split_pmid = UUID(str(raw_split_pmid))
+                        except ValueError:
+                            split_pmid = None
+                    if await _payment_tender_is_wompi(
+                        conn, tenant_id, split_payment.get("payment_method"), split_pmid
+                    ):
+                        is_wompi_collection = True
+                        break
             if status == "completed":
                 (
                     discount_type_value,
@@ -1759,6 +1819,49 @@ async def update_order_status(
                     + Decimal(str(tip_amount_value))
                     + Decimal(str(tip_tax_amount_value or 0))
                 )
+
+            advance_applied_total = Decimal("0")
+            if (
+                status == "completed"
+                and not is_wompi_collection
+                and not using_split
+                and row["table_session_id"]
+            ):
+                available_advance_total = await get_available_advance_total(
+                    conn,
+                    tenant_id,
+                    row["table_session_id"],
+                )
+                session_min_row = await conn.fetchrow(
+                    """
+                    SELECT
+                        minimum_consumption_enabled_snapshot,
+                        minimum_consumption_amount_snapshot,
+                        minimum_consumption_restrictive_snapshot
+                    FROM table_sessions
+                    WHERE id = $1
+                    """,
+                    row["table_session_id"],
+                )
+                if session_min_row and bool(session_min_row.get("minimum_consumption_enabled_snapshot")):
+                    min_amount = Decimal(str(session_min_row["minimum_consumption_amount_snapshot"] or 0))
+                    covered = amount_due + available_advance_total
+                    missing = max(min_amount - covered, Decimal("0"))
+                    if bool(session_min_row["minimum_consumption_restrictive_snapshot"]) and missing > 0:
+                        raise APIError(
+                            f"Faltan ${round(missing):,} para cubrir el consumo mínimo",
+                            status_code=409,
+                            details={
+                                "code": "minimum_consumption_not_covered",
+                                "minimum_amount": float(min_amount),
+                                "missing": float(missing),
+                            },
+                        )
+                advance_applied_total = min(available_advance_total, amount_due)
+                amount_due = max(Decimal("0"), amount_due - advance_applied_total)
+
+            if is_wompi_collection and using_split:
+                raise APIError("Wompi no admite cobro dividido", status_code=400)
 
             if payment_method:
                 group_row = await conn.fetchrow(
@@ -1850,7 +1953,7 @@ async def update_order_status(
                         status_code=400,
                         details={"code": "split_sum_mismatch"},
                     )
-                if any(p.get("payment_method") == "wompi" for p in split_payments) or payment_method == "wompi":
+                if is_wompi_collection:
                     raise APIError("Wompi no admite cobro dividido", status_code=400)
 
             if status == "completed" and using_sequential_split:
@@ -1895,19 +1998,20 @@ async def update_order_status(
                 if member_check is None:
                     raise APIError("Member not found", status_code=404)
 
+            write_status = "pending" if status == "completed" and is_wompi_collection else status
             cash_received_value = None
             if (
-                status == "completed"
+                write_status == "completed"
                 and payment_method == "cash"
                 and cash_received is not None
                 and not using_split
             ):
                 cash_received_value = Decimal(str(cash_received))
-            credit_due_value = credit_due_date if status == "completed" and payment_method == "credit" else None
-            served_by_value = served_by_member_id if status == "completed" else None
+            credit_due_value = credit_due_date if write_status == "completed" and payment_method == "credit" else None
+            served_by_value = served_by_member_id if write_status == "completed" else None
 
             payment_status_update = None
-            if status == "completed" and payment_method:
+            if write_status == "completed" and payment_method:
                 if using_sequential_split and not settlement_complete:
                     payment_status_update = "partial"
                 else:
@@ -1932,15 +2036,26 @@ async def update_order_status(
                        tip_taxable = CASE WHEN $14::numeric IS NULL THEN tip_taxable ELSE $16 END,
                        tip_tax_amount = CASE WHEN $14::numeric IS NULL THEN tip_tax_amount ELSE $17 END
                    WHERE id = $3""",
-                status, payment_method, order_id, pmid, cid, payment_status_update,
+                write_status, payment_method, order_id, pmid, cid, payment_status_update,
                 cash_received_value, credit_due_value, served_by_value,
                 discount_type_value, discount_value_value, discount_amount_value,
                 discounted_total_value,
                 tip_amount_value, tip_source_value, tip_taxable_value, tip_tax_amount_value,
             )
+            if is_wompi_collection and status == "completed":
+                await conn.execute(
+                    """
+                    UPDATE orders
+                    SET payment_method = NULL,
+                        payment_method_id = NULL,
+                        payment_status = NULL
+                    WHERE id = $1
+                    """,
+                    order_id,
+                )
 
             if (
-                status == "completed"
+                write_status == "completed"
                 and payment_method == "customer_wallet"
                 and cid
                 and not using_split
@@ -1959,7 +2074,7 @@ async def update_order_status(
                             user_id,
                         )
 
-            if status == "completed" and using_one_shot_split:
+            if write_status == "completed" and using_one_shot_split:
                 await _insert_complete_tenders(
                     conn,
                     order_id=order_id,
@@ -1978,7 +2093,7 @@ async def update_order_status(
                     payment_status_update,
                 )
 
-            if status == "completed" and using_sequential_split:
+            if write_status == "completed" and using_sequential_split:
                 await _insert_complete_tenders(
                     conn,
                     order_id=order_id,
@@ -2011,8 +2126,8 @@ async def update_order_status(
                 )
 
             # Stock adjustment based on transition
-            if old_status != status:
-                if old_status != 'completed' and status == 'completed':
+            if old_status != write_status:
+                if old_status != 'completed' and write_status == 'completed':
                     inventory_already_consumed = await _order_inventory_already_consumed_before_completion(
                         conn,
                         row=row,
@@ -2045,6 +2160,14 @@ async def update_order_status(
                                     if using_split
                                     else None
                                 )
+                                if advance_applied_total > 0 and row["table_session_id"]:
+                                    advance_applied_total = await apply_session_advances_for_close(
+                                        conn,
+                                        tenant_id,
+                                        row["table_session_id"],
+                                        advance_applied_total,
+                                        [order_id],
+                                    )
                                 await _post_order_gl_entry(
                                     conn=conn,
                                     tenant_id=tenant_id,
@@ -2057,6 +2180,7 @@ async def update_order_status(
                                     order_number=int(completed_order["order_number"]),
                                     tip_amount=Decimal(str(completed_order["tip_amount"] or 0)),
                                     tip_tax_amount=Decimal(str(completed_order["tip_tax_amount"] or 0)),
+                                    advance_amount=advance_applied_total,
                                     payment_splits=gl_splits,
                                 )
                                 await _post_order_cogs_gl_entry(
@@ -2070,8 +2194,8 @@ async def update_order_status(
                             raise
                         except Exception as gl_exc:
                             logger.error(f"GL entries failed for order status update: {gl_exc}")
-                elif old_status == 'completed' and status in ('cancelled', 'pending'):
-                    if status == 'cancelled':
+                elif old_status == 'completed' and write_status in ('cancelled', 'pending'):
+                    if write_status == 'cancelled':
                         await restore_wallet_for_cancelled_order(
                             conn,
                             tenant_id,
@@ -2081,7 +2205,7 @@ async def update_order_status(
                         )
                         await revoke_waros_awarded_for_order(conn, order_id, tenant_id)
                     await _return_stock_for_order_cancellation(conn, order_id, tenant_id, user_id, order_number)
-                    if status == 'cancelled':
+                    if write_status == 'cancelled':
                         try:
                             await _void_order_gl_entries(
                                 conn,
@@ -2101,8 +2225,8 @@ async def update_order_status(
                             )
 
             # Release the table session if this is a mesa order being closed
-            if status in ("completed", "cancelled") and row['table_session_id']:
-                if status == "cancelled" or settlement_complete:
+            if write_status in ("completed", "cancelled") and row['table_session_id']:
+                if write_status == "cancelled" or settlement_complete:
                     await conn.execute(
                         "UPDATE table_sessions SET closed_at = now() WHERE id = $1 AND closed_at IS NULL",
                         row['table_session_id']
@@ -2135,7 +2259,7 @@ async def update_order_status(
                 except Exception as _fe:
                     logger.error(f"Auto-fire failed for manual order {order_id} (preparing): {_fe}")
 
-            if old_status != status:
+            if old_status != write_status:
                 await record_operation_event(
                     conn,
                     tenant_id,
@@ -2149,7 +2273,7 @@ async def update_order_status(
                         "entity_id": str(order_id),
                         "order_number": order_number,
                         "old_status": old_status,
-                        "new_status": status,
+                        "new_status": write_status,
                     },
                     reason=reason_text or None,
                 )
@@ -2162,7 +2286,7 @@ async def update_order_status(
             except Exception as _waros_err:
                 logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
 
-        return {"success": True, "message": f"Estado actualizado a {status}"}
+        return {"success": True, "message": f"Estado actualizado a {write_status}"}
 
     except (AuthenticationError, APIError) as e:
         raise e

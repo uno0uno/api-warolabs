@@ -383,6 +383,7 @@ class UpdateOrderStatusRequest(BaseModel):
     split_first_cash_received: Optional[float] = Field(None, ge=0, description="Cash handed over for the first sequential tender")
     waros_to_redeem: Optional[int] = Field(None, ge=0, description="B1 WaRos to redeem after manual discount")
     waro_reward_id: Optional[UUID] = Field(None, description="B2 reward catalog UUID")
+    wompi_collection: bool = Field(False, description="Leave pending and unpaid until Wompi collection")
 
 
 class AssociateOrderCustomerRequest(BaseModel):
@@ -444,6 +445,7 @@ async def update_order_status(
         split_first_cash_received=body.split_first_cash_received,
         waros_to_redeem=body.waros_to_redeem,
         waro_reward_id=body.waro_reward_id,
+        wompi_collection=body.wompi_collection,
     )
 
 
