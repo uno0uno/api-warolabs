@@ -1,0 +1,39 @@
+issue: 888
+title: Allow WARO Wompi keys on restaurant Pasarela activate
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-888-pasarela-allow-waro-keys
+
+paths:
+  - app/services/wompi_collections_service.py
+  - tests/test_wompi_collections.py
+
+ac:
+  - Activating Pasarela with the same public/private keys as server WOMPI_* succeeds; Wompi still validates the merchant.
+  - Collections still encrypt keys via OpenBao and never call the shared billing Wompi header helper.
+  - Unit tests no longer reject the server merchant pair; keep restaurant-path isolation coverage.
+  - No frontend change.
+
+out_of_scope:
+  - Paddle billing
+  - Webhook tunnels
+  - OpenBao setup
+  - Creating a separate restaurant Wompi merchant
+
+hints:
+  entry: "activate_merchant"
+  pattern: "app/services/wompi_collections_service.py:_matches_server_merchant"
+  tests: "pytest tests/test_wompi_collections.py -q"
+
+risk:
+  sensitive: true
+  areas:
+    - payments
+
+skip:
+  audits: []
+
+next:
+  after_pr: "Staff paste sandbox WOMPI_* keys in Integraciones → Pasarela"
