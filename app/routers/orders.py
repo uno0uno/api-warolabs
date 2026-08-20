@@ -372,6 +372,8 @@ class UpdateOrderStatusRequest(BaseModel):
     cash_received: Optional[float] = Field(None, ge=0, description="Cash handed over when completing with cash")
     credit_due_date: Optional[date] = Field(None, description="Due date when completing with credit")
     served_by_member_id: Optional[UUID] = Field(None, description="Waiter member UUID at complete")
+    discount_type: Optional[str] = Field(None, description="'percent' | 'fixed'")
+    discount_value: Optional[float] = Field(None, description="10 for 10%, 5000 for $5,000 COP")
 
 
 class AssociateOrderCustomerRequest(BaseModel):
@@ -422,6 +424,8 @@ async def update_order_status(
         cash_received=body.cash_received,
         credit_due_date=body.credit_due_date,
         served_by_member_id=body.served_by_member_id,
+        discount_type=body.discount_type,
+        discount_value=body.discount_value,
     )
 
 
