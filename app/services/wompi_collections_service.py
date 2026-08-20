@@ -1,4 +1,4 @@
-"""Restaurant Wompi diner collections (#862). Never uses server WOMPI_* keys."""
+"""Restaurant Wompi diner collections (#862). Uses tenant keys; OpenBao envelope."""
 from __future__ import annotations
 
 import hashlib
@@ -14,7 +14,6 @@ from uuid import UUID, uuid4
 import httpx
 from fastapi import Request
 
-from app.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.middleware import require_valid_session
 from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
@@ -72,18 +71,6 @@ def fingerprint_public_key(public_key: str) -> str:
     digest = hashlib.sha256(public_key.strip().encode("utf-8")).hexdigest()[:12]
     tail = public_key.strip()[-4:]
     return f"{digest}:{tail}"
-
-
-def _matches_server_merchant(public_key: str, private_key: str) -> bool:
-    server_pub = (settings.wompi_public_key or "").strip()
-    server_prv = (settings.wompi_private_key or "").strip()
-    pub = public_key.strip()
-    prv = private_key.strip()
-    if server_pub and pub == server_pub:
-        return True
-    if server_prv and prv == server_prv:
-        return True
-    return False
 
 
 def restaurant_headers(private_key: str) -> Dict[str, str]:
@@ -196,8 +183,6 @@ async def activate_merchant(
 ) -> dict:
     session = require_valid_session(request)
     tenant_id = session.tenant_id
-    if _matches_server_merchant(public_key, private_key):
-        raise ValidationError("No se pueden usar las llaves Wompi de WARO/Tickets")
     environment = _environment_from_private_key(private_key)
     await validate_merchant_keys(public_key, private_key, environment)
     private_ct = await openbao_transit.encrypt_plaintext(private_key)

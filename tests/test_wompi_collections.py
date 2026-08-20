@@ -62,18 +62,11 @@ def test_next_puc_child_skips_taken_05():
     assert svc.next_puc_child_code("1110", {"1110", "111005"}) == "111001"
 
 
-def test_reject_server_merchant_keys(monkeypatch):
-    monkeypatch.setattr(svc.settings, "wompi_public_key", "pub_prod_waro")
-    monkeypatch.setattr(svc.settings, "wompi_private_key", "prv_prod_waro")
-    assert svc._matches_server_merchant("pub_prod_waro", "prv_test_rest") is True
-    assert svc._matches_server_merchant("pub_test_rest", "prv_prod_waro") is True
-    assert svc._matches_server_merchant("pub_test_rest", "prv_test_rest") is False
-
-
 def test_collections_never_call_server_wompi_headers():
     src = Path("app/services/wompi_collections_service.py").read_text()
     assert "wompi_service._headers" not in src
-    assert "settings.wompi_private_key" in src  # only to reject match
+    assert "settings.wompi_private_key" not in src
+    assert "_matches_server_merchant" not in src
     router = Path("app/routers/wompi_collections.py").read_text()
     assert "payments_webhook" not in router
     assert '@session_router.get("/sessions/{session_id}")' in router
@@ -99,9 +92,6 @@ async def test_activate_fails_without_digitales_parent(tenant_id):
     with patch(
         "app.services.wompi_collections_service.require_valid_session",
         return_value=SimpleNamespace(tenant_id=tenant_id),
-    ), patch(
-        "app.services.wompi_collections_service._matches_server_merchant",
-        return_value=False,
     ), patch(
         "app.services.wompi_collections_service.validate_merchant_keys",
         new=AsyncMock(),
@@ -156,9 +146,6 @@ async def test_activate_creates_puc_child_and_method(tenant_id):
     with patch(
         "app.services.wompi_collections_service.require_valid_session",
         return_value=SimpleNamespace(tenant_id=tenant_id),
-    ), patch(
-        "app.services.wompi_collections_service._matches_server_merchant",
-        return_value=False,
     ), patch(
         "app.services.wompi_collections_service.validate_merchant_keys",
         new=AsyncMock(),
