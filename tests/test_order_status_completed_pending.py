@@ -124,4 +124,33 @@ async def test_delete_order_item_rejects_when_completed():
             await orders_service.delete_order_item(Request({"type": "http"}), order_id, item_id)
 
     assert exc.value.status_code == 409
+    assert exc.value.details.get("code") == "sale_not_editable"
+    conn.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_order_item_rejects_when_pending():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    item_id = uuid4()
+    conn = AsyncMock()
+    conn.transaction = MagicMock(return_value=_AsyncContext())
+    conn.fetchrow = AsyncMock(return_value={
+        "id": order_id,
+        "order_number": 42,
+        "order_date": datetime(2026, 8, 15),
+        "status": "pending",
+    })
+    conn.execute = AsyncMock()
+
+    with patch("app.services.orders_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
+         patch("app.services.orders_service.get_db_connection", return_value=_AsyncContext(conn)), \
+         patch("app.services.orders_service.assert_order_not_in_closed_monthly_period", new=AsyncMock()), \
+         patch("app.services.orders_service.assert_order_invoice_allows_mutation", new=AsyncMock()):
+        with pytest.raises(APIError) as exc:
+            await orders_service.delete_order_item(Request({"type": "http"}), order_id, item_id)
+
+    assert exc.value.status_code == 409
+    assert exc.value.details.get("code") == "sale_not_editable"
     conn.execute.assert_not_called()

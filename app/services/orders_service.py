@@ -1376,13 +1376,12 @@ def _assert_not_completed_to_pending(old_status: str, new_status: str) -> None:
         )
 
 
-def _assert_order_status_allows_line_edit(status: Optional[str]) -> None:
-    if status != "pending":
-        raise APIError(
-            "Solo se puede editar una venta pendiente.",
-            status_code=409,
-            details={"code": "sale_not_editable"},
-        )
+def _assert_order_status_allows_line_edit(_status: Optional[str]) -> None:
+    raise APIError(
+        "Las líneas de una venta no se editan en Ventas. Usa el punto de venta.",
+        status_code=409,
+        details={"code": "sale_not_editable"},
+    )
 
 
 def _ventas_event_channel(row) -> str:
