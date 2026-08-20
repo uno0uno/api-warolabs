@@ -186,96 +186,59 @@ async def test_update_order_status_cancel_mesa_uses_mesa_channel():
 
 
 @pytest.mark.asyncio
-async def test_delete_order_item_records_event():
+async def test_delete_order_item_rejects_line_edit():
     tenant_id = uuid4()
     user_id = uuid4()
     order_id = uuid4()
     item_id = uuid4()
-    recorded, capture_record = _capture()
     conn = AsyncMock()
     conn.transaction = MagicMock(return_value=_AsyncContext())
-    conn.fetchrow = AsyncMock(side_effect=[
-        {"id": order_id, "order_number": 42, "order_date": datetime(2026, 8, 15), "status": "pending"},
-        {"id": item_id, "product_id": uuid4(), "quantity": 2, "product_name": "Bandeja"},
-        {"count": 2},
-        {"new_total": 10000},
-    ])
-    conn.fetch = AsyncMock(return_value=[])
+    conn.fetchrow = AsyncMock(return_value={
+        "id": order_id, "order_number": 42, "order_date": datetime(2026, 8, 15), "status": "pending",
+    })
     conn.execute = AsyncMock()
-    snapshot_return = AsyncMock(return_value=True)
 
     with patch("app.services.orders_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
          patch("app.services.orders_service.get_db_connection", return_value=_AsyncContext(conn)), \
          patch("app.services.orders_service.assert_order_not_in_closed_monthly_period", new=AsyncMock()), \
-         patch(
-             "app.services.orders_service._pos_modifier_inventory_helpers",
-             return_value=(AsyncMock(), AsyncMock(), snapshot_return),
-         ), \
-         patch("app.services.orders_service.record_operation_event", new=capture_record):
-        result = await orders_service.delete_order_item(Request({"type": "http"}), order_id, item_id)
+         patch("app.services.orders_service.assert_order_invoice_allows_mutation", new=AsyncMock()):
+        with pytest.raises(APIError) as exc:
+            await orders_service.delete_order_item(Request({"type": "http"}), order_id, item_id)
 
-    assert result["success"] is True
-    assert len(recorded) == 1
-    event = recorded[0]
-    assert event["domain"] == "ventas"
-    assert event["action"] == "order_item_deleted"
-    assert event["order_id"] == order_id
-    assert event["order_item_id"] == item_id
-    assert event["payload"]["product_name"] == "Bandeja"
+    assert exc.value.status_code == 409
+    assert exc.value.details.get("code") == "sale_not_editable"
+    conn.execute.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_delete_order_item_modifier_records_event():
+async def test_delete_order_item_modifier_rejects_line_edit():
     tenant_id = uuid4()
     user_id = uuid4()
     order_id = uuid4()
     item_id = uuid4()
     modifier_id = uuid4()
-    recorded, capture_record = _capture()
     conn = AsyncMock()
     conn.transaction = MagicMock(return_value=_AsyncContext())
-    conn.fetchrow = AsyncMock(side_effect=[
-        {"id": order_id, "order_number": 42, "order_date": datetime(2026, 8, 15), "status": "pending"},
-        {"id": item_id, "quantity": 1, "product_name": "Hamburguesa"},
-        {
-            "id": modifier_id,
-            "price_at_purchase": 2000,
-            "modifier_name": "Queso",
-            "modifier_qty": 1,
-            "included_quantity_at_purchase": 0,
-            "original_modifier_id": None,
-            "ingredient_id": None,
-            "ingredient_quantity": None,
-            "ingredient_unit": None,
-            "ingredient_name": None,
-        },
-        {"new_subtotal": 12000},
-        {"new_total": 12000},
-    ])
+    conn.fetchrow = AsyncMock(return_value={
+        "id": order_id, "order_number": 42, "order_date": datetime(2026, 8, 15), "status": "pending",
+    })
     conn.execute = AsyncMock()
 
     with patch("app.services.orders_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
          patch("app.services.orders_service.get_db_connection", return_value=_AsyncContext(conn)), \
          patch("app.services.orders_service.assert_order_not_in_closed_monthly_period", new=AsyncMock()), \
-         patch(
-             "app.services.orders_service._pos_modifier_inventory_helpers",
-             return_value=(AsyncMock(), AsyncMock(), AsyncMock()),
-         ), \
-         patch("app.services.orders_service.record_operation_event", new=capture_record):
-        result = await orders_service.delete_order_item_modifier(
-            Request({"type": "http"}),
-            order_id,
-            item_id,
-            modifier_id,
-        )
+         patch("app.services.orders_service.assert_order_invoice_allows_mutation", new=AsyncMock()):
+        with pytest.raises(APIError) as exc:
+            await orders_service.delete_order_item_modifier(
+                Request({"type": "http"}),
+                order_id,
+                item_id,
+                modifier_id,
+            )
 
-    assert result["success"] is True
-    assert len(recorded) == 1
-    event = recorded[0]
-    assert event["action"] == "order_item_modifier_deleted"
-    assert event["domain"] == "ventas"
-    assert event["order_id"] == order_id
-    assert event["payload"]["modifier_name"] == "Queso"
+    assert exc.value.status_code == 409
+    assert exc.value.details.get("code") == "sale_not_editable"
+    conn.execute.assert_not_called()
 
 
 @pytest.mark.asyncio
