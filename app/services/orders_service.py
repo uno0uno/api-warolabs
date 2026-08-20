@@ -1376,6 +1376,56 @@ def _ventas_event_channel(row) -> str:
     return "mostrador"
 
 
+def _row_numeric(row, key: str) -> float:
+    try:
+        value = row[key]
+    except (KeyError, IndexError):
+        return 0.0
+    return float(value or 0)
+
+
+def _complete_manual_discount(
+    *,
+    current_total: float,
+    current_discount_amount: float,
+    discount_type: Optional[str],
+    discount_value: Optional[float],
+) -> tuple[Optional[str], Optional[float], Optional[float], Optional[float]]:
+    """Resolve order-level discount for pending complete.
+
+    Omit / zero returns Nones (leave columns unchanged). Integer COP like POS
+    `_manual_discount_amount`. Base is current total plus any existing order-level
+    discount so a new discount replaces rather than stacking.
+    """
+    if not discount_type or discount_value is None or discount_value <= 0:
+        return None, None, None, None
+    if discount_type not in ("percent", "fixed"):
+        raise APIError(
+            "discount_type debe ser 'percent' o 'fixed'",
+            status_code=400,
+            details={"code": "discount_type_invalid"},
+        )
+    if discount_type == "percent" and discount_value > 100:
+        raise APIError(
+            "El descuento porcentual no puede superar el 100%",
+            status_code=400,
+            details={"code": "discount_percent_max"},
+        )
+    base = float(current_total or 0) + float(current_discount_amount or 0)
+    if discount_type == "percent":
+        amount = float(round(base * discount_value / 100))
+    else:
+        if round(discount_value) > round(base):
+            raise APIError(
+                "El descuento no puede superar el subtotal",
+                status_code=400,
+                details={"code": "discount_exceeds_total"},
+            )
+        amount = float(min(round(discount_value), round(base)))
+    new_total = float(max(0, round(base) - round(amount)))
+    return discount_type, float(discount_value), amount, new_total
+
+
 async def update_order_status(
     request: Request,
     order_id: UUID,
@@ -1387,6 +1437,8 @@ async def update_order_status(
     cash_received: Optional[float] = None,
     credit_due_date: Optional[date] = None,
     served_by_member_id: Optional[UUID] = None,
+    discount_type: Optional[str] = None,
+    discount_value: Optional[float] = None,
 ) -> dict:
     """Update the status of an order (mesa orders only)."""
     allowed = {"completed", "cancelled", "pending", "preparing"}
@@ -1407,7 +1459,8 @@ async def update_order_status(
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             row = await conn.fetchrow(
                 """SELECT id, status, order_number, table_session_id, pos_cart_id,
-                          payment_status, order_date, total_amount, customer_id
+                          payment_status, order_date, total_amount, customer_id,
+                          discount_amount
                    FROM orders WHERE id = $1 AND tenant_id = $2""",
                 order_id, tenant_id
             )
@@ -1456,6 +1509,26 @@ async def update_order_status(
                     status_code=400,
                     details={"code": "payment_method_required"},
                 )
+
+            discount_type_value = None
+            discount_value_value = None
+            discount_amount_value = None
+            discounted_total_value = None
+            amount_due = Decimal(str(row["total_amount"] or 0))
+            if status == "completed":
+                (
+                    discount_type_value,
+                    discount_value_value,
+                    discount_amount_value,
+                    discounted_total_value,
+                ) = _complete_manual_discount(
+                    current_total=float(row["total_amount"] or 0),
+                    current_discount_amount=_row_numeric(row, "discount_amount"),
+                    discount_type=discount_type,
+                    discount_value=discount_value,
+                )
+                if discounted_total_value is not None:
+                    amount_due = Decimal(str(discounted_total_value))
 
             if payment_method:
                 group_row = await conn.fetchrow(
@@ -1531,7 +1604,6 @@ async def update_order_status(
                             status_code=400,
                             details={"code": "cash_received_required"},
                         )
-                    amount_due = Decimal(str(row["total_amount"] or 0))
                     received = Decimal(str(cash_received))
                     if received < amount_due:
                         raise APIError(
@@ -1571,17 +1643,23 @@ async def update_order_status(
                        payment_status = COALESCE($6, payment_status),
                        cash_received = CASE WHEN $7::numeric IS NULL THEN cash_received ELSE $7 END,
                        credit_due_date = CASE WHEN $8::date IS NULL THEN credit_due_date ELSE $8 END,
-                       served_by_member_id = CASE WHEN $9::uuid IS NULL THEN served_by_member_id ELSE $9 END
+                       served_by_member_id = CASE WHEN $9::uuid IS NULL THEN served_by_member_id ELSE $9 END,
+                       discount_type = CASE WHEN $10::text IS NULL THEN discount_type ELSE $10 END,
+                       discount_value = CASE WHEN $10::text IS NULL THEN discount_value ELSE $11 END,
+                       discount_amount = CASE WHEN $10::text IS NULL THEN discount_amount ELSE $12 END,
+                       total_amount = CASE WHEN $10::text IS NULL THEN total_amount ELSE $13 END
                    WHERE id = $3""",
                 status, payment_method, order_id, pmid, cid, payment_status_update,
                 cash_received_value, credit_due_value, served_by_value,
+                discount_type_value, discount_value_value, discount_amount_value,
+                discounted_total_value,
             )
 
             if status == "completed" and payment_method == "customer_wallet" and cid:
                 from app.services.customer_wallet_service import apply_wallet_for_order
 
                 if old_status != "completed":
-                    amount_cop = Decimal(str(row["total_amount"]))
+                    amount_cop = amount_due
                     if amount_cop > 0:
                         await apply_wallet_for_order(
                             conn,
