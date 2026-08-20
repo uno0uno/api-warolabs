@@ -374,6 +374,9 @@ class UpdateOrderStatusRequest(BaseModel):
     served_by_member_id: Optional[UUID] = Field(None, description="Waiter member UUID at complete")
     discount_type: Optional[str] = Field(None, description="'percent' | 'fixed'")
     discount_value: Optional[float] = Field(None, description="10 for 10%, 5000 for $5,000 COP")
+    tip_amount: Optional[float] = Field(None, ge=0, description="Tip in COP when completing a pending sale")
+    tip_source: Optional[str] = Field(None, description="'preset' | 'custom' | 'none'")
+    tip_taxable: Optional[bool] = Field(None, description="Apply consumption tax to tip when true")
 
 
 class AssociateOrderCustomerRequest(BaseModel):
@@ -426,6 +429,9 @@ async def update_order_status(
         served_by_member_id=body.served_by_member_id,
         discount_type=body.discount_type,
         discount_value=body.discount_value,
+        tip_amount=body.tip_amount,
+        tip_source=body.tip_source,
+        tip_taxable=body.tip_taxable,
     )
 
 
