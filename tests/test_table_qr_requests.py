@@ -66,13 +66,41 @@ async def test_reject_request_marks_rejected():
          patch(
              "app.services.table_qr_requests_service.notifications_service.mark_table_qr_notifications_read",
              new_callable=AsyncMock,
-         ) as mark_read_mock:
+         ) as mark_read_mock, \
+         patch(
+             "app.services.table_qr_requests_service.record_operation_event",
+             new_callable=AsyncMock,
+         ) as record_mock, \
+         patch(
+             "app.services.table_qr_requests_service._table_bitacora_context",
+             new=AsyncMock(return_value=("mesa", "Mesa 1")),
+         ):
         mock_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
         mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        result = await table_qr_requests_service.reject_request(MagicMock(), request_id)
+        result = await table_qr_requests_service.reject_request(
+            MagicMock(), request_id, "Mesa ocupada"
+        )
         assert result["data"]["status"] == "rejected"
         mark_read_mock.assert_awaited_once_with(conn, session.tenant_id, request_id)
+        record_mock.assert_awaited_once()
+        kwargs = record_mock.await_args.kwargs
+        assert kwargs["domain"] == "despacho"
+        assert kwargs["action"] == "table_qr_rejected"
+        assert kwargs["reason"] == "Mesa ocupada"
+        assert kwargs["channel"] == "mesa"
+
+
+@pytest.mark.asyncio
+async def test_reject_request_requires_reason():
+    session = _session()
+    with patch("app.services.table_qr_requests_service.require_valid_session", return_value=session), \
+         patch("app.services.table_qr_requests_service.get_db_connection") as mock_conn:
+        mock_conn.return_value.__aenter__ = AsyncMock()
+        with pytest.raises(APIError) as exc:
+            await table_qr_requests_service.reject_request(MagicMock(), uuid4(), "   ")
+        assert exc.value.status_code == 400
+        assert exc.value.details["code"] == "reject_reason_required"
 
 
 @pytest.mark.asyncio
@@ -231,7 +259,13 @@ async def test_accept_requests_passes_persisted_modifier_quantity_to_tab_core():
     ), patch(
         "app.services.table_qr_requests_service.notifications_service.mark_table_qr_notifications_read",
         new_callable=AsyncMock,
-    ) as mark_read_mock:
+    ) as mark_read_mock, patch(
+        "app.services.table_qr_requests_service.record_operation_event",
+        new_callable=AsyncMock,
+    ) as record_mock, patch(
+        "app.services.table_qr_requests_service._table_bitacora_context",
+        new=AsyncMock(return_value=("mesa", "Mesa 1")),
+    ):
         mock_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
         mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -244,9 +278,9 @@ async def test_accept_requests_passes_persisted_modifier_quantity_to_tab_core():
     forwarded_items = add_tab_mock.await_args.args[4]
     assert forwarded_items[0]["modifiers"][0]["quantity"] == 3
     mark_read_mock.assert_awaited_once_with(conn, session.tenant_id, request_id)
-
-
-def test_list_endpoint_delegates():
+    record_mock.assert_awaited_once()
+    assert record_mock.await_args.kwargs["action"] == "table_qr_accepted"
+    assert record_mock.await_args.kwargs["domain"] == "despacho"
     app = FastAPI()
     app.include_router(table_qr_requests_router.router, prefix="/table-qr-requests")
 

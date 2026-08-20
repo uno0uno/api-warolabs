@@ -3,7 +3,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.exceptions import APIError
 from app.core.permissions import Module, require_module
@@ -16,6 +16,10 @@ class BulkAcceptRequest(BaseModel):
     request_ids: Optional[List[UUID]] = None
     table_id: Optional[UUID] = None
     all_pending: bool = False
+
+
+class RejectTableQrRequest(BaseModel):
+    reason: str = Field(..., min_length=1)
 
 
 @router.get("", dependencies=[Depends(require_module(Module.DESPACHO))])
@@ -36,8 +40,8 @@ async def get_table_qr_request(request: Request, request_id: UUID):
 
 
 @router.patch("/{request_id}/reject", dependencies=[Depends(require_module(Module.DESPACHO))])
-async def reject_table_qr_request(request: Request, request_id: UUID):
-    return await table_qr_requests_service.reject_request(request, request_id)
+async def reject_table_qr_request(request: Request, request_id: UUID, body: RejectTableQrRequest):
+    return await table_qr_requests_service.reject_request(request, request_id, body.reason)
 
 
 @router.patch("/{request_id}/accept", dependencies=[Depends(require_module(Module.DESPACHO))])
