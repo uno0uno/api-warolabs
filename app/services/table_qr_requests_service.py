@@ -11,6 +11,7 @@ from app.core.middleware import require_valid_session
 from app.core.timezones import resolve_tenant_timezone
 from app.database import get_db_connection
 from app.services import notifications_service
+from app.services.operation_events_service import DOMAIN_DESPACHO, record_operation_event
 from app.services.tables_service import (
     _add_tab_items_core,
     _get_minimum_consumption_snapshot,
@@ -113,6 +114,21 @@ async def _resolve_tenant_member_id(conn, tenant_id: UUID, user_id: UUID) -> Opt
         tenant_id,
         user_id,
     )
+
+
+async def _table_bitacora_context(conn, tenant_id: UUID, table_id: UUID) -> tuple[str, Optional[str]]:
+    row = await conn.fetchrow(
+        """
+        SELECT name, COALESCE(is_bar, false) AS is_bar
+        FROM tables
+        WHERE id = $1 AND tenant_id = $2
+        """,
+        table_id,
+        tenant_id,
+    )
+    if not row:
+        return "mesa", None
+    return ("barra" if row["is_bar"] else "mesa"), row["name"]
 
 
 async def _ensure_open_session_in_tx(
@@ -256,11 +272,20 @@ async def get_request(request: Request, request_id: UUID) -> dict:
     return {"success": True, "data": data}
 
 
-async def reject_request(request: Request, request_id: UUID) -> dict:
+async def reject_request(request: Request, request_id: UUID, reason: str) -> dict:
     session = require_valid_session(request)
     tenant_id = session.tenant_id
+    user_id = getattr(session, "user_id", None)
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
+
+    reason_text = (reason or "").strip()
+    if not reason_text:
+        raise APIError(
+            "Indica el motivo del rechazo.",
+            status_code=400,
+            details={"code": "reject_reason_required"},
+        )
 
     async with get_db_connection() as conn:
         row = await conn.fetchrow(
@@ -281,6 +306,23 @@ async def reject_request(request: Request, request_id: UUID) -> dict:
 
         await notifications_service.mark_table_qr_notifications_read(
             conn, tenant_id, request_id
+        )
+        channel, table_name = await _table_bitacora_context(conn, tenant_id, row["table_id"])
+        await record_operation_event(
+            conn,
+            tenant_id,
+            domain=DOMAIN_DESPACHO,
+            channel=channel,
+            action="table_qr_rejected",
+            actor_user_id=user_id,
+            table_id=row["table_id"],
+            reason=reason_text,
+            payload={
+                "entity_type": "table_qr_request",
+                "entity_id": str(request_id),
+                "table_name": table_name,
+                "label": table_name,
+            },
         )
 
     return {
@@ -412,6 +454,30 @@ async def accept_requests(
             for rid in accepted_ids:
                 await notifications_service.mark_table_qr_notifications_read(
                     conn, tenant_id, rid
+                )
+
+            channel, table_name = await _table_bitacora_context(conn, tenant_id, table_id)
+            order_id = tab_result.get("order_id")
+            order_number = tab_result.get("order_number")
+            for rid in accepted_ids:
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_DESPACHO,
+                    channel=channel,
+                    action="table_qr_accepted",
+                    actor_user_id=user_id,
+                    table_id=table_id,
+                    table_session_id=tab_result.get("session_id"),
+                    order_id=order_id,
+                    payload={
+                        "entity_type": "table_qr_request",
+                        "entity_id": str(rid),
+                        "table_name": table_name,
+                        "label": table_name,
+                        "order_number": order_number,
+                        "items_count": tab_result.get("items_count"),
+                    },
                 )
 
     try:

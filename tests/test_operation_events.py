@@ -349,6 +349,8 @@ async def test_record_operation_event_accepts_promotion_deleted():
         "comanda_status_changed",
         "comanda_recalled",
         "comanda_line_cancelled",
+        "table_qr_accepted",
+        "table_qr_rejected",
     ],
 )
 async def test_record_operation_event_accepts_ventas_despacho_actions(action):
