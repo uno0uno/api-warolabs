@@ -386,6 +386,48 @@ def _build_invoice_presentation(
     )
 
 
+_ORDER_SOURCE_FILTERS = frozenset({"pos", "mesa", "barra", "delivery"})
+_ORDER_PAYMENT_STATUS_FILTERS = frozenset({"paid", "credit", "partial", "unpaid"})
+
+
+def _append_orders_source_payment_filters(
+    where_conditions: List[str],
+    params: List[Any],
+    param_count: int,
+    *,
+    source: Optional[str] = None,
+    delivery_only: Optional[bool] = None,
+    payment_status: Optional[str] = None,
+) -> int:
+    """Append origin + payment_status predicates. Requires t_meta join for mesa/barra."""
+    normalized_source = (source or "").strip().lower()
+    if normalized_source not in _ORDER_SOURCE_FILTERS and delivery_only:
+        normalized_source = "delivery"
+
+    if normalized_source == "delivery":
+        where_conditions.append("o.delivery_address_id IS NOT NULL")
+    elif normalized_source == "barra":
+        where_conditions.append("o.table_session_id IS NOT NULL AND COALESCE(t_meta.is_bar, FALSE) IS TRUE")
+    elif normalized_source == "mesa":
+        where_conditions.append(
+            "o.table_session_id IS NOT NULL AND COALESCE(t_meta.is_bar, FALSE) IS NOT TRUE"
+        )
+    elif normalized_source == "pos":
+        where_conditions.append("o.table_session_id IS NULL AND o.delivery_address_id IS NULL")
+
+    normalized_payment = (payment_status or "").strip().lower()
+    if normalized_payment == "unpaid":
+        where_conditions.append(
+            "(o.payment_status IS NULL OR o.payment_status IN ('unpaid', 'pending'))"
+        )
+    elif normalized_payment in _ORDER_PAYMENT_STATUS_FILTERS:
+        param_count += 1
+        where_conditions.append(f"o.payment_status = ${param_count}")
+        params.append(normalized_payment)
+
+    return param_count
+
+
 async def get_orders_list(
     request: Request,
     limit: int = 50,
@@ -400,6 +442,8 @@ async def get_orders_list(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     delivery_only: Optional[bool] = None,
+    source: Optional[str] = None,
+    payment_status: Optional[str] = None,
 ) -> dict:
     """
     Get list of POS orders with filters and pagination
@@ -465,9 +509,14 @@ async def get_orders_list(
                 timezone_name,
             )
 
-            # Delivery-only filter: composes with POS_LIKE_FILTER, uses partial index idx_orders_delivery_address_id
-            if delivery_only:
-                where_conditions.append("o.delivery_address_id IS NOT NULL")
+            param_count = _append_orders_source_payment_filters(
+                where_conditions,
+                params,
+                param_count,
+                source=source,
+                delivery_only=delivery_only,
+                payment_status=payment_status,
+            )
 
             where_clause = " AND ".join(where_conditions)
 
@@ -3639,6 +3688,9 @@ async def export_orders_to_email(
     sort_direction: str = "desc",
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    delivery_only: Optional[bool] = None,
+    source: Optional[str] = None,
+    payment_status: Optional[str] = None,
     tips_only: bool = False,
     member_id: Optional[str] = None,
     channel: Optional[str] = None,
@@ -3729,6 +3781,16 @@ async def export_orders_to_email(
                 timezone_name,
             )
 
+            if not tips_only:
+                param_count = _append_orders_source_payment_filters(
+                    where_conditions,
+                    params,
+                    param_count,
+                    source=source,
+                    delivery_only=delivery_only,
+                    payment_status=payment_status,
+                )
+
             # warocol.com#640 — tips-only filters (ignored when tips_only is False)
             if tips_only and member_id:
                 param_count += 1
@@ -3788,6 +3850,8 @@ async def export_orders_to_email(
                     LEFT JOIN profile p ON p.id = tm.user_id
                     LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id AND pm.tenant_id = $1
                     LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id AND pmg.tenant_id = $1
+                    LEFT JOIN table_sessions ts_meta ON ts_meta.id = o.table_session_id
+                    LEFT JOIN tables t_meta ON t_meta.id = ts_meta.table_id
                     WHERE {where_clause}
                     ORDER BY {sort_column} {sort_direction}
                 """
@@ -3812,6 +3876,8 @@ async def export_orders_to_email(
                     LEFT JOIN profile p ON o.customer_id = p.id
                     LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id AND pm.tenant_id = $1
                     LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id AND pmg.tenant_id = $1
+                    LEFT JOIN table_sessions ts_meta ON ts_meta.id = o.table_session_id
+                    LEFT JOIN tables t_meta ON t_meta.id = ts_meta.table_id
                     WHERE {where_clause}
                     ORDER BY {sort_column} {sort_direction}
                 """

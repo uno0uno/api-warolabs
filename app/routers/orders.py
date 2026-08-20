@@ -101,6 +101,9 @@ async def export_orders(
     sort_direction: str = Query("desc"),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    delivery_only: Optional[bool] = Query(None),
+    source: Optional[str] = Query(None, description="Origin: pos | mesa | barra | delivery"),
+    payment_status: Optional[str] = Query(None, description="Payment status: paid | credit | partial | unpaid"),
     # warocol.com#640 — tips-only export mode
     tips_only: bool = Query(False, description="When true, restrict to orders with tip_amount > 0 and emit tip-specific CSV columns."),
     member_id: Optional[str] = Query(None, description="Filter by served_by_member_id (tips-only flow)."),
@@ -117,6 +120,9 @@ async def export_orders(
         sort_direction=sort_direction,
         date_from=date_from,
         date_to=date_to,
+        delivery_only=delivery_only,
+        source=source,
+        payment_status=payment_status,
         tips_only=tips_only,
         member_id=member_id,
         channel=channel,
@@ -138,6 +144,8 @@ async def get_orders(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     delivery_only: Optional[bool] = Query(None, description="When true, narrow results to orders with delivery_address_id IS NOT NULL"),
+    source: Optional[str] = Query(None, description="Origin: pos | mesa | barra | delivery"),
+    payment_status: Optional[str] = Query(None, description="Payment status: paid | credit | partial | unpaid"),
 ):
     return await orders_service.get_orders_list(
         request,
@@ -153,6 +161,8 @@ async def get_orders(
         date_from=date_from,
         date_to=date_to,
         delivery_only=delivery_only,
+        source=source,
+        payment_status=payment_status,
     )
 
 
