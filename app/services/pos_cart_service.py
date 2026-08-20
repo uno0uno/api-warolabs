@@ -83,6 +83,38 @@ async def _order_payment_splits_for_gl(conn, order_id: UUID) -> List[Dict[str, A
     ]
 
 
+async def _release_table_session(conn, table_session_id, tenant_id) -> None:
+    if not table_session_id:
+        return
+    await conn.execute(
+        "UPDATE table_sessions SET closed_at = now() WHERE id = $1 AND closed_at IS NULL",
+        table_session_id,
+    )
+    await conn.execute(
+        """UPDATE tables SET status = 'free'
+           WHERE id = (SELECT table_id FROM table_sessions WHERE id = $1)
+             AND tenant_id = $2""",
+        table_session_id,
+        tenant_id,
+    )
+
+
+async def _reopen_table_session(conn, table_session_id, tenant_id) -> None:
+    if not table_session_id:
+        return
+    await conn.execute(
+        "UPDATE table_sessions SET closed_at = NULL WHERE id = $1",
+        table_session_id,
+    )
+    await conn.execute(
+        """UPDATE tables SET status = 'open'
+           WHERE id = (SELECT table_id FROM table_sessions WHERE id = $1)
+             AND tenant_id = $2""",
+        table_session_id,
+        tenant_id,
+    )
+
+
 def _distribute_discount(items: List[dict], discount_amount: float) -> List[dict]:
     """
     Distribute a discount proportionally across cart items based on each item's
@@ -1379,14 +1411,15 @@ async def get_cart_tax_preview(
 
 async def add_order_payment(
     request: Request,
-    cart_id: str,
-    amount: float,
-    payment_method: str,
+    cart_id: Optional[str] = None,
+    amount: float = 0,
+    payment_method: str = "",
     payment_method_id: Optional[str] = None,
     cash_received: Optional[float] = None,
     tip_amount: Optional[float] = None,
     tip_source: Optional[str] = None,
     tip_taxable: Optional[bool] = None,
+    order_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Add a partial payment to a POS cart's underlying order.
@@ -1419,48 +1452,65 @@ async def add_order_payment(
         paid_total = 0.0
         remaining = 0.0
         is_complete = False
+        lookup_order_id = order_id
+        lookup_by_order = bool(lookup_order_id)
         order_id = None
         award_customer_id = None
+        table_session_id = None
+
+        if not cart_id and not lookup_order_id:
+            raise APIError("cart_id or order_id is required", status_code=400)
 
         async with get_db_connection() as conn:
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             async with conn.transaction():
-                # 1. Lock cart row
-                cart_row = await conn.fetchrow(
-                    """
-                    SELECT id, tenant_id
-                    FROM pos_carts
-                    WHERE id = $1 AND tenant_id = $2
-                    FOR UPDATE
-                    """,
-                    cart_id, tenant_id
-                )
+                if lookup_by_order:
+                    order_row = await conn.fetchrow(
+                        """
+                        SELECT id, total_amount, tip_amount, tip_source, tip_taxable,
+                               tip_tax_amount, status, payment_status, customer_id,
+                               order_number, table_session_id
+                        FROM orders
+                        WHERE id = $1::uuid AND tenant_id = $2
+                        FOR UPDATE
+                        """,
+                        lookup_order_id, tenant_id
+                    )
+                    if not order_row:
+                        raise APIError("Orden no encontrada", status_code=404)
+                else:
+                    cart_row = await conn.fetchrow(
+                        """
+                        SELECT id, tenant_id
+                        FROM pos_carts
+                        WHERE id = $1 AND tenant_id = $2
+                        FOR UPDATE
+                        """,
+                        cart_id, tenant_id
+                    )
 
-                if not cart_row:
-                    raise APIError("Cart not found", status_code=404)
+                    if not cart_row:
+                        raise APIError("Cart not found", status_code=404)
 
-                # 2. Fetch + lock the order linked to this cart via pos_cart_id
-                order_row = await conn.fetchrow(
-                    """
-                    SELECT id, total_amount, tip_amount, tip_source, tip_taxable,
-                           tip_tax_amount, status, payment_status, customer_id,
-                           order_number
-                    FROM orders
-                    WHERE pos_cart_id = $1 AND tenant_id = $2
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                    FOR UPDATE
-                    """,
-                    cart_id, tenant_id
-                )
+                    order_row = await conn.fetchrow(
+                        """
+                        SELECT id, total_amount, tip_amount, tip_source, tip_taxable,
+                               tip_tax_amount, status, payment_status, customer_id,
+                               order_number, table_session_id
+                        FROM orders
+                        WHERE pos_cart_id = $1 AND tenant_id = $2
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        FOR UPDATE
+                        """,
+                        cart_id, tenant_id
+                    )
 
-                if not order_row:
-                    raise APIError("No order found for this cart — complete the order first", status_code=400)
+                    if not order_row:
+                        raise APIError("No order found for this cart — complete the order first", status_code=400)
 
                 order_id = order_row["id"]
-
-                if not order_row:
-                    raise APIError("Order not found", status_code=404)
+                table_session_id = order_row["table_session_id"]
 
                 if order_row["status"] == "cancelled":
                     raise APIError("Cannot add payment to a cancelled order", status_code=409)
@@ -1684,6 +1734,9 @@ async def add_order_payment(
                             f"Deferred tip GL failed for POS order {order_id}: {_tip_gl_err}"
                         )
 
+                if is_complete and lookup_by_order:
+                    await _release_table_session(conn, table_session_id, tenant_id)
+
         # 6. Fire-and-forget side effects OUTSIDE transaction (only on completion)
         if is_complete and award_customer_id:
             try:
@@ -1728,10 +1781,11 @@ _PAYMENT_VOID_ROLES = {'admin', 'superuser'}
 
 async def void_order_payment(
     request: Request,
-    cart_id: str,
-    payment_id: str,
+    cart_id: Optional[str] = None,
+    payment_id: str = "",
     reason: Optional[str] = None,
     channel: Optional[str] = None,
+    order_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Issue warocol.com#649 — soft-delete a partial payment on a POS cart's order.
@@ -1764,7 +1818,8 @@ async def void_order_payment(
                            op.cash_received, op.created_by_user_id, op.voided_at,
                            op.payment_method_id,
                            o.pos_cart_id, o.total_amount, o.tip_amount, o.tip_tax_amount,
-                           o.payment_status, o.status AS order_status, o.customer_id
+                           o.payment_status, o.status AS order_status, o.customer_id,
+                           o.table_session_id
                     FROM order_payments op
                     JOIN orders o ON o.id = op.order_id
                     WHERE op.id = $1::uuid AND op.tenant_id = $2
@@ -1776,15 +1831,20 @@ async def void_order_payment(
                     raise APIError("Pago no encontrado", status_code=404)
                 if payment_row["voided_at"] is not None:
                     raise APIError("Este pago ya fue anulado", status_code=409)
-                # pos_cart_id is NULL on mesa orders — flag the wrong endpoint
-                # instead of returning the generic mismatch error.
-                if payment_row["pos_cart_id"] is None:
-                    raise APIError(
-                        "Este pago pertenece a una sesión de mesa — usa el endpoint /api/tables/{table_id}/payments/{payment_id}",
-                        status_code=400,
-                    )
-                if str(payment_row["pos_cart_id"]) != str(cart_id):
-                    raise APIError("El pago no pertenece a este carrito", status_code=400)
+                lookup_order_id = order_id
+                if lookup_order_id:
+                    if str(payment_row["order_id"]) != str(lookup_order_id):
+                        raise APIError("El pago no pertenece a esta orden", status_code=400)
+                else:
+                    # pos_cart_id is NULL on mesa orders — flag the wrong endpoint
+                    # instead of returning the generic mismatch error.
+                    if payment_row["pos_cart_id"] is None:
+                        raise APIError(
+                            "Este pago pertenece a una sesión de mesa — usa el endpoint /api/tables/{table_id}/payments/{payment_id}",
+                            status_code=400,
+                        )
+                    if str(payment_row["pos_cart_id"]) != str(cart_id):
+                        raise APIError("El pago no pertenece a este carrito", status_code=400)
 
                 order_id = payment_row["order_id"]
 
@@ -1858,10 +1918,15 @@ async def void_order_payment(
                     await sync_order_split_credit_status(
                         conn, order_id, settlement_complete=False,
                     )
-                    await conn.execute(
-                        "UPDATE pos_carts SET status = 'active', updated_at = NOW() WHERE id = $1",
-                        payment_row["pos_cart_id"],
-                    )
+                    if payment_row["pos_cart_id"] is not None:
+                        await conn.execute(
+                            "UPDATE pos_carts SET status = 'active', updated_at = NOW() WHERE id = $1",
+                            payment_row["pos_cart_id"],
+                        )
+                    if lookup_order_id:
+                        await _reopen_table_session(
+                            conn, payment_row["table_session_id"], tenant_id,
+                        )
                     # Reverse the posted GL entry — same transaction, atomic.
                     await void_order_journal_entry_in_txn(
                         conn, tenant_id, order_id, user_id, normalized_reason,
