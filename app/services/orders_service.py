@@ -28,6 +28,7 @@ from app.services.cierre_service import (
     _post_order_gl_entry,
     _void_order_gl_entries,
 )
+from app.services.tip_tax_service import compute_tip_tax_amount, normalize_tip_payload
 from app.services.account_role_service import (
     AccountRole,
     MissingAccountRoleError,
@@ -1439,6 +1440,9 @@ async def update_order_status(
     served_by_member_id: Optional[UUID] = None,
     discount_type: Optional[str] = None,
     discount_value: Optional[float] = None,
+    tip_amount: Optional[float] = None,
+    tip_source: Optional[str] = None,
+    tip_taxable: Optional[bool] = None,
 ) -> dict:
     """Update the status of an order (mesa orders only)."""
     allowed = {"completed", "cancelled", "pending", "preparing"}
@@ -1529,6 +1533,53 @@ async def update_order_status(
                 )
                 if discounted_total_value is not None:
                     amount_due = Decimal(str(discounted_total_value))
+
+            tip_amount_value = None
+            tip_source_value = None
+            tip_taxable_value = None
+            tip_tax_amount_value = None
+            if status == "completed":
+                try:
+                    normalized_tip_amount, normalized_tip_source, normalized_tip_taxable = (
+                        normalize_tip_payload(
+                            tip_amount or 0,
+                            tip_source or "none",
+                            bool(tip_taxable),
+                        )
+                    )
+                except ValueError as exc:
+                    raise APIError(
+                        str(exc),
+                        status_code=400,
+                        details={"code": "tip_invalid"},
+                    )
+                if normalized_tip_amount > 0:
+                    tip_enabled = await conn.fetchval(
+                        "SELECT tip_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                        tenant_id,
+                    )
+                    if not bool(tip_enabled):
+                        raise APIError(
+                            "Tipping is not enabled for this tenant",
+                            status_code=400,
+                            details={"code": "tip_disabled"},
+                        )
+                    tax_config_for_tip = await _get_tenant_tax_config(conn, tenant_id)
+                    tip_tax_amount_value = compute_tip_tax_amount(
+                        normalized_tip_amount,
+                        normalized_tip_taxable,
+                        tax_config_for_tip,
+                    )
+                else:
+                    tip_tax_amount_value = 0.0
+                tip_amount_value = normalized_tip_amount
+                tip_source_value = normalized_tip_source
+                tip_taxable_value = normalized_tip_taxable
+                amount_due = (
+                    amount_due
+                    + Decimal(str(tip_amount_value))
+                    + Decimal(str(tip_tax_amount_value or 0))
+                )
 
             if payment_method:
                 group_row = await conn.fetchrow(
@@ -1647,12 +1698,17 @@ async def update_order_status(
                        discount_type = CASE WHEN $10::text IS NULL THEN discount_type ELSE $10 END,
                        discount_value = CASE WHEN $10::text IS NULL THEN discount_value ELSE $11 END,
                        discount_amount = CASE WHEN $10::text IS NULL THEN discount_amount ELSE $12 END,
-                       total_amount = CASE WHEN $10::text IS NULL THEN total_amount ELSE $13 END
+                       total_amount = CASE WHEN $10::text IS NULL THEN total_amount ELSE $13 END,
+                       tip_amount = CASE WHEN $14::numeric IS NULL THEN tip_amount ELSE $14 END,
+                       tip_source = CASE WHEN $14::numeric IS NULL THEN tip_source ELSE $15 END,
+                       tip_taxable = CASE WHEN $14::numeric IS NULL THEN tip_taxable ELSE $16 END,
+                       tip_tax_amount = CASE WHEN $14::numeric IS NULL THEN tip_tax_amount ELSE $17 END
                    WHERE id = $3""",
                 status, payment_method, order_id, pmid, cid, payment_status_update,
                 cash_received_value, credit_due_value, served_by_value,
                 discount_type_value, discount_value_value, discount_amount_value,
                 discounted_total_value,
+                tip_amount_value, tip_source_value, tip_taxable_value, tip_tax_amount_value,
             )
 
             if status == "completed" and payment_method == "customer_wallet" and cid:

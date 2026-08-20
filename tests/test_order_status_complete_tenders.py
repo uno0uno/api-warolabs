@@ -550,3 +550,205 @@ async def test_complete_wallet_debits_discounted_total():
     apply_wallet.assert_awaited()
     assert apply_wallet.await_args.args[3] == Decimal("15000")
 
+
+def _completed_gl_row(order_id, *, total_amount, payment_method="card", tip_amount=0, tip_tax_amount=0):
+    return {
+        "id": order_id,
+        "order_number": 23631,
+        "total_amount": total_amount,
+        "payment_method": payment_method,
+        "payment_method_id": None,
+        "order_date": datetime(2026, 8, 19, 12, 0),
+        "tip_amount": tip_amount,
+        "tip_tax_amount": tip_tax_amount,
+    }
+
+
+@pytest.mark.asyncio
+async def test_complete_persists_tip_and_passes_it_to_gl():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    gl_mock = AsyncMock()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            _pending_row(order_id, total_amount=20000),
+            {"id": uuid4()},
+            _completed_gl_row(order_id, total_amount=20000, tip_amount=2000, tip_tax_amount=0),
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=True)
+    conn.execute = AsyncMock()
+
+    patches = list(_complete_patches(conn, tenant_id, user_id))
+    patches[7] = patch("app.services.orders_service._post_order_gl_entry", new=gl_mock)
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+         patches[6], patches[7], patches[8], patches[9], patches[10], patches[11]:
+        result = await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "card",
+            tip_amount=2000,
+            tip_source="custom",
+            tip_taxable=False,
+        )
+
+    assert result["success"] is True
+    update_args = conn.execute.await_args_list[0].args
+    assert update_args[14] == 2000.0
+    assert update_args[15] == "custom"
+    assert update_args[16] is False
+    assert update_args[17] == 0.0
+    assert gl_mock.await_args.kwargs["tip_amount"] == Decimal("2000")
+    assert gl_mock.await_args.kwargs["tip_tax_amount"] == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_complete_omitted_tip_stays_zero():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            _pending_row(order_id, total_amount=20000),
+            {"id": uuid4()},
+            _completed_gl_row(order_id, total_amount=20000),
+        ]
+    )
+    conn.execute = AsyncMock()
+
+    patches = _complete_patches(conn, tenant_id, user_id)
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+         patches[6], patches[7], patches[8], patches[9], patches[10], patches[11]:
+        await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "card",
+        )
+
+    update_args = conn.execute.await_args_list[0].args
+    assert update_args[14] == 0.0
+    assert update_args[15] == "none"
+    assert update_args[16] is False
+    assert update_args[17] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_complete_tip_rejected_when_tenant_disabled():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=_pending_row(order_id, total_amount=20000))
+    conn.fetchval = AsyncMock(return_value=False)
+    conn.execute = AsyncMock()
+
+    with patch("app.services.orders_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
+         patch("app.services.orders_service.get_db_connection", return_value=_AsyncContext(conn)), \
+         patch("app.services.orders_service.resolve_tenant_timezone", new=AsyncMock(return_value="America/Bogota")), \
+         patch("app.services.orders_service.assert_order_not_in_closed_monthly_period", new=AsyncMock()), \
+         patch("app.services.orders_service.assert_order_invoice_allows_mutation", new=AsyncMock()):
+        with pytest.raises(APIError) as exc:
+            await orders_service.update_order_status(
+                Request({"type": "http"}),
+                order_id,
+                "completed",
+                "card",
+                tip_amount=2000,
+                tip_source="preset",
+            )
+
+    assert exc.value.status_code == 400
+    assert exc.value.details.get("code") == "tip_disabled"
+    conn.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_complete_tip_invalid_source_is_400():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=_pending_row(order_id, total_amount=20000))
+    conn.execute = AsyncMock()
+
+    with patch("app.services.orders_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
+         patch("app.services.orders_service.get_db_connection", return_value=_AsyncContext(conn)), \
+         patch("app.services.orders_service.resolve_tenant_timezone", new=AsyncMock(return_value="America/Bogota")), \
+         patch("app.services.orders_service.assert_order_not_in_closed_monthly_period", new=AsyncMock()), \
+         patch("app.services.orders_service.assert_order_invoice_allows_mutation", new=AsyncMock()):
+        with pytest.raises(APIError) as exc:
+            await orders_service.update_order_status(
+                Request({"type": "http"}),
+                order_id,
+                "completed",
+                "card",
+                tip_amount=2000,
+                tip_source="none",
+            )
+
+    assert exc.value.status_code == 400
+    assert exc.value.details.get("code") == "tip_invalid"
+    conn.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_complete_cash_must_cover_product_plus_tip():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=_pending_row(order_id, total_amount=20000))
+    conn.fetchval = AsyncMock(return_value=True)
+    conn.execute = AsyncMock()
+
+    with patch("app.services.orders_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
+         patch("app.services.orders_service.get_db_connection", return_value=_AsyncContext(conn)), \
+         patch("app.services.orders_service.resolve_tenant_timezone", new=AsyncMock(return_value="America/Bogota")), \
+         patch("app.services.orders_service.assert_order_not_in_closed_monthly_period", new=AsyncMock()), \
+         patch("app.services.orders_service.assert_order_invoice_allows_mutation", new=AsyncMock()), \
+         patch("app.services.orders_service._get_tenant_tax_config", new=AsyncMock(return_value={"inc_enabled": True})):
+        with pytest.raises(APIError) as exc:
+            await orders_service.update_order_status(
+                Request({"type": "http"}),
+                order_id,
+                "completed",
+                "cash",
+                cash_received=20000,
+                tip_amount=2000,
+                tip_source="custom",
+            )
+
+    assert exc.value.details.get("code") == "cash_received_short"
+    conn.execute.assert_not_called()
+
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            _pending_row(order_id, total_amount=20000),
+            {"id": uuid4()},
+            _completed_gl_row(order_id, total_amount=20000, payment_method="cash", tip_amount=2000),
+        ]
+    )
+    patches = _complete_patches(conn, tenant_id, user_id)
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+         patches[6], patches[7], patches[8], patches[9], patches[10], patches[11]:
+        result = await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "cash",
+            cash_received=22000,
+            tip_amount=2000,
+            tip_source="custom",
+        )
+
+    assert result["success"] is True
+    update_args = conn.execute.await_args_list[0].args
+    assert update_args[7] == Decimal("22000")
+    assert update_args[14] == 2000.0
+
+
