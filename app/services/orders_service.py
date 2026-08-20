@@ -875,7 +875,7 @@ async def get_order_by_id(
                 """
                 SELECT id, amount, payment_method, payment_method_id, paid_at
                 FROM order_payments
-                WHERE order_id = $1
+                WHERE order_id = $1 AND voided_at IS NULL
                 ORDER BY paid_at ASC
                 """,
                 order_id
@@ -1427,6 +1427,155 @@ def _complete_manual_discount(
     return discount_type, float(discount_value), amount, new_total
 
 
+async def _payment_splits_for_gl(conn, order_id: UUID) -> List[Dict[str, Any]]:
+    rows = await conn.fetch(
+        """
+        SELECT amount, payment_method, payment_method_id
+        FROM order_payments
+        WHERE order_id = $1 AND voided_at IS NULL
+        ORDER BY paid_at ASC, id ASC
+        """,
+        order_id,
+    )
+    return [
+        {
+            "amount": Decimal(str(row["amount"])),
+            "payment_method": row["payment_method"],
+            "payment_method_id": row["payment_method_id"],
+        }
+        for row in rows
+    ]
+
+
+async def _insert_complete_tenders(
+    conn,
+    *,
+    order_id: UUID,
+    tenant_id: UUID,
+    user_id,
+    customer_id,
+    payments: List[dict],
+) -> None:
+    from app.services.customer_wallet_service import apply_wallet_for_order
+
+    for payment in payments:
+        method = payment["payment_method"]
+        amount = round(float(payment["amount"]), 2)
+        if amount <= 0:
+            raise APIError("Cada pago debe ser mayor a 0", status_code=400)
+        pmid = payment.get("payment_method_id")
+        cash = payment.get("cash_received")
+        if cash is not None and method != "cash":
+            raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
+        if method == "cash" and cash is not None and Decimal(str(cash)) < Decimal(str(amount)):
+            raise APIError(
+                f"Efectivo recibido ({cash}) debe ser mayor o igual al monto a cobrar ({amount})",
+                status_code=400,
+            )
+        if method == "customer_wallet" and not customer_id:
+            raise APIError(
+                "La billetera requiere un cliente identificado",
+                status_code=400,
+                details={"code": "customer_required"},
+            )
+        if method == "customer_wallet":
+            from app.services.customer_wallet_service import assert_wallet_customer_identified
+            await assert_wallet_customer_identified(conn, customer_id)
+        payment_row = await conn.fetchrow(
+            """
+            INSERT INTO order_payments
+                (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id, cash_received)
+            VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, $7)
+            RETURNING id
+            """,
+            order_id,
+            tenant_id,
+            amount,
+            method,
+            str(pmid) if pmid else None,
+            str(user_id) if user_id else None,
+            cash,
+        )
+        if method == "customer_wallet":
+            await apply_wallet_for_order(
+                conn,
+                customer_id,
+                tenant_id,
+                Decimal(str(amount)),
+                order_id,
+                user_id,
+                payment_row["id"],
+            )
+
+
+async def _apply_complete_waro_redemption(
+    conn,
+    *,
+    tenant_id,
+    customer_id,
+    order_id: UUID,
+    product_total: float,
+    discount_amount: float,
+    waros_to_redeem: Optional[int],
+    waro_reward_id: Optional[UUID],
+) -> float:
+    if not waros_to_redeem and not waro_reward_id:
+        return product_total
+    from fastapi import HTTPException as FastAPIHTTPException
+    from app.services.waros_service import (
+        apply_checkout_waro_redemption,
+        settle_waro_redemption,
+    )
+
+    item_rows = await conn.fetch(
+        """
+        SELECT id, product_id, quantity,
+               COALESCE(net_total, subtotal, 0) AS net_total,
+               COALESCE(subtotal, 0) AS subtotal
+        FROM order_items
+        WHERE order_id = $1
+        """,
+        order_id,
+    )
+    base_after_promos = product_total + float(discount_amount or 0)
+    checkout_eval = {
+        "subtotal": base_after_promos,
+        "subtotal_after_promos": base_after_promos,
+        "manual_discount_amount": float(discount_amount or 0),
+        "promo_savings": 0,
+        "total_amount": float(product_total),
+        "lines": [
+            {
+                "id": str(item["id"]),
+                "product_id": str(item["product_id"]),
+                "quantity": float(item["quantity"] or 1),
+                "subtotal": float(item["subtotal"] or 0),
+                "net_total": float(item["net_total"] or 0),
+            }
+            for item in item_rows
+        ],
+    }
+    try:
+        checkout_eval = await apply_checkout_waro_redemption(
+            conn,
+            tenant_id,
+            customer_id,
+            checkout_eval,
+            waros_to_redeem=waros_to_redeem,
+            waro_reward_id=waro_reward_id,
+        )
+    except FastAPIHTTPException as waro_exc:
+        raise APIError(str(waro_exc.detail), status_code=waro_exc.status_code)
+    preview = checkout_eval.pop("_waro_redemption_preview", None)
+    new_total = float(checkout_eval.get("total_amount") or product_total)
+    if preview and customer_id:
+        try:
+            await settle_waro_redemption(conn, tenant_id, customer_id, order_id, preview)
+        except FastAPIHTTPException as waro_exc:
+            raise APIError(str(waro_exc.detail), status_code=waro_exc.status_code)
+    return new_total
+
+
 async def update_order_status(
     request: Request,
     order_id: UUID,
@@ -1443,6 +1592,12 @@ async def update_order_status(
     tip_amount: Optional[float] = None,
     tip_source: Optional[str] = None,
     tip_taxable: Optional[bool] = None,
+    payments: Optional[List[dict]] = None,
+    split_mode: bool = False,
+    split_first_amount: float = 0.0,
+    split_first_cash_received: Optional[float] = None,
+    waros_to_redeem: Optional[int] = None,
+    waro_reward_id: Optional[UUID] = None,
 ) -> dict:
     """Update the status of an order (mesa orders only)."""
     allowed = {"completed", "cancelled", "pending", "preparing"}
@@ -1519,6 +1674,11 @@ async def update_order_status(
             discount_amount_value = None
             discounted_total_value = None
             amount_due = Decimal(str(row["total_amount"] or 0))
+            split_payments = [p for p in (payments or []) if p]
+            using_sequential_split = bool(split_mode) and not split_payments
+            using_one_shot_split = len(split_payments) > 0
+            using_split = using_one_shot_split or using_sequential_split
+            settlement_complete = True
             if status == "completed":
                 (
                     discount_type_value,
@@ -1531,8 +1691,27 @@ async def update_order_status(
                     discount_type=discount_type,
                     discount_value=discount_value,
                 )
-                if discounted_total_value is not None:
-                    amount_due = Decimal(str(discounted_total_value))
+                product_total = (
+                    float(discounted_total_value)
+                    if discounted_total_value is not None
+                    else float(row["total_amount"] or 0)
+                )
+                waro_discount_amount = float(discount_amount_value or 0)
+                if discount_amount_value is None:
+                    waro_discount_amount = _row_numeric(row, "discount_amount")
+                if waros_to_redeem or waro_reward_id:
+                    product_total = await _apply_complete_waro_redemption(
+                        conn,
+                        tenant_id=tenant_id,
+                        customer_id=cid,
+                        order_id=order_id,
+                        product_total=product_total,
+                        discount_amount=waro_discount_amount,
+                        waros_to_redeem=waros_to_redeem,
+                        waro_reward_id=waro_reward_id,
+                    )
+                    discounted_total_value = product_total
+                amount_due = Decimal(str(product_total))
 
             tip_amount_value = None
             tip_source_value = None
@@ -1648,7 +1827,7 @@ async def update_order_status(
                 if status == "completed" and cash_received is not None and payment_method != "cash":
                     raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
 
-                if status == "completed" and payment_method == "cash":
+                if status == "completed" and payment_method == "cash" and not using_split:
                     if cash_received is None:
                         raise APIError(
                             "Indica el efectivo recibido",
@@ -1663,6 +1842,47 @@ async def update_order_status(
                             details={"code": "cash_received_short"},
                         )
 
+            if status == "completed" and using_one_shot_split:
+                paid_total = round(sum(float(p["amount"]) for p in split_payments), 2)
+                if abs(paid_total - float(amount_due)) > 0.01:
+                    raise APIError(
+                        f"Los pagos divididos ({paid_total}) deben sumar el total ({amount_due})",
+                        status_code=400,
+                        details={"code": "split_sum_mismatch"},
+                    )
+                if any(p.get("payment_method") == "wompi" for p in split_payments) or payment_method == "wompi":
+                    raise APIError("Wompi no admite cobro dividido", status_code=400)
+
+            if status == "completed" and using_sequential_split:
+                if split_first_amount <= 0:
+                    raise APIError(
+                        "Indica el monto del primer pago",
+                        status_code=400,
+                        details={"code": "split_first_amount_required"},
+                    )
+                if split_first_amount - float(amount_due) > 0.01:
+                    raise APIError(
+                        f"El pago excede el saldo pendiente ({amount_due})",
+                        status_code=400,
+                        details={"code": "split_exceeds_due"},
+                    )
+                if payment_method == "cash":
+                    first_cash = split_first_cash_received if split_first_cash_received is not None else cash_received
+                    if first_cash is None:
+                        raise APIError(
+                            "Indica el efectivo recibido",
+                            status_code=400,
+                            details={"code": "cash_received_required"},
+                        )
+                    if Decimal(str(first_cash)) < Decimal(str(split_first_amount)):
+                        raise APIError(
+                            f"Efectivo recibido ({first_cash}) debe ser mayor o igual al monto ({split_first_amount})",
+                            status_code=400,
+                            details={"code": "cash_received_short"},
+                        )
+                    split_first_cash_received = first_cash
+                settlement_complete = (float(amount_due) - split_first_amount) <= 0.01
+
             if status == "completed" and served_by_member_id is not None:
                 member_check = await conn.fetchval(
                     """
@@ -1676,14 +1896,22 @@ async def update_order_status(
                     raise APIError("Member not found", status_code=404)
 
             cash_received_value = None
-            if status == "completed" and payment_method == "cash" and cash_received is not None:
+            if (
+                status == "completed"
+                and payment_method == "cash"
+                and cash_received is not None
+                and not using_split
+            ):
                 cash_received_value = Decimal(str(cash_received))
             credit_due_value = credit_due_date if status == "completed" and payment_method == "credit" else None
             served_by_value = served_by_member_id if status == "completed" else None
 
             payment_status_update = None
             if status == "completed" and payment_method:
-                payment_status_update = "credit" if payment_method == "credit" else "paid"
+                if using_sequential_split and not settlement_complete:
+                    payment_status_update = "partial"
+                else:
+                    payment_status_update = "credit" if payment_method == "credit" else "paid"
 
             await conn.execute(
                 """UPDATE orders
@@ -1698,7 +1926,7 @@ async def update_order_status(
                        discount_type = CASE WHEN $10::text IS NULL THEN discount_type ELSE $10 END,
                        discount_value = CASE WHEN $10::text IS NULL THEN discount_value ELSE $11 END,
                        discount_amount = CASE WHEN $10::text IS NULL THEN discount_amount ELSE $12 END,
-                       total_amount = CASE WHEN $10::text IS NULL THEN total_amount ELSE $13 END,
+                       total_amount = CASE WHEN $13::numeric IS NULL THEN total_amount ELSE $13 END,
                        tip_amount = CASE WHEN $14::numeric IS NULL THEN tip_amount ELSE $14 END,
                        tip_source = CASE WHEN $14::numeric IS NULL THEN tip_source ELSE $15 END,
                        tip_taxable = CASE WHEN $14::numeric IS NULL THEN tip_taxable ELSE $16 END,
@@ -1711,7 +1939,12 @@ async def update_order_status(
                 tip_amount_value, tip_source_value, tip_taxable_value, tip_tax_amount_value,
             )
 
-            if status == "completed" and payment_method == "customer_wallet" and cid:
+            if (
+                status == "completed"
+                and payment_method == "customer_wallet"
+                and cid
+                and not using_split
+            ):
                 from app.services.customer_wallet_service import apply_wallet_for_order
 
                 if old_status != "completed":
@@ -1725,6 +1958,50 @@ async def update_order_status(
                             order_id,
                             user_id,
                         )
+
+            if status == "completed" and using_one_shot_split:
+                await _insert_complete_tenders(
+                    conn,
+                    order_id=order_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    customer_id=cid,
+                    payments=split_payments,
+                )
+                from app.services.credit_service import sync_order_split_credit_status
+                payment_status_update = await sync_order_split_credit_status(
+                    conn, order_id, settlement_complete=True,
+                )
+                await conn.execute(
+                    "UPDATE orders SET payment_status = $2 WHERE id = $1",
+                    order_id,
+                    payment_status_update,
+                )
+
+            if status == "completed" and using_sequential_split:
+                await _insert_complete_tenders(
+                    conn,
+                    order_id=order_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    customer_id=cid,
+                    payments=[{
+                        "amount": split_first_amount,
+                        "payment_method": payment_method,
+                        "payment_method_id": str(pmid) if pmid else None,
+                        "cash_received": split_first_cash_received,
+                    }],
+                )
+                if settlement_complete:
+                    from app.services.credit_service import sync_order_split_credit_status
+                    payment_status_update = await sync_order_split_credit_status(
+                        conn, order_id, settlement_complete=True,
+                    )
+                    await conn.execute(
+                        "UPDATE orders SET payment_status = $2 WHERE id = $1",
+                        order_id,
+                        payment_status_update,
+                    )
 
             # If cancelling a credit order, clear payment_status so it leaves cartera
             if status == 'cancelled' and row['payment_status'] in ('credit', 'partial'):
@@ -1745,47 +2022,54 @@ async def update_order_status(
                     )
                     if not inventory_already_consumed:
                         await _deduct_stock_for_status_update(conn, order_id, tenant_id, user_id, order_number)
-                    try:
-                        completed_order = await conn.fetchrow(
-                            """
-                            SELECT id, order_number, total_amount, payment_method,
-                                   payment_method_id, order_date, tip_amount, tip_tax_amount
-                            FROM orders
-                            WHERE id = $1 AND tenant_id = $2 AND status = 'completed'
-                            """,
-                            order_id,
-                            tenant_id,
-                        )
-                        if completed_order:
-                            if cid:
-                                waros_award_order_id = completed_order["id"]
-                                waros_award_customer_id = cid
-                            gl_order_date = local_date_for_tenant(completed_order["order_date"], timezone_name)
-                            tax_config = await _get_tenant_tax_config(conn, tenant_id)
-                            await _post_order_gl_entry(
-                                conn=conn,
-                                tenant_id=tenant_id,
-                                order_id=completed_order["id"],
-                                order_date=gl_order_date,
-                                total_amount=Decimal(str(completed_order["total_amount"])),
-                                payment_method=completed_order["payment_method"] or payment_method,
-                                payment_method_id=completed_order["payment_method_id"],
-                                tax_config=tax_config,
-                                order_number=int(completed_order["order_number"]),
-                                tip_amount=Decimal(str(completed_order["tip_amount"] or 0)),
-                                tip_tax_amount=Decimal(str(completed_order["tip_tax_amount"] or 0)),
+                    if settlement_complete:
+                        try:
+                            completed_order = await conn.fetchrow(
+                                """
+                                SELECT id, order_number, total_amount, payment_method,
+                                       payment_method_id, order_date, tip_amount, tip_tax_amount
+                                FROM orders
+                                WHERE id = $1 AND tenant_id = $2 AND status = 'completed'
+                                """,
+                                order_id,
+                                tenant_id,
                             )
-                            await _post_order_cogs_gl_entry(
-                                conn=conn,
-                                tenant_id=tenant_id,
-                                order_id=completed_order["id"],
-                                order_date=gl_order_date,
-                                order_number=int(completed_order["order_number"]),
-                            )
-                    except MissingAccountRoleError:
-                        raise
-                    except Exception as gl_exc:
-                        logger.error(f"GL entries failed for order status update: {gl_exc}")
+                            if completed_order:
+                                if cid:
+                                    waros_award_order_id = completed_order["id"]
+                                    waros_award_customer_id = cid
+                                gl_order_date = local_date_for_tenant(completed_order["order_date"], timezone_name)
+                                tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                                gl_splits = (
+                                    await _payment_splits_for_gl(conn, order_id)
+                                    if using_split
+                                    else None
+                                )
+                                await _post_order_gl_entry(
+                                    conn=conn,
+                                    tenant_id=tenant_id,
+                                    order_id=completed_order["id"],
+                                    order_date=gl_order_date,
+                                    total_amount=Decimal(str(completed_order["total_amount"])),
+                                    payment_method=completed_order["payment_method"] or payment_method,
+                                    payment_method_id=completed_order["payment_method_id"],
+                                    tax_config=tax_config,
+                                    order_number=int(completed_order["order_number"]),
+                                    tip_amount=Decimal(str(completed_order["tip_amount"] or 0)),
+                                    tip_tax_amount=Decimal(str(completed_order["tip_tax_amount"] or 0)),
+                                    payment_splits=gl_splits,
+                                )
+                                await _post_order_cogs_gl_entry(
+                                    conn=conn,
+                                    tenant_id=tenant_id,
+                                    order_id=completed_order["id"],
+                                    order_date=gl_order_date,
+                                    order_number=int(completed_order["order_number"]),
+                                )
+                        except MissingAccountRoleError:
+                            raise
+                        except Exception as gl_exc:
+                            logger.error(f"GL entries failed for order status update: {gl_exc}")
                 elif old_status == 'completed' and status in ('cancelled', 'pending'):
                     if status == 'cancelled':
                         await restore_wallet_for_cancelled_order(
@@ -1818,16 +2102,17 @@ async def update_order_status(
 
             # Release the table session if this is a mesa order being closed
             if status in ("completed", "cancelled") and row['table_session_id']:
-                await conn.execute(
-                    "UPDATE table_sessions SET closed_at = now() WHERE id = $1 AND closed_at IS NULL",
-                    row['table_session_id']
-                )
-                await conn.execute(
-                    """UPDATE tables SET status = 'free'
-                       WHERE id = (SELECT table_id FROM table_sessions WHERE id = $1)
-                         AND tenant_id = $2""",
-                    row['table_session_id'], tenant_id
-                )
+                if status == "cancelled" or settlement_complete:
+                    await conn.execute(
+                        "UPDATE table_sessions SET closed_at = now() WHERE id = $1 AND closed_at IS NULL",
+                        row['table_session_id']
+                    )
+                    await conn.execute(
+                        """UPDATE tables SET status = 'free'
+                           WHERE id = (SELECT table_id FROM table_sessions WHERE id = $1)
+                             AND tenant_id = $2""",
+                        row['table_session_id'], tenant_id
+                    )
 
             # Auto-fire hook for manual orders transitioning to 'preparing'
             if status == "preparing":

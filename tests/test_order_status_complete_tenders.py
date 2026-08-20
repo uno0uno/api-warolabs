@@ -27,12 +27,12 @@ def _session(tenant_id, user_id):
     return SimpleNamespace(tenant_id=tenant_id, user_id=user_id)
 
 
-def _pending_row(order_id, *, customer_id=None, total_amount=20000):
+def _pending_row(order_id, *, customer_id=None, total_amount=20000, table_session_id=None):
     return {
         "id": order_id,
         "status": "pending",
         "order_number": 23631,
-        "table_session_id": None,
+        "table_session_id": table_session_id,
         "pos_cart_id": uuid4(),
         "payment_status": None,
         "order_date": datetime(2026, 8, 19, 12, 0),
@@ -750,5 +750,266 @@ async def test_complete_cash_must_cover_product_plus_tip():
     update_args = conn.execute.await_args_list[0].args
     assert update_args[7] == Decimal("22000")
     assert update_args[14] == 2000.0
+
+
+@pytest.mark.asyncio
+async def test_complete_one_shot_payments_must_equal_due():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=_pending_row(order_id, total_amount=20000))
+    conn.execute = AsyncMock()
+
+    with patch("app.services.orders_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
+         patch("app.services.orders_service.get_db_connection", return_value=_AsyncContext(conn)), \
+         patch("app.services.orders_service.resolve_tenant_timezone", new=AsyncMock(return_value="America/Bogota")), \
+         patch("app.services.orders_service.assert_order_not_in_closed_monthly_period", new=AsyncMock()), \
+         patch("app.services.orders_service.assert_order_invoice_allows_mutation", new=AsyncMock()):
+        with pytest.raises(APIError) as exc:
+            await orders_service.update_order_status(
+                Request({"type": "http"}),
+                order_id,
+                "completed",
+                "cash",
+                payments=[
+                    {"amount": 5000, "payment_method": "cash", "cash_received": 5000},
+                    {"amount": 5000, "payment_method": "card"},
+                ],
+            )
+
+    assert exc.value.status_code == 400
+    assert exc.value.details.get("code") == "split_sum_mismatch"
+    conn.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_complete_one_shot_payments_inserts_tenders():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    payment_a = uuid4()
+    payment_b = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            _pending_row(order_id, total_amount=20000),
+            {"id": uuid4()},
+            {"id": payment_a},
+            {"id": payment_b},
+            _completed_gl_row(order_id, total_amount=20000),
+        ]
+    )
+    conn.fetch = AsyncMock(return_value=[
+        {"amount": 8000, "payment_method": "cash", "payment_method_id": None},
+        {"amount": 12000, "payment_method": "card", "payment_method_id": None},
+    ])
+    conn.execute = AsyncMock()
+
+    patches = list(_complete_patches(conn, tenant_id, user_id))
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+         patches[6], patches[7], patches[8], patches[9], patches[10], patches[11], \
+         patch("app.services.credit_service.sync_order_split_credit_status", new=AsyncMock(return_value="paid")):
+        result = await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "cash",
+            payments=[
+                {"amount": 8000, "payment_method": "cash", "cash_received": 8000},
+                {"amount": 12000, "payment_method": "card"},
+            ],
+        )
+
+    assert result["success"] is True
+    inserted_amounts = [
+        call.args[3]
+        for call in conn.fetchrow.await_args_list
+        if call.args and call.args[0].strip().startswith("INSERT INTO order_payments")
+    ]
+    assert inserted_amounts == [8000.0, 12000.0]
+
+
+@pytest.mark.asyncio
+async def test_complete_sequential_split_keeps_session_open():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    session_id = uuid4()
+    gl_mock = AsyncMock()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            _pending_row(order_id, total_amount=20000, table_session_id=session_id),
+            {"id": uuid4()},
+            {"id": uuid4()},
+        ]
+    )
+    conn.execute = AsyncMock()
+
+    patches = list(_complete_patches(conn, tenant_id, user_id))
+    patches[7] = patch("app.services.orders_service._post_order_gl_entry", new=gl_mock)
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+         patches[6], patches[7], patches[8], patches[9], patches[10], patches[11]:
+        result = await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "card",
+            split_mode=True,
+            split_first_amount=5000,
+        )
+
+    assert result["success"] is True
+    gl_mock.assert_not_awaited()
+    update_args = conn.execute.await_args_list[0].args
+    assert update_args[6] == "partial"
+    session_sql = [
+        call.args[0]
+        for call in conn.execute.await_args_list
+        if "table_sessions" in call.args[0]
+    ]
+    assert session_sql == []
+
+
+@pytest.mark.asyncio
+async def test_complete_guest_waro_redeem_is_422():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=_pending_row(order_id, total_amount=20000))
+    conn.fetch = AsyncMock(return_value=[])
+    conn.execute = AsyncMock()
+
+    with patch("app.services.orders_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
+         patch("app.services.orders_service.get_db_connection", return_value=_AsyncContext(conn)), \
+         patch("app.services.orders_service.resolve_tenant_timezone", new=AsyncMock(return_value="America/Bogota")), \
+         patch("app.services.orders_service.assert_order_not_in_closed_monthly_period", new=AsyncMock()), \
+         patch("app.services.orders_service.assert_order_invoice_allows_mutation", new=AsyncMock()):
+        with pytest.raises(APIError) as exc:
+            await orders_service.update_order_status(
+                Request({"type": "http"}),
+                order_id,
+                "completed",
+                "card",
+                waros_to_redeem=10,
+            )
+
+    assert exc.value.status_code == 422
+    conn.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_complete_applies_waro_reward_after_discount():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    customer_id = uuid4()
+    reward_id = uuid4()
+    settle = AsyncMock()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            _pending_row(order_id, customer_id=customer_id, total_amount=20000),
+            {"id": uuid4()},
+            _completed_gl_row(order_id, total_amount=13000),
+        ]
+    )
+    conn.fetch = AsyncMock(return_value=[])
+    conn.execute = AsyncMock()
+
+    async def _apply(*args, **kwargs):
+        return {
+            "total_amount": 13000,
+            "_waro_redemption_preview": {
+                "total_waros_cost": 20,
+                "total_waro_discount_cop": 5000,
+                "waro_reward_id": str(reward_id),
+            },
+        }
+
+    patches = list(_complete_patches(conn, tenant_id, user_id))
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+         patches[6], patches[7], patches[8], patches[9], patches[10], patches[11], \
+         patch("app.services.waros_service.apply_checkout_waro_redemption", new=_apply), \
+         patch("app.services.waros_service.settle_waro_redemption", new=settle):
+        result = await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "card",
+            customer_id=str(customer_id),
+            discount_type="percent",
+            discount_value=10,
+            waro_reward_id=reward_id,
+        )
+
+    assert result["success"] is True
+    settle.assert_awaited()
+    update_args = conn.execute.await_args_list[0].args
+    assert update_args[13] == 13000
+
+
+@pytest.mark.asyncio
+async def test_void_tender_by_order_id_allows_mesa_row():
+    from app.services import pos_cart_service
+
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    payment_id = uuid4()
+    session_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": payment_id,
+                "order_id": order_id,
+                "amount": 5000,
+                "payment_method": "card",
+                "cash_received": None,
+                "created_by_user_id": user_id,
+                "voided_at": None,
+                "payment_method_id": None,
+                "pos_cart_id": None,
+                "total_amount": 20000,
+                "tip_amount": 0,
+                "tip_tax_amount": 0,
+                "payment_status": "partial",
+                "order_status": "completed",
+                "customer_id": None,
+                "table_session_id": session_id,
+            },
+            {"paid": 5000},
+            {"paid": 0},
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=0)
+    conn.execute = AsyncMock()
+    conn.transaction = MagicMock(return_value=_AsyncContext())
+
+    with patch("app.services.pos_cart_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
+         patch("app.services.pos_cart_service.get_db_connection", return_value=_AsyncContext(conn)), \
+         patch("app.services.pos_cart_service.resolve_tenant_timezone", new=AsyncMock(return_value="America/Bogota")), \
+         patch("app.services.pos_cart_service._get_tenant_tax_config", new=AsyncMock(return_value={})), \
+         patch("app.services.pos_cart_service._additive_tax_for_order", new=AsyncMock(return_value=0)), \
+         patch("app.services.pos_cart_service.record_operation_event", new=AsyncMock()), \
+         patch("app.services.credit_service.sync_order_split_credit_status", new=AsyncMock(return_value="partial")):
+        result = await pos_cart_service.void_order_payment(
+            Request({"type": "http"}),
+            payment_id=str(payment_id),
+            reason="test",
+            order_id=str(order_id),
+        )
+
+    assert result["success"] is True
+    assert result["data"]["remaining"] == 20000
+    void_sql = [
+        call.args[0]
+        for call in conn.execute.await_args_list
+        if "voided_at" in call.args[0]
+    ]
+    assert void_sql
 
 

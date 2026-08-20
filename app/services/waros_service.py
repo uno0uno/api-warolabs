@@ -825,8 +825,9 @@ async def apply_checkout_waro_redemption(
         waros_to_redeem=waros_to_redeem,
         waro_reward_id=waro_reward_id,
     )
-    checkout_eval["_waro_redemption_preview"] = preview
-    return preview["checkout_eval"]
+    evaluated = preview["checkout_eval"]
+    evaluated["_waro_redemption_preview"] = preview
+    return evaluated
 
 
 async def preview_redemption(

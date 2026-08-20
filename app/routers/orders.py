@@ -10,7 +10,7 @@ from pydantic import BaseModel, EmailStr, Field
 from app.core.dependencies import require_invoicing_ready
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
-from app.services import orders_service, facturacion_service, invoice_email_tracking_service
+from app.services import orders_service, facturacion_service, invoice_email_tracking_service, pos_cart_service
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
@@ -377,6 +377,12 @@ class UpdateOrderStatusRequest(BaseModel):
     tip_amount: Optional[float] = Field(None, ge=0, description="Tip in COP when completing a pending sale")
     tip_source: Optional[str] = Field(None, description="'preset' | 'custom' | 'none'")
     tip_taxable: Optional[bool] = Field(None, description="Apply consumption tax to tip when true")
+    payments: Optional[List[ManualOrderPayment]] = Field(None, description="One-shot split tenders; sum must equal amount due")
+    split_mode: bool = Field(False, description="Sequential split: first tender only, payment_status=partial")
+    split_first_amount: float = Field(0.0, ge=0, description="First sequential tender amount when split_mode=True")
+    split_first_cash_received: Optional[float] = Field(None, ge=0, description="Cash handed over for the first sequential tender")
+    waros_to_redeem: Optional[int] = Field(None, ge=0, description="B1 WaRos to redeem after manual discount")
+    waro_reward_id: Optional[UUID] = Field(None, description="B2 reward catalog UUID")
 
 
 class AssociateOrderCustomerRequest(BaseModel):
@@ -432,6 +438,56 @@ async def update_order_status(
         tip_amount=body.tip_amount,
         tip_source=body.tip_source,
         tip_taxable=body.tip_taxable,
+        payments=[payment.model_dump() for payment in body.payments] if body.payments else None,
+        split_mode=body.split_mode,
+        split_first_amount=body.split_first_amount,
+        split_first_cash_received=body.split_first_cash_received,
+        waros_to_redeem=body.waros_to_redeem,
+        waro_reward_id=body.waro_reward_id,
+    )
+
+
+class AddOrderTenderRequest(BaseModel):
+    amount: float = Field(..., gt=0, description="Amount for this sequential tender")
+    payment_method: str = Field(..., description="cash | card | digital | credit | customer_wallet")
+    payment_method_id: Optional[str] = Field(None, description="UUID of the selected payment_methods row")
+    cash_received: Optional[float] = Field(None, ge=0, description="Cash handed over when payment_method is cash")
+
+
+class VoidOrderTenderRequest(BaseModel):
+    reason: Optional[str] = Field(None, description="Optional void reason for audit")
+
+
+@router.post("/{order_id}/tenders", dependencies=[Depends(require_module(Module.VENTAS))])
+async def add_order_tender(
+    request: Request,
+    order_id: UUID,
+    body: AddOrderTenderRequest,
+):
+    """Add a sequential tender to a partially paid completed sale (mostrador or mesa)."""
+    return await pos_cart_service.add_order_payment(
+        request=request,
+        amount=body.amount,
+        payment_method=body.payment_method,
+        payment_method_id=body.payment_method_id,
+        cash_received=body.cash_received,
+        order_id=str(order_id),
+    )
+
+
+@router.delete("/{order_id}/tenders/{payment_id}", dependencies=[Depends(require_module(Module.VENTAS))])
+async def void_order_tender(
+    request: Request,
+    order_id: UUID,
+    payment_id: UUID,
+    body: VoidOrderTenderRequest = VoidOrderTenderRequest(),
+):
+    """Void one sequential tender and realign remaining (mirror POS void)."""
+    return await pos_cart_service.void_order_payment(
+        request=request,
+        payment_id=str(payment_id),
+        reason=body.reason,
+        order_id=str(order_id),
     )
 
 
