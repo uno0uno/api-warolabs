@@ -46,6 +46,27 @@ def test_sql_is_additive_create_only():
     assert "DROP COLUMN" not in sql.upper()
 
 
+def test_rename_migration_is_additive_and_provider_agnostic():
+    """#894 — provider-agnostic rename + payload columns."""
+    from pathlib import Path
+    sql = Path("sql/20260820_payment_provider_rename_and_payload.sql").read_text()
+    assert "RENAME TO tenant_payment_providers" in sql
+    assert "RENAME TO tenant_collection_sessions" in sql
+    assert "ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'wompi'" in sql
+    assert "ADD COLUMN IF NOT EXISTS provider_payload JSONB" in sql
+    assert "ADD COLUMN IF NOT EXISTS provider_payment_method_type TEXT" in sql
+    assert "ADD COLUMN IF NOT EXISTS customer_email TEXT" in sql
+    assert "ADD COLUMN IF NOT EXISTS currency TEXT" in sql
+    assert "ADD COLUMN IF NOT EXISTS environment TEXT" in sql
+    # backfill safety net
+    assert "provider = 'wompi'" in sql
+    # the migration is additive: no DROP, no TRUNCATE
+    upper = sql.upper()
+    assert "DROP TABLE" not in upper
+    assert "DROP COLUMN" not in upper
+    assert "TRUNCATE" not in upper
+
+
 def test_pending_session_unique_index_is_additive():
     sql = PENDING_SQL.read_text()
     assert "CREATE UNIQUE INDEX IF NOT EXISTS tenant_wompi_collection_sessions_pending_order_uidx" in sql
@@ -327,20 +348,63 @@ async def test_idempotent_apply_get_then_webhook(tenant_id):
 
 @pytest.mark.asyncio
 async def test_public_session_returns_only_checkout_url_and_status():
+    """#894 — public /gracias lookup now exposes provider + payload fields, no secrets."""
+    session_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "checkout_url": "https://checkout.wompi.co/l/abc",
+            "status": "approved",
+            "provider": "wompi",
+            "provider_payment_method_type": "CARD",
+            "customer_email": "diner@example.com",
+            "currency": "COP",
+            "environment": "test",
+            "provider_payload": {"id": "tx-1", "status": "APPROVED", "amount_in_cents": 5100000},
+        }
+    )
+    with patch.object(svc, "get_db_connection", return_value=_AsyncContext(conn)):
+        result = await svc.public_collection_session(session_id)
+    data = result["data"]
+    assert data["checkoutUrl"] == "https://checkout.wompi.co/l/abc"
+    assert data["status"] == "approved"
+    assert data["provider"] == "wompi"
+    assert data["providerPaymentMethodType"] == "CARD"
+    assert data["customerEmail"] == "diner@example.com"
+    assert data["currency"] == "COP"
+    assert data["environment"] == "test"
+    assert data["providerPayload"]["id"] == "tx-1"
+    # no secret-like keys in the public response
+    flat = str(data).lower()
+    assert "private_key" not in flat
+    assert "ciphertext" not in flat
+    assert "events_secret" not in flat
+    assert "integrity_secret" not in flat
+
+
+@pytest.mark.asyncio
+async def test_public_session_returns_minimal_when_columns_null():
+    """#894 — backfill-safe: rows from before the migration have null new columns; no error."""
     session_id = uuid4()
     conn = MagicMock()
     conn.fetchrow = AsyncMock(
         return_value={
             "checkout_url": "https://checkout.wompi.co/l/abc",
             "status": "pending",
+            "provider": "wompi",
+            "provider_payment_method_type": None,
+            "customer_email": None,
+            "currency": None,
+            "environment": None,
+            "provider_payload": None,
         }
     )
     with patch.object(svc, "get_db_connection", return_value=_AsyncContext(conn)):
         result = await svc.public_collection_session(session_id)
-    assert set(result["data"].keys()) == {"checkoutUrl", "status"}
-    assert result["data"]["checkoutUrl"] == "https://checkout.wompi.co/l/abc"
-    assert "key" not in str(result["data"]).lower()
-    assert "secret" not in str(result).lower()
+    data = result["data"]
+    assert data["provider"] == "wompi"
+    assert data["providerPaymentMethodType"] is None
+    assert data["providerPayload"] is None
 
 
 @pytest.mark.asyncio
@@ -568,3 +632,194 @@ async def test_verify_looks_up_transaction_by_reference(tenant_id):
     lookup.assert_awaited_once()
     assert result["data"]["applied"] is False
     assert result["data"]["status"] == "pending"
+
+
+# --- #894 provider payload persistence ------------------------------------
+
+@pytest.mark.asyncio
+async def test_apply_from_transaction_persists_payload_for_approved(tenant_id):
+    """#894 — APPROVED transaction: provider_payload + provider_payment_method_type +
+    customer_email + currency + environment must be persisted on the session row.
+    """
+    session_id = uuid4()
+    order_id = uuid4()
+    method_id = uuid4()
+    payment_id = uuid4()
+    session_row = {
+        "id": session_id,
+        "order_id": order_id,
+        "amount": Decimal("51000"),
+        "status": "pending",
+        "order_payment_id": None,
+    }
+    transaction = {
+        "id": "tx-1894-A",
+        "status": "APPROVED",
+        "amount_in_cents": 5100000,
+        "payment_method_type": "CARD",
+        "customer_email": "diner@example.com",
+        "currency": "COP",
+        "environment": "test",
+        "status_message": "Transacción aprobada",
+    }
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "tenant_id": tenant_id,
+                "payment_method_id": method_id,
+                "is_active": True,
+                "private_key_ciphertext": "x",
+                "events_secret_ciphertext": "y",
+                "environment": "test",
+            },
+            {"id": payment_id},
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=None)
+    conn.execute = AsyncMock()
+
+    with patch.object(svc, "_post_approved_collection_gl", new=AsyncMock()):
+        result = await svc.apply_from_transaction(
+            conn,
+            tenant_id=tenant_id,
+            session_row=session_row,
+            transaction=transaction,
+        )
+
+    assert result["applied"] is True
+    # Find the UPDATE that wrote the session to approved (the last execute on the session)
+    final_session_update = None
+    for call in conn.execute.await_args_list:
+        sql = call.args[0] if call.args else ""
+        if "UPDATE tenant_collection_sessions" in sql and "status = 'approved'" in sql:
+            final_session_update = call
+            break
+    assert final_session_update is not None, "expected final approved UPDATE on tenant_collection_sessions"
+    # positional args after the SQL: (session_id, provider_tx_id, payment_id, payload_json, pm_type, email, currency, env)
+    args = final_session_update.args[1:]
+    assert args[0] == session_id
+    assert args[1] == "tx-1894-A"
+    assert args[2] == payment_id
+    payload = args[3]
+    assert isinstance(payload, dict)
+    assert payload["id"] == "tx-1894-A"
+    assert payload["status"] == "APPROVED"
+    assert args[4] == "CARD"
+    assert args[5] == "diner@example.com"
+    assert args[6] == "COP"
+    assert args[7] == "test"
+
+
+@pytest.mark.asyncio
+async def test_apply_from_transaction_persists_payload_for_declined(tenant_id):
+    """#894 — DECLINED transaction: status + provider_tx_id + payload + provider fields
+    must be persisted, but the order is not marked paid.
+    """
+    session_id = uuid4()
+    session_row = {
+        "id": session_id,
+        "order_id": uuid4(),
+        "amount": Decimal("1000"),
+        "status": "pending",
+        "order_payment_id": None,
+    }
+    transaction = {
+        "id": "tx-1894-D",
+        "status": "DECLINED",
+        "amount_in_cents": 100000,
+        "payment_method_type": "CARD",
+        "customer_email": "nope@example.com",
+        "currency": "COP",
+        "environment": "test",
+        "status_message": "Fondos insuficientes",
+    }
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+
+    result = await svc.apply_from_transaction(
+        conn,
+        tenant_id=tenant_id,
+        session_row=session_row,
+        transaction=transaction,
+    )
+
+    assert result["applied"] is False
+    assert result["status"] == "DECLINED"
+
+    update_call = conn.execute.await_args
+    sql = update_call.args[0]
+    assert "UPDATE tenant_collection_sessions" in sql
+    assert "provider_payload" in sql
+    assert "provider_payment_method_type" in sql
+    assert "customer_email" in sql
+    assert "currency" in sql
+    assert "environment" in sql
+    args = update_call.args[1:]
+    assert args[0] == session_id
+    assert args[1] == "declined"
+    assert args[2] == "tx-1894-D"
+    assert isinstance(args[3], dict)
+    assert args[3]["id"] == "tx-1894-D"
+    assert args[4] == "CARD"
+    assert args[5] == "nope@example.com"
+    assert args[6] == "COP"
+
+
+@pytest.mark.asyncio
+async def test_apply_from_transaction_persists_payload_for_error(tenant_id):
+    """#894 — ERROR (network / voided) also stores the payload for audit."""
+    session_id = uuid4()
+    session_row = {
+        "id": session_id,
+        "order_id": uuid4(),
+        "amount": Decimal("1000"),
+        "status": "pending",
+        "order_payment_id": None,
+    }
+    transaction = {
+        "id": "tx-1894-E",
+        "status": "ERROR",
+        "amount_in_cents": 100000,
+        "payment_method_type": "BANCOLOMBIA_TRANSFER",
+        "currency": "COP",
+        "environment": "test",
+    }
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+
+    result = await svc.apply_from_transaction(
+        conn,
+        tenant_id=tenant_id,
+        session_row=session_row,
+        transaction=transaction,
+    )
+
+    assert result["applied"] is False
+    assert result["status"] == "ERROR"
+    args = conn.execute.await_args.args[1:]
+    assert args[1] == "error"
+    assert args[2] == "tx-1894-E"
+    assert args[4] == "BANCOLOMBIA_TRANSFER"
+
+
+def test_jsonable_coerces_decimal_datetime_uuid_and_nested():
+    from datetime import datetime, timezone
+    from uuid import uuid4
+    uid = uuid4()
+    src = {
+        "amount": Decimal("51000.50"),
+        "ts": datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc),
+        "uid": uid,
+        "items": [{"price": Decimal("10"), "tags": ["a", "b"]}],
+        "null_field": None,
+        "plain": "hello",
+    }
+    out = svc._jsonable(src)
+    assert out["amount"] == "51000.50"
+    assert out["ts"] == "2026-08-20T12:00:00+00:00"
+    assert out["uid"] == str(uid)
+    assert out["items"][0]["price"] == "10"
+    assert out["items"][0]["tags"] == ["a", "b"]
+    assert out["null_field"] is None
+    assert out["plain"] == "hello"
