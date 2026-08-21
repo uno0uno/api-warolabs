@@ -80,6 +80,18 @@ async def create_session(request: Request, body: CreateSessionRequest):
     )
 
 
+@session_router.post("/sessions/regenerate", dependencies=[Depends(require_any_module(Module.POS, Module.VENTAS))])
+async def regenerate_session(request: Request, body: CreateSessionRequest):
+    return await wompi_collections_service.regenerate_collection_session(
+        request,
+        order_id=body.order_id,
+        amount=body.amount,
+        selected_customer_id=body.customer_id,
+        link_email=body.link_email,
+        redirect_url=body.redirect_url,
+    )
+
+
 @session_router.post("/sessions/online")
 async def create_online_session(body: OnlineSessionRequest):
     return await wompi_collections_service.create_online_collection_session(
