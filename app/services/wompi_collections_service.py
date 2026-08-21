@@ -55,6 +55,23 @@ def _safe_thank_you_url(redirect_url: Optional[str], session_id: UUID) -> str:
     return resolved
 
 
+def _jsonable(value: Any) -> Any:
+    """Recursively coerce Decimal/datetime/UUID to JSON-safe primitives for JSONB columns."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, (datetime,)):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
+
+
 def _wompi_payment_link_redirect(redirect_url: Optional[str], session_id: UUID) -> str:
     """Pass through staff thank-you origin (localhost in local, warocol.com in prod)."""
     return _safe_thank_you_url(redirect_url, session_id)
@@ -323,7 +340,7 @@ async def activate_merchant(
             method_id = method["id"]
         await conn.execute(
             """
-            INSERT INTO tenant_wompi_merchants (
+            INSERT INTO tenant_payment_providers (
                 tenant_id, public_key, fingerprint, private_key_ciphertext,
                 events_secret_ciphertext, integrity_secret_ciphertext,
                 payment_method_id, environment, is_active, updated_at
@@ -366,7 +383,7 @@ async def merchant_status(request: Request) -> dict:
         row = await conn.fetchrow(
             """
             SELECT fingerprint, environment, is_active, payment_method_id
-            FROM tenant_wompi_merchants
+            FROM tenant_payment_providers
             WHERE tenant_id = $1
             """,
             session.tenant_id,
@@ -386,7 +403,7 @@ async def merchant_status(request: Request) -> dict:
 
 async def _load_merchant(conn, tenant_id: UUID) -> Any:
     row = await conn.fetchrow(
-        "SELECT * FROM tenant_wompi_merchants WHERE tenant_id = $1 AND is_active = true",
+        "SELECT * FROM tenant_payment_providers WHERE tenant_id = $1 AND is_active = true",
         tenant_id,
     )
     if not row:
@@ -398,8 +415,9 @@ async def public_collection_session(session_id: UUID) -> dict:
     async with get_db_connection(use_transaction=False) as conn:
         row = await conn.fetchrow(
             """
-            SELECT checkout_url, status
-            FROM tenant_wompi_collection_sessions
+            SELECT checkout_url, status, provider, provider_payment_method_type,
+                   customer_email, currency, environment, provider_payload
+            FROM tenant_collection_sessions
             WHERE id = $1
             """,
             session_id,
@@ -411,6 +429,12 @@ async def public_collection_session(session_id: UUID) -> dict:
         "data": {
             "checkoutUrl": row["checkout_url"],
             "status": row["status"],
+            "provider": row["provider"],
+            "providerPaymentMethodType": row["provider_payment_method_type"],
+            "customerEmail": row["customer_email"],
+            "currency": row["currency"],
+            "environment": row["environment"],
+            "providerPayload": row["provider_payload"],
         },
     }
 
@@ -430,7 +454,7 @@ async def _pending_session_for_order(conn, tenant_id: UUID, order_id: UUID):
     return await conn.fetchrow(
         """
         SELECT id, status, customer_id
-        FROM tenant_wompi_collection_sessions
+        FROM tenant_collection_sessions
         WHERE tenant_id = $1 AND order_id = $2 AND status = 'pending'
         ORDER BY created_at DESC
         LIMIT 1
@@ -484,7 +508,7 @@ async def staff_session_for_order(request: Request, order_id: UUID) -> dict:
         row = await conn.fetchrow(
             """
             SELECT id, status
-            FROM tenant_wompi_collection_sessions
+            FROM tenant_collection_sessions
             WHERE tenant_id = $1 AND order_id = $2
             ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, created_at DESC
             LIMIT 1
@@ -609,7 +633,7 @@ async def _create_session_row(
     checkout_url = f"https://checkout.wompi.co/l/{link_id}"
     await conn.execute(
         """
-        INSERT INTO tenant_wompi_collection_sessions (
+        INSERT INTO tenant_collection_sessions (
             id, tenant_id, order_id, amount, customer_id, link_email,
             provider_link_id, checkout_url, status
         )
@@ -708,7 +732,7 @@ async def regenerate_collection_session(
         approved = await conn.fetchval(
             """
             SELECT 1
-            FROM tenant_wompi_collection_sessions
+            FROM tenant_collection_sessions
             WHERE tenant_id = $1 AND order_id = $2 AND status = 'approved'
             LIMIT 1
             """,
@@ -721,7 +745,7 @@ async def regenerate_collection_session(
         if pending:
             await conn.execute(
                 """
-                UPDATE tenant_wompi_collection_sessions
+                UPDATE tenant_collection_sessions
                 SET status = 'expired', updated_at = NOW()
                 WHERE id = $1 AND status = 'pending'
                 """,
@@ -797,6 +821,7 @@ async def apply_approved_payment(
     session_row: Any,
     provider_tx_id: str,
     amount: Optional[Decimal] = None,
+    provider_payload: Optional[Dict[str, Any]] = None,
 ) -> dict:
     if session_row["status"] == "approved" and session_row["order_payment_id"]:
         return {
@@ -816,7 +841,7 @@ async def apply_approved_payment(
     if already_paid:
         await conn.execute(
             """
-            UPDATE tenant_wompi_collection_sessions
+            UPDATE tenant_collection_sessions
             SET status = 'approved',
                 updated_at = NOW()
             WHERE id = $1 AND status = 'pending'
@@ -825,7 +850,7 @@ async def apply_approved_payment(
         )
         await conn.execute(
             """
-            UPDATE tenant_wompi_collection_sessions
+            UPDATE tenant_collection_sessions
             SET status = 'voided',
                 updated_at = NOW()
             WHERE order_id = $2
@@ -857,16 +882,26 @@ async def apply_approved_payment(
     )
     await conn.execute(
         """
-        UPDATE tenant_wompi_collection_sessions
+        UPDATE tenant_collection_sessions
         SET status = 'approved',
             provider_tx_id = $2,
             order_payment_id = $3,
+            provider_payload = COALESCE($4, provider_payload),
+            provider_payment_method_type = COALESCE($5, provider_payment_method_type),
+            customer_email = COALESCE($6, customer_email),
+            currency = COALESCE($7, currency),
+            environment = COALESCE($8, environment),
             updated_at = NOW()
         WHERE id = $1
         """,
         session_row["id"],
         provider_tx_id,
         payment["id"],
+        _jsonable(provider_payload) if provider_payload else None,
+        (provider_payload or {}).get("payment_method_type"),
+        (provider_payload or {}).get("customer_email"),
+        (provider_payload or {}).get("currency"),
+        (provider_payload or {}).get("environment"),
     )
     await conn.execute(
         """
@@ -924,13 +959,25 @@ async def apply_from_transaction(
     if status != "APPROVED":
         await conn.execute(
             """
-            UPDATE tenant_wompi_collection_sessions
-            SET status = $2, provider_tx_id = $3, updated_at = NOW()
+            UPDATE tenant_collection_sessions
+            SET status = $2,
+                provider_tx_id = $3,
+                provider_payload = $4,
+                provider_payment_method_type = $5,
+                customer_email = $6,
+                currency = $7,
+                environment = COALESCE($8, environment),
+                updated_at = NOW()
             WHERE id = $1 AND status = 'pending'
             """,
             session_row["id"],
             status.lower(),
             tx_id,
+            _jsonable(transaction),
+            transaction.get("payment_method_type"),
+            transaction.get("customer_email"),
+            transaction.get("currency"),
+            transaction.get("environment"),
         )
         return {"applied": False, "idempotent": False, "status": status}
     cents = transaction.get("amount_in_cents")
@@ -941,6 +988,7 @@ async def apply_from_transaction(
         session_row=session_row,
         provider_tx_id=tx_id,
         amount=amount,
+        provider_payload=transaction,
     )
 
 
@@ -1007,7 +1055,7 @@ async def verify_session(session_id: UUID, transaction_id: Optional[str] = None)
     async with get_db_connection(use_transaction=True) as conn:
         session_row = await conn.fetchrow(
             """
-            SELECT * FROM tenant_wompi_collection_sessions WHERE id = $1
+            SELECT * FROM tenant_collection_sessions WHERE id = $1
             FOR UPDATE
             """,
             session_id,
@@ -1057,7 +1105,7 @@ async def handle_collections_webhook(event_data: Dict[str, Any]) -> dict:
     async with get_db_connection(use_transaction=True) as conn:
         session_row = await conn.fetchrow(
             """
-            SELECT * FROM tenant_wompi_collection_sessions WHERE id = $1
+            SELECT * FROM tenant_collection_sessions WHERE id = $1
             FOR UPDATE
             """,
             session_id,
