@@ -113,6 +113,7 @@ def test_collections_never_call_server_wompi_headers():
     assert "require_module" not in router.split('@session_router.get("/sessions/{session_id}")', 1)[1].split("@session_router.post")[0]
     assert '@session_router.get("/sessions", dependencies=[Depends(require_any_module(Module.POS, Module.VENTAS))])' in router
     assert '@session_router.post("/sessions", dependencies=[Depends(require_any_module(Module.POS, Module.VENTAS))])' in router
+    assert '@session_router.post("/sessions/regenerate", dependencies=[Depends(require_any_module(Module.POS, Module.VENTAS))])' in router
     assert '@session_router.post("/sessions/online")' in router
     online_block = router.split('@session_router.post("/sessions/online")', 1)[1].split("@session_router.", 1)[0]
     assert "require_module" not in online_block
@@ -459,6 +460,73 @@ async def test_create_session_reuses_pending(tenant_id):
     assert result["data"]["id"] == str(session_id)
     assert result["data"]["status"] == "pending"
     assert "checkoutUrl" not in result["data"]
+
+
+@pytest.mark.asyncio
+async def test_regenerate_expires_pending_then_creates(tenant_id):
+    req, _ = _request(tenant_id)
+    order_id = uuid4()
+    old_id = uuid4()
+    new_id = uuid4()
+    customer_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"id": order_id, "customer_id": customer_id, "total_amount": Decimal("10")},
+            {"id": old_id, "status": "pending", "customer_id": customer_id},
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=None)
+    conn.execute = AsyncMock()
+    created = {
+        "success": True,
+        "data": {"id": str(new_id), "status": "pending", "customerId": str(customer_id)},
+    }
+    with patch(
+        "app.services.wompi_collections_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id),
+    ), patch(
+        "app.services.wompi_collections_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.wompi_collections_service.resolve_collection_customer",
+        new=AsyncMock(return_value=customer_id),
+    ), patch.object(
+        svc, "_create_session_row", new=AsyncMock(return_value=created)
+    ) as create_row:
+        result = await svc.regenerate_collection_session(
+            req, order_id=order_id, amount=Decimal("10")
+        )
+    create_row.assert_awaited_once()
+    assert conn.execute.await_args.args[1] == old_id
+    assert "expired" in conn.execute.await_args.args[0]
+    assert result["data"]["id"] == str(new_id)
+
+
+@pytest.mark.asyncio
+async def test_regenerate_rejects_when_approved(tenant_id):
+    req, _ = _request(tenant_id)
+    order_id = uuid4()
+    customer_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value={"id": order_id, "customer_id": customer_id, "total_amount": Decimal("10")}
+    )
+    conn.fetchval = AsyncMock(return_value=1)
+    with patch(
+        "app.services.wompi_collections_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id),
+    ), patch(
+        "app.services.wompi_collections_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch.object(
+        svc, "_create_session_row", new=AsyncMock()
+    ) as create_row:
+        with pytest.raises(ValidationError, match="ya fue aprobado"):
+            await svc.regenerate_collection_session(
+                req, order_id=order_id, amount=Decimal("10")
+            )
+    create_row.assert_not_called()
 
 
 @pytest.mark.asyncio

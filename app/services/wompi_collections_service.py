@@ -680,6 +680,67 @@ async def create_collection_session(
         )
 
 
+async def regenerate_collection_session(
+    request: Request,
+    order_id: UUID,
+    amount: Decimal,
+    selected_customer_id: Optional[UUID] = None,
+    link_email: Optional[str] = None,
+    redirect_url: Optional[str] = None,
+) -> dict:
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id
+    if amount <= 0:
+        raise ValidationError("El monto debe ser positivo")
+    async with get_db_connection(use_transaction=True) as conn:
+        order = await conn.fetchrow(
+            """
+            SELECT id, customer_id, total_amount
+            FROM orders
+            WHERE id = $1 AND tenant_id = $2
+            FOR UPDATE
+            """,
+            order_id,
+            tenant_id,
+        )
+        if not order:
+            raise NotFoundError("Orden no encontrada")
+        approved = await conn.fetchval(
+            """
+            SELECT 1
+            FROM tenant_wompi_collection_sessions
+            WHERE tenant_id = $1 AND order_id = $2 AND status = 'approved'
+            LIMIT 1
+            """,
+            tenant_id,
+            order_id,
+        )
+        if approved:
+            raise ValidationError("Este cobro ya fue aprobado")
+        pending = await _pending_session_for_order(conn, tenant_id, order_id)
+        if pending:
+            await conn.execute(
+                """
+                UPDATE tenant_wompi_collection_sessions
+                SET status = 'expired', updated_at = NOW()
+                WHERE id = $1 AND status = 'pending'
+                """,
+                pending["id"],
+            )
+        customer_id = await resolve_collection_customer(
+            conn, tenant_id, selected_customer_id or order["customer_id"]
+        )
+        return await _create_session_row(
+            conn,
+            tenant_id=tenant_id,
+            order_id=order_id,
+            amount=amount,
+            customer_id=customer_id,
+            link_email=link_email,
+            redirect_url=redirect_url,
+        )
+
+
 async def create_online_collection_session(
     *,
     order_id: UUID,
