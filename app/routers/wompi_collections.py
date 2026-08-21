@@ -50,7 +50,10 @@ async def activate_pasarela(request: Request, body: ActivatePasarelaRequest):
     )
 
 
-@staff_router.get("", dependencies=[Depends(require_module(Module.INTEGRACIONES))])
+@staff_router.get(
+    "",
+    dependencies=[Depends(require_any_module(Module.INTEGRACIONES, Module.POS, Module.VENTAS))],
+)
 async def pasarela_status(request: Request):
     return await wompi_collections_service.merchant_status(request)
 
@@ -65,7 +68,7 @@ class OnlineSessionRequest(BaseModel):
     redirect_url: Optional[str] = Field(default=None, alias="redirectUrl")
 
 
-@session_router.post("/sessions", dependencies=[Depends(require_module(Module.POS))])
+@session_router.post("/sessions", dependencies=[Depends(require_any_module(Module.POS, Module.VENTAS))])
 async def create_session(request: Request, body: CreateSessionRequest):
     return await wompi_collections_service.create_collection_session(
         request,
