@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
+import json
 
 import pytest
 
@@ -696,15 +697,17 @@ async def test_apply_from_transaction_persists_payload_for_approved(tenant_id):
             final_session_update = call
             break
     assert final_session_update is not None, "expected final approved UPDATE on tenant_collection_sessions"
-    # positional args after the SQL: (session_id, provider_tx_id, payment_id, payload_json, pm_type, email, currency, env)
+    # positional args after the SQL: (session_id, provider_tx_id, payment_id, payload_json_str, pm_type, email, currency, env)
     args = final_session_update.args[1:]
     assert args[0] == session_id
     assert args[1] == "tx-1894-A"
     assert args[2] == payment_id
     payload = args[3]
-    assert isinstance(payload, dict)
-    assert payload["id"] == "tx-1894-A"
-    assert payload["status"] == "APPROVED"
+    # #896 fix: asyncpg JSONB expects a JSON-encoded string, not a dict
+    assert isinstance(payload, str)
+    decoded = json.loads(payload)
+    assert decoded["id"] == "tx-1894-A"
+    assert decoded["status"] == "APPROVED"
     assert args[4] == "CARD"
     assert args[5] == "diner@example.com"
     assert args[6] == "COP"
@@ -759,8 +762,10 @@ async def test_apply_from_transaction_persists_payload_for_declined(tenant_id):
     assert args[0] == session_id
     assert args[1] == "declined"
     assert args[2] == "tx-1894-D"
-    assert isinstance(args[3], dict)
-    assert args[3]["id"] == "tx-1894-D"
+    # #896 fix: payload is a JSON-encoded string, not a dict
+    assert isinstance(args[3], str)
+    decoded = json.loads(args[3])
+    assert decoded["id"] == "tx-1894-D"
     assert args[4] == "CARD"
     assert args[5] == "nope@example.com"
     assert args[6] == "COP"
@@ -823,3 +828,134 @@ def test_jsonable_coerces_decimal_datetime_uuid_and_nested():
     assert out["items"][0]["tags"] == ["a", "b"]
     assert out["null_field"] is None
     assert out["plain"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_provider_payload_is_json_encoded_string_for_asyncpg(tenant_id):
+    """#896 — asyncpg JSONB expects a JSON-encoded string, not a dict. Regress if we
+    drop the json.dumps() wrap in either UPDATE call site.
+    """
+    session_id = uuid4()
+    order_id = uuid4()
+    method_id = uuid4()
+    payment_id = uuid4()
+    transaction = {
+        "id": "tx-1896",
+        "status": "APPROVED",
+        "amount_in_cents": 1234500,
+        "payment_method_type": "CARD",
+        "customer_email": "qa@example.com",
+        "currency": "COP",
+        "environment": "test",
+    }
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "tenant_id": tenant_id,
+                "payment_method_id": method_id,
+                "is_active": True,
+                "private_key_ciphertext": "x",
+                "events_secret_ciphertext": "y",
+                "environment": "test",
+            },
+            {"id": payment_id},
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=None)
+    conn.execute = AsyncMock()
+
+    with patch.object(svc, "_post_approved_collection_gl", new=AsyncMock()):
+        await svc.apply_from_transaction(
+            conn,
+            tenant_id=tenant_id,
+            session_row={
+                "id": session_id,
+                "order_id": order_id,
+                "amount": Decimal("12345"),
+                "status": "pending",
+                "order_payment_id": None,
+            },
+            transaction=transaction,
+        )
+
+    # Every UPDATE on tenant_collection_sessions that writes provider_payload
+    # must use a JSON-encoded string at the provider_payload positional argument.
+    payload_writes = [
+        call for call in conn.execute.await_args_list
+        if "UPDATE tenant_collection_sessions" in call.args[0]
+        and "provider_payload" in call.args[0]
+    ]
+    assert payload_writes, "expected at least one UPDATE on tenant_collection_sessions with provider_payload"
+    for call in payload_writes:
+        # the $4 placeholder for provider_payload — find it by looking for the JSONB arg
+        sql = call.args[0]
+        assert "provider_payload = $4" in sql or "provider_payload = COALESCE($4" in sql
+        arg = call.args[4]  # $4 = provider_payload
+        assert isinstance(arg, str), f"provider_payload must be a JSON string, got {type(arg).__name__}"
+        # round-trip is valid JSON
+        parsed = json.loads(arg)
+        assert "id" in parsed or "status" in parsed
+
+
+@pytest.mark.asyncio
+async def test_apply_approved_payment_with_payload_serializes_to_string(tenant_id):
+    """#896 — apply_approved_payment called directly must also send a JSON string."""
+    session_id = uuid4()
+    order_id = uuid4()
+    method_id = uuid4()
+    payment_id = uuid4()
+    payload = {
+        "id": "tx-1896-DIRECT",
+        "status": "APPROVED",
+        "amount_in_cents": 5000_00,
+        "payment_method_type": "BANCOLOMBIA_TRANSFER",
+        "customer_email": "direct@example.com",
+        "currency": "COP",
+        "environment": "test",
+    }
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "tenant_id": tenant_id,
+                "payment_method_id": method_id,
+                "is_active": True,
+                "private_key_ciphertext": "x",
+                "events_secret_ciphertext": "y",
+                "environment": "test",
+            },
+            {"id": payment_id},
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=None)
+    conn.execute = AsyncMock()
+
+    with patch.object(svc, "_post_approved_collection_gl", new=AsyncMock()):
+        await svc.apply_approved_payment(
+            conn,
+            tenant_id=tenant_id,
+            session_row={
+                "id": session_id,
+                "order_id": order_id,
+                "amount": Decimal("5000"),
+                "status": "pending",
+                "order_payment_id": None,
+            },
+            provider_tx_id="tx-1896-DIRECT",
+            provider_payload=payload,
+        )
+
+    # Find the final UPDATE on tenant_collection_sessions (not SELECT pg_notify, not UPDATE orders).
+    session_updates = [
+        call for call in conn.execute.await_args_list
+        if "UPDATE tenant_collection_sessions" in call.args[0]
+        and "status = 'approved'" in call.args[0]
+    ]
+    assert session_updates, "expected final approved UPDATE on tenant_collection_sessions"
+    final_update = session_updates[-1]
+    assert "provider_payload = COALESCE($4" in final_update.args[0]
+    payload_arg = final_update.args[4]
+    assert isinstance(payload_arg, str)
+    decoded = json.loads(payload_arg)
+    assert decoded["id"] == "tx-1896-DIRECT"
