@@ -62,6 +62,46 @@ def test_next_puc_child_skips_taken_05():
     assert svc.next_puc_child_code("1110", {"1110", "111005"}) == "111001"
 
 
+def test_merchant_public_keys_from_object_or_list():
+    assert svc.merchant_public_keys_from_wompi_body(
+        {"data": {"public_key": "pub_test_a"}}
+    ) == ["pub_test_a"]
+    assert svc.merchant_public_keys_from_wompi_body(
+        {"data": [{"public_key": "pub_test_b"}, {"id": 1}]}
+    ) == ["pub_test_b"]
+    assert svc.merchant_public_keys_from_wompi_body({"data": []}) == []
+
+
+def test_payment_link_id_from_object_or_list():
+    assert svc.payment_link_id_from_wompi_body({"data": {"id": "test_abc"}}) == "test_abc"
+    assert svc.payment_link_id_from_wompi_body({"data": [{"id": "test_list"}]}) == "test_list"
+    assert svc.payment_link_id_from_wompi_body({"data": []}) is None
+
+
+def test_wompi_redirect_follows_local_and_prod_origin():
+    sid = uuid4()
+    local = f"http://localhost:8080/cobro/{sid}/gracias"
+    prod = f"https://warocol.com/cobro/{sid}/gracias"
+    assert svc._wompi_payment_link_redirect(local, sid) == local
+    assert svc._wompi_payment_link_redirect(prod, sid) == prod
+    assert svc.wompi_resource_data({"data": {"id": "tx"}}) == {"id": "tx"}
+    assert svc.wompi_resource_data({"data": [{"id": "tx"}]}) == [{"id": "tx"}]
+
+
+@pytest.mark.asyncio
+async def test_validate_merchant_keys_accepts_list_data():
+    pub = "pub_test_ok"
+    payload = {"data": [{"id": 1}, {"public_key": pub}]}
+    response = MagicMock(status_code=200)
+    response.json.return_value = payload
+    client = MagicMock()
+    client.get = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    with patch("app.services.wompi_collections_service.httpx.AsyncClient", return_value=client):
+        await svc.validate_merchant_keys(pub, "prv_test_ok", "test")
+
+
 def test_collections_never_call_server_wompi_headers():
     src = Path("app/services/wompi_collections_service.py").read_text()
     assert "wompi_service._headers" not in src
@@ -72,6 +112,7 @@ def test_collections_never_call_server_wompi_headers():
     assert '@session_router.get("/sessions/{session_id}")' in router
     assert "require_module" not in router.split('@session_router.get("/sessions/{session_id}")', 1)[1].split("@session_router.post")[0]
     assert '@session_router.get("/sessions", dependencies=[Depends(require_any_module(Module.POS, Module.VENTAS))])' in router
+    assert '@session_router.post("/sessions", dependencies=[Depends(require_any_module(Module.POS, Module.VENTAS))])' in router
     assert '@session_router.post("/sessions/online")' in router
     online_block = router.split('@session_router.post("/sessions/online")', 1)[1].split("@session_router.", 1)[0]
     assert "require_module" not in online_block
@@ -180,6 +221,8 @@ async def test_generic_customer_when_none_selected(tenant_id):
     found = await svc.resolve_collection_customer(conn, tenant_id, None)
     assert found == generic_id
     assert conn.fetchrow.await_args.args[2] == "0000000000"
+    assert "tc.profile_id" in conn.fetchrow.await_args.args[0]
+    assert "tc.customer_id" not in conn.fetchrow.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -189,6 +232,9 @@ async def test_selected_customer_must_belong_to_tenant(tenant_id):
     conn.fetchval = AsyncMock(return_value=1)
     found = await svc.resolve_collection_customer(conn, tenant_id, selected)
     assert found == selected
+    sql = conn.fetchval.await_args.args[0]
+    assert "profile_id" in sql
+    assert "customer_id" not in sql
 
 
 @pytest.mark.asyncio

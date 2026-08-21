@@ -26,6 +26,7 @@ from app.services.cierre_service import (
     _post_order_gl_entry,
 )
 from app.services.account_role_service import resolve_group_parent_account
+from app.services.customer_relationship_service import is_tenant_customer
 from app.services.customers_service import ANONYMOUS_PHONE, GENERIC_CUSTOMER_EMAIL
 from app.services.wompi_service import WOMPI_PRODUCTION_URL, WOMPI_SANDBOX_URL
 
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 WOMPI_METHOD_NAME = "Wompi"
 DIGITAL_SLUG = "digital"
 NOTIFY_TYPE = "order_payment_approved"
-_THANK_YOU_HOSTS = {"warocol.com", "www.warocol.com", "localhost"}
+_THANK_YOU_HOSTS = {"warocol.com", "www.warocol.com", "localhost", "127.0.0.1"}
 
 
 def _safe_thank_you_url(redirect_url: Optional[str], session_id: UUID) -> str:
@@ -52,6 +53,11 @@ def _safe_thank_you_url(redirect_url: Optional[str], session_id: UUID) -> str:
     if path != f"/cobro/{session_id}/gracias":
         return default
     return resolved
+
+
+def _wompi_payment_link_redirect(redirect_url: Optional[str], session_id: UUID) -> str:
+    """Pass through staff thank-you origin (localhost in local, warocol.com in prod)."""
+    return _safe_thank_you_url(redirect_url, session_id)
 
 
 def _wompi_base_url(environment: str) -> str:
@@ -101,6 +107,52 @@ def verify_event_signature_with_secret(
     return hmac.compare_digest(computed, checksum)
 
 
+def merchant_public_keys_from_wompi_body(payload: Any) -> list[str]:
+    """Wompi GET /merchants may return data as an object or a list."""
+    found: list[str] = []
+    if isinstance(payload, dict):
+        key = payload.get("public_key")
+        if isinstance(key, str) and key.strip():
+            found.append(key.strip())
+        for value in payload.values():
+            if isinstance(value, (dict, list)):
+                found.extend(merchant_public_keys_from_wompi_body(value))
+    elif isinstance(payload, list):
+        for item in payload:
+            found.extend(merchant_public_keys_from_wompi_body(item))
+    return found
+
+
+def payment_link_id_from_wompi_body(payload: Any) -> Optional[str]:
+    """Wompi POST /payment_links may return data as an object or a list."""
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            link_id = data.get("id")
+            if isinstance(link_id, str) and link_id.strip():
+                return link_id.strip()
+        if isinstance(data, list):
+            for item in data:
+                found = payment_link_id_from_wompi_body({"data": item})
+                if found:
+                    return found
+        if isinstance(data, str) and data.strip():
+            return data.strip()
+    elif isinstance(payload, list):
+        for item in payload:
+            found = payment_link_id_from_wompi_body(item)
+            if found:
+                return found
+    return None
+
+
+def wompi_resource_data(payload: Any) -> Any:
+    """Unwrap Wompi `data` whether it is an object, a list, or missing."""
+    if isinstance(payload, dict):
+        return payload.get("data")
+    return payload
+
+
 async def validate_merchant_keys(public_key: str, private_key: str, environment: str) -> None:
     url = f"{_wompi_base_url(environment)}/merchants"
     try:
@@ -111,9 +163,9 @@ async def validate_merchant_keys(public_key: str, private_key: str, environment:
         raise ValidationError("No se pudo validar el comercio en Wompi") from exc
     if response.status_code >= 400:
         raise ValidationError("Las llaves Wompi del restaurante no son válidas")
-    data = (response.json() or {}).get("data") or {}
-    remote_pub = (data.get("public_key") or "").strip()
-    if remote_pub and remote_pub != public_key.strip():
+    remote_pubs = merchant_public_keys_from_wompi_body(response.json())
+    submitted = public_key.strip()
+    if remote_pubs and submitted not in remote_pubs:
         raise ValidationError("La llave pública no corresponde a este comercio Wompi")
 
 
@@ -136,7 +188,7 @@ async def _generic_customer_id(conn, tenant_id: UUID) -> UUID:
         """
         SELECT p.id
         FROM profile p
-        JOIN tenant_customers tc ON tc.customer_id = p.id AND tc.tenant_id = $1
+        JOIN tenant_customers tc ON tc.profile_id = p.id AND tc.tenant_id = $1 AND tc.is_active = true
         WHERE p.phone_number = $2
         ORDER BY
           CASE
@@ -161,15 +213,7 @@ async def resolve_collection_customer(
 ) -> UUID:
     if selected_customer_id is None:
         return await _generic_customer_id(conn, tenant_id)
-    owned = await conn.fetchval(
-        """
-        SELECT 1 FROM tenant_customers
-        WHERE tenant_id = $1 AND customer_id = $2
-        """,
-        tenant_id,
-        selected_customer_id,
-    )
-    if not owned:
+    if not await is_tenant_customer(conn, selected_customer_id, tenant_id):
         raise ValidationError("El cliente no pertenece a este negocio")
     return selected_customer_id
 
@@ -423,7 +467,7 @@ async def _create_or_reuse_session_row(
         pending = await _pending_session_for_order(conn, tenant_id, order_id)
         if pending:
             return _session_reuse_payload(pending)
-        raise
+        raise ValidationError("Ya existe un cobro Wompi para esta orden")
 
 
 async def staff_session_for_order(request: Request, order_id: UUID) -> dict:
@@ -523,7 +567,7 @@ async def _create_session_row(
     session_id = uuid4()
     amount_cents = int((amount * 100).quantize(Decimal("1")))
     expiration = datetime.now(timezone.utc) + timedelta(hours=2)
-    thank_you_url = _safe_thank_you_url(redirect_url, session_id)
+    thank_you_url = _wompi_payment_link_redirect(redirect_url, session_id)
     payload = {
         "name": f"WARO cobro {order_id}",
         "description": "Cobro al comensal (restaurante)",
@@ -531,7 +575,7 @@ async def _create_session_row(
         "collect_shipping": False,
         "currency": "COP",
         "amount_in_cents": amount_cents,
-        "expires_at": expiration.isoformat(),
+        "expires_at": expiration.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "redirect_url": thank_you_url,
         "reference": str(session_id),
     }
@@ -548,9 +592,18 @@ async def _create_session_row(
         logger.error("Wompi payment_links connection error")
         raise ValidationError("Wompi no respondió al crear el link") from exc
     if response.status_code >= 400:
+        logger.error(
+            "Wompi payment_links rejected status=%s body=%s",
+            response.status_code,
+            (response.text or "")[:400],
+        )
         raise ValidationError("Wompi rechazó la creación del link de cobro")
-    data = (response.json() or {}).get("data") or {}
-    link_id = data.get("id")
+    try:
+        body = response.json()
+    except ValueError as exc:
+        logger.error("Wompi payment_links returned non-JSON")
+        raise ValidationError("Wompi no devolvió link de cobro") from exc
+    link_id = payment_link_id_from_wompi_body(body)
     if not link_id:
         raise ValidationError("Wompi no devolvió link de cobro")
     checkout_url = f"https://checkout.wompi.co/l/{link_id}"
@@ -840,11 +893,19 @@ async def fetch_transaction(private_key: str, environment: str, transaction_id: 
         raise ValidationError("No se pudo consultar la transacción en Wompi") from exc
     if response.status_code >= 400:
         raise ValidationError("Wompi no encontró la transacción")
-    return (response.json() or {}).get("data") or {}
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise ValidationError("Wompi no encontró la transacción") from exc
+    data = wompi_resource_data(body)
+    if isinstance(data, list):
+        first = data[0] if data else {}
+        return first if isinstance(first, dict) else {}
+    return data if isinstance(data, dict) else {}
 
 
 def _pick_referenced_transaction(rows: Any) -> Optional[dict]:
-    items = list(rows or [])
+    items = [row for row in list(rows or []) if isinstance(row, dict)]
     for row in items:
         if str(row.get("status") or "").upper() == "APPROVED":
             return row
@@ -867,7 +928,18 @@ async def fetch_transaction_by_reference(
         raise ValidationError("No se pudo consultar la transacción en Wompi") from exc
     if response.status_code >= 400:
         raise ValidationError("Wompi no encontró la transacción")
-    return _pick_referenced_transaction((response.json() or {}).get("data") or [])
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise ValidationError("Wompi no encontró la transacción") from exc
+    data = wompi_resource_data(body)
+    if isinstance(data, dict):
+        rows = [data]
+    elif isinstance(data, list):
+        rows = data
+    else:
+        rows = []
+    return _pick_referenced_transaction(rows)
 
 
 async def verify_session(session_id: UUID, transaction_id: Optional[str] = None) -> dict:
