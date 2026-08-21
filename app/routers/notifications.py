@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from uuid import UUID
 from app.config import settings
 from app.core.middleware import require_valid_session
-from app.core.permissions import Module, require_module
+from app.core.permissions import Module, require_any_module, require_module
 from app.services import notifications_service
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -51,7 +51,7 @@ async def _remove_listener_if_empty(channel: str) -> None:
             _channel_locks.pop(channel, None)
 
 
-@router.get("/stream", dependencies=[Depends(require_module(Module.POS))])
+@router.get("/stream", dependencies=[Depends(require_any_module(Module.POS, Module.VENTAS))])
 async def notification_stream(request: Request):
     """
     SSE endpoint — keeps connection open and pushes new order notifications in real time.
