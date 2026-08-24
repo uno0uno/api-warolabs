@@ -1,6 +1,6 @@
 from typing import Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 import asyncpg
 
 from app.core.middleware import require_valid_session
@@ -18,6 +18,7 @@ from app.models.category import (
 )
 from app.services import categories_service
 from app.services.billing_service import check_plan_quota_growth
+from app.services.operation_events_service import DOMAIN_MENU, record_module_event
 
 router = APIRouter()
 
@@ -273,17 +274,24 @@ async def category_delete_impact_endpoint(request: Request, category_id: UUID):
     "/{category_id}",
     dependencies=[Depends(require_module(Module.MENU))],
 )
-async def delete_category_endpoint(request: Request, category_id: UUID):
+async def delete_category_endpoint(
+    request: Request,
+    category_id: UUID,
+    payload: dict = Body(default={}),
+):
     """
     Delete a tenant-owned category.
 
-    Blocks deletion (409) when `product.category_id` references exist
-    (RESTRICT FK). Station-mapping rows cascade-delete automatically and
-    are NOT a blocker — the count is returned so the caller can refresh
-    the routing UI on success.
+    Requires `reason` in body (Bitácora audit). Blocks deletion (409) when
+    `product.category_id` references exist (RESTRICT FK). Station-mapping rows
+    cascade-delete automatically.
     """
     session_context = require_valid_session(request)
     tenant_id = session_context.tenant_id
+
+    reason = (payload or {}).get("reason", "").strip() if isinstance(payload, dict) else ""
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason is required")
 
     if not tenant_id:
         raise HTTPException(status_code=400, detail="Tenant context is required")
@@ -327,8 +335,20 @@ async def delete_category_endpoint(request: Request, category_id: UUID):
                 },
             )
 
+        await record_module_event(
+            conn,
+            tenant_id,
+            domain=DOMAIN_MENU,
+            action="category_deleted",
+            actor_user_id=getattr(session_context, "user_id", None),
+            entity_type="category",
+            entity_id=category_id,
+            reason=reason,
+        )
+
     return {
         "success": True,
         "message": "Category deleted successfully",
         "cascaded": {"station_mappings": int(deps["station_mappings"])},
+        "reason": reason,
     }

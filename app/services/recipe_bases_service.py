@@ -589,7 +589,8 @@ async def update_recipe_base_type(
 
 async def delete_recipe_base_type(
     request: Request,
-    recipe_base_id: UUID
+    recipe_base_id: UUID,
+    reason: Optional[str] = None
 ) -> dict:
     """
     Delete a recipe base type and its ingredient templates.
@@ -658,6 +659,7 @@ async def delete_recipe_base_type(
                 entity_type="recipe_base",
                 entity_id=recipe_base_id,
                 label=recipe_name,
+                reason=reason,
             )
 
             return {
