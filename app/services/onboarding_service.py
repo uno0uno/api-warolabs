@@ -365,7 +365,9 @@ async def complete_registration(
         identity = dict(active)
         identity["next_step"] = None
     else:
-        pending = await conn.fetchrow(
+        # Mid-alta first, else any non-cancelled owned tenant. Public /registro
+        # must not INSERT a second business; that is Crear only (#839).
+        owned = await conn.fetchrow(
             """
             SELECT p.id AS user_id, p.email, p.name,
                    p.created_at AS user_created_at,
@@ -376,14 +378,23 @@ async def complete_registration(
             JOIN tenant_onboarding o ON o.owner_user_id = p.id
             JOIN tenants t ON t.id = o.tenant_id
             WHERE lower(trim(p.email)) = $1
-              AND t.lifecycle_status = 'pending'
-              AND o.state NOT IN ('setup_complete', 'cancelled')
+              AND o.state <> 'cancelled'
+            ORDER BY
+              CASE WHEN o.state IN (
+                'email_verified',
+                'business_profile_pending',
+                'terms_pending',
+                'payment_pending',
+                'paid'
+              ) THEN 0 ELSE 1 END,
+              o.created_at DESC NULLS LAST,
+              t.created_at DESC NULLS LAST
             LIMIT 1
             """,
             email,
         )
-        if pending:
-            identity = dict(pending)
+        if owned:
+            identity = dict(owned)
             identity["next_step"] = next_step_for_state(identity.get("onboarding_state"))
         else:
             profile = await conn.fetchrow(
