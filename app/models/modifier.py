@@ -158,6 +158,7 @@ class ModifierGroup(ModifierGroupBase):
     """Complete modifier group with modifiers"""
     id: UUID
     tenant_id: UUID
+    is_active: bool = Field(default=True, description="Activo/Archivado estado like warehouse_categories.is_active")
     created_at: datetime
     updated_at: datetime
 
