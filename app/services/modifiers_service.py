@@ -782,7 +782,8 @@ async def update_modifier_group(
 
 async def delete_modifier_group(
     request: Request,
-    group_id: UUID
+    group_id: UUID,
+    reason: Optional[str] = None
 ) -> dict:
     """Deletes a modifier group and its modifiers."""
     try:
@@ -835,6 +836,7 @@ async def delete_modifier_group(
                     entity_type="modifier_group",
                     entity_id=group_id,
                     label=group_name,
+                    reason=reason,
                 )
 
                 return {

@@ -232,6 +232,7 @@ async def archive_warehouse_category(
     conn,
     tenant_id: UUID,
     category_id: UUID,
+    reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     await _load_owned_category(conn, tenant_id, category_id)
     await conn.execute(
@@ -250,6 +251,7 @@ async def archive_warehouse_category(
         action="warehouse_category_archived",
         entity_type="warehouse_category",
         entity_id=category_id,
+        reason=reason,
     )
     return _category_dict(
         await _load_visible_category(conn, tenant_id, category_id),
