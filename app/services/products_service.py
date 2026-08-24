@@ -1368,7 +1368,6 @@ async def update_product_with_recipe(
                     entity_type="product",
                     entity_id=product_id,
                     label=product_name,
-                    reason=getattr(product_data, "reason", None),
                 )
 
                 # 6. Get complete updated product
