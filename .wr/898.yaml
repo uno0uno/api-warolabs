@@ -1,0 +1,42 @@
+issue: 898
+title: "Fix uq_period_tenant_active: permitir múltiples cierres por día con turnos distintos"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /home/saifer/api-warocol.com
+stack: fastapi
+branch: wr-898-fix-uq-period-tenant-active
+
+paths:
+  - app/services/cierre_service.py
+  - migrations/versions/2026_08_24_replace_uq_period_tenant_active.py
+  - tests/test_cierre_duplicate_period.py
+
+ac:
+  - create_cierre captura asyncpg.UniqueViolationError para uq_period_tenant_active y devuelve APIError(409) con mensaje claro en español
+  - Migración Alembic reemplaza uq_period_tenant_active por uq_period_tenant_shift incluyendo COALESCE(shift_template_id, '00...')
+  - Backfill valida que no haya duplicados antes de aplicar (caso actual pasa limpio: solo hay 1 row activo de Waro_Colombia)
+  - Test cubre INSERT con mismo (tenant, date) pero distinto shift_template_id retorna 200
+  - Test cubre INSERT con mismo (tenant, date) y mismo shift_template_id retorna 409
+  - Logs de producción dejan de mostrar error 500 tras deploy
+
+out_of_scope:
+  - Refactor del overlap check para casos con shift_template_id sin timestamps
+  - Cambios en front (warolabs-nuxt / warocol-nuxt)
+  - Validación manual de QA
+
+hints:
+  entry: "app/services/cierre_service.py::create_cierre (línea ~2573)"
+  pattern: "app/services/cierre_service.py:2620+ — agregar except asyncpg.UniqueViolationError que mapea a APIError(409)"
+  tests: "pytest tests/test_cierre_duplicate_period.py -v"
+
+risk:
+  sensitive: false
+  areas:
+    - constraint uq_period_tenant_active (BD producción)
+    - flujo crítico de cierres (Finanzas)
+
+skip:
+  audits: []
+
+next:
+  after_pr: "Validar que usuario bf923061 puede cerrar turno restaurante del 2026-08-23 sin error"
