@@ -12,7 +12,7 @@ Endpoints tested:
 import pytest
 from httpx import AsyncClient
 from uuid import uuid4
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from app.services.menu_history_service import get_modifier_group_snapshot
 
@@ -141,6 +141,91 @@ class TestModifierGroupCRUD:
         fake_id = str(uuid4())
         response = await client.delete(f"/menu/modifier-groups/{fake_id}")
         assert response.status_code in [404, 401, 403, 500]
+
+
+class TestModifierGroupDeleteSoftDelete:
+    """Soft-delete when modifiers have order history"""
+
+    @pytest.mark.asyncio
+    async def test_soft_delete_archives_when_used_in_orders(self, monkeypatch):
+        from app.services.modifiers_service import delete_modifier_group
+        from unittest.mock import AsyncMock, MagicMock
+
+        group_id = uuid4()
+        tenant_id = uuid4()
+        user_id = uuid4()
+
+        mock_session = MagicMock(tenant_id=tenant_id, user_id=user_id)
+        monkeypatch.setattr("app.services.modifiers_service.require_valid_session", lambda req: mock_session)
+
+        mock_conn = AsyncMock()
+        # verify group exists
+        mock_conn.fetchrow.return_value = {"id": group_id, "name": "Salsas"}
+        # has_sales = True
+        mock_conn.fetchval.return_value = True
+        mock_conn.execute.return_value = None
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_conn
+        mock_cm.__aexit__.return_value = False
+        # transaction cm
+        mock_tx = AsyncMock()
+        mock_tx.__aenter__.return_value = mock_conn
+        mock_tx.__aexit__.return_value = False
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+
+        monkeypatch.setattr("app.services.modifiers_service.get_db_connection", lambda: mock_cm)
+        monkeypatch.setattr("app.services.modifiers_service.menu_history_service.get_modifier_group_snapshot", AsyncMock(return_value={"dummy": True}))
+        monkeypatch.setattr("app.services.modifiers_service.menu_history_service.record_modifier_group_delete", AsyncMock(return_value=None))
+        monkeypatch.setattr("app.services.modifiers_service.record_module_event", AsyncMock(return_value=None))
+
+        from fastapi import Request
+        req = MagicMock(spec=Request)
+
+        result = await delete_modifier_group(req, group_id, reason="cleanup")
+
+        assert result["archived"] is True
+        # should have called soft-delete queries, not hard delete of group
+        executed = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
+        assert any("product_modifier_groups" in q for q in executed)
+        assert any("UPDATE modifiers" in q for q in executed)
+        assert any("UPDATE modifier_groups SET updated_at" in q for q in executed)
+        assert not any("DELETE FROM modifier_groups" in q for q in executed)
+
+    @pytest.mark.asyncio
+    async def test_hard_delete_when_no_history(self, monkeypatch):
+        from app.services.modifiers_service import delete_modifier_group
+        from unittest.mock import MagicMock
+
+        group_id = uuid4()
+        tenant_id = uuid4()
+        user_id = uuid4()
+        mock_session = MagicMock(tenant_id=tenant_id, user_id=user_id)
+        monkeypatch.setattr("app.services.modifiers_service.require_valid_session", lambda req: mock_session)
+
+        mock_conn = AsyncMock()
+        mock_conn.fetchrow.return_value = {"id": group_id, "name": "Salsas"}
+        mock_conn.fetchval.return_value = False
+        mock_conn.execute.return_value = None
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_conn
+        mock_cm.__aexit__.return_value = False
+        mock_tx = AsyncMock()
+        mock_tx.__aenter__.return_value = mock_conn
+        mock_tx.__aexit__.return_value = False
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+        monkeypatch.setattr("app.services.modifiers_service.get_db_connection", lambda: mock_cm)
+        monkeypatch.setattr("app.services.modifiers_service.menu_history_service.get_modifier_group_snapshot", AsyncMock(return_value={"dummy": True}))
+        monkeypatch.setattr("app.services.modifiers_service.menu_history_service.record_modifier_group_delete", AsyncMock(return_value=None))
+        monkeypatch.setattr("app.services.modifiers_service.record_module_event", AsyncMock(return_value=None))
+
+        from fastapi import Request
+        req = MagicMock(spec=Request)
+        result = await delete_modifier_group(req, group_id, reason="cleanup")
+
+        assert result["archived"] is False
+        executed = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
+        assert any("DELETE FROM modifier_groups" in q for q in executed)
 
 
 @pytest.mark.asyncio

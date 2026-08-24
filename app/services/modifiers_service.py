@@ -808,28 +808,34 @@ async def delete_modifier_group(
 
             # Start transaction
             async with conn.transaction():
-                # Check if any modifier in this group was used in orders
+                # Check if any modifier in this group was used in orders (tenant-scoped via verify gate)
                 has_sales = await conn.fetchval(
                     """
                     SELECT EXISTS(
                         SELECT 1 FROM order_item_modifiers oim
                         JOIN modifiers m ON m.id = oim.modifier_id
-                        WHERE m.modifier_group_id = $1
+                        JOIN modifier_groups mg ON mg.id = m.modifier_group_id
+                        WHERE m.modifier_group_id = $1 AND mg.tenant_id = $2
                     )
                     """,
-                    group_id,
+                    group_id, tenant_id,
                 )
 
                 if has_sales:
-                    # Soft-delete: preserve order history, hide from sale
+                    # Soft-delete: preserve order history, hide from sale (idempotent via COALESCE)
                     if group_snapshot:
                         await menu_history_service.record_modifier_group_delete(
                             conn, tenant_id, group_id, group_name,
                             group_snapshot, user_id
                         )
+                    # Tenant-scoped via subquery on modifier_groups
                     await conn.execute(
-                        "DELETE FROM product_modifier_groups WHERE modifier_group_id = $1",
-                        group_id,
+                        """
+                        DELETE FROM product_modifier_groups
+                         WHERE modifier_group_id = $1
+                           AND modifier_group_id IN (SELECT id FROM modifier_groups WHERE tenant_id = $2)
+                        """,
+                        group_id, tenant_id,
                     )
                     await conn.execute(
                         """
@@ -838,8 +844,9 @@ async def delete_modifier_group(
                                removed_at = COALESCE(removed_at, NOW()),
                                updated_at = NOW()
                          WHERE modifier_group_id = $1
+                           AND modifier_group_id IN (SELECT id FROM modifier_groups WHERE tenant_id = $2)
                         """,
-                        group_id,
+                        group_id, tenant_id,
                     )
                     await conn.execute(
                         "UPDATE modifier_groups SET updated_at = NOW() WHERE id = $1 AND tenant_id = $2",
@@ -871,13 +878,25 @@ async def delete_modifier_group(
                         group_snapshot, user_id
                     )
 
-                # 2. Delete product associations first
-                delete_assoc_query = "DELETE FROM product_modifier_groups WHERE modifier_group_id = $1"
-                await conn.execute(delete_assoc_query, group_id)
+                # 2. Delete product associations first (tenant-scoped)
+                await conn.execute(
+                    """
+                    DELETE FROM product_modifier_groups
+                     WHERE modifier_group_id = $1
+                       AND modifier_group_id IN (SELECT id FROM modifier_groups WHERE tenant_id = $2)
+                    """,
+                    group_id, tenant_id,
+                )
 
-                # 3. Delete modifiers (foreign key constraint)
-                delete_modifiers_query = "DELETE FROM modifiers WHERE modifier_group_id = $1"
-                await conn.execute(delete_modifiers_query, group_id)
+                # 3. Delete modifiers (FK modifier_recipes ON DELETE CASCADE, tenant-scoped)
+                await conn.execute(
+                    """
+                    DELETE FROM modifiers
+                     WHERE modifier_group_id = $1
+                       AND modifier_group_id IN (SELECT id FROM modifier_groups WHERE tenant_id = $2)
+                    """,
+                    group_id, tenant_id,
+                )
 
                 # 4. Delete group
                 delete_group_query = "DELETE FROM modifier_groups WHERE id = $1 AND tenant_id = $2"
