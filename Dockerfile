@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.4
 FROM python:3.11-slim
 
 # Set environment variables
@@ -18,7 +19,9 @@ RUN apt-get update \
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt /code/requirements.txt
-RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
+# Mount host SSH agent so pip can clone private git deps (waro-trail) via SSH.
+# Build with: docker build --ssh default . (or docker compose build --ssh default)
+RUN --mount=type=ssh pip install --no-cache-dir --upgrade -r /code/requirements.txt
 
 # Copy application code
 COPY ./app /code/app
