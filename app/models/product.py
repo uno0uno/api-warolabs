@@ -199,7 +199,6 @@ class ProductConvertToResale(BaseModel):
 
 class ProductUpdate(BaseModel):
     """Update product fields"""
-    reason: Optional[str] = Field(None, description="Motivo obligatorio para Bitácora en update/delete")
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None
     price: Optional[Decimal] = Field(None, gt=0)
