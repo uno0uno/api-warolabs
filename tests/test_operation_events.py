@@ -1,6 +1,7 @@
 """Tests for operation events service and router (warocol.com#782)."""
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -68,6 +69,50 @@ def test_to_jsonb_round_trip():
     parsed = json.loads(raw)
     assert parsed["product"] == "Café"
     assert parsed["unit_price"] == 5000.0
+
+
+def _event_row(**overrides):
+    row = {
+        "id": uuid4(),
+        "tenant_id": uuid4(),
+        "created_at": datetime(2026, 8, 15, 15, 46, tzinfo=timezone.utc),
+        "domain": "pos",
+        "channel": "mesa",
+        "action": "payment_voided",
+        "actor_user_id": None,
+        "actor_user_name": None,
+        "actor_member_id": None,
+        "actor_member_name": None,
+        "table_id": None,
+        "table_session_id": None,
+        "pos_cart_id": None,
+        "order_id": uuid4(),
+        "order_item_id": None,
+        "comanda_item_id": None,
+        "payload": {"payment_method": "card", "amount": 4000},
+        "reason": "prueba",
+        "live_order_number": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_row_to_event_fills_order_number_from_live_order():
+    event = operation_events_service._row_to_event(
+        _event_row(live_order_number=18020),
+    )
+    assert event["payload"]["order_number"] == 18020
+    assert event["payload"]["payment_method"] == "card"
+
+
+def test_row_to_event_keeps_snapshotted_order_number():
+    event = operation_events_service._row_to_event(
+        _event_row(
+            payload={"order_number": 18020, "payment_method": "card"},
+            live_order_number=99,
+        ),
+    )
+    assert event["payload"]["order_number"] == 18020
 
 
 @pytest.mark.asyncio
@@ -276,6 +321,9 @@ async def test_list_operation_events_omitted_domain_does_not_filter_domain():
     assert result["success"] is True
     sql = conn.fetchval.call_args[0][0]
     assert "e.domain =" not in sql
+    fetch_sql = conn.fetch.call_args[0][0]
+    assert "LEFT JOIN orders o ON o.id = e.order_id" in fetch_sql
+    assert "o.order_number AS live_order_number" in fetch_sql
 
 
 @pytest.mark.asyncio
