@@ -1368,6 +1368,7 @@ async def update_product_with_recipe(
                     entity_type="product",
                     entity_id=product_id,
                     label=product_name,
+                    reason=getattr(product_data, "reason", None),
                 )
 
                 # 6. Get complete updated product
@@ -1386,7 +1387,8 @@ async def update_product_with_recipe(
 
 async def delete_product(
     request: Request,
-    product_id: UUID
+    product_id: UUID,
+    reason: Optional[str] = None
 ) -> dict:
     """
     Deletes a product when it has no sales history, or archives it when order_items exist.
@@ -1464,6 +1466,7 @@ async def delete_product(
                         entity_id=product_id,
                         label=product_name,
                         extra={"archived": True},
+                        reason=reason,
                     )
 
                     return {
@@ -1500,6 +1503,7 @@ async def delete_product(
                     entity_id=product_id,
                     label=product_name,
                     extra={"archived": False},
+                    reason=reason,
                 )
 
                 return {
