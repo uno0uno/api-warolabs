@@ -808,6 +808,62 @@ async def delete_modifier_group(
 
             # Start transaction
             async with conn.transaction():
+                # Check if any modifier in this group was used in orders
+                has_sales = await conn.fetchval(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM order_item_modifiers oim
+                        JOIN modifiers m ON m.id = oim.modifier_id
+                        WHERE m.modifier_group_id = $1
+                    )
+                    """,
+                    group_id,
+                )
+
+                if has_sales:
+                    # Soft-delete: preserve order history, hide from sale
+                    if group_snapshot:
+                        await menu_history_service.record_modifier_group_delete(
+                            conn, tenant_id, group_id, group_name,
+                            group_snapshot, user_id
+                        )
+                    await conn.execute(
+                        "DELETE FROM product_modifier_groups WHERE modifier_group_id = $1",
+                        group_id,
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE modifiers
+                           SET is_available = false,
+                               removed_at = COALESCE(removed_at, NOW()),
+                               updated_at = NOW()
+                         WHERE modifier_group_id = $1
+                        """,
+                        group_id,
+                    )
+                    await conn.execute(
+                        "UPDATE modifier_groups SET updated_at = NOW() WHERE id = $1 AND tenant_id = $2",
+                        group_id, tenant_id,
+                    )
+                    await record_module_event(
+                        conn,
+                        tenant_id,
+                        domain=DOMAIN_MENU,
+                        action="modifier_group_deleted",
+                        actor_user_id=user_id,
+                        entity_type="modifier_group",
+                        entity_id=group_id,
+                        label=group_name,
+                        reason=reason,
+                        extra={"archived": True},
+                    )
+                    return {
+                        "success": True,
+                        "archived": True,
+                        "message": "Modifier group archived. Hidden from sale, history preserved.",
+                    }
+
+                # Hard delete when no order history
                 # 1. Registrar eliminación en historial
                 if group_snapshot:
                     await menu_history_service.record_modifier_group_delete(
@@ -837,10 +893,12 @@ async def delete_modifier_group(
                     entity_id=group_id,
                     label=group_name,
                     reason=reason,
+                    extra={"archived": False},
                 )
 
                 return {
                     "success": True,
+                    "archived": False,
                     "message": "Modifier group deleted successfully"
                 }
 
