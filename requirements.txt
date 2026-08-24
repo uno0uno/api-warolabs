@@ -21,7 +21,7 @@ cachetools==5.5.0
 Babel==2.17.0
 # Private repo: Docker/local pip needs GitHub SSH or GH_TOKEN.
 # Pin #8 (scroll props) until uno0uno/waro-trail#11 merges, then return to @main.
-waro-trail @ git+https://github.com/uno0uno/waro-trail.git@497dc49de8da30873ade6c85dc93d67839a4054e
+waro-trail @ git+ssh://git@github.com/uno0uno/waro-trail.git@497dc49de8da30873ade6c85dc93d67839a4054e
 
 # Testing
 pytest==8.3.4
