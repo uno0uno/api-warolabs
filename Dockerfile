@@ -15,6 +15,7 @@ RUN apt-get update \
         build-essential \
         git \
         libpq-dev \
+        openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies
