@@ -1,4 +1,5 @@
 """Lead capture forwards optional visitor_key (uno0uno/waro-trail#4)."""
+import json
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -139,7 +140,82 @@ def test_get_campaign_returns_public_payload():
     with patch("app.routers.leads.get_db_connection", _campaign_db):
         response = _client().get("/leads/campaigns/n8n")
     assert response.status_code == 200
-    assert response.json() == {"slug": "n8n", "name": "Curso n8n"}
+    assert response.json() == {
+        "slug": "n8n",
+        "name": "Curso n8n",
+        "title": "Curso n8n",
+        "description": None,
+        "cta_label": None,
+        "microcopy": None,
+        "image_url": None,
+        "video_url": None,
+    }
+
+
+def test_get_campaign_includes_landing_json_and_nested_image():
+    campaign_id = uuid4()
+    landing = {
+        "title": "Deja de vender a ciegas",
+        "description": "El POS cobró el plato. No descontó los gramos.",
+        "cta_label": "Quiero ver mi food cost",
+        "microcopy": "Te escribimos por WhatsApp.",
+        "image": {"type": "image", "content": "https://cdn.example.com/poster.png"},
+        "video_url": "https://cdn.example.com/ad.mp4",
+    }
+
+    @asynccontextmanager
+    async def _campaign_db():
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(
+            return_value={
+                "id": campaign_id,
+                "slug": "food-cost",
+                "name": "Deja de vender a ciegas",
+                "landing_content": json.dumps(landing),
+            }
+        )
+        yield conn
+
+    with patch("app.routers.leads.get_db_connection", _campaign_db):
+        response = _client().get("/leads/campaigns/food-cost")
+    assert response.status_code == 200
+    assert response.json() == {
+        "slug": "food-cost",
+        "name": "Deja de vender a ciegas",
+        "title": "Deja de vender a ciegas",
+        "description": "El POS cobró el plato. No descontó los gramos.",
+        "cta_label": "Quiero ver mi food cost",
+        "microcopy": "Te escribimos por WhatsApp.",
+        "image_url": "https://cdn.example.com/poster.png",
+        "video_url": "https://cdn.example.com/ad.mp4",
+    }
+
+
+def test_get_campaign_rejects_youtube_video_url():
+    campaign_id = uuid4()
+
+    @asynccontextmanager
+    async def _campaign_db():
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(
+            return_value={
+                "id": campaign_id,
+                "slug": "food-cost",
+                "name": "Deja de vender a ciegas",
+                "landing_content": json.dumps({
+                    "image_url": "https://cdn.example.com/poster.png",
+                    "video_url": "https://www.youtube.com/watch?v=abc",
+                }),
+            }
+        )
+        yield conn
+
+    with patch("app.routers.leads.get_db_connection", _campaign_db):
+        response = _client().get("/leads/campaigns/food-cost")
+    body = response.json()
+    assert response.status_code == 200
+    assert body["image_url"] == "https://cdn.example.com/poster.png"
+    assert body["video_url"] is None
 
 
 def test_get_campaign_404_when_missing():

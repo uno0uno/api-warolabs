@@ -1,0 +1,35 @@
+issue: 2339
+title: "Dynamic squeeze copy from campaign landing template (image or video)"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2339-landing-template
+risk: low
+
+paths:
+  - app/services/leads_service.py
+  - app/routers/leads.py
+  - tests/test_leads_capture.py
+  - sql/20260816_landing_templates_food_cost_ia.sql
+
+ac:
+  - GET /leads/campaigns/{slug} returns slug, name, title, description, image_url, optional cta_label, microcopy, video_url from active landing template JSON
+  - Missing landing template falls back to campaign.name; missing/inactive/other-brand still 404
+  - Normalize image_url and { image.content }; reject YouTube; https public URLs only
+  - Attach landing-only templates to food-cost and ia-factura (no campaign columns, no DROP/ALTER)
+
+out_of_scope:
+  - New columns on campaign
+  - n8n HTML/email templates
+  - Facebook Ads Manager
+  - Campaign admin UI
+  - Recording/uploading final videos
+
+hints:
+  entry: "GET /leads/campaigns/{slug} — leads.py + get_public_campaign"
+  pattern: "campaign LEFT JOIN LATERAL latest active landing template_versions.content"
+  tests: "./venv/bin/python -m pytest tests/test_leads_capture.py -q"
+
+skip:
+  audits: [ux, color, typography]
