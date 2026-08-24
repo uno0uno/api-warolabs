@@ -435,7 +435,8 @@ async def get_modifier_groups_list(
     limit: int = 50,
     search: Optional[str] = None,
     product_id: Optional[UUID] = None,
-    is_required: Optional[bool] = None
+    is_required: Optional[bool] = None,
+    estado: Optional[str] = None,
 ) -> ModifierGroupsListResponse:
     """Get list of modifier groups with filters. Now supports multiple products per group."""
     try:
@@ -456,6 +457,7 @@ async def get_modifier_groups_list(
                     mg.max_qty,
                     mg.is_required,
                     mg.sort_order,
+                    mg.is_active,
                     mg.created_at,
                     mg.updated_at
                 FROM modifier_groups mg
@@ -492,6 +494,13 @@ async def get_modifier_groups_list(
                 base_query += f" AND mg.is_required = ${param_count}"
                 count_query += f" AND mg.is_required = ${param_count}"
                 params.append(is_required)
+                param_count += 1
+
+            if estado in ("activo", "archivado"):
+                is_active_val = estado == "activo"
+                base_query += f" AND mg.is_active = ${param_count}"
+                count_query += f" AND mg.is_active = ${param_count}"
+                params.append(is_active_val)
                 param_count += 1
 
             # Add pagination
@@ -849,7 +858,7 @@ async def delete_modifier_group(
                         group_id, tenant_id,
                     )
                     await conn.execute(
-                        "UPDATE modifier_groups SET updated_at = NOW() WHERE id = $1 AND tenant_id = $2",
+                        "UPDATE modifier_groups SET is_active = FALSE, updated_at = NOW() WHERE id = $1 AND tenant_id = $2",
                         group_id, tenant_id,
                     )
                     await record_module_event(

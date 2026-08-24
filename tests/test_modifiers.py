@@ -189,7 +189,7 @@ class TestModifierGroupDeleteSoftDelete:
         executed = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
         assert any("product_modifier_groups" in q for q in executed)
         assert any("UPDATE modifiers" in q for q in executed)
-        assert any("UPDATE modifier_groups SET updated_at" in q for q in executed)
+        assert any("UPDATE modifier_groups SET is_active" in q for q in executed)
         assert not any("DELETE FROM modifier_groups" in q for q in executed)
 
     @pytest.mark.asyncio

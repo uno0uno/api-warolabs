@@ -1,0 +1,30 @@
+issue: 912
+title: "Modifier groups need Estado (Activo/Archivado) column like warehouse/products"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-912-modifier-group-estado
+paths:
+  - sql/20260825_modifier_groups_is_active.sql
+  - app/services/modifiers_service.py
+  - app/routers/modifiers.py
+ac:
+  - Migration ADD COLUMN is_active BOOL DEFAULT TRUE to modifier_groups
+  - GET /menu/modifier-groups supports ?estado=activo|archivado|todos and returns estado
+  - DELETE when has_orders sets is_active=false (archived) + soft-delete modifiers, returns {archived:true}
+  - No 500 FK, reason 422 still
+out_of_scope:
+  - front Estado column (follow-up PR in warocol.com)
+  - other menu entities
+hints:
+  entry: "app/services/modifiers_service.py:783 delete_modifier_group"
+  pattern: "app/services/warehouse_categories_service.py:241 is_active archiving"
+  tests: "pytest tests/test_modifiers.py -q"
+risk:
+  sensitive: false
+  areas: []
+skip:
+  audits: []
+next:
+  after_pr: "front PR warocol.com Estado column + filter"
