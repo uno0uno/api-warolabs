@@ -6,6 +6,7 @@ Issue: https://github.com/uno0uno/warocol.com/issues/311
 """
 import logging
 import json
+import asyncpg
 from decimal import Decimal
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -2862,9 +2863,36 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
 
     except (AuthenticationError, APIError):
         raise
+    except asyncpg.UniqueViolationError as exc:
+        # Issue #898: uq_period_tenant_shift_active (replaces uq_period_tenant_active
+        # after migration 122) enforces (tenant, day, shift_template) uniqueness.
+        # Match the constraint family so the friendly 409 keeps firing across the
+        # deploy window (when both old and new indexes may briefly coexist) and
+        # future renames in the same family.
+        constraint = (getattr(exc, "constraint_name", "") or "").lower()
+        detail = (getattr(exc, "detail", "") or "").lower()
+        message = (getattr(exc, "message", "") or str(exc) or "").lower()
+        haystack = f"{constraint} {detail} {message}"
+        if "uq_period_tenant" in haystack:
+            logger.warning(
+                "Duplicate cierre for tenant=%s period=%s..%s (constraint=%s)",
+                tenant_id, period_start, period_end, constraint or "uq_period_tenant*",
+            )
+            raise APIError(
+                "Ya existe un cierre para este día y turno. "
+                "Revisa la lista de cierres o usa otra plantilla de turno.",
+                status_code=409,
+            )
+        # Any other unique violation: log internally but don't leak raw exception
+        # text to the API client.
+        logger.error("Error in create_cierre (unique violation, constraint=%s): %s", constraint, exc)
+        raise APIError(
+            "Conflicto de unicidad al registrar el cierre. Contacta soporte si persiste.",
+            status_code=409,
+        )
     except Exception as exc:
         logger.error(f"Error in create_cierre: {exc}")
-        raise APIError(f"Error in create_cierre: {exc}", status_code=500)
+        raise APIError("Error al registrar el cierre. Intenta de nuevo.", status_code=500)
 
 
 # ---------------------------------------------------------------------------
