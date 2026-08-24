@@ -16,7 +16,9 @@ RUN apt-get update \
         git \
         libpq-dev \
         openssh-client \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /root/.ssh \
+    && ssh-keyscan github.com >> /root/.ssh/known_hosts
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt /code/requirements.txt
