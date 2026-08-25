@@ -205,3 +205,12 @@ class IngredientPurchaseUnitsListResponse(BaseModel):
     success: bool = True
     total: int
     data: List[IngredientPurchaseUnit]
+
+
+class IngredientPurchaseUnitsBatchRequest(BaseModel):
+    ingredient_ids: List[UUID] = Field(..., min_length=1, max_length=250, description="Ingredient IDs to fetch purchase units for")
+
+
+class IngredientPurchaseUnitsBatchResponse(BaseModel):
+    success: bool = True
+    data: dict
