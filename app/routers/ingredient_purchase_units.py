@@ -4,6 +4,7 @@ from uuid import UUID
 from app.core.permissions import Module, require_module
 from app.services.ingredient_purchase_units_service import (
     get_all_purchase_units,
+    get_purchase_units_batch,
     get_purchase_units_by_ingredient,
     get_purchase_unit_by_id,
     create_purchase_unit,
@@ -14,7 +15,9 @@ from app.models.ingredient import (
     IngredientPurchaseUnitCreate,
     IngredientPurchaseUnitUpdate,
     IngredientPurchaseUnitResponse,
-    IngredientPurchaseUnitsListResponse
+    IngredientPurchaseUnitsListResponse,
+    IngredientPurchaseUnitsBatchRequest,
+    IngredientPurchaseUnitsBatchResponse
 )
 
 router = APIRouter()
@@ -37,6 +40,16 @@ async def list_purchase_units_endpoint(
     return await get_all_purchase_units(
         request, response, page, limit, search, ingredient_id, active_only
     )
+
+
+@router.post("/batch", response_model=IngredientPurchaseUnitsBatchResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
+async def batch_purchase_units_endpoint(
+    body: IngredientPurchaseUnitsBatchRequest,
+    request: Request,
+    response: Response,
+):
+    """Batch fetch purchase units for multiple ingredients (fix N+1 in recipe builder)."""
+    return await get_purchase_units_batch(request, response, body.ingredient_ids)
 
 
 @router.get("/ingredient/{ingredient_id}", response_model=IngredientPurchaseUnitsListResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
