@@ -215,8 +215,8 @@ async def create_recipe_base_type(
                 label=recipe_data.name,
             )
 
-            # Re-load for response shape (ingredients + meta)
-            return await get_recipe_base_type_by_id(request, base_type_id)
+            # Re-load for response shape (ingredients + meta) — reuse tx conn so reload sees uncommitted row
+            return await get_recipe_base_type_by_id(request, base_type_id, conn)
 
     except AuthenticationError:
         raise
@@ -329,7 +329,8 @@ async def get_recipe_base_types_list(
 
 async def get_recipe_base_type_by_id(
     request: Request,
-    recipe_base_id: UUID
+    recipe_base_id: UUID,
+    conn=None,
 ) -> RecipeBaseTypeResponse:
     """
     Get a single recipe base type by ID with its ingredients.
@@ -337,6 +338,7 @@ async def get_recipe_base_type_by_id(
     Args:
         request: FastAPI request object
         recipe_base_id: UUID of the recipe base type
+        conn: Optional existing connection (reuse tx when called from create)
 
     Returns:
         RecipeBaseTypeResponse with recipe base type data
@@ -351,7 +353,7 @@ async def get_recipe_base_type_by_id(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
-        async with get_db_connection(use_transaction=False) as conn:
+        async def _fetch(connection):
             # Fetch recipe base type
             base_query = """
                 SELECT id, name, description, is_active, created_at, updated_at
@@ -359,13 +361,13 @@ async def get_recipe_base_type_by_id(
                 WHERE id = $1 AND tenant_id = $2
             """
 
-            row = await conn.fetchrow(base_query, recipe_base_id, tenant_id)
+            row = await connection.fetchrow(base_query, recipe_base_id, tenant_id)
 
             if not row:
                 raise HTTPException(status_code=404, detail="Recipe base type not found")
 
             # Fetch ingredients
-            ingredient_rows = await conn.fetch(
+            ingredient_rows = await connection.fetch(
                 _RECIPE_BASE_INGREDIENT_SELECT, recipe_base_id, tenant_id
             )
             ingredients = [
@@ -380,6 +382,12 @@ async def get_recipe_base_type_by_id(
                 success=True,
                 data=RecipeBaseType(**recipe_dict)
             )
+
+        if conn is not None:
+            return await _fetch(conn)
+
+        async with get_db_connection(use_transaction=False) as connection:
+            return await _fetch(connection)
 
     except AuthenticationError:
         raise

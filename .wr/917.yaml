@@ -1,0 +1,29 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 917
+title: "fix(menu): POST /menu/recipe-bases 404 Recipe base type not found tras create — get_recipe_base_type_by_id fuera de tx"
+repo: api-warolabs
+repo_remote: uno0uno/api-warolabs
+cwd: "/Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com"
+stack: fastapi
+branch: wr-917-recipe-create-404
+paths:
+  - app/services/recipe_bases_service.py
+ac:
+  - POST /menu/recipe-bases retorna 201 sin 404 tras Recipe base create recorded
+  - GET /menu/recipe-bases/{id} 200 con ingredientes para el tenant
+  - create_recipe_base_type reusa conn/tx para reload (no nueva conexion antes de commit)
+  - Sin regresion en warocol.com/menu/recetas/crear
+out_of_scope:
+  - Cambios en products_service / modifiers_service / direct_purchase_service
+  - Billing eligibility / slug alias
+hints:
+  entry: "app/services/recipe_bases_service.py:219 get_recipe_base_type_by_id"
+  pattern: "app/services/modifiers_service.py:334 get_modifier_group_by_id(conn)"
+  tests: "pytest tests/test_public_slug.py -q"
+risk:
+  sensitive: false
+  areas: []
+skip:
+  audits: []
+next:
+  after_pr: "verificar warocol.com/menu/recetas/crear"
