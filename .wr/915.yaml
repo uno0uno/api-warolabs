@@ -1,0 +1,31 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 915
+title: "Fix: /public/restaurant/{slug}/menu 500 en todos los tenants — falta f-string en products_query"
+repo: api-warolabs
+repo_remote: uno0uno/api-warolabs
+cwd: "/Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com"
+stack: fastapi
+branch: wr-915-public-menu-fstring
+paths:
+  - app/services/public_restaurant_service.py
+ac:
+  - GET /api/public/restaurant/{slug}/menu responde 200 con categorias y productos para armelo-perro y waro-colombia (no 500)
+  - warocol.com/{slug} no muestra "Restaurante no encontrado" por error de menu; front error solo en 404 real
+  - get_menu_by_slug products_query usa f""" para interpolar online_menu_product_order_join_sql()
+  - get_menu_by_tenant_id mismo fix f""" y por-tenant ordering intacto
+  - Sin syntax error at or near "{"
+out_of_scope:
+  - Cambios en _PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL
+  - Migracion slug alias / city_slug
+  - Billing eligibility
+hints:
+  entry: "app/services/public_restaurant_service.py:177 get_menu_by_slug"
+  pattern: "app/services/categories_service.py:56 online_menu_product_order_join_sql"
+  tests: "pytest tests/test_public_slug.py tests/test_online_menu_product_order.py -q"
+risk:
+  sensitive: false
+  areas: []
+skip:
+  audits: []
+next:
+  after_pr: "deploy y verificar warocol.com/armelo-perro"
