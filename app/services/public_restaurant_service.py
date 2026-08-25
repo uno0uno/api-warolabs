@@ -174,7 +174,7 @@ async def get_menu_by_slug(
             categories = [dict(row) for row in categories_rows]
 
             # 3. Get products
-            products_query = """
+            products_query = f"""
                 SELECT
                     p.id, p.name, p.description, p.price, p.image_url,
                     p.category_id, c.name as category_name,
@@ -346,7 +346,7 @@ async def get_menu_by_tenant_id(
             categories_rows = await conn.fetch(categories_query, tenant_id)
             categories = [dict(row) for row in categories_rows]
 
-            products_query = """
+            products_query = f"""
                 SELECT
                     p.id, p.name, p.description, p.price, p.image_url,
                     p.category_id, c.name as category_name,
