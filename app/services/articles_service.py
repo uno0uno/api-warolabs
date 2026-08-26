@@ -2,6 +2,7 @@ from typing import Optional
 from uuid import UUID
 from fastapi import Request, Response
 from app.database import get_db_connection
+from app.core.country_locale import normalize_article_country_code
 from app.core.exceptions import APIError
 from app.models.article import (
     Article, ArticleSummary, ArticlesListResponse, ArticleDetailResponse, AuthorInfo
@@ -9,6 +10,60 @@ from app.models.article import (
 import logging
 
 logger = logging.getLogger(__name__)
+
+_SUMMARY_COLUMNS = """
+                    a.id,
+                    a.title,
+                    a.slug,
+                    a.description,
+                    a.thumbnail,
+                    a.cover,
+                    a.tags,
+                    a.pillar,
+                    COALESCE(a.views, 0) as views,
+                    a.published,
+                    a.created_at,
+                    a.updated_at,
+                    a.lang,
+                    a.country,
+                    a.country_code,
+                    p.name as author_name,
+                    p.logo_avatar as author_avatar
+"""
+
+
+def _row_get(row, key, default=None):
+    try:
+        value = row[key]
+    except (KeyError, IndexError):
+        return default
+    return default if value is None else value
+
+
+def _article_summary_from_row(row) -> ArticleSummary:
+    country_code = _row_get(row, "country_code")
+    if country_code:
+        country_code = str(country_code).strip().upper() or None
+    else:
+        country_code = normalize_article_country_code(_row_get(row, "country"))
+    return ArticleSummary(
+        id=row["id"],
+        title=row["title"],
+        slug=row["slug"],
+        description=row["description"],
+        thumbnail=row["thumbnail"],
+        cover=row["cover"],
+        tags=row["tags"],
+        pillar=row["pillar"],
+        views=row["views"],
+        published=row["published"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        author_name=row["author_name"],
+        author_avatar=row["author_avatar"],
+        lang=_row_get(row, "lang"),
+        country_code=country_code,
+    )
 
 
 async def get_articles_list(
@@ -72,20 +127,7 @@ async def get_articles_list(
 
             query = f"""
                 SELECT
-                    a.id,
-                    a.title,
-                    a.slug,
-                    a.description,
-                    a.thumbnail,
-                    a.cover,
-                    a.tags,
-                    a.pillar,
-                    COALESCE(a.views, 0) as views,
-                    a.published,
-                    a.created_at,
-                    a.updated_at,
-                    p.name as author_name,
-                    p.logo_avatar as author_avatar
+                    {_SUMMARY_COLUMNS}
                 FROM articles a
                 LEFT JOIN profile p ON a.author = p.id
                 WHERE {where_sql}
@@ -96,25 +138,7 @@ async def get_articles_list(
 
             rows = await conn.fetch(query, *params)
 
-            articles = [
-                ArticleSummary(
-                    id=row['id'],
-                    title=row['title'],
-                    slug=row['slug'],
-                    description=row['description'],
-                    thumbnail=row['thumbnail'],
-                    cover=row['cover'],
-                    tags=row['tags'],
-                    pillar=row['pillar'],
-                    views=row['views'],
-                    published=row['published'],
-                    created_at=row['created_at'],
-                    updated_at=row['updated_at'],
-                    author_name=row['author_name'],
-                    author_avatar=row['author_avatar']
-                )
-                for row in rows
-            ]
+            articles = [_article_summary_from_row(row) for row in rows]
 
             return ArticlesListResponse(
                 success=True,
@@ -167,6 +191,7 @@ async def get_article_by_slug(
                     a.lang,
                     a.planet,
                     a.country,
+                    a.country_code,
                     a.city,
                     a.created_at,
                     a.updated_at,
@@ -236,6 +261,11 @@ async def get_article_by_slug(
                 lang=row['lang'],
                 planet=row['planet'],
                 country=row['country'],
+                country_code=(
+                    str(row['country_code']).strip().upper()
+                    if row['country_code']
+                    else normalize_article_country_code(row['country'])
+                ),
                 city=row['city'],
                 created_at=row['created_at'],
                 updated_at=row['updated_at'],
@@ -283,20 +313,7 @@ async def get_related_articles(
 
             query = f"""
                 SELECT
-                    a.id,
-                    a.title,
-                    a.slug,
-                    a.description,
-                    a.thumbnail,
-                    a.cover,
-                    a.tags,
-                    a.pillar,
-                    COALESCE(a.views, 0) as views,
-                    a.published,
-                    a.created_at,
-                    a.updated_at,
-                    p.name as author_name,
-                    p.logo_avatar as author_avatar
+                    {_SUMMARY_COLUMNS}
                 FROM articles a
                 LEFT JOIN profile p ON a.author = p.id
                 WHERE a.tenant_id = $1
@@ -310,25 +327,7 @@ async def get_related_articles(
 
             rows = await conn.fetch(query, tenant_id, current_article_id, limit)
 
-            articles = [
-                ArticleSummary(
-                    id=row['id'],
-                    title=row['title'],
-                    slug=row['slug'],
-                    description=row['description'],
-                    thumbnail=row['thumbnail'],
-                    cover=row['cover'],
-                    tags=row['tags'],
-                    pillar=row['pillar'],
-                    views=row['views'],
-                    published=row['published'],
-                    created_at=row['created_at'],
-                    updated_at=row['updated_at'],
-                    author_name=row['author_name'],
-                    author_avatar=row['author_avatar']
-                )
-                for row in rows
-            ]
+            articles = [_article_summary_from_row(row) for row in rows]
 
             return ArticlesListResponse(
                 success=True,
