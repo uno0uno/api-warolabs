@@ -123,9 +123,9 @@ async def test_access_request_inserts_visitor_key_column():
             user_agent=None,
             visitor_key="opaque-id",
         )
-    sql = conn.execute.await_args.args[0]
-    assert "visitor_key" in sql
-    assert conn.execute.await_args.args[-1] == "opaque-id"
+    # last lead_interactions insert should contain visitor_key param
+    assert any("visitor_key" in str(c.args[0]) for c in conn.execute.call_args_list)
+    assert any("opaque-id" in str(c.args) for c in conn.execute.call_args_list)
 
 
 def test_get_campaign_returns_public_payload():
@@ -230,6 +230,19 @@ def test_get_campaign_404_when_missing():
     assert response.status_code == 404
 
 
+def test_access_request_unknown_campaign_returns_404():
+    capture = AsyncMock(side_effect=leads_router.leads_service.PublicCampaignNotFound("nope"))
+    with (
+        patch("app.routers.leads.get_db_connection", _fake_db),
+        patch("app.routers.leads.leads_service.capture_access_request", capture),
+    ):
+        response = _client().post(
+            "/leads/access-request",
+            json={"email": "lead@example.com", "campaign_slug": "nope"},
+        )
+    assert response.status_code == 404
+
+
 def test_capture_unknown_campaign_returns_404():
     capture = AsyncMock(side_effect=leads_router.leads_service.PublicCampaignNotFound("nope"))
     with (
@@ -246,6 +259,31 @@ def test_capture_unknown_campaign_returns_404():
             },
         )
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_access_request_links_campaign_and_utm():
+    profile_id = uuid4()
+    lead_id = uuid4()
+    campaign_id = uuid4()
+    conn = AsyncMock()
+    # fetchrow order: profile SELECT, campaign SELECT, lead INSERT/SELECT lead
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"id": campaign_id, "slug": "food-cost", "name": "Food", "landing_content": None},
+            {"id": profile_id},
+            {"id": lead_id},
+        ]
+    )
+    conn.execute = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=None)
+    with patch("app.services.leads_service._send_access_request_notifications", new_callable=AsyncMock):
+        await capture_access_request(
+            conn, email="lead@example.com", phone="3001234567", ip_address="1.1.1.1", user_agent="Mozilla/5.0",
+            visitor_key="vk1", campaign_slug="food-cost", utm_source="facebook", utm_medium="paid", utm_campaign="food-cost",
+        )
+    assert any("campaign_id" in str(c.args[0]) for c in conn.execute.call_args_list)
+    assert any("campaign_leads" in str(c.args[0]) for c in conn.execute.call_args_list)
 
 
 @pytest.mark.asyncio

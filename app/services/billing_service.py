@@ -1811,14 +1811,39 @@ async def create_onboarding_payment_attempt(
         raise HTTPException(status_code=422, detail="Invalid payment provider")
     if currency_norm not in ("COP", "USD", "EUR"):
         raise HTTPException(status_code=422, detail="Invalid payment currency")
+    # Best-effort attribution: copy last visitor_key/lead_id seen for this tenant's owner email
+    attempt_visitor_key = None
+    attempt_lead_id = None
+    try:
+        tenant_email = await conn.fetchval("SELECT email FROM tenants WHERE id = $1", tenant_id)
+        if tenant_email:
+            owner = await conn.fetchrow("SELECT id FROM profile WHERE lower(trim(email)) = lower(trim($1))", tenant_email)
+            if owner:
+                li = await conn.fetchrow(
+                    """
+                    SELECT li.visitor_key, li.lead_id
+                    FROM lead_interactions li
+                    JOIN leads l ON l.id = li.lead_id
+                    WHERE l.profile_id = $1 AND li.visitor_key IS NOT NULL
+                    ORDER BY li.created_at DESC
+                    LIMIT 1
+                    """,
+                    owner["id"],
+                )
+                if li:
+                    attempt_visitor_key = li["visitor_key"]
+                    attempt_lead_id = li["lead_id"]
+    except Exception:
+        pass
     row = await conn.fetchrow("""
         INSERT INTO billing_payment_attempts (
             tenant_id, plan_id, provider, expected_amount_in_cents,
-            currency, billing_cycle, status, provider_environment
+            currency, billing_cycle, status, provider_environment,
+            visitor_key, lead_id
         )
-        VALUES ($1, $2, $3, $4, $5, 'monthly', 'created', $6)
+        VALUES ($1, $2, $3, $4, $5, 'monthly', 'created', $6, $7, $8)
         RETURNING id
-    """, tenant_id, plan_id, provider_norm, amount_in_cents, currency_norm, provider_environment)
+    """, tenant_id, plan_id, provider_norm, amount_in_cents, currency_norm, provider_environment, attempt_visitor_key, attempt_lead_id)
     return row["id"]
 
 
