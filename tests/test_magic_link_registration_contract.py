@@ -309,6 +309,59 @@ def test_magic_link_email_copy_distinguishes_registration_from_login():
     assert "123456" in registration_html
 
 
+def test_magic_link_email_copy_localizes_to_english():
+    from app.templates.magic_link_template import (
+        get_magic_link_subject,
+        get_magic_link_template,
+    )
+
+    context = {
+        "brand_name": "WARO",
+        "tenant_name": "WARO Colombia",
+        "admin_name": "Admin",
+        "admin_email": "admin@warolabs.com",
+    }
+
+    # Subject localizes
+    login_subject_en = get_magic_link_subject("WARO", locale="en")
+    registration_subject_en = get_magic_link_subject("WARO", "registration", locale="en")
+    assert "Your access to" in login_subject_en
+    assert "Complete your registration" in registration_subject_en
+
+    # Body localizes and <html lang> reflects the locale
+    login_html_en = get_magic_link_template(
+        "https://x.test/verify?token=1", "123456", context, locale="en"
+    )
+    registration_html_en = get_magic_link_template(
+        "https://x.test/verify?token=1&purpose=registration",
+        "123456",
+        context,
+        "registration",
+        locale="en",
+    )
+    assert 'lang="en_US"' in login_html_en
+    assert 'lang="en_US"' in registration_html_en
+    assert "You requested access to your account on WARO" in login_html_en
+    assert "Access my account" in login_html_en
+    assert "You started your registration on WARO" in registration_html_en
+    assert "Complete my registration" in registration_html_en
+    # No raw Spanish copy leaks into the English render
+    assert "Has solicitado acceso" not in login_html_en
+    assert "Acceder a mi cuenta" not in login_html_en
+
+
+def test_magic_link_subject_defaults_to_spanish_without_locale():
+    from app.templates.magic_link_template import (
+        get_magic_link_subject,
+        get_magic_link_template,
+    )
+
+    assert "acceso" in get_magic_link_subject("WARO")
+    assert 'lang="es_CO"' in get_magic_link_template(
+        "https://x.test/verify?token=1", "123456", {"brand_name": "WARO"}
+    )
+
+
 def test_registration_payload_rejects_missing_consent_and_pii_attribution():
     with pytest.raises(ValidationError):
         _payload(consent=False)
