@@ -39,6 +39,12 @@ class AccessRequestBody(BaseModel):
     phone: Optional[str] = None
     button_source: str = "access_request"
     visitor_key: Optional[str] = Field(default=None, max_length=128)
+    campaign_slug: Optional[str] = Field(default=None, max_length=255)
+    utm_source: Optional[str] = Field(default=None, max_length=100)
+    utm_medium: Optional[str] = Field(default=None, max_length=100)
+    utm_campaign: Optional[str] = Field(default=None, max_length=100)
+    utm_term: Optional[str] = Field(default=None, max_length=100)
+    utm_content: Optional[str] = Field(default=None, max_length=100)
 
     @field_validator("email", mode="before")
     @classmethod
@@ -55,10 +61,22 @@ class AccessRequestBody(BaseModel):
             raise ValueError("El teléfono debe tener entre 7 y 10 dígitos")
         return digits
 
-    @field_validator("visitor_key", mode="before")
+    @field_validator("visitor_key", "campaign_slug", mode="before")
     @classmethod
     def _strip_visitor_key(cls, v: object) -> Optional[str]:
         return _optional_visitor_key(v)
+
+    @field_validator(
+        "utm_source",
+        "utm_medium",
+        "utm_campaign",
+        "utm_term",
+        "utm_content",
+        mode="before",
+    )
+    @classmethod
+    def _strip_utm(cls, v: object) -> Optional[str]:
+        return _optional_utm(v)
 
 
 class LeadCaptureRequest(BaseModel):
@@ -180,15 +198,24 @@ async def capture_access_request(body: AccessRequestBody, request: Request):
 
     logger.info(f"📥 [leads/access-request] email={body.email} source={body.button_source} ip={ip_address}")
 
-    async with get_db_connection() as conn:
-        await leads_service.capture_access_request(
-            conn=conn,
-            email=str(body.email),
-            phone=body.phone,
-            ip_address=ip_address,
-            user_agent=user_agent,
-            button_source=body.button_source,
-            visitor_key=body.visitor_key,
-        )
+    try:
+        async with get_db_connection() as conn:
+            await leads_service.capture_access_request(
+                conn=conn,
+                email=str(body.email),
+                phone=body.phone,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                button_source=body.button_source,
+                visitor_key=body.visitor_key,
+                campaign_slug=body.campaign_slug,
+                utm_source=body.utm_source,
+                utm_medium=body.utm_medium,
+                utm_campaign=body.utm_campaign,
+                utm_term=body.utm_term,
+                utm_content=body.utm_content,
+            )
+    except leads_service.PublicCampaignNotFound:
+        raise HTTPException(status_code=404, detail="Campaign not found")
 
     return {"success": True, "message": "¡Solicitud enviada! Nos pondremos en contacto contigo pronto."}

@@ -384,6 +384,12 @@ async def capture_access_request(
     user_agent: Optional[str],
     button_source: str = "access_request",
     visitor_key: Optional[str] = None,
+    campaign_slug: Optional[str] = None,
+    utm_source: Optional[str] = None,
+    utm_medium: Optional[str] = None,
+    utm_campaign: Optional[str] = None,
+    utm_term: Optional[str] = None,
+    utm_content: Optional[str] = None,
 ) -> dict:
     """
     Capture an access request from the login page.
@@ -395,6 +401,19 @@ async def capture_access_request(
     """
 
     email = normalize_email(email)
+
+    utm_source = _blank_to_none(utm_source)
+    utm_medium = _blank_to_none(utm_medium)
+    utm_campaign = _blank_to_none(utm_campaign)
+    utm_term = _blank_to_none(utm_term)
+    utm_content = _blank_to_none(utm_content)
+
+    campaign = None
+    campaign_slug = _blank_to_none(campaign_slug)
+    if campaign_slug:
+        campaign = await get_public_campaign(conn, campaign_slug)
+        if campaign is None:
+            raise PublicCampaignNotFound(campaign_slug)
 
     # 1. UPSERT profile — update phone if provided, otherwise leave existing value
     if phone:
@@ -447,21 +466,61 @@ async def capture_access_request(
 
     # 3. INSERT lead_interaction for every access request
     import json as _json
-    metadata = _json.dumps({"button": button_source})
+    metadata = _json.dumps({"button": button_source, "campaign_slug": campaign_slug, "utm": {
+        "source": utm_source, "medium": utm_medium, "campaign": utm_campaign, "term": utm_term, "content": utm_content,
+    } if any((utm_source, utm_medium, utm_campaign, utm_term, utm_content)) else None})
     stored_visitor_key = (visitor_key or "").strip() or None
+    campaign_id = campaign["id"] if campaign else None
+    interaction_source = "landing" if campaign else "login_page"
+    # Also persist UTM to leads row when first seen (best-effort, coalesce)
+    if any((utm_source, utm_medium, utm_campaign, utm_term, utm_content)):
+        await conn.execute(
+            """
+            UPDATE leads SET
+                utm_source = coalesce(utm_source, $2),
+                utm_medium = coalesce(utm_medium, $3),
+                utm_campaign = coalesce(utm_campaign, $4),
+                utm_term = coalesce(utm_term, $5),
+                utm_content = coalesce(utm_content, $6)
+            WHERE id = $1
+            """,
+            lead_id,
+            utm_source,
+            utm_medium,
+            utm_campaign,
+            utm_term,
+            utm_content,
+        )
     await conn.execute(
         """
         INSERT INTO lead_interactions
-            (lead_id, interaction_type, source, ip_address, user_agent, metadata, visitor_key)
-        VALUES ($1, 'access_request', 'login_page', $2, $3, $4::jsonb, $5)
+            (lead_id, interaction_type, source, ip_address, user_agent, metadata,
+             visitor_key, campaign_id, medium, campaign, term, content)
+        VALUES ($1, 'access_request', $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11)
         """,
         lead_id,
+        interaction_source,
         ip_address,
         user_agent,
         metadata,
         stored_visitor_key,
+        campaign_id,
+        utm_medium,
+        utm_campaign,
+        utm_term,
+        utm_content,
     )
     logger.info(f"📥 [capture_access_request] Interaction recorded for lead {lead_id}")
+    if campaign_id is not None:
+        await conn.execute(
+            """
+            INSERT INTO campaign_leads (campaign_id, lead_id)
+            VALUES ($1, $2)
+            ON CONFLICT (campaign_id, lead_id) DO NOTHING
+            """,
+            campaign_id,
+            lead_id,
+        )
 
     # Fire-and-forget notifications (non-blocking)
     asyncio.create_task(_send_access_request_notifications(email, phone, ip_address))
