@@ -21,7 +21,7 @@ cachetools==5.5.0
 Babel==2.17.0
 # Private repo: Docker/local pip needs GitHub SSH or GH_TOKEN.
 # Pinned to #13 (index trail_events_visitor_occurred + utm caps).
-waro-trail @ git+ssh://git@github.com/uno0uno/waro-trail.git@9db93edd4230ea54d64c06503267b873444d6dba
+waro-trail @ git+ssh://git@github.com/uno0uno/waro-trail.git@9db93edde83c509321b78c382f7a23f2a8207a6a
 
 # Testing
 pytest==8.3.4
