@@ -256,7 +256,7 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
                 )
             )
 
-    except (ValidationError, AuthenticationError, AuthorizationError):
+    except (ValidationError, AuthenticationError, AuthorizationError, APIError):
         raise
     except Exception as e:
         logger.error(f"❌ Send invitation error: {e}", exc_info=True)

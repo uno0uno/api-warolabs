@@ -1,0 +1,32 @@
+# Compact plan — warocol.com#2465
+issue: 2465
+title: "Equipo invite: show plan-limit modal like Menú (do not swallow quota 429)"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2465-invitation-quota-modal
+
+paths:
+  - app/services/invitation_service.py
+  - tests/test_quota_enforcement.py
+
+ac:
+  - "Over-quota invite returns 429 quota_exceeded, not Failed to send invitation"
+
+out_of_scope:
+  - "Changing starter/trial numeric limits"
+
+hints:
+  entry: "send_invitation except"
+  tests: "pytest tests/test_quota_enforcement.py::test_send_invitation_quota_block_reraises_api_error -q --noconftest"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: []
+
+next:
+  after_pr: ""
