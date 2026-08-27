@@ -197,18 +197,23 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
                 current_user_id
             )
 
-            # Prepare template context
+            # Resolve tenant locale for localized email copy
+            from app.core.localization import resolve_tenant_locale_settings
+            locale_settings = await resolve_tenant_locale_settings(conn, tenant_context.tenant_id)
+            invite_locale = locale_settings.locale
+
+            # Prepare template context (role as localization key, not display string)
             template_context = {
                 'brand_name': brand_name,
                 'tenant_name': tenant_name,
-                'inviter_name': inviter_name or 'Un administrador',
+                'inviter_name': inviter_name or '',
                 'invitee_name': payload.name,
-                'role': 'Administrador' if payload.role.value == 'admin' else 'Super Usuario',
+                'role': payload.role.value,
             }
 
             # Generate email content
-            html_template = get_invitation_template(invitation_url, template_context)
-            subject = get_invitation_subject(brand_name)
+            html_template = get_invitation_template(invitation_url, template_context, locale=invite_locale)
+            subject = get_invitation_subject(brand_name, locale=invite_locale)
 
             from_name = f"{inviter_name or 'Equipo'} - {brand_name}"
 

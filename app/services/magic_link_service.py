@@ -159,6 +159,7 @@ async def _deliver_magic_link(
     tenant_name: str,
     tenant_email: Optional[str],
     purpose: Literal["login", "registration"] = "login",
+    locale: Optional[str] = None,
 ) -> None:
     from app.services.aws_ses_service import ses_service
     from app.services.email_sender import resolve_sender_email_value
@@ -167,19 +168,22 @@ async def _deliver_magic_link(
     template_context = {
         "brand_name": brand_name,
         "tenant_name": tenant_name,
-        "admin_name": "Saifer 101 (Anderson Arévalo)",
-        "admin_email": tenant_email,
+        # Contact signature is sourced from tenant_context/env by the caller;
+        # not hardcoded to a specific person/city here.
+        "admin_name": "",
+        "admin_email": tenant_email or "",
     }
     sent = await ses_service.send_email(
         from_email=resolve_sender_email_value(tenant_email),
-        from_name=f"Saifer 101 (Anderson Arévalo) - {brand_name}",
+        from_name=brand_name,
         to_emails=[email],
-        subject=get_magic_link_subject(brand_name, purpose),
+        subject=get_magic_link_subject(brand_name, purpose, locale),
         html_body=get_magic_link_template(
             magic_link_url,
             verification_code,
             template_context,
             purpose,
+            locale,
         ),
     )
     if sent:
@@ -351,6 +355,9 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
                     user_tenant_id,
                 )
                 branding = await _tenant_email_branding(conn, user_tenant_id)
+                from app.core.localization import resolve_tenant_locale_settings
+                locale_settings = await resolve_tenant_locale_settings(conn, user_tenant_id)
+                login_locale = locale_settings.locale
 
         if registration_draft:
             # The public response stays generic. A fresh opaque registration
@@ -377,6 +384,7 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             brand_name=branding["brand_name"],
             tenant_name=branding["tenant_name"],
             tenant_email=branding["tenant_email"] or tenant_context.tenant_email,
+            locale=login_locale,
         )
         return MagicLinkResponse()
             
