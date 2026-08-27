@@ -69,6 +69,56 @@ def locale_from_country(country_code: Optional[str]) -> str:
     return validate_ui_locale(DEFAULT_TENANT_UI_LOCALE)
 
 
+_LATAM_REGION_LABELS = frozenset({
+    "latam",
+    "latin america",
+    "latinoamerica",
+    "latinoamérica",
+    "américa latina",
+    "america latina",
+})
+
+_COUNTRY_NAME_ALIASES = {
+    "usa": "US",
+    "u.s.": "US",
+    "u.s.a.": "US",
+    "united states of america": "US",
+    "uk": "GB",
+    "england": "GB",
+    "españa": "ES",
+    "espana": "ES",
+    "méxico": "MX",
+    "mexico": "MX",
+    "brasil": "BR",
+    "col": "CO",
+}
+
+_DISPLAY_NAME_TO_CODE = {
+    name.casefold(): code for code, name in COUNTRY_DISPLAY_NAMES.items()
+}
+
+
+def normalize_article_country_code(value: Optional[str]) -> Optional[str]:
+    """Map free-text articles.country to ISO-2, or None for region/unknown (LATAM)."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    folded = raw.casefold()
+    if folded in _LATAM_REGION_LABELS:
+        return None
+    if len(raw) == 2:
+        code = raw.upper()
+        if code in COUNTRY_CURRENCY_PAIRS:
+            return code
+    alias = _COUNTRY_NAME_ALIASES.get(folded)
+    if alias:
+        return alias
+    mapped = _DISPLAY_NAME_TO_CODE.get(folded)
+    if mapped:
+        return mapped
+    return None
+
+
 def public_country_name(country_code: Optional[str]) -> str:
     """Human-readable country for tenant_public_profiles.country."""
     code = str(country_code or "").strip().upper()
