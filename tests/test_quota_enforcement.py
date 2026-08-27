@@ -231,6 +231,52 @@ async def test_table_quota_count_includes_bar_by_not_filtering_is_bar():
 
 
 @pytest.mark.asyncio
+async def test_send_invitation_quota_block_reraises_api_error():
+    tenant_id = uuid4()
+    quota_error = APIError(
+        "Límite del plan alcanzado",
+        status_code=429,
+        details={"code": "quota_exceeded", "resource": "admin_users", "used": 2, "limit": 1},
+    )
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        {
+            "id": tenant_id,
+            "name": "Tenant",
+            "slug": "tenant",
+            "tenant_email": "tenant@example.com",
+            "brand_name": "Tenant",
+        },
+        None,
+    ])
+    conn.fetchval = AsyncMock(return_value="superuser")
+
+    payload = SimpleNamespace(
+        email="new@example.com",
+        phone="3001234567",
+        name="New",
+        role=SimpleNamespace(value="admin"),
+    )
+
+    with (
+        patch("app.services.invitation_service.require_valid_session", return_value=_session(tenant_id)),
+        patch(
+            "app.services.invitation_service.require_valid_tenant",
+            return_value=SimpleNamespace(site="tenant.example.com", tenant_email="tenant@example.com"),
+        ),
+        patch("app.services.invitation_service.get_db_connection", side_effect=_db_context(conn)),
+        patch("app.services.invitation_service.check_plan_quota_growth", new=AsyncMock(side_effect=quota_error)),
+    ):
+        with pytest.raises(APIError) as raised:
+            await invitation_service.send_invitation(_request(), payload)
+
+    assert raised.value.status_code == 429
+    assert raised.value.details["code"] == "quota_exceeded"
+    assert raised.value.details["resource"] == "admin_users"
+    assert "Failed to send invitation" not in str(raised.value)
+
+
+@pytest.mark.asyncio
 async def test_accept_invitation_quota_block_does_not_accept_or_create_member():
     tenant_id = uuid4()
     profile_id = uuid4()
