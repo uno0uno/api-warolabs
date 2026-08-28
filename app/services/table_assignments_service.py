@@ -24,7 +24,7 @@ from fastapi import HTTPException
 from app.core.permissions import can_reassign_waiter
 from app.database import get_db_connection
 from app.services.operaciones_context_service import assert_waiter_attribution_enabled
-from app.services.table_session_guests import normalize_custom_label
+from app.services.table_session_guests import guest_snapshot_from_capacity, normalize_custom_label
 
 
 async def assign_member_to_table(
@@ -338,14 +338,24 @@ async def set_session_guests(
 
             new_covers = covers if covers is not None else session_row["covers"]
             new_label = label_value if custom_label_provided else session_row["custom_label"]
+            new_capacity_snapshot = session_row["capacity_snapshot"]
+            if new_capacity_snapshot is None:
+                table_capacity = await conn.fetchval(
+                    "SELECT capacity FROM tables WHERE id = $1 AND tenant_id = $2",
+                    table_id,
+                    tenant_id,
+                )
+                _, new_capacity_snapshot = guest_snapshot_from_capacity(table_capacity)
+
             await conn.execute(
                 """
                 UPDATE table_sessions
-                SET covers = $1, custom_label = $2
-                WHERE id = $3
+                SET covers = $1, custom_label = $2, capacity_snapshot = $3
+                WHERE id = $4
                 """,
                 new_covers,
                 new_label,
+                new_capacity_snapshot,
                 session_row["id"],
             )
 
@@ -355,7 +365,7 @@ async def set_session_guests(
             "session_id": str(session_row["id"]),
             "covers": new_covers,
             "custom_label": new_label,
-            "capacity_snapshot": session_row["capacity_snapshot"],
+            "capacity_snapshot": new_capacity_snapshot,
         },
     }
 
