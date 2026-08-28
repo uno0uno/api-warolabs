@@ -556,6 +556,8 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                     ts.opened_by_user_id,
                     ts.attended_by_member_id AS session_attended_by_member_id,
                     ts.custom_label AS session_custom_label,
+                    ts.covers AS session_covers,
+                    ts.capacity_snapshot AS session_capacity_snapshot,
                     ts.minimum_consumption_enabled_snapshot,
                     ts.minimum_consumption_amount_snapshot,
                     ts.minimum_consumption_restrictive_snapshot,
@@ -5040,6 +5042,8 @@ def _format_table_row(row: dict) -> dict:
             "attended_by_member_name": row.get("session_attended_by_member_name"),
             "attended_by_member_role": row.get("session_attended_by_member_role"),
             "custom_label": row.get("session_custom_label"),
+            "covers": int(row["session_covers"]) if row.get("session_covers") is not None else None,
+            "capacity_snapshot": int(row["session_capacity_snapshot"]) if row.get("session_capacity_snapshot") is not None else None,
         }
     return result
 
