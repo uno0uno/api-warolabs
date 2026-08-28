@@ -31,6 +31,7 @@ from app.services.pos_cart_service import (
 )
 from app.services.orders_service import _return_ingredient_to_stock
 from app.utils.table_code import infer_table_code, normalize_table_code, resolve_unique_code
+from app.services.table_session_guests import guest_snapshot_from_capacity
 from app.services.tip_tax_service import (
     compute_tip_tax_amount,
     normalize_tip_payload,
@@ -1173,7 +1174,7 @@ async def open_session(
             async with conn.transaction():
                 # Lock the table row to prevent concurrent opens
                 table_row = await conn.fetchrow(
-                    "SELECT id, status FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
+                    "SELECT id, status, capacity FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
                     table_id,
                     tenant_id,
                 )
@@ -1190,6 +1191,7 @@ async def open_session(
                     raise APIError("Table already has an open session", status_code=409)
 
                 minimum_snapshot = await _get_minimum_consumption_snapshot(conn, tenant_id)
+                covers, capacity_snapshot = guest_snapshot_from_capacity(table_row["capacity"])
 
                 # Create session
                 session_row = await conn.fetchrow(
@@ -1201,9 +1203,11 @@ async def open_session(
                         attended_by_member_id,
                         minimum_consumption_enabled_snapshot,
                         minimum_consumption_amount_snapshot,
-                        minimum_consumption_restrictive_snapshot
+                        minimum_consumption_restrictive_snapshot,
+                        covers,
+                        capacity_snapshot
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     RETURNING id, opened_at
                     """,
                     table_id,
@@ -1213,6 +1217,8 @@ async def open_session(
                     minimum_snapshot["enabled"],
                     minimum_snapshot["amount"],
                     minimum_snapshot["restrictive"],
+                    covers,
+                    capacity_snapshot,
                 )
 
                 # Update table status
@@ -2708,6 +2714,9 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     ts.opened_at,
                     ts.opened_by_user_id,
                     ts.attended_by_member_id,
+                    ts.covers,
+                    ts.capacity_snapshot,
+                    ts.custom_label,
                     ts.minimum_consumption_enabled_snapshot,
                     ts.minimum_consumption_amount_snapshot,
                     ts.minimum_consumption_restrictive_snapshot,
@@ -2976,6 +2985,9 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     "effective_waiter_member_id": str(session_row["effective_waiter_member_id"]) if session_row.get("effective_waiter_member_id") else None,
                     "effective_waiter_member_name": session_row.get("effective_waiter_member_name"),
                     "effective_waiter_member_role": session_row.get("effective_waiter_member_role"),
+                    "covers": int(session_row["covers"]) if session_row.get("covers") is not None else None,
+                    "capacity_snapshot": int(session_row["capacity_snapshot"]) if session_row.get("capacity_snapshot") is not None else None,
+                    "custom_label": session_row.get("custom_label"),
                     # Issue warocol.com#656 — rehydration source for checkout's Pagos registrados
                     "partial_payments": [
                         {
@@ -4780,7 +4792,9 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
                         id,
                         minimum_consumption_enabled_snapshot,
                         minimum_consumption_amount_snapshot,
-                        minimum_consumption_restrictive_snapshot
+                        minimum_consumption_restrictive_snapshot,
+                        covers,
+                        custom_label
                     FROM table_sessions
                     WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL
                     LIMIT 1
@@ -4792,7 +4806,7 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
 
                 # 3. Lock + validate target table
                 target = await conn.fetchrow(
-                    "SELECT id, name, status, is_bar FROM tables "
+                    "SELECT id, name, status, is_bar, capacity FROM tables "
                     "WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
                     target_table_id, tenant_id,
                 )
@@ -4811,6 +4825,9 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
                     raise APIError("target table is occupied", status_code=409)
 
                 # 5. Create new session on target
+                _covers, _cap_snap = guest_snapshot_from_capacity(target["capacity"])
+                if source_session["covers"] is not None:
+                    _covers = int(source_session["covers"])
                 new_session = await conn.fetchrow(
                     """
                     INSERT INTO table_sessions (
@@ -4819,9 +4836,12 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
                         opened_by_user_id,
                         minimum_consumption_enabled_snapshot,
                         minimum_consumption_amount_snapshot,
-                        minimum_consumption_restrictive_snapshot
+                        minimum_consumption_restrictive_snapshot,
+                        covers,
+                        capacity_snapshot,
+                        custom_label
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     RETURNING id
                     """,
                     target_table_id,
@@ -4830,6 +4850,9 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
                     source_session["minimum_consumption_enabled_snapshot"],
                     source_session["minimum_consumption_amount_snapshot"],
                     source_session["minimum_consumption_restrictive_snapshot"],
+                    _covers,
+                    _cap_snap,
+                    source_session["custom_label"],
                 )
                 new_session_id = new_session["id"]
 

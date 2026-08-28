@@ -18,7 +18,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
-from app.models.table_member_assignment import SetOrderServedByRequest, SetSessionWaiterRequest
+from app.models.table_member_assignment import (
+    SetOrderServedByRequest,
+    SetSessionGuestsRequest,
+    SetSessionWaiterRequest,
+)
 from app.services import table_assignments_service
 from app.services.pos_context_service import get_restaurant_context
 
@@ -64,6 +68,26 @@ async def set_session_waiter_endpoint(
         member_id=body.member_id,
         caller_user_id=session.user_id,
         caller_role=session.role,
+    )
+
+
+@router.patch(
+    "/tables/{table_id}/session-guests",
+    dependencies=[Depends(require_module(Module.POS))],
+)
+async def set_session_guests_endpoint(
+    request: Request,
+    table_id: UUID,
+    body: SetSessionGuestsRequest,
+):
+    """Set covers and/or custom label on the open table session."""
+    session = require_valid_session(request)
+    return await table_assignments_service.set_session_guests(
+        tenant_id=session.tenant_id,
+        table_id=table_id,
+        covers=body.covers,
+        custom_label=body.custom_label,
+        custom_label_provided="custom_label" in body.model_fields_set,
     )
 
 

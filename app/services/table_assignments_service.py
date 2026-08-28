@@ -24,6 +24,7 @@ from fastapi import HTTPException
 from app.core.permissions import can_reassign_waiter
 from app.database import get_db_connection
 from app.services.operaciones_context_service import assert_waiter_attribution_enabled
+from app.services.table_session_guests import normalize_custom_label
 
 
 async def assign_member_to_table(
@@ -303,6 +304,58 @@ async def set_session_waiter(
             "attended_by_member_id": str(member_id) if member_id else None,
             "attended_by_member_name": member_name,
             "attended_by_member_role": member_role,
+        },
+    }
+
+
+async def set_session_guests(
+    tenant_id: UUID,
+    table_id: UUID,
+    covers: Optional[int],
+    custom_label: Optional[str],
+    custom_label_provided: bool,
+) -> Dict[str, Any]:
+    """Update covers and/or custom_label on the open table session (#2469)."""
+    if covers is None and not custom_label_provided:
+        raise HTTPException(status_code=400, detail="covers or custom_label is required")
+
+    label_value = normalize_custom_label(custom_label) if custom_label_provided else None
+
+    async with get_db_connection() as conn:
+        async with conn.transaction():
+            session_row = await conn.fetchrow(
+                """
+                SELECT id, covers, custom_label, capacity_snapshot
+                FROM table_sessions
+                WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL
+                FOR UPDATE
+                """,
+                table_id,
+                tenant_id,
+            )
+            if session_row is None:
+                raise HTTPException(status_code=404, detail="No open session for this table")
+
+            new_covers = covers if covers is not None else session_row["covers"]
+            new_label = label_value if custom_label_provided else session_row["custom_label"]
+            await conn.execute(
+                """
+                UPDATE table_sessions
+                SET covers = $1, custom_label = $2
+                WHERE id = $3
+                """,
+                new_covers,
+                new_label,
+                session_row["id"],
+            )
+
+    return {
+        "success": True,
+        "data": {
+            "session_id": str(session_row["id"]),
+            "covers": new_covers,
+            "custom_label": new_label,
+            "capacity_snapshot": session_row["capacity_snapshot"],
         },
     }
 
