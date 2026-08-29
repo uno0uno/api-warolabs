@@ -3,6 +3,7 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Optional, Set
 from fastapi import HTTPException, Request, Response
+import asyncpg
 from app.config import settings
 from app.database import get_db_connection
 from app.core.security import (
@@ -109,6 +110,7 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
             session_query = """
                 SELECT s.*, p.id as user_id, p.email, p.name, p.user_name,
                        p.description, p.logo_avatar, p.preferred_locale,
+                       p.pos_catalog_layout_override,
                        p.created_at as user_created_at
                 FROM sessions s
                 JOIN profile p ON s.user_id = p.id
@@ -118,9 +120,30 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                   AND s.last_activity_at > NOW() - ($2::int * INTERVAL '1 hour')
                 LIMIT 1
             """
-            session_result = await conn.fetchrow(
-                session_query, session_token, IDLE_SESSION_HOURS
-            )
+            try:
+                session_result = await conn.fetchrow(
+                    session_query, session_token, IDLE_SESSION_HOURS
+                )
+            except asyncpg.UndefinedColumnError:
+                logger.warning(
+                    "profile.pos_catalog_layout_override missing; "
+                    "using null until warocol.com#2496 migration is applied."
+                )
+                session_query_legacy = """
+                    SELECT s.*, p.id as user_id, p.email, p.name, p.user_name,
+                           p.description, p.logo_avatar, p.preferred_locale,
+                           p.created_at as user_created_at
+                    FROM sessions s
+                    JOIN profile p ON s.user_id = p.id
+                    WHERE s.id = $1
+                      AND s.expires_at > NOW()
+                      AND s.is_active = true
+                      AND s.last_activity_at > NOW() - ($2::int * INTERVAL '1 hour')
+                    LIMIT 1
+                """
+                session_result = await conn.fetchrow(
+                    session_query_legacy, session_token, IDLE_SESSION_HOURS
+                )
             
             if not session_result:
                 logger.warning("Invalid or expired session")
@@ -207,6 +230,7 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                 description=session_result.get('description'),
                 logo_avatar=session_result.get('logo_avatar'),
                 preferred_locale=session_result.get('preferred_locale'),
+                pos_catalog_layout_override=session_result.get('pos_catalog_layout_override'),
                 createdAt=session_result.get('user_created_at') or datetime.utcnow(),
                 role=user_role
             )
@@ -418,6 +442,7 @@ async def update_profile(
     city: Optional[str] = None,
     description: Optional[str] = None,
     preferred_locale: Optional[str] = None,
+    pos_catalog_layout_override: Optional[str] = None,
     fields_set: Optional[Set[str]] = None,
 ) -> UpdateProfileResponse:
     """
@@ -443,6 +468,7 @@ async def update_profile(
                     'city': city,
                     'description': description,
                     'preferred_locale': preferred_locale,
+                    'pos_catalog_layout_override': pos_catalog_layout_override,
                 }.items()
                 if field_value is not None
             }
@@ -477,6 +503,11 @@ async def update_profile(
                 values.append(preferred_locale)
                 param_idx += 1
 
+            if 'pos_catalog_layout_override' in provided_fields:
+                updates.append(f"pos_catalog_layout_override = ${param_idx}")
+                values.append(pos_catalog_layout_override)
+                param_idx += 1
+
             if not updates:
                 raise AuthenticationError("No fields to update")
 
@@ -491,10 +522,17 @@ async def update_profile(
                 SET {', '.join(updates)}
                 WHERE id = ${param_idx}
                 RETURNING id, email, name, user_name, description, logo_avatar,
-                          preferred_locale, created_at
+                          preferred_locale, pos_catalog_layout_override, created_at
             """
 
-            result = await conn.fetchrow(update_query, *values)
+            try:
+                result = await conn.fetchrow(update_query, *values)
+            except asyncpg.UndefinedColumnError:
+                if 'pos_catalog_layout_override' not in provided_fields:
+                    raise
+                raise AuthenticationError(
+                    "POS catalog layout preference is not available yet"
+                ) from None
 
             if not result:
                 raise AuthenticationError("User not found")
@@ -507,6 +545,7 @@ async def update_profile(
                 description=result['description'],
                 logo_avatar=result['logo_avatar'],
                 preferred_locale=result['preferred_locale'],
+                pos_catalog_layout_override=result.get('pos_catalog_layout_override'),
                 createdAt=result['created_at']
             )
 
