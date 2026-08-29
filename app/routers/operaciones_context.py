@@ -25,6 +25,7 @@ from app.services.operaciones_context_service import (
     get_operaciones_context,
     set_open_sale_enabled,
     update_minimum_consumption_config,
+    update_pos_catalog_layout,
     update_promo_conflict_config,
     update_tables_label,
     update_tip_config,
@@ -53,6 +54,20 @@ class UiLocaleRequest(BaseModel):
         from app.core.tenant_prefs import validate_ui_locale
 
         return validate_ui_locale(value)
+
+
+class PosCatalogLayoutRequest(BaseModel):
+    """Payload for PATCH /operaciones/pos-catalog-layout (warocol.com#2495)."""
+
+    layout: str
+
+    @field_validator("layout")
+    @classmethod
+    def _validate_layout(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized not in ("grid", "list"):
+            raise ValueError("layout must be one of: grid, list")
+        return normalized
 
 
 class TablesLabelRequest(BaseModel):
@@ -170,6 +185,36 @@ async def patch_ui_locale(request: Request, body: UiLocaleRequest):
     """Persist the frontend language shared by every member of the tenant."""
     session = require_valid_session(request)
     return await update_ui_locale(session.tenant_id, body.locale)
+
+
+@router.patch(
+    "/pos-catalog-layout",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def patch_pos_catalog_layout(request: Request, body: PosCatalogLayoutRequest):
+    """Persist tenant default POS catalog layout (warocol.com#2495)."""
+    session = require_valid_session(request)
+    return await update_pos_catalog_layout(session.tenant_id, body.layout)
+
+
+@router.patch(
+    "/toggles/pos-show-product-image",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def toggle_pos_show_product_image(request: Request, body: ToggleRequest):
+    """Toggle whether POS catalog shows product images (warocol.com#2495)."""
+    session = require_valid_session(request)
+    return await update_toggle(session.tenant_id, "pos_show_product_image", body.enabled)
+
+
+@router.patch(
+    "/toggles/pos-show-search",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def toggle_pos_show_search(request: Request, body: ToggleRequest):
+    """Toggle whether POS catalog shows the search bar (warocol.com#2495)."""
+    session = require_valid_session(request)
+    return await update_toggle(session.tenant_id, "pos_show_search", body.enabled)
 
 
 @router.patch(
