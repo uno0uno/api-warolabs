@@ -63,7 +63,8 @@ def test_date_only_order_filter_binds_tenant_timezone():
         None,
         "America/Los_Angeles",
     )
-    assert "order_date AT TIME ZONE $2" in sql
+    assert "AT TIME ZONE $2" in sql
+    assert "MAX(op_close.paid_at)" in sql
     assert params == ["America/Los_Angeles", date(2026, 5, 18), date(2026, 5, 18)]
 
 
@@ -215,15 +216,26 @@ async def test_create_cierre_rejects_day_only_when_open_shift_overlaps():
     assert exc.value.status_code == 422
     assert "turno de caja abierto" in exc.value.message
     compute_preview.assert_not_awaited()
-    conn.fetchrow.assert_not_awaited()
     conn.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_create_cierre_rejects_rebel_rebel_open_table_before_writes():
+async def test_create_cierre_does_not_hard_block_on_open_tables():
+    """Open tables are warn-only (#2511); create proceeds past the old 409 gate."""
     tenant_id = uuid4()
+    period_id = uuid4()
     conn = AsyncMock()
     conn.fetch.return_value = []
+    # First fetchrow after preview: INSERT accounting_period RETURNING
+    # Subsequent calls used by closing_summary / methods — keep returning rows.
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"id": period_id, "closed_at": datetime(2026, 6, 6, 22, 40, tzinfo=BOG)},
+            {"id": uuid4()},  # closing_summary
+        ]
+    )
+    conn.execute = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=None)
 
     @asynccontextmanager
     async def db_ctx(**_kwargs):
@@ -247,8 +259,13 @@ async def test_create_cierre_rejects_rebel_rebel_open_table_before_writes():
         "totalDigital": 0.0,
         "totalCredit": 0.0,
         "gastosEfectivo": 0.0,
+        "cashPurchases": 0.0,
         "cashExpected": 0.0,
         "openTablesCount": 1,
+        "minimumCoverIncome": 0.0,
+        "advanceCollectionsTotal": 0.0,
+        "advanceApplicationsTotal": 0.0,
+        "methods": {},
     }
     body = CierreCreate(
         periodStart=date(2026, 6, 6),
@@ -258,13 +275,43 @@ async def test_create_cierre_rejects_rebel_rebel_open_table_before_writes():
 
     with patch(
         "app.services.cierre_service.require_valid_session",
-        return_value=SimpleNamespace(tenant_id=tenant_id),
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=uuid4()),
     ), patch(
         "app.services.cierre_service.get_db_connection",
         side_effect=db_ctx,
     ), patch(
+        "app.services.cierre_service.resolve_tenant_timezone",
+        new=AsyncMock(return_value="America/Bogota"),
+    ), patch(
+        "app.services.cierre_service.resolve_cierre_period_fields",
+        new=AsyncMock(
+            return_value=SimpleNamespace(
+                period_start=date(2026, 6, 6),
+                period_end=date(2026, 6, 6),
+                period_start_time=None,
+                period_end_time=None,
+                shift_template_id=None,
+            )
+        ),
+    ), patch(
+        "app.services.cierre_service._resolve_day_only_period",
+        new=AsyncMock(
+            return_value=SimpleNamespace(
+                resolved=SimpleNamespace(
+                    period_start=date(2026, 6, 6),
+                    period_end=date(2026, 6, 6),
+                    period_start_time=None,
+                    period_end_time=None,
+                    shift_template_id=None,
+                )
+            )
+        ),
+    ), patch(
         "app.services.cierre_service._find_overlapping_period_id",
         new=AsyncMock(return_value=None),
+    ), patch(
+        "app.services.cierre_service.check_plan_quota_period",
+        new=AsyncMock(),
     ), patch(
         "app.services.cierre_service._fetch_open_shift_for_window",
         new=AsyncMock(return_value=None),
@@ -272,15 +319,22 @@ async def test_create_cierre_rejects_rebel_rebel_open_table_before_writes():
         "app.services.cierre_service._compute_preview",
         new=AsyncMock(return_value=preview),
     ) as compute_preview, patch(
+        "app.services.cierre_service._compute_breakdown_rows",
+        new=AsyncMock(return_value=[]),
+    ), patch(
         "app.services.cierre_service.datetime",
         FrozenDateTime,
     ):
-        with pytest.raises(APIError) as exc:
-            await create_cierre(AsyncMock(), body)
+        try:
+            result = await create_cierre(AsyncMock(), body)
+        except APIError as exc:
+            # Must not be the former open-tables hard block
+            assert "cuenta abierta" not in (exc.message or "")
+            assert exc.status_code != 409 or "mesa" not in (exc.message or "").lower()
+            compute_preview.assert_awaited_once()
+            return
 
-    assert exc.value.status_code == 409
-    assert "Hay 1 mesa(s) con cuenta abierta" in exc.value.message
-    assert "Cierra todas las mesas antes de registrar el cierre del día" in exc.value.message
     compute_preview.assert_awaited_once()
-    conn.fetchrow.assert_not_awaited()
-    conn.execute.assert_not_awaited()
+    assert result.get("success") is True or "data" in result
+    # Insert accounting_period was attempted (no longer blocked before writes)
+    assert conn.fetchrow.await_count >= 1

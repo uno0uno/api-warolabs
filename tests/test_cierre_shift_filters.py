@@ -20,17 +20,30 @@ def test_order_filter_date_only_uses_bogota_dates():
         date(2026, 5, 18), date(2026, 5, 18), None, None
     )
     assert "AT TIME ZONE $2" in sql
+    assert "MAX(op_close.paid_at)" in sql
     assert params == ["America/Bogota", date(2026, 5, 18), date(2026, 5, 18)]
 
 
-def test_order_filter_shift_uses_timestamps():
+def test_order_filter_shift_uses_close_or_payment_timestamps():
     start = datetime(2026, 5, 18, 14, 0, tzinfo=BOG)
     end = datetime(2026, 5, 18, 22, 0, tzinfo=BOG)
     sql, params = _build_order_date_filter(
         date(2026, 5, 18), date(2026, 5, 18), start, end
     )
-    assert "order_date >=" in sql
+    assert "MAX(op_close.paid_at)" in sql
+    assert "order_date" in sql
     assert "AT TIME ZONE" not in sql
+    assert params == [start, end]
+
+
+def test_order_filter_aliased_qualifies_order_id():
+    start = datetime(2026, 5, 18, 14, 0, tzinfo=BOG)
+    end = datetime(2026, 5, 18, 22, 0, tzinfo=BOG)
+    sql, params = _build_order_date_filter(
+        date(2026, 5, 18), date(2026, 5, 18), start, end, order_alias="o"
+    )
+    assert "op_close.order_id = o.id" in sql
+    assert "o.order_date" in sql
     assert params == [start, end]
 
 
