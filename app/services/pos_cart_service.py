@@ -1647,7 +1647,7 @@ async def add_order_payment(
                         SET status = 'completed',
                             payment_method = $2,
                             payment_method_id = $3::uuid,
-                            order_date = COALESCE(order_date, now())
+                            order_date = now()
                         WHERE id = $1
                         """,
                         order_id, payment_method,

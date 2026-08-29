@@ -1021,6 +1021,23 @@ async def _void_order_gl_entries(
 # Shared — aggregation queries
 # ---------------------------------------------------------------------------
 
+def _sale_close_at_sql(order_alias: Optional[str] = None) -> str:
+    """
+    Drawer attribution timestamp for arqueo (#2511).
+
+    Prefer last non-void payment time (actual cash/card hit); fall back to
+    order_date. Works for mesas (pending then pay), mostrador, and barra.
+    """
+    prefix = f"{order_alias}." if order_alias else ""
+    id_ref = f"{order_alias}.id" if order_alias else "id"
+    return (
+        "COALESCE("
+        "(SELECT MAX(op_close.paid_at) FROM order_payments op_close "
+        f"WHERE op_close.order_id = {id_ref} AND op_close.voided_at IS NULL), "
+        f"{prefix}order_date)"
+    )
+
+
 def _build_order_date_filter(
     period_start: date,
     period_end: date,
@@ -1028,24 +1045,26 @@ def _build_order_date_filter(
     period_end_time: Optional[datetime],
     timezone_name: str = DEFAULT_TENANT_TIMEZONE,
     param_offset: int = 2,
+    order_alias: Optional[str] = None,
 ):
     """
-    Returns (sql_fragment, [p_start, p_end]) for order_date filtering.
+    Returns (sql_fragment, params) filtering by sale close/payment time (#2511).
 
-    When exact timestamps are provided, compares directly against order_date
-    (TIMESTAMPTZ). Otherwise, truncates order_date to the tenant calendar date.
+    When exact timestamps are provided, compares against the close-at expression.
+    Otherwise truncates that timestamp to the tenant calendar date.
     """
+    sale_at = _sale_close_at_sql(order_alias)
     if period_start_time and period_end_time:
         p2 = f"${param_offset}"
         p3 = f"${param_offset + 1}"
-        sql = f"AND order_date >= {p2} AND order_date <= {p3}"
+        sql = f"AND {sale_at} >= {p2} AND {sale_at} <= {p3}"
         return sql, [period_start_time, period_end_time]
     p_tz = f"${param_offset}"
     p2 = f"${param_offset + 1}"
     p3 = f"${param_offset + 2}"
     sql = (
-        f"AND (order_date AT TIME ZONE {p_tz})::date >= {p2} "
-        f"AND (order_date AT TIME ZONE {p_tz})::date <= {p3}"
+        f"AND ({sale_at} AT TIME ZONE {p_tz})::date >= {p2} "
+        f"AND ({sale_at} AT TIME ZONE {p_tz})::date <= {p3}"
     )
     return sql, [timezone_name, period_start, period_end]
 
@@ -1542,8 +1561,17 @@ async def _compute_preview(
     and open-table filters use exact TIMESTAMPTZ comparison (shift windows).
     """
     status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
+    status_filter_o = status_filter.replace("status", "o.status")
     date_filter, date_params = _build_order_date_filter(
         period_start, period_end, period_start_time, period_end_time, timezone_name
+    )
+    date_filter_o, _ = _build_order_date_filter(
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+        timezone_name,
+        order_alias="o",
     )
     expense_filter, expense_params = _build_expense_filter(
         period_start, period_end, period_start_time, period_end_time
@@ -1584,8 +1612,8 @@ async def _compute_preview(
         LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
         LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter.replace('status', 'o.status')}
-          {date_filter.replace('order_date', 'o.order_date')}
+          {status_filter_o}
+          {date_filter_o}
           AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
           AND COALESCE(pmg.slug, o.payment_method) = 'cash'
         """,
@@ -1605,8 +1633,8 @@ async def _compute_preview(
         LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
         LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter.replace('status', 'o.status')}
-          {date_filter.replace('order_date', 'o.order_date')}
+          {status_filter_o}
+          {date_filter_o}
           AND op.voided_at IS NULL
         GROUP BY COALESCE(pmg.slug, op.payment_method)
 
@@ -1619,8 +1647,8 @@ async def _compute_preview(
         JOIN payment_methods pm ON pm.id = o.payment_method_id
         JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NOT NULL
           AND NOT EXISTS (
               SELECT 1
@@ -1637,8 +1665,8 @@ async def _compute_preview(
             COALESCE(SUM(o.total_amount), 0) AS total
         FROM orders o
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NOT NULL
           AND NOT EXISTS (
@@ -1659,8 +1687,8 @@ async def _compute_preview(
         JOIN payment_methods pm ON pm.id = o.payment_method_id
         JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NOT NULL
           AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
         GROUP BY pmg.slug
@@ -1672,8 +1700,8 @@ async def _compute_preview(
             COALESCE(SUM(o.tip_amount + o.tip_tax_amount), 0) AS total
         FROM orders o
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NOT NULL
           AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
@@ -1824,8 +1852,14 @@ async def _compute_breakdown_rows(
     When period_start_time / period_end_time are supplied, uses exact TIMESTAMPTZ comparison.
     """
     status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
-    date_filter, date_params = _build_order_date_filter(
-        period_start, period_end, period_start_time, period_end_time, timezone_name
+    status_filter_o = status_filter.replace("status", "o.status")
+    date_filter_o, date_params = _build_order_date_filter(
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+        timezone_name,
+        order_alias="o",
     )
     rows = await conn.fetch(
         f"""
@@ -1839,8 +1873,8 @@ async def _compute_breakdown_rows(
         LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
         LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter.replace('status', 'o.status')}
-          {date_filter.replace('order_date', 'o.order_date')}
+          {status_filter_o}
+          {date_filter_o}
           AND op.voided_at IS NULL
         GROUP BY COALESCE(pmg.slug, op.payment_method), COALESCE(pm.name, op.payment_method)
 
@@ -1855,8 +1889,8 @@ async def _compute_breakdown_rows(
         JOIN payment_methods pm ON pm.id = o.payment_method_id
         JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NOT NULL
           AND NOT EXISTS (
               SELECT 1
@@ -1875,8 +1909,8 @@ async def _compute_breakdown_rows(
             COALESCE(SUM(o.total_amount), 0) AS total
         FROM orders o
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NOT NULL
           AND NOT EXISTS (
@@ -1897,8 +1931,8 @@ async def _compute_breakdown_rows(
             COALESCE(SUM(o.total_amount), 0) AS total
         FROM orders o
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NULL
           AND NOT EXISTS (
@@ -1919,8 +1953,8 @@ async def _compute_breakdown_rows(
         JOIN payment_methods pm ON pm.id = o.payment_method_id
         JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NOT NULL
           AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
         GROUP BY pmg.slug, pm.name
@@ -1934,8 +1968,8 @@ async def _compute_breakdown_rows(
             COALESCE(SUM(o.tip_amount + o.tip_tax_amount), 0) AS total
         FROM orders o
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NOT NULL
           AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
@@ -1950,8 +1984,8 @@ async def _compute_breakdown_rows(
             COALESCE(SUM(o.tip_amount + o.tip_tax_amount), 0) AS total
         FROM orders o
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NULL
           AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
@@ -2657,15 +2691,9 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 timezone_name=timezone_name,
             )
 
-            # 3. Open tables check — skip for past periods (mesas actuales no pertenecen al período)
-            # Use tenant-local date so the check is correct even when the server runs in UTC.
-            is_past_period = period_end < tenant_today(timezone_name, datetime.now())
-            if not is_past_period and preview["openTablesCount"] > 0:
-                raise APIError(
-                    f"Hay {preview['openTablesCount']} mesa(s) con cuenta abierta. "
-                    "Cierra todas las mesas antes de registrar el cierre del día.",
-                    status_code=409,
-                )
+            # 3. Open tables: warn-only for shift chaining (#2511). Still counted in
+            # preview.openTablesCount for UI; do not hard-block create_cierre.
+            # Past-period skip is no longer needed for blocking (kept preview count).
 
             # 4. INSERT accounting_period
             period_row = await conn.fetchrow(

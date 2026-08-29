@@ -1557,7 +1557,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 payment_method_id = $6,
                                 discount_type = $7,
                                 discount_value = $8,
-                                discount_amount = $9
+                                discount_amount = $9,
+                                order_date = now()
                             WHERE table_session_id = $1 AND status = 'pending'
                             """,
                             session_row["id"],
@@ -1579,7 +1580,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 payment_status = $3,
                                 credit_due_date = $4,
                                 customer_id = COALESCE($5::uuid, customer_id),
-                                payment_method_id = $6
+                                payment_method_id = $6,
+                                order_date = now()
                             WHERE table_session_id = $1 AND status = 'pending'
                             """,
                             session_row["id"],
