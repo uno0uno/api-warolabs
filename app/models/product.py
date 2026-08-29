@@ -254,6 +254,10 @@ class Product(ProductBase):
 
     # Related data
     category_name: Optional[str] = None
+    category_color: Optional[str] = Field(
+        None,
+        description="Category POS card color #RRGGBB when set; null = client keyword fallback",
+    )
     ingredients: List[RecipeIngredient] = []
     recipe_base_ids: List[UUID] = Field(default=[], description="DEPRECATED: associated recipe base IDs (sourced from recipe_bases for backwards compat).")
     recipe_bases: List[RecipeBaseLink] = Field(default=[], description="Recipe bases with per-product quantity multiplier (Issue #517).")

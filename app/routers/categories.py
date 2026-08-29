@@ -42,7 +42,7 @@ async def get_categories_endpoint(
         raise HTTPException(status_code=400, detail="Tenant context is required")
 
     base_query = """
-        SELECT id, name, description, tenant_id, created_at, updated_at
+        SELECT id, name, description, color, tenant_id, created_at, updated_at
         FROM categories
         WHERE (tenant_id IS NULL OR tenant_id = $1)
     """
@@ -84,9 +84,9 @@ async def create_category_endpoint(request: Request, payload: CategoryCreate):
         raise HTTPException(status_code=400, detail="Tenant context is required")
 
     insert_query = """
-        INSERT INTO categories (name, description, tenant_id)
-        VALUES ($1, $2, $3)
-        RETURNING id, name, description, tenant_id, created_at, updated_at
+        INSERT INTO categories (name, description, color, tenant_id)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, name, description, color, tenant_id, created_at, updated_at
     """
 
     try:
@@ -97,6 +97,7 @@ async def create_category_endpoint(request: Request, payload: CategoryCreate):
                     insert_query,
                     payload.name.strip(),
                     (payload.description.strip() if payload.description else None),
+                    payload.color,
                     tenant_id,
                 )
     except asyncpg.UniqueViolationError:
@@ -195,11 +196,15 @@ async def update_category_endpoint(
     if not tenant_id:
         raise HTTPException(status_code=400, detail="Tenant context is required")
 
+    data = payload.model_dump(exclude_unset=True)
     updates = {}
-    if payload.name is not None:
-        updates["name"] = payload.name.strip()
-    if payload.description is not None:
-        updates["description"] = payload.description.strip() or None
+    if "name" in data and data["name"] is not None:
+        updates["name"] = data["name"].strip()
+    if "description" in data:
+        desc = data["description"]
+        updates["description"] = (desc.strip() or None) if isinstance(desc, str) else None
+    if "color" in data:
+        updates["color"] = data["color"]  # None clears
 
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -216,7 +221,7 @@ async def update_category_endpoint(
         UPDATE categories
         SET {", ".join(set_clauses)}
         WHERE id = ${len(params)}
-        RETURNING id, name, description, tenant_id, created_at, updated_at
+        RETURNING id, name, description, color, tenant_id, created_at, updated_at
     """
 
     try:
