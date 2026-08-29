@@ -132,11 +132,11 @@ async def list_online_menu_categories(request: Request) -> Dict[str, Any]:
         rows = await conn.fetch(
             f"""
             SELECT
-                sub.id, sub.name, sub.description, sub.tenant_id,
+                sub.id, sub.name, sub.description, sub.color, sub.tenant_id,
                 sub.created_at, sub.updated_at
             FROM (
                 SELECT DISTINCT ON (c.id)
-                    c.id, c.name, c.description, c.tenant_id,
+                    c.id, c.name, c.description, c.color, c.tenant_id,
                     c.created_at, c.updated_at, o.display_order
                 FROM categories c
                 {_ONLINE_MENU_PRODUCT_JOIN}
