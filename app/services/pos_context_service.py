@@ -61,6 +61,9 @@ SELECT
     tpp.allow_promo_line_opt_out,
     tpp.promo_conflict_strategy,
     tpp.promo_type_block_map,
+    tpp.pos_catalog_layout_default,
+    tpp.pos_show_product_image,
+    tpp.pos_show_search,
     fd.nit,
     fd.business_name,
     fd.type_organization_id,
@@ -101,9 +104,23 @@ _CONTEXT_QUERY_WITHOUT_UI_LOCALE = _CONTEXT_QUERY.replace(
     "    NULL AS ui_locale,\n",
 )
 
+# When #2495 migration is pending, keep POS context working with defaults.
+_CONTEXT_QUERY_WITHOUT_POS_CATALOG = (
+    _CONTEXT_QUERY
+    .replace("    tpp.pos_catalog_layout_default,\n", "    NULL AS pos_catalog_layout_default,\n")
+    .replace("    tpp.pos_show_product_image,\n", "    NULL AS pos_show_product_image,\n")
+    .replace("    tpp.pos_show_search,\n", "    NULL AS pos_show_search,\n")
+)
+_CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG = (
+    _CONTEXT_QUERY_WITHOUT_UI_LOCALE
+    .replace("    tpp.pos_catalog_layout_default,\n", "    NULL AS pos_catalog_layout_default,\n")
+    .replace("    tpp.pos_show_product_image,\n", "    NULL AS pos_show_product_image,\n")
+    .replace("    tpp.pos_show_search,\n", "    NULL AS pos_show_search,\n")
+)
+
 # Legacy fallback when older preference migrations are also pending.
 _CONTEXT_QUERY_WITHOUT_PREFS = (
-    _CONTEXT_QUERY
+    _CONTEXT_QUERY_WITHOUT_POS_CATALOG
     .replace("    tpp.timezone,\n", "    NULL AS timezone,\n")
     .replace("    tpp.locale,\n", "    NULL AS locale,\n")
     .replace("    tpp.ui_locale,\n", "    NULL AS ui_locale,\n")
@@ -140,22 +157,61 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
     async with get_db_connection(use_transaction=False) as conn:
         try:
             row = await conn.fetchrow(_CONTEXT_QUERY, tenant_id)
-        except asyncpg.UndefinedColumnError:
-            logger.warning(
-                "tenant_public_profiles.ui_locale missing in POS context; "
-                "preserving existing tenant preferences until migration 100."
-            )
-            try:
-                row = await conn.fetchrow(
-                    _CONTEXT_QUERY_WITHOUT_UI_LOCALE,
-                    tenant_id,
-                )
-            except asyncpg.UndefinedColumnError:
+        except asyncpg.UndefinedColumnError as exc:
+            missing = str(exc)
+            if "pos_catalog" in missing or "pos_show_" in missing:
                 logger.warning(
-                    "Older tenant preference columns also missing in POS context; "
-                    "using safe defaults until migrations 095/099 are applied."
+                    "POS catalog preference columns missing in POS context; "
+                    "using defaults until warocol.com#2495 migration is applied."
                 )
-                row = await conn.fetchrow(_CONTEXT_QUERY_WITHOUT_PREFS, tenant_id)
+                try:
+                    row = await conn.fetchrow(
+                        _CONTEXT_QUERY_WITHOUT_POS_CATALOG,
+                        tenant_id,
+                    )
+                except asyncpg.UndefinedColumnError:
+                    logger.warning(
+                        "tenant_public_profiles.ui_locale missing in POS context; "
+                        "preserving existing tenant preferences until migration 100."
+                    )
+                    try:
+                        row = await conn.fetchrow(
+                            _CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG,
+                            tenant_id,
+                        )
+                    except asyncpg.UndefinedColumnError:
+                        logger.warning(
+                            "Older tenant preference columns also missing in POS context; "
+                            "using safe defaults until migrations 095/099 are applied."
+                        )
+                        row = await conn.fetchrow(
+                            _CONTEXT_QUERY_WITHOUT_PREFS, tenant_id
+                        )
+            else:
+                logger.warning(
+                    "tenant_public_profiles.ui_locale missing in POS context; "
+                    "preserving existing tenant preferences until migration 100."
+                )
+                try:
+                    row = await conn.fetchrow(
+                        _CONTEXT_QUERY_WITHOUT_UI_LOCALE,
+                        tenant_id,
+                    )
+                except asyncpg.UndefinedColumnError as inner_exc:
+                    inner = str(inner_exc)
+                    if "pos_catalog" in inner or "pos_show_" in inner:
+                        row = await conn.fetchrow(
+                            _CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG,
+                            tenant_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Older tenant preference columns also missing in POS context; "
+                            "using safe defaults until migrations 095/099 are applied."
+                        )
+                        row = await conn.fetchrow(
+                            _CONTEXT_QUERY_WITHOUT_PREFS, tenant_id
+                        )
         if row is None:
             return None
         members_rows = await conn.fetch(_MEMBERS_QUERY, tenant_id)
@@ -250,6 +306,28 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         ),
         'promo_type_block_map': normalize_promo_type_block_map(
             row['promo_type_block_map']
+        ),
+        # warocol.com#2495 — POS catalog presentation defaults (tenant-wide)
+        'pos_catalog_layout_default': (
+            row['pos_catalog_layout_default']
+            if (
+                'pos_catalog_layout_default' in row.keys()
+                and row['pos_catalog_layout_default'] in ('grid', 'list')
+            )
+            else 'grid'
+        ),
+        'pos_show_product_image': (
+            bool(row['pos_show_product_image'])
+            if (
+                'pos_show_product_image' in row.keys()
+                and row['pos_show_product_image'] is not None
+            )
+            else True
+        ),
+        'pos_show_search': (
+            bool(row['pos_show_search'])
+            if ('pos_show_search' in row.keys() and row['pos_show_search'] is not None)
+            else True
         ),
         'logo_url': row['logo_url'],
         'receipt_print_settings': {

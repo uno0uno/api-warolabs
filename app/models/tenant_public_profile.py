@@ -200,6 +200,20 @@ class TenantPublicProfileBase(BaseModel):
                     "checkout. NULL = nothing pre-selected (Ley 1935 voluntariness).",
     )
 
+    # POS catalog presentation defaults (warocol.com#2495)
+    pos_catalog_layout_default: str = Field(
+        "grid",
+        description="Default POS catalog layout: grid | list.",
+    )
+    pos_show_product_image: bool = Field(
+        True,
+        description="When true, POS catalog shows product images.",
+    )
+    pos_show_search: bool = Field(
+        True,
+        description="When true, POS catalog shows the search bar.",
+    )
+
     @field_validator('timezone')
     @classmethod
     def _validate_timezone(cls, v):
@@ -317,6 +331,11 @@ class TenantPublicProfileUpdate(BaseModel):
     tip_taxable_default: Optional[bool] = None
     tip_default_percentages: Optional[list[Decimal]] = None
     tip_preselect_index: Optional[int] = None
+
+    # POS catalog presentation defaults (warocol.com#2495)
+    pos_catalog_layout_default: Optional[str] = None
+    pos_show_product_image: Optional[bool] = None
+    pos_show_search: Optional[bool] = None
 
     @field_validator('timezone')
     @classmethod

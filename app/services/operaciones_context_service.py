@@ -47,7 +47,11 @@ ALLOWED_TOGGLES = frozenset({
     "tip_taxable_default",          # warocol.com#740
     "open_sale_enabled",            # warocol.com#805
     "allow_promo_line_opt_out",     # warocol.com#1003
+    "pos_show_product_image",       # warocol.com#2495
+    "pos_show_search",              # warocol.com#2495
 })
+
+ALLOWED_POS_CATALOG_LAYOUTS = frozenset({"grid", "list"})
 
 
 async def get_operaciones_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
@@ -132,6 +136,42 @@ async def update_ui_locale(
     if row is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return {"success": True, "data": {"ui_locale": row["ui_locale"]}}
+
+
+async def update_pos_catalog_layout(
+    tenant_id: UUID,
+    layout: str,
+) -> Dict[str, Any]:
+    """Persist tenant default POS catalog layout (warocol.com#2495)."""
+    normalized = (layout or "").strip().lower()
+    if normalized not in ALLOWED_POS_CATALOG_LAYOUTS:
+        raise HTTPException(
+            status_code=422,
+            detail="pos_catalog_layout_default must be one of: grid, list",
+        )
+
+    query = """
+        INSERT INTO tenant_public_profiles (
+            tenant_id, slug, display_name, pos_catalog_layout_default
+        )
+        SELECT t.id, t.slug, t.name, $2
+        FROM tenants t
+        WHERE t.id = $1
+        ON CONFLICT (tenant_id) DO UPDATE
+            SET pos_catalog_layout_default = EXCLUDED.pos_catalog_layout_default,
+                updated_at = now()
+        RETURNING pos_catalog_layout_default
+    """
+
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(query, tenant_id, normalized)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {
+        "success": True,
+        "data": {"pos_catalog_layout_default": row["pos_catalog_layout_default"]},
+    }
 
 
 async def set_open_sale_enabled(

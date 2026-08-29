@@ -58,6 +58,8 @@ def _enforce_db_ctx():
         conn = MagicMock()
         conn.fetchval = AsyncMock(return_value="enforce")
         conn.fetch = AsyncMock(return_value=[])
+        conn.fetchrow = AsyncMock(return_value=None)
+        conn.execute = AsyncMock()
         yield conn
     return _ctx
 
@@ -394,3 +396,117 @@ def test_tables_label_rejects_oversized_strings():
         )
 
     assert response.status_code == 422
+
+
+# ─── POS catalog prefs (warocol.com#2495) ────────────────────────────────
+
+
+def test_supervisor_updates_pos_catalog_layout_under_enforce():
+    """OPERACIONES can set tenant POS catalog layout default (#2495)."""
+    session = _build_session(role="supervisor")
+    app = FastAPI()
+    app.include_router(operaciones_context_router)
+    modules = frozenset({Module.POS, Module.VENTAS, Module.OPERACIONES})
+    layout_stub = AsyncMock(
+        return_value={"success": True, "data": {"pos_catalog_layout_default": "list"}}
+    )
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.operaciones_context.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=modules),
+         ), \
+         patch(
+             "app.routers.operaciones_context.update_pos_catalog_layout",
+             new=layout_stub,
+         ):
+        client = TestClient(app)
+        response = client.patch(
+            "/operaciones/pos-catalog-layout",
+            json={"layout": "LIST"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["pos_catalog_layout_default"] == "list"
+    args, _ = layout_stub.call_args
+    assert args == (session.tenant_id, "list")
+
+
+def test_pos_catalog_layout_rejects_unknown_value_before_service():
+    session = _build_session(role="supervisor")
+    app = FastAPI()
+    app.include_router(operaciones_context_router)
+    modules = frozenset({Module.OPERACIONES})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.operaciones_context.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=modules),
+         ):
+        client = TestClient(app)
+        response = client.patch(
+            "/operaciones/pos-catalog-layout",
+            json={"layout": "masonry"},
+        )
+
+    assert response.status_code == 422
+
+
+def test_supervisor_toggles_pos_show_product_image_under_enforce():
+    session = _build_session(role="supervisor")
+    app = FastAPI()
+    app.include_router(operaciones_context_router)
+    modules = frozenset({Module.OPERACIONES})
+    toggle_stub = AsyncMock(
+        return_value={"success": True, "data": {"pos_show_product_image": False}}
+    )
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.operaciones_context.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=modules),
+         ), \
+         patch(
+             "app.routers.operaciones_context.update_toggle",
+             new=toggle_stub,
+         ):
+        client = TestClient(app)
+        response = client.patch(
+            "/operaciones/toggles/pos-show-product-image",
+            json={"enabled": False},
+        )
+
+    assert response.status_code == 200
+    args, _ = toggle_stub.call_args
+    assert args == (session.tenant_id, "pos_show_product_image", False)
+
+
+@pytest.mark.asyncio
+async def test_update_toggle_allows_pos_show_search_column():
+    """Whitelist accepts #2495 boolean catalog prefs (no Starter lock)."""
+    tenant_id = uuid4()
+
+    with patch(
+        "app.services.operaciones_context_service.get_db_connection"
+    ) as mock_db, patch(
+        "app.services.operaciones_context_service.assert_starter_toggle_allowed",
+        new=AsyncMock(),
+    ):
+        conn = MagicMock()
+        conn.execute = AsyncMock()
+
+        @asynccontextmanager
+        async def _ctx():
+            yield conn
+
+        mock_db.side_effect = _ctx
+        result = await update_toggle(tenant_id, "pos_show_search", False)
+
+    assert result["data"]["pos_show_search"] is False
+    conn.execute.assert_awaited_once()
