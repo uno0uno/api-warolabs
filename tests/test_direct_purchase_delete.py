@@ -178,7 +178,7 @@ async def test_delete_blocks_closed_purchase_period():
             "id": purchase_id,
             "purchase_number": "WR-CD-0099",
             "purchase_date": datetime(2026, 2, 15),
-            "status": "paid",
+            "status": "received",
         }
     )
     conn.fetchval = AsyncMock(return_value=1)  # closed period
@@ -219,7 +219,7 @@ async def test_delete_allows_insufficient_stock_going_negative():
                 "id": purchase_id,
                 "purchase_number": "WR-CD-0100",
                 "purchase_date": datetime(2026, 3, 1),
-                "status": "paid",
+                "status": "received",
             },
             {"id": uuid4(), "current_stock": Decimal("2")},  # stock < qty 5 → -3
             {"id": uuid4()},  # reversing JE
@@ -307,7 +307,7 @@ async def test_delete_happy_path_reverses_stock_voids_gl_and_deletes_row():
                 "id": purchase_id,
                 "purchase_number": "WR-CD-0101",
                 "purchase_date": datetime(2026, 3, 2),
-                "status": "paid",
+                "status": "received",
             },
             {"id": uuid4(), "current_stock": Decimal("10")},
             {"id": uuid4()},  # reversing JE

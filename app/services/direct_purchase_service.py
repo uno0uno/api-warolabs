@@ -13,6 +13,24 @@ _DIRECT_PURCHASE_DECIMAL_PRECISION = 42
 _DECIMAL_ZERO = Decimal("0")
 _DECIMAL_ONE = Decimal("1")
 
+_PAID_DIRECT_PURCHASE_EDIT_MSG = (
+    "No se puede editar una compra directa que ya está pagada"
+)
+_PAID_DIRECT_PURCHASE_DELETE_MSG = (
+    "No se puede eliminar una compra directa que ya está pagada"
+)
+
+
+def _assert_direct_purchase_not_paid(status: str, *, action: str = "edit") -> None:
+    if status != "paid":
+        return
+    detail = (
+        _PAID_DIRECT_PURCHASE_DELETE_MSG
+        if action == "delete"
+        else _PAID_DIRECT_PURCHASE_EDIT_MSG
+    )
+    raise HTTPException(status_code=409, detail=detail)
+
 # Catalog units matching backend PURCHASE_UNIT_CATALOG
 # Used to convert catalog keys (lt, kg, galon…) to base units (ml, gr)
 _CATALOG_TO_BASE: Dict[str, Any] = {
@@ -1296,6 +1314,8 @@ async def update_direct_purchase(
                 if not existing_purchase:
                     raise HTTPException(status_code=404, detail="Compra directa no encontrada")
 
+                _assert_direct_purchase_not_paid(existing_purchase["status"], action="edit")
+
                 purchase_number = existing_purchase['purchase_number']
                 effective_payment_type = (
                     payment_type
@@ -1707,6 +1727,8 @@ async def update_direct_purchase(
                     }
                 }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in update_direct_purchase: {str(e)}")
         logger.exception(e)
@@ -1826,6 +1848,8 @@ async def delete_direct_purchase(
                 )
                 if not purchase:
                     raise HTTPException(status_code=404, detail="Compra directa no encontrada")
+
+                _assert_direct_purchase_not_paid(purchase["status"], action="delete")
 
                 purchase_date = purchase["purchase_date"]
                 if hasattr(purchase_date, "year"):
