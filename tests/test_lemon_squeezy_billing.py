@@ -366,7 +366,7 @@ async def test_handle_renewal_invoice_activates_with_invoice_ref():
 
 
 @pytest.mark.asyncio
-async def test_onboarding_accepts_tax_inclusive_total_above_list():
+async def test_onboarding_accepts_tax_exclusive_total_above_list():
     attempt_id = uuid4()
     tenant_id = uuid4()
     plan_id = uuid4()
@@ -420,6 +420,177 @@ async def test_onboarding_accepts_tax_inclusive_total_above_list():
         )
 
     assert result["activated"] is True
+
+
+def test_lemon_squeezy_payment_matches_expected_matrix():
+    assert billing_service.lemon_squeezy_payment_matches_expected(
+        expected_amount=900, charged=1080, subtotal=900
+    )
+    assert billing_service.lemon_squeezy_payment_matches_expected(
+        expected_amount=900, charged=900, subtotal=756
+    )
+    assert not billing_service.lemon_squeezy_payment_matches_expected(
+        expected_amount=900, charged=800, subtotal=756
+    )
+    assert not billing_service.lemon_squeezy_payment_matches_expected(
+        expected_amount=900, charged=950, subtotal=756
+    )
+    assert not billing_service.lemon_squeezy_payment_matches_expected(
+        expected_amount=900, charged=1080, subtotal=1000
+    )
+    assert billing_service.lemon_squeezy_payment_matches_expected(
+        expected_amount=900, charged=1080, subtotal=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_onboarding_accepts_tax_inclusive_list_price_as_total():
+    attempt_id = uuid4()
+    tenant_id = uuid4()
+    plan_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": attempt_id,
+                "tenant_id": tenant_id,
+                "plan_id": plan_id,
+                "provider_reference": "ls_chk_1",
+                "expected_amount_in_cents": 900,
+                "currency": "USD",
+                "status": "pending",
+                "provider_transaction_id": None,
+                "provider_environment": "test",
+                "plan_name": "Pro",
+                "plan_is_active": True,
+            },
+            {"id": uuid4(), "status": "pending"},
+            {
+                "id": uuid4(),
+                "current_period_end": __import__("datetime").datetime(
+                    2026, 9, 1, tzinfo=__import__("datetime").timezone.utc
+                ),
+            },
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=None)
+    conn.execute = AsyncMock()
+
+    with patch(
+        "app.services.billing_service.onboarding_service.activate_paid_onboarding_identity",
+        new_callable=AsyncMock,
+        return_value={
+            "tenant_name": "T",
+            "tenant_email": "t@example.com",
+        },
+    ):
+        result = await billing_service.process_mo_r_onboarding_payment(
+            conn,
+            attempt_id=attempt_id,
+            transaction_id="ls_ord_2",
+            amount_minor=900,
+            currency="USD",
+            provider_environment="test",
+            provider="lemon_squeezy",
+            amount_subtotal_minor=756,
+            ls_order_id="2",
+            ls_subscription_id="55",
+        )
+
+    assert result["activated"] is True
+
+
+@pytest.mark.asyncio
+async def test_onboarding_rejects_subtotal_above_list():
+    attempt_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "id": attempt_id,
+            "tenant_id": uuid4(),
+            "plan_id": uuid4(),
+            "provider_reference": "ls_chk_1",
+            "expected_amount_in_cents": 900,
+            "currency": "USD",
+            "status": "pending",
+            "provider_transaction_id": None,
+            "provider_environment": "test",
+            "plan_name": "Pro",
+            "plan_is_active": True,
+        }
+    )
+    conn.fetchval = AsyncMock(return_value=None)
+    conn.execute = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc:
+        await billing_service.process_mo_r_onboarding_payment(
+            conn,
+            attempt_id=attempt_id,
+            transaction_id="ls_ord_bad",
+            amount_minor=1080,
+            currency="USD",
+            provider_environment="test",
+            provider="lemon_squeezy",
+            amount_subtotal_minor=1000,
+        )
+
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_handle_renewal_invoice_tax_inclusive_activates():
+    tenant_id = uuid4()
+    payload = {
+        "meta": {
+            "event_name": "subscription_payment_success",
+            "custom_data": {
+                "tenant_id": str(tenant_id),
+                "plan_id": str(uuid4()),
+                "billing_cycle": "monthly",
+                "provider_environment": "test",
+            },
+        },
+        "data": {
+            "type": "subscription-invoices",
+            "id": "9002",
+            "attributes": {
+                "subscription_id": 55,
+                "billing_reason": "renewal",
+                "status": "paid",
+                "currency": "USD",
+                "subtotal": 756,
+                "tax": 144,
+                "total": 900,
+                "created_at": "2026-08-01T12:00:00Z",
+            },
+        },
+    }
+
+    mock_conn = MagicMock()
+
+    @asynccontextmanager
+    async def _db(*args, **kwargs):
+        yield mock_conn
+
+    with (
+        patch("app.database.get_db_connection", _db),
+        patch(
+            "app.services.billing_service.activate_subscription_by_gateway_ref",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as activate,
+        patch(
+            "app.services.billing_service.get_tenant_notify_info_after_activate",
+            new_callable=AsyncMock,
+            return_value={"tenant_email": "t@example.com"},
+        ),
+    ):
+        result = await lemon_squeezy_service.handle_verified_webhook(
+            payload, environment="test"
+        )
+
+    assert result["activated"] is True
+    assert activate.await_args.kwargs["amount"] == 9.0
 
 
 @pytest.mark.asyncio
