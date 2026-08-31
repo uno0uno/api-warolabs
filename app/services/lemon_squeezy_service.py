@@ -231,19 +231,120 @@ def _amount_minor_from_attrs(attrs: Dict[str, Any]) -> int:
         if raw is None:
             continue
         try:
-            return int(raw)
+            value = int(raw)
         except (TypeError, ValueError):
             continue
+        if value > 0:
+            return value
     item = attrs.get("first_subscription_item") or {}
     for key in ("price", "unit_price"):
         raw = item.get(key)
         if raw is None:
             continue
         try:
-            return int(raw)
+            value = int(raw)
         except (TypeError, ValueError):
             continue
+        if value > 0:
+            return value
+    first_order_item = attrs.get("first_order_item") or {}
+    raw = first_order_item.get("price")
+    if raw is not None:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
     return 0
+
+
+async def fetch_order_totals(order_id: str) -> Dict[str, Any]:
+    """GET /v1/orders/{id} — subscription_created payloads omit money fields."""
+    api_key = _api_key()
+    if not api_key or not order_id:
+        return {"amount_minor": 0, "currency": None}
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{LS_API}/orders/{order_id}",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Accept": "application/vnd.api+json",
+                    "Content-Type": "application/vnd.api+json",
+                },
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("Lemon Squeezy get order failed order=%s: %s", order_id, exc)
+        return {"amount_minor": 0, "currency": None}
+
+    if response.status_code >= 400:
+        logger.warning(
+            "Lemon Squeezy get order %s → %s: %s",
+            order_id,
+            response.status_code,
+            response.text[:300],
+        )
+        return {"amount_minor": 0, "currency": None}
+
+    attrs = (response.json().get("data") or {}).get("attributes") or {}
+    amount_minor = _amount_minor_from_attrs(attrs)
+    currency = str(attrs.get("currency") or "").upper() or None
+    return {"amount_minor": amount_minor, "currency": currency}
+
+
+async def resolve_webhook_amount(
+    parsed: Dict[str, Any],
+    *,
+    environment: ProviderEnvironment,
+) -> Dict[str, Any]:
+    """
+    Fill amount/currency when subscription webhooks omit totals.
+
+    Order: attrs → GET order by ls_order_id → offer monthly for tenant country.
+    """
+    amount_minor = int(parsed.get("amount_minor") or 0)
+    currency = str(parsed.get("currency") or "USD").upper()
+    if amount_minor > 0:
+        return {"amount_minor": amount_minor, "currency": currency}
+
+    order_id = parsed.get("ls_order_id")
+    if order_id:
+        totals = await fetch_order_totals(str(order_id))
+        if int(totals.get("amount_minor") or 0) > 0:
+            return {
+                "amount_minor": int(totals["amount_minor"]),
+                "currency": str(totals.get("currency") or currency).upper(),
+            }
+
+    tenant_raw = parsed.get("tenant_id")
+    if tenant_raw:
+        from uuid import UUID as _UUID
+
+        from app.database import get_db_connection
+        from app.services import billing_service
+        from app.core.billing_pricing import resolve_price_offer
+
+        try:
+            tenant_id = _UUID(str(tenant_raw))
+        except ValueError:
+            tenant_id = None
+        if tenant_id is not None:
+            async with get_db_connection(use_transaction=False) as conn:
+                ctx = await billing_service.get_tenant_billing_context(conn, tenant_id)
+            offer = resolve_price_offer(ctx.get("country_code"))
+            logger.info(
+                "LS amount fallback to offer segment=%s env=%s tenant=%s",
+                offer.segment,
+                environment,
+                tenant_id,
+            )
+            return {
+                "amount_minor": offer.monthly_amount_minor,
+                "currency": offer.currency,
+            }
+
+    return {"amount_minor": 0, "currency": currency}
 
 
 def extract_subscription_event(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -401,9 +502,13 @@ async def handle_verified_webhook(
         logger.warning("LS webhook missing order/sub ref: %s", parsed)
         return {"ok": True, "activated": False, "reason": "missing_ids"}
 
-    amount_minor = int(parsed["amount_minor"] or 0)
+    resolved = await resolve_webhook_amount(parsed, environment=environment)
+    amount_minor = int(resolved["amount_minor"] or 0)
     amount = amount_minor / 100.0
-    currency = str(parsed.get("currency") or "USD").upper()
+    currency = str(resolved.get("currency") or parsed.get("currency") or "USD").upper()
+    if amount_minor <= 0:
+        logger.warning("LS webhook could not resolve amount ref=%s", txn_id)
+        return {"ok": True, "activated": False, "reason": "missing_amount"}
     activated = False
     tenant_info = None
     onboarding = False
@@ -420,7 +525,7 @@ async def handle_verified_webhook(
                 attempt_id=attempt_id,
                 transaction_id=str(txn_id),
                 amount_minor=amount_minor,
-                currency=parsed["currency"],
+                currency=currency,
                 period_anchor=parsed["period_anchor"],
                 provider_environment=environment,
                 provider=PROVIDER,
@@ -448,7 +553,7 @@ async def handle_verified_webhook(
                 wompi_transaction_id="",
                 amount=amount,
                 period_anchor=parsed["period_anchor"],
-                currency=parsed["currency"],
+                currency=currency,
                 ls_order_id=parsed.get("ls_order_id"),
                 ls_subscription_id=parsed.get("ls_subscription_id"),
                 provider=PROVIDER,

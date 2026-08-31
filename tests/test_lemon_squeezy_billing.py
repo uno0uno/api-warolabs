@@ -26,7 +26,8 @@ def _created_payload(
     subscription_id="55",
     status="active",
     attempt_id=None,
-    amount_minor=900,
+    amount_minor=None,
+    include_total=False,
 ):
     custom = {
         "tenant_id": str(tenant_id),
@@ -36,6 +37,19 @@ def _created_payload(
     }
     if attempt_id is not None:
         custom["attempt_id"] = str(attempt_id)
+    attrs = {
+        "status": status,
+        "order_id": order_id,
+        "currency": "USD",
+        "created_at": "2026-08-01T12:00:00Z",
+        "first_subscription_item": {
+            "price_id": 99,
+            "quantity": 1,
+        },
+    }
+    # Real LS subscription_created omits money; tests may inject total for invoice events.
+    if include_total and amount_minor is not None:
+        attrs["total"] = amount_minor
     return {
         "meta": {
             "event_name": "subscription_created",
@@ -44,13 +58,7 @@ def _created_payload(
         "data": {
             "type": "subscriptions",
             "id": subscription_id,
-            "attributes": {
-                "status": status,
-                "order_id": order_id,
-                "currency": "USD",
-                "total": amount_minor,
-                "created_at": "2026-08-01T12:00:00Z",
-            },
+            "attributes": attrs,
         },
     }
 
@@ -175,18 +183,24 @@ async def test_create_checkout_posts_variant_and_custom(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handle_webhook_activates_on_subscription_created():
+async def test_handle_webhook_activates_resolving_order_amount():
+    """Real subscription_created has no total — resolve via GET /orders/:id."""
     tenant_id = uuid4()
-    payload = _created_payload(tenant_id=tenant_id)
+    payload = _created_payload(tenant_id=tenant_id)  # no total
 
     mock_conn = MagicMock()
 
     @asynccontextmanager
-    async def _db():
+    async def _db(*args, **kwargs):
         yield mock_conn
 
     with (
         patch("app.database.get_db_connection", _db),
+        patch(
+            "app.services.lemon_squeezy_service.fetch_order_totals",
+            new_callable=AsyncMock,
+            return_value={"amount_minor": 900, "currency": "USD"},
+        ),
         patch(
             "app.services.billing_service.activate_subscription_by_gateway_ref",
             new_callable=AsyncMock,
@@ -207,8 +221,52 @@ async def test_handle_webhook_activates_on_subscription_created():
     kwargs = activate.await_args.kwargs
     assert kwargs["provider"] == "lemon_squeezy"
     assert kwargs["gateway_reference"] == "ls_ord_101"
+    assert kwargs["amount"] == 9.0
+    assert kwargs["currency"] == "USD"
     assert kwargs["ls_order_id"] == "101"
     assert kwargs["ls_subscription_id"] == "55"
+
+
+@pytest.mark.asyncio
+async def test_handle_webhook_amount_falls_back_to_price_offer():
+    tenant_id = uuid4()
+    payload = _created_payload(tenant_id=tenant_id)
+
+    mock_conn = MagicMock()
+
+    @asynccontextmanager
+    async def _db(*args, **kwargs):
+        yield mock_conn
+
+    with (
+        patch("app.database.get_db_connection", _db),
+        patch(
+            "app.services.lemon_squeezy_service.fetch_order_totals",
+            new_callable=AsyncMock,
+            return_value={"amount_minor": 0, "currency": None},
+        ),
+        patch(
+            "app.services.billing_service.get_tenant_billing_context",
+            new_callable=AsyncMock,
+            return_value={"slug": "demo", "country_code": "CO"},
+        ),
+        patch(
+            "app.services.billing_service.activate_subscription_by_gateway_ref",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as activate,
+        patch(
+            "app.services.billing_service.get_tenant_notify_info_after_activate",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        result = await lemon_squeezy_service.handle_verified_webhook(
+            payload, environment="test"
+        )
+
+    assert result["activated"] is True
+    assert activate.await_args.kwargs["amount"] == 9.0
 
 
 @pytest.mark.asyncio
@@ -220,6 +278,36 @@ async def test_handle_webhook_ignores_noise_events():
     )
     assert result["activated"] is False
     assert result["reason"] == "ignored_event"
+
+
+@pytest.mark.asyncio
+async def test_handle_webhook_payment_failed_marks_past_due():
+    tenant_id = uuid4()
+    payload = _created_payload(tenant_id=tenant_id)
+    payload["meta"]["event_name"] = "subscription_payment_failed"
+
+    mock_conn = MagicMock()
+
+    @asynccontextmanager
+    async def _db(*args, **kwargs):
+        yield mock_conn
+
+    with (
+        patch("app.database.get_db_connection", _db),
+        patch(
+            "app.services.billing_service.mark_subscription_past_due_by_tenant",
+            new_callable=AsyncMock,
+            return_value={"tenant_email": None},
+        ) as past_due,
+    ):
+        result = await lemon_squeezy_service.handle_verified_webhook(
+            payload, environment="test"
+        )
+
+    assert result["activated"] is False
+    assert result["reason"] == "failed_or_cancelled"
+    past_due.assert_awaited_once()
+    assert past_due.await_args.kwargs["provider"] == "lemon_squeezy"
 
 
 def test_lemon_squeezy_sandbox_webhook_route_verifies_signature():
