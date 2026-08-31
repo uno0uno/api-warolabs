@@ -15,6 +15,34 @@ from app.services.onboarding_service import (
 
 
 @pytest.mark.asyncio
+async def test_registration_challenge_persists_visitor_key():
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={"email_count": 0, "ip_count": 0})
+    conn.execute = AsyncMock(return_value="OK")
+
+    with patch("app.services.onboarding_service.settings.auth_secret", "test-secret"):
+        created = await store_registration_challenge(
+            conn,
+            email="new@example.com",
+            token="raw-token",
+            code="123456",
+            request_ip="127.0.0.1",
+            user_agent="pytest",
+            consent=True,
+            visitor_key="opaque-trail-id",
+        )
+
+    assert created is True
+    insert = next(
+        call for call in conn.execute.await_args_list
+        if "INSERT INTO onboarding_email_challenges" in call.args[0]
+    )
+    assert "first_visitor_key" in insert.args[0]
+    assert "last_visitor_key" in insert.args[0]
+    assert insert.args[-1] == "opaque-trail-id"
+
+
+@pytest.mark.asyncio
 async def test_new_email_challenge_is_hashed_and_does_not_create_identity():
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value={"email_count": 0, "ip_count": 0})
@@ -118,6 +146,8 @@ async def test_verified_challenge_atomically_creates_pending_owner():
             "last_content": "cta",
             "last_campaign": "launch",
             "last_variant": "b",
+            "first_visitor_key": "opaque-trail-id",
+            "last_visitor_key": "opaque-trail-id",
         },
         None,
         None,
@@ -163,6 +193,12 @@ async def test_verified_challenge_atomically_creates_pending_owner():
     assert identity["registration_notification"]["source"] == "blog"
     assert identity["registration_notification"]["variant"] == "b"
     writes = "\n".join(call.args[0] for call in conn.execute.await_args_list)
+    lead_event = next(
+        call for call in conn.fetchrow.await_args_list
+        if call.args and "INSERT INTO lead_interactions" in call.args[0]
+    )
+    assert "visitor_key" in lead_event.args[0]
+    assert lead_event.args[-1] == "opaque-trail-id"
     assert "pg_advisory_xact_lock" in writes
     assert "INSERT INTO tenants" in writes
     assert "'pending'" in writes
