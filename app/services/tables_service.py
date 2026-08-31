@@ -29,7 +29,13 @@ from app.services.pos_cart_service import (
     _PAYMENT_VOID_ROLES,
     _tax_rows_from_evaluated_lines,
 )
-from app.services.orders_service import _return_ingredient_to_stock
+from app.services.orders_service import (
+    _compute_tax_breakdown,
+    _return_ingredient_to_stock,
+    get_order_by_id,
+    get_order_items,
+    update_order_status,
+)
 from app.utils.table_code import infer_table_code, normalize_table_code, resolve_unique_code
 from app.services.table_session_guests import guest_snapshot_from_capacity
 from app.services.tip_tax_service import (
@@ -38,7 +44,6 @@ from app.services.tip_tax_service import (
     split_settlement_amount_due,
     tip_settlement_total,
 )
-from app.services.orders_service import _compute_tax_breakdown
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import _parse_item_row, fire_comandas
 from app.services.billing_service import check_plan_quota_growth
@@ -2688,6 +2693,160 @@ async def defer_tab_delivery_payment(
             "payment_method": None,
             "delivery_address_id": str(delivery_address_id),
             "next_table_session_id": str(new_session_row["id"]),
+        },
+    }
+
+
+_PENDING_DELIVERY_PAYMENT_STATUSES = {None, "unpaid", "pending"}
+
+
+def _is_unpaid_pending_delivery(order: dict) -> bool:
+    return (
+        order.get("status") == "pending"
+        and bool(order.get("is_delivery") or order.get("delivery_address_id"))
+        and order.get("payment_status") in _PENDING_DELIVERY_PAYMENT_STATUSES
+    )
+
+
+def _serialize_pending_delivery_row(row) -> dict:
+    address_parts = [row["address_line1"], row["address_line2"], row["city"]]
+    address_label = ", ".join(part for part in address_parts if part)
+    return {
+        "id": str(row["id"]),
+        "order_number": int(row["order_number"]),
+        "order_date": row["order_date"].isoformat() if row["order_date"] else None,
+        "total_amount": float(row["total_amount"] or 0),
+        "status": row["status"],
+        "payment_status": row["payment_status"],
+        "delivery_instructions": row["delivery_instructions"],
+        "customer": {
+            "id": str(row["customer_id"]) if row["customer_id"] else None,
+            "name": row["customer_name"],
+            "phone_number": row["customer_phone"],
+        },
+        "address_label": address_label or None,
+        "delivery_address_id": str(row["delivery_address_id"]) if row["delivery_address_id"] else None,
+    }
+
+
+async def list_pending_deliveries(request: Request) -> dict:
+    """POS queue of unpaid pending delivery orders deferred from barra."""
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                o.id,
+                o.order_number,
+                o.order_date,
+                o.total_amount,
+                o.status,
+                o.payment_status,
+                o.delivery_instructions,
+                o.delivery_address_id,
+                p.id AS customer_id,
+                p.name AS customer_name,
+                p.phone_number AS customer_phone,
+                ap.address_line1,
+                ap.address_line2,
+                ap.city
+            FROM orders o
+            LEFT JOIN profile p ON p.id = o.customer_id
+            LEFT JOIN addresses_profile ap
+              ON ap.id = o.delivery_address_id AND ap.deleted_at IS NULL
+            WHERE o.tenant_id = $1
+              AND o.status = 'pending'
+              AND o.delivery_address_id IS NOT NULL
+              AND (o.payment_status IS NULL OR o.payment_status IN ('unpaid', 'pending'))
+            ORDER BY o.order_date DESC
+            """,
+            tenant_id,
+        )
+
+    return {
+        "success": True,
+        "data": [_serialize_pending_delivery_row(row) for row in rows],
+    }
+
+
+async def get_pending_delivery(request: Request, order_id: UUID) -> dict:
+    """Load a pending unpaid delivery for POS checkout."""
+    order_payload = await get_order_by_id(request, order_id)
+    order = order_payload.get("data") or {}
+    if not _is_unpaid_pending_delivery(order):
+        raise APIError("Este domicilio ya no está pendiente de cobro", status_code=409)
+
+    items_payload = await get_order_items(request, order_id)
+    return {
+        "success": True,
+        "data": {
+            **order,
+            "items": items_payload.get("data") or [],
+        },
+    }
+
+
+async def complete_pending_delivery(
+    request: Request,
+    order_id: UUID,
+    *,
+    payment_method: Optional[str] = None,
+    payment_method_id: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    cash_received: Optional[float] = None,
+    credit_due_date: Optional[date] = None,
+    served_by_member_id: Optional[UUID] = None,
+    discount_type: Optional[str] = None,
+    discount_value: Optional[float] = None,
+    tip_amount: Optional[float] = None,
+    tip_source: Optional[str] = None,
+    tip_taxable: Optional[bool] = None,
+    waros_to_redeem: Optional[int] = None,
+    waro_reward_id: Optional[UUID] = None,
+    wompi_collection: bool = False,
+) -> dict:
+    """Collect payment on a pending delivery from POS checkout."""
+    detail = await get_pending_delivery(request, order_id)
+    order = detail["data"]
+    result = await update_order_status(
+        request,
+        order_id,
+        "completed",
+        payment_method,
+        payment_method_id,
+        customer_id or (order.get("customer") or {}).get("id"),
+        None,
+        cash_received=cash_received,
+        credit_due_date=credit_due_date,
+        served_by_member_id=served_by_member_id,
+        discount_type=discount_type,
+        discount_value=discount_value,
+        tip_amount=tip_amount,
+        tip_source=tip_source,
+        tip_taxable=tip_taxable,
+        waros_to_redeem=waros_to_redeem,
+        waro_reward_id=waro_reward_id,
+        wompi_collection=wompi_collection,
+    )
+    return {
+        "success": True,
+        "message": result.get("message") or "Domicilio cobrado",
+        "data": {
+            "order_id": order["id"],
+            "order_number": order.get("order_number"),
+            "total_amount": order.get("total_amount"),
+            "status": "completed" if not wompi_collection else order.get("status"),
+            "payment_status": None if wompi_collection else "paid",
+            "payment_method": payment_method,
+            "customer_id": (order.get("customer") or {}).get("id"),
+            "standard_tax": order.get("standard_tax"),
+            "liquor_tax": order.get("liquor_tax"),
+            "standard_tax_label": order.get("standard_tax_label"),
+            "liquor_tax_label": order.get("liquor_tax_label"),
         },
     }
 

@@ -91,6 +91,62 @@ class ReorderTablesRequest(BaseModel):
     table_ids: List[UUID] = Field(..., min_length=1)
 
 
+class CompletePendingDeliveryRequest(BaseModel):
+    payment_method: Optional[str] = Field(None, description="Payment method group slug")
+    payment_method_id: Optional[str] = Field(None, description="UUID of the selected payment_methods row")
+    customer_id: Optional[str] = Field(None, description="UUID of customer already on the order")
+    cash_received: Optional[float] = Field(None, ge=0)
+    credit_due_date: Optional[date] = None
+    served_by_member_id: Optional[UUID] = None
+    discount_type: Optional[str] = None
+    discount_value: Optional[float] = None
+    tip_amount: Optional[float] = Field(None, ge=0)
+    tip_source: Optional[str] = None
+    tip_taxable: Optional[bool] = None
+    waros_to_redeem: Optional[int] = Field(None, ge=0)
+    waro_reward_id: Optional[UUID] = None
+    wompi_collection: bool = False
+
+
+@router.get("/pending-deliveries", dependencies=[Depends(require_module(Module.POS))])
+async def list_pending_deliveries(request: Request):
+    """POS queue of unpaid pending delivery orders deferred from barra."""
+    return await tables_service.list_pending_deliveries(request)
+
+
+@router.get("/pending-deliveries/{order_id}", dependencies=[Depends(require_module(Module.POS))])
+async def get_pending_delivery(request: Request, order_id: UUID):
+    """Load a pending unpaid delivery for POS checkout."""
+    return await tables_service.get_pending_delivery(request, order_id)
+
+
+@router.post("/pending-deliveries/{order_id}/complete", dependencies=[Depends(require_module(Module.POS))])
+async def complete_pending_delivery(
+    request: Request,
+    order_id: UUID,
+    body: CompletePendingDeliveryRequest,
+):
+    """Collect payment on a pending delivery from POS checkout."""
+    return await tables_service.complete_pending_delivery(
+        request,
+        order_id,
+        payment_method=body.payment_method,
+        payment_method_id=body.payment_method_id,
+        customer_id=body.customer_id,
+        cash_received=body.cash_received,
+        credit_due_date=body.credit_due_date,
+        served_by_member_id=body.served_by_member_id,
+        discount_type=body.discount_type,
+        discount_value=body.discount_value,
+        tip_amount=body.tip_amount,
+        tip_source=body.tip_source,
+        tip_taxable=body.tip_taxable,
+        waros_to_redeem=body.waros_to_redeem,
+        waro_reward_id=body.waro_reward_id,
+        wompi_collection=body.wompi_collection,
+    )
+
+
 @router.get("", dependencies=[Depends(require_module(Module.POS))])
 async def list_tables(request: Request, include_inactive: bool = Query(False)):
     """
