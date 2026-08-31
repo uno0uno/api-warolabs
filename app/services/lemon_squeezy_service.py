@@ -289,8 +289,19 @@ async def fetch_order_totals(order_id: str) -> Dict[str, Any]:
 
     attrs = (response.json().get("data") or {}).get("attributes") or {}
     amount_minor = _amount_minor_from_attrs(attrs)
+    amount_subtotal_minor = 0
+    raw_sub = attrs.get("subtotal")
+    if raw_sub is not None:
+        try:
+            amount_subtotal_minor = int(raw_sub)
+        except (TypeError, ValueError):
+            amount_subtotal_minor = 0
     currency = str(attrs.get("currency") or "").upper() or None
-    return {"amount_minor": amount_minor, "currency": currency}
+    return {
+        "amount_minor": amount_minor,
+        "amount_subtotal_minor": amount_subtotal_minor,
+        "currency": currency,
+    }
 
 
 async def resolve_webhook_amount(
@@ -304,9 +315,14 @@ async def resolve_webhook_amount(
     Order: attrs → GET order by ls_order_id → offer monthly for tenant country.
     """
     amount_minor = int(parsed.get("amount_minor") or 0)
+    amount_subtotal_minor = int(parsed.get("amount_subtotal_minor") or 0)
     currency = str(parsed.get("currency") or "USD").upper()
     if amount_minor > 0:
-        return {"amount_minor": amount_minor, "currency": currency}
+        return {
+            "amount_minor": amount_minor,
+            "amount_subtotal_minor": amount_subtotal_minor,
+            "currency": currency,
+        }
 
     order_id = parsed.get("ls_order_id")
     if order_id:
@@ -314,6 +330,7 @@ async def resolve_webhook_amount(
         if int(totals.get("amount_minor") or 0) > 0:
             return {
                 "amount_minor": int(totals["amount_minor"]),
+                "amount_subtotal_minor": int(totals.get("amount_subtotal_minor") or 0),
                 "currency": str(totals.get("currency") or currency).upper(),
             }
 
@@ -341,41 +358,83 @@ async def resolve_webhook_amount(
             )
             return {
                 "amount_minor": offer.monthly_amount_minor,
+                "amount_subtotal_minor": offer.monthly_amount_minor,
                 "currency": offer.currency,
             }
 
-    return {"amount_minor": 0, "currency": currency}
+    return {
+        "amount_minor": 0,
+        "amount_subtotal_minor": 0,
+        "currency": currency,
+    }
 
 
 def extract_subscription_event(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize Lemon Squeezy webhook payload into activation fields."""
+    """Normalize Lemon Squeezy webhook payload into activation fields.
+
+    ``subscription_created`` → Subscription object (``data.type=subscriptions``).
+    ``subscription_payment_*`` → Subscription Invoice (``data.type=subscription-invoices``):
+    use ``attributes.subscription_id`` for the LS subscription and ``data.id`` as invoice id.
+    """
     meta = payload.get("meta") or {}
     event_type = str(meta.get("event_name") or payload.get("event_name") or "")
     custom = meta.get("custom_data") or {}
     data = payload.get("data") or {}
     attrs = data.get("attributes") or {}
-    subscription_id = data.get("id")
-    order_id = attrs.get("order_id")
+    data_type = str(data.get("type") or "").lower()
     status = str(attrs.get("status") or "").lower()
     currency = str(attrs.get("currency") or "USD").upper()
-    gateway_reference = (
-        f"ls_ord_{order_id}" if order_id is not None else (
-            f"ls_sub_{subscription_id}" if subscription_id is not None else None
+
+    ls_invoice_id: Optional[str] = None
+    ls_subscription_id: Optional[str] = None
+    order_id = attrs.get("order_id")
+    gateway_reference: Optional[str] = None
+
+    if data_type == "subscription-invoices" or event_type.startswith("subscription_payment_"):
+        # Renewal / payment events: data.id is the invoice, not the subscription.
+        if data.get("id") is not None:
+            ls_invoice_id = str(data.get("id"))
+        sub_raw = attrs.get("subscription_id")
+        if sub_raw is not None:
+            ls_subscription_id = str(sub_raw)
+        gateway_reference = f"ls_inv_{ls_invoice_id}" if ls_invoice_id else (
+            f"ls_sub_{ls_subscription_id}" if ls_subscription_id else None
         )
-    )
+    else:
+        # subscription_created / subscription_* lifecycle on Subscription object
+        if data.get("id") is not None:
+            ls_subscription_id = str(data.get("id"))
+        if order_id is not None:
+            gateway_reference = f"ls_ord_{order_id}"
+        elif ls_subscription_id is not None:
+            gateway_reference = f"ls_sub_{ls_subscription_id}"
+
+    amount_minor = _amount_minor_from_attrs(attrs)
+    amount_subtotal_minor = 0
+    raw_sub = attrs.get("subtotal")
+    if raw_sub is not None:
+        try:
+            amount_subtotal_minor = int(raw_sub)
+        except (TypeError, ValueError):
+            amount_subtotal_minor = 0
+
     return {
         "event_type": event_type,
+        "data_type": data_type,
         "status": status,
         "tenant_id": custom.get("tenant_id"),
         "plan_id": custom.get("plan_id"),
         "billing_cycle": custom.get("billing_cycle") or "monthly",
         "attempt_id": custom.get("attempt_id"),
         "provider_environment": custom.get("provider_environment") or "prod",
-        "amount_minor": _amount_minor_from_attrs(attrs),
+        "amount_minor": amount_minor,
+        "amount_subtotal_minor": amount_subtotal_minor,
         "currency": currency,
+        "billing_reason": attrs.get("billing_reason"),
         "period_anchor": parse_period_anchor(attrs),
-        "ls_subscription_id": str(subscription_id) if subscription_id is not None else None,
+        "ls_subscription_id": ls_subscription_id,
         "ls_order_id": str(order_id) if order_id is not None else None,
+        "ls_invoice_id": ls_invoice_id,
         "gateway_reference": gateway_reference,
         "transaction_id": gateway_reference,
     }
@@ -498,6 +557,14 @@ async def handle_verified_webhook(
         logger.info("LS status not success event=%s status=%s", event_type, status)
         return {"ok": True, "activated": False, "reason": "ignored_event"}
 
+    if (
+        event_type == "subscription_payment_success"
+        and status
+        and status not in {"paid"}
+    ):
+        logger.info("LS invoice status not paid event=%s status=%s", event_type, status)
+        return {"ok": True, "activated": False, "reason": "ignored_event"}
+
     if not txn_id:
         logger.warning("LS webhook missing order/sub ref: %s", parsed)
         return {"ok": True, "activated": False, "reason": "missing_ids"}
@@ -506,6 +573,11 @@ async def handle_verified_webhook(
     amount_minor = int(resolved["amount_minor"] or 0)
     amount = amount_minor / 100.0
     currency = str(resolved.get("currency") or parsed.get("currency") or "USD").upper()
+    amount_subtotal_minor = int(
+        resolved.get("amount_subtotal_minor")
+        or parsed.get("amount_subtotal_minor")
+        or 0
+    ) or None
     if amount_minor <= 0:
         logger.warning("LS webhook could not resolve amount ref=%s", txn_id)
         return {"ok": True, "activated": False, "reason": "missing_amount"}
@@ -531,6 +603,8 @@ async def handle_verified_webhook(
                 provider=PROVIDER,
                 ls_subscription_id=parsed.get("ls_subscription_id"),
                 ls_order_id=parsed.get("ls_order_id"),
+                ls_invoice_id=parsed.get("ls_invoice_id"),
+                amount_subtotal_minor=amount_subtotal_minor,
             )
             activated = bool(result.get("activated"))
             tenant_info = result.get("tenant_info")
@@ -556,6 +630,7 @@ async def handle_verified_webhook(
                 currency=currency,
                 ls_order_id=parsed.get("ls_order_id"),
                 ls_subscription_id=parsed.get("ls_subscription_id"),
+                ls_invoice_id=parsed.get("ls_invoice_id"),
                 provider=PROVIDER,
                 provider_environment=environment,
             )

@@ -2087,6 +2087,7 @@ async def payment_approved_exists(
     paddle_transaction_id: Optional[str] = None,
     ls_order_id: Optional[str] = None,
     ls_subscription_id: Optional[str] = None,
+    ls_invoice_id: Optional[str] = None,
 ) -> bool:
     """True if this provider transaction already recorded as payment_approved."""
     if paddle_transaction_id:
@@ -2100,6 +2101,23 @@ async def payment_approved_exists(
             """,
             subscription_id,
             paddle_transaction_id,
+        )
+        return row is not None
+    if ls_invoice_id:
+        row = await conn.fetchval(
+            """
+            SELECT 1 FROM billing_events
+            WHERE subscription_id = $1
+              AND event_type = 'payment_approved'
+              AND (
+                metadata->>'ls_invoice_id' = $2
+                OR metadata->>'gateway_reference' = $3
+              )
+            LIMIT 1
+            """,
+            subscription_id,
+            ls_invoice_id,
+            f"ls_inv_{ls_invoice_id}",
         )
         return row is not None
     if ls_order_id:
@@ -2207,6 +2225,7 @@ async def activate_subscription_by_gateway_ref(
     paddle_subscription_id: Optional[str] = None,
     ls_order_id: Optional[str] = None,
     ls_subscription_id: Optional[str] = None,
+    ls_invoice_id: Optional[str] = None,
     provider: str = "lemon_squeezy",
     provider_environment: Optional[str] = None,
 ) -> bool:
@@ -2275,6 +2294,7 @@ async def activate_subscription_by_gateway_ref(
         paddle_transaction_id=paddle_transaction_id,
         ls_order_id=ls_order_id,
         ls_subscription_id=ls_subscription_id,
+        ls_invoice_id=ls_invoice_id,
     ):
         logger.info(
             "activate_subscription: duplicate provider txn tenant=%s — skipped",
@@ -2296,6 +2316,8 @@ async def activate_subscription_by_gateway_ref(
         metadata["ls_order_id"] = ls_order_id
     if ls_subscription_id:
         metadata["ls_subscription_id"] = ls_subscription_id
+    if ls_invoice_id:
+        metadata["ls_invoice_id"] = ls_invoice_id
     if provider_environment:
         metadata["provider_environment"] = provider_environment
     if not matched_gateway:
@@ -3273,11 +3295,15 @@ async def process_mo_r_onboarding_payment(
     paddle_subscription_id: Optional[str] = None,
     ls_subscription_id: Optional[str] = None,
     ls_order_id: Optional[str] = None,
+    ls_invoice_id: Optional[str] = None,
+    amount_subtotal_minor: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Activate paid onboarding from a verified MoR transaction (#795 / #942).
 
     Looks up billing_payment_attempts by attempt_id + provider.
+    Lemon Squeezy may charge list + tax: accept total >= expected list, or
+    subtotal == expected when subtotal is provided.
     """
     provider_norm = str(provider or "lemon_squeezy").strip().lower()
     if provider_norm not in ("paddle", "lemon_squeezy"):
@@ -3332,11 +3358,19 @@ async def process_mo_r_onboarding_payment(
     expected_currency = str(attempt["currency"]).strip().upper()
     currency_norm = str(currency or "").strip().upper()
     expected_amount = int(attempt["expected_amount_in_cents"])
-    if (
-        currency_norm != expected_currency
-        or int(amount_minor) != expected_amount
-        or not attempt["plan_is_active"]
-    ):
+    charged = int(amount_minor)
+    subtotal = int(amount_subtotal_minor) if amount_subtotal_minor is not None else None
+
+    if currency_norm != expected_currency or not attempt["plan_is_active"]:
+        raise HTTPException(status_code=409, detail="Payment evidence mismatch")
+
+    if provider_norm == "lemon_squeezy":
+        # List price must match when subtotal is known; MoR tax may raise total.
+        if subtotal is not None and subtotal != expected_amount:
+            raise HTTPException(status_code=409, detail="Payment evidence mismatch")
+        if charged < expected_amount:
+            raise HTTPException(status_code=409, detail="Payment evidence mismatch")
+    elif charged != expected_amount:
         raise HTTPException(status_code=409, detail="Payment evidence mismatch")
 
     existing_subscription = await conn.fetchrow(
@@ -3411,7 +3445,11 @@ async def process_mo_r_onboarding_payment(
         "plan_id": str(attempt["plan_id"]),
         "provider": provider_norm,
         "provider_environment": provider_environment,
+        "expected_amount_in_cents": expected_amount,
+        "charged_amount_in_cents": charged,
     }
+    if subtotal is not None:
+        metadata["subtotal_amount_in_cents"] = subtotal
     if provider_norm == "paddle":
         metadata["paddle_transaction_id"] = txn_id
         if paddle_subscription_id:
@@ -3421,6 +3459,8 @@ async def process_mo_r_onboarding_payment(
             metadata["ls_order_id"] = ls_order_id
         if ls_subscription_id:
             metadata["ls_subscription_id"] = ls_subscription_id
+        if ls_invoice_id:
+            metadata["ls_invoice_id"] = ls_invoice_id
         metadata["ls_transaction_id"] = txn_id
 
     await conn.execute(
@@ -3432,7 +3472,7 @@ async def process_mo_r_onboarding_payment(
         """,
         attempt["tenant_id"],
         subscription["id"],
-        Decimal(amount_minor) / Decimal("100"),
+        Decimal(charged) / Decimal("100"),
         expected_currency,
         json.dumps(metadata),
     )
