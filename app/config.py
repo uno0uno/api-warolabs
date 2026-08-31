@@ -158,6 +158,41 @@ class Settings(BaseSettings):
         default=None, alias='PADDLE_PRICE_EUR_30_ANNUAL_TEST'
     )
 
+    # Lemon Squeezy — sole SaaS MoR checkout (#942 / epic #941)
+    lemon_squeezy_environment: str = Field(
+        default='sandbox', alias='LEMON_SQUEEZY_ENVIRONMENT'
+    )
+    lemon_squeezy_api_key: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_API_KEY'
+    )
+    lemon_squeezy_store_id: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_STORE_ID'
+    )
+    lemon_squeezy_webhook_secret_live: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_WEBHOOK_SECRET_LIVE'
+    )
+    lemon_squeezy_webhook_secret_sandbox: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_WEBHOOK_SECRET_SANDBOX'
+    )
+    lemon_squeezy_variant_usd_9_monthly_live: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_VARIANT_USD_9_MONTHLY_LIVE'
+    )
+    lemon_squeezy_variant_usd_9_monthly_test: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_VARIANT_USD_9_MONTHLY_TEST'
+    )
+    lemon_squeezy_variant_usd_30_monthly_live: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_VARIANT_USD_30_MONTHLY_LIVE'
+    )
+    lemon_squeezy_variant_usd_30_monthly_test: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_VARIANT_USD_30_MONTHLY_TEST'
+    )
+    lemon_squeezy_variant_eur_30_monthly_live: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_VARIANT_EUR_30_MONTHLY_LIVE'
+    )
+    lemon_squeezy_variant_eur_30_monthly_test: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_VARIANT_EUR_30_MONTHLY_TEST'
+    )
+
     # Cron secret — grace period reminders (issue #62)
     cron_secret: Optional[str] = Field(default=None, alias='CRON_SECRET')
 

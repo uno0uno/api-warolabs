@@ -1,8 +1,8 @@
-"""Paddle regional pricing policy (epic #805 / batch #806).
+"""Regional SaaS pricing policy (epic #805 / #941).
 
-List prices and default Paddle charge for new checkouts are monthly
+List prices and default MoR charge for new checkouts are monthly
 (USD 9 / USD 30 / EUR 30). Annual 10× from #793 is legacy/display only.
-Do not use subscription_plans.price_* for Paddle charge amounts.
+Do not use subscription_plans.price_* for MoR charge amounts.
 """
 from __future__ import annotations
 
@@ -49,12 +49,19 @@ class PriceOffer:
     annual_amount_minor: int
     paddle_price_id_test: str
     paddle_price_id_live: str
+    lemon_squeezy_variant_id_test: str
+    lemon_squeezy_variant_id_live: str
 
     def paddle_price_id(self, environment: ProviderEnvironment) -> str:
         return self.paddle_price_id_test if environment == "test" else self.paddle_price_id_live
 
+    def lemon_squeezy_variant_id(self, environment: ProviderEnvironment) -> str:
+        if environment == "test":
+            return self.lemon_squeezy_variant_id_test
+        return self.lemon_squeezy_variant_id_live
 
-# Placeholders until env PADDLE_PRICE_*_MONTHLY_* is set (prefer env via paddle_service).
+
+# Placeholders until env MoR price/variant IDs are set (prefer env via provider service).
 SEGMENT_OFFERS: dict[PriceSegment, PriceOffer] = {
     "usd_9": PriceOffer(
         segment="usd_9",
@@ -63,6 +70,8 @@ SEGMENT_OFFERS: dict[PriceSegment, PriceOffer] = {
         annual_amount_minor=900 * ANNUAL_MULTIPLIER,
         paddle_price_id_test="TODO_PADDLE_PRICE_USD_9_MONTHLY_TEST",
         paddle_price_id_live="TODO_PADDLE_PRICE_USD_9_MONTHLY_LIVE",
+        lemon_squeezy_variant_id_test="TODO_LEMON_SQUEEZY_VARIANT_USD_9_MONTHLY_TEST",
+        lemon_squeezy_variant_id_live="TODO_LEMON_SQUEEZY_VARIANT_USD_9_MONTHLY_LIVE",
     ),
     "usd_30": PriceOffer(
         segment="usd_30",
@@ -71,6 +80,8 @@ SEGMENT_OFFERS: dict[PriceSegment, PriceOffer] = {
         annual_amount_minor=3000 * ANNUAL_MULTIPLIER,
         paddle_price_id_test="TODO_PADDLE_PRICE_USD_30_MONTHLY_TEST",
         paddle_price_id_live="TODO_PADDLE_PRICE_USD_30_MONTHLY_LIVE",
+        lemon_squeezy_variant_id_test="TODO_LEMON_SQUEEZY_VARIANT_USD_30_MONTHLY_TEST",
+        lemon_squeezy_variant_id_live="TODO_LEMON_SQUEEZY_VARIANT_USD_30_MONTHLY_LIVE",
     ),
     "eur_30": PriceOffer(
         segment="eur_30",
@@ -79,6 +90,8 @@ SEGMENT_OFFERS: dict[PriceSegment, PriceOffer] = {
         annual_amount_minor=3000 * ANNUAL_MULTIPLIER,
         paddle_price_id_test="TODO_PADDLE_PRICE_EUR_30_MONTHLY_TEST",
         paddle_price_id_live="TODO_PADDLE_PRICE_EUR_30_MONTHLY_LIVE",
+        lemon_squeezy_variant_id_test="TODO_LEMON_SQUEEZY_VARIANT_EUR_30_MONTHLY_TEST",
+        lemon_squeezy_variant_id_live="TODO_LEMON_SQUEEZY_VARIANT_EUR_30_MONTHLY_LIVE",
     ),
 }
 
@@ -120,22 +133,36 @@ def resolve_provider_environment(
     tenant_id: Optional[str] = None,
     billing_test: bool = False,
 ) -> ProviderEnvironment:
-    """Paddle sandbox vs live (#813).
+    """MoR sandbox vs live (#813 / #942).
+
+    Prefers LEMON_SQUEEZY_ENVIRONMENT; falls back to PADDLE_ENVIRONMENT.
 
     test when:
     - billing_test=True, or
-    - PADDLE_ENVIRONMENT is sandbox|test (default sandbox for local/dev), or
+    - MoR environment is sandbox|test (default sandbox for local/dev), or
     - production mode and tenant slug/id is in PADDLE_SANDBOX_TENANT_SLUGS
       (empty env → DEFAULT_PADDLE_SANDBOX_TENANT_SLUGS).
 
-    prod: PADDLE_ENVIRONMENT=production and tenant not on allowlist.
+    prod: MoR environment=production and tenant not on allowlist.
     """
     if billing_test:
         return "test"
 
     from app.config import settings
 
-    mode = (settings.paddle_environment or "sandbox").strip().lower()
+    ls_raw = settings.lemon_squeezy_environment
+    paddle_raw = settings.paddle_environment
+    ls_mode = (
+        ls_raw.strip().lower()
+        if isinstance(ls_raw, str) and ls_raw.strip()
+        else ""
+    )
+    paddle_mode = (
+        paddle_raw.strip().lower()
+        if isinstance(paddle_raw, str) and paddle_raw.strip()
+        else "sandbox"
+    )
+    mode = ls_mode or paddle_mode or "sandbox"
     if mode in ("sandbox", "test"):
         return "test"
 

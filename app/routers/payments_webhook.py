@@ -3,7 +3,8 @@ Payment provider webhook ingress.
 
 Public URLs:
   POST /payments/webhooks/wompi[+sandbox]   — Tickets forward; Colombia billing no-op (#798)
-  POST /payments/webhooks/paddle[+sandbox]
+  POST /payments/webhooks/paddle[+sandbox]  — legacy until #944
+  POST /payments/webhooks/lemon-squeezy[+sandbox]  — SaaS MoR (#942)
 
 Legacy Colombia Wompi URL remains: POST /billing/webhook (also no-op for billing activate)
 """
@@ -11,7 +12,7 @@ import json
 
 from fastapi import APIRouter, BackgroundTasks, Request
 
-from app.services import paddle_service, wompi_webhook_router_service
+from app.services import lemon_squeezy_service, paddle_service, wompi_webhook_router_service
 
 router = APIRouter(prefix="/payments/webhooks", tags=["Payments Webhooks"])
 
@@ -70,5 +71,37 @@ async def paddle_sandbox_webhook(request: Request, background_tasks: BackgroundT
     )
     payload = json.loads(raw.decode("utf-8"))
     return await paddle_service.handle_verified_webhook(
+        payload, environment="test", background_tasks=background_tasks
+    )
+
+
+@router.post("/lemon-squeezy", status_code=200)
+async def lemon_squeezy_live_webhook(request: Request, background_tasks: BackgroundTasks):
+    """Lemon Squeezy live webhook — X-Signature verified (#942)."""
+    raw = await request.body()
+    lemon_squeezy_service.verify_lemon_squeezy_signature(
+        raw_body=raw,
+        signature_header=request.headers.get("X-Signature"),
+        environment="prod",
+    )
+    payload = json.loads(raw.decode("utf-8"))
+    return await lemon_squeezy_service.handle_verified_webhook(
+        payload, environment="prod", background_tasks=background_tasks
+    )
+
+
+@router.post("/lemon-squeezy/sandbox", status_code=200)
+async def lemon_squeezy_sandbox_webhook(
+    request: Request, background_tasks: BackgroundTasks
+):
+    """Lemon Squeezy sandbox webhook — isolated signing secret (#942)."""
+    raw = await request.body()
+    lemon_squeezy_service.verify_lemon_squeezy_signature(
+        raw_body=raw,
+        signature_header=request.headers.get("X-Signature"),
+        environment="test",
+    )
+    payload = json.loads(raw.decode("utf-8"))
+    return await lemon_squeezy_service.handle_verified_webhook(
         payload, environment="test", background_tasks=background_tasks
     )

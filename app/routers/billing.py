@@ -28,6 +28,7 @@ from app.services import (
     billing_service,
     billing_email_service,
     legal_service,
+    lemon_squeezy_service,
     onboarding_service,
     paddle_service,
     wompi_service,
@@ -90,7 +91,7 @@ async def tenant_list_plans(request: Request):
 )
 async def subscribe(body: SubscribeBody, request: Request):
     """
-    Subscribe the authenticated tenant to a plan via Paddle checkout (#807).
+    Subscribe the authenticated tenant to a plan via Lemon Squeezy checkout (#942).
 
     billing_cycle must be 'monthly' for new subscriptions.
     Active annuals with a future period end are blocked mid-period (#797).
@@ -109,8 +110,7 @@ async def subscribe(body: SubscribeBody, request: Request):
     from urllib.parse import urlparse
     from app.core.billing_pricing import resolve_price_offer, resolve_provider_environment
 
-    # Return page after Paddle pay (#2208): transaction payment links use this as
-    # checkout.url when not localhost; activation still comes from webhooks.
+    # Return page after LS pay: hosted checkout redirect; activation still from webhooks.
     parsed = urlparse(settings.frontend_url)
     frontend_host = f"{parsed.scheme}://{parsed.netloc}"
     redirect_url = f"{frontend_host}/billing/confirmacion"
@@ -142,10 +142,10 @@ async def subscribe(body: SubscribeBody, request: Request):
                 amount_in_cents=offer.monthly_amount_minor,
                 provider_environment=provider_environment,
                 currency=offer.currency,
-                provider="paddle",
+                provider="lemon_squeezy",
             )
         else:
-            paddle_result = await paddle_service.create_checkout(
+            ls_result = await lemon_squeezy_service.create_checkout(
                 offer=offer,
                 environment=provider_environment,
                 tenant_id=tenant_id,
@@ -159,11 +159,12 @@ async def subscribe(body: SubscribeBody, request: Request):
                 tenant_id=tenant_id,
                 plan_id=body.plan_id,
                 billing_cycle=body.billing_cycle,
-                checkout_url=paddle_result["checkout_url"],
-                gateway_reference=paddle_result["gateway_reference"],
+                checkout_url=ls_result["checkout_url"],
+                gateway_reference=ls_result["gateway_reference"],
+                provider="lemon_squeezy",
             )
 
-    paddle_result = await paddle_service.create_checkout(
+    ls_result = await lemon_squeezy_service.create_checkout(
         offer=offer,
         environment=provider_environment,
         tenant_id=tenant_id,
@@ -178,19 +179,19 @@ async def subscribe(body: SubscribeBody, request: Request):
             conn,
             attempt_id=attempt_id,
             tenant_id=tenant_id,
-            provider_reference=paddle_result["gateway_reference"],
-            checkout_url=paddle_result["checkout_url"],
+            provider_reference=ls_result["gateway_reference"],
+            checkout_url=ls_result["checkout_url"],
         )
     return {
         "attempt_id": str(attempt_id),
         "plan_id": str(body.plan_id),
-        "checkout_url": paddle_result["checkout_url"],
-        "gateway_reference": paddle_result["gateway_reference"],
+        "checkout_url": ls_result["checkout_url"],
+        "gateway_reference": ls_result["gateway_reference"],
         "amount_in_cents": offer.monthly_amount_minor,
         "currency": offer.currency,
         "billing_cycle": "monthly",
         "status": "pending",
-        "provider": "paddle",
+        "provider": "lemon_squeezy",
     }
 
 
@@ -264,6 +265,21 @@ async def verify_payment(
         "payment_link_id": payment_link_id,
         "activation": "deprecated",
     }
+
+
+@tenant_router.get("/lemon-squeezy/checkout-status")
+async def lemon_squeezy_checkout_status(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    checkout_id: Optional[str] = Query(default=None),
+):
+    """Thank-you poll stub for Lemon Squeezy (#942) — local subscription state."""
+    session = require_valid_session(request)
+    return await lemon_squeezy_service.reconcile_checkout_status_for_tenant(
+        tenant_id=session.tenant_id,
+        checkout_id=checkout_id,
+        background_tasks=background_tasks,
+    )
 
 
 @tenant_router.get("/paddle/transaction-status")
