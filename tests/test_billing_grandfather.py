@@ -88,7 +88,7 @@ async def test_subscribe_tenant_refuses_grandfathered_overwrite():
 
 
 @pytest.mark.asyncio
-async def test_paddle_renew_by_tenant_converts_ended_annual_to_monthly():
+async def test_ls_renew_by_tenant_converts_ended_annual_to_monthly():
     tenant_id = uuid4()
     sub_id = uuid4()
     past = datetime.now(timezone.utc) - timedelta(days=3)
@@ -121,11 +121,11 @@ async def test_paddle_renew_by_tenant_converts_ended_annual_to_monthly():
     activated = await billing_service.activate_subscription_by_gateway_ref(
         conn,
         tenant_id=tenant_id,
-        gateway_reference="txn_new_paddle",
+        gateway_reference="ls_chk_new",
         amount=9.0,
         currency="USD",
-        paddle_transaction_id="txn_new_paddle",
-        provider="paddle",
+        ls_order_id="301",
+        provider="lemon_squeezy",
         provider_environment="test",
     )
 
@@ -138,14 +138,14 @@ async def test_paddle_renew_by_tenant_converts_ended_annual_to_monthly():
             break
     assert event_call is not None
     metadata = json.loads(event_call.args[5])
-    assert metadata["paddle_transaction_id"] == "txn_new_paddle"
+    assert metadata["ls_order_id"] == "301"
     assert metadata["renewal"] is True
     assert metadata["previous_gateway_reference"] == "txn_old"
     assert metadata["converted_from_annual"] is True
 
 
 @pytest.mark.asyncio
-async def test_paddle_renew_past_due_annual_converts_to_monthly():
+async def test_ls_renew_past_due_annual_converts_to_monthly():
     tenant_id = uuid4()
     sub_id = uuid4()
     past = datetime.now(timezone.utc) - timedelta(days=10)
@@ -178,8 +178,8 @@ async def test_paddle_renew_past_due_annual_converts_to_monthly():
         gateway_reference="txn_past_due",
         amount=9.0,
         currency="USD",
-        paddle_transaction_id="txn_past_due_pay",
-        provider="paddle",
+        ls_order_id="302",
+        provider="lemon_squeezy",
     )
 
     assert activated is True
@@ -188,7 +188,7 @@ async def test_paddle_renew_past_due_annual_converts_to_monthly():
 
 
 @pytest.mark.asyncio
-async def test_paddle_renew_skips_grandfathered_mid_period():
+async def test_ls_renew_skips_grandfathered_mid_period():
     tenant_id = uuid4()
     future = datetime.now(timezone.utc) + timedelta(days=100)
     conn = MagicMock()
@@ -215,8 +215,8 @@ async def test_paddle_renew_skips_grandfathered_mid_period():
         gateway_reference="txn_mid_period",
         amount=90.0,
         currency="USD",
-        paddle_transaction_id="txn_mid_period",
-        provider="paddle",
+        ls_order_id="303",
+        provider="lemon_squeezy",
     )
 
     assert activated is False
