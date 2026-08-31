@@ -247,11 +247,11 @@ async def test_activate_by_gateway_ref_monthly_past_due_extends_period():
     await billing_service.activate_subscription_by_gateway_ref(
         conn,
         tenant_id=tenant_id,
-        gateway_reference="txn_monthly_1",
+        gateway_reference="ls_chk_monthly_1",
         amount=9.0,
         currency="USD",
-        paddle_transaction_id="txn_monthly_1",
-        provider="paddle",
+        ls_order_id="101",
+        provider="lemon_squeezy",
     )
 
     update_call = None
@@ -263,7 +263,7 @@ async def test_activate_by_gateway_ref_monthly_past_due_extends_period():
     assert update_call is not None
     assert update_call.args[2] == "monthly"
     metadata = json.loads(conn.execute.call_args[0][5])
-    assert metadata["paddle_transaction_id"] == "txn_monthly_1"
+    assert metadata["ls_order_id"] == "101"
 
 
 @pytest.mark.asyncio
@@ -275,11 +275,11 @@ async def test_activate_by_gateway_ref_monthly_pending_activates():
     activated = await billing_service.activate_subscription_by_gateway_ref(
         conn,
         tenant_id=tenant_id,
-        gateway_reference="txn_monthly_pending",
+        gateway_reference="ls_chk_monthly_pending",
         amount=9.0,
         currency="USD",
-        paddle_transaction_id="txn_monthly_pending",
-        provider="paddle",
+        ls_order_id="202",
+        provider="lemon_squeezy",
     )
 
     assert activated is True

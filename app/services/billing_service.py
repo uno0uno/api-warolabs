@@ -1807,7 +1807,7 @@ async def create_onboarding_payment_attempt(
             status_code=422,
             detail="Wompi is deprecated for new billing payments; use Lemon Squeezy",
         )
-    if provider_norm not in ("paddle", "lemon_squeezy"):
+    if provider_norm not in ("lemon_squeezy",):
         raise HTTPException(status_code=422, detail="Invalid payment provider")
     if currency_norm not in ("COP", "USD", "EUR"):
         raise HTTPException(status_code=422, detail="Invalid payment currency")
@@ -2249,7 +2249,7 @@ async def activate_subscription_by_gateway_ref(
     )
     matched_gateway = row is not None
 
-    if row is None and provider in ("paddle", "lemon_squeezy"):
+    if row is None and provider == "lemon_squeezy":
         row = await conn.fetchrow(
             """SELECT id, status, billing_cycle, current_period_end, gateway_reference
                FROM tenant_subscriptions
@@ -3006,7 +3006,7 @@ async def abandon_pending_checkout(conn, tenant_id: UUID) -> Dict[str, Any]:
         json.dumps({
             "gateway_reference": gateway_reference,
             "plan_id": str(plan_id) if plan_id else None,
-            "provider": "paddle",
+            "provider": "lemon_squeezy",
         }),
     )
 
@@ -3306,7 +3306,7 @@ async def process_mo_r_onboarding_payment(
     subtotal == expected when subtotal is provided.
     """
     provider_norm = str(provider or "lemon_squeezy").strip().lower()
-    if provider_norm not in ("paddle", "lemon_squeezy"):
+    if provider_norm not in ("lemon_squeezy",):
         return {"handled": False, "activated": False, "reason": "invalid_provider"}
 
     txn_id = str(transaction_id or "").strip()
@@ -3450,18 +3450,13 @@ async def process_mo_r_onboarding_payment(
     }
     if subtotal is not None:
         metadata["subtotal_amount_in_cents"] = subtotal
-    if provider_norm == "paddle":
-        metadata["paddle_transaction_id"] = txn_id
-        if paddle_subscription_id:
-            metadata["paddle_subscription_id"] = paddle_subscription_id
-    else:
-        if ls_order_id:
-            metadata["ls_order_id"] = ls_order_id
-        if ls_subscription_id:
-            metadata["ls_subscription_id"] = ls_subscription_id
-        if ls_invoice_id:
-            metadata["ls_invoice_id"] = ls_invoice_id
-        metadata["ls_transaction_id"] = txn_id
+    if ls_order_id:
+        metadata["ls_order_id"] = ls_order_id
+    if ls_subscription_id:
+        metadata["ls_subscription_id"] = ls_subscription_id
+    if ls_invoice_id:
+        metadata["ls_invoice_id"] = ls_invoice_id
+    metadata["ls_transaction_id"] = txn_id
 
     await conn.execute(
         """
@@ -3499,31 +3494,6 @@ async def process_mo_r_onboarding_payment(
             "next_period_end": subscription["current_period_end"].isoformat(),
         },
     }
-
-
-async def process_paddle_onboarding_payment(
-    conn,
-    *,
-    attempt_id: UUID,
-    transaction_id: str,
-    amount_minor: int,
-    currency: str,
-    period_anchor: Optional[datetime] = None,
-    provider_environment: str = "prod",
-    paddle_subscription_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Back-compat wrapper for Paddle onboarding (#795) until #944."""
-    return await process_mo_r_onboarding_payment(
-        conn,
-        attempt_id=attempt_id,
-        transaction_id=transaction_id,
-        amount_minor=amount_minor,
-        currency=currency,
-        period_anchor=period_anchor,
-        provider_environment=provider_environment,
-        provider="paddle",
-        paddle_subscription_id=paddle_subscription_id,
-    )
 
 
 async def activate_tenant_subscription(
@@ -3874,7 +3844,7 @@ async def mark_subscription_past_due_by_tenant(
     tenant_id: UUID,
     event_type: str,
     *,
-    provider: str = "paddle",
+    provider: str = "lemon_squeezy",
     paddle_transaction_id: Optional[str] = None,
     paddle_subscription_id: Optional[str] = None,
     ls_order_id: Optional[str] = None,

@@ -28,15 +28,13 @@ USD_CHARGE_COUNTRIES = frozenset(
 # Strong-currency / intl allowlist → USD 30 (not USD 9).
 INTL_USD_30_ALLOWLIST = frozenset({"GB", "CA", "AU", "NZ", "SG", "AE"})
 
-# Fallback QA allowlist when PADDLE_SANDBOX_TENANT_SLUGS env is unset (#813).
-DEFAULT_PADDLE_SANDBOX_TENANT_SLUGS = frozenset(
+# Fallback QA allowlist when BILLING_SANDBOX_TENANT_SLUGS env is unset (#813 / #944).
+DEFAULT_BILLING_SANDBOX_TENANT_SLUGS = frozenset(
     {
         "waro-colombia",
         "warocolombia",
     }
 )
-# Back-compat alias (prefer resolve_paddle_sandbox_tenant_keys() / env).
-PADDLE_SANDBOX_TENANT_SLUGS = DEFAULT_PADDLE_SANDBOX_TENANT_SLUGS
 
 ANNUAL_MULTIPLIER = 10
 
@@ -47,13 +45,8 @@ class PriceOffer:
     currency: Literal["USD", "EUR"]
     monthly_amount_minor: int  # cents / euro cents
     annual_amount_minor: int
-    paddle_price_id_test: str
-    paddle_price_id_live: str
     lemon_squeezy_variant_id_test: str
     lemon_squeezy_variant_id_live: str
-
-    def paddle_price_id(self, environment: ProviderEnvironment) -> str:
-        return self.paddle_price_id_test if environment == "test" else self.paddle_price_id_live
 
     def lemon_squeezy_variant_id(self, environment: ProviderEnvironment) -> str:
         if environment == "test":
@@ -61,15 +54,13 @@ class PriceOffer:
         return self.lemon_squeezy_variant_id_live
 
 
-# Placeholders until env MoR price/variant IDs are set (prefer env via provider service).
+# Placeholders until env MoR variant IDs are set (prefer env via lemon_squeezy_service).
 SEGMENT_OFFERS: dict[PriceSegment, PriceOffer] = {
     "usd_9": PriceOffer(
         segment="usd_9",
         currency="USD",
         monthly_amount_minor=900,
         annual_amount_minor=900 * ANNUAL_MULTIPLIER,
-        paddle_price_id_test="TODO_PADDLE_PRICE_USD_9_MONTHLY_TEST",
-        paddle_price_id_live="TODO_PADDLE_PRICE_USD_9_MONTHLY_LIVE",
         lemon_squeezy_variant_id_test="TODO_LEMON_SQUEEZY_VARIANT_USD_9_MONTHLY_TEST",
         lemon_squeezy_variant_id_live="TODO_LEMON_SQUEEZY_VARIANT_USD_9_MONTHLY_LIVE",
     ),
@@ -78,8 +69,6 @@ SEGMENT_OFFERS: dict[PriceSegment, PriceOffer] = {
         currency="USD",
         monthly_amount_minor=3000,
         annual_amount_minor=3000 * ANNUAL_MULTIPLIER,
-        paddle_price_id_test="TODO_PADDLE_PRICE_USD_30_MONTHLY_TEST",
-        paddle_price_id_live="TODO_PADDLE_PRICE_USD_30_MONTHLY_LIVE",
         lemon_squeezy_variant_id_test="TODO_LEMON_SQUEEZY_VARIANT_USD_30_MONTHLY_TEST",
         lemon_squeezy_variant_id_live="TODO_LEMON_SQUEEZY_VARIANT_USD_30_MONTHLY_LIVE",
     ),
@@ -88,8 +77,6 @@ SEGMENT_OFFERS: dict[PriceSegment, PriceOffer] = {
         currency="EUR",
         monthly_amount_minor=3000,
         annual_amount_minor=3000 * ANNUAL_MULTIPLIER,
-        paddle_price_id_test="TODO_PADDLE_PRICE_EUR_30_MONTHLY_TEST",
-        paddle_price_id_live="TODO_PADDLE_PRICE_EUR_30_MONTHLY_LIVE",
         lemon_squeezy_variant_id_test="TODO_LEMON_SQUEEZY_VARIANT_EUR_30_MONTHLY_TEST",
         lemon_squeezy_variant_id_live="TODO_LEMON_SQUEEZY_VARIANT_EUR_30_MONTHLY_LIVE",
     ),
@@ -97,7 +84,7 @@ SEGMENT_OFFERS: dict[PriceSegment, PriceOffer] = {
 
 
 def normalize_country_code(country_code: Optional[str]) -> str:
-    """Blank/missing country defaults to CO (usd_9) — documented in paddle-pricing-policy.md."""
+    """Blank/missing country defaults to CO (usd_9) — docs/payments/saas-mor-pricing.md."""
     if not country_code or not str(country_code).strip():
         return "CO"
     return str(country_code).strip().upper()
@@ -117,13 +104,13 @@ def resolve_price_offer(country_code: Optional[str]) -> PriceOffer:
     return SEGMENT_OFFERS[resolve_price_segment(country_code)]
 
 
-def resolve_paddle_sandbox_tenant_keys() -> frozenset[str]:
-    """CSV from PADDLE_SANDBOX_TENANT_SLUGS, or DEFAULT_PADDLE_SANDBOX_TENANT_SLUGS."""
+def resolve_billing_sandbox_tenant_keys() -> frozenset[str]:
+    """CSV from BILLING_SANDBOX_TENANT_SLUGS, or DEFAULT_BILLING_SANDBOX_TENANT_SLUGS."""
     from app.config import settings
 
-    raw = (settings.paddle_sandbox_tenant_slugs or "").strip()
+    raw = (settings.billing_sandbox_tenant_slugs or "").strip()
     if not raw:
-        return DEFAULT_PADDLE_SANDBOX_TENANT_SLUGS
+        return DEFAULT_BILLING_SANDBOX_TENANT_SLUGS
     return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
 
 
@@ -133,17 +120,15 @@ def resolve_provider_environment(
     tenant_id: Optional[str] = None,
     billing_test: bool = False,
 ) -> ProviderEnvironment:
-    """MoR sandbox vs live (#813 / #942).
-
-    Prefers LEMON_SQUEEZY_ENVIRONMENT; falls back to PADDLE_ENVIRONMENT.
+    """Lemon Squeezy sandbox vs live (#813 / #942 / #944).
 
     test when:
     - billing_test=True, or
-    - MoR environment is sandbox|test (default sandbox for local/dev), or
-    - production mode and tenant slug/id is in PADDLE_SANDBOX_TENANT_SLUGS
-      (empty env → DEFAULT_PADDLE_SANDBOX_TENANT_SLUGS).
+    - LEMON_SQUEEZY_ENVIRONMENT is sandbox|test (default sandbox for local/dev), or
+    - production mode and tenant slug/id is in BILLING_SANDBOX_TENANT_SLUGS
+      (empty env → DEFAULT_BILLING_SANDBOX_TENANT_SLUGS).
 
-    prod: MoR environment=production and tenant not on allowlist.
+    prod: environment=production and tenant not on allowlist.
     """
     if billing_test:
         return "test"
@@ -151,22 +136,15 @@ def resolve_provider_environment(
     from app.config import settings
 
     ls_raw = settings.lemon_squeezy_environment
-    paddle_raw = settings.paddle_environment
-    ls_mode = (
+    mode = (
         ls_raw.strip().lower()
         if isinstance(ls_raw, str) and ls_raw.strip()
-        else ""
-    )
-    paddle_mode = (
-        paddle_raw.strip().lower()
-        if isinstance(paddle_raw, str) and paddle_raw.strip()
         else "sandbox"
     )
-    mode = ls_mode or paddle_mode or "sandbox"
     if mode in ("sandbox", "test"):
         return "test"
 
-    keys = resolve_paddle_sandbox_tenant_keys()
+    keys = resolve_billing_sandbox_tenant_keys()
     slug = (tenant_slug or "").strip().lower()
     if slug and slug in keys:
         return "test"

@@ -106,57 +106,8 @@ class Settings(BaseSettings):
     openbao_role_id_file: Optional[str] = Field(default=None, alias='OPENBAO_ROLE_ID_FILE')
     openbao_secret_id_file: Optional[str] = Field(default=None, alias='OPENBAO_SECRET_ID_FILE')
 
-    # Paddle Billing — regional SaaS checkout (epic #793 / batch #795)
-    # sandbox|production — default sandbox (local/dev); prod must set production (#813)
-    paddle_environment: str = Field(default='sandbox', alias='PADDLE_ENVIRONMENT')
-    # CSV of tenant slugs and/or ids routed to Paddle Test when paddle_environment=production
-    paddle_sandbox_tenant_slugs: str = Field(default='', alias='PADDLE_SANDBOX_TENANT_SLUGS')
-    paddle_api_key_live: Optional[str] = Field(default=None, alias='PADDLE_API_KEY_LIVE')
-    paddle_api_key_sandbox: Optional[str] = Field(default=None, alias='PADDLE_API_KEY_SANDBOX')
-    paddle_webhook_secret_live: Optional[str] = Field(
-        default=None, alias='PADDLE_WEBHOOK_SECRET_LIVE'
-    )
-    paddle_webhook_secret_sandbox: Optional[str] = Field(
-        default=None, alias='PADDLE_WEBHOOK_SECRET_SANDBOX'
-    )
-    # Monthly Paddle price IDs — default charge cycle for new checkouts (#806 / epic #805)
-    paddle_price_usd_9_monthly_live: Optional[str] = Field(
-        default=None, alias='PADDLE_PRICE_USD_9_MONTHLY_LIVE'
-    )
-    paddle_price_usd_9_monthly_test: Optional[str] = Field(
-        default=None, alias='PADDLE_PRICE_USD_9_MONTHLY_TEST'
-    )
-    paddle_price_usd_30_monthly_live: Optional[str] = Field(
-        default=None, alias='PADDLE_PRICE_USD_30_MONTHLY_LIVE'
-    )
-    paddle_price_usd_30_monthly_test: Optional[str] = Field(
-        default=None, alias='PADDLE_PRICE_USD_30_MONTHLY_TEST'
-    )
-    paddle_price_eur_30_monthly_live: Optional[str] = Field(
-        default=None, alias='PADDLE_PRICE_EUR_30_MONTHLY_LIVE'
-    )
-    paddle_price_eur_30_monthly_test: Optional[str] = Field(
-        default=None, alias='PADDLE_PRICE_EUR_30_MONTHLY_TEST'
-    )
-    # Annual price IDs — optional legacy only (not required for new checkout)
-    paddle_price_usd_9_annual_live: Optional[str] = Field(
-        default=None, alias='PADDLE_PRICE_USD_9_ANNUAL_LIVE'
-    )
-    paddle_price_usd_9_annual_test: Optional[str] = Field(
-        default=None, alias='PADDLE_PRICE_USD_9_ANNUAL_TEST'
-    )
-    paddle_price_usd_30_annual_live: Optional[str] = Field(
-        default=None, alias='PADDLE_PRICE_USD_30_ANNUAL_LIVE'
-    )
-    paddle_price_usd_30_annual_test: Optional[str] = Field(
-        default=None, alias='PADDLE_PRICE_USD_30_ANNUAL_TEST'
-    )
-    paddle_price_eur_30_annual_live: Optional[str] = Field(
-        default=None, alias='PADDLE_PRICE_EUR_30_ANNUAL_LIVE'
-    )
-    paddle_price_eur_30_annual_test: Optional[str] = Field(
-        default=None, alias='PADDLE_PRICE_EUR_30_ANNUAL_TEST'
-    )
+    # MoR sandbox tenant allowlist when LEMON_SQUEEZY_ENVIRONMENT=production (#813 / #944)
+    billing_sandbox_tenant_slugs: str = Field(default='', alias='BILLING_SANDBOX_TENANT_SLUGS')
 
     # Lemon Squeezy — sole SaaS MoR checkout (#942 / epic #941)
     lemon_squeezy_environment: str = Field(

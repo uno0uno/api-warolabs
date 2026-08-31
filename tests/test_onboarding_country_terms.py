@@ -297,19 +297,19 @@ async def test_pending_subscribe_checks_onboarding_before_wompi():
         "ensure_onboarding_payment_ready",
         new=AsyncMock(side_effect=not_ready),
     ), patch.object(
-        billing.paddle_service,
+        billing.lemon_squeezy_service,
         "create_checkout",
         new=AsyncMock(),
-    ) as paddle:
+    ) as ls_checkout:
         with pytest.raises(HTTPException) as exc:
             await billing.subscribe(
-                billing.SubscribeBody(plan_id=uuid4(), billing_cycle="annual"),
+                billing.SubscribeBody(plan_id=uuid4(), billing_cycle="monthly"),
                 object(),
             )
 
     assert exc.value.detail["code"] == "ONBOARDING_PAYMENT_NOT_READY"
     get_plan.assert_not_awaited()
-    paddle.assert_not_awaited()
+    ls_checkout.assert_not_awaited()
 
 
 @pytest.mark.asyncio

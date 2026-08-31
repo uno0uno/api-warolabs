@@ -30,7 +30,6 @@ from app.services import (
     legal_service,
     lemon_squeezy_service,
     onboarding_service,
-    paddle_service,
     wompi_service,
     wompi_colombia_webhook_service,
 )
@@ -58,7 +57,7 @@ class SubscribeBody(BaseModel):
     dependencies=[Depends(require_module(Module.MI_PLAN))],
 )
 async def tenant_list_plans(request: Request):
-    """List active subscription plans plus regional Paddle price_offer (#796)."""
+    """List active subscription plans plus regional MoR price_offer (#796 / #944)."""
     session = require_valid_session(request)
     from app.core.billing_pricing import resolve_price_offer
 
@@ -228,7 +227,7 @@ async def verify_payment(
     """
     Read-only status for a legacy Wompi transaction (#798).
 
-    Does not activate or renew subscriptions — new billing is Paddle-only.
+    Does not activate or renew subscriptions — new billing is Lemon Squeezy-only.
     Still requires the payment link to belong to the authenticated tenant.
     """
     session = require_valid_session(request)
@@ -282,40 +281,6 @@ async def lemon_squeezy_checkout_status(
     )
 
 
-@tenant_router.get("/paddle/transaction-status")
-async def paddle_transaction_status(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    transaction_id: str = Query(..., min_length=8, max_length=64),
-):
-    """
-    Post-checkout thank-you poll (#2219).
-
-    Asks Paddle for the transaction; if already paid/completed, runs the same
-    idempotent activation as the webhook. Client events never activate alone.
-    """
-    from fastapi import HTTPException
-
-    session = require_valid_session(request)
-    if not transaction_id.startswith("txn_"):
-        raise HTTPException(status_code=422, detail="Invalid Paddle transaction id")
-
-    from app.core.billing_pricing import resolve_provider_environment
-
-    async with get_db_connection(use_transaction=False) as conn:
-        ctx = await billing_service.get_tenant_billing_context(conn, session.tenant_id)
-    environment = resolve_provider_environment(
-        tenant_slug=ctx.get("slug"),
-        tenant_id=str(session.tenant_id),
-    )
-    return await paddle_service.reconcile_transaction_status_for_tenant(
-        tenant_id=session.tenant_id,
-        transaction_id=transaction_id,
-        environment=environment,
-        background_tasks=background_tasks,
-    )
-
-
 @tenant_router.get(
     "/usage-history",
     dependencies=[Depends(require_module(Module.MI_PLAN))],
@@ -352,7 +317,7 @@ async def get_my_billing_events(
 async def cancel_my_subscription(request: Request):
     """
     Cancela la suscripción activa del tenant en la DB.
-    Provider cancel (Paddle) is handled separately when wired; DB status is source of access.
+    Provider cancel (Lemon Squeezy) is handled separately when wired; DB status is source of access.
     """
     session = require_valid_session(request)
 
