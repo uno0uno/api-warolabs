@@ -2705,6 +2705,7 @@ def _is_unpaid_pending_delivery(order: dict) -> bool:
         order.get("status") == "pending"
         and bool(order.get("is_delivery") or order.get("delivery_address_id"))
         and order.get("payment_status") in _PENDING_DELIVERY_PAYMENT_STATUSES
+        and order.get("source") == "barra"
     )
 
 
@@ -2755,6 +2756,8 @@ async def list_pending_deliveries(request: Request) -> dict:
                 ap.address_line2,
                 ap.city
             FROM orders o
+            INNER JOIN table_sessions ts ON ts.id = o.table_session_id
+            INNER JOIN tables t ON t.id = ts.table_id AND t.is_bar = TRUE
             LEFT JOIN profile p ON p.id = o.customer_id
             LEFT JOIN addresses_profile ap
               ON ap.id = o.delivery_address_id AND ap.deleted_at IS NULL
@@ -2832,6 +2835,25 @@ async def complete_pending_delivery(
         waro_reward_id=waro_reward_id,
         wompi_collection=wompi_collection,
     )
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    if tenant_id:
+        async with get_db_connection() as conn:
+            await conn.execute(
+                """
+                UPDATE tables t
+                   SET status = 'open'
+                 WHERE t.tenant_id = $1
+                   AND t.is_bar = TRUE
+                   AND EXISTS (
+                       SELECT 1
+                         FROM table_sessions ts
+                        WHERE ts.table_id = t.id
+                          AND ts.closed_at IS NULL
+                   )
+                """,
+                tenant_id,
+            )
     return {
         "success": True,
         "message": result.get("message") or "Domicilio cobrado",

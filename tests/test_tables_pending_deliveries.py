@@ -61,6 +61,7 @@ async def test_list_pending_deliveries_filters_unpaid_delivery_orders():
     query = conn.fetch.await_args.args[0]
     assert "o.delivery_address_id IS NOT NULL" in query
     assert "o.status = 'pending'" in query
+    assert "t.is_bar = TRUE" in query
     assert result["success"] is True
     assert result["data"][0]["id"] == str(order_id)
     assert result["data"][0]["address_label"] == "Cra 50 #10-20, Bogotá"
@@ -80,6 +81,28 @@ async def test_get_pending_delivery_rejects_paid_orders():
                 "is_delivery": True,
                 "delivery_address_id": str(uuid4()),
                 "payment_status": "paid",
+                "source": "barra",
+            },
+        }),
+    ):
+        with pytest.raises(APIError, match="pendiente"):
+            await tables_service.get_pending_delivery(object(), order_id)
+
+
+@pytest.mark.asyncio
+async def test_get_pending_delivery_rejects_non_bar_orders():
+    order_id = uuid4()
+    with patch(
+        "app.services.tables_service.get_order_by_id",
+        new=AsyncMock(return_value={
+            "success": True,
+            "data": {
+                "id": str(order_id),
+                "status": "pending",
+                "is_delivery": True,
+                "delivery_address_id": str(uuid4()),
+                "payment_status": None,
+                "source": "pos",
             },
         }),
     ):
@@ -100,6 +123,7 @@ async def test_complete_pending_delivery_marks_order_completed():
         "delivery_address_id": str(uuid4()),
         "payment_status": None,
         "customer": {"id": str(customer_id)},
+        "source": "barra",
         "items": [],
         "standard_tax": 0,
         "liquor_tax": 0,
@@ -114,6 +138,10 @@ async def test_complete_pending_delivery_marks_order_completed():
             "app.services.tables_service.update_order_status",
             new=AsyncMock(return_value={"success": True, "message": "Estado actualizado a completed"}),
         ) as update,
+        patch("app.services.tables_service.require_valid_session", return_value=_session()),
+        patch("app.services.tables_service.get_db_connection", side_effect=_db_context(MagicMock(
+            execute=AsyncMock(),
+        ))),
     ):
         result = await tables_service.complete_pending_delivery(
             object(),
