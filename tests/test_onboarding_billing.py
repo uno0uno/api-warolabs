@@ -108,6 +108,7 @@ async def test_each_retry_inserts_a_new_payment_attempt():
     first_id = uuid4()
     second_id = uuid4()
     conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=None)
     conn.fetchrow = AsyncMock(side_effect=[{"id": first_id}, {"id": second_id}])
     tenant_id = uuid4()
     plan_id = uuid4()
@@ -124,7 +125,7 @@ async def test_each_retry_inserts_a_new_payment_attempt():
     for call in conn.fetchrow.await_args_list:
         assert "INSERT INTO billing_payment_attempts" in call.args[0]
         assert "ON CONFLICT" not in call.args[0]
-        assert call.args[3] == "paddle"
+        assert call.args[3] == "lemon_squeezy"
         assert call.args[5] == "COP"
         assert call.args[6] == "prod"
 
