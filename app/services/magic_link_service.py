@@ -221,6 +221,7 @@ async def _issue_registration_challenge(
             content=draft.get("last_content") or draft.get("first_content"),
             campaign=draft.get("last_campaign") or draft.get("first_campaign"),
             variant=draft.get("last_variant") or draft.get("first_variant"),
+            visitor_key=draft.get("last_visitor_key") or draft.get("first_visitor_key"),
         )
 
     query = {"token": token, "purpose": "registration"}
@@ -423,6 +424,7 @@ async def send_registration_magic_link(
                 "last_content": payload.content,
                 "last_campaign": payload.campaign,
                 "last_variant": payload.variant,
+                "last_visitor_key": payload.visitor_key,
             },
         )
         return RegistrationMagicLinkResponse(action="verification_sent")

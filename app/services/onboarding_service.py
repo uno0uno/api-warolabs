@@ -85,6 +85,7 @@ async def store_registration_challenge(
     content: Optional[str] = None,
     campaign: Optional[str] = None,
     variant: Optional[str] = None,
+    visitor_key: Optional[str] = None,
 ) -> bool:
     """Persist a pre-user challenge for an address without an active tenant."""
     if consent is not True:
@@ -136,7 +137,8 @@ async def store_registration_challenge(
             phone_country_code, phone_number, consent_at, consent_version,
             business_name, country_code, base_currency_code, tax_jurisdiction_code,
             first_source, first_content, first_campaign, first_variant,
-            last_source, last_content, last_campaign, last_variant
+            last_source, last_content, last_campaign, last_variant,
+            first_visitor_key, last_visitor_key
         )
         VALUES (
             $1, $2, $3, $4, 'registration', $5::inet, $6,
@@ -162,7 +164,13 @@ async def store_registration_challenge(
                 WHERE normalized_email = $1 AND purpose = 'registration'
                 ORDER BY created_at ASC LIMIT 1
             ), $16),
-            $13, $14, $15, $16
+            $13, $14, $15, $16,
+            COALESCE((
+                SELECT first_visitor_key FROM onboarding_email_challenges
+                WHERE normalized_email = $1 AND purpose = 'registration'
+                ORDER BY created_at ASC LIMIT 1
+            ), $17),
+            $17
         )
         """,
         email,
@@ -181,6 +189,7 @@ async def store_registration_challenge(
         content,
         campaign,
         variant,
+        (visitor_key or "").strip() or None,
     )
     await conn.execute(
         """
@@ -198,7 +207,8 @@ async def get_resumable_registration_draft(conn, email: str) -> Optional[dict[st
         SELECT phone_country_code, phone_number,
                business_name, country_code, base_currency_code, tax_jurisdiction_code,
                first_source, first_content, first_campaign, first_variant,
-               last_source, last_content, last_campaign, last_variant
+               last_source, last_content, last_campaign, last_variant,
+               first_visitor_key, last_visitor_key
         FROM onboarding_email_challenges
         WHERE normalized_email = $1
           AND purpose = 'registration'
@@ -260,7 +270,8 @@ async def complete_registration(
         phone_country_code, phone_number,
         business_name, country_code, base_currency_code, tax_jurisdiction_code,
         first_source, first_content, first_campaign, first_variant,
-        last_source, last_content, last_campaign, last_variant
+        last_source, last_content, last_campaign, last_variant,
+        first_visitor_key, last_visitor_key
     """
     if opaque_token:
         if kind != "token":
@@ -536,14 +547,19 @@ async def complete_registration(
             "variant": challenge.get("last_variant"),
             "first_variant": challenge.get("first_variant"),
         })
+        stored_visitor_key = (
+            (challenge.get("last_visitor_key") or challenge.get("first_visitor_key") or "")
+            .strip()
+            or None
+        )
         event = await conn.fetchrow(
             """
             INSERT INTO lead_interactions (
                 lead_id, interaction_type, source, campaign, content,
-                metadata, interaction_context
+                metadata, interaction_context, visitor_key
             )
             VALUES ($1, 'registration_verified', $2, $3, $4, $5::jsonb,
-                    'self_service_registration')
+                    'self_service_registration', $6)
             ON CONFLICT (lead_id, interaction_type)
                 WHERE interaction_type = 'registration_verified'
             DO NOTHING
@@ -554,6 +570,7 @@ async def complete_registration(
             challenge.get("last_campaign"),
             challenge.get("last_content"),
             metadata,
+            stored_visitor_key,
         )
         if event:
             notification = {

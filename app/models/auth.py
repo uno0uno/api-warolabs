@@ -108,6 +108,7 @@ class RegistrationMagicLinkRequest(BaseModel):
     content: Optional[str] = None
     campaign: Optional[str] = None
     variant: Optional[str] = None
+    visitor_key: Optional[str] = Field(default=None, max_length=128)
 
     @field_validator("email", mode="before")
     @classmethod
@@ -171,6 +172,16 @@ class RegistrationMagicLinkRequest(BaseModel):
         if not _ATTRIBUTION_PATTERN.fullmatch(normalized):
             raise ValueError("Attribution values must be slug-like and at most 100 characters")
         return normalized
+
+    @field_validator("visitor_key", mode="before")
+    @classmethod
+    def _strip_visitor_key(cls, value: object) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        return None
 
 
 class RegistrationVerifyTokenRequest(BaseModel):
