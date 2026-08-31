@@ -3282,6 +3282,28 @@ async def process_onboarding_payment_transaction(
     }
 
 
+def lemon_squeezy_payment_matches_expected(
+    *,
+    expected_amount: int,
+    charged: int,
+    subtotal: Optional[int],
+) -> bool:
+    """Validate LS webhook amounts for tax-exclusive and tax-inclusive store pricing (#949).
+
+    Tax-exclusive (LS setting OFF): subtotal equals list price; total may include MoR tax.
+    Tax-inclusive (LS setting ON): total equals list price; subtotal is the net portion.
+    """
+    if charged < expected_amount:
+        return False
+    if subtotal is None:
+        return True
+    if subtotal > expected_amount:
+        return False
+    if subtotal == expected_amount:
+        return True
+    return charged == expected_amount
+
+
 async def process_mo_r_onboarding_payment(
     conn,
     *,
@@ -3302,8 +3324,8 @@ async def process_mo_r_onboarding_payment(
     Activate paid onboarding from a verified MoR transaction (#795 / #942).
 
     Looks up billing_payment_attempts by attempt_id + provider.
-    Lemon Squeezy may charge list + tax: accept total >= expected list, or
-    subtotal == expected when subtotal is provided.
+    Lemon Squeezy tax-exclusive: subtotal == list, total may be higher.
+    Tax-inclusive: total == list, subtotal may be lower (#949).
     """
     provider_norm = str(provider or "lemon_squeezy").strip().lower()
     if provider_norm not in ("lemon_squeezy",):
@@ -3365,10 +3387,11 @@ async def process_mo_r_onboarding_payment(
         raise HTTPException(status_code=409, detail="Payment evidence mismatch")
 
     if provider_norm == "lemon_squeezy":
-        # List price must match when subtotal is known; MoR tax may raise total.
-        if subtotal is not None and subtotal != expected_amount:
-            raise HTTPException(status_code=409, detail="Payment evidence mismatch")
-        if charged < expected_amount:
+        if not lemon_squeezy_payment_matches_expected(
+            expected_amount=expected_amount,
+            charged=charged,
+            subtotal=subtotal,
+        ):
             raise HTTPException(status_code=409, detail="Payment evidence mismatch")
     elif charged != expected_amount:
         raise HTTPException(status_code=409, detail="Payment evidence mismatch")
