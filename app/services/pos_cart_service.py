@@ -1658,6 +1658,11 @@ async def add_order_payment(
                     final_payment_status = await sync_order_split_credit_status(
                         conn, order_id, settlement_complete=True,
                     )
+                    await conn.execute(
+                        "UPDATE orders SET payment_status = $2 WHERE id = $1",
+                        order_id,
+                        final_payment_status,
+                    )
                     # Mostrador: auto-deliver; barra: keep comandas open (#799).
                     _bar_order = await conn.fetchval(
                         """

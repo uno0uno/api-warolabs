@@ -60,8 +60,8 @@ async def test_list_pending_deliveries_filters_unpaid_delivery_orders():
 
     query = conn.fetch.await_args.args[0]
     assert "o.delivery_address_id IS NOT NULL" in query
-    assert "o.status = 'pending'" in query
-    assert "o.payment_status = 'partial'" in query
+    assert "order_payments op" in query
+    assert "o.status NOT IN ('cancelled', 'refunded')" in query
     assert "t.is_bar = TRUE" in query
     assert result["success"] is True
     assert result["data"][0]["id"] == str(order_id)
@@ -72,19 +72,59 @@ async def test_list_pending_deliveries_filters_unpaid_delivery_orders():
 @pytest.mark.asyncio
 async def test_get_pending_delivery_rejects_paid_orders():
     order_id = uuid4()
-    with patch(
-        "app.services.tables_service.get_order_by_id",
-        new=AsyncMock(return_value={
-            "success": True,
-            "data": {
-                "id": str(order_id),
-                "status": "completed",
-                "is_delivery": True,
-                "delivery_address_id": str(uuid4()),
-                "payment_status": "paid",
-                "source": "barra",
-            },
-        }),
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"paid_total": 180000})
+    with (
+        patch(
+            "app.services.tables_service.get_order_by_id",
+            new=AsyncMock(return_value={
+                "success": True,
+                "data": {
+                    "id": str(order_id),
+                    "status": "completed",
+                    "is_delivery": True,
+                    "delivery_address_id": str(uuid4()),
+                    "payment_status": "paid",
+                    "source": "barra",
+                    "total_amount": 180000,
+                    "tip_amount": 0,
+                    "tip_tax_amount": 0,
+                },
+            }),
+        ),
+        patch("app.services.tables_service.require_valid_session", return_value=_session()),
+        patch("app.services.tables_service.get_db_connection", side_effect=_db_context(conn)),
+    ):
+        with pytest.raises(APIError, match="pendiente"):
+            await tables_service.get_pending_delivery(object(), order_id)
+
+
+@pytest.mark.asyncio
+async def test_get_pending_delivery_rejects_fully_paid_credit_split():
+    """Credit-mixed split keeps payment_status=partial for Cartera but leaves the POS queue."""
+    order_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"paid_total": 180000})
+    with (
+        patch(
+            "app.services.tables_service.get_order_by_id",
+            new=AsyncMock(return_value={
+                "success": True,
+                "data": {
+                    "id": str(order_id),
+                    "status": "completed",
+                    "is_delivery": True,
+                    "delivery_address_id": str(uuid4()),
+                    "payment_status": "partial",
+                    "source": "barra",
+                    "total_amount": 180000,
+                    "tip_amount": 0,
+                    "tip_tax_amount": 0,
+                },
+            }),
+        ),
+        patch("app.services.tables_service.require_valid_session", return_value=_session()),
+        patch("app.services.tables_service.get_db_connection", side_effect=_db_context(conn)),
     ):
         with pytest.raises(APIError, match="pendiente"):
             await tables_service.get_pending_delivery(object(), order_id)
@@ -172,6 +212,7 @@ async def test_complete_pending_delivery_marks_order_completed():
 async def test_get_pending_delivery_accepts_partial_completed():
     order_id = uuid4()
     conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"paid_total": 50000})
     conn.fetch = AsyncMock(return_value=[])
 
     with (
@@ -186,6 +227,9 @@ async def test_get_pending_delivery_accepts_partial_completed():
                     "delivery_address_id": str(uuid4()),
                     "payment_status": "partial",
                     "source": "barra",
+                    "total_amount": 180000,
+                    "tip_amount": 0,
+                    "tip_tax_amount": 0,
                 },
             }),
         ),

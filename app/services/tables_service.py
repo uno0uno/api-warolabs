@@ -2702,17 +2702,53 @@ async def defer_tab_delivery_payment(
 _PENDING_DELIVERY_PAYMENT_STATUSES = {None, "unpaid", "pending"}
 
 
-def _is_collectible_pending_delivery(order: dict) -> bool:
-    """Pending bar delivery still owed, or partially paid and not yet settled."""
+def _pending_delivery_amount_due(order: dict) -> float:
+    return round(
+        float(order.get("total_amount") or 0)
+        + float(order.get("tip_amount") or 0)
+        + float(order.get("tip_tax_amount") or 0),
+        2,
+    )
+
+
+def _is_pending_delivery_candidate(order: dict) -> bool:
+    """Bar delivery order that may appear in the POS domicilios queue."""
     if order.get("source") != "barra":
         return False
     if not (order.get("is_delivery") or order.get("delivery_address_id")):
         return False
+    return order.get("status") not in ("cancelled", "refunded")
+
+
+def _is_collectible_pending_delivery(order: dict, *, outstanding: float | None = None) -> bool:
+    """Pending bar delivery still owed at POS (split in progress or not yet started).
+
+    Credit-mixed splits keep ``payment_status='partial'`` for Cartera even when
+    the cashier has collected every tender; use outstanding balance, not status.
+    """
+    if not _is_pending_delivery_candidate(order):
+        return False
+    if outstanding is not None:
+        return outstanding > 0.01
     if order.get("status") == "pending":
         return order.get("payment_status") in _PENDING_DELIVERY_PAYMENT_STATUSES
     if order.get("status") == "completed":
         return order.get("payment_status") == "partial"
     return False
+
+
+async def _pending_delivery_outstanding(conn, order_id: UUID, order: dict) -> float:
+    paid_row = await conn.fetchrow(
+        """
+        SELECT COALESCE(SUM(amount), 0) AS paid_total
+        FROM order_payments
+        WHERE order_id = $1 AND voided_at IS NULL
+        """,
+        order_id,
+    )
+    paid_total = round(float(paid_row["paid_total"] or 0), 2)
+    amount_due = _pending_delivery_amount_due(order)
+    return max(0.0, round(amount_due - paid_total, 2))
 
 
 def _is_unpaid_pending_delivery(order: dict) -> bool:
@@ -2773,12 +2809,16 @@ async def list_pending_deliveries(request: Request) -> dict:
               ON ap.id = o.delivery_address_id AND ap.deleted_at IS NULL
             WHERE o.tenant_id = $1
               AND o.delivery_address_id IS NOT NULL
+              AND o.status NOT IN ('cancelled', 'refunded')
               AND (
-                  (
-                      o.status = 'pending'
-                      AND (o.payment_status IS NULL OR o.payment_status IN ('unpaid', 'pending'))
-                  )
-                  OR (o.status = 'completed' AND o.payment_status = 'partial')
+                  SELECT COALESCE(SUM(op.amount), 0)
+                  FROM order_payments op
+                  WHERE op.order_id = o.id AND op.voided_at IS NULL
+              ) < (
+                  o.total_amount
+                  + COALESCE(o.tip_amount, 0)
+                  + COALESCE(o.tip_tax_amount, 0)
+                  - 0.01
               )
             ORDER BY o.order_date DESC
             """,
@@ -2795,12 +2835,17 @@ async def get_pending_delivery(request: Request, order_id: UUID) -> dict:
     """Load a pending unpaid delivery for POS checkout."""
     order_payload = await get_order_by_id(request, order_id)
     order = order_payload.get("data") or {}
-    if not _is_collectible_pending_delivery(order):
+    if not _is_pending_delivery_candidate(order):
+        raise APIError("Este domicilio ya no está pendiente de cobro", status_code=409)
+
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    async with get_db_connection(use_transaction=False) as conn:
+        outstanding = await _pending_delivery_outstanding(conn, order_id, order)
+    if outstanding <= 0.01:
         raise APIError("Este domicilio ya no está pendiente de cobro", status_code=409)
 
     items_payload = await get_order_items(request, order_id)
-    session_context = require_valid_session(request)
-    tenant_id = session_context.tenant_id
     partial_payments: list[dict] = []
     if tenant_id:
         async with get_db_connection(use_transaction=False) as conn:
