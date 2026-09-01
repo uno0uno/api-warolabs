@@ -12,7 +12,7 @@ from app.services import tables_service
 
 def _db_context(conn):
     @asynccontextmanager
-    async def _ctx():
+    async def _ctx(*_args, **_kwargs):
         yield conn
 
     return _ctx
@@ -61,6 +61,7 @@ async def test_list_pending_deliveries_filters_unpaid_delivery_orders():
     query = conn.fetch.await_args.args[0]
     assert "o.delivery_address_id IS NOT NULL" in query
     assert "o.status = 'pending'" in query
+    assert "o.payment_status = 'partial'" in query
     assert "t.is_bar = TRUE" in query
     assert result["success"] is True
     assert result["data"][0]["id"] == str(order_id)
@@ -141,6 +142,17 @@ async def test_complete_pending_delivery_marks_order_completed():
         patch("app.services.tables_service.require_valid_session", return_value=_session()),
         patch("app.services.tables_service.get_db_connection", side_effect=_db_context(MagicMock(
             execute=AsyncMock(),
+            fetchrow=AsyncMock(side_effect=[
+                {
+                    "total_amount": 25000,
+                    "tip_amount": 0,
+                    "tip_tax_amount": 0,
+                    "status": "completed",
+                    "payment_status": "paid",
+                },
+                {"paid": 25000},
+                {"id": uuid4()},
+            ]),
         ))),
     ):
         result = await tables_service.complete_pending_delivery(
@@ -154,3 +166,37 @@ async def test_complete_pending_delivery_marks_order_completed():
     assert update.await_args.args[2] == "completed"
     assert result["data"]["order_id"] == str(order_id)
     assert result["data"]["payment_method"] == "cash"
+
+
+@pytest.mark.asyncio
+async def test_get_pending_delivery_accepts_partial_completed():
+    order_id = uuid4()
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    with (
+        patch(
+            "app.services.tables_service.get_order_by_id",
+            new=AsyncMock(return_value={
+                "success": True,
+                "data": {
+                    "id": str(order_id),
+                    "status": "completed",
+                    "is_delivery": True,
+                    "delivery_address_id": str(uuid4()),
+                    "payment_status": "partial",
+                    "source": "barra",
+                },
+            }),
+        ),
+        patch(
+            "app.services.tables_service.get_order_items",
+            new=AsyncMock(return_value={"success": True, "data": []}),
+        ),
+        patch("app.services.tables_service.require_valid_session", return_value=_session()),
+        patch("app.services.tables_service.get_db_connection", side_effect=_db_context(conn)),
+    ):
+        result = await tables_service.get_pending_delivery(object(), order_id)
+
+    assert result["success"] is True
+    assert result["data"]["partial_payments"] == []
