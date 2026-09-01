@@ -1515,9 +1515,6 @@ async def add_order_payment(
                 if order_row["status"] == "cancelled":
                     raise APIError("Cannot add payment to a cancelled order", status_code=409)
 
-                if order_row["status"] == "completed" and order_row["payment_status"] == "paid":
-                    raise APIError("Order is already fully paid", status_code=409)
-
                 total_amount = float(order_row["total_amount"])
                 resolved_tip_amount = float(order_row["tip_amount"] or 0)
                 resolved_tip_source = order_row["tip_source"] or "none"
