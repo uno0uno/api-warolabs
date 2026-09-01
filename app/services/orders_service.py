@@ -1417,6 +1417,45 @@ async def assert_order_invoice_allows_mutation(conn, tenant_id, order_id) -> Non
         )
 
 
+async def order_has_outstanding_deferred_bar_delivery(
+    conn,
+    tenant_id,
+    order_id,
+) -> bool:
+    """True when a bar delivery order still owes payment at POS checkout."""
+    row = await conn.fetchrow(
+        """
+        SELECT
+            o.total_amount,
+            o.tip_amount,
+            o.tip_tax_amount,
+            (
+                SELECT COALESCE(SUM(op.amount), 0)
+                FROM order_payments op
+                WHERE op.order_id = o.id AND op.voided_at IS NULL
+            ) AS paid_total
+        FROM orders o
+        INNER JOIN table_sessions ts ON ts.id = o.table_session_id
+        INNER JOIN tables t ON t.id = ts.table_id AND t.is_bar = TRUE
+        WHERE o.id = $1
+          AND o.tenant_id = $2
+          AND o.delivery_address_id IS NOT NULL
+        """,
+        order_id,
+        tenant_id,
+    )
+    if not row:
+        return False
+    amount_due = round(
+        float(row["total_amount"] or 0)
+        + float(row["tip_amount"] or 0)
+        + float(row["tip_tax_amount"] or 0),
+        2,
+    )
+    paid_total = round(float(row["paid_total"] or 0), 2)
+    return paid_total < amount_due - 0.01
+
+
 async def assert_order_has_no_credit_payments(conn, order_id) -> None:
     """Raise 409 when the sale already has cartera abonos."""
     count = await conn.fetchval(
@@ -1733,7 +1772,12 @@ async def update_order_status(
 
             # Guard: block mutation if order falls in a closed monthly accounting period (#362)
             await assert_order_not_in_closed_monthly_period(conn, tenant_id, row['order_date'])
-            await assert_order_invoice_allows_mutation(conn, tenant_id, order_id)
+            skip_invoice_guard = (
+                status == "completed"
+                and await order_has_outstanding_deferred_bar_delivery(conn, tenant_id, order_id)
+            )
+            if not skip_invoice_guard:
+                await assert_order_invoice_allows_mutation(conn, tenant_id, order_id)
 
             old_status = row['status']
             order_number = int(row['order_number'])

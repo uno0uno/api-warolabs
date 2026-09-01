@@ -2701,6 +2701,27 @@ async def defer_tab_delivery_payment(
 
 _PENDING_DELIVERY_PAYMENT_STATUSES = {None, "unpaid", "pending"}
 
+# completed+paid in DB but zero order_payments — inconsistent legacy rows, not POS-collectible
+_PENDING_DELIVERY_ZOMBIE_SQL = """
+              AND NOT (
+                  o.status = 'completed'
+                  AND o.payment_status = 'paid'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM order_payments op
+                      WHERE op.order_id = o.id AND op.voided_at IS NULL
+                  )
+              )
+"""
+
+
+def _is_pending_delivery_zombie(order: dict, *, payment_count: int) -> bool:
+    return (
+        order.get("status") == "completed"
+        and order.get("payment_status") == "paid"
+        and payment_count <= 0
+    )
+
 
 def _pending_delivery_amount_due(order: dict) -> float:
     return round(
@@ -2783,9 +2804,10 @@ async def list_pending_deliveries(request: Request) -> dict:
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
 
+    zombie_sql = _PENDING_DELIVERY_ZOMBIE_SQL.strip()
     async with get_db_connection() as conn:
         rows = await conn.fetch(
-            """
+            f"""
             SELECT
                 o.id,
                 o.order_number,
@@ -2820,6 +2842,7 @@ async def list_pending_deliveries(request: Request) -> dict:
                   + COALESCE(o.tip_tax_amount, 0)
                   - 0.01
               )
+            {zombie_sql}
             ORDER BY o.order_date DESC
             """,
             tenant_id,
@@ -2841,6 +2864,21 @@ async def get_pending_delivery(request: Request, order_id: UUID) -> dict:
     session_context = require_valid_session(request)
     tenant_id = session_context.tenant_id
     async with get_db_connection(use_transaction=False) as conn:
+        payment_facts = await conn.fetchrow(
+            """
+            SELECT COUNT(*)::int AS payment_count
+            FROM order_payments
+            WHERE order_id = $1 AND voided_at IS NULL
+            """,
+            order_id,
+        )
+        payment_count = int(payment_facts["payment_count"] or 0)
+        if _is_pending_delivery_zombie(order, payment_count=payment_count):
+            raise APIError(
+                "Esta venta figura como cobrada pero no tiene pagos registrados. Revísala en Ventas.",
+                status_code=409,
+                details={"code": "pending_delivery_zombie"},
+            )
         outstanding = await _pending_delivery_outstanding(conn, order_id, order)
     if outstanding <= 0.01:
         raise APIError("Este domicilio ya no está pendiente de cobro", status_code=409)
