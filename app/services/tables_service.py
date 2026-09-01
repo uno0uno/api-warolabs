@@ -28,6 +28,8 @@ from app.services.pos_cart_service import (
     _order_payment_splits_for_gl,
     _PAYMENT_VOID_ROLES,
     _tax_rows_from_evaluated_lines,
+    add_order_payment,
+    void_order_payment,
 )
 from app.services.orders_service import (
     _compute_tax_breakdown,
@@ -2700,13 +2702,21 @@ async def defer_tab_delivery_payment(
 _PENDING_DELIVERY_PAYMENT_STATUSES = {None, "unpaid", "pending"}
 
 
+def _is_collectible_pending_delivery(order: dict) -> bool:
+    """Pending bar delivery still owed, or partially paid and not yet settled."""
+    if order.get("source") != "barra":
+        return False
+    if not (order.get("is_delivery") or order.get("delivery_address_id")):
+        return False
+    if order.get("status") == "pending":
+        return order.get("payment_status") in _PENDING_DELIVERY_PAYMENT_STATUSES
+    if order.get("status") == "completed":
+        return order.get("payment_status") == "partial"
+    return False
+
+
 def _is_unpaid_pending_delivery(order: dict) -> bool:
-    return (
-        order.get("status") == "pending"
-        and bool(order.get("is_delivery") or order.get("delivery_address_id"))
-        and order.get("payment_status") in _PENDING_DELIVERY_PAYMENT_STATUSES
-        and order.get("source") == "barra"
-    )
+    return _is_collectible_pending_delivery(order)
 
 
 def _serialize_pending_delivery_row(row) -> dict:
@@ -2762,9 +2772,14 @@ async def list_pending_deliveries(request: Request) -> dict:
             LEFT JOIN addresses_profile ap
               ON ap.id = o.delivery_address_id AND ap.deleted_at IS NULL
             WHERE o.tenant_id = $1
-              AND o.status = 'pending'
               AND o.delivery_address_id IS NOT NULL
-              AND (o.payment_status IS NULL OR o.payment_status IN ('unpaid', 'pending'))
+              AND (
+                  (
+                      o.status = 'pending'
+                      AND (o.payment_status IS NULL OR o.payment_status IN ('unpaid', 'pending'))
+                  )
+                  OR (o.status = 'completed' AND o.payment_status = 'partial')
+              )
             ORDER BY o.order_date DESC
             """,
             tenant_id,
@@ -2780,15 +2795,45 @@ async def get_pending_delivery(request: Request, order_id: UUID) -> dict:
     """Load a pending unpaid delivery for POS checkout."""
     order_payload = await get_order_by_id(request, order_id)
     order = order_payload.get("data") or {}
-    if not _is_unpaid_pending_delivery(order):
+    if not _is_collectible_pending_delivery(order):
         raise APIError("Este domicilio ya no está pendiente de cobro", status_code=409)
 
     items_payload = await get_order_items(request, order_id)
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    partial_payments: list[dict] = []
+    if tenant_id:
+        async with get_db_connection(use_transaction=False) as conn:
+            partial_rows = await conn.fetch(
+                """
+                SELECT op.id, op.amount, op.payment_method, op.payment_method_id,
+                       pm.name AS payment_method_name
+                FROM order_payments op
+                LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
+                WHERE op.order_id = $1
+                  AND op.tenant_id = $2
+                  AND op.voided_at IS NULL
+                ORDER BY op.paid_at, op.id
+                """,
+                order_id,
+                tenant_id,
+            )
+            partial_payments = [
+                {
+                    "id": str(row["id"]),
+                    "amount": float(row["amount"]),
+                    "payment_method": row["payment_method"],
+                    "payment_method_id": str(row["payment_method_id"]) if row["payment_method_id"] else None,
+                    "payment_method_name": row["payment_method_name"],
+                }
+                for row in partial_rows
+            ]
     return {
         "success": True,
         "data": {
             **order,
             "items": items_payload.get("data") or [],
+            "partial_payments": partial_payments,
         },
     }
 
@@ -2811,11 +2856,16 @@ async def complete_pending_delivery(
     waros_to_redeem: Optional[int] = None,
     waro_reward_id: Optional[UUID] = None,
     wompi_collection: bool = False,
+    split_mode: bool = False,
+    split_first_amount: float = 0.0,
+    split_first_cash_received: Optional[float] = None,
 ) -> dict:
     """Collect payment on a pending delivery from POS checkout."""
     detail = await get_pending_delivery(request, order_id)
     order = detail["data"]
-    result = await update_order_status(
+    if split_mode and wompi_collection:
+        raise APIError("Wompi no admite cobro dividido", status_code=400)
+    await update_order_status(
         request,
         order_id,
         "completed",
@@ -2834,43 +2884,165 @@ async def complete_pending_delivery(
         waros_to_redeem=waros_to_redeem,
         waro_reward_id=waro_reward_id,
         wompi_collection=wompi_collection,
+        split_mode=split_mode,
+        split_first_amount=split_first_amount,
+        split_first_cash_received=split_first_cash_received,
     )
     session_context = require_valid_session(request)
     tenant_id = session_context.tenant_id
+    paid_total = 0.0
+    remaining = 0.0
+    is_complete = not split_mode
+    payment_id: Optional[str] = None
     if tenant_id:
-        async with get_db_connection() as conn:
-            await conn.execute(
+        async with get_db_connection(use_transaction=False) as conn:
+            order_row = await conn.fetchrow(
                 """
-                UPDATE tables t
-                   SET status = 'open'
-                 WHERE t.tenant_id = $1
-                   AND t.is_bar = TRUE
-                   AND EXISTS (
-                       SELECT 1
-                         FROM table_sessions ts
-                        WHERE ts.table_id = t.id
-                          AND ts.closed_at IS NULL
-                   )
+                SELECT total_amount, tip_amount, tip_tax_amount, status, payment_status
+                FROM orders
+                WHERE id = $1 AND tenant_id = $2
                 """,
+                order_id,
                 tenant_id,
             )
+            paid_row = await conn.fetchrow(
+                """
+                SELECT COALESCE(SUM(amount), 0) AS paid
+                FROM order_payments
+                WHERE order_id = $1 AND voided_at IS NULL
+                """,
+                order_id,
+            )
+            last_payment = await conn.fetchrow(
+                """
+                SELECT id
+                FROM order_payments
+                WHERE order_id = $1 AND voided_at IS NULL
+                ORDER BY paid_at DESC, id DESC
+                LIMIT 1
+                """,
+                order_id,
+            )
+            if order_row and paid_row:
+                amount_due = split_settlement_amount_due(
+                    float(order_row["total_amount"] or 0),
+                    float(order_row["tip_amount"] or 0),
+                    float(order_row["tip_tax_amount"] or 0),
+                )
+                paid_total = float(paid_row["paid"])
+                remaining = max(0.0, amount_due - paid_total)
+                is_complete = remaining <= 0.01 or order_row["payment_status"] == "paid"
+            if last_payment:
+                payment_id = str(last_payment["id"])
+            if is_complete and not wompi_collection:
+                await conn.execute(
+                    """
+                    UPDATE tables t
+                       SET status = 'open'
+                     WHERE t.tenant_id = $1
+                       AND t.is_bar = TRUE
+                       AND EXISTS (
+                           SELECT 1
+                             FROM table_sessions ts
+                            WHERE ts.table_id = t.id
+                              AND ts.closed_at IS NULL
+                       )
+                    """,
+                    tenant_id,
+                )
     return {
         "success": True,
-        "message": result.get("message") or "Domicilio cobrado",
+        "message": "Domicilio cobrado",
         "data": {
             "order_id": order["id"],
             "order_number": order.get("order_number"),
             "total_amount": order.get("total_amount"),
             "status": "completed" if not wompi_collection else order.get("status"),
-            "payment_status": None if wompi_collection else "paid",
+            "payment_status": None if wompi_collection else ("paid" if is_complete else "partial"),
             "payment_method": payment_method,
             "customer_id": (order.get("customer") or {}).get("id"),
             "standard_tax": order.get("standard_tax"),
             "liquor_tax": order.get("liquor_tax"),
             "standard_tax_label": order.get("standard_tax_label"),
             "liquor_tax_label": order.get("liquor_tax_label"),
+            **(
+                {
+                    "paid_total": paid_total,
+                    "remaining": remaining,
+                    "is_complete": is_complete,
+                    "payment_id": payment_id,
+                }
+                if split_mode
+                else {}
+            ),
         },
     }
+
+
+async def add_pending_delivery_payment(
+    request: Request,
+    order_id: UUID,
+    *,
+    amount: float,
+    payment_method: str,
+    payment_method_id: Optional[str] = None,
+    cash_received: Optional[float] = None,
+) -> dict:
+    """Add a follow-up tender while collecting a deferred bar delivery."""
+    detail = await get_pending_delivery(request, order_id)
+    order = detail["data"]
+    if order.get("status") == "pending" and not detail["data"].get("partial_payments"):
+        raise APIError(
+            "Registra el primer pago con cobro parcial activo",
+            status_code=400,
+            details={"code": "pending_delivery_split_first_required"},
+        )
+    result = await add_order_payment(
+        request=request,
+        order_id=str(order_id),
+        amount=amount,
+        payment_method=payment_method,
+        payment_method_id=payment_method_id,
+        cash_received=cash_received,
+    )
+    if result.get("data", {}).get("is_complete"):
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if tenant_id:
+            async with get_db_connection() as conn:
+                await conn.execute(
+                    """
+                    UPDATE tables t
+                       SET status = 'open'
+                     WHERE t.tenant_id = $1
+                       AND t.is_bar = TRUE
+                       AND EXISTS (
+                           SELECT 1
+                             FROM table_sessions ts
+                            WHERE ts.table_id = t.id
+                              AND ts.closed_at IS NULL
+                       )
+                    """,
+                    tenant_id,
+                )
+    return result
+
+
+async def void_pending_delivery_payment(
+    request: Request,
+    order_id: UUID,
+    payment_id: UUID,
+    *,
+    reason: Optional[str] = None,
+) -> dict:
+    """Void a partial tender on a deferred bar delivery checkout."""
+    await get_pending_delivery(request, order_id)
+    return await void_order_payment(
+        request=request,
+        order_id=str(order_id),
+        payment_id=str(payment_id),
+        reason=reason,
+    )
 
 
 async def get_current_session(request: Request, table_id: UUID) -> dict:

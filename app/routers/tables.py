@@ -106,6 +106,20 @@ class CompletePendingDeliveryRequest(BaseModel):
     waros_to_redeem: Optional[int] = Field(None, ge=0)
     waro_reward_id: Optional[UUID] = None
     wompi_collection: bool = False
+    split_mode: bool = Field(False, description="Sequential split: first tender only")
+    split_first_amount: float = Field(0.0, ge=0, description="First split tender when split_mode=True")
+    split_first_cash_received: Optional[float] = Field(None, ge=0, description="Cash received for first split tender")
+
+
+class AddPendingDeliveryPaymentRequest(BaseModel):
+    amount: float = Field(..., gt=0)
+    payment_method: str
+    payment_method_id: Optional[str] = None
+    cash_received: Optional[float] = Field(None, ge=0)
+
+
+class VoidPendingDeliveryPaymentRequest(BaseModel):
+    reason: Optional[str] = Field(None, description="Optional void reason for audit")
 
 
 @router.get("/pending-deliveries", dependencies=[Depends(require_module(Module.POS))])
@@ -144,6 +158,42 @@ async def complete_pending_delivery(
         waros_to_redeem=body.waros_to_redeem,
         waro_reward_id=body.waro_reward_id,
         wompi_collection=body.wompi_collection,
+        split_mode=body.split_mode,
+        split_first_amount=body.split_first_amount,
+        split_first_cash_received=body.split_first_cash_received,
+    )
+
+
+@router.post("/pending-deliveries/{order_id}/payments", dependencies=[Depends(require_module(Module.POS))])
+async def add_pending_delivery_payment(
+    request: Request,
+    order_id: UUID,
+    body: AddPendingDeliveryPaymentRequest,
+):
+    """Add a follow-up tender while collecting a deferred bar delivery."""
+    return await tables_service.add_pending_delivery_payment(
+        request,
+        order_id,
+        amount=body.amount,
+        payment_method=body.payment_method,
+        payment_method_id=body.payment_method_id,
+        cash_received=body.cash_received,
+    )
+
+
+@router.delete("/pending-deliveries/{order_id}/payments/{payment_id}", dependencies=[Depends(require_module(Module.POS))])
+async def void_pending_delivery_payment(
+    request: Request,
+    order_id: UUID,
+    payment_id: UUID,
+    body: VoidPendingDeliveryPaymentRequest = Body(default_factory=VoidPendingDeliveryPaymentRequest),
+):
+    """Void a partial tender on a deferred bar delivery checkout."""
+    return await tables_service.void_pending_delivery_payment(
+        request,
+        order_id,
+        payment_id,
+        reason=body.reason,
     )
 
 
