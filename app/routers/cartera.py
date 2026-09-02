@@ -86,6 +86,27 @@ async def get_customer_cartera(
     return await cartera_service.get_customer_cartera(request, customer_id)
 
 
+@router.get(
+    "/customers/{customer_id}/payments",
+    dependencies=[Depends(require_module(Module.FINANZAS))],
+)
+async def list_customer_credit_payments(
+    request: Request,
+    customer_id: UUID,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
+):
+    """
+    Paginated history of all credit payments (abonos) for a customer.
+    """
+    return await cartera_service.list_customer_credit_payments(
+        request,
+        customer_id,
+        page=page,
+        per_page=per_page,
+    )
+
+
 @router.get("/aging", dependencies=[Depends(require_module(Module.FINANZAS))])
 async def cartera_aging(request: Request):
     """
