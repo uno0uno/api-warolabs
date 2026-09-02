@@ -428,7 +428,6 @@ async def test_register_credit_payment_wallet_applies_before_insert():
     order_id = uuid4()
     customer_id = uuid4()
     payment_id = uuid4()
-    group_id = uuid4()
     payment_date = datetime(2026, 6, 8, tzinfo=timezone.utc)
     apply_mock = AsyncMock(return_value=uuid4())
 
@@ -436,7 +435,6 @@ async def test_register_credit_payment_wallet_applies_before_insert():
     conn.transaction.return_value = _AsyncContext(None)
     conn.fetchrow = AsyncMock(side_effect=[
         _credit_order(tenant_id, customer_id),
-        {"id": group_id},
         {"id": payment_id, "payment_date": payment_date, "created_at": payment_date},
         {"id": uuid4()},
     ])
@@ -456,7 +454,7 @@ async def test_register_credit_payment_wallet_applies_before_insert():
                 uuid4(), "2805", "Anticipos", AccountRole.CUSTOMER_ADVANCES, "localization_default"
             )
         ),
-    ), patch(
+    ) as resolve_payment, patch(
         "app.services.credit_service.resolve_account",
         new=AsyncMock(
             return_value=AccountRef(
@@ -482,8 +480,10 @@ async def test_register_credit_payment_wallet_applies_before_insert():
     assert apply_mock.await_args.kwargs["profile_id"] == customer_id
     assert apply_mock.await_args.kwargs["amount_cop"] == Decimal("20.00")
     assert apply_mock.await_args.kwargs["order_id"] == order_id
-    insert_args = conn.fetchrow.await_args_list[2].args
+    insert_args = conn.fetchrow.await_args_list[1].args
     assert insert_args[5] == "customer_wallet"
+    assert resolve_payment.await_args.kwargs["payment_group_id"] is None
+    assert resolve_payment.await_args.kwargs["payment_method_id"] is None
 
 
 @pytest.mark.asyncio
@@ -492,13 +492,11 @@ async def test_register_credit_payment_wallet_insufficient_balance_skips_insert(
     user_id = uuid4()
     order_id = uuid4()
     customer_id = uuid4()
-    group_id = uuid4()
 
     conn = MagicMock()
     conn.transaction.return_value = _AsyncContext(None)
     conn.fetchrow = AsyncMock(side_effect=[
         _credit_order(tenant_id, customer_id),
-        {"id": group_id},
     ])
     conn.execute = AsyncMock()
 
@@ -528,7 +526,7 @@ async def test_register_credit_payment_wallet_insufficient_balance_skips_insert(
     assert exc_info.value.status_code == 400
     assert "insuficiente" in str(exc_info.value).lower() or "insuficiente" in (exc_info.value.message or "").lower()
     assert conn.execute.await_count == 0
-    assert conn.fetchrow.await_count == 2
+    assert conn.fetchrow.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -536,12 +534,11 @@ async def test_register_credit_payment_wallet_requires_customer():
     tenant_id = uuid4()
     user_id = uuid4()
     order_id = uuid4()
-    group_id = uuid4()
     order = _credit_order(tenant_id, None)
 
     conn = MagicMock()
     conn.transaction.return_value = _AsyncContext(None)
-    conn.fetchrow = AsyncMock(side_effect=[order, {"id": group_id}])
+    conn.fetchrow = AsyncMock(side_effect=[order])
     conn.execute = AsyncMock()
     apply_mock = AsyncMock()
 

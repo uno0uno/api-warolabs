@@ -99,7 +99,7 @@ async def _resolve_credit_payment_debit_account(
     conn,
     tenant_id: UUID,
     payment_method: str,
-    group_id: UUID,
+    group_id: Optional[UUID],
     payment_method_id: Optional[UUID],
 ):
     return await resolve_payment_account(
@@ -119,7 +119,7 @@ async def _post_credit_payment_gl(
     order_id: UUID,
     amount: Decimal,
     payment_method: str,
-    group_id: UUID,
+    group_id: Optional[UUID],
     payment_method_id: Optional[UUID],
     payment_date_value,
     created_by: Optional[UUID],
@@ -273,48 +273,60 @@ async def register_credit_payment(
                         status_code=400,
                     )
 
-                group_row = await conn.fetchrow(
-                    """
-                    SELECT id
-                    FROM payment_method_groups
-                    WHERE slug = $1
-                      AND is_active = true
-                      AND (tenant_id IS NULL OR tenant_id = $2)
-                    """,
-                    payment_method,
-                    tenant_id,
-                )
-                if not group_row:
-                    raise APIError(
-                        f"Método de pago '{payment_method}' no es válido para este restaurante.",
-                        status_code=400,
-                        details={"code": "payment_method_invalid"},
-                    )
-
-                if payment_method_id:
-                    method_row = await conn.fetchrow(
-                        """
-                        SELECT id
-                        FROM payment_methods
-                        WHERE id = $1
-                          AND tenant_id = $2
-                          AND group_id = $3
-                          AND is_active = true
-                        """,
-                        payment_method_id,
-                        tenant_id,
-                        group_row["id"],
-                    )
-                    if not method_row:
+                is_wallet = payment_method == "customer_wallet"
+                group_row = None
+                if is_wallet:
+                    # Synthetic POS tender — not a DB payment_method_groups row
+                    # (front merges customer_wallet from PAYMENT_DEFAULTS).
+                    if payment_method_id:
                         raise APIError(
-                            "El método seleccionado no pertenece al grupo elegido.",
+                            "Saldo wallet no admite submétodo.",
                             status_code=400,
                             details={"code": "payment_method_id_invalid"},
                         )
+                else:
+                    group_row = await conn.fetchrow(
+                        """
+                        SELECT id
+                        FROM payment_method_groups
+                        WHERE slug = $1
+                          AND is_active = true
+                          AND (tenant_id IS NULL OR tenant_id = $2)
+                        """,
+                        payment_method,
+                        tenant_id,
+                    )
+                    if not group_row:
+                        raise APIError(
+                            f"Método de pago '{payment_method}' no es válido para este restaurante.",
+                            status_code=400,
+                            details={"code": "payment_method_invalid"},
+                        )
+
+                    if payment_method_id:
+                        method_row = await conn.fetchrow(
+                            """
+                            SELECT id
+                            FROM payment_methods
+                            WHERE id = $1
+                              AND tenant_id = $2
+                              AND group_id = $3
+                              AND is_active = true
+                            """,
+                            payment_method_id,
+                            tenant_id,
+                            group_row["id"],
+                        )
+                        if not method_row:
+                            raise APIError(
+                                "El método seleccionado no pertenece al grupo elegido.",
+                                status_code=400,
+                                details={"code": "payment_method_id_invalid"},
+                            )
 
                 # Debit wallet before writing the abono so insufficient balance
                 # fails without mutating credit_payments / order status.
-                if payment_method == "customer_wallet":
+                if is_wallet:
                     customer_id = order_row["customer_id"]
                     if not customer_id:
                         raise APIError(
@@ -390,7 +402,7 @@ async def register_credit_payment(
                     order_id,
                     amount,
                     payment_method,
-                    group_row["id"],
+                    group_row["id"] if group_row else None,
                     payment_method_id,
                     payment_row["payment_date"],
                     user_id,
