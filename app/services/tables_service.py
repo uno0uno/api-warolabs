@@ -33,6 +33,8 @@ from app.services.pos_cart_service import (
 )
 from app.services.orders_service import (
     _compute_tax_breakdown,
+    _deduct_stock_for_status_update,
+    _order_inventory_already_consumed_before_completion,
     _return_ingredient_to_stock,
     get_order_by_id,
     get_order_items,
@@ -1605,6 +1607,30 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                     )
 
                     await _merge_duplicate_completed_orders_for_session(conn, session_row["id"])
+
+                    # warocol.com#2566 — if send skipped stock (flag off), deduct at mesa close
+                    # before COGS so snapshots + kardex match checkout-time behavior.
+                    just_completed = await conn.fetch(
+                        """
+                        SELECT id, order_number, table_session_id, pos_cart_id
+                        FROM orders
+                        WHERE table_session_id = $1 AND status = 'completed'
+                        """,
+                        session_row["id"],
+                    )
+                    for ord_row in just_completed:
+                        try:
+                            await _ensure_tab_order_inventory_at_close(
+                                conn,
+                                tenant_id=tenant_id,
+                                user_id=user_id,
+                                order_row=ord_row,
+                            )
+                        except Exception as _inv_close_exc:
+                            logger.error(
+                                f"[close_session] inventory deduct failed for order "
+                                f"{ord_row['id']}: {_inv_close_exc}"
+                            )
 
                     # warocol.com#663 — checkout waiter attribution on all completed session orders
                     if resolved_served_by is not None:
@@ -4189,6 +4215,82 @@ async def _record_tab_cleared_pending_lines(
     return len(pending_lines)
 
 
+async def _order_has_consumption_movements(conn, *, tenant_id: UUID, order_id: UUID) -> bool:
+    return bool(await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM tenant_ingredient_movements
+            WHERE tenant_id = $1
+              AND reference_table = 'orders'
+              AND reference_id = $2
+              AND movement_type = 'consumption'
+              AND quantity_change < 0
+        )
+        """,
+        tenant_id,
+        order_id,
+    ))
+
+
+async def _ensure_tab_order_inventory_at_close(
+    conn,
+    *,
+    tenant_id: UUID,
+    user_id: UUID,
+    order_row,
+) -> None:
+    """Deduct recipe + modifier stock at mesa close when send did not (flag off)."""
+    order_id = order_row["id"]
+    order_number = int(order_row["order_number"])
+    already = await _order_inventory_already_consumed_before_completion(
+        conn,
+        row=order_row,
+        order_id=order_id,
+        tenant_id=tenant_id,
+        old_status="pending",
+    )
+    if already:
+        return
+
+    await _deduct_stock_for_status_update(conn, order_id, tenant_id, user_id, order_number)
+
+    items = await conn.fetch(
+        """
+        SELECT id, product_id, quantity
+        FROM order_items
+        WHERE order_id = $1
+        """,
+        order_id,
+    )
+    for item in items:
+        mods = await conn.fetch(
+            """
+            SELECT modifier_id, modifier_name, quantity
+            FROM order_item_modifiers
+            WHERE order_item_id = $1
+            """,
+            item["id"],
+        )
+        for mod in mods:
+            if not mod["modifier_id"]:
+                continue
+            await _deduct_modifier_inventory_for_order_item(
+                conn,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                order_id=order_id,
+                order_item_id=item["id"],
+                order_number=order_number,
+                item_quantity=float(item["quantity"]),
+                modifier={
+                    "id": str(mod["modifier_id"]),
+                    "name": mod["modifier_name"],
+                },
+                modifier_qty=float(mod["quantity"] or 1),
+            )
+
+
 async def _return_tab_item_inventory_from_snapshots(
     conn,
     *,
@@ -4363,15 +4465,19 @@ async def remove_tab_item(
             )
 
             try:
-                await _return_tab_item_inventory_from_snapshots(
-                    conn,
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    order_id=row["order_id"],
-                    order_number=row["order_number"],
-                    order_item_id=order_item_id,
-                    product_name=row["product_name"],
-                )
+                # warocol.com#2566 — only restore qty that was actually deducted on send
+                if await _order_has_consumption_movements(
+                    conn, tenant_id=tenant_id, order_id=row["order_id"]
+                ):
+                    await _return_tab_item_inventory_from_snapshots(
+                        conn,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        order_id=row["order_id"],
+                        order_number=row["order_number"],
+                        order_item_id=order_item_id,
+                        product_name=row["product_name"],
+                    )
             except Exception as _ret_exc:
                 logger.error(
                     f"[tab] inventory return failed for item {order_item_id}: {_ret_exc}"
@@ -4640,14 +4746,24 @@ async def _add_tab_items_core(
     if not session_row:
         raise NotFoundError("No open session found for this table")
 
-    deduct_flag = await conn.fetchval(
-        """
-        SELECT deduct_inventory_on_command
-        FROM tenant_public_profiles
-        WHERE tenant_id = $1
-        """,
-        tenant_id,
-    )
+    deduct_flag = True
+    try:
+        deduct_flag = await conn.fetchval(
+            """
+            SELECT deduct_inventory_on_command
+            FROM tenant_public_profiles
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+    except Exception as _flag_exc:
+        # Column missing until migration — keep legacy on-send deduct.
+        if "deduct_inventory_on_command" not in str(_flag_exc):
+            raise
+        logger.warning(
+            "[tab] deduct_inventory_on_command missing; defaulting true until migration"
+        )
+        deduct_flag = True
     deduct_on_command = True if deduct_flag is None else bool(deduct_flag)
 
     session_id = session_row["session_id"]

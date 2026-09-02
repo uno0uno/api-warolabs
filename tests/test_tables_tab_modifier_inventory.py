@@ -321,6 +321,114 @@ async def test_remove_tab_item_returns_inventory_from_snapshots():
 
 
 @pytest.mark.asyncio
+async def test_remove_tab_item_skips_restore_when_no_consumption():
+    """warocol.com#2566 — flag-off send left only snapshots; do not inflate stock on remove."""
+    tenant_id = uuid4()
+    user_id = uuid4()
+    table_id = uuid4()
+    order_item_id = uuid4()
+    order_id = uuid4()
+    product_id = uuid4()
+
+    row = {
+        "id": order_item_id,
+        "product_id": product_id,
+        "quantity": 1,
+        "price_at_purchase": 25.0,
+        "subtotal": 43.0,
+        "notes": None,
+        "fulfillment_status": "new",
+        "order_id": order_id,
+        "total_amount": 43.0,
+        "order_number": 99,
+        "table_session_id": uuid4(),
+        "product_name": "Santa inquisición",
+        "table_name": "Mesa 1",
+        "is_bar": False,
+        "effective_waiter_member_id": None,
+    }
+
+    mock_conn = AsyncMock()
+    mock_conn.fetchrow = AsyncMock(side_effect=[row, None])
+    mock_conn.fetch = AsyncMock(return_value=[])
+    mock_conn.fetchval = AsyncMock(return_value=False)
+    mock_conn.execute = AsyncMock()
+    return_mock = AsyncMock()
+
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    mock_request = MagicMock()
+    with patch(
+        "app.services.tables_service.require_valid_session",
+    ) as mock_sess, patch(
+        "app.services.tables_service.get_db_connection",
+        return_value=mock_cm,
+    ), patch(
+        "app.services.tables_service._fetch_order_item_modifiers",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "app.services.tables_service._record_tab_operation_event",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.tables_service._return_tab_item_inventory_from_snapshots",
+        return_mock,
+    ):
+        mock_sess.return_value = MagicMock(
+            tenant_id=tenant_id, user_id=user_id,
+        )
+        await tables_service.remove_tab_item(
+            mock_request, table_id, order_item_id
+        )
+
+    return_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ensure_tab_order_inventory_at_close_deducts_when_not_consumed():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    order_item_id = uuid4()
+    modifier_id = uuid4()
+    product_id = uuid4()
+
+    mock_conn = AsyncMock()
+    mock_conn.fetch = AsyncMock(side_effect=[
+        [{"id": order_item_id, "product_id": product_id, "quantity": 2}],
+        [{"modifier_id": modifier_id, "modifier_name": "Extra", "quantity": 1}],
+    ])
+    deduct_stock = AsyncMock()
+    deduct_mod = AsyncMock()
+
+    with patch(
+        "app.services.tables_service._order_inventory_already_consumed_before_completion",
+        new=AsyncMock(return_value=False),
+    ), patch(
+        "app.services.tables_service._deduct_stock_for_status_update",
+        deduct_stock,
+    ), patch(
+        "app.services.tables_service._deduct_modifier_inventory_for_order_item",
+        deduct_mod,
+    ):
+        await tables_service._ensure_tab_order_inventory_at_close(
+            mock_conn,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            order_row={
+                "id": order_id,
+                "order_number": 77,
+                "table_session_id": uuid4(),
+                "pos_cart_id": None,
+            },
+        )
+
+    deduct_stock.assert_awaited_once()
+    deduct_mod.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_deduct_modifier_inventory_for_order_item_writes_movement():
     tenant_id = uuid4()
     user_id = uuid4()
