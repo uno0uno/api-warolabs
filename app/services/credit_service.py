@@ -312,6 +312,27 @@ async def register_credit_payment(
                             details={"code": "payment_method_id_invalid"},
                         )
 
+                # Debit wallet before writing the abono so insufficient balance
+                # fails without mutating credit_payments / order status.
+                if payment_method == "customer_wallet":
+                    customer_id = order_row["customer_id"]
+                    if not customer_id:
+                        raise APIError(
+                            "Se requiere un cliente identificado para pagar con wallet.",
+                            status_code=400,
+                            details={"code": "wallet_customer_required"},
+                        )
+                    from app.services.customer_wallet_service import apply_wallet_for_order
+
+                    await apply_wallet_for_order(
+                        conn,
+                        profile_id=customer_id,
+                        tenant_id=tenant_id,
+                        amount_cop=amount,
+                        order_id=order_id,
+                        created_by_user_id=user_id,
+                    )
+
                 # 3. Insert payment record
                 effective_payment_date = (
                     datetime.combine(payment_date, datetime.min.time()).replace(tzinfo=timezone.utc)

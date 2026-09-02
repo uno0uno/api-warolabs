@@ -100,6 +100,9 @@ async def test_register_credit_payment_base_method_persists_null_method_id():
     ), patch(
         "app.services.credit_service.resolve_account",
         new=AsyncMock(return_value=AccountRef(uuid4(), "AR", "Receivable", AccountRole.ACCOUNTS_RECEIVABLE, "localization_default")),
+    ), patch(
+        "app.services.credit_service.record_operation_event",
+        new=AsyncMock(),
     ):
         result = await credit_service.register_credit_payment(
             _request(),
@@ -151,6 +154,9 @@ async def test_register_credit_payment_custom_method_validates_and_persists_id()
     ), patch(
         "app.services.credit_service.resolve_account",
         new=AsyncMock(return_value=AccountRef(uuid4(), "AR", "Receivable", AccountRole.ACCOUNTS_RECEIVABLE, "localization_default")),
+    ), patch(
+        "app.services.credit_service.record_operation_event",
+        new=AsyncMock(),
     ):
         result = await credit_service.register_credit_payment(
             _request(),
@@ -413,3 +419,150 @@ async def test_get_credit_payments_returns_payment_method_id():
 
     assert result["data"]["payments"][0]["payment_method"] == "digital"
     assert result["data"]["payments"][0]["payment_method_id"] == str(method_id)
+
+
+@pytest.mark.asyncio
+async def test_register_credit_payment_wallet_applies_before_insert():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    customer_id = uuid4()
+    payment_id = uuid4()
+    group_id = uuid4()
+    payment_date = datetime(2026, 6, 8, tzinfo=timezone.utc)
+    apply_mock = AsyncMock(return_value=uuid4())
+
+    conn = MagicMock()
+    conn.transaction.return_value = _AsyncContext(None)
+    conn.fetchrow = AsyncMock(side_effect=[
+        _credit_order(tenant_id, customer_id),
+        {"id": group_id},
+        {"id": payment_id, "payment_date": payment_date, "created_at": payment_date},
+        {"id": uuid4()},
+    ])
+    conn.fetchval = AsyncMock(side_effect=[None, None, uuid4(), uuid4()])
+    conn.execute = AsyncMock()
+
+    with patch(
+        "app.services.credit_service.require_valid_session",
+        return_value=_session(tenant_id, user_id),
+    ), patch(
+        "app.services.credit_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.credit_service.resolve_payment_account",
+        new=AsyncMock(
+            return_value=AccountRef(
+                uuid4(), "2805", "Anticipos", AccountRole.CUSTOMER_ADVANCES, "localization_default"
+            )
+        ),
+    ), patch(
+        "app.services.credit_service.resolve_account",
+        new=AsyncMock(
+            return_value=AccountRef(
+                uuid4(), "AR", "Receivable", AccountRole.ACCOUNTS_RECEIVABLE, "localization_default"
+            )
+        ),
+    ), patch(
+        "app.services.customer_wallet_service.apply_wallet_for_order",
+        apply_mock,
+    ), patch(
+        "app.services.credit_service.record_operation_event",
+        new=AsyncMock(),
+    ):
+        result = await credit_service.register_credit_payment(
+            _request(),
+            order_id,
+            Decimal("20.00"),
+            "customer_wallet",
+        )
+
+    assert result["data"]["payment_method"] == "customer_wallet"
+    apply_mock.assert_awaited_once()
+    assert apply_mock.await_args.kwargs["profile_id"] == customer_id
+    assert apply_mock.await_args.kwargs["amount_cop"] == Decimal("20.00")
+    assert apply_mock.await_args.kwargs["order_id"] == order_id
+    insert_args = conn.fetchrow.await_args_list[2].args
+    assert insert_args[5] == "customer_wallet"
+
+
+@pytest.mark.asyncio
+async def test_register_credit_payment_wallet_insufficient_balance_skips_insert():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    customer_id = uuid4()
+    group_id = uuid4()
+
+    conn = MagicMock()
+    conn.transaction.return_value = _AsyncContext(None)
+    conn.fetchrow = AsyncMock(side_effect=[
+        _credit_order(tenant_id, customer_id),
+        {"id": group_id},
+    ])
+    conn.execute = AsyncMock()
+
+    with patch(
+        "app.services.credit_service.require_valid_session",
+        return_value=_session(tenant_id, user_id),
+    ), patch(
+        "app.services.credit_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.customer_wallet_service.apply_wallet_for_order",
+        new=AsyncMock(
+            side_effect=APIError(
+                "Saldo de billetera insuficiente. Disponible: 5.00, requerido: 20.00",
+                status_code=400,
+            )
+        ),
+    ):
+        with pytest.raises(APIError) as exc_info:
+            await credit_service.register_credit_payment(
+                _request(),
+                order_id,
+                Decimal("20.00"),
+                "customer_wallet",
+            )
+
+    assert exc_info.value.status_code == 400
+    assert "insuficiente" in str(exc_info.value).lower() or "insuficiente" in (exc_info.value.message or "").lower()
+    assert conn.execute.await_count == 0
+    assert conn.fetchrow.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_register_credit_payment_wallet_requires_customer():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    group_id = uuid4()
+    order = _credit_order(tenant_id, None)
+
+    conn = MagicMock()
+    conn.transaction.return_value = _AsyncContext(None)
+    conn.fetchrow = AsyncMock(side_effect=[order, {"id": group_id}])
+    conn.execute = AsyncMock()
+    apply_mock = AsyncMock()
+
+    with patch(
+        "app.services.credit_service.require_valid_session",
+        return_value=_session(tenant_id, user_id),
+    ), patch(
+        "app.services.credit_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.customer_wallet_service.apply_wallet_for_order",
+        apply_mock,
+    ):
+        with pytest.raises(APIError) as exc_info:
+            await credit_service.register_credit_payment(
+                _request(),
+                order_id,
+                Decimal("20.00"),
+                "customer_wallet",
+            )
+
+    assert exc_info.value.status_code == 400
+    assert apply_mock.await_count == 0
+    assert conn.execute.await_count == 0
