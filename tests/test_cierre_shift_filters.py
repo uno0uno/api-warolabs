@@ -166,9 +166,16 @@ async def test_preview_open_tables_count_excludes_permanent_bar_sessions(monkeyp
     async def no_wallet_recharges(*_args, **_kwargs):
         return {}
 
+    async def no_credit_payments(*_args, **_kwargs):
+        return {}
+
     monkeypatch.setattr(
         "app.services.customer_wallet_service.fetch_wallet_recharge_totals_for_cierre",
         no_wallet_recharges,
+    )
+    monkeypatch.setattr(
+        "app.services.credit_service.fetch_credit_payment_totals_for_cierre",
+        no_credit_payments,
     )
     conn = _PreviewConn(open_tables_count=0)
 

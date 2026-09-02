@@ -1,0 +1,38 @@
+issue: 957
+title: "fix(cierre): include cartera abonos in arqueo expected cash and method breakdown"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-957-cierre-cartera-abonos
+
+paths:
+  - app/services/credit_service.py
+  - app/services/cierre_service.py
+  - tests/test_cierre_cartera_abonos.py
+  - tests/test_cierre_shift_filters.py
+
+ac:
+  - Cartera abonos add to preview method totals and cashExpected
+  - Breakdown rows include cartera abonos and wallet recharges
+  - No double-count with POS sales/tips/advances
+  - Focused pytest on cierre aggregation
+
+out_of_scope:
+  - GL posting rules
+  - Front arqueo UI labels
+
+hints:
+  entry: "cierre_service._compute_preview / _compute_breakdown_rows"
+  pattern: "customer_wallet_service.fetch_wallet_recharge_totals_for_cierre"
+  tests: "pytest tests/test_cierre_cartera_abonos.py tests/test_cierre_shift_filters.py -q"
+
+risk:
+  sensitive: false
+  areas: [cierre, cartera]
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "/wr-review or merge after auto review"

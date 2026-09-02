@@ -1718,6 +1718,7 @@ async def _compute_preview(
             method_totals[m] = method_totals.get(m, 0.0) + float(row["total"])
 
     from app.services.customer_wallet_service import fetch_wallet_recharge_totals_for_cierre
+    from app.services.credit_service import fetch_credit_payment_totals_for_cierre
     from app.services.table_session_advances_service import fetch_table_session_advance_totals_for_cierre
 
     recharge_totals = await fetch_wallet_recharge_totals_for_cierre(
@@ -1729,6 +1730,17 @@ async def _compute_preview(
         period_end_time,
     )
     for method, total in recharge_totals.items():
+        method_totals[method] = method_totals.get(method, 0.0) + total
+
+    credit_totals = await fetch_credit_payment_totals_for_cierre(
+        conn,
+        tenant_id,
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+    )
+    for method, total in credit_totals.items():
         method_totals[method] = method_totals.get(method, 0.0) + total
 
     advance_totals = await fetch_table_session_advance_totals_for_cierre(
@@ -2006,6 +2018,8 @@ async def _compute_breakdown_rows(
             }
         else:
             aggregated[key]["total"] += total
+    from app.services.customer_wallet_service import fetch_wallet_recharge_totals_for_cierre
+    from app.services.credit_service import fetch_credit_payment_breakdown_for_cierre
     from app.services.table_session_advances_service import fetch_table_session_advance_totals_for_cierre
     advance_totals = await fetch_table_session_advance_totals_for_cierre(
         conn,
@@ -2032,6 +2046,48 @@ async def _compute_breakdown_rows(
             }
         else:
             aggregated[key]["total"] += float(total)
+    recharge_totals = await fetch_wallet_recharge_totals_for_cierre(
+        conn,
+        tenant_id,
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+    )
+    for method, total in recharge_totals.items():
+        if total == 0:
+            continue
+        key = (method, f"Recarga billetera - {method}")
+        if key not in aggregated:
+            aggregated[key] = {
+                "group_slug": method,
+                "method_name": f"Recarga billetera - {method}",
+                "total": float(total),
+            }
+        else:
+            aggregated[key]["total"] += float(total)
+    credit_rows = await fetch_credit_payment_breakdown_for_cierre(
+        conn,
+        tenant_id,
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+    )
+    for row in credit_rows:
+        total = float(row["total"])
+        if total == 0:
+            continue
+        label = f"Abono cartera - {row['method_name']}"
+        key = (row["group_slug"], label)
+        if key not in aggregated:
+            aggregated[key] = {
+                "group_slug": row["group_slug"],
+                "method_name": label,
+                "total": total,
+            }
+        else:
+            aggregated[key]["total"] += total
     return [r for r in aggregated.values() if r["total"] > 0]
 
 
