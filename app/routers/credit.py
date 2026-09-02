@@ -92,7 +92,7 @@ async def get_payments(
 async def send_credit_receipt_email(request: Request, body: SendCreditReceiptRequest):
     """
     Email a credit cartera abono receipt after CRM payment registration.
-  """
+    """
     session = require_valid_session(request)
     tenant_id = session.tenant_id if session else None
 
