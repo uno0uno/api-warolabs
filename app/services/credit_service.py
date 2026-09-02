@@ -4,7 +4,7 @@ Handles credit payment registration, payment history, and open-credit order list
 
 Issue: https://github.com/uno0uno/warocol.com/issues/294
 """
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 from decimal import Decimal
 from datetime import date, datetime, timezone
@@ -581,3 +581,106 @@ async def list_credit_orders(
     except Exception as exc:
         logger.error(f"Error listing credit orders: {exc}")
         raise APIError(f"Error listing credit orders: {exc}", status_code=500)
+
+
+async def fetch_credit_payment_totals_for_cierre(
+    conn,
+    tenant_id: UUID,
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime] = None,
+    period_end_time: Optional[datetime] = None,
+) -> Dict[str, float]:
+    """
+    Sum cartera abonos by payment_method slug for arqueo cash/card/digital totals.
+    Uses payment_date (business timestamp) with shift half-open windows.
+    """
+    rows = await _fetch_credit_payment_cierre_rows(
+        conn,
+        tenant_id,
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+    )
+    out: Dict[str, float] = {}
+    for row in rows:
+        slug = row["group_slug"]
+        if slug:
+            out[slug] = out.get(slug, 0.0) + float(row["total"])
+    return out
+
+
+async def fetch_credit_payment_breakdown_for_cierre(
+    conn,
+    tenant_id: UUID,
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime] = None,
+    period_end_time: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Per-method cartera abono rows for arqueo payment breakdown."""
+    return await _fetch_credit_payment_cierre_rows(
+        conn,
+        tenant_id,
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+    )
+
+
+async def _fetch_credit_payment_cierre_rows(
+    conn,
+    tenant_id: UUID,
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime] = None,
+    period_end_time: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    if period_start_time and period_end_time:
+        rows = await conn.fetch(
+            """
+            SELECT
+                cp.payment_method AS group_slug,
+                COALESCE(pm.name, cp.payment_method) AS method_name,
+                COALESCE(SUM(cp.amount), 0) AS total
+            FROM credit_payments cp
+            LEFT JOIN payment_methods pm ON pm.id = cp.payment_method_id
+            WHERE cp.tenant_id = $1
+              AND cp.payment_method IS NOT NULL
+              AND cp.payment_date >= $2
+              AND cp.payment_date < $3
+            GROUP BY cp.payment_method, COALESCE(pm.name, cp.payment_method)
+            """,
+            tenant_id,
+            period_start_time,
+            period_end_time,
+        )
+    else:
+        rows = await conn.fetch(
+            """
+            SELECT
+                cp.payment_method AS group_slug,
+                COALESCE(pm.name, cp.payment_method) AS method_name,
+                COALESCE(SUM(cp.amount), 0) AS total
+            FROM credit_payments cp
+            LEFT JOIN payment_methods pm ON pm.id = cp.payment_method_id
+            WHERE cp.tenant_id = $1
+              AND cp.payment_method IS NOT NULL
+              AND cp.payment_date::date >= $2
+              AND cp.payment_date::date <= $3
+            GROUP BY cp.payment_method, COALESCE(pm.name, cp.payment_method)
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    return [
+        {
+            "group_slug": row["group_slug"],
+            "method_name": row["method_name"],
+            "total": float(row["total"]),
+        }
+        for row in rows
+    ]
