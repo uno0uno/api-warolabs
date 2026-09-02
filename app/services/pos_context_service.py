@@ -64,6 +64,7 @@ SELECT
     tpp.pos_catalog_layout_default,
     tpp.pos_show_product_image,
     tpp.pos_show_search,
+    tpp.deduct_inventory_on_command,
     fd.nit,
     fd.business_name,
     fd.type_organization_id,
@@ -110,12 +111,20 @@ _CONTEXT_QUERY_WITHOUT_POS_CATALOG = (
     .replace("    tpp.pos_catalog_layout_default,\n", "    NULL AS pos_catalog_layout_default,\n")
     .replace("    tpp.pos_show_product_image,\n", "    NULL AS pos_show_product_image,\n")
     .replace("    tpp.pos_show_search,\n", "    NULL AS pos_show_search,\n")
+    .replace("    tpp.deduct_inventory_on_command,\n", "    NULL AS deduct_inventory_on_command,\n")
 )
 _CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG = (
     _CONTEXT_QUERY_WITHOUT_UI_LOCALE
     .replace("    tpp.pos_catalog_layout_default,\n", "    NULL AS pos_catalog_layout_default,\n")
     .replace("    tpp.pos_show_product_image,\n", "    NULL AS pos_show_product_image,\n")
     .replace("    tpp.pos_show_search,\n", "    NULL AS pos_show_search,\n")
+    .replace("    tpp.deduct_inventory_on_command,\n", "    NULL AS deduct_inventory_on_command,\n")
+)
+
+# warocol.com#2566 — column may land after catalog prefs
+_CONTEXT_QUERY_WITHOUT_DEDUCT_ON_COMMAND = _CONTEXT_QUERY.replace(
+    "    tpp.deduct_inventory_on_command,\n",
+    "    NULL AS deduct_inventory_on_command,\n",
 )
 
 # Legacy fallback when older preference migrations are also pending.
@@ -159,7 +168,31 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             row = await conn.fetchrow(_CONTEXT_QUERY, tenant_id)
         except asyncpg.UndefinedColumnError as exc:
             missing = str(exc)
-            if "pos_catalog" in missing or "pos_show_" in missing:
+            if "deduct_inventory_on_command" in missing:
+                logger.warning(
+                    "deduct_inventory_on_command missing in POS context; "
+                    "defaulting true until warocol.com#2566 migration is applied."
+                )
+                try:
+                    row = await conn.fetchrow(
+                        _CONTEXT_QUERY_WITHOUT_DEDUCT_ON_COMMAND,
+                        tenant_id,
+                    )
+                except asyncpg.UndefinedColumnError as nested:
+                    missing = str(nested)
+                    if "pos_catalog" in missing or "pos_show_" in missing:
+                        row = await conn.fetchrow(
+                            _CONTEXT_QUERY_WITHOUT_POS_CATALOG,
+                            tenant_id,
+                        )
+                    else:
+                        row = await conn.fetchrow(
+                            _CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG
+                            if "ui_locale" in missing
+                            else _CONTEXT_QUERY_WITHOUT_PREFS,
+                            tenant_id,
+                        )
+            elif "pos_catalog" in missing or "pos_show_" in missing:
                 logger.warning(
                     "POS catalog preference columns missing in POS context; "
                     "using defaults until warocol.com#2495 migration is applied."
@@ -199,7 +232,15 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                     )
                 except asyncpg.UndefinedColumnError as inner_exc:
                     inner = str(inner_exc)
-                    if "pos_catalog" in inner or "pos_show_" in inner:
+                    if "deduct_inventory_on_command" in inner:
+                        row = await conn.fetchrow(
+                            _CONTEXT_QUERY_WITHOUT_UI_LOCALE.replace(
+                                "    tpp.deduct_inventory_on_command,\n",
+                                "    NULL AS deduct_inventory_on_command,\n",
+                            ),
+                            tenant_id,
+                        )
+                    elif "pos_catalog" in inner or "pos_show_" in inner:
                         row = await conn.fetchrow(
                             _CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG,
                             tenant_id,
@@ -327,6 +368,14 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         'pos_show_search': (
             bool(row['pos_show_search'])
             if ('pos_show_search' in row.keys() and row['pos_show_search'] is not None)
+            else True
+        ),
+        'deduct_inventory_on_command': (
+            bool(row['deduct_inventory_on_command'])
+            if (
+                'deduct_inventory_on_command' in row.keys()
+                and row['deduct_inventory_on_command'] is not None
+            )
             else True
         ),
         'logo_url': row['logo_url'],

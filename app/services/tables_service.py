@@ -4640,6 +4640,16 @@ async def _add_tab_items_core(
     if not session_row:
         raise NotFoundError("No open session found for this table")
 
+    deduct_flag = await conn.fetchval(
+        """
+        SELECT deduct_inventory_on_command
+        FROM tenant_public_profiles
+        WHERE tenant_id = $1
+        """,
+        tenant_id,
+    )
+    deduct_on_command = True if deduct_flag is None else bool(deduct_flag)
+
     session_id = session_row["session_id"]
     tab_ctx = {
         "channel": "barra" if session_row["is_bar"] else "mesa",
@@ -4764,19 +4774,20 @@ async def _add_tab_items_core(
             )
 
         try:
-            for mod in item.get("modifiers") or []:
-                modifier_qty = float(mod.get("quantity", 1))
-                await _deduct_modifier_inventory_for_order_item(
-                    conn,
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    order_id=order_id,
-                    order_item_id=order_item_id,
-                    order_number=order_number,
-                    item_quantity=float(item["quantity"]),
-                    modifier=mod,
-                    modifier_qty=modifier_qty,
-                )
+            if deduct_on_command:
+                for mod in item.get("modifiers") or []:
+                    modifier_qty = float(mod.get("quantity", 1))
+                    await _deduct_modifier_inventory_for_order_item(
+                        conn,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        order_id=order_id,
+                        order_item_id=order_item_id,
+                        order_number=order_number,
+                        item_quantity=float(item["quantity"]),
+                        modifier=mod,
+                        modifier_qty=modifier_qty,
+                    )
         except Exception as _mod_inv_exc:
             logger.error(
                 f"[tab] modifier inventory deduction failed for item {order_item_id}: {_mod_inv_exc}"
@@ -4789,6 +4800,9 @@ async def _add_tab_items_core(
             )
         except Exception as _snap_exc:
             logger.error(f"[tab] ingredient snapshot failed for item {order_item_id}: {_snap_exc}")
+
+        if not deduct_on_command:
+            continue
 
         try:
             ingredients = await conn.fetch(

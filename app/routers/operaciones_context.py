@@ -218,6 +218,16 @@ async def toggle_pos_show_search(request: Request, body: ToggleRequest):
 
 
 @router.patch(
+    "/toggles/deduct-inventory-on-command",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def toggle_deduct_inventory_on_command(request: Request, body: ToggleRequest):
+    """Toggle inventory deduction when items are sent to kitchen (warocol.com#2566)."""
+    session = require_valid_session(request)
+    return await update_toggle(session.tenant_id, "deduct_inventory_on_command", body.enabled)
+
+
+@router.patch(
     "/toggles/kds",
     dependencies=[Depends(require_module(Module.OPERACIONES))],
 )

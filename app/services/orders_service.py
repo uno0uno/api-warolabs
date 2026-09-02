@@ -1299,7 +1299,14 @@ async def bulk_update_order_status(
 
                 # Stock
                 if old_status != 'completed' and status == 'completed':
-                    if not (row['pos_cart_id'] and old_status == 'pending'):
+                    inventory_already_consumed = await _order_inventory_already_consumed_before_completion(
+                        conn,
+                        row=row,
+                        order_id=order_id_row,
+                        tenant_id=tenant_id,
+                        old_status=old_status,
+                    )
+                    if not inventory_already_consumed:
                         await _deduct_stock_for_status_update(conn, order_id_row, tenant_id, user_id, order_number)
                     newly_completed_order_ids.append(order_id_row)
                 elif old_status == 'completed' and status in ('cancelled', 'pending'):

@@ -89,6 +89,94 @@ async def test_add_tab_items_core_deducts_modifier_inventory():
 
 
 @pytest.mark.asyncio
+async def test_add_tab_items_core_skips_inventory_when_flag_off_keeps_snapshot():
+    """warocol.com#2566 — flag off: no qty/modifier deduct; snapshot still written."""
+    tenant_id = uuid4()
+    user_id = uuid4()
+    table_id = uuid4()
+    session_id = uuid4()
+    order_id = uuid4()
+    product_id = uuid4()
+    order_item_id = uuid4()
+    modifier_id = uuid4()
+
+    session_row = {
+        "session_id": session_id,
+        "table_name": "Mesa 3",
+        "is_bar": False,
+        "effective_waiter_member_id": None,
+    }
+    mock_conn = AsyncMock()
+    mock_conn.fetchval = AsyncMock(return_value=False)
+    mock_conn.fetchrow = AsyncMock(side_effect=[
+        session_row,
+        None,
+        {"id": order_id, "order_number": 42, "total_amount": 43.0},
+        {"id": order_item_id},
+        {"total_amount": 43.0},
+    ])
+    mock_conn.fetch = AsyncMock(return_value=[])
+    mock_conn.execute = AsyncMock()
+
+    items = [{
+        "product_id": product_id,
+        "quantity": 1,
+        "unit_price": 25.0,
+        "modifiers": [{
+            "id": str(modifier_id),
+            "name": "Tocineta",
+            "price": 4.0,
+        }],
+    }]
+
+    pricing_map = {str(product_id): {"price": Decimal("25.00"), "open_priced": False}}
+    deduct_mock = AsyncMock()
+    capture_mock = AsyncMock()
+
+    with patch(
+        "app.services.tables_service._record_tab_operation_event",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.tables_service._prefetch_product_names",
+        new=AsyncMock(return_value={str(product_id): "Santa inquisición"}),
+    ), patch(
+        "app.services.tables_service.fetch_product_pricing_map",
+        new=AsyncMock(return_value=pricing_map),
+    ), patch(
+        "app.services.tables_service._capture_order_item_ingredients",
+        capture_mock,
+    ), patch(
+        "app.services.tables_service._deduct_modifier_inventory_for_order_item",
+        deduct_mock,
+    ), patch(
+        "app.services.promotions_service.persist_session_tab_promos",
+        new=AsyncMock(return_value={"promo_savings": 0, "promo_breakdown": [], "lines": []}),
+    ), patch(
+        "app.services.tables_service.resolve_modifier_selections",
+        new=AsyncMock(return_value=[{
+            "id": modifier_id,
+            "name": "Tocineta",
+            "price": Decimal("4"),
+            "quantity": 1,
+            "included_quantity": 0,
+            "chargeable_quantity": 1,
+            "subtotal": Decimal("4"),
+        }]),
+    ):
+        await tables_service._add_tab_items_core(
+            mock_conn, tenant_id, user_id, table_id, items
+        )
+
+    deduct_mock.assert_not_called()
+    capture_mock.assert_awaited_once()
+    consumption_inserts = [
+        call for call in mock_conn.execute.await_args_list
+        if len(call.args) > 1 and call.args[0] and "tenant_ingredient_movements" in str(call.args[0])
+    ]
+    assert consumption_inserts == []
+
+
+@pytest.mark.asyncio
 async def test_add_tab_items_core_persists_modifier_quantity():
     tenant_id = uuid4()
     user_id = uuid4()

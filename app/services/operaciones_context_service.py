@@ -49,6 +49,7 @@ ALLOWED_TOGGLES = frozenset({
     "allow_promo_line_opt_out",     # warocol.com#1003
     "pos_show_product_image",       # warocol.com#2495
     "pos_show_search",              # warocol.com#2495
+    "deduct_inventory_on_command",  # warocol.com#2566
 })
 
 ALLOWED_POS_CATALOG_LAYOUTS = frozenset({"grid", "list"})
