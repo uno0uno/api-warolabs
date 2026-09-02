@@ -2170,26 +2170,6 @@ async def update_order_status(
                     order_id,
                 )
 
-            if (
-                write_status == "completed"
-                and payment_method == "customer_wallet"
-                and cid
-                and not using_split
-            ):
-                from app.services.customer_wallet_service import apply_wallet_for_order
-
-                if old_status != "completed":
-                    amount_cop = amount_due
-                    if amount_cop > 0:
-                        await apply_wallet_for_order(
-                            conn,
-                            cid,
-                            tenant_id,
-                            amount_cop,
-                            order_id,
-                            user_id,
-                        )
-
             if write_status == "completed" and using_one_shot_split:
                 await _insert_complete_tenders(
                     conn,
@@ -2232,6 +2212,44 @@ async def update_order_status(
                         "UPDATE orders SET payment_status = $2 WHERE id = $1",
                         order_id,
                         payment_status_update,
+                    )
+
+            if (
+                write_status == "completed"
+                and settlement_complete
+                and not using_split
+                and not is_wompi_collection
+                and payment_method
+                and payment_method != "credit"
+            ):
+                has_active_payments = await conn.fetchval(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1
+                        FROM order_payments
+                        WHERE order_id = $1 AND voided_at IS NULL
+                    )
+                    """,
+                    order_id,
+                )
+                if not has_active_payments:
+                    tender_cash_received = (
+                        cash_received
+                        if payment_method == "cash" and cash_received is not None
+                        else None
+                    )
+                    await _insert_complete_tenders(
+                        conn,
+                        order_id=order_id,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        customer_id=cid,
+                        payments=[{
+                            "amount": float(amount_due),
+                            "payment_method": payment_method,
+                            "payment_method_id": str(pmid) if pmid else None,
+                            "cash_received": tender_cash_received,
+                        }],
                     )
 
             # If cancelling a credit order, clear payment_status so it leaves cartera

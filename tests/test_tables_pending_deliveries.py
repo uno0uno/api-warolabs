@@ -285,3 +285,141 @@ async def test_get_pending_delivery_accepts_partial_completed():
 
     assert result["success"] is True
     assert result["data"]["partial_payments"] == []
+
+
+class _OrdersAsyncContext:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def _delivery_pending_order_row(order_id, tenant_id=None):
+    return {
+        "id": order_id,
+        "status": "pending",
+        "order_number": 19823,
+        "table_session_id": uuid4(),
+        "pos_cart_id": None,
+        "payment_status": None,
+        "order_date": datetime(2026, 9, 2, 0, 20, tzinfo=timezone.utc),
+        "total_amount": 88000,
+        "customer_id": uuid4(),
+        "discount_amount": 0,
+    }
+
+
+def _orders_complete_patches(conn, tenant_id, user_id):
+    return (
+        patch("app.services.orders_service.require_valid_session", return_value=_session(tenant_id)),
+        patch("app.services.orders_service.get_db_connection", return_value=_OrdersAsyncContext(conn)),
+        patch("app.services.orders_service.resolve_tenant_timezone", new=AsyncMock(return_value="America/Bogota")),
+        patch("app.services.orders_service.assert_order_not_in_closed_monthly_period", new=AsyncMock()),
+        patch("app.services.orders_service.assert_order_invoice_allows_mutation", new=AsyncMock()),
+        patch("app.services.orders_service._order_inventory_already_consumed_before_completion", new=AsyncMock(return_value=True)),
+        patch("app.services.orders_service._get_tenant_tax_config", new=AsyncMock(return_value={"inc_enabled": True})),
+        patch("app.services.orders_service._post_order_gl_entry", new=AsyncMock()),
+        patch("app.services.orders_service._post_order_cogs_gl_entry", new=AsyncMock()),
+        patch("app.services.orders_service.evaluate_and_award", new=MagicMock(return_value=object())),
+        patch("app.services.orders_service.asyncio.create_task", new=MagicMock()),
+        patch("app.services.orders_service.record_operation_event", new=AsyncMock()),
+    )
+
+
+@pytest.mark.asyncio
+async def test_single_pay_completion_inserts_order_payment_row():
+    from fastapi import Request
+    from app.services import orders_service
+
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    insert_mock = AsyncMock()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            _delivery_pending_order_row(order_id),
+            {"id": uuid4()},
+            {
+                "id": order_id,
+                "order_number": 19823,
+                "total_amount": 88000,
+                "payment_method": "card",
+                "payment_method_id": uuid4(),
+                "order_date": datetime(2026, 9, 2, 0, 20, tzinfo=timezone.utc),
+                "tip_amount": 0,
+                "tip_tax_amount": 0,
+            },
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=False)
+    conn.execute = AsyncMock()
+
+    patches = _orders_complete_patches(conn, tenant_id, user_id)
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+         patches[6], patches[7], patches[8], patches[9], patches[10], patches[11], \
+         patch("app.services.orders_service.order_has_outstanding_deferred_bar_delivery", new=AsyncMock(return_value=False)), \
+         patch("app.services.orders_service._insert_complete_tenders", insert_mock):
+        result = await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "card",
+        )
+
+    assert result["success"] is True
+    insert_mock.assert_awaited_once()
+    payment = insert_mock.await_args.kwargs["payments"][0]
+    assert payment["amount"] == 88000.0
+    assert payment["payment_method"] == "card"
+
+
+@pytest.mark.asyncio
+async def test_single_pay_credit_skips_order_payment_insert():
+    from fastapi import Request
+    from app.services import orders_service
+
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    customer_id = uuid4()
+    insert_mock = AsyncMock()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            _delivery_pending_order_row(order_id) | {"customer_id": customer_id},
+            {"id": uuid4()},
+            {
+                "id": order_id,
+                "order_number": 19823,
+                "total_amount": 88000,
+                "payment_method": "credit",
+                "payment_method_id": None,
+                "order_date": datetime(2026, 9, 2, 0, 20, tzinfo=timezone.utc),
+                "tip_amount": 0,
+                "tip_tax_amount": 0,
+            },
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=None)
+    conn.execute = AsyncMock()
+
+    patches = _orders_complete_patches(conn, tenant_id, user_id)
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+         patches[6], patches[7], patches[8], patches[9], patches[10], patches[11], \
+         patch("app.services.orders_service.order_has_outstanding_deferred_bar_delivery", new=AsyncMock(return_value=False)), \
+         patch("app.services.orders_service._insert_complete_tenders", insert_mock):
+        await orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "completed",
+            "credit",
+            customer_id=str(customer_id),
+            credit_due_date=datetime(2026, 10, 1).date(),
+        )
+
+    insert_mock.assert_not_awaited()
