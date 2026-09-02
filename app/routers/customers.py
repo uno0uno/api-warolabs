@@ -5,9 +5,10 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Request, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 from uuid import UUID
 from app.core.permissions import Module, require_module
+from app.core.middleware import require_valid_session
 from app.services.customers_service import (
     search_or_create_customer,
     search_customer_by_phone,
@@ -21,6 +22,7 @@ from app.services.customer_wallet_service import (
     recharge_customer_wallet,
     refund_customer_wallet,
 )
+from app.services.email_helpers import send_wallet_recharge_receipt_email
 from app.models.customer import (
     CustomerSearchOrCreate,
     CustomerResponse,
@@ -47,6 +49,20 @@ class WalletRefundRequest(BaseModel):
     payment_method: str = Field(..., description="cash | card | digital")
     payment_method_id: Optional[UUID] = None
     notes: Optional[str] = None
+
+
+class SendWalletRechargeReceiptRequest(BaseModel):
+    email: EmailStr = Field(..., description="Recipient email")
+    customer_name: str = Field(..., min_length=1)
+    recharge_date: str = Field(..., description="ISO datetime or formatted date from client")
+    payment_method_label: str = Field(..., min_length=1)
+    amount_cop: float = Field(..., gt=0)
+    balance_after_cop: float = Field(..., ge=0)
+    notes: Optional[str] = None
+    business_name: Optional[str] = None
+    business_address: Optional[str] = None
+    business_city: Optional[str] = None
+    business_phone: Optional[str] = None
 
 
 @router.get(
@@ -83,6 +99,37 @@ async def recharge_customer_wallet_endpoint(
         body.notes,
         body.idempotency_key,
     )
+
+
+@router.post(
+    "/{customer_id}/wallet/receipt-email",
+    status_code=200,
+    dependencies=[Depends(require_module(Module.VENTAS))],
+)
+async def send_wallet_recharge_receipt_email_endpoint(
+    request: Request,
+    customer_id: UUID,
+    body: SendWalletRechargeReceiptRequest,
+):
+    """Email a wallet recharge receipt after CRM staff recharge."""
+    session = require_valid_session(request)
+    tenant_id = session.tenant_id if session else None
+
+    success = await send_wallet_recharge_receipt_email(
+        customer_email=str(body.email),
+        customer_name=body.customer_name,
+        recharge_date_label=body.recharge_date,
+        payment_method_label=body.payment_method_label,
+        amount_cop=body.amount_cop,
+        balance_after_cop=body.balance_after_cop,
+        notes=body.notes,
+        tenant_id=str(tenant_id) if tenant_id else None,
+        business_name=body.business_name,
+        business_address=body.business_address,
+        business_city=body.business_city,
+        business_phone=body.business_phone,
+    )
+    return {"success": success}
 
 
 @router.post(
