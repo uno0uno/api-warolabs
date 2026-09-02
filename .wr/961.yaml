@@ -1,0 +1,44 @@
+issue: 961
+title: "feat(cartera): allow wallet payment on credit abonos with wallet apply + GL"
+repo: both
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-961-cartera-wallet-abono
+
+paths:
+  - app/services/credit_service.py
+  - tests/test_credit_payment_methods.py
+  - ../front_nuxt/pages/crm/clientes/[id].vue
+
+ac:
+  - register_credit_payment with customer_wallet calls apply_wallet_for_order
+  - insufficient wallet balance returns 400 without credit_payments insert
+  - credit_payments + status + GL still run after successful wallet apply
+  - CRM carteraPaymentGroups includes wallet (still excludes credit)
+  - cash/card/digital abonos unchanged
+
+out_of_scope:
+  - wallet recharge funding methods
+  - POS wallet checkout
+  - abono void/reversal
+  - historical backfill
+
+hints:
+  entry: "credit_service.register_credit_payment before credit_payments INSERT"
+  pattern: "pos_cart_service apply_wallet_for_order; account_role customer_wallet→CUSTOMER_ADVANCES"
+  tests: "./venv/bin/pytest tests/test_credit_payment_methods.py -q"
+
+risk:
+  sensitive: true
+  areas: [payments, wallet, cartera]
+
+skip:
+  audits: [ux]
+
+next:
+  after_pr: "/wr-review"
+
+notes: |
+  SPLIT_PR: API PR closes #961; front PR Closes #961.
+  Do not change walletPaymentGroups (recharge still excludes wallet).
