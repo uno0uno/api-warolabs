@@ -33,6 +33,10 @@ from app.templates.credit_abono_receipt_template import (
     get_credit_abono_subject,
     get_credit_abono_text,
 )
+from app.templates.wallet_recharge_receipt_template import (
+    get_wallet_recharge_subject,
+    get_wallet_recharge_text,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -822,4 +826,87 @@ async def send_credit_abono_receipt_email(
         return success
     except Exception as exc:
         logger.error("Error sending credit abono receipt email: %s", exc)
+        return False
+
+
+async def send_wallet_recharge_receipt_email(
+    customer_email: str,
+    customer_name: str,
+    recharge_date_label: str,
+    payment_method_label: str,
+    amount_cop: float,
+    balance_after_cop: float,
+    notes: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    business_name: Optional[str] = None,
+    business_address: Optional[str] = None,
+    business_city: Optional[str] = None,
+    business_phone: Optional[str] = None,
+) -> bool:
+    """
+    Send a wallet recharge receipt email (CRM client detail).
+    Never raises — returns False on validation or SES failure.
+    """
+    if not customer_email or "@" not in customer_email:
+        logger.warning(
+            "Wallet recharge receipt email skipped: invalid customer_email=%r",
+            customer_email,
+        )
+        return False
+
+    locale_settings = TenantLocaleSettings(
+        locale=normalize_locale(None),
+        currency_code=normalize_currency(None),
+        timezone=normalize_timezone(None),
+    )
+    if tenant_id:
+        try:
+            async with get_db_connection(use_transaction=False) as conn:
+                locale_settings = await resolve_tenant_locale_settings(conn, tenant_id)
+        except Exception as exc:
+            logger.warning("Wallet recharge receipt locale resolve failed: %s", exc)
+
+    locale = locale_settings.locale
+    currency_code = locale_settings.currency_code
+
+    text_body = get_wallet_recharge_text(
+        customer_name=customer_name,
+        recharge_date_label=recharge_date_label,
+        payment_method_label=payment_method_label,
+        amount_cop=amount_cop,
+        balance_after_cop=balance_after_cop,
+        notes=notes,
+        business_name=business_name,
+        business_address=business_address,
+        business_city=business_city,
+        business_phone=business_phone,
+        locale=locale,
+        currency_code=currency_code,
+    )
+    subject = get_wallet_recharge_subject(business_name, locale=locale)
+    escaped_text = text_body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    html_body = (
+        f'<html><body style="font-family:Arial,sans-serif;color:#111;">'
+        f'<pre style="font-family:monospace;font-size:13px;white-space:pre-wrap;'
+        f'word-wrap:break-word;margin:0;padding:16px;">{escaped_text}</pre>'
+        "</body></html>"
+    )
+
+    try:
+        ses_service = AWSSESService()
+        success = await ses_service.send_email(
+            from_email=await resolve_sender_email_for_tenant(tenant_id),
+            from_name=business_name or "WARO Colombia",
+            to_emails=[customer_email],
+            subject=subject,
+            html_body=html_body,
+            text_body=text_body,
+        )
+        if success:
+            logger.info("Wallet recharge receipt email sent to %s", customer_email)
+        else:
+            logger.warning("SES returned failure for wallet recharge receipt to %s", customer_email)
+        return success
+    except Exception as exc:
+        logger.error("Error sending wallet recharge receipt email: %s", exc)
         return False
