@@ -264,6 +264,7 @@ async def test_online_update_order_status_records_despacho_event():
     with patch("app.services.online_orders_service.require_valid_session", return_value=_session(tenant_id, user_id)), \
          patch("app.services.online_orders_service.get_db_connection", return_value=_AsyncContext(conn)), \
          patch("app.services.online_orders_service.resolve_tenant_timezone", new=AsyncMock(return_value="America/Bogota")), \
+         patch("app.services.online_orders_service._deduct_inventory_on_command_enabled", new=AsyncMock(return_value=False)), \
          patch("app.services.online_orders_service.record_operation_event", new=capture_record):
         result = await online_orders_service.update_order_status(
             Request({"type": "http"}),
