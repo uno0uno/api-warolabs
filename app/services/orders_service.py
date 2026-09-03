@@ -1186,7 +1186,7 @@ async def bulk_update_order_status(
             # Fetch current state of all orders before updating
             order_rows = await conn.fetch(
                 """SELECT id, status, order_number, table_session_id, pos_cart_id,
-                          payment_status, total_amount
+                          online_cart_id, payment_status, total_amount
                    FROM orders WHERE id = ANY($1) AND tenant_id = $2""",
                 ids, tenant_id
             )
@@ -1782,8 +1782,8 @@ async def update_order_status(
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             row = await conn.fetchrow(
                 """SELECT id, status, order_number, table_session_id, pos_cart_id,
-                          payment_status, order_date, total_amount, customer_id,
-                          discount_amount
+                          online_cart_id, payment_status, order_date, total_amount,
+                          customer_id, discount_amount
                    FROM orders WHERE id = $1 AND tenant_id = $2""",
                 order_id, tenant_id
             )
@@ -2567,12 +2567,14 @@ async def _order_inventory_already_consumed_before_completion(
     tenant_id: UUID,
     old_status: str,
 ) -> bool:
-    """Return true when a pending order already consumed inventory at creation time."""
-    if old_status != "pending":
-        return False
-    if row["pos_cart_id"]:
+    """Return true when inventory was already consumed before this completion.
+
+    POS cart: pending completes after cart checkout already deducted.
+    Mesa / online: may have deducted on send/accept (warocol.com#2566/#2568).
+    """
+    if row.get("pos_cart_id") and old_status == "pending":
         return True
-    if not row["table_session_id"]:
+    if not (row.get("table_session_id") or row.get("online_cart_id")):
         return False
 
     return bool(await conn.fetchval(
