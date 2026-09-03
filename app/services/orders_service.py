@@ -1338,6 +1338,11 @@ async def bulk_update_order_status(
                                 status_code=500,
                                 details={"code": "sale_gl_void_failed"},
                             )
+                elif old_status != 'completed' and status == 'cancelled':
+                    # warocol.com#2567 — pending/preparing cancel after on-command deduct
+                    await _return_stock_for_order_cancellation(
+                        conn, order_id_row, tenant_id, user_id, order_number
+                    )
 
                 # If cancelling a credit order, clear payment_status so it leaves cartera
                 if status == 'cancelled' and row['payment_status'] in ('credit', 'partial'):
@@ -2364,6 +2369,11 @@ async def update_order_status(
                                 status_code=500,
                                 details={"code": "sale_gl_void_failed"},
                             )
+                elif old_status != 'completed' and write_status == 'cancelled':
+                    # warocol.com#2567 — pending/preparing cancel after on-command deduct
+                    await _return_stock_for_order_cancellation(
+                        conn, order_id, tenant_id, user_id, order_number
+                    )
 
             # Release the table session if this is a mesa order being closed
             if write_status in ("completed", "cancelled") and row['table_session_id']:
@@ -4426,24 +4436,104 @@ async def _deduct_stock_for_status_update(conn, order_id, tenant_id, user_id, or
 
 
 async def _return_stock_for_order_cancellation(conn, order_id, tenant_id, user_id, order_number: int) -> None:
-    """Return ingredient stock when a completed order is cancelled or rolled back to pending."""
+    """
+    Return ingredient stock when an order is cancelled or rolled back.
+
+    warocol.com#2567 — same contract as line-delete: snapshots when present
+    (includes modifier snapshot lines); recipe + live modifier return only when
+    snapshots are missing. Skip when no ingredient still has net consumption.
+    """
+    still_owes = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM tenant_ingredient_movements
+            WHERE tenant_id = $1
+              AND reference_table = 'orders'
+              AND reference_id = $2
+              AND movement_type IN ('consumption', 'return')
+            GROUP BY ingredient_id
+            HAVING SUM(quantity_change) < 0
+        )
+        """,
+        tenant_id,
+        order_id,
+    )
+    if not still_owes:
+        return
+
+    (
+        _,
+        return_modifier_inventory_for_order_item,
+        return_order_item_inventory_from_snapshots,
+    ) = _pos_modifier_inventory_helpers()
+
     items = await conn.fetch(
-        """SELECT oi.product_id, oi.quantity, p.name AS product_name
-           FROM order_items oi
-           JOIN product p ON p.id = oi.product_id
-           WHERE oi.order_id = $1""",
+        """
+        SELECT oi.id AS order_item_id, oi.product_id, oi.quantity, p.name AS product_name
+        FROM order_items oi
+        JOIN product p ON p.id = oi.product_id
+        WHERE oi.order_id = $1
+        """,
         order_id,
     )
     for item in items:
+        product_name = item["product_name"]
+        item_quantity = float(item["quantity"])
+        returned_from_snapshots = await return_order_item_inventory_from_snapshots(
+            conn,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            order_id=order_id,
+            order_number=order_number,
+            order_item_id=item["order_item_id"],
+            reason_detail=f"Cancelación: {item['quantity']}x {product_name}",
+        )
+        if returned_from_snapshots:
+            continue
+
         ingredients = await conn.fetch(_INGREDIENTS_QUERY, item["product_id"])
         for ing in ingredients:
-            qty = _inventory_quantity(Decimal(str(item["quantity"])) * Decimal(str(ing["quantity"])))
-            await _return_ingredient_to_stock(
-                conn, tenant_id, user_id, order_id, order_number,
-                ing["ingredient_id"], qty, ing["unit"], ing["ingredient_name"],
-                f"Cancelación: {item['quantity']}x {item['product_name']}"
+            qty = _inventory_quantity(
+                Decimal(str(item["quantity"])) * Decimal(str(ing["quantity"]))
             )
-            logger.info(f"Stock returned (cancellation): {ing['ingredient_name']} +{qty}{ing['unit']} (Orden #{order_number})")
+            await _return_ingredient_to_stock(
+                conn,
+                tenant_id,
+                user_id,
+                order_id,
+                order_number,
+                ing["ingredient_id"],
+                qty,
+                ing["unit"],
+                ing["ingredient_name"],
+                f"Cancelación: {item['quantity']}x {product_name}",
+            )
+
+        modifiers = await conn.fetch(
+            """
+            SELECT modifier_id, modifier_name, quantity
+            FROM order_item_modifiers
+            WHERE order_item_id = $1
+            """,
+            item["order_item_id"],
+        )
+        for mod in modifiers:
+            if not mod["modifier_id"]:
+                continue
+            await return_modifier_inventory_for_order_item(
+                conn,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                order_id=order_id,
+                order_number=order_number,
+                order_item_id=item["order_item_id"],
+                item_quantity=item_quantity,
+                modifier_id=mod["modifier_id"],
+                modifier_qty=float(mod["quantity"] or 1),
+                modifier_name=mod["modifier_name"] or "Modificador",
+                product_name=product_name,
+            )
 
 
 async def _return_ingredient_to_stock(

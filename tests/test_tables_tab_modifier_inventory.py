@@ -429,6 +429,35 @@ async def test_ensure_tab_order_inventory_at_close_deducts_when_not_consumed():
 
 
 @pytest.mark.asyncio
+async def test_restore_pending_session_orders_inventory_calls_return():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    session_id = uuid4()
+    order_id = uuid4()
+
+    mock_conn = AsyncMock()
+    mock_conn.fetch = AsyncMock(
+        return_value=[{"id": order_id, "order_number": 501}]
+    )
+    return_mock = AsyncMock()
+
+    with patch(
+        "app.services.tables_service._return_stock_for_order_cancellation",
+        return_mock,
+    ):
+        await tables_service._restore_pending_session_orders_inventory(
+            mock_conn,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+
+    return_mock.assert_awaited_once_with(
+        mock_conn, order_id, tenant_id, user_id, 501
+    )
+
+
+@pytest.mark.asyncio
 async def test_deduct_modifier_inventory_for_order_item_writes_movement():
     tenant_id = uuid4()
     user_id = uuid4()

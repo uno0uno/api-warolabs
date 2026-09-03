@@ -211,3 +211,152 @@ async def test_bulk_complete_skips_stock_when_table_already_consumed():
     assert result["success"] is True
     deduct_stock.assert_not_awaited()
     post_cogs.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bulk_cancel_pending_restores_stock():
+    """warocol.com#2567 — cancelling pending with prior consumption restores stock."""
+    tenant_id = uuid4()
+    user_id = uuid4()
+    pending_order_id = uuid4()
+
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value="Europe/Madrid")
+    conn.fetchrow = AsyncMock(return_value=None)
+    conn.fetch = AsyncMock(
+        return_value=[
+            {
+                "id": pending_order_id,
+                "status": "pending",
+                "order_number": 15001,
+                "table_session_id": uuid4(),
+                "pos_cart_id": None,
+                "payment_status": None,
+                "total_amount": 12000,
+            },
+        ]
+    )
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+    return_stock = AsyncMock()
+
+    with patch(
+        "app.services.orders_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=user_id),
+    ), patch(
+        "app.services.orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.orders_service._return_stock_for_order_cancellation",
+        new=return_stock,
+    ), patch(
+        "app.services.orders_service.assert_order_invoice_allows_mutation",
+        new=AsyncMock(),
+    ):
+        result = await orders_service.bulk_update_order_status(
+            Request({"type": "http"}),
+            [str(pending_order_id)],
+            "cancelled",
+        )
+
+    assert result["success"] is True
+    return_stock.assert_awaited_once_with(
+        conn, pending_order_id, tenant_id, user_id, 15001
+    )
+
+
+@pytest.mark.asyncio
+async def test_return_stock_for_order_cancellation_skips_when_no_negative_net():
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=False)
+    snap = AsyncMock()
+
+    with patch(
+        "app.services.orders_service._pos_modifier_inventory_helpers",
+        return_value=(AsyncMock(), AsyncMock(), snap),
+    ):
+        await orders_service._return_stock_for_order_cancellation(
+            conn, uuid4(), uuid4(), uuid4(), 99
+        )
+
+    snap.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_return_stock_for_order_cancellation_uses_snapshots_only_when_present():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    order_item_id = uuid4()
+    product_id = uuid4()
+
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=True)
+    conn.fetch = AsyncMock(
+        return_value=[{
+            "order_item_id": order_item_id,
+            "product_id": product_id,
+            "quantity": 1,
+            "product_name": "Burger",
+        }]
+    )
+    snap = AsyncMock(return_value=True)
+    return_mod = AsyncMock()
+
+    with patch(
+        "app.services.orders_service._pos_modifier_inventory_helpers",
+        return_value=(AsyncMock(), return_mod, snap),
+    ):
+        await orders_service._return_stock_for_order_cancellation(
+            conn, order_id, tenant_id, user_id, 42
+        )
+
+    snap.assert_awaited_once()
+    return_mod.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_return_stock_for_order_cancellation_recipe_fallback_returns_modifiers():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    order_item_id = uuid4()
+    product_id = uuid4()
+    modifier_id = uuid4()
+    ingredient_id = uuid4()
+
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=True)
+    conn.fetch = AsyncMock(
+        side_effect=[
+            [{
+                "order_item_id": order_item_id,
+                "product_id": product_id,
+                "quantity": 1,
+                "product_name": "Burger",
+            }],
+            [{
+                "ingredient_id": ingredient_id,
+                "quantity": 2,
+                "unit": "und",
+                "ingredient_name": "Bun",
+            }],
+            [{"modifier_id": modifier_id, "modifier_name": "Bacon", "quantity": 1}],
+        ]
+    )
+    snap = AsyncMock(return_value=False)
+    return_mod = AsyncMock()
+    return_ing = AsyncMock()
+
+    with patch(
+        "app.services.orders_service._pos_modifier_inventory_helpers",
+        return_value=(AsyncMock(), return_mod, snap),
+    ), patch(
+        "app.services.orders_service._return_ingredient_to_stock",
+        return_ing,
+    ):
+        await orders_service._return_stock_for_order_cancellation(
+            conn, order_id, tenant_id, user_id, 42
+        )
+
+    return_ing.assert_awaited()
+    return_mod.assert_awaited_once()
