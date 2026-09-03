@@ -4223,28 +4223,29 @@ async def _restore_pending_session_orders_inventory(
     user_id: UUID,
     session_id: UUID,
 ) -> None:
-    """Restore stock for pending session orders that already consumed (warocol.com#2567)."""
+    """Restore stock for pending session orders that already consumed (warocol.com#2567).
+
+    Fail-closed: any restore error propagates so discard/clear do not DELETE unrestored stock.
+    """
     pending_orders = await conn.fetch(
         """
         SELECT id, order_number
         FROM orders
-        WHERE table_session_id = $1 AND status = 'pending'
+        WHERE table_session_id = $1
+          AND tenant_id = $2
+          AND status = 'pending'
         """,
         session_id,
+        tenant_id,
     )
     for ord_row in pending_orders:
-        try:
-            await _return_stock_for_order_cancellation(
-                conn,
-                ord_row["id"],
-                tenant_id,
-                user_id,
-                int(ord_row["order_number"]),
-            )
-        except Exception as exc:
-            logger.error(
-                f"[tab] inventory restore failed for pending order {ord_row['id']}: {exc}"
-            )
+        await _return_stock_for_order_cancellation(
+            conn,
+            ord_row["id"],
+            tenant_id,
+            user_id,
+            int(ord_row["order_number"]),
+        )
 
 
 async def _order_has_consumption_movements(conn, *, tenant_id: UUID, order_id: UUID) -> bool:

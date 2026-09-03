@@ -4439,23 +4439,27 @@ async def _return_stock_for_order_cancellation(conn, order_id, tenant_id, user_i
     """
     Return ingredient stock when an order is cancelled or rolled back.
 
-    warocol.com#2567 — prefer order_item_ingredients snapshots + modifier reverse.
-    Idempotent via net movements (consumption + return): skip when net >= 0.
-    Falls back to recipe re-query when no snapshots (legacy completed sales).
+    warocol.com#2567 — same contract as line-delete: snapshots when present
+    (includes modifier snapshot lines); recipe + live modifier return only when
+    snapshots are missing. Skip when no ingredient still has net consumption.
     """
-    net_change = await conn.fetchval(
+    still_owes = await conn.fetchval(
         """
-        SELECT COALESCE(SUM(quantity_change), 0)
-        FROM tenant_ingredient_movements
-        WHERE tenant_id = $1
-          AND reference_table = 'orders'
-          AND reference_id = $2
-          AND movement_type IN ('consumption', 'return')
+        SELECT EXISTS (
+            SELECT 1
+            FROM tenant_ingredient_movements
+            WHERE tenant_id = $1
+              AND reference_table = 'orders'
+              AND reference_id = $2
+              AND movement_type IN ('consumption', 'return')
+            GROUP BY ingredient_id
+            HAVING SUM(quantity_change) < 0
+        )
         """,
         tenant_id,
         order_id,
     )
-    if float(net_change or 0) >= 0:
+    if not still_owes:
         return
 
     (
@@ -4485,27 +4489,27 @@ async def _return_stock_for_order_cancellation(conn, order_id, tenant_id, user_i
             order_item_id=item["order_item_id"],
             reason_detail=f"Cancelación: {item['quantity']}x {product_name}",
         )
-        if not returned_from_snapshots:
-            ingredients = await conn.fetch(_INGREDIENTS_QUERY, item["product_id"])
-            for ing in ingredients:
-                qty = _inventory_quantity(
-                    Decimal(str(item["quantity"])) * Decimal(str(ing["quantity"]))
-                )
-                await _return_ingredient_to_stock(
-                    conn,
-                    tenant_id,
-                    user_id,
-                    order_id,
-                    order_number,
-                    ing["ingredient_id"],
-                    qty,
-                    ing["unit"],
-                    ing["ingredient_name"],
-                    f"Cancelación: {item['quantity']}x {product_name}",
-                )
+        if returned_from_snapshots:
             continue
 
-        # Snapshots imply command/complete capture path — reverse modifiers too
+        ingredients = await conn.fetch(_INGREDIENTS_QUERY, item["product_id"])
+        for ing in ingredients:
+            qty = _inventory_quantity(
+                Decimal(str(item["quantity"])) * Decimal(str(ing["quantity"]))
+            )
+            await _return_ingredient_to_stock(
+                conn,
+                tenant_id,
+                user_id,
+                order_id,
+                order_number,
+                ing["ingredient_id"],
+                qty,
+                ing["unit"],
+                ing["ingredient_name"],
+                f"Cancelación: {item['quantity']}x {product_name}",
+            )
+
         modifiers = await conn.fetch(
             """
             SELECT modifier_id, modifier_name, quantity
