@@ -36,6 +36,7 @@ from app.services.orders_service import (
     _deduct_stock_for_status_update,
     _order_inventory_already_consumed_before_completion,
     _return_ingredient_to_stock,
+    _return_stock_for_order_cancellation,
     get_order_by_id,
     get_order_items,
     update_order_status,
@@ -4215,6 +4216,37 @@ async def _record_tab_cleared_pending_lines(
     return len(pending_lines)
 
 
+async def _restore_pending_session_orders_inventory(
+    conn,
+    *,
+    tenant_id: UUID,
+    user_id: UUID,
+    session_id: UUID,
+) -> None:
+    """Restore stock for pending session orders that already consumed (warocol.com#2567)."""
+    pending_orders = await conn.fetch(
+        """
+        SELECT id, order_number
+        FROM orders
+        WHERE table_session_id = $1 AND status = 'pending'
+        """,
+        session_id,
+    )
+    for ord_row in pending_orders:
+        try:
+            await _return_stock_for_order_cancellation(
+                conn,
+                ord_row["id"],
+                tenant_id,
+                user_id,
+                int(ord_row["order_number"]),
+            )
+        except Exception as exc:
+            logger.error(
+                f"[tab] inventory restore failed for pending order {ord_row['id']}: {exc}"
+            )
+
+
 async def _order_has_consumption_movements(conn, *, tenant_id: UUID, order_id: UUID) -> bool:
     return bool(await conn.fetchval(
         """
@@ -5131,6 +5163,7 @@ async def discard_table_session(request: Request, table_id: UUID) -> dict:
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
@@ -5167,6 +5200,14 @@ async def discard_table_session(request: Request, table_id: UUID) -> dict:
                         "No se puede descartar una sesión con órdenes completadas",
                         status_code=409,
                     )
+
+                # warocol.com#2567 — restore stock before hard-delete when commanded early
+                await _restore_pending_session_orders_inventory(
+                    conn,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
 
                 # Hard-delete pending orders (cascade: modifiers → items → orders)
                 await conn.execute(
@@ -5660,6 +5701,14 @@ async def clear_tab(request: Request, table_id: UUID, reason: Optional[str] = No
                         session_id=session_row["id"],
                         reason=reason,
                     )
+
+                # warocol.com#2567 — restore stock before deleting pending lines
+                await _restore_pending_session_orders_inventory(
+                    conn,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    session_id=session_row["id"],
+                )
 
                 # Cancel comanda_items that point at the order_items we're
                 # about to delete. Two reasons:
