@@ -265,9 +265,9 @@ async def test_bulk_cancel_pending_restores_stock():
 
 
 @pytest.mark.asyncio
-async def test_return_stock_for_order_cancellation_skips_when_net_non_negative():
+async def test_return_stock_for_order_cancellation_skips_when_no_negative_net():
     conn = AsyncMock()
-    conn.fetchval = AsyncMock(return_value=0)
+    conn.fetchval = AsyncMock(return_value=False)
     snap = AsyncMock()
 
     with patch(
@@ -282,26 +282,22 @@ async def test_return_stock_for_order_cancellation_skips_when_net_non_negative()
 
 
 @pytest.mark.asyncio
-async def test_return_stock_for_order_cancellation_uses_snapshots_when_net_negative():
+async def test_return_stock_for_order_cancellation_uses_snapshots_only_when_present():
     tenant_id = uuid4()
     user_id = uuid4()
     order_id = uuid4()
     order_item_id = uuid4()
     product_id = uuid4()
-    modifier_id = uuid4()
 
     conn = AsyncMock()
-    conn.fetchval = AsyncMock(return_value=-5)
+    conn.fetchval = AsyncMock(return_value=True)
     conn.fetch = AsyncMock(
-        side_effect=[
-            [{
-                "order_item_id": order_item_id,
-                "product_id": product_id,
-                "quantity": 1,
-                "product_name": "Burger",
-            }],
-            [{"modifier_id": modifier_id, "modifier_name": "Bacon", "quantity": 1}],
-        ]
+        return_value=[{
+            "order_item_id": order_item_id,
+            "product_id": product_id,
+            "quantity": 1,
+            "product_name": "Burger",
+        }]
     )
     snap = AsyncMock(return_value=True)
     return_mod = AsyncMock()
@@ -315,4 +311,52 @@ async def test_return_stock_for_order_cancellation_uses_snapshots_when_net_negat
         )
 
     snap.assert_awaited_once()
+    return_mod.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_return_stock_for_order_cancellation_recipe_fallback_returns_modifiers():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    order_item_id = uuid4()
+    product_id = uuid4()
+    modifier_id = uuid4()
+    ingredient_id = uuid4()
+
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=True)
+    conn.fetch = AsyncMock(
+        side_effect=[
+            [{
+                "order_item_id": order_item_id,
+                "product_id": product_id,
+                "quantity": 1,
+                "product_name": "Burger",
+            }],
+            [{
+                "ingredient_id": ingredient_id,
+                "quantity": 2,
+                "unit": "und",
+                "ingredient_name": "Bun",
+            }],
+            [{"modifier_id": modifier_id, "modifier_name": "Bacon", "quantity": 1}],
+        ]
+    )
+    snap = AsyncMock(return_value=False)
+    return_mod = AsyncMock()
+    return_ing = AsyncMock()
+
+    with patch(
+        "app.services.orders_service._pos_modifier_inventory_helpers",
+        return_value=(AsyncMock(), return_mod, snap),
+    ), patch(
+        "app.services.orders_service._return_ingredient_to_stock",
+        return_ing,
+    ):
+        await orders_service._return_stock_for_order_cancellation(
+            conn, order_id, tenant_id, user_id, 42
+        )
+
+    return_ing.assert_awaited()
     return_mod.assert_awaited_once()
