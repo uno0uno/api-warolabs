@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _deduct_inventory_on_command_enabled(conn, tenant_id) -> bool:
-    """Shared tenant flag (warocol.com#2566 / #2568). Default true if column missing."""
+    """Shared tenant flag (warocol.com#2566 / #2568 / #2572). Default false if missing/null."""
     try:
         flag = await conn.fetchval(
             """
@@ -45,10 +45,10 @@ async def _deduct_inventory_on_command_enabled(conn, tenant_id) -> bool:
         if "deduct_inventory_on_command" not in str(exc):
             raise
         logger.warning(
-            "[online] deduct_inventory_on_command missing; defaulting true until migration"
+            "[online] deduct_inventory_on_command missing; defaulting false until migration"
         )
-        return True
-    return True if flag is None else bool(flag)
+        return False
+    return False if flag is None else bool(flag)
 
 
 async def _order_has_consumption_movements(conn, *, tenant_id, order_id: UUID) -> bool:
