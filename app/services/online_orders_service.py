@@ -30,6 +30,45 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+async def _deduct_inventory_on_command_enabled(conn, tenant_id) -> bool:
+    """Shared tenant flag (warocol.com#2566 / #2568). Default true if column missing."""
+    try:
+        flag = await conn.fetchval(
+            """
+            SELECT deduct_inventory_on_command
+            FROM tenant_public_profiles
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+    except Exception as exc:
+        if "deduct_inventory_on_command" not in str(exc):
+            raise
+        logger.warning(
+            "[online] deduct_inventory_on_command missing; defaulting true until migration"
+        )
+        return True
+    return True if flag is None else bool(flag)
+
+
+async def _order_has_consumption_movements(conn, *, tenant_id, order_id: UUID) -> bool:
+    return bool(await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM tenant_ingredient_movements
+            WHERE tenant_id = $1
+              AND reference_table = 'orders'
+              AND reference_id = $2
+              AND movement_type = 'consumption'
+              AND quantity_change < 0
+        )
+        """,
+        tenant_id,
+        order_id,
+    ))
+
+
 async def _deduct_stock_for_order(conn, order_id: UUID, tenant_id, changed_by) -> None:
     """
     Deduct ingredient stock for all items in an online order, mirroring POS logic.
@@ -545,6 +584,29 @@ async def update_order_status(
                 order_id, old_status, new_status, changed_by, reason,
             )
 
+            # warocol.com#2568 — operational stock on accept (pending → confirmed)
+            if old_status == "pending" and new_status == "confirmed":
+                if await _deduct_inventory_on_command_enabled(conn, tenant_id):
+                    try:
+                        await _deduct_stock_for_order(conn, order_id, tenant_id, changed_by)
+                    except Exception as _stock_err:
+                        logger.error(
+                            f"Stock deduction failed on accept for order {order_id}: {_stock_err}"
+                        )
+                        raise
+
+            # warocol.com#2568 — restore when cancelling after early accept deduct
+            if new_status == "cancelled":
+                from app.services.orders_service import _return_stock_for_order_cancellation
+
+                await _return_stock_for_order_cancellation(
+                    conn,
+                    order_id,
+                    tenant_id,
+                    changed_by,
+                    int(row["order_number"]),
+                )
+
             # 5. Auto-complete: if requested and this was a pending → confirmed transition,
             #    immediately execute a second confirmed → completed transition in the same conn.
             if auto_complete and old_status == "pending" and new_status == "confirmed":
@@ -591,9 +653,12 @@ async def update_order_status(
                     order_id, "confirmed", "completed", changed_by, None,
                 )
 
-                # Deduct stock for completed order
+                # Deduct at complete only when accept did not (flag off)
                 try:
-                    await _deduct_stock_for_order(conn, order_id, tenant_id, changed_by)
+                    if not await _order_has_consumption_movements(
+                        conn, tenant_id=tenant_id, order_id=order_id
+                    ):
+                        await _deduct_stock_for_order(conn, order_id, tenant_id, changed_by)
                 except Exception as _stock_err:
                     logger.error(f"Stock deduction failed for order {order_id}: {_stock_err}")
 
@@ -732,10 +797,13 @@ async def update_order_status(
                     },
                 }
 
-            # Deduct stock for direct completed transition
+            # Deduct stock for direct completed transition (skip if already consumed at accept)
             if new_status == "completed":
                 try:
-                    await _deduct_stock_for_order(conn, order_id, tenant_id, changed_by)
+                    if not await _order_has_consumption_movements(
+                        conn, tenant_id=tenant_id, order_id=order_id
+                    ):
+                        await _deduct_stock_for_order(conn, order_id, tenant_id, changed_by)
                 except Exception as _stock_err:
                     logger.error(f"Stock deduction failed for order {order_id}: {_stock_err}")
 
