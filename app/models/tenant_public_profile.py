@@ -213,6 +213,13 @@ class TenantPublicProfileBase(BaseModel):
         True,
         description="When true, POS catalog shows the search bar.",
     )
+    deduct_inventory_on_command: bool = Field(
+        True,
+        description=(
+            "When true, inventory qty is deducted when items are sent to kitchen "
+            "(mesa/tab command). COGS GL still posts at checkout."
+        ),
+    )
 
     @field_validator('timezone')
     @classmethod
@@ -336,6 +343,8 @@ class TenantPublicProfileUpdate(BaseModel):
     pos_catalog_layout_default: Optional[str] = None
     pos_show_product_image: Optional[bool] = None
     pos_show_search: Optional[bool] = None
+    # warocol.com#2566
+    deduct_inventory_on_command: Optional[bool] = None
 
     @field_validator('timezone')
     @classmethod

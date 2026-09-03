@@ -128,3 +128,86 @@ async def test_bulk_complete_posts_gl_cogs_only_for_new_completions():
         order_date=date(2026, 6, 7),
         order_number=14799,
     )
+
+
+@pytest.mark.asyncio
+async def test_bulk_complete_skips_stock_when_table_already_consumed():
+    """warocol.com#2566 — bulk complete uses same already-consumed guard as single."""
+    tenant_id = uuid4()
+    user_id = uuid4()
+    payment_group_id = uuid4()
+    payment_method_id = uuid4()
+    pending_order_id = uuid4()
+    table_session_id = uuid4()
+    order_date = datetime(2026, 6, 7, 0, 30, tzinfo=timezone.utc)
+
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(side_effect=["Europe/Madrid", True])
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            None,
+            {"id": payment_group_id},
+            {"id": payment_method_id},
+        ]
+    )
+    conn.fetch = AsyncMock(
+        side_effect=[
+            [
+                {
+                    "id": pending_order_id,
+                    "status": "pending",
+                    "order_number": 14900,
+                    "table_session_id": table_session_id,
+                    "pos_cart_id": None,
+                    "payment_status": None,
+                    "total_amount": 25000,
+                },
+            ],
+            [
+                {
+                    "id": pending_order_id,
+                    "order_number": 14900,
+                    "total_amount": 25000,
+                    "payment_method": "digital",
+                    "payment_method_id": payment_method_id,
+                    "order_date": order_date,
+                },
+            ],
+        ]
+    )
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    post_gl = AsyncMock()
+    post_cogs = AsyncMock()
+    deduct_stock = AsyncMock()
+
+    with patch(
+        "app.services.orders_service.require_valid_session",
+        return_value=SimpleNamespace(tenant_id=tenant_id, user_id=user_id),
+    ), patch(
+        "app.services.orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.orders_service._deduct_stock_for_status_update",
+        new=deduct_stock,
+    ), patch(
+        "app.services.orders_service._get_tenant_tax_config",
+        new=AsyncMock(return_value={"inc_enabled": True}),
+    ), patch(
+        "app.services.orders_service._post_order_gl_entry",
+        new=post_gl,
+    ), patch(
+        "app.services.orders_service._post_order_cogs_gl_entry",
+        new=post_cogs,
+    ):
+        result = await orders_service.bulk_update_order_status(
+            Request({"type": "http"}),
+            [str(pending_order_id)],
+            "completed",
+            payment_method="digital",
+            payment_method_id=str(payment_method_id),
+        )
+
+    assert result["success"] is True
+    deduct_stock.assert_not_awaited()
+    post_cogs.assert_awaited_once()

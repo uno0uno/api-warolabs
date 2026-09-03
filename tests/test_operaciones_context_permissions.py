@@ -510,3 +510,59 @@ async def test_update_toggle_allows_pos_show_search_column():
 
     assert result["data"]["pos_show_search"] is False
     conn.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_update_toggle_allows_deduct_inventory_on_command_column():
+    """Whitelist accepts #2566 live-deduct flag (no Starter lock)."""
+    tenant_id = uuid4()
+
+    with patch(
+        "app.services.operaciones_context_service.get_db_connection"
+    ) as mock_db, patch(
+        "app.services.operaciones_context_service.assert_starter_toggle_allowed",
+        new=AsyncMock(),
+    ):
+        conn = MagicMock()
+        conn.execute = AsyncMock()
+
+        @asynccontextmanager
+        async def _ctx():
+            yield conn
+
+        mock_db.side_effect = _ctx
+        result = await update_toggle(tenant_id, "deduct_inventory_on_command", False)
+
+    assert result["data"]["deduct_inventory_on_command"] is False
+    conn.execute.assert_awaited_once()
+
+
+def test_supervisor_toggles_deduct_inventory_on_command_under_enforce():
+    session = _build_session(role="supervisor")
+    app = FastAPI()
+    app.include_router(operaciones_context_router)
+    modules = frozenset({Module.OPERACIONES})
+    toggle_stub = AsyncMock(
+        return_value={"success": True, "data": {"deduct_inventory_on_command": False}}
+    )
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.operaciones_context.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=modules),
+         ), \
+         patch(
+             "app.routers.operaciones_context.update_toggle",
+             new=toggle_stub,
+         ):
+        client = TestClient(app)
+        response = client.patch(
+            "/operaciones/toggles/deduct-inventory-on-command",
+            json={"enabled": False},
+        )
+
+    assert response.status_code == 200
+    args, _ = toggle_stub.call_args
+    assert args == (session.tenant_id, "deduct_inventory_on_command", False)
