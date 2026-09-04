@@ -2,7 +2,7 @@
 Public restaurant service - handles public profile and menu queries
 No authentication required - these are public endpoints
 """
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from uuid import UUID
 from datetime import datetime, time
 from fastapi import HTTPException
@@ -17,6 +17,30 @@ import json
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+async def _apply_hide_products_without_stock_filter(
+    conn,
+    tenant_id: UUID,
+    products_query: str,
+    params: List[Any],
+) -> Tuple[str, List[Any]]:
+    """Soft-hide insufficient recipe-stock products when tenant flag is on (#2575)."""
+    from app.services.recipe_stock_availability_service import (
+        is_hide_products_without_stock_enabled,
+        product_ids_insufficient_recipe_stock,
+    )
+
+    if not await is_hide_products_without_stock_enabled(conn, tenant_id):
+        return products_query, params
+    hide_ids = await product_ids_insufficient_recipe_stock(conn, tenant_id)
+    if not hide_ids:
+        return products_query, params
+    next_param = len(params) + 1
+    products_query += f" AND p.id <> ALL(${next_param}::uuid[])"
+    params = list(params) + [list(hide_ids)]
+    return products_query, params
+
 
 _PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL = """
 (
@@ -200,6 +224,10 @@ async def get_menu_by_slug(
                 products_query += " AND p.category_id = $2"
                 params.append(category_id)
 
+            products_query, params = await _apply_hide_products_without_stock_filter(
+                conn, tenant_id, products_query, params
+            )
+
             products_query += f" ORDER BY {categories_service.online_menu_products_order_by_sql()}"
 
             products_rows = await conn.fetch(products_query, *params)
@@ -370,6 +398,10 @@ async def get_menu_by_tenant_id(
             if category_id:
                 products_query += " AND p.category_id = $2"
                 params.append(category_id)
+
+            products_query, params = await _apply_hide_products_without_stock_filter(
+                conn, tenant_id, products_query, params
+            )
 
             products_query += f" ORDER BY {categories_service.online_menu_products_order_by_sql()}"
 
