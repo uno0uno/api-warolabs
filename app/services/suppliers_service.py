@@ -8,6 +8,7 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
 from app.services.billing_service import check_plan_quota_growth
+from app.services.operation_events_service import DOMAIN_ABASTECIMIENTO, record_module_event
 from app.models.supplier import (
     Supplier,
     SupplierCreate,
@@ -353,7 +354,7 @@ async def create_supplier(
                         elif not payment_hour:
                             payment_hour = time(23, 59, 0)  # Default to 23:59:00
 
-                        await conn.execute(
+                        new_agreement = await conn.fetchrow(
                             """
                             INSERT INTO supplier_payment_agreements (
                                 tenant_id,
@@ -372,6 +373,7 @@ async def create_supplier(
                                 metadata,
                                 created_by
                             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                            RETURNING id
                             """,
                             tenant_id,
                             supplier.id,
@@ -390,9 +392,31 @@ async def create_supplier(
                             user_id
                         )
                         logger.info(f"Created payment agreement '{agreement_data.get('name')}' for supplier {supplier.id}")
+                        await record_module_event(
+                            conn,
+                            tenant_id,
+                            domain=DOMAIN_ABASTECIMIENTO,
+                            action="payment_agreement_created",
+                            actor_user_id=user_id,
+                            entity_type="payment_agreement",
+                            entity_id=new_agreement["id"],
+                            label=agreement_data.get('name'),
+                            extra={"supplier_id": str(supplier.id)},
+                        )
                     except Exception as e:
                         logger.error(f"Error creating payment agreement: {str(e)}", exc_info=True)
                         # Continue with other agreements even if one fails
+
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_ABASTECIMIENTO,
+                action="supplier_created",
+                actor_user_id=session_context.user_id,
+                entity_type="supplier",
+                entity_id=supplier.id,
+                label=supplier.name,
+            )
 
         # Send Discord notification outside transaction (non-blocking)
         try:
@@ -508,6 +532,17 @@ async def update_supplier(
                 createdAt=updated_supplier['created_at'],
                 updatedAt=updated_supplier['updated_at']
             )
+
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_ABASTECIMIENTO,
+                action="supplier_updated",
+                actor_user_id=session_context.user_id,
+                entity_type="supplier",
+                entity_id=supplier.id,
+                label=supplier.name,
+            )
             
             return SupplierResponse(data=supplier)
             
@@ -522,10 +557,11 @@ async def update_supplier(
 async def delete_supplier(
     request: Request,
     response: Response,
-    supplier_id: UUID
+    supplier_id: UUID,
+    reason: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Delete a supplier with tenant isolation
+    Delete a supplier with tenant isolation. Requires `reason` (Bitácora audit).
     """
     try:
         session_context = require_valid_session(request)
@@ -537,7 +573,7 @@ async def delete_supplier(
         async with get_db_connection() as conn:
             # Verify supplier exists and belongs to tenant
             existing_supplier = await conn.fetchrow("""
-                SELECT id FROM tenant_suppliers
+                SELECT id, name FROM tenant_suppliers
                 WHERE id = $1 AND tenant_id = $2
             """, supplier_id, tenant_id)
 
@@ -574,14 +610,6 @@ async def delete_supplier(
                     WHERE id = $1 AND tenant_id = $2
                 """, supplier_id, tenant_id)
             except asyncpg.exceptions.ForeignKeyViolationError as fk_err:
-                # Defense-in-depth: a future FK without ON DELETE CASCADE would
-                # land here instead of leaking a generic 500. Pre-count above
-                # covers the known cases; this protects against schema drift.
-                logger.warning(
-                    "FK violation deleting supplier %s after pre-count passed: %s",
-                    supplier_id,
-                    fk_err,
-                )
                 raise HTTPException(
                     status_code=409,
                     detail={
@@ -589,6 +617,19 @@ async def delete_supplier(
                         "message": "El proveedor tiene registros asociados que impiden su eliminación.",
                     },
                 )
+
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_ABASTECIMIENTO,
+                action="supplier_deleted",
+                actor_user_id=session_context.user_id,
+                entity_type="supplier",
+                entity_id=supplier_id,
+                label=existing_supplier["name"],
+                extra={"cascade_payment_agreements": True},
+                reason=reason,
+            )
 
             return {
                 "success": True,
