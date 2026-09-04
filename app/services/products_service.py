@@ -717,6 +717,25 @@ async def get_products_list(
                 else:
                     inner_filters += f" AND NOT {_HAS_RECIPE_SQL}"
 
+            # Selling catalogs (POS + venta manual use include_modifiers=true).
+            # Soft-hide only — never flips is_available* (warocol.com#2574).
+            if include_modifiers:
+                from app.services.recipe_stock_availability_service import (
+                    is_hide_products_without_stock_enabled,
+                    product_ids_insufficient_recipe_stock,
+                )
+
+                if await is_hide_products_without_stock_enabled(conn, tenant_id):
+                    hide_ids = await product_ids_insufficient_recipe_stock(
+                        conn, tenant_id
+                    )
+                    if hide_ids:
+                        inner_filters += (
+                            f" AND p.id <> ALL(${param_count}::uuid[])"
+                        )
+                        params.append(list(hide_ids))
+                        param_count += 1
+
             if inner_filters:
                 base_query = base_query.replace(
                     "WHERE p.tenant_id = $1",

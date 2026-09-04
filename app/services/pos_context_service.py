@@ -65,6 +65,7 @@ SELECT
     tpp.pos_show_product_image,
     tpp.pos_show_search,
     tpp.deduct_inventory_on_command,
+    tpp.hide_products_without_stock,
     fd.nit,
     fd.business_name,
     fd.type_organization_id,
@@ -112,6 +113,7 @@ _CONTEXT_QUERY_WITHOUT_POS_CATALOG = (
     .replace("    tpp.pos_show_product_image,\n", "    NULL AS pos_show_product_image,\n")
     .replace("    tpp.pos_show_search,\n", "    NULL AS pos_show_search,\n")
     .replace("    tpp.deduct_inventory_on_command,\n", "    NULL AS deduct_inventory_on_command,\n")
+    .replace("    tpp.hide_products_without_stock,\n", "    NULL AS hide_products_without_stock,\n")
 )
 _CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG = (
     _CONTEXT_QUERY_WITHOUT_UI_LOCALE
@@ -119,10 +121,17 @@ _CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG = (
     .replace("    tpp.pos_show_product_image,\n", "    NULL AS pos_show_product_image,\n")
     .replace("    tpp.pos_show_search,\n", "    NULL AS pos_show_search,\n")
     .replace("    tpp.deduct_inventory_on_command,\n", "    NULL AS deduct_inventory_on_command,\n")
+    .replace("    tpp.hide_products_without_stock,\n", "    NULL AS hide_products_without_stock,\n")
+)
+
+# warocol.com#2574 — newest column; fall back before older prefs
+_CONTEXT_QUERY_WITHOUT_HIDE_WITHOUT_STOCK = _CONTEXT_QUERY.replace(
+    "    tpp.hide_products_without_stock,\n",
+    "    NULL AS hide_products_without_stock,\n",
 )
 
 # warocol.com#2566 — column may land after catalog prefs
-_CONTEXT_QUERY_WITHOUT_DEDUCT_ON_COMMAND = _CONTEXT_QUERY.replace(
+_CONTEXT_QUERY_WITHOUT_DEDUCT_ON_COMMAND = _CONTEXT_QUERY_WITHOUT_HIDE_WITHOUT_STOCK.replace(
     "    tpp.deduct_inventory_on_command,\n",
     "    NULL AS deduct_inventory_on_command,\n",
 )
@@ -168,7 +177,36 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             row = await conn.fetchrow(_CONTEXT_QUERY, tenant_id)
         except asyncpg.UndefinedColumnError as exc:
             missing = str(exc)
-            if "deduct_inventory_on_command" in missing:
+            if "hide_products_without_stock" in missing:
+                logger.warning(
+                    "hide_products_without_stock missing in POS context; "
+                    "defaulting false (warocol.com#2574)."
+                )
+                try:
+                    row = await conn.fetchrow(
+                        _CONTEXT_QUERY_WITHOUT_HIDE_WITHOUT_STOCK,
+                        tenant_id,
+                    )
+                except asyncpg.UndefinedColumnError as nested:
+                    missing = str(nested)
+                    if "deduct_inventory_on_command" in missing:
+                        row = await conn.fetchrow(
+                            _CONTEXT_QUERY_WITHOUT_DEDUCT_ON_COMMAND,
+                            tenant_id,
+                        )
+                    elif "pos_catalog" in missing or "pos_show_" in missing:
+                        row = await conn.fetchrow(
+                            _CONTEXT_QUERY_WITHOUT_POS_CATALOG,
+                            tenant_id,
+                        )
+                    else:
+                        row = await conn.fetchrow(
+                            _CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG
+                            if "ui_locale" in missing
+                            else _CONTEXT_QUERY_WITHOUT_PREFS,
+                            tenant_id,
+                        )
+            elif "deduct_inventory_on_command" in missing:
                 logger.warning(
                     "deduct_inventory_on_command missing in POS context; "
                     "defaulting true until warocol.com#2566 migration is applied."
@@ -232,9 +270,20 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                     )
                 except asyncpg.UndefinedColumnError as inner_exc:
                     inner = str(inner_exc)
-                    if "deduct_inventory_on_command" in inner:
+                    if "hide_products_without_stock" in inner:
                         row = await conn.fetchrow(
                             _CONTEXT_QUERY_WITHOUT_UI_LOCALE.replace(
+                                "    tpp.hide_products_without_stock,\n",
+                                "    NULL AS hide_products_without_stock,\n",
+                            ),
+                            tenant_id,
+                        )
+                    elif "deduct_inventory_on_command" in inner:
+                        row = await conn.fetchrow(
+                            _CONTEXT_QUERY_WITHOUT_UI_LOCALE.replace(
+                                "    tpp.hide_products_without_stock,\n",
+                                "    NULL AS hide_products_without_stock,\n",
+                            ).replace(
                                 "    tpp.deduct_inventory_on_command,\n",
                                 "    NULL AS deduct_inventory_on_command,\n",
                             ),
@@ -377,6 +426,14 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                 and row['deduct_inventory_on_command'] is not None
             )
             else True
+        ),
+        'hide_products_without_stock': (
+            bool(row['hide_products_without_stock'])
+            if (
+                'hide_products_without_stock' in row.keys()
+                and row['hide_products_without_stock'] is not None
+            )
+            else False
         ),
         'logo_url': row['logo_url'],
         'receipt_print_settings': {

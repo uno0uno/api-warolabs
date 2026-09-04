@@ -228,6 +228,16 @@ async def toggle_deduct_inventory_on_command(request: Request, body: ToggleReque
 
 
 @router.patch(
+    "/toggles/hide-products-without-stock",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def toggle_hide_products_without_stock(request: Request, body: ToggleRequest):
+    """Hide catalog products that cannot be made from recipe stock (warocol.com#2574)."""
+    session = require_valid_session(request)
+    return await update_toggle(session.tenant_id, "hide_products_without_stock", body.enabled)
+
+
+@router.patch(
     "/toggles/kds",
     dependencies=[Depends(require_module(Module.OPERACIONES))],
 )
