@@ -1,0 +1,24 @@
+issue: 2589
+title: "feat(despacho): en-mesa status header filter and pending-first sort"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2589-en-mesa-pending-sort
+risk: low
+
+paths:
+  - app/services/table_qr_requests_service.py
+
+ac:
+  - Flat list ORDER BY pending → accepted → rejected then created_at DESC
+
+out_of_scope:
+  - front UI
+
+hints:
+  entry: "list_requests order_sql"
+  tests: "pytest tests/test_table_qr_requests.py -v"
+
+skip:
+  audits: [ux, color, typography]
