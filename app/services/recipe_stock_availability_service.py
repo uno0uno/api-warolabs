@@ -1,9 +1,9 @@
-"""Recipe-stock availability for catalog visibility (warocol.com#2574).
+"""Recipe-stock availability for catalog visibility (warocol.com#2574 / #2579).
 
 When `tenant_public_profiles.hide_products_without_stock` is on, selling
-catalogs soft-hide products that have expandable recipe rows but cannot
-make qty>=1 from current `tenant_inventory`. Products with no recipe
-ingredients stay visible.
+catalogs soft-hide products that cannot make qty>=1 from current
+`tenant_inventory` via direct bodega lines, recipe bases, or linked resale
+warehouse articles. Non-resale products with no composition stay visible.
 """
 from __future__ import annotations
 
@@ -81,42 +81,103 @@ async def product_ids_insufficient_recipe_stock(
     conn,
     tenant_id: UUID,
 ) -> Set[UUID]:
-    """Product IDs with recipe lines that cannot satisfy qty>=1 from inventory.
+    """Product IDs that cannot satisfy qty>=1 from warehouse inventory.
 
-    Missing inventory rows count as 0 stock. Products with no expandable
-    recipe rows are never returned (they stay visible).
+    Composition sources (warocol.com#2579):
+    - Direct bodega lines (`product_recipes`)
+    - Recipe bases (`product_base_recipes` → templates)
+    - Resale without recipe rows: name-match to `ingredients.is_resale`
+    - Resale with no resolvable warehouse article → treated as insufficient
+
+    Missing inventory rows count as 0 stock. Non-resale products with no
+    expandable composition are never returned (they stay visible).
     """
     rows = await conn.fetch(
         """
         SELECT
-            p.id AS product_id,
+            r.product_id,
             r.ingredient_id,
             r.quantity,
             COALESCE(r.unit, '') AS unit
-        FROM product p
-        JOIN (
+        FROM (
             SELECT
                 pr.product_id,
                 pr.ingredient_id,
                 pr.quantity,
                 pr.unit
             FROM product_recipes pr
+            JOIN product p ON p.id = pr.product_id
+            WHERE p.tenant_id = $1
+
             UNION ALL
+
             SELECT
                 pbr.product_id,
                 brt.ingredient_id,
                 brt.base_quantity * pbr.quantity AS quantity,
                 brt.unit
             FROM product_base_recipes pbr
+            JOIN product p ON p.id = pbr.product_id
             JOIN base_recipe_templates brt
                 ON pbr.product_base_type_id = brt.product_base_type_id
-        ) r ON r.product_id = p.id
-        WHERE p.tenant_id = $1
+            WHERE p.tenant_id = $1
+
+            UNION ALL
+
+            -- Orphan resale: no recipe rows — link by name to warehouse article
+            SELECT
+                p.id AS product_id,
+                i.id AS ingredient_id,
+                1::numeric AS quantity,
+                'und'::text AS unit
+            FROM product p
+            JOIN ingredients i
+                ON i.tenant_id = p.tenant_id
+               AND i.is_resale = true
+               AND lower(trim(i.name)) = lower(trim(p.name))
+            WHERE p.tenant_id = $1
+              AND p.is_resale = true
+              AND NOT EXISTS (
+                  SELECT 1 FROM product_recipes pr WHERE pr.product_id = p.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM product_base_recipes pbr WHERE pbr.product_id = p.id
+              )
+        ) r
         """,
         tenant_id,
     )
+
+    insufficient: Set[UUID] = set()
+
+    # Resale with neither composition nor name-matched article → hide when flag on
+    unlinked_resale = await conn.fetch(
+        """
+        SELECT p.id
+        FROM product p
+        WHERE p.tenant_id = $1
+          AND p.is_resale = true
+          AND NOT EXISTS (
+              SELECT 1 FROM product_recipes pr WHERE pr.product_id = p.id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM product_base_recipes pbr WHERE pbr.product_id = p.id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ingredients i
+              WHERE i.tenant_id = p.tenant_id
+                AND i.is_resale = true
+                AND lower(trim(i.name)) = lower(trim(p.name))
+          )
+        """,
+        tenant_id,
+    )
+    for row in unlinked_resale:
+        insufficient.add(row["id"])
+
     if not rows:
-        return set()
+        return insufficient
 
     ingredient_ids = list({row["ingredient_id"] for row in rows})
     ing_rows = await conn.fetch(
@@ -157,7 +218,6 @@ async def product_ids_insufficient_recipe_stock(
         )
         required[row["product_id"]][row["ingredient_id"]] += need
 
-    insufficient: Set[UUID] = set()
     for product_id, ingredients in required.items():
         for ingredient_id, need in ingredients.items():
             if stock.get(ingredient_id, 0.0) < need:
