@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, Request, Response, Query
+from fastapi import APIRouter, Body, Depends, Request, Response, Query
+from fastapi import HTTPException
 from uuid import UUID
 from typing import Optional
 from app.core.permissions import Module, require_module
@@ -88,12 +89,16 @@ async def update_supplier_endpoint(
 async def delete_supplier_endpoint(
     supplier_id: UUID,
     request: Request,
-    response: Response
+    response: Response,
+    payload: dict = Body(default={}),
 ):
     """
-    Delete a supplier with tenant isolation
+    Delete a supplier with tenant isolation. Requires `reason` in body (Bitácora audit).
     """
-    return await delete_supplier(request, response, supplier_id)
+    reason = (payload or {}).get("reason", "").strip() if isinstance(payload, dict) else ""
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason is required")
+    return await delete_supplier(request, response, supplier_id, reason=reason)
 
 # Payment Agreements Endpoints
 
@@ -150,9 +155,13 @@ async def delete_payment_agreement_endpoint(
     supplier_id: UUID,
     agreement_id: UUID,
     request: Request,
-    response: Response
+    response: Response,
+    payload: dict = Body(default={}),
 ):
     """
-    Delete a payment agreement with tenant isolation
+    Delete a payment agreement with tenant isolation. Requires `reason` in body (Bitácora audit).
     """
-    return await delete_payment_agreement(request, response, supplier_id, agreement_id)
+    reason = (payload or {}).get("reason", "").strip() if isinstance(payload, dict) else ""
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason is required")
+    return await delete_payment_agreement(request, response, supplier_id, agreement_id, reason=reason)
