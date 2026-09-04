@@ -214,10 +214,11 @@ class TenantPublicProfileBase(BaseModel):
         description="When true, POS catalog shows the search bar.",
     )
     deduct_inventory_on_command: bool = Field(
-        True,
+        False,
         description=(
             "When true, inventory qty is deducted when items are sent to kitchen "
-            "(mesa/tab command). COGS GL still posts at checkout."
+            "(mesa/tab command) or on QR/delivery accept. COGS GL still posts at checkout. "
+            "Default false (opt-in)."
         ),
     )
     hide_products_without_stock: bool = Field(

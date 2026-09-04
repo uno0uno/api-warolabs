@@ -4779,7 +4779,7 @@ async def _add_tab_items_core(
     if not session_row:
         raise NotFoundError("No open session found for this table")
 
-    deduct_flag = True
+    deduct_flag = False
     try:
         deduct_flag = await conn.fetchval(
             """
@@ -4790,14 +4790,14 @@ async def _add_tab_items_core(
             tenant_id,
         )
     except Exception as _flag_exc:
-        # Column missing until migration — keep legacy on-send deduct.
+        # Column missing until migration — opt-in off (warocol.com#2572).
         if "deduct_inventory_on_command" not in str(_flag_exc):
             raise
         logger.warning(
-            "[tab] deduct_inventory_on_command missing; defaulting true until migration"
+            "[tab] deduct_inventory_on_command missing; defaulting false until migration"
         )
-        deduct_flag = True
-    deduct_on_command = True if deduct_flag is None else bool(deduct_flag)
+        deduct_flag = False
+    deduct_on_command = False if deduct_flag is None else bool(deduct_flag)
 
     session_id = session_row["session_id"]
     tab_ctx = {

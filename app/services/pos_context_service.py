@@ -209,7 +209,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             elif "deduct_inventory_on_command" in missing:
                 logger.warning(
                     "deduct_inventory_on_command missing in POS context; "
-                    "defaulting true until warocol.com#2566 migration is applied."
+                    "defaulting false (warocol.com#2572)."
                 )
                 try:
                     row = await conn.fetchrow(
@@ -425,7 +425,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                 'deduct_inventory_on_command' in row.keys()
                 and row['deduct_inventory_on_command'] is not None
             )
-            else True
+            else False
         ),
         'hide_products_without_stock': (
             bool(row['hide_products_without_stock'])
