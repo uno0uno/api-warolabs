@@ -277,7 +277,12 @@ async def list_requests(
         order_sql = (
             "ORDER BY t.name, r.created_at ASC"
             if grouped and status == "pending"
-            else "ORDER BY r.created_at DESC"
+            else """ORDER BY CASE r.status
+                WHEN 'pending' THEN 0
+                WHEN 'accepted' THEN 1
+                WHEN 'rejected' THEN 2
+                ELSE 3
+            END, r.created_at DESC"""
         )
 
         rows = await conn.fetch(
