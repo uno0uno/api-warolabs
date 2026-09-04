@@ -220,6 +220,14 @@ class TenantPublicProfileBase(BaseModel):
             "(mesa/tab command). COGS GL still posts at checkout."
         ),
     )
+    hide_products_without_stock: bool = Field(
+        False,
+        description=(
+            "When true, selling catalogs hide products that have a recipe but cannot "
+            "make qty>=1 from current tenant_inventory. Products without recipes stay "
+            "visible. Default false (opt-in). warocol.com#2574"
+        ),
+    )
 
     @field_validator('timezone')
     @classmethod
@@ -345,6 +353,8 @@ class TenantPublicProfileUpdate(BaseModel):
     pos_show_search: Optional[bool] = None
     # warocol.com#2566
     deduct_inventory_on_command: Optional[bool] = None
+    # warocol.com#2574
+    hide_products_without_stock: Optional[bool] = None
 
     @field_validator('timezone')
     @classmethod
