@@ -647,7 +647,11 @@ async def create_adjustment(
         body = await request.json()
         ingredient_id = UUID(body.get('ingredient_id'))
         quantity_change = _decimal_value(body.get('quantity_change'))
-        reason = body.get('reason', 'Manual adjustment')
+        # warocol.com#980 — reason is required (Bitácora audit); no silent default.
+        raw_reason = body.get('reason')
+        reason = raw_reason.strip() if isinstance(raw_reason, str) else ''
+        if not reason:
+            raise HTTPException(status_code=422, detail="reason is required")
         source = body.get('source', 'manual_adjustment')
         # New fields for enhanced adjustments
         purchase_unit = body.get('unit')  # Optional: unit selected by user
