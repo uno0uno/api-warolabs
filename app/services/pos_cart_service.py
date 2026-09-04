@@ -1736,8 +1736,23 @@ async def add_order_payment(
                             f"Deferred tip GL failed for POS order {order_id}: {_tip_gl_err}"
                         )
 
-                if is_complete and lookup_by_order:
-                    await _release_table_session(conn, table_session_id, tenant_id)
+                if is_complete and (lookup_by_order or table_session_id):
+                    if table_session_id and not lookup_by_order:
+                        # warocol.com#976 — cart-flow charge on a mesa order:
+                        # only release when no other open orders remain in
+                        # the session (bar tabs serve several orders over time).
+                        open_orders = await conn.fetchval(
+                            """
+                            SELECT COUNT(*) FROM orders
+                            WHERE table_session_id = $1 AND tenant_id = $2
+                              AND status NOT IN ('completed', 'cancelled')
+                            """,
+                            table_session_id, tenant_id,
+                        )
+                        if not open_orders:
+                            await _release_table_session(conn, table_session_id, tenant_id)
+                    else:
+                        await _release_table_session(conn, table_session_id, tenant_id)
 
         # 6. Fire-and-forget side effects OUTSIDE transaction (only on completion)
         if is_complete and award_customer_id:
@@ -2741,6 +2756,21 @@ async def complete_pos_order(
                             await finalize_open_comandas(conn, order_id, tenant_id)
                         except Exception as _ce:
                             logger.warning(f"Could not finalize comandas for order {order_id}: {_ce}")
+                        # warocol.com#976 — mesa order completed via cart flow:
+                        # release the session or /pos keeps showing the table
+                        # as active. Bar rotates its own session above; split
+                        # partials that don't complete never reach this branch.
+                        if table_session_id and (not split_mode or _split_is_complete):
+                            open_orders = await conn.fetchval(
+                                """
+                                SELECT COUNT(*) FROM orders
+                                WHERE table_session_id = $1 AND tenant_id = $2
+                                  AND status NOT IN ('completed', 'cancelled')
+                                """,
+                                table_session_id, tenant_id,
+                            )
+                            if not open_orders:
+                                await _release_table_session(conn, table_session_id, tenant_id)
 
                 logger.info(f"Order #{order_number} created (split_mode={split_mode})")
 
