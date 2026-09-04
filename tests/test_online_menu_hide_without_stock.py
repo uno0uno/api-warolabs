@@ -6,6 +6,9 @@ from uuid import uuid4
 import pytest
 
 from app.services import public_restaurant_service
+from app.services.recipe_stock_availability_service import (
+    apply_hide_products_without_stock_filter,
+)
 
 
 @pytest.mark.asyncio
@@ -122,7 +125,7 @@ async def test_apply_filter_no_op_when_hide_set_empty():
         "app.services.recipe_stock_availability_service.product_ids_insufficient_recipe_stock",
         new=AsyncMock(return_value=set()),
     ):
-        query, params = await public_restaurant_service._apply_hide_products_without_stock_filter(
+        query, params = await apply_hide_products_without_stock_filter(
             conn,
             tenant_id,
             "SELECT 1 FROM product p WHERE p.tenant_id = $1",

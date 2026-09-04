@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from decimal import Decimal
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID
 
 import asyncpg
@@ -164,3 +164,24 @@ async def product_ids_insufficient_recipe_stock(
                 insufficient.add(product_id)
                 break
     return insufficient
+
+
+async def apply_hide_products_without_stock_filter(
+    conn,
+    tenant_id: UUID,
+    products_query: str,
+    params: List[Any],
+) -> Tuple[str, List[Any]]:
+    """Append SQL excluding insufficient-recipe-stock products when flag is on.
+
+    Used by online menu (#2575) and table QR (#2576) listings.
+    """
+    if not await is_hide_products_without_stock_enabled(conn, tenant_id):
+        return products_query, params
+    hide_ids = await product_ids_insufficient_recipe_stock(conn, tenant_id)
+    if not hide_ids:
+        return products_query, params
+    next_param = len(params) + 1
+    products_query += f" AND p.id <> ALL(${next_param}::uuid[])"
+    params = list(params) + [list(hide_ids)]
+    return products_query, params
