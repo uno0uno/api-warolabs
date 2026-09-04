@@ -5,7 +5,6 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
-from app.core.exceptions import APIError
 from app.core.permissions import Module, require_module
 from app.services import table_qr_requests_service
 
@@ -25,17 +24,30 @@ class RejectTableQrRequest(BaseModel):
 @router.get("", dependencies=[Depends(require_module(Module.DESPACHO))])
 async def list_table_qr_requests(
     request: Request,
-    status: str = Query(default="pending", pattern="^(pending|accepted|rejected)$"),
+    status: str = Query(default="pending", pattern="^(pending|accepted|rejected|all)$"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    table_id: Optional[UUID] = Query(None),
+    grouped: Optional[bool] = Query(
+        None,
+        description="Legacy tables[] grouping. Defaults to true when status=pending.",
+    ),
 ):
-    """List pending Table QR requests grouped by table (Despacho UI)."""
-    if status != "pending":
-        raise APIError("Only status=pending is supported", status_code=400)
-    return await table_qr_requests_service.list_pending_grouped(request)
+    """List Table QR requests for Despacho (filter + pagination)."""
+    use_grouped = grouped if grouped is not None else (status == "pending")
+    return await table_qr_requests_service.list_requests(
+        request,
+        status=status,
+        limit=limit,
+        offset=offset,
+        table_id=table_id,
+        grouped=use_grouped,
+    )
 
 
 @router.get("/{request_id}", dependencies=[Depends(require_module(Module.DESPACHO))])
 async def get_table_qr_request(request: Request, request_id: UUID):
-    """Get a single pending Table QR request (Despacho detail page)."""
+    """Get a single Table QR request (any status) for Despacho detail."""
     return await table_qr_requests_service.get_request(request, request_id)
 
 

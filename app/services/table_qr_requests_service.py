@@ -54,6 +54,8 @@ def _parse_items_json(raw: Any) -> List[dict]:
 
 def _format_request_row(row: dict, tenant_timezone: Optional[str] = None) -> dict:
     items = _parse_items_json(row["items"])
+    accepted_at = row.get("accepted_at")
+    rejected_at = row.get("rejected_at")
     return {
         "id": str(row["id"]),
         "table_id": str(row["table_id"]),
@@ -68,6 +70,8 @@ def _format_request_row(row: dict, tenant_timezone: Optional[str] = None) -> dic
         "payment_display": _payment_display(row),
         "customer_notes": row.get("customer_notes"),
         "created_at": row["created_at"].isoformat(),
+        "accepted_at": accepted_at.isoformat() if accepted_at else None,
+        "rejected_at": rejected_at.isoformat() if rejected_at else None,
         "tenant_timezone": tenant_timezone,
     }
 
@@ -188,54 +192,166 @@ async def _ensure_open_session_in_tx(
 
 
 async def list_pending_grouped(request: Request) -> dict:
-    """GET /table-qr-requests?status=pending — grouped by table for Despacho."""
+    """Backward-compatible wrapper — pending only, grouped by table."""
+    return await list_requests(request, status="pending", limit=200, offset=0, grouped=True)
+
+
+async def list_requests(
+    request: Request,
+    status: str = "pending",
+    limit: int = 50,
+    offset: int = 0,
+    table_id: Optional[UUID] = None,
+    grouped: bool = False,
+) -> dict:
+    """
+    GET /table-qr-requests — list by status with pagination.
+
+    status: pending | accepted | rejected | all
+    When grouped=True and status=pending, returns legacy {tables, total_pending} shape.
+    Otherwise returns flat {requests, tables, total_pending} + pagination.
+    """
     session = require_valid_session(request)
     tenant_id = session.tenant_id
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
 
+    if status not in ("pending", "accepted", "rejected", "all"):
+        raise APIError("Invalid status filter", status_code=400)
+
+    where = ["r.tenant_id = $1"]
+    params: list = [tenant_id]
+    param_n = 1
+
+    if status != "all":
+        param_n += 1
+        where.append(f"r.status = ${param_n}")
+        params.append(status)
+
+    if table_id is not None:
+        param_n += 1
+        where.append(f"r.table_id = ${param_n}")
+        params.append(table_id)
+
+    where_sql = " AND ".join(where)
+
     async with get_db_connection(use_transaction=False) as conn:
         tenant_timezone = await resolve_tenant_timezone(conn, tenant_id)
+
+        count_row = await conn.fetchrow(
+            f"SELECT COUNT(*) AS total FROM table_qr_requests r WHERE {where_sql}",
+            *params,
+        )
+        total_count = int(count_row["total"]) if count_row else 0
+
+        pending_count_row = await conn.fetchrow(
+            """
+            SELECT COUNT(*) AS total
+            FROM table_qr_requests r
+            WHERE r.tenant_id = $1 AND r.status = 'pending'
+            """,
+            tenant_id,
+        )
+        total_pending = int(pending_count_row["total"]) if pending_count_row else 0
+
+        table_rows = await conn.fetch(
+            f"""
+            SELECT DISTINCT t.id, t.name
+            FROM table_qr_requests r
+            JOIN tables t ON t.id = r.table_id
+            WHERE {where_sql}
+            ORDER BY t.name
+            """,
+            *params,
+        )
+        tables_for_filter = [
+            {"table_id": str(r["id"]), "table_name": r["name"]}
+            for r in table_rows
+        ]
+
+        param_n += 1
+        limit_p = param_n
+        param_n += 1
+        offset_p = param_n
+
+        order_sql = (
+            "ORDER BY t.name, r.created_at ASC"
+            if grouped and status == "pending"
+            else "ORDER BY r.created_at DESC"
+        )
+
         rows = await conn.fetch(
             f"""
             SELECT
                 r.id, r.table_id, r.status, r.items,
                 r.payment_method, r.payment_method_id, r.customer_notes, r.created_at,
+                r.accepted_at, r.rejected_at,
                 t.name AS table_name,
                 pmg.name AS payment_method_group_name,
                 pm.name AS payment_method_name
             FROM table_qr_requests r
             JOIN tables t ON t.id = r.table_id
             {_PAYMENT_LABEL_JOINS}
-            WHERE r.tenant_id = $1 AND r.status = 'pending'
-            ORDER BY t.name, r.created_at ASC
+            WHERE {where_sql}
+            {order_sql}
+            LIMIT ${limit_p} OFFSET ${offset_p}
             """,
-            tenant_id,
+            *params,
+            limit,
+            offset,
         )
 
-    tables_map: Dict[str, dict] = {}
+    formatted = []
     for row in rows:
-        table_id = str(row["table_id"])
-        if table_id not in tables_map:
-            tables_map[table_id] = {
-                "table_id": table_id,
-                "table_name": row["table_name"],
-                "requests": [],
-            }
-        tables_map[table_id]["requests"].append(_format_request_row(dict(row), tenant_timezone))
+        data = _format_request_row(dict(row), tenant_timezone)
+        data["total_amount"] = _request_total_amount(data["items"])
+        formatted.append(data)
+
+    if grouped and status == "pending":
+        tables_map: Dict[str, dict] = {}
+        for item in formatted:
+            tid = item["table_id"]
+            if tid not in tables_map:
+                tables_map[tid] = {
+                    "table_id": tid,
+                    "table_name": item["table_name"],
+                    "requests": [],
+                }
+            tables_map[tid]["requests"].append(item)
+        return {
+            "success": True,
+            "data": {
+                "tables": list(tables_map.values()),
+                "total_pending": total_pending,
+                "tenant_timezone": tenant_timezone,
+            },
+            "pagination": {
+                "total": total_count,
+                "limit": limit,
+                "offset": offset,
+                "has_more": (offset + limit) < total_count,
+            },
+        }
 
     return {
         "success": True,
         "data": {
-            "tables": list(tables_map.values()),
-            "total_pending": len(rows),
+            "requests": formatted,
+            "tables": tables_for_filter,
+            "total_pending": total_pending,
             "tenant_timezone": tenant_timezone,
+        },
+        "pagination": {
+            "total": total_count,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + limit) < total_count,
         },
     }
 
 
 async def get_request(request: Request, request_id: UUID) -> dict:
-    """GET /table-qr-requests/{request_id} — single pending request for Despacho detail."""
+    """GET /table-qr-requests/{request_id} — any status for Despacho detail."""
     session = require_valid_session(request)
     tenant_id = session.tenant_id
     if not tenant_id:
@@ -248,20 +364,21 @@ async def get_request(request: Request, request_id: UUID) -> dict:
             SELECT
                 r.id, r.table_id, r.status, r.items,
                 r.payment_method, r.payment_method_id, r.customer_notes, r.created_at,
+                r.accepted_at, r.rejected_at,
                 t.name AS table_name,
                 pmg.name AS payment_method_group_name,
                 pm.name AS payment_method_name
             FROM table_qr_requests r
             JOIN tables t ON t.id = r.table_id
             {_PAYMENT_LABEL_JOINS}
-            WHERE r.id = $1 AND r.tenant_id = $2 AND r.status = 'pending'
+            WHERE r.id = $1 AND r.tenant_id = $2
             """,
             request_id,
             tenant_id,
         )
         if not row:
             raise APIError(
-                "Request not found or not pending",
+                "Request not found",
                 status_code=404,
             )
 

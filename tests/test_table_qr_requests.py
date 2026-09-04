@@ -281,13 +281,16 @@ async def test_accept_requests_passes_persisted_modifier_quantity_to_tab_core():
     record_mock.assert_awaited_once()
     assert record_mock.await_args.kwargs["action"] == "table_qr_accepted"
     assert record_mock.await_args.kwargs["domain"] == "despacho"
+
+
+def test_list_endpoint_pending_delegates():
     app = FastAPI()
     app.include_router(table_qr_requests_router.router, prefix="/table-qr-requests")
 
     payload = {"success": True, "data": {"tables": [], "total_pending": 0}}
 
     with patch(
-        "app.routers.table_qr_requests.table_qr_requests_service.list_pending_grouped",
+        "app.routers.table_qr_requests.table_qr_requests_service.list_requests",
         new_callable=AsyncMock,
         return_value=payload,
     ):
@@ -295,6 +298,31 @@ async def test_accept_requests_passes_persisted_modifier_quantity_to_tab_core():
         res = client.get("/table-qr-requests?status=pending")
         assert res.status_code == 200
         assert res.json()["data"]["total_pending"] == 0
+
+
+def test_list_endpoint_accepted_delegates():
+    app = FastAPI()
+    app.include_router(table_qr_requests_router.router, prefix="/table-qr-requests")
+
+    payload = {
+        "success": True,
+        "data": {"requests": [], "tables": [], "total_pending": 0},
+        "pagination": {"total": 0, "limit": 25, "offset": 0, "has_more": False},
+    }
+
+    with patch(
+        "app.routers.table_qr_requests.table_qr_requests_service.list_requests",
+        new_callable=AsyncMock,
+        return_value=payload,
+    ) as mock_list:
+        client = TestClient(app)
+        res = client.get("/table-qr-requests?status=accepted&limit=25&offset=0&grouped=false")
+        assert res.status_code == 200
+        mock_list.assert_awaited_once()
+        kwargs = mock_list.await_args.kwargs
+        assert kwargs["status"] == "accepted"
+        assert kwargs["limit"] == 25
+        assert kwargs["grouped"] is False
 
 
 def test_format_request_row_payment_display_with_submethod():
