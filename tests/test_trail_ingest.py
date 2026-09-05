@@ -91,15 +91,28 @@ def test_forwards_scroll_depth_and_page_leave():
                 "dwell_ms": 12000,
             },
         )
+        cta = client.post(
+            "/public/trail/events",
+            json={
+                "visitor_key": "opaque-id",
+                "path": "/blog/demo",
+                "event_type": "cta_click",
+                "utm_content": "article:pos1",
+            },
+        )
     assert scroll.status_code == 200
     assert leave.status_code == 200
+    assert cta.status_code == 200
     scroll_payload = ingest.call_args_list[0].args[1]
     leave_payload = ingest.call_args_list[1].args[1]
+    cta_payload = ingest.call_args_list[2].args[1]
     assert scroll_payload["event_type"] == "scroll_depth"
     assert scroll_payload["scroll_pct"] == 75
     assert leave_payload["event_type"] == "page_leave"
     assert leave_payload["scroll_pct"] == 100
     assert leave_payload["dwell_ms"] == 12000
+    assert cta_payload["event_type"] == "cta_click"
+    assert cta_payload["utm_content"] == "article:pos1"
 
 
 def test_rejects_unknown_event_type_and_bad_scroll():

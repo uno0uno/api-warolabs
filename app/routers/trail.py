@@ -35,7 +35,7 @@ class TrailEventBody(BaseModel):
     visitor_key: str = Field(min_length=1, max_length=128)
     path: str = Field(min_length=1, max_length=10000)
     site_key: str = Field(default=SITE_KEY, max_length=253)
-    event_type: Literal["page_view", "scroll_depth", "page_leave"] = "page_view"
+    event_type: Literal["page_view", "scroll_depth", "page_leave", "cta_click"] = "page_view"
     scroll_pct: Optional[int] = Field(default=None, ge=0, le=100)
     dwell_ms: Optional[int] = Field(default=None, ge=0)
     referrer: Optional[str] = Field(default=None, max_length=2048)
