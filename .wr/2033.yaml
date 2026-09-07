@@ -1,0 +1,30 @@
+# Machine contract for wr-fast — keep ≤80 lines.
+issue: 2033
+title: "Facturación: unify Datos fiscales + Impuestos into one save"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2033-unify-fiscal-tax
+risk: low
+
+paths:
+  - app/routers/tenant_config.py
+  - tests/test_tenant_fiscal_data.py
+
+ac:
+  - PUT fiscal-data accepts optional tax_config and persists via update_tax_config
+  - Without tax_config, profile sync (#2031) still runs
+  - GET/PUT tax-config remain (Menú readers)
+
+out_of_scope:
+  - Delete tax-config endpoints
+  - Commercial jurisdiction redesign
+
+hints:
+  entry: "update_fiscal_data tax_config → TaxConfigUpdate → update_tax_config"
+  pattern: "after fiscal upsert; force iva/inc from sales_tax_profile"
+  tests: "pytest tests/test_tenant_fiscal_data.py -q"
+
+skip:
+  audits: [ux, color, typography]

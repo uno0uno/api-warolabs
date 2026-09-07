@@ -1,0 +1,39 @@
+issue: 669
+title: "Auth: tests flaky del session resolver + sesiones internas máx 24h"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-669-session-ttl-flaky-tests
+
+paths:
+  - app/core/security.py
+  - app/services/magic_link_service.py
+  - app/services/auth_service.py
+  - app/services/invitation_service.py
+  - tests/test_customer_internal_access.py
+
+ac:
+  - "Constante INTERNAL_SESSION_HOURS=24 usada en 5 inserts de sesión + max_age de cookie"
+  - "Tests del session resolver deterministas (random parcheado); suite 10/10 verde"
+  - "Test: sesión recién creada expira ~24h (no 7 días)"
+  - "import random al tope del módulo en security.py"
+
+out_of_scope:
+  - CUSTOMER_SESSION_DAYS (portal customer, JWT separado)
+  - cambios de comportamiento del zombie-cleanup en producción
+
+hints:
+  entry: "security.py:185 (cookie max_age), :362-365 (random cleanup); inserts: magic_link_service.py:201,440,596; auth_service.py:293; invitation_service.py:328"
+  pattern: "CUSTOMER_SESSION_DAYS=7 (security.py:224) como patrón de constante"
+  tests: "./venv/bin/python -m pytest tests/test_customer_internal_access.py tests/test_magic_link_registration_contract.py tests/test_magic_link_cross_tenant.py tests/test_magic_link_email_normalize.py -q (x10)"
+
+risk:
+  sensitive: true
+  areas: [auth, sessions]
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "auto review wr-review + revisión humana obligatoria (auth)"

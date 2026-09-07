@@ -42,6 +42,7 @@ async def test_get_menu_for_token_returns_table_qr_products():
             "has_modifiers": False,
         }],
     ])
+    conn.fetchval = AsyncMock(return_value=False)
 
     with patch(
         "app.services.public_table_qr_service.resolve_table_qr_context",
@@ -57,6 +58,81 @@ async def test_get_menu_for_token_returns_table_qr_products():
         assert result["is_currently_open"] is True
         assert len(result["products"]) == 1
         assert result["products"][0]["price"] == 5000.0
+        product_query = conn.fetch.await_args_list[1].args[0]
+        assert "<> ALL" not in product_query
+
+
+@pytest.mark.asyncio
+async def test_get_menu_for_token_excludes_insufficient_when_flag_on():
+    ctx = _active_ctx()
+    keep_id = uuid4()
+    hide_id = uuid4()
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=[
+        [{"id": uuid4(), "name": "Bebidas", "description": None}],
+        [{
+            "id": keep_id,
+            "name": "Té",
+            "description": None,
+            "price": 3000,
+            "image_url": None,
+            "category_id": uuid4(),
+            "category_name": "Bebidas",
+            "is_available": True,
+            "preparation_time": 3,
+            "allow_modifiers": False,
+            "has_modifiers": False,
+        }],
+    ])
+
+    with patch(
+        "app.services.public_table_qr_service.resolve_table_qr_context",
+        new_callable=AsyncMock,
+        return_value=ctx,
+    ), patch("app.services.public_table_qr_service.get_db_connection") as mock_conn, patch(
+        "app.services.recipe_stock_availability_service.is_hide_products_without_stock_enabled",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "app.services.recipe_stock_availability_service.product_ids_insufficient_recipe_stock",
+        new=AsyncMock(return_value={hide_id}),
+    ):
+        mock_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
+        mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
+        result = await public_table_qr_service.get_menu_for_token("tok-abc")
+
+    assert len(result["products"]) == 1
+    assert result["products"][0]["id"] == keep_id
+    product_call = conn.fetch.await_args_list[1]
+    assert "<> ALL" in product_call.args[0]
+    assert hide_id in product_call.args[2]
+
+
+@pytest.mark.asyncio
+async def test_build_item_snapshots_rejects_insufficient_when_flag_on():
+    tenant_id = uuid4()
+    product_id = uuid4()
+    conn = MagicMock()
+    conn.fetch = AsyncMock(
+        return_value=[{"id": product_id, "name": "Café", "price": 5000}]
+    )
+
+    with patch(
+        "app.services.public_table_qr_service.validate_products_belong_to_tenant",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.public_table_qr_service.is_hide_products_without_stock_enabled",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "app.services.public_table_qr_service.product_ids_insufficient_recipe_stock",
+        new=AsyncMock(return_value={product_id}),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await public_table_qr_service._build_item_snapshots(
+                conn,
+                tenant_id,
+                [{"product_id": str(product_id), "quantity": 1, "modifiers": []}],
+            )
+    assert exc.value.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -283,6 +359,9 @@ async def test_build_item_snapshots_multiplies_and_persists_modifier_quantity():
     ), patch(
         "app.services.public_table_qr_service.validate_modifiers_for_item",
         new=AsyncMock(),
+    ), patch(
+        "app.services.public_table_qr_service.is_hide_products_without_stock_enabled",
+        new=AsyncMock(return_value=False),
     ):
         snapshots, total = await public_table_qr_service._build_item_snapshots(
             conn,
@@ -321,6 +400,9 @@ async def test_build_item_snapshots_rejects_invalid_modifier_quantity():
     ), patch(
         "app.services.public_table_qr_service.validate_modifiers_for_item",
         new=AsyncMock(),
+    ), patch(
+        "app.services.public_table_qr_service.is_hide_products_without_stock_enabled",
+        new=AsyncMock(return_value=False),
     ):
         with pytest.raises(HTTPException) as exc:
             await public_table_qr_service._build_item_snapshots(

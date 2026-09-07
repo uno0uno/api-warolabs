@@ -1,4 +1,5 @@
 """Session cookie parsing and duplicate-token resolution (#387)."""
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
@@ -8,7 +9,7 @@ from fastapi import HTTPException, Request
 from app.core.security import collect_session_tokens, get_session_token, _normalize_session_token
 
 
-def _make_request(cookie_header: str = "", cookies: dict | None = None) -> Request:
+def _make_request(cookie_header: str = "", cookies: Optional[dict] = None) -> Request:
     scope = {
         "type": "http",
         "headers": [(b"cookie", cookie_header.encode())] if cookie_header else [],
@@ -67,8 +68,10 @@ async def test_get_session_token_picks_newest_valid_among_duplicates():
 
     assert token == fresh
     conn.fetchrow.assert_awaited_once()
-    _sql, bound_ids = conn.fetchrow.await_args.args
+    _sql, bound_ids, idle_hours = conn.fetchrow.await_args.args
     assert bound_ids == [UUID(stale), UUID(fresh)]
+    assert idle_hours == 4
+    assert "last_activity_at" in _sql
     assert conn.execute.await_count == 1
     _deactivate_sql, stale_uuid = conn.execute.await_args.args
     assert stale_uuid == UUID(stale)

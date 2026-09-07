@@ -145,13 +145,13 @@ async def update_recipe_base_endpoint(
 @router.delete("/{recipe_base_id}", status_code=200, dependencies=[Depends(require_module(Module.MENU))])
 async def delete_recipe_base_endpoint(
     request: Request,
-    recipe_base_id: UUID = Path(..., description="Recipe base type UUID")
+    recipe_base_id: UUID = Path(..., description="Recipe base type UUID"),
+    payload: dict = Body(default={}),
 ):
     """
     Delete a recipe base type and its ingredient templates.
 
-    **Warning:** This will permanently delete the recipe base type and all
-    its ingredient templates. Products using this recipe base will not be affected.
+    Requires `reason` in body (Bitácora audit).
 
     **Path Parameters:**
     - recipe_base_id: UUID of the recipe base type to delete
@@ -159,4 +159,7 @@ async def delete_recipe_base_endpoint(
     **Returns:**
     - Success message
     """
-    return await delete_recipe_base_type(request, recipe_base_id)
+    reason = (payload or {}).get("reason", "").strip() if isinstance(payload, dict) else ""
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason is required")
+    return await delete_recipe_base_type(request, recipe_base_id, reason=reason)

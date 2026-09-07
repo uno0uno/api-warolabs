@@ -1,0 +1,43 @@
+# Compact plan for wr-exec. Keep <=80 lines.
+issue: 2349
+issue_ref: uno0uno/warocol.com#2349
+title: "Record Ventas bitácora for status, customer, and email"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2349-ventas-bitacora-events
+parent_epic: uno0uno/warocol.com#2346
+closes: "Closes uno0uno/warocol.com#2349"
+companion: uno0uno/warocol.com wr-2349-ventas-bitacora-events
+risk: low
+
+paths:
+  - app/services/operation_events_service.py
+  - app/services/orders_service.py
+  - tests/test_orders_despacho_operation_events.py
+  - tests/test_order_customer_association.py
+  - tests/test_invoice_send_email.py
+
+ac:
+  - Ventas detail status change persists order_status_changed with channel None
+  - Associate or change customer persists order_customer_changed
+  - Send receipt or invoice email persists order_email_sent
+  - channel None no longer dropped (apply existing sql/20260815_operation_events_relax_checks.sql)
+  - Helper still never raises; sale mutation stays 200 if insert fails
+
+out_of_scope:
+  - Status machine (#2347) and GL reverse (#2348)
+  - Bulk status events
+  - POS / Productos / Propinas bitácora
+  - Credit notes
+  - Failing the sale when bitácora insert fails
+
+hints:
+  entry: "update_order_status already records; associate_order_customer and send_invoice_email do not"
+  pattern: "orders_service.py:1590 channel=None order_status_changed; keep None; add ACTIONS keys"
+  tests: "./venv/bin/pytest tests/test_orders_despacho_operation_events.py tests/test_order_customer_association.py tests/test_invoice_send_email.py -q"
+  deploy: "PR body: apply sql/20260815_operation_events_relax_checks.sql on prod (DROP NOT NULL + CHECKs). Already in repo."
+
+skip:
+  audits: [ux, color, typography]

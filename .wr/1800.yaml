@@ -1,0 +1,43 @@
+issue: 1800
+title: "Add starter recipe_bases quota and gate Recetas Nuevo"
+repo: both
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-1800-recipe-bases-quota
+
+paths:
+  - app/services/billing_service.py
+  - app/services/recipe_bases_service.py
+  - sql/20260724_starter_recipe_bases_quota.sql
+  - tests/test_quota_enforcement.py
+  - tests/test_billing_remaining_usage.py
+  - tests/test_billing_plan_quotas.py
+  - .wr/1800.yaml
+
+ac:
+  - "Starter recipe_bases limit is 5, counted from product_base_types"
+  - "Recipe base CREATE enforces the quota with a 429 quota_exceeded payload"
+  - "remaining-usage exposes recipe_bases"
+  - "Paid plans keep recipe_bases effectively unlimited"
+  - "Migration only merges recipe_bases into the starter plan quotas"
+
+out_of_scope:
+  - "Change menu_products, modifier_groups, recipe_lines_per_product or recipe_base_template_lines"
+  - "Add menu_categories (separate issue #1798)"
+
+hints:
+  entry: "billing_service.check_plan_quota_growth; recipe_bases_service.create_recipe_base_type"
+  pattern: "Existing menu_products and modifier_groups growth quotas"
+  tests: "./venv/bin/pytest tests/test_quota_enforcement.py tests/test_billing_remaining_usage.py tests/test_billing_plan_quotas.py -q"
+
+risk:
+  sensitive: false
+  areas:
+    - "API/front quota contract"
+
+skip:
+  audits: []
+
+next:
+  after_pr: "Merge API before companion front PR, then apply the SQL seed"

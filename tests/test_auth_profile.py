@@ -42,6 +42,7 @@ def profile_row(**overrides):
         'description': 'Personal description',
         'logo_avatar': AVATAR_URL,
         'preferred_locale': 'en',
+        'pos_catalog_layout_override': None,
         'created_at': datetime(2026, 1, 1, tzinfo=timezone.utc),
     }
     row.update(overrides)
@@ -76,39 +77,55 @@ def test_update_profile_request_normalizes_and_validates_fields():
         name='  Person Name  ',
         description='  A short description  ',
         preferred_locale='pt',
+        pos_catalog_layout_override='LIST',
     )
 
     assert payload.name == 'Person Name'
     assert payload.description == 'A short description'
     assert payload.preferred_locale == 'pt'
+    assert payload.pos_catalog_layout_override == 'list'
 
     with pytest.raises(ValidationError):
         UpdateProfileRequest(name='   ')
     with pytest.raises(ValidationError):
         UpdateProfileRequest(preferred_locale='it')
+    with pytest.raises(ValidationError):
+        UpdateProfileRequest(pos_catalog_layout_override='masonry')
 
 
 def test_update_profile_request_tracks_explicit_null_locale():
     payload = UpdateProfileRequest.model_validate({
         'preferred_locale': None,
+        'pos_catalog_layout_override': None,
         'user_id': str(OTHER_USER_ID),
         'logo_avatar': 'https://attacker.example/avatar.png',
     })
 
     assert 'preferred_locale' in payload.model_fields_set
     assert payload.preferred_locale is None
+    assert 'pos_catalog_layout_override' in payload.model_fields_set
+    assert payload.pos_catalog_layout_override is None
     assert 'user_id' not in payload.model_dump()
     assert 'logo_avatar' not in payload.model_dump()
 
 
 @pytest.mark.asyncio
 async def test_session_returns_personal_profile_without_active_tenant(monkeypatch):
-    connection = SimpleNamespace(fetchrow=AsyncMock(return_value=session_row()))
+    connection = SimpleNamespace(
+        fetchrow=AsyncMock(return_value=session_row(
+            pos_catalog_layout_override='list',
+        )),
+        execute=AsyncMock(),
+    )
     monkeypatch.setattr(auth_service, 'get_session_token', AsyncMock(return_value='session-token'))
     monkeypatch.setattr(
         auth_service,
         'get_db_connection',
         lambda: AsyncConnectionContext(connection),
+    )
+    monkeypatch.setattr(
+        'app.core.security.touch_session_activity',
+        AsyncMock(),
     )
 
     result = await auth_service.get_session_data(MagicMock(), Response())
@@ -119,6 +136,7 @@ async def test_session_returns_personal_profile_without_active_tenant(monkeypatc
     assert payload['user']['description'] == 'Personal description'
     assert payload['user']['logo_avatar'] == AVATAR_URL
     assert payload['user']['preferred_locale'] == 'en'
+    assert payload['user']['pos_catalog_layout_override'] == 'list'
 
 
 @pytest.mark.asyncio
@@ -126,6 +144,7 @@ async def test_update_profile_uses_session_user_and_can_clear_nullable_fields(mo
     connection = SimpleNamespace(fetchrow=AsyncMock(return_value=profile_row(
         description=None,
         preferred_locale=None,
+        pos_catalog_layout_override=None,
     )))
     monkeypatch.setattr(
         auth_service,
@@ -142,16 +161,47 @@ async def test_update_profile_uses_session_user_and_can_clear_nullable_fields(mo
         MagicMock(),
         description=None,
         preferred_locale=None,
-        fields_set={'description', 'preferred_locale'},
+        pos_catalog_layout_override=None,
+        fields_set={'description', 'preferred_locale', 'pos_catalog_layout_override'},
     )
 
-    query, description, locale, owner_id = connection.fetchrow.await_args.args
+    query, description, locale, layout, owner_id = connection.fetchrow.await_args.args
     assert 'description = $1' in query
     assert 'preferred_locale = $2' in query
-    assert 'WHERE id = $3' in query
-    assert (description, locale, owner_id) == (None, None, USER_ID)
+    assert 'pos_catalog_layout_override = $3' in query
+    assert 'WHERE id = $4' in query
+    assert (description, locale, layout, owner_id) == (None, None, None, USER_ID)
     assert owner_id != OTHER_USER_ID
     assert result.user.preferred_locale is None
+    assert result.user.pos_catalog_layout_override is None
+
+
+@pytest.mark.asyncio
+async def test_update_profile_sets_pos_catalog_layout_override(monkeypatch):
+    connection = SimpleNamespace(fetchrow=AsyncMock(return_value=profile_row(
+        pos_catalog_layout_override='grid',
+    )))
+    monkeypatch.setattr(
+        auth_service,
+        'require_valid_session',
+        lambda request: SimpleNamespace(user_id=USER_ID),
+    )
+    monkeypatch.setattr(
+        auth_service,
+        'get_db_connection',
+        lambda: AsyncConnectionContext(connection),
+    )
+
+    result = await auth_service.update_profile(
+        MagicMock(),
+        pos_catalog_layout_override='grid',
+        fields_set={'pos_catalog_layout_override'},
+    )
+
+    query, layout, owner_id = connection.fetchrow.await_args.args
+    assert 'pos_catalog_layout_override = $1' in query
+    assert (layout, owner_id) == ('grid', USER_ID)
+    assert result.user.pos_catalog_layout_override == 'grid'
 
 
 @pytest.mark.asyncio

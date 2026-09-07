@@ -23,6 +23,50 @@ from app.models.purchase import (
 from app.services.email_helpers import send_quotation_email
 from app.services.gemini_service import process_invoice
 from app.services.ingredients_service import match_ingredient_by_name
+from app.services.operation_events_service import DOMAIN_ABASTECIMIENTO, record_module_event
+
+# Direct credit payables for Pagos — unpaid received + paid settlements (not contado).
+# See warocol.com#2110 / #2111 / epic #2109.
+_DIRECT_PAYABLES_SQL = """(
+                    (tp.is_direct_entry = FALSE OR tp.is_direct_entry IS NULL)
+                    OR (
+                        tp.is_direct_entry = TRUE
+                        AND lower(COALESCE(tp.payment_type, '')) IS DISTINCT FROM 'contado'
+                        AND (
+                            (tp.paid_at IS NULL AND tp.status = 'received')
+                            OR tp.paid_at IS NOT NULL
+                        )
+                    )
+                )"""
+
+_EXCLUDE_DIRECTS_SQL = "(tp.is_direct_entry = FALSE OR tp.is_direct_entry IS NULL)"
+
+
+def direct_entry_list_clause(include_direct_payables: bool) -> str:
+    """WHERE fragment after tenant_id for purchase list scoping."""
+    return _DIRECT_PAYABLES_SQL if include_direct_payables else _EXCLUDE_DIRECTS_SQL
+
+
+def row_matches_purchases_list_scope(
+    *,
+    is_direct_entry: Optional[bool],
+    paid_at,
+    status: Optional[str],
+    payment_type: Optional[str],
+    include_direct_payables: bool,
+) -> bool:
+    """Python mirror of `direct_entry_list_clause` for unit tests (keep in sync with SQL)."""
+    is_direct = bool(is_direct_entry)
+    if not include_direct_payables:
+        return not is_direct
+    if not is_direct:
+        return True
+    if (payment_type or "").strip().lower() == "contado":
+        return False
+    if paid_at is None:
+        return status == "received"
+    return True
+
 
 async def get_purchases_list(
     request: Request,
@@ -34,7 +78,8 @@ async def get_purchases_list(
     status: Optional[str] = None,
     supplier_id: Optional[UUID] = None,
     payment_status: Optional[str] = None,  # pending, overdue, due_this_week
-    date_filter: Optional[str] = None  # today, yesterday, last_week, 15_days, 1_month, 3_months
+    date_filter: Optional[str] = None,  # today, yesterday, last_week, 15_days, 1_month, 3_months
+    include_direct_payables: bool = False,
 ) -> PurchasesListResponse:
     """
     Get purchases list with tenant isolation
@@ -106,7 +151,8 @@ async def get_purchases_list(
                     CASE
                         WHEN tp.paid_at IS NOT NULL OR psh_paid.id IS NOT NULL THEN true
                         ELSE false
-                    END as has_payment
+                    END as has_payment,
+                    tp.is_direct_entry
                 FROM tenant_purchases tp
                 LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
                 LEFT JOIN LATERAL (
@@ -118,7 +164,7 @@ async def get_purchases_list(
                     LIMIT 1
                 ) psh_paid ON true
                 WHERE tp.tenant_id = $1
-                AND (tp.is_direct_entry = FALSE OR tp.is_direct_entry IS NULL)
+                AND """ + direct_entry_list_clause(include_direct_payables) + """
             """
 
             count_query = """
@@ -126,7 +172,7 @@ async def get_purchases_list(
                 FROM tenant_purchases tp
                 LEFT JOIN tenant_suppliers ts ON tp.supplier_id = ts.id
                 WHERE tp.tenant_id = $1
-                AND (tp.is_direct_entry = FALSE OR tp.is_direct_entry IS NULL)
+                AND """ + direct_entry_list_clause(include_direct_payables) + """
             """
 
             params = [tenant_id]
@@ -295,6 +341,7 @@ async def get_purchases_list(
                     received_by=row.get('received_by'),
                     verified_by=row.get('verified_by'),
                     package_condition=row.get('package_condition'),
+                    is_direct_entry=row.get('is_direct_entry') or False,
                     items=items
                 )
                 purchases.append(purchase)
@@ -762,6 +809,17 @@ async def create_purchase(
                     # Log error but don't fail
                     print(f"Failed to send Discord notification: {e}")
 
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_ABASTECIMIENTO,
+                    action="purchase_created",
+                    actor_user_id=user_id,
+                    entity_type="purchase",
+                    entity_id=new_purchase["id"],
+                    label=new_purchase["purchase_number"],
+                )
+
                 return PurchaseResponse(data=purchase)
 
     except AuthenticationError:
@@ -783,6 +841,7 @@ async def update_purchase(
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
@@ -884,6 +943,15 @@ async def update_purchase(
                         )
 
                 # Fetch updated purchase
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_ABASTECIMIENTO,
+                    action="purchase_updated",
+                    actor_user_id=user_id,
+                    entity_type="purchase",
+                    entity_id=purchase_id,
+                )
                 return await get_purchase_by_id(request, response, purchase_id)
 
     except AuthenticationError:

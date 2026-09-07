@@ -1,0 +1,42 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 760
+title: "fix(gl): post exact payment amounts (single + split, no tip proration)"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-760-exact-gl-payment-amounts
+
+paths:
+  - app/services/cierre_service.py
+  - app/services/pos_cart_service.py
+  - app/services/tables_service.py
+  - tests/test_manual_order_gl_cogs.py
+
+ac:
+  - Single payment: GL debit equals collected tender (product+tax+tip attribution correct)
+  - Split payments: each order_payments row posts exact amount (no share/split_total scale)
+  - Tip credits balance the entry; deferred tip does not double-count or distort tenders
+  - DR=CR for no tip, tip+single, tip+split
+  - Tests cover split+tip exact amounts and no-tip baseline
+  - Country-agnostic shared cierre_service path
+
+out_of_scope:
+  - Tip as third-party liability per country
+  - Historical journal backfill
+  - UI / FE tax math
+
+hints:
+  entry: "_post_order_gl_entry / _post_deferred_order_tip_gl in cierre_service.py"
+  pattern: "cierre_service.py:486-506 proportional scale to replace with exact split amounts; when tip deferred and splits include tip, credit tip from excess or pass tip into main GL"
+  tests: "pytest tests/test_manual_order_gl_cogs.py -k 'splits_debits or exact or tip' -q"
+
+risk:
+  sensitive: true
+  areas: [payments, accounting]
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "merge then /wr-fast #2023"

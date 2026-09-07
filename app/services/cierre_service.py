@@ -6,6 +6,7 @@ Issue: https://github.com/uno0uno/warocol.com/issues/311
 """
 import logging
 import json
+import asyncpg
 from decimal import Decimal
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -21,6 +22,7 @@ from app.core.timezones import (
     resolve_tenant_timezone,
     tenant_today,
 )
+from app.services.operation_events_service import DOMAIN_FINANZAS, record_operation_event
 from app.models.cierre import (
     CierreCashSettingsUpdate,
     CierreCreate,
@@ -28,6 +30,7 @@ from app.models.cierre import (
     CierreReconciliationResolve,
     OpenShiftCreate,
 )
+from app.services.billing_service import check_plan_quota_growth, check_plan_quota_period
 from app.services.tip_tax_service import tip_settlement_total
 from app.services.account_role_service import (
     AccountRole,
@@ -84,17 +87,14 @@ def _tip_gl_amounts(
     Return (settlement_debit, net_tip_revenue, tip_tax_credit) for GL posting.
     Mirrors additive vs extractive tip tax from tenant_tax_config.
     """
+    from app.services.hospitality_tax_engine import tip_tax_is_additive
+
     tip_amt = Decimal(str(tip_amount or 0))
     tip_tax = Decimal(str(tip_tax_amount or 0))
     if tip_amt <= 0 and tip_tax <= 0:
         return Decimal("0"), Decimal("0"), Decimal("0")
 
-    tip_tax_additive = False
-    if tip_tax > 0:
-        if tax_config.get("inc_applicable"):
-            tip_tax_additive = not tax_config.get("inc_included_in_price", True)
-        elif tax_config.get("iva_applicable"):
-            tip_tax_additive = not tax_config.get("iva_included_in_price", False)
+    tip_tax_additive = tip_tax > 0 and tip_tax_is_additive(tax_config)
 
     if tip_tax_additive:
         settlement = tip_amt + tip_tax
@@ -111,11 +111,9 @@ async def _resolve_standard_tax_account_id(
     tax_config: Dict[str, Any],
 ) -> Optional[UUID]:
     """Resolve INC/IVA credit account for standard (non-liquor) tax, including tip tax."""
-    tax_kind = None
-    if tax_config.get("inc_applicable"):
-        tax_kind = "inc"
-    elif tax_config.get("iva_applicable"):
-        tax_kind = "iva"
+    from app.services.hospitality_tax_engine import primary_gl_role
+
+    tax_kind = primary_gl_role(tax_config)
     if not tax_kind:
         return None
     account = await resolve_tax_account(
@@ -128,19 +126,26 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
     """
     Return tax config for the tenant.  Falls back to all-disabled defaults
     if no row exists (safe for tenants created before migration 027).
+
+    Includes menu_category_line_map + exempt_menu_category_ids so POS/orders
+    tax breakdown can honor Facturación category maps (#1889 follow-up).
     """
+    from app.services.tenant_config_service import decode_tax_config_jsonb
+
     row = await conn.fetchrow(
         """SELECT inc_applicable, inc_rate, inc_gl_account_code, inc_gl_account_id,
                   inc_included_in_price,
-                  liquor_tax_applicable, liquor_tax_rate,
+                  liquor_tax_applicable, liquor_tax_rate, liquor_tax_included_in_price,
                   liquor_tax_gl_account_code, liquor_tax_gl_account_id,
                   iva_applicable, iva_rate, iva_gl_account_code, iva_gl_account_id,
-                  iva_included_in_price
+                  iva_included_in_price,
+                  tax_lines, category_map, commercial_tax_applicable,
+                  menu_category_line_map, exempt_menu_category_ids
            FROM tenant_tax_config WHERE tenant_id = $1""",
         tenant_id,
     )
     if row:
-        return dict(row)
+        return decode_tax_config_jsonb(dict(row))
     return {
         "inc_applicable":             False,
         "inc_rate":                   Decimal("0.0800"),
@@ -149,6 +154,7 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
         "inc_included_in_price":      True,
         "liquor_tax_applicable":      False,
         "liquor_tax_rate":            Decimal("0.0000"),
+        "liquor_tax_included_in_price": False,
         "liquor_tax_gl_account_code": None,
         "liquor_tax_gl_account_id":   None,
         "iva_applicable":             False,
@@ -156,6 +162,11 @@ async def _get_tenant_tax_config(conn, tenant_id: UUID) -> Dict[str, Any]:
         "iva_gl_account_code":        None,
         "iva_gl_account_id":          None,
         "iva_included_in_price":      False,
+        "tax_lines":                  None,
+        "category_map":               None,
+        "commercial_tax_applicable":  False,
+        "menu_category_line_map":     {},
+        "exempt_menu_category_ids":   [],
     }
 
 
@@ -221,18 +232,25 @@ async def _post_cierre_gl_entry(
         conn, tenant_id, AccountRole.SALES_REVENUE, source="cierre"
     )
 
-    # Determine tax split
+    # Determine tax split (primary standard line; extractive on total_sales)
+    from app.services.hospitality_tax_engine import resolve_tax_profile, tax_amount_decimal
+
     tax_amount = Decimal("0")
     tax_acct_id = None
-    if tax_config.get("inc_applicable"):
-        rate = Decimal(str(tax_config["inc_rate"]))
-        tax_amount = total_sales - (total_sales / (1 + rate))
-        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "inc")
-        tax_acct_id = tax_account.id if tax_account else None
-    elif tax_config.get("iva_applicable"):
-        rate = Decimal(str(tax_config["iva_rate"]))
-        tax_amount = total_sales - (total_sales / (1 + rate))
-        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "iva")
+    primary = resolve_tax_profile(tax_config).primary_line()
+    if primary and total_sales > 0:
+        # Cierre summary historically treats the period total as extractive on the
+        # primary rate (included-in-price style), matching pre-engine INC/IVA posts.
+        extractive_line = primary
+        if not primary.included_in_price:
+            # Keep legacy cierre behavior: always extract from total_sales.
+            from dataclasses import replace
+
+            extractive_line = replace(primary, included_in_price=True)
+        tax_amount, _ = tax_amount_decimal(total_sales, extractive_line)
+        tax_account = await resolve_tax_account(
+            conn, tenant_id, tax_config, primary.gl_role,
+        )
         tax_acct_id = tax_account.id if tax_account else None
 
     net_income = total_sales - tax_amount
@@ -321,7 +339,13 @@ async def _post_order_gl_entry(
       inc_included_in_price=False           : tax added on top — additive formula
 
     Tips: single-payment checkout posts product net on `— ingreso neto` and tip net on
-    `— propina` (#915). Split flows defer tip to _post_deferred_order_tip_gl (#912).
+    `— propina` (#915). Prefer passing tip_amount here for split checkouts too so each
+    tender debits its exact collected amount. `_post_deferred_order_tip_gl` remains as
+    an idempotent fallback when tip was not included in this call.
+
+    Split payment debits use exact `order_payments` amounts (no proportional re-scale
+    against payment_debit). If tip was omitted but tenders exceed product+tax, the
+    excess is credited as tip so the entry still balances.
 
     Idempotent: skips if an 'orden' entry already exists for this order_id.
     Caller MUST wrap in try/except — GL failure must never roll back the order.
@@ -329,7 +353,8 @@ async def _post_order_gl_entry(
     # ── Idempotency guard ──────────────────────────────────────────────────
     existing = await conn.fetchval(
         """SELECT id FROM tenant_journal_entries
-           WHERE source_module = 'orden' AND source_id = $1 AND tenant_id = $2""",
+           WHERE source_module = 'orden' AND source_id = $1 AND tenant_id = $2
+             AND status = 'posted'""",
         order_id, tenant_id,
     )
     if existing:
@@ -381,6 +406,9 @@ async def _post_order_gl_entry(
     order_items = await conn.fetch(
         """SELECT
                COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal,
+               COALESCE(p.category_id, pv_p.category_id) AS category_id,
+               COALESCE(p.tax_resolution, pv_p.tax_resolution, 'inherit') AS tax_resolution,
+               COALESCE(p.tax_line_key, pv_p.tax_line_key) AS tax_line_key,
                COALESCE(p.tax_category, pv_p.tax_category, 'standard') AS tax_category
            FROM order_items oi
            LEFT JOIN product p ON p.id = oi.product_id
@@ -390,106 +418,113 @@ async def _post_order_gl_entry(
         order_id,
     )
 
-    # ── Accumulate subtotals per tax category ─────────────────────────────
-    standard_subtotal = Decimal("0")
-    liquor_subtotal   = Decimal("0")
-    for item in order_items:
-        cat = item["tax_category"] or "standard"
-        sub = Decimal(str(item["subtotal"]))
-        if cat == "liquor":
-            liquor_subtotal += sub
-        elif cat == "exempt":
-            pass  # $0 tax contribution
-        else:  # standard (or unknown — fall back to standard)
-            standard_subtotal += sub
-    # No items at all → treat total as standard (backwards-compatible fallback)
-    if not order_items:
-        standard_subtotal = total_amount
+    # ── Calculate taxes per item (alternate/stack + included_in_price) ────
+    from app.services.hospitality_tax_engine import (
+        compute_gl_category_taxes,
+        compute_items_tax_totals,
+    )
 
-    # ── Calculate taxes per category ──────────────────────────────────────
-    standard_tax     = Decimal("0")
-    liquor_tax       = Decimal("0")
+    if order_items:
+        tax_result = compute_items_tax_totals(order_items, tax_config)
+    else:
+        # No items at all → treat total as standard (backwards-compatible fallback)
+        tax_result = compute_gl_category_taxes(total_amount, Decimal("0"), tax_config)
+
+    standard_tax = Decimal(str(tax_result["standard_tax"] or 0))
+    liquor_tax = Decimal(str(tax_result["liquor_tax"] or 0))
+    standard_additive = Decimal(str(tax_result.get("standard_additive") or 0))
+    liquor_additive = Decimal(str(tax_result.get("liquor_additive") or 0))
+    if "standard_additive" not in tax_result and tax_result.get("standard_is_additive"):
+        standard_additive = standard_tax
+    if "liquor_additive" not in tax_result and tax_result.get("liquor_is_additive"):
+        liquor_additive = liquor_tax
     standard_acct_id = None
-    liquor_acct_id   = None
-    standard_is_additive = False
+    liquor_acct_id = None
 
-    if tax_config.get("inc_applicable") and standard_subtotal > 0:
-        rate = Decimal(str(tax_config["inc_rate"]))
-        if tax_config.get("inc_included_in_price", True):
-            # Extractive: price already includes INC
-            standard_tax = standard_subtotal - (standard_subtotal / (1 + rate))
-        else:
-            # Additive: INC charged on top of base price
-            standard_tax = standard_subtotal * rate
-            standard_is_additive = True
-        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "inc")
+    if tax_result["standard_gl_role"] and standard_tax > 0:
+        tax_account = await resolve_tax_account(
+            conn, tenant_id, tax_config, tax_result["standard_gl_role"],
+        )
         standard_acct_id = tax_account.id if tax_account else None
 
-    elif tax_config.get("iva_applicable") and standard_subtotal > 0:
-        rate = Decimal(str(tax_config["iva_rate"]))
-        if tax_config.get("iva_included_in_price", False):
-            standard_tax = standard_subtotal - (standard_subtotal / (1 + rate))
-        else:
-            standard_tax = standard_subtotal * rate
-            standard_is_additive = True
-        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "iva")
-        standard_acct_id = tax_account.id if tax_account else None
-
-    if tax_config.get("liquor_tax_applicable") and liquor_subtotal > 0:
-        rate = Decimal(str(tax_config["liquor_tax_rate"]))
-        liquor_tax = liquor_subtotal * rate  # IVA licores — always additive (external VAT)
-        tax_account = await resolve_tax_account(conn, tenant_id, tax_config, "liquor")
+    if tax_result["liquor_gl_role"] and liquor_tax > 0:
+        tax_account = await resolve_tax_account(
+            conn, tenant_id, tax_config, tax_result["liquor_gl_role"],
+        )
         liquor_acct_id = tax_account.id if tax_account else None
 
     # ── Compute debit_total and net_revenue ───────────────────────────────
-    # Additive taxes (non-included INC/IVA, liquor) increase what the customer pays.
-    # Extractive taxes are already embedded in total_amount.
-    additive_extra = (standard_tax if standard_is_additive else Decimal("0")) + liquor_tax
+    # Additive taxes (non-included INC/IVA/liquor) increase what the customer pays.
+    # Extractive taxes are already embedded in total_amount (#765 liquor Incluido).
+    additive_extra = standard_additive + liquor_additive
     debit_total    = total_amount + additive_extra
     net_revenue    = debit_total - standard_tax - liquor_tax
     # Invariant: DR debit_total = CR net_revenue + CR standard_tax + CR liquor_tax ✓
 
-    tip_settlement, tip_net_revenue, tip_tax_credit = _tip_gl_amounts(
-        tip_amount, tip_tax_amount, tax_config,
-    )
+    product_net_revenue = net_revenue
+    product_gross = debit_total  # product + additive tax, before tip
+    advance_raw = Decimal(str(advance_amount or 0)).quantize(Decimal("0.01"))
+
+    # Exact tender debits when splits are provided (country-agnostic; no proration).
+    split_debit_lines: List[Dict[str, Any]] = []
+    payments_sum = Decimal("0")
+    if split_debits:
+        for split in split_debits:
+            debit_amount = Decimal(str(split["amount"] or 0)).quantize(Decimal("0.01"))
+            if debit_amount <= 0:
+                continue
+            payments_sum += debit_amount
+            split_debit_lines.append(
+                {
+                    "account_id": split["account"].id,
+                    "amount": debit_amount,
+                    "payment_method": split["payment_method"],
+                }
+            )
+
+    tip_settlement = Decimal("0")
+    tip_net_revenue = Decimal("0")
+    tip_tax_credit = Decimal("0")
+    debit_acct = None
+
+    if split_debit_lines:
+        # Advance applies to product first; tip is whatever tenders collect beyond product.
+        advance_debit = min(advance_raw, product_gross)
+        remaining_product = product_gross - advance_debit
+        tip_from_tenders = (payments_sum - remaining_product).quantize(Decimal("0.01"))
+        if tip_from_tenders < 0:
+            tip_from_tenders = Decimal("0")
+        explicit_settlement, explicit_net, explicit_tax = _tip_gl_amounts(
+            tip_amount, tip_tax_amount, tax_config,
+        )
+        if (
+            tip_from_tenders > 0
+            and explicit_settlement > 0
+            and abs(explicit_settlement - tip_from_tenders) <= Decimal("0.01")
+        ):
+            tip_settlement, tip_net_revenue, tip_tax_credit = (
+                explicit_settlement, explicit_net, explicit_tax,
+            )
+        elif tip_from_tenders > 0:
+            tip_settlement, tip_net_revenue, tip_tax_credit = _tip_gl_amounts(
+                tip_from_tenders, Decimal("0"), tax_config,
+            )
+        debit_total = advance_debit + payments_sum
+    else:
+        tip_settlement, tip_net_revenue, tip_tax_credit = _tip_gl_amounts(
+            tip_amount, tip_tax_amount, tax_config,
+        )
+        if tip_settlement > 0:
+            debit_total += tip_settlement
+        advance_debit = min(advance_raw, debit_total)
+        payment_debit = debit_total - advance_debit
+        if payment_debit > 0:
+            debit_acct = debit_account
+
     tip_tax_acct_id = None
     if tip_tax_credit > 0:
         tip_tax_acct_id = await _resolve_standard_tax_account_id(conn, tenant_id, tax_config)
-    product_net_revenue = net_revenue
-    if tip_settlement > 0:
-        debit_total += tip_settlement
 
-    advance_debit = min(
-        Decimal(str(advance_amount or 0)).quantize(Decimal("0.01")),
-        debit_total,
-    )
-    payment_debit = debit_total - advance_debit
-    debit_acct = None
-    split_debit_lines: List[Dict[str, Any]] = []
-    if payment_debit > 0:
-        if split_debits:
-            split_total = sum(split["amount"] for split in split_debits)
-            remaining_debit = payment_debit
-            for idx, split in enumerate(split_debits):
-                if split["amount"] <= 0:
-                    continue
-                if idx == len(split_debits) - 1:
-                    debit_amount = remaining_debit
-                else:
-                    debit_amount = (payment_debit * split["amount"] / split_total).quantize(Decimal("0.01"))
-                    remaining_debit -= debit_amount
-                if debit_amount <= 0:
-                    continue
-                split_acct = split["account"]
-                split_debit_lines.append(
-                    {
-                        "account_id": split_acct.id,
-                        "amount": debit_amount,
-                        "payment_method": split["payment_method"],
-                    }
-                )
-        else:
-            debit_acct = debit_account
     advance_acct = None
     if advance_debit > 0:
         advance_acct = await resolve_account(
@@ -757,7 +792,8 @@ async def _post_order_cogs_gl_entry(
     # ── Idempotency guard ──────────────────────────────────────────────────
     existing = await conn.fetchval(
         """SELECT id FROM tenant_journal_entries
-           WHERE source_module = 'orden_cogs' AND source_id = $1 AND tenant_id = $2""",
+           WHERE source_module = 'orden_cogs' AND source_id = $1 AND tenant_id = $2
+             AND status = 'posted'""",
         order_id, tenant_id,
     )
     if existing:
@@ -901,9 +937,106 @@ async def _void_cierre_gl_entry(
     )
 
 
+async def _void_order_gl_entries(
+    conn,
+    tenant_id: UUID,
+    order_id: UUID,
+    reason: str = "Cancelación de venta",
+) -> None:
+    """
+    Void posted sale journals (`orden` and `orden_cogs`) and post reversals.
+    Original rows stay visible as voided. Skips if none posted or period closed.
+    """
+    entries = await conn.fetch(
+        """SELECT id, entry_date, period_year, period_month, description,
+                  total_debit, total_credit, source_module
+           FROM tenant_journal_entries
+           WHERE tenant_id = $1
+             AND source_id = $2
+             AND source_module IN ('orden', 'orden_cogs')
+             AND status = 'posted'
+           ORDER BY created_at ASC""",
+        tenant_id,
+        order_id,
+    )
+    if not entries:
+        logger.info(f"[GL] No posted sale GL for order {order_id} — skip void")
+        return
+
+    async with conn.transaction():
+        for entry in entries:
+            closed = await conn.fetchval(
+                """SELECT 1 FROM tenant_monthly_periods
+                   WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+                tenant_id, entry["period_year"], entry["period_month"],
+            )
+            if closed:
+                logger.warning(
+                    f"[GL] Period {entry['period_year']}-{entry['period_month']:02d} closed — "
+                    f"skip GL void for order {order_id} entry {entry['id']}"
+                )
+                continue
+
+            original_lines = await conn.fetch(
+                """SELECT account_id, debit, credit, description, line_order
+                   FROM tenant_journal_lines
+                   WHERE journal_entry_id = $1 ORDER BY line_order""",
+                entry["id"],
+            )
+
+            await conn.execute(
+                "UPDATE tenant_journal_entries SET status = 'voided', voided_at = NOW() WHERE id = $1",
+                entry["id"],
+            )
+            rev_row = await conn.fetchrow(
+                """INSERT INTO tenant_journal_entries
+                       (tenant_id, entry_date, period_year, period_month,
+                        description, source_module, source_id, status,
+                        total_debit, total_credit, posted_at)
+                   VALUES ($1, $2, $3, $4, $5, 'system', $6, 'posted', $7, $8, NOW())
+                   RETURNING id""",
+                tenant_id, entry["entry_date"], entry["period_year"], entry["period_month"],
+                f"Reversión: {entry['description']} — {reason}",
+                entry["id"],
+                float(entry["total_debit"]), float(entry["total_credit"]),
+            )
+            rev_id = rev_row["id"]
+            for line in original_lines:
+                await conn.execute(
+                    """INSERT INTO tenant_journal_lines
+                           (journal_entry_id, account_id, debit, credit, description, line_order)
+                       VALUES ($1, $2, $3, $4, $5, $6)""",
+                    rev_id, line["account_id"],
+                    float(line["credit"]), float(line["debit"]),
+                    line["description"], line["line_order"],
+                )
+
+            logger.info(
+                f"[GL] ✅ Voided {entry['source_module']} entry {entry['id']} → reversing {rev_id} "
+                f"for order {order_id}"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Shared — aggregation queries
 # ---------------------------------------------------------------------------
+
+def _sale_close_at_sql(order_alias: Optional[str] = None) -> str:
+    """
+    Drawer attribution timestamp for arqueo (#2511).
+
+    Prefer last non-void payment time (actual cash/card hit); fall back to
+    order_date. Works for mesas (pending then pay), mostrador, and barra.
+    """
+    prefix = f"{order_alias}." if order_alias else ""
+    id_ref = f"{order_alias}.id" if order_alias else "id"
+    return (
+        "COALESCE("
+        "(SELECT MAX(op_close.paid_at) FROM order_payments op_close "
+        f"WHERE op_close.order_id = {id_ref} AND op_close.voided_at IS NULL), "
+        f"{prefix}order_date)"
+    )
+
 
 def _build_order_date_filter(
     period_start: date,
@@ -912,24 +1045,26 @@ def _build_order_date_filter(
     period_end_time: Optional[datetime],
     timezone_name: str = DEFAULT_TENANT_TIMEZONE,
     param_offset: int = 2,
+    order_alias: Optional[str] = None,
 ):
     """
-    Returns (sql_fragment, [p_start, p_end]) for order_date filtering.
+    Returns (sql_fragment, params) filtering by sale close/payment time (#2511).
 
-    When exact timestamps are provided, compares directly against order_date
-    (TIMESTAMPTZ). Otherwise, truncates order_date to the tenant calendar date.
+    When exact timestamps are provided, compares against the close-at expression.
+    Otherwise truncates that timestamp to the tenant calendar date.
     """
+    sale_at = _sale_close_at_sql(order_alias)
     if period_start_time and period_end_time:
         p2 = f"${param_offset}"
         p3 = f"${param_offset + 1}"
-        sql = f"AND order_date >= {p2} AND order_date <= {p3}"
+        sql = f"AND {sale_at} >= {p2} AND {sale_at} <= {p3}"
         return sql, [period_start_time, period_end_time]
     p_tz = f"${param_offset}"
     p2 = f"${param_offset + 1}"
     p3 = f"${param_offset + 2}"
     sql = (
-        f"AND (order_date AT TIME ZONE {p_tz})::date >= {p2} "
-        f"AND (order_date AT TIME ZONE {p_tz})::date <= {p3}"
+        f"AND ({sale_at} AT TIME ZONE {p_tz})::date >= {p2} "
+        f"AND ({sale_at} AT TIME ZONE {p_tz})::date <= {p3}"
     )
     return sql, [timezone_name, period_start, period_end]
 
@@ -1281,6 +1416,7 @@ async def _compute_method_outflow_rows(
         LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE e.tenant_id = $1
           AND COALESCE(pmg.slug, e.payment_method) IS NOT NULL
+          AND COALESCE(e.from_cash_drawer, true) = true
           {expense_filter}
         GROUP BY COALESCE(pmg.slug, e.payment_method), COALESCE(pm.name, e.payment_method)
         """,
@@ -1300,6 +1436,7 @@ async def _compute_method_outflow_rows(
           AND tp.status = 'paid'
           AND COALESCE(tp.payment_amount, 0) > 0
           AND COALESCE(pmg.slug, tp.payment_method) IS NOT NULL
+          AND COALESCE(tp.from_cash_drawer, true) = true
           {purchase_filter}
         GROUP BY COALESCE(pmg.slug, tp.payment_method), COALESCE(pm.name, tp.payment_method)
         """,
@@ -1424,8 +1561,17 @@ async def _compute_preview(
     and open-table filters use exact TIMESTAMPTZ comparison (shift windows).
     """
     status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
+    status_filter_o = status_filter.replace("status", "o.status")
     date_filter, date_params = _build_order_date_filter(
         period_start, period_end, period_start_time, period_end_time, timezone_name
+    )
+    date_filter_o, _ = _build_order_date_filter(
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+        timezone_name,
+        order_alias="o",
     )
     expense_filter, expense_params = _build_expense_filter(
         period_start, period_end, period_start_time, period_end_time
@@ -1466,8 +1612,8 @@ async def _compute_preview(
         LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
         LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter.replace('status', 'o.status')}
-          {date_filter.replace('order_date', 'o.order_date')}
+          {status_filter_o}
+          {date_filter_o}
           AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
           AND COALESCE(pmg.slug, o.payment_method) = 'cash'
         """,
@@ -1487,8 +1633,8 @@ async def _compute_preview(
         LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
         LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter.replace('status', 'o.status')}
-          {date_filter.replace('order_date', 'o.order_date')}
+          {status_filter_o}
+          {date_filter_o}
           AND op.voided_at IS NULL
         GROUP BY COALESCE(pmg.slug, op.payment_method)
 
@@ -1501,8 +1647,8 @@ async def _compute_preview(
         JOIN payment_methods pm ON pm.id = o.payment_method_id
         JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NOT NULL
           AND NOT EXISTS (
               SELECT 1
@@ -1519,8 +1665,8 @@ async def _compute_preview(
             COALESCE(SUM(o.total_amount), 0) AS total
         FROM orders o
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NOT NULL
           AND NOT EXISTS (
@@ -1541,8 +1687,8 @@ async def _compute_preview(
         JOIN payment_methods pm ON pm.id = o.payment_method_id
         JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NOT NULL
           AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
         GROUP BY pmg.slug
@@ -1554,8 +1700,8 @@ async def _compute_preview(
             COALESCE(SUM(o.tip_amount + o.tip_tax_amount), 0) AS total
         FROM orders o
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NOT NULL
           AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
@@ -1572,6 +1718,7 @@ async def _compute_preview(
             method_totals[m] = method_totals.get(m, 0.0) + float(row["total"])
 
     from app.services.customer_wallet_service import fetch_wallet_recharge_totals_for_cierre
+    from app.services.credit_service import fetch_credit_payment_totals_for_cierre
     from app.services.table_session_advances_service import fetch_table_session_advance_totals_for_cierre
 
     recharge_totals = await fetch_wallet_recharge_totals_for_cierre(
@@ -1583,6 +1730,17 @@ async def _compute_preview(
         period_end_time,
     )
     for method, total in recharge_totals.items():
+        method_totals[method] = method_totals.get(method, 0.0) + total
+
+    credit_totals = await fetch_credit_payment_totals_for_cierre(
+        conn,
+        tenant_id,
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+    )
+    for method, total in credit_totals.items():
         method_totals[method] = method_totals.get(method, 0.0) + total
 
     advance_totals = await fetch_table_session_advance_totals_for_cierre(
@@ -1603,6 +1761,7 @@ async def _compute_preview(
         FROM tenant_expenses
         WHERE tenant_id = $1
           AND payment_method = 'cash'
+          AND COALESCE(from_cash_drawer, true) = true
           {expense_filter}
         """,
         tenant_id, *expense_params,
@@ -1621,6 +1780,7 @@ async def _compute_preview(
           AND tp.status = 'paid'
           AND COALESCE(tp.payment_amount, 0) > 0
           AND COALESCE(pmg.slug, tp.payment_method) = 'cash'
+          AND COALESCE(tp.from_cash_drawer, true) = true
           {purchase_filter}
         """,
         tenant_id, *purchase_params,
@@ -1704,8 +1864,14 @@ async def _compute_breakdown_rows(
     When period_start_time / period_end_time are supplied, uses exact TIMESTAMPTZ comparison.
     """
     status_filter = "AND status = 'completed'" if completed_only else "AND status IN ('completed', 'pending')"
-    date_filter, date_params = _build_order_date_filter(
-        period_start, period_end, period_start_time, period_end_time, timezone_name
+    status_filter_o = status_filter.replace("status", "o.status")
+    date_filter_o, date_params = _build_order_date_filter(
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+        timezone_name,
+        order_alias="o",
     )
     rows = await conn.fetch(
         f"""
@@ -1719,8 +1885,8 @@ async def _compute_breakdown_rows(
         LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
         LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter.replace('status', 'o.status')}
-          {date_filter.replace('order_date', 'o.order_date')}
+          {status_filter_o}
+          {date_filter_o}
           AND op.voided_at IS NULL
         GROUP BY COALESCE(pmg.slug, op.payment_method), COALESCE(pm.name, op.payment_method)
 
@@ -1735,8 +1901,8 @@ async def _compute_breakdown_rows(
         JOIN payment_methods pm ON pm.id = o.payment_method_id
         JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NOT NULL
           AND NOT EXISTS (
               SELECT 1
@@ -1755,8 +1921,8 @@ async def _compute_breakdown_rows(
             COALESCE(SUM(o.total_amount), 0) AS total
         FROM orders o
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NOT NULL
           AND NOT EXISTS (
@@ -1777,8 +1943,8 @@ async def _compute_breakdown_rows(
             COALESCE(SUM(o.total_amount), 0) AS total
         FROM orders o
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NULL
           AND NOT EXISTS (
@@ -1799,8 +1965,8 @@ async def _compute_breakdown_rows(
         JOIN payment_methods pm ON pm.id = o.payment_method_id
         JOIN payment_method_groups pmg ON pmg.id = pm.group_id
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NOT NULL
           AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
         GROUP BY pmg.slug, pm.name
@@ -1814,8 +1980,8 @@ async def _compute_breakdown_rows(
             COALESCE(SUM(o.tip_amount + o.tip_tax_amount), 0) AS total
         FROM orders o
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NOT NULL
           AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
@@ -1830,8 +1996,8 @@ async def _compute_breakdown_rows(
             COALESCE(SUM(o.tip_amount + o.tip_tax_amount), 0) AS total
         FROM orders o
         WHERE o.tenant_id = $1
-          {status_filter}
-          {date_filter}
+          {status_filter_o}
+          {date_filter_o}
           AND o.payment_method_id IS NULL
           AND o.payment_method IS NULL
           AND (o.tip_amount > 0 OR o.tip_tax_amount > 0)
@@ -1852,6 +2018,8 @@ async def _compute_breakdown_rows(
             }
         else:
             aggregated[key]["total"] += total
+    from app.services.customer_wallet_service import fetch_wallet_recharge_totals_for_cierre
+    from app.services.credit_service import fetch_credit_payment_breakdown_for_cierre
     from app.services.table_session_advances_service import fetch_table_session_advance_totals_for_cierre
     advance_totals = await fetch_table_session_advance_totals_for_cierre(
         conn,
@@ -1878,6 +2046,48 @@ async def _compute_breakdown_rows(
             }
         else:
             aggregated[key]["total"] += float(total)
+    recharge_totals = await fetch_wallet_recharge_totals_for_cierre(
+        conn,
+        tenant_id,
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+    )
+    for method, total in recharge_totals.items():
+        if total == 0:
+            continue
+        key = (method, f"Recarga billetera - {method}")
+        if key not in aggregated:
+            aggregated[key] = {
+                "group_slug": method,
+                "method_name": f"Recarga billetera - {method}",
+                "total": float(total),
+            }
+        else:
+            aggregated[key]["total"] += float(total)
+    credit_rows = await fetch_credit_payment_breakdown_for_cierre(
+        conn,
+        tenant_id,
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+    )
+    for row in credit_rows:
+        total = float(row["total"])
+        if total == 0:
+            continue
+        label = f"Abono cartera - {row['method_name']}"
+        key = (row["group_slug"], label)
+        if key not in aggregated:
+            aggregated[key] = {
+                "group_slug": row["group_slug"],
+                "method_name": label,
+                "total": total,
+            }
+        else:
+            aggregated[key]["total"] += total
     return [r for r in aggregated.values() if r["total"] > 0]
 
 
@@ -2194,6 +2404,8 @@ async def open_shift(request: Request, body: OpenShiftCreate) -> dict:
                     status_code=409,
                 )
 
+            await check_plan_quota_growth(conn, tenant_id, "active_open_cash_shifts")
+
             breakdown_json = (
                 json.dumps(body.opening_breakdown)
                 if body.opening_breakdown is not None
@@ -2220,6 +2432,20 @@ async def open_shift(request: Request, body: OpenShiftCreate) -> dict:
                 body.opening_cash,
                 breakdown_json,
                 session_context.user_id,
+            )
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="shift_opened",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "shift_opening",
+                    "entity_id": str(row["id"]),
+                    "label": str(resolved.period_start),
+                },
             )
 
         return {"success": True, "data": _open_shift_row_to_dict(row)}
@@ -2490,6 +2716,8 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                     status_code=409,
                 )
 
+            await check_plan_quota_period(conn, tenant_id, "cash_closes_per_period")
+
             open_shift = await _fetch_open_shift_for_window(
                 conn, tenant_id, eff_start, eff_end, timezone_name,
             )
@@ -2519,15 +2747,9 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
                 timezone_name=timezone_name,
             )
 
-            # 3. Open tables check — skip for past periods (mesas actuales no pertenecen al período)
-            # Use tenant-local date so the check is correct even when the server runs in UTC.
-            is_past_period = period_end < tenant_today(timezone_name, datetime.now())
-            if not is_past_period and preview["openTablesCount"] > 0:
-                raise APIError(
-                    f"Hay {preview['openTablesCount']} mesa(s) con cuenta abierta. "
-                    "Cierra todas las mesas antes de registrar el cierre del día.",
-                    status_code=409,
-                )
+            # 3. Open tables: warn-only for shift chaining (#2511). Still counted in
+            # preview.openTablesCount for UI; do not hard-block create_cierre.
+            # Past-period skip is no longer needed for blocking (kept preview count).
 
             # 4. INSERT accounting_period
             period_row = await conn.fetchrow(
@@ -2672,6 +2894,20 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
             # income in the SALES_REVENUE role. The cierre is a cash reconciliation
             # report, not as the GL trigger for revenue recognition.
 
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="cierre_created",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "cierre",
+                    "entity_id": str(summary_row["id"]),
+                    "label": f"{period_start.isoformat()}–{period_end.isoformat()}",
+                },
+            )
+
         return {
             "success": True,
             "data": {
@@ -2711,9 +2947,36 @@ async def create_cierre(request: Request, body: CierreCreate) -> dict:
 
     except (AuthenticationError, APIError):
         raise
+    except asyncpg.UniqueViolationError as exc:
+        # Issue #898: uq_period_tenant_shift_active (replaces uq_period_tenant_active
+        # after migration 122) enforces (tenant, day, shift_template) uniqueness.
+        # Match the constraint family so the friendly 409 keeps firing across the
+        # deploy window (when both old and new indexes may briefly coexist) and
+        # future renames in the same family.
+        constraint = (getattr(exc, "constraint_name", "") or "").lower()
+        detail = (getattr(exc, "detail", "") or "").lower()
+        message = (getattr(exc, "message", "") or str(exc) or "").lower()
+        haystack = f"{constraint} {detail} {message}"
+        if "uq_period_tenant" in haystack:
+            logger.warning(
+                "Duplicate cierre for tenant=%s period=%s..%s (constraint=%s)",
+                tenant_id, period_start, period_end, constraint or "uq_period_tenant*",
+            )
+            raise APIError(
+                "Ya existe un cierre para este día y turno. "
+                "Revisa la lista de cierres o usa otra plantilla de turno.",
+                status_code=409,
+            )
+        # Any other unique violation: log internally but don't leak raw exception
+        # text to the API client.
+        logger.error("Error in create_cierre (unique violation, constraint=%s): %s", constraint, exc)
+        raise APIError(
+            "Conflicto de unicidad al registrar el cierre. Contacta soporte si persiste.",
+            status_code=409,
+        )
     except Exception as exc:
         logger.error(f"Error in create_cierre: {exc}")
-        raise APIError(f"Error in create_cierre: {exc}", status_code=500)
+        raise APIError("Error al registrar el cierre. Intenta de nuevo.", status_code=500)
 
 
 # ---------------------------------------------------------------------------
@@ -3289,6 +3552,19 @@ async def delete_cierre(request: Request, cierre_id: UUID) -> dict:
                 row["ap_id"], tenant_id,
             )
 
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="cierre_deleted",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "cierre",
+                    "entity_id": str(cierre_id),
+                },
+            )
+
         return {"success": True, "data": None}
 
     except (AuthenticationError, APIError):
@@ -3329,6 +3605,19 @@ async def delete_open_shift(request: Request, opening_id: UUID) -> dict:
             await conn.execute(
                 "DELETE FROM cash_shift_openings WHERE id = $1 AND tenant_id = $2",
                 opening_id, tenant_id,
+            )
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="shift_deleted",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "shift_opening",
+                    "entity_id": str(opening_id),
+                },
             )
 
         return {"success": True, "data": None}
@@ -3573,6 +3862,10 @@ async def close_monthly_period(
                     status_code=409,
                 )
 
+            await check_plan_quota_period(
+                conn, tenant_id, "accounting_period_closes_per_period"
+            )
+
             if existing:
                 row = await conn.fetchrow(
                     """
@@ -3593,6 +3886,20 @@ async def close_monthly_period(
                     """,
                     tenant_id, year, month, user_id, notes,
                 )
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="period_closed",
+                actor_user_id=user_id,
+                payload={
+                    "entity_type": "monthly_period",
+                    "entity_id": str(row["id"]),
+                    "label": f"{year}-{month:02d}",
+                },
+            )
 
         return {"success": True, "data": _monthly_period_to_dict(row)}
 

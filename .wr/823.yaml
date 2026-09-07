@@ -1,0 +1,46 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 823
+title: "Auth: 4h idle session timeout and dual sessions for superuser"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-823-session-idle-superuser
+
+paths:
+  - sql/20260812_sessions_last_activity.sql
+  - app/core/security.py
+  - app/core/middleware.py
+  - app/services/auth_service.py
+  - tests/test_session_idle_and_cap.py
+  - tests/test_session_token.py
+  - tests/test_customer_internal_access.py
+  - tests/test_customer_team_migration_regression.py
+  - .wr/823.yaml
+
+ac:
+  - Idle 4h without authenticated activity invalidates session
+  - Absolute 24h from login still expires session
+  - Concurrent: 1 normal / 2 superuser (tenant role or platform allowlist)
+  - Cap ends oldest excess sessions on new login
+  - Server-enforced; focused tests
+
+out_of_scope:
+  - Front idle banners
+  - POS terminal auto-logout
+  - Customer/public sessions
+
+hints:
+  entry: "get_session_from_request / replace_active_admin_sessions"
+  pattern: "security.py:INTERNAL_SESSION_HOURS + auth_service.replace_active_admin_sessions"
+  tests: "pytest tests/test_session_idle_and_cap.py tests/test_session_token.py tests/test_customer_internal_access.py tests/test_customer_team_migration_regression.py -q"
+
+risk:
+  sensitive: true
+  areas: [auth, sessions]
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "new chat /wr-review (auth); merge after green"

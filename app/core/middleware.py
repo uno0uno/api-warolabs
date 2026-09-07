@@ -204,24 +204,24 @@ async def tenant_detection_middleware(request: Request, call_next):
         )
         kds_token = request.query_params.get('token')
         if kds_public_path and kds_token:
-            # Validate KDS token and inject tenant_id
+            # Validate KDS token and inject tenant_id (both queries inside one conn)
             try:
                 from app.database import get_db_connection as _get_conn
+                _t_row = None
                 async with _get_conn() as _conn:
                     _token_row = await _conn.fetchrow(
                         "SELECT tenant_id FROM kds_tokens WHERE token = $1 AND revoked_at IS NULL",
                         kds_token,
                     )
-                if _token_row:
-                    _tid = _token_row['tenant_id']
-                    _t_row = await _conn.fetchrow(
-                        "SELECT id AS tenant_id, name AS tenant_name, slug AS tenant_slug, slug AS tenant_email, slug AS site, name AS brand_name, true AS is_active FROM tenants WHERE id = $1",
-                        _tid,
-                    )
-                    if _t_row:
-                        request.state.tenant_context = TenantContext(dict(_t_row))
-                        response = await call_next(request)
-                        return response
+                    if _token_row:
+                        _t_row = await _conn.fetchrow(
+                            "SELECT id AS tenant_id, name AS tenant_name, slug AS tenant_slug, slug AS tenant_email, slug AS site, name AS brand_name, true AS is_active FROM tenants WHERE id = $1",
+                            _token_row['tenant_id'],
+                        )
+                if _t_row:
+                    request.state.tenant_context = TenantContext(dict(_t_row))
+                    response = await call_next(request)
+                    return response
             except Exception:
                 pass
         elif kds_public_path:
@@ -301,6 +301,7 @@ async def tenant_detection_middleware(request: Request, call_next):
                 logger.info(f"🔍 No origin header, attempting tenant inference from session: {session_token}")
                 try:
                     async with get_db_connection(use_transaction=False) as conn:
+                        from app.core.security import IDLE_SESSION_HOURS
                         session_tenant_query = """
                             SELECT ts.site, ts.tenant_id, ts.brand_name, ts.is_active,
                                    t.name as tenant_name, t.slug as tenant_slug, t.email as tenant_email
@@ -308,10 +309,13 @@ async def tenant_detection_middleware(request: Request, call_next):
                             JOIN tenant_sites ts ON s.tenant_id = ts.tenant_id
                             JOIN tenants t ON ts.tenant_id = t.id
                             WHERE s.id = $1 AND s.expires_at > NOW() AND s.is_active = true
+                              AND s.last_activity_at > NOW() - ($2::int * INTERVAL '1 hour')
                               AND ts.is_active = true
                             LIMIT 1
                         """
-                        session_tenant_result = await conn.fetchrow(session_tenant_query, session_token)
+                        session_tenant_result = await conn.fetchrow(
+                            session_tenant_query, session_token, IDLE_SESSION_HOURS
+                        )
                         if session_tenant_result:
                             logger.info(f"✅ Inferred tenant from session: {session_tenant_result['tenant_name']}")
                             requesting_site = session_tenant_result['site']
@@ -503,6 +507,7 @@ async def session_validation_middleware(request: Request, call_next):
             '/public/restaurant',
             '/public/table-qr',
             '/public/email-tracking',
+            '/public/trail',
             '/payments/webhooks',
             '/billing/webhook',
         ]

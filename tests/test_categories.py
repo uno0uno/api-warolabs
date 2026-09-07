@@ -114,6 +114,39 @@ class TestCategoryCreateModel:
         cat = CategoryCreate(name="ok", tenant_id=str(uuid4()))  # type: ignore[call-arg]
         assert not hasattr(cat, "tenant_id")
 
+    def test_accepts_valid_hex_color(self):
+        from app.models.category import CategoryCreate
+        cat = CategoryCreate(name="Bebidas", color="#0ea5e9")
+        assert cat.color == "#0EA5E9"
+
+    def test_empty_color_becomes_none(self):
+        from app.models.category import CategoryCreate
+        cat = CategoryCreate(name="Bebidas", color="  ")
+        assert cat.color is None
+
+    def test_rejects_invalid_color(self):
+        from app.models.category import CategoryCreate
+        with pytest.raises(ValidationError):
+            CategoryCreate(name="Bebidas", color="#fff")
+
+
+class TestCategoryColorNormalize:
+    """Unit tests for category POS color (#2509)."""
+
+    def test_normalize_uppercases(self):
+        from app.models.category import normalize_category_color
+        assert normalize_category_color("#a1b2c3") == "#A1B2C3"
+
+    def test_normalize_adds_hash(self):
+        from app.models.category import normalize_category_color
+        assert normalize_category_color("ff00aa") == "#FF00AA"
+
+    def test_update_can_clear_color(self):
+        from app.models.category import CategoryUpdate
+        payload = CategoryUpdate(color=None)
+        assert "color" in payload.model_fields_set
+        assert payload.color is None
+
 
 class TestCategoryUpdateAndDelete:
     """Test PUT, DELETE, and delete-impact endpoints (issue warocol.com#600)."""

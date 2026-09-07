@@ -4,7 +4,7 @@ Handles credit payment registration, payment history, and open-credit order list
 
 Issue: https://github.com/uno0uno/warocol.com/issues/294
 """
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 from decimal import Decimal
 from datetime import date, datetime, timezone
@@ -12,6 +12,7 @@ from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError
+from app.services.operation_events_service import DOMAIN_FINANZAS, record_operation_event
 from app.services.account_role_service import (
     AccountRole,
     resolve_account,
@@ -21,11 +22,84 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+async def sync_order_split_credit_status(
+    conn,
+    order_id: UUID,
+    *,
+    settlement_complete: bool = False,
+) -> str:
+    """Derive payment_status + credit_paid_amount from active order_payments.
+
+    Split tenders that include ``credit`` must leave receivable outstanding so
+    Cartera (payment_status IN credit/partial) can show the debt. Non-credit
+    tenders (cash, wallet, card, …) seed ``credit_paid_amount``.
+
+    When there is no credit tender, ``payment_status='paid'`` is only written if
+    ``settlement_complete`` is true (avoids marking mid-split orders as paid).
+
+    Returns the payment_status written on the order.
+    """
+    order_row = await conn.fetchrow(
+        "SELECT total_amount, payment_status FROM orders WHERE id = $1",
+        order_id,
+    )
+    if not order_row:
+        return "paid"
+
+    total = round(float(order_row["total_amount"] or 0), 2)
+    payments = await conn.fetch(
+        """
+        SELECT payment_method, amount
+        FROM order_payments
+        WHERE order_id = $1 AND voided_at IS NULL
+        """,
+        order_id,
+    )
+    credit_sum = round(
+        sum(float(p["amount"]) for p in payments if p["payment_method"] == "credit"),
+        2,
+    )
+    non_credit_sum = round(
+        sum(float(p["amount"]) for p in payments if p["payment_method"] != "credit"),
+        2,
+    )
+
+    if credit_sum <= 0.01:
+        if not settlement_complete:
+            status = "partial"
+            credit_paid = 0.0
+        else:
+            status = "paid"
+            credit_paid = 0.0
+    elif non_credit_sum <= 0.01:
+        status = "credit"
+        credit_paid = 0.0
+    else:
+        status = "partial"
+        # Remaining ≈ credit tender(s), capped by order merchandise total
+        # (tips may sit in order_payments above total_amount).
+        credit_paid = max(0.0, round(total - min(credit_sum, total), 2))
+
+    await conn.execute(
+        """
+        UPDATE orders
+        SET payment_status = $2,
+            credit_paid_amount = $3
+        WHERE id = $1
+        """,
+        order_id,
+        status,
+        credit_paid,
+    )
+    return status
+
+
 async def _resolve_credit_payment_debit_account(
     conn,
     tenant_id: UUID,
     payment_method: str,
-    group_id: UUID,
+    group_id: Optional[UUID],
     payment_method_id: Optional[UUID],
 ):
     return await resolve_payment_account(
@@ -45,7 +119,7 @@ async def _post_credit_payment_gl(
     order_id: UUID,
     amount: Decimal,
     payment_method: str,
-    group_id: UUID,
+    group_id: Optional[UUID],
     payment_method_id: Optional[UUID],
     payment_date_value,
     created_by: Optional[UUID],
@@ -199,44 +273,77 @@ async def register_credit_payment(
                         status_code=400,
                     )
 
-                group_row = await conn.fetchrow(
-                    """
-                    SELECT id
-                    FROM payment_method_groups
-                    WHERE slug = $1
-                      AND is_active = true
-                      AND (tenant_id IS NULL OR tenant_id = $2)
-                    """,
-                    payment_method,
-                    tenant_id,
-                )
-                if not group_row:
-                    raise APIError(
-                        f"Método de pago '{payment_method}' no es válido para este restaurante.",
-                        status_code=400,
-                        details={"code": "payment_method_invalid"},
-                    )
-
-                if payment_method_id:
-                    method_row = await conn.fetchrow(
-                        """
-                        SELECT id
-                        FROM payment_methods
-                        WHERE id = $1
-                          AND tenant_id = $2
-                          AND group_id = $3
-                          AND is_active = true
-                        """,
-                        payment_method_id,
-                        tenant_id,
-                        group_row["id"],
-                    )
-                    if not method_row:
+                is_wallet = payment_method == "customer_wallet"
+                group_row = None
+                if is_wallet:
+                    # Synthetic POS tender — not a DB payment_method_groups row
+                    # (front merges customer_wallet from PAYMENT_DEFAULTS).
+                    if payment_method_id:
                         raise APIError(
-                            "El método seleccionado no pertenece al grupo elegido.",
+                            "Saldo wallet no admite submétodo.",
                             status_code=400,
                             details={"code": "payment_method_id_invalid"},
                         )
+                else:
+                    group_row = await conn.fetchrow(
+                        """
+                        SELECT id
+                        FROM payment_method_groups
+                        WHERE slug = $1
+                          AND is_active = true
+                          AND (tenant_id IS NULL OR tenant_id = $2)
+                        """,
+                        payment_method,
+                        tenant_id,
+                    )
+                    if not group_row:
+                        raise APIError(
+                            f"Método de pago '{payment_method}' no es válido para este restaurante.",
+                            status_code=400,
+                            details={"code": "payment_method_invalid"},
+                        )
+
+                    if payment_method_id:
+                        method_row = await conn.fetchrow(
+                            """
+                            SELECT id
+                            FROM payment_methods
+                            WHERE id = $1
+                              AND tenant_id = $2
+                              AND group_id = $3
+                              AND is_active = true
+                            """,
+                            payment_method_id,
+                            tenant_id,
+                            group_row["id"],
+                        )
+                        if not method_row:
+                            raise APIError(
+                                "El método seleccionado no pertenece al grupo elegido.",
+                                status_code=400,
+                                details={"code": "payment_method_id_invalid"},
+                            )
+
+                # Debit wallet before writing the abono so insufficient balance
+                # fails without mutating credit_payments / order status.
+                if is_wallet:
+                    customer_id = order_row["customer_id"]
+                    if not customer_id:
+                        raise APIError(
+                            "Se requiere un cliente identificado para pagar con wallet.",
+                            status_code=400,
+                            details={"code": "wallet_customer_required"},
+                        )
+                    from app.services.customer_wallet_service import apply_wallet_for_order
+
+                    await apply_wallet_for_order(
+                        conn,
+                        profile_id=customer_id,
+                        tenant_id=tenant_id,
+                        amount_cop=amount,
+                        order_id=order_id,
+                        created_by_user_id=user_id,
+                    )
 
                 # 3. Insert payment record
                 effective_payment_date = (
@@ -295,7 +402,7 @@ async def register_credit_payment(
                     order_id,
                     amount,
                     payment_method,
-                    group_row["id"],
+                    group_row["id"] if group_row else None,
                     payment_method_id,
                     payment_row["payment_date"],
                     user_id,
@@ -305,6 +412,22 @@ async def register_credit_payment(
                     f"[register_credit_payment] order={order_id} "
                     f"amount={amount} new_status={new_status} "
                     f"new_paid={new_paid}/{total}"
+                )
+
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_FINANZAS,
+                    channel=None,
+                    action="credit_payment_registered",
+                    actor_user_id=user_id,
+                    order_id=order_id,
+                    payload={
+                        "entity_type": "credit_payment",
+                        "entity_id": str(payment_row["id"]),
+                        "amount": float(amount),
+                        "new_payment_status": new_status,
+                    },
                 )
 
                 return {
@@ -491,3 +614,106 @@ async def list_credit_orders(
     except Exception as exc:
         logger.error(f"Error listing credit orders: {exc}")
         raise APIError(f"Error listing credit orders: {exc}", status_code=500)
+
+
+async def fetch_credit_payment_totals_for_cierre(
+    conn,
+    tenant_id: UUID,
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime] = None,
+    period_end_time: Optional[datetime] = None,
+) -> Dict[str, float]:
+    """
+    Sum cartera abonos by payment_method slug for arqueo cash/card/digital totals.
+    Uses payment_date (business timestamp) with shift half-open windows.
+    """
+    rows = await _fetch_credit_payment_cierre_rows(
+        conn,
+        tenant_id,
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+    )
+    out: Dict[str, float] = {}
+    for row in rows:
+        slug = row["group_slug"]
+        if slug:
+            out[slug] = out.get(slug, 0.0) + float(row["total"])
+    return out
+
+
+async def fetch_credit_payment_breakdown_for_cierre(
+    conn,
+    tenant_id: UUID,
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime] = None,
+    period_end_time: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Per-method cartera abono rows for arqueo payment breakdown."""
+    return await _fetch_credit_payment_cierre_rows(
+        conn,
+        tenant_id,
+        period_start,
+        period_end,
+        period_start_time,
+        period_end_time,
+    )
+
+
+async def _fetch_credit_payment_cierre_rows(
+    conn,
+    tenant_id: UUID,
+    period_start: date,
+    period_end: date,
+    period_start_time: Optional[datetime] = None,
+    period_end_time: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    if period_start_time and period_end_time:
+        rows = await conn.fetch(
+            """
+            SELECT
+                cp.payment_method AS group_slug,
+                COALESCE(pm.name, cp.payment_method) AS method_name,
+                COALESCE(SUM(cp.amount), 0) AS total
+            FROM credit_payments cp
+            LEFT JOIN payment_methods pm ON pm.id = cp.payment_method_id
+            WHERE cp.tenant_id = $1
+              AND cp.payment_method IS NOT NULL
+              AND cp.payment_date >= $2
+              AND cp.payment_date < $3
+            GROUP BY cp.payment_method, COALESCE(pm.name, cp.payment_method)
+            """,
+            tenant_id,
+            period_start_time,
+            period_end_time,
+        )
+    else:
+        rows = await conn.fetch(
+            """
+            SELECT
+                cp.payment_method AS group_slug,
+                COALESCE(pm.name, cp.payment_method) AS method_name,
+                COALESCE(SUM(cp.amount), 0) AS total
+            FROM credit_payments cp
+            LEFT JOIN payment_methods pm ON pm.id = cp.payment_method_id
+            WHERE cp.tenant_id = $1
+              AND cp.payment_method IS NOT NULL
+              AND cp.payment_date::date >= $2
+              AND cp.payment_date::date <= $3
+            GROUP BY cp.payment_method, COALESCE(pm.name, cp.payment_method)
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    return [
+        {
+            "group_slug": row["group_slug"],
+            "method_name": row["method_name"],
+            "total": float(row["total"]),
+        }
+        for row in rows
+    ]

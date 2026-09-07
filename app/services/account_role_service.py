@@ -4,9 +4,12 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
+from fastapi import Request
+
 from app.core.exceptions import APIError
 from app.core.middleware import require_valid_session
 from app.database import get_db_connection
+from app.services.operation_events_service import DOMAIN_EQUIPO, record_module_event
 
 
 class AccountRole:
@@ -58,6 +61,7 @@ PAYMENT_ROLE_BY_SLUG = {
 }
 
 _TAX_BINDINGS = {
+    # gl_role on tax_lines maps to these kinds (hospitality_tax_engine).
     "inc": ("inc_gl_account_id", "inc_gl_account_code", AccountRole.INC_PAYABLE),
     "iva": ("iva_gl_account_id", "iva_gl_account_code", AccountRole.IVA_PAYABLE),
     "liquor": (
@@ -203,6 +207,40 @@ def payment_role(payment_slug: Optional[str]) -> str:
     return PAYMENT_ROLE_BY_SLUG.get(payment_slug or "", AccountRole.CASH)
 
 
+async def resolve_group_parent_account(
+    conn,
+    tenant_id: UUID,
+    *,
+    slug: Optional[str],
+    gl_account_id: Optional[UUID] = None,
+    gl_account_code: Optional[str] = None,
+    group_tenant_id: Optional[UUID] = None,
+) -> Optional[AccountRef]:
+    """
+    Parent GL for a payment method group in the current tenant's chart.
+
+    Global groups (tenant_id IS NULL) ignore hardcoded CO PUC codes and resolve
+    via payment_role(slug) + localization defaults (CO → 1110 BANK, GLOBAL → 1010).
+    Tenant-owned groups still honor explicit id/code when present in the chart.
+    """
+    explicit = await resolve_account_by_id(conn, tenant_id, gl_account_id)
+    if explicit:
+        return explicit
+
+    if group_tenant_id is not None:
+        legacy = await resolve_legacy_account(conn, tenant_id, gl_account_code)
+        if legacy:
+            return legacy
+
+    return await resolve_account(
+        conn,
+        tenant_id,
+        payment_role(slug),
+        required=False,
+        source="payment_group_list",
+    )
+
+
 async def resolve_payment_account(
     conn,
     tenant_id: UUID,
@@ -274,6 +312,17 @@ async def resolve_payment_account(
     return account
 
 
+# CO-specific tax roles. Non-CO global chart only seeds TAX_PAYABLE (2100);
+# commercial packs still use gl_role iva/inc/liquor — fall back when missing.
+_TAX_ROLES_WITH_GLOBAL_FALLBACK = frozenset(
+    {
+        AccountRole.INC_PAYABLE,
+        AccountRole.IVA_PAYABLE,
+        AccountRole.LIQUOR_TAX_PAYABLE,
+    }
+)
+
+
 async def resolve_tax_account(
     conn,
     tenant_id: UUID,
@@ -287,6 +336,7 @@ async def resolve_tax_account(
     account_id = tax_config.get(id_field)
     if account_id and not isinstance(account_id, UUID):
         account_id = UUID(str(account_id))
+    source = "{}_tax".format(tax_kind)
     try:
         return await resolve_configured_account(
             conn,
@@ -294,9 +344,22 @@ async def resolve_tax_account(
             account_id,
             tax_config.get(code_field),
             role,
-            source="{}_tax".format(tax_kind),
+            source=source,
         )
     except MissingAccountRoleError:
+        if role in _TAX_ROLES_WITH_GLOBAL_FALLBACK:
+            try:
+                return await resolve_account(
+                    conn,
+                    tenant_id,
+                    AccountRole.TAX_PAYABLE,
+                    required=True,
+                    source="{}_fallback".format(source),
+                )
+            except MissingAccountRoleError:
+                if required:
+                    raise
+                return None
         if required:
             raise
         return None
@@ -320,12 +383,38 @@ async def ensure_colombia_payroll(conn, tenant_id: UUID) -> None:
         )
 
 
-async def require_colombia_payroll_capability(request) -> None:
+async def require_colombia_payroll_capability(request: Request) -> None:
     session = require_valid_session(request)
     if not session.tenant_id:
         raise APIError("Tenant ID is required", status_code=401)
     async with get_db_connection() as conn:
         await ensure_colombia_payroll(conn, session.tenant_id)
+
+
+async def ensure_matias_dian(conn, tenant_id: UUID) -> None:
+    """Fail closed when capabilities.matias_dian is off (non-CO profiles)."""
+    enabled = await conn.fetchval(
+        """
+        SELECT country_code = 'CO'
+        FROM tenant_financial_profiles
+        WHERE tenant_id = $1
+        """,
+        tenant_id,
+    )
+    if not enabled:
+        raise APIError(
+            "La facturacion electronica Matias/DIAN no esta disponible para este perfil financiero",
+            status_code=409,
+            details={"code": "MATIAS_DIAN_NOT_AVAILABLE"},
+        )
+
+
+async def require_matias_dian_capability(request: Request) -> None:
+    session = require_valid_session(request)
+    if not session.tenant_id:
+        raise APIError("Tenant ID is required", status_code=401)
+    async with get_db_connection() as conn:
+        await ensure_matias_dian(conn, session.tenant_id)
 
 
 async def list_role_bindings(conn, tenant_id: UUID) -> List[Dict[str, Any]]:
@@ -388,6 +477,15 @@ async def set_role_override(
         role,
         account_id,
     )
+    await record_module_event(
+        conn,
+        tenant_id,
+        domain=DOMAIN_EQUIPO,
+        action="role_override_updated",
+        entity_type="account_role",
+        entity_id=role,
+        label=role,
+    )
 
 
 async def delete_role_override(conn, tenant_id: UUID, role: str) -> None:
@@ -395,4 +493,13 @@ async def delete_role_override(conn, tenant_id: UUID, role: str) -> None:
         "DELETE FROM tenant_account_role_overrides WHERE tenant_id = $1 AND role = $2",
         tenant_id,
         role,
+    )
+    await record_module_event(
+        conn,
+        tenant_id,
+        domain=DOMAIN_EQUIPO,
+        action="role_override_deleted",
+        entity_type="account_role",
+        entity_id=role,
+        label=role,
     )

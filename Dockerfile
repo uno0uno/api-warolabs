@@ -1,4 +1,5 @@
-FROM python:3.9-slim
+# syntax=docker/dockerfile:1.4
+FROM python:3.11-slim
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -12,12 +13,18 @@ WORKDIR /code
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
+        git \
         libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+        openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /root/.ssh \
+    && ssh-keyscan github.com >> /root/.ssh/known_hosts
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt /code/requirements.txt
-RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
+# Mount host SSH agent so pip can clone private git deps (waro-trail) via SSH.
+# Build with: docker build --ssh default . (or docker compose build --ssh default)
+RUN --mount=type=ssh pip install --no-cache-dir --upgrade -r /code/requirements.txt
 
 # Copy application code
 COPY ./app /code/app

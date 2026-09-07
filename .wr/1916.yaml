@@ -1,0 +1,41 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 1916
+title: "Starter: block creating Operaciones Turnos (shift templates) with Mi Plan modal"
+repo: both
+repo_remote: uno0uno/api-warolabs + uno0uno/warocol.com
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-1916-starter-shift-templates
+
+paths:
+  - app/services/billing_service.py
+  - app/services/shift_templates_service.py
+  - tests/test_quota_enforcement.py
+  - pages/operaciones/turnos.vue  # front_nuxt
+
+ac:
+  - "Starter Nuevo turno → Mi Plan modal, no create"
+  - "API create/reactivate → 403 starter_plan_restriction"
+  - "Front maps error to Mi Plan modal"
+  - "List/edit/deactivate allowed"
+  - "Pro unchanged"
+  - "API pytest for assert"
+
+out_of_scope:
+  - Promociones quotas
+  - Personalizar/Propinas locks
+  - active_open_cash_shifts arqueo quota
+  - Country banner (#1917)
+
+hints:
+  entry: "assert_starter_shift_template_growth_allowed"
+  pattern: "billing_service.assert_starter_toggle_allowed + mesas starter modal"
+  tests: "pytest tests/test_quota_enforcement.py -k shift_template_growth -q"
+
+risk: low
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "merge API then front; manual Starter Turnos smoke"

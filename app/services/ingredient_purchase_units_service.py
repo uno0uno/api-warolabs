@@ -494,6 +494,60 @@ async def delete_purchase_unit(
         raise HTTPException(status_code=500, detail=f"Error deleting purchase unit: {str(e)}")
 
 
+async def get_purchase_units_batch(
+    request: Request,
+    response: Response,
+    ingredient_ids: List[UUID],
+    active_only: bool = True,
+) -> dict:
+    """Batch fetch purchase units for multiple ingredients — fixes N+1 in menu recipe builder."""
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+        # Deduplicate, cap 250
+        unique_ids = list(dict.fromkeys(ingredient_ids))[:250]
+        if not unique_ids:
+            return {"success": True, "data": {}}
+        async with get_db_connection() as conn:
+            query = """
+                SELECT
+                    ipu.id,
+                    ipu.ingredient_id,
+                    ipu.purchase_unit,
+                    ipu.purchase_unit_label,
+                    ipu.conversion_factor,
+                    ipu.unit_cost,
+                    ipu.is_default,
+                    ipu.is_active,
+                    ipu.notes,
+                    ipu.created_at,
+                    ipu.updated_at,
+                    i.name as ingredient_name,
+                    i.unit as ingredient_base_unit
+                FROM ingredient_purchase_units ipu
+                JOIN ingredients i ON ipu.ingredient_id = i.id
+                WHERE ipu.ingredient_id = ANY($1::uuid[])
+                  AND (i.tenant_id IS NULL OR i.tenant_id = $2)
+            """
+            params: list = [unique_ids, tenant_id]
+            if active_only:
+                query += " AND ipu.is_active = true"
+            query += " ORDER BY ipu.ingredient_id, ipu.is_default DESC, ipu.conversion_factor ASC"
+            rows = await conn.fetch(query, *params)
+            grouped: dict[str, list] = {str(uid): [] for uid in unique_ids}
+            for row in rows:
+                pu = IngredientPurchaseUnit(**dict(row))
+                grouped[str(row["ingredient_id"])].append(pu.model_dump(mode="json"))
+            return {"success": True, "data": grouped}
+    except AuthenticationError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error fetching purchase units batch: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching purchase units batch: {str(e)}")
+
+
 async def get_all_purchase_units(
     request: Request,
     response: Response,

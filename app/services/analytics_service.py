@@ -1096,7 +1096,8 @@ async def _get_menu_analysis_for_tenant(
     tenant_id: str,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    limit: int = 10
+    limit: int = 10,
+    category_id: Optional[str] = None,
 ) -> dict:
     """Auth-agnostic core for menu analysis. Called by session wrapper and public API."""
     # Default to start of current year
@@ -1111,6 +1112,11 @@ async def _get_menu_analysis_for_tenant(
             parsed_date_from = today.replace(month=1, day=1)
 
         # Real/perceived costs from product table (#744/#745); BCG uses operativo when set (#747).
+        # Bind order: $1 tenant, $2 from, $3 to, $4 tz, $5 limit, optional $6 category_id
+        category_filter = ""
+        if category_id:
+            category_filter = "AND p.category_id = $6::uuid"
+
         query = f"""
             WITH {_PRODUCT_COSTS_CTE},
             product_sales AS (
@@ -1134,6 +1140,7 @@ async def _get_menu_analysis_for_tenant(
                 LEFT JOIN orders o ON oi.order_id = o.id
                 WHERE p.tenant_id = $1
                     AND p.is_available = true
+                    {category_filter}
                     AND (
                         o.id IS NULL OR (
                             o.status = 'completed'
@@ -1184,13 +1191,19 @@ async def _get_menu_analysis_for_tenant(
             LIMIT $5
         """
 
-        rows = await conn.fetch(
-            query,
+        fetch_args: List[Any] = [
             tenant_id,
             parsed_date_from,
             parsed_date_to,
             timezone_name,
-            limit
+            limit,
+        ]
+        if category_id:
+            fetch_args.append(category_id)
+
+        rows = await conn.fetch(
+            query,
+            *fetch_args,
         )
 
         menu_items = []
@@ -1257,7 +1270,8 @@ async def get_menu_analysis(
     request: Request,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    limit: int = 10
+    limit: int = 10,
+    category_id: Optional[str] = None,
 ) -> dict:
     """
     Get menu analysis with product classification based on profitability and popularity
@@ -1276,7 +1290,9 @@ async def get_menu_analysis(
         tenant_id = session_context.tenant_id
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
-        return await _get_menu_analysis_for_tenant(tenant_id, date_from, date_to, limit)
+        return await _get_menu_analysis_for_tenant(
+            tenant_id, date_from, date_to, limit, category_id=category_id
+        )
     except AuthenticationError as e:
         raise e
     except Exception as e:
@@ -1291,6 +1307,7 @@ async def _get_food_cost_for_tenant(
     compare_to: Optional[str] = None,
     compare_from: Optional[str] = None,
     compare_date_to: Optional[str] = None,
+    category_id: Optional[str] = None,
 ) -> dict:
     """Auth-agnostic core for food cost. Called by session wrapper and public API."""
     # Default to start of current year
@@ -1320,6 +1337,10 @@ async def _get_food_cost_for_tenant(
             prev_date_to = parsed_date_from - timedelta(days=1)
             prev_date_from = prev_date_to - timedelta(days=days_diff - 1)
 
+        category_filter = ""
+        if category_id:
+            category_filter = "AND p.category_id = $7::uuid"
+
         query = f"""
             WITH {_PRODUCT_COSTS_CTE},
             period_costs AS (
@@ -1335,9 +1356,11 @@ async def _get_food_cost_for_tenant(
                     END as period
                 FROM order_items oi
                 JOIN orders o ON oi.order_id = o.id
+                JOIN product p ON p.id = oi.product_id
                 JOIN product_costs pc ON oi.product_id = pc.id
                 WHERE o.tenant_id = $1
                     AND o.status = 'completed'
+                    {category_filter}
                     AND (
                         (DATE(o.order_date AT TIME ZONE $6) >= $2
                             AND DATE(o.order_date AT TIME ZONE $6) <= $3)
@@ -1356,14 +1379,20 @@ async def _get_food_cost_for_tenant(
             FROM period_costs
         """
 
-        rows = await conn.fetch(
-            query,
+        fetch_args: List[Any] = [
             tenant_id,
             parsed_date_from,
             parsed_date_to,
             prev_date_from,
             prev_date_to,
             timezone_name,
+        ]
+        if category_id:
+            fetch_args.append(category_id)
+
+        rows = await conn.fetch(
+            query,
+            *fetch_args,
         )
 
         # Parse results — food_cost_pct = real (estimated_cost); operativo KPI optional (#747)
@@ -1427,7 +1456,8 @@ async def _get_food_cost_for_tenant(
 async def get_food_cost(
     request: Request,
     date_from: Optional[str] = None,
-    date_to: Optional[str] = None
+    date_to: Optional[str] = None,
+    category_id: Optional[str] = None,
 ) -> dict:
     """
     Get food cost percentage with comparison to previous period
@@ -1440,7 +1470,9 @@ async def get_food_cost(
         tenant_id = session_context.tenant_id
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
-        return await _get_food_cost_for_tenant(tenant_id, date_from, date_to)
+        return await _get_food_cost_for_tenant(
+            tenant_id, date_from, date_to, category_id=category_id
+        )
     except AuthenticationError as e:
         raise e
     except Exception as e:

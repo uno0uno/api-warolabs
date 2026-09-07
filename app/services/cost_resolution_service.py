@@ -7,13 +7,105 @@ Priority for each ingredient unit cost:
   3. 0
 
 Product total = sum(direct product_recipes) + sum(product_base_recipes × base_recipe_templates).
+
+Recipe quantities are converted to the ingredient stock unit before multiplying cost
+(same rules as resolve_recipe_quantity_to_base_unit: ml|gr ↔ und via unit_weight_gr).
 """
 from decimal import Decimal
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
+# Catalog purchase-style units → gr/ml (mirrors ingredient_purchase_units_service).
+_CATALOG_TO_BASE_FACTOR: dict[str, tuple[Decimal, str]] = {
+    "kg": (Decimal("1000"), "gr"),
+    "libra": (Decimal("500"), "gr"),
+    "arroba": (Decimal("12500"), "gr"),
+    "bulto_25kg": (Decimal("25000"), "gr"),
+    "lt": (Decimal("1000"), "ml"),
+    "botella": (Decimal("750"), "ml"),
+    "galon": (Decimal("3785"), "ml"),
+}
+
+
+def recipe_qty_to_stock_units(
+    quantity: Any,
+    recipe_unit: Optional[str],
+    stock_unit: Optional[str],
+    unit_weight_gr: Any = None,
+) -> Decimal:
+    """
+    Convert a recipe line quantity into the ingredient's stock unit for costing.
+
+    Mirrors resolve_recipe_quantity_to_base_unit (stock path) for the common cases.
+    """
+    qty = Decimal(str(quantity or 0))
+    ru = (recipe_unit or stock_unit or "").strip()
+    su = (stock_unit or "").strip()
+    if not su or ru == su or not ru:
+        return qty
+
+    weight = Decimal(str(unit_weight_gr)) if unit_weight_gr not in (None, "") else Decimal("0")
+
+    if su == "und" and ru in ("gr", "ml") and weight > 0:
+        return qty / weight
+    if ru == "und" and su in ("gr", "ml") and weight > 0:
+        return qty * weight
+
+    catalog = _CATALOG_TO_BASE_FACTOR.get(ru)
+    if catalog and su == "und" and weight > 0:
+        factor, base = catalog
+        if base in ("gr", "ml"):
+            return (qty * factor) / weight
+
+    return qty
+
+
+def _sql_recipe_qty_to_stock(qty_sql: str, unit_sql: str) -> str:
+    """
+    SQL expression: recipe qty in ingredient stock units (ingredients alias must be `i`).
+    """
+    return f"""(
+        CASE
+          WHEN COALESCE(NULLIF(TRIM({unit_sql}), ''), i.unit) IS NOT DISTINCT FROM i.unit
+            THEN ({qty_sql})::numeric
+          WHEN i.unit = 'und'
+               AND COALESCE(NULLIF(TRIM({unit_sql}), ''), '') IN ('gr', 'ml')
+               AND i.unit_weight_gr IS NOT NULL AND i.unit_weight_gr > 0
+            THEN ({qty_sql})::numeric / i.unit_weight_gr::numeric
+          WHEN COALESCE(NULLIF(TRIM({unit_sql}), ''), '') = 'und'
+               AND i.unit IN ('gr', 'ml')
+               AND i.unit_weight_gr IS NOT NULL AND i.unit_weight_gr > 0
+            THEN ({qty_sql})::numeric * i.unit_weight_gr::numeric
+          WHEN i.unit = 'und'
+               AND COALESCE(NULLIF(TRIM({unit_sql}), ''), '') = 'lt'
+               AND i.unit_weight_gr IS NOT NULL AND i.unit_weight_gr > 0
+            THEN (({qty_sql})::numeric * 1000) / i.unit_weight_gr::numeric
+          WHEN i.unit = 'und'
+               AND COALESCE(NULLIF(TRIM({unit_sql}), ''), '') = 'botella'
+               AND i.unit_weight_gr IS NOT NULL AND i.unit_weight_gr > 0
+            THEN (({qty_sql})::numeric * 750) / i.unit_weight_gr::numeric
+          WHEN i.unit = 'und'
+               AND COALESCE(NULLIF(TRIM({unit_sql}), ''), '') = 'galon'
+               AND i.unit_weight_gr IS NOT NULL AND i.unit_weight_gr > 0
+            THEN (({qty_sql})::numeric * 3785) / i.unit_weight_gr::numeric
+          WHEN i.unit = 'und'
+               AND COALESCE(NULLIF(TRIM({unit_sql}), ''), '') = 'kg'
+               AND i.unit_weight_gr IS NOT NULL AND i.unit_weight_gr > 0
+            THEN (({qty_sql})::numeric * 1000) / i.unit_weight_gr::numeric
+          WHEN i.unit = 'und'
+               AND COALESCE(NULLIF(TRIM({unit_sql}), ''), '') = 'libra'
+               AND i.unit_weight_gr IS NOT NULL AND i.unit_weight_gr > 0
+            THEN (({qty_sql})::numeric * 500) / i.unit_weight_gr::numeric
+          ELSE ({qty_sql})::numeric
+        END
+    )"""
+
+
+_DIRECT_QTY = _sql_recipe_qty_to_stock("pr.quantity", "pr.unit")
+_BASE_QTY = _sql_recipe_qty_to_stock("brt.base_quantity", "brt.unit")
+
 # Shared CTE for list queries — $1 must be tenant_id
-LIST_COST_CTE_PREFIX = """
+LIST_COST_CTE_PREFIX = f"""
     WITH latest_purchase_costs AS (
         SELECT DISTINCT ON (pi.ingredient_id)
             pi.ingredient_id,
@@ -29,7 +121,7 @@ LIST_COST_CTE_PREFIX = """
         SELECT
             pr.product_id,
             SUM(
-                pr.quantity * COALESCE(lpc.unit_cost, i.costo_unitario, 0)
+                {_DIRECT_QTY} * COALESCE(lpc.unit_cost, i.costo_unitario, 0)
             ) AS direct_cost
         FROM product_recipes pr
         JOIN ingredients i ON pr.ingredient_id = i.id
@@ -40,7 +132,7 @@ LIST_COST_CTE_PREFIX = """
         SELECT
             pbr.product_id,
             SUM(
-                pbr.quantity * brt.base_quantity * COALESCE(lpc.unit_cost, i.costo_unitario, 0)
+                pbr.quantity * {_BASE_QTY} * COALESCE(lpc.unit_cost, i.costo_unitario, 0)
             ) AS base_cost
         FROM product_base_recipes pbr
         JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
@@ -50,7 +142,7 @@ LIST_COST_CTE_PREFIX = """
     )
 """
 
-_CALCULATE_PRODUCT_COST_SQL = """
+_CALCULATE_PRODUCT_COST_SQL = f"""
     WITH latest_purchase_costs AS (
         SELECT DISTINCT ON (pi.ingredient_id)
             pi.ingredient_id,
@@ -64,7 +156,7 @@ _CALCULATE_PRODUCT_COST_SQL = """
     ),
     direct_cost AS (
         SELECT COALESCE(SUM(
-            pr.quantity * COALESCE(lpc.unit_cost, i.costo_unitario, 0)
+            {_DIRECT_QTY} * COALESCE(lpc.unit_cost, i.costo_unitario, 0)
         ), 0) AS amount
         FROM product_recipes pr
         JOIN ingredients i ON pr.ingredient_id = i.id
@@ -73,7 +165,7 @@ _CALCULATE_PRODUCT_COST_SQL = """
     ),
     base_cost AS (
         SELECT COALESCE(SUM(
-            pbr.quantity * brt.base_quantity * COALESCE(lpc.unit_cost, i.costo_unitario, 0)
+            pbr.quantity * {_BASE_QTY} * COALESCE(lpc.unit_cost, i.costo_unitario, 0)
         ), 0) AS amount
         FROM product_base_recipes pbr
         JOIN base_recipe_templates brt ON pbr.product_base_type_id = brt.product_base_type_id
@@ -112,6 +204,89 @@ async def product_has_any_recipe(product_id: UUID, conn) -> bool:
         """,
         product_id,
     )
+
+
+async def ingredient_has_purchase_unit_cost(
+    conn,
+    *,
+    tenant_id: UUID,
+    ingredient_id: UUID,
+) -> bool:
+    """True when a purchase line supplies a positive unit_cost for this ingredient."""
+    return bool(
+        await conn.fetchval(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM tenant_purchase_items pi
+                JOIN tenant_purchases tp ON pi.purchase_id = tp.id
+                WHERE tp.tenant_id = $1
+                  AND pi.ingredient_id = $2
+                  AND pi.unit_cost IS NOT NULL
+                  AND pi.unit_cost > 0
+            )
+            """,
+            tenant_id,
+            ingredient_id,
+        )
+    )
+
+
+async def sync_resale_mi_costo_to_ingredient(
+    conn,
+    *,
+    tenant_id: UUID,
+    product_id: UUID,
+    costo_percibido: Optional[Decimal],
+) -> bool:
+    """
+    For resale products, seed linked warehouse ingredient.costo_unitario from Mi costo
+    when no purchase-based unit cost exists. Returns True if the ingredient was updated.
+    """
+    ingredient_id = await conn.fetchval(
+        """
+        SELECT i.id
+        FROM product p
+        JOIN product_recipes pr ON pr.product_id = p.id
+        JOIN ingredients i ON i.id = pr.ingredient_id
+        WHERE p.id = $1
+          AND p.tenant_id = $2
+          AND p.is_resale = true
+          AND i.tenant_id = $2
+          AND i.is_resale = true
+        ORDER BY pr.created_at ASC
+        LIMIT 1
+        """,
+        product_id,
+        tenant_id,
+    )
+    if ingredient_id is None:
+        return False
+
+    # Match create seeding: only write a concrete Mi costo, never wipe via null.
+    if costo_percibido is None:
+        return False
+
+    if await ingredient_has_purchase_unit_cost(
+        conn,
+        tenant_id=tenant_id,
+        ingredient_id=ingredient_id,
+    ):
+        return False
+
+    await conn.execute(
+        """
+        UPDATE ingredients
+        SET costo_unitario = $2,
+            updated_at = NOW()
+        WHERE id = $1
+          AND tenant_id = $3
+        """,
+        ingredient_id,
+        float(costo_percibido),
+        tenant_id,
+    )
+    return True
 
 
 async def persist_product_costo_calculado(

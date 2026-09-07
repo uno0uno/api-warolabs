@@ -8,12 +8,13 @@ from uuid import UUID
 from urllib.parse import urlencode
 from fastapi import HTTPException, Request, Response
 from app.database import get_db_connection
-from app.core.security import set_session_cookie, get_client_ip
+from app.core.security import INTERNAL_SESSION_HOURS, set_session_cookie, get_client_ip
 from app.core.middleware import require_valid_tenant
 from app.core.exceptions import AuthenticationError, ValidationError
 from app.core.email_utils import normalize_email
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.core.onboarding_access import next_step_for_state
+from app.core.platform_superusers import is_platform_superuser_email
 from app.models.auth import (
     MagicLinkResponse,
     RegistrationAttribution,
@@ -47,7 +48,7 @@ _LOGIN_IDENTITY_QUERY = """
         (tm.is_active = true AND tm.role = ANY($2::text[]))
         OR (
           t.lifecycle_status = 'pending'
-          AND tm.role = 'owner'
+          AND tm.role IN ('owner', 'superuser')
           AND o.state NOT IN ('setup_complete', 'cancelled')
         )
       )
@@ -63,6 +64,62 @@ async def _lookup_internal_team_member(conn, email: str) -> Optional[Any]:
         email,
         list(LEGACY_INTERNAL_TEAM_ROLES),
     )
+
+
+async def _lookup_platform_superuser(conn, email: str, tenant_id: UUID) -> Optional[Any]:
+    """Resolve env allowlisted operator without a tenant_members row."""
+    if not is_platform_superuser_email(email) or not tenant_id:
+        return None
+    return await conn.fetchrow(
+        """
+        SELECT p.id as user_id, p.email, p.name,
+               'superuser'::text AS role,
+               $2::uuid AS tenant_id,
+               COALESCE(t.lifecycle_status, 'active') AS lifecycle_status,
+               o.state AS onboarding_state
+        FROM profile p
+        LEFT JOIN tenants t ON t.id = $2
+        LEFT JOIN tenant_onboarding o
+          ON o.tenant_id = t.id AND o.owner_user_id = p.id
+        WHERE lower(trim(p.email)) = $1
+        LIMIT 1
+        """,
+        email,
+        tenant_id,
+    )
+
+
+_PLATFORM_VERIFY_BY_CODE = """
+    SELECT mt.*, p.email, p.name, p.id as user_id, p.created_at as user_created_at,
+           'superuser'::text AS user_role,
+           COALESCE(t.lifecycle_status, 'active') AS lifecycle_status,
+           o.state AS onboarding_state, o.email_verified_at
+    FROM magic_tokens mt
+    JOIN profile p ON mt.user_id = p.id
+    INNER JOIN tenants t ON t.id = mt.tenant_id
+    LEFT JOIN tenant_onboarding o
+      ON o.tenant_id = t.id AND o.owner_user_id = p.id
+    WHERE lower(trim(p.email)) = $1 AND mt.verification_code = $2
+      AND mt.expires_at > NOW() AND mt.used = false
+      AND mt.purpose = 'login'
+    LIMIT 1
+"""
+
+_PLATFORM_VERIFY_BY_TOKEN = """
+    SELECT mt.*, p.email, p.name, p.id as user_id, p.created_at as user_created_at,
+           'superuser'::text AS user_role,
+           COALESCE(t.lifecycle_status, 'active') AS lifecycle_status,
+           o.state AS onboarding_state, o.email_verified_at
+    FROM magic_tokens mt
+    JOIN profile p ON mt.user_id = p.id
+    INNER JOIN tenants t ON t.id = mt.tenant_id
+    LEFT JOIN tenant_onboarding o
+      ON o.tenant_id = t.id AND o.owner_user_id = p.id
+    WHERE lower(trim(p.email)) = $1 AND mt.token = $2
+      AND mt.expires_at > NOW() AND mt.used = false
+      AND mt.purpose = 'login'
+    LIMIT 1
+"""
 
 
 async def _tenant_email_branding(conn, tenant_id: UUID) -> dict[str, str]:
@@ -102,6 +159,7 @@ async def _deliver_magic_link(
     tenant_name: str,
     tenant_email: Optional[str],
     purpose: Literal["login", "registration"] = "login",
+    locale: Optional[str] = None,
 ) -> None:
     from app.services.aws_ses_service import ses_service
     from app.services.email_sender import resolve_sender_email_value
@@ -110,19 +168,22 @@ async def _deliver_magic_link(
     template_context = {
         "brand_name": brand_name,
         "tenant_name": tenant_name,
-        "admin_name": "Saifer 101 (Anderson Arévalo)",
-        "admin_email": tenant_email,
+        # Contact signature is sourced from tenant_context/env by the caller;
+        # not hardcoded to a specific person/city here.
+        "admin_name": "",
+        "admin_email": tenant_email or "",
     }
     sent = await ses_service.send_email(
         from_email=resolve_sender_email_value(tenant_email),
-        from_name=f"Saifer 101 (Anderson Arévalo) - {brand_name}",
+        from_name=brand_name,
         to_emails=[email],
-        subject=get_magic_link_subject(brand_name, purpose),
+        subject=get_magic_link_subject(brand_name, purpose, locale),
         html_body=get_magic_link_template(
             magic_link_url,
             verification_code,
             template_context,
             purpose,
+            locale,
         ),
     )
     if sent:
@@ -155,10 +216,12 @@ async def _issue_registration_challenge(
             business_name=draft.get("business_name"),
             country_code=draft.get("country_code"),
             base_currency_code=draft.get("base_currency_code"),
+            tax_jurisdiction_code=draft.get("tax_jurisdiction_code"),
             source=draft.get("last_source") or draft.get("first_source"),
             content=draft.get("last_content") or draft.get("first_content"),
             campaign=draft.get("last_campaign") or draft.get("first_campaign"),
             variant=draft.get("last_variant") or draft.get("first_variant"),
+            visitor_key=draft.get("last_visitor_key") or draft.get("first_visitor_key"),
         )
 
     query = {"token": token, "purpose": "registration"}
@@ -198,7 +261,7 @@ async def _complete_registration_login(
         return None
 
     session_id = secrets.token_hex(16)
-    expires_at = datetime.utcnow() + timedelta(days=7)
+    expires_at = datetime.utcnow() + timedelta(hours=INTERNAL_SESSION_HOURS)  # 24 hours
     await conn.execute(
         """
         INSERT INTO sessions (
@@ -254,6 +317,10 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
         async with get_db_connection() as conn:
             user_result = await _lookup_internal_team_member(conn, email)
             if not user_result:
+                user_result = await _lookup_platform_superuser(
+                    conn, email, tenant_context.tenant_id
+                )
+            if not user_result:
                 registration_draft = await get_resumable_registration_draft(conn, email)
             else:
                 registration_draft = None
@@ -289,6 +356,9 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
                     user_tenant_id,
                 )
                 branding = await _tenant_email_branding(conn, user_tenant_id)
+                from app.core.localization import resolve_tenant_locale_settings
+                locale_settings = await resolve_tenant_locale_settings(conn, user_tenant_id)
+                login_locale = locale_settings.locale
 
         if registration_draft:
             # The public response stays generic. A fresh opaque registration
@@ -315,6 +385,7 @@ async def send_magic_link(request: Request, email: str, redirect: Optional[str] 
             brand_name=branding["brand_name"],
             tenant_name=branding["tenant_name"],
             tenant_email=branding["tenant_email"] or tenant_context.tenant_email,
+            locale=login_locale,
         )
         return MagicLinkResponse()
             
@@ -348,10 +419,12 @@ async def send_registration_magic_link(
                 "business_name": payload.business_name,
                 "country_code": payload.country_code,
                 "base_currency_code": payload.base_currency_code,
+                "tax_jurisdiction_code": payload.tax_jurisdiction_code,
                 "last_source": payload.source,
                 "last_content": payload.content,
                 "last_campaign": payload.campaign,
                 "last_variant": payload.variant,
+                "last_visitor_key": payload.visitor_key,
             },
         )
         return RegistrationMagicLinkResponse(action="verification_sent")
@@ -392,7 +465,7 @@ async def verify_code(request: Request, response: Response, email: str, code: st
                     (tm.is_active = true AND tm.role = ANY($3::text[]))
                     OR (
                         t.lifecycle_status = 'pending'
-                        AND tm.role = 'owner'
+                        AND tm.role IN ('owner', 'superuser')
                         AND o.state NOT IN ('setup_complete', 'cancelled')
                     )
                 )
@@ -405,6 +478,12 @@ async def verify_code(request: Request, response: Response, email: str, code: st
                 code,
                 list(LEGACY_INTERNAL_TEAM_ROLES),
             )
+            if not token_data and is_platform_superuser_email(email):
+                token_data = await conn.fetchrow(
+                    _PLATFORM_VERIFY_BY_CODE,
+                    email,
+                    code,
+                )
             
             if not token_data:
                 registration = await _complete_registration_login(
@@ -437,7 +516,7 @@ async def verify_code(request: Request, response: Response, email: str, code: st
 
             # Create session with user's tenant from token
             session_id = secrets.token_hex(16)
-            expires_at = datetime.utcnow() + timedelta(days=7)  # 7 days (1 week)
+            expires_at = datetime.utcnow() + timedelta(hours=INTERNAL_SESSION_HOURS)  # 24 hours
             user_tenant_id = token_data['tenant_id']
 
             # Get client info for analytics
@@ -548,7 +627,7 @@ async def verify_token(request: Request, response: Response, email: str, token: 
                     (tm.is_active = true AND tm.role = ANY($3::text[]))
                     OR (
                         t.lifecycle_status = 'pending'
-                        AND tm.role = 'owner'
+                        AND tm.role IN ('owner', 'superuser')
                         AND o.state NOT IN ('setup_complete', 'cancelled')
                     )
                 )
@@ -561,6 +640,12 @@ async def verify_token(request: Request, response: Response, email: str, token: 
                 token,
                 list(LEGACY_INTERNAL_TEAM_ROLES),
             )
+            if not token_data and is_platform_superuser_email(email):
+                token_data = await conn.fetchrow(
+                    _PLATFORM_VERIFY_BY_TOKEN,
+                    email,
+                    token,
+                )
             
             if not token_data:
                 registration = await _complete_registration_login(
@@ -593,7 +678,7 @@ async def verify_token(request: Request, response: Response, email: str, token: 
 
             # Create session with user's tenant from token
             session_id = secrets.token_hex(16)
-            expires_at = datetime.utcnow() + timedelta(days=7)  # 7 days (1 week)
+            expires_at = datetime.utcnow() + timedelta(hours=INTERNAL_SESSION_HOURS)  # 24 hours
             user_tenant_id = token_data['tenant_id']
 
             # Get client info for analytics

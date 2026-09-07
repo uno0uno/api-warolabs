@@ -44,19 +44,20 @@ class TestModifierGroupProductAssociation:
         # All IDs should be unique
         assert len(set(product_ids)) == 3
 
-    def test_product_ids_required_on_create(self):
+    def test_product_ids_optional_on_create(self):
         """
-        Test: product_ids is required when creating modifier group
+        Test: product_ids may be empty on create (CSV import / unassigned groups).
+        Front create UX still requires products.
         """
         from app.models.modifier import ModifierGroupCreate
 
-        # Should raise validation error if product_ids is empty
-        with pytest.raises(Exception):
-            ModifierGroupCreate(
-                product_ids=[],  # Empty list should fail
-                name="Test Group",
-                tenant_id=UUID("00000000-0000-0000-0000-000000000001")
-            )
+        group = ModifierGroupCreate(
+            product_ids=[],
+            name="Test Group",
+            tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
+        )
+        assert group.product_ids == []
+        assert group.name == "Test Group"
 
     def test_product_ids_optional_on_update(self):
         """

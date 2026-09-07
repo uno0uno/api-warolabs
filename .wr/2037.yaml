@@ -1,0 +1,39 @@
+issue: 2037
+title: "KDS: 400 on comanda status when UI is stale / duplicate transition"
+repo: both
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-2037-kds-status-idempotent
+
+paths:
+  - app/services/comandas_service.py
+  - app/core/middleware.py
+  - tests/test_comanda_status_idempotent.py
+  - ../front_nuxt/components/cocina/ComandaCard.vue
+
+ac:
+  - Same-status or already-past PATCH returns 200 no-op (no hard 400 toast)
+  - Card updates immediately via optimistic localStatus
+  - Mesa-close delivered race soft-succeeds on ready/preparing retries
+  - TenantMiddleware KDS token uses one open DB connection for both queries
+  - Focused pytest for idempotent status behavior
+
+out_of_scope:
+  - KDS UX redesign / SSE realtime
+  - Changing ALLOWED_TRANSITIONS business rules beyond soft-success
+
+hints:
+  entry: "update_comanda_status + _is_stale_status_request; TenantMiddleware kds_token block"
+  pattern: "STATUS_RANK soft-success before ALLOWED_TRANSITIONS ValidationError"
+  tests: "./venv/bin/pytest tests/test_comanda_status_idempotent.py -q"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: []
+
+next:
+  after_pr: "companion front PR; /wr-review auto"

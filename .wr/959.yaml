@@ -1,0 +1,41 @@
+issue: 959
+title: "fix(pos): insert order_payments when completing pending delivery with single tender"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-959-pending-delivery-order-payments
+
+paths:
+  - app/services/orders_service.py
+  - tests/test_order_status_complete_tenders.py
+  - tests/test_tables_pending_deliveries.py
+
+ac:
+  - Single-tender update_order_status inserts order_payments when none exist
+  - Pending delivery queue excludes fully paid orders
+  - Split/Wompi/credit paths unchanged
+  - Tests cover card single-pay completion
+
+out_of_scope:
+  - Backfill zombie orders
+  - Front cache invalidation (checkout already invalidates)
+
+hints:
+  entry: "orders_service.update_order_status after split blocks"
+  pattern: "tables_service.close_session INSERT order_payments"
+  tests: "./venv/bin/pytest tests/test_order_status_complete_tenders.py tests/test_tables_pending_deliveries.py -q"
+
+risk:
+  sensitive: true
+  areas: [payments, pos]
+
+skip:
+  audits: [ux]
+
+next:
+  after_pr: "/wr-review"
+
+notes: |
+  Symptom only visible in POS Domicilios queue (filters order_payments).
+  Normal POS cart checkout and bar/mesa close_session already insert order_payments.

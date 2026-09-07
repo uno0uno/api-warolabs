@@ -1,14 +1,21 @@
 """Grace-period access levels via get_subscription_access (#62, #363)."""
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from typing import Optional
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
+from app.core.exceptions import APIError
 from app.services import billing_service
 
 
-def _conn_with_subscription(status: str, period_end: datetime | None):
+def _conn_with_subscription(
+    status: str,
+    period_end: Optional[datetime],
+    *,
+    prior_payment_approved: bool = False,
+):
     conn = MagicMock()
     conn.fetchrow = AsyncMock(
         return_value={
@@ -17,6 +24,8 @@ def _conn_with_subscription(status: str, period_end: datetime | None):
             "plan_id": uuid4(),
         }
     )
+    # Used by pending first-vs-renew check (payment_approved history).
+    conn.fetchval = AsyncMock(return_value=1 if prior_payment_approved else None)
     return conn
 
 
@@ -70,10 +79,25 @@ async def test_active_subscription_returns_full():
 
 
 @pytest.mark.asyncio
-async def test_pending_checkout_returns_blocked():
+async def test_pending_first_checkout_returns_starter():
     tenant_id = uuid4()
     period_end = datetime.now(timezone.utc) + timedelta(days=20)
-    conn = _conn_with_subscription("pending", period_end)
+    conn = _conn_with_subscription("pending", period_end, prior_payment_approved=False)
+
+    access = await billing_service.get_subscription_access(tenant_id, conn)
+
+    assert access.level == "starter"
+    assert access.subscription_status == "pending"
+    assert access.grace_days_remaining == 0
+    assert access.next_payment_date is None
+    assert "Starter" in access.message
+
+
+@pytest.mark.asyncio
+async def test_pending_renew_after_prior_payment_returns_blocked():
+    tenant_id = uuid4()
+    period_end = datetime.now(timezone.utc) + timedelta(days=20)
+    conn = _conn_with_subscription("pending", period_end, prior_payment_approved=True)
 
     access = await billing_service.get_subscription_access(tenant_id, conn)
 
@@ -109,7 +133,7 @@ async def test_expired_subscription_returns_blocked():
 
 
 @pytest.mark.asyncio
-async def test_no_subscription_returns_free():
+async def test_no_subscription_returns_starter():
     tenant_id = uuid4()
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=None)
@@ -117,7 +141,7 @@ async def test_no_subscription_returns_free():
 
     access = await billing_service.get_subscription_access(tenant_id, conn)
 
-    assert access.level == "free"
+    assert access.level == "starter"
     conn.fetchrow.assert_called_once()
 
 
@@ -134,3 +158,49 @@ async def test_payment_pending_onboarding_without_subscription_is_blocked():
     assert access.subscription_status == "payment_pending"
     assert "Mi Plan" in access.message
     assert "completa el pago" in access.message
+
+
+@pytest.mark.asyncio
+async def test_get_effective_plan_slug_returns_starter_without_paid_sub():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=[None, None])
+    conn.fetchval = AsyncMock(return_value="starter_active")
+
+    slug = await billing_service.get_effective_plan_slug(conn, tenant_id)
+
+    assert slug == billing_service.STARTER_PLAN_SLUG
+
+
+@pytest.mark.asyncio
+async def test_check_plan_quota_growth_blocks_starter_table_growth_at_zero():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        None,
+        None,
+        {
+            "plan_slug": billing_service.STARTER_PLAN_SLUG,
+            "plan_features": {"quotas": billing_service.STARTER_OPERATIONAL_QUOTAS},
+            "override_id": None,
+            "limit_override": None,
+            "override_disabled": False,
+            "override_reason": None,
+        },
+    ])
+    conn.fetchval = AsyncMock(return_value="starter_active")
+
+    with patch.object(
+        billing_service,
+        "_count_quota_resource_usage",
+        new=AsyncMock(return_value=0),
+    ):
+        with pytest.raises(APIError) as exc:
+            await billing_service.check_plan_quota_growth(
+                conn,
+                tenant_id,
+                "active_tables_including_bar",
+            )
+
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["plan_slug"] == billing_service.STARTER_PLAN_SLUG

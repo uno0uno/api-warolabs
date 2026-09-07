@@ -4,18 +4,13 @@ Sub-task E2.13 of Epic 2 (#197). Validates that:
 1. Owner role under enforce reaches a gated session-authenticated endpoint.
 2. Cashier role under enforce gets 403 on the gated session endpoint (cashier
    lacks INTEGRACIONES — admin + owner only by matrix).
-3. **API-key bypass test**: a request with NO SessionContext (mimicking an
-   API-key call) successfully reaches a /v1/* handler under enforce. Proves
-   the `require_module` early-return behavior protects API-key callers.
+3. **API-key bypass test**: a request with a valid ApiKeyContext (and the
+   role-less pseudo-session middleware builds for API keys) reaches a /v1/*
+   handler under enforce. Proves require_module bypasses staff gates for
+   API-key callers (#819).
 
 Scope: 3 files, 48 endpoints total — api_tokens.py (6, session), public_api.py
 (25, api_key), v1_ordering.py (17 across 5 sub-routers, api_key).
-
-The 3rd test documents the architecture: API-key middleware sets
-`request.state.tenant_context` only, NEVER `request.state.session_context`.
-`get_session_context()` returns an empty `SessionContext()` with `is_valid=False`,
-which `require_module()` short-circuits on (permissions.py:339-343). So gating
-all 48 endpoints is safe — api-key requests pass via the early-return.
 
 Pairs with `tests/test_equipo_permissions.py` (#196 reference impl).
 """
@@ -28,7 +23,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.core import permissions
-from app.core.middleware import SessionContext
+from app.core.middleware import ApiKeyContext, SessionContext
 from app.core.permissions import Module
 from app.routers.api_tokens import router as api_tokens_router
 from app.routers.v1_ordering import router as v1_cart_router
@@ -63,6 +58,8 @@ def _enforce_db_ctx():
     async def _ctx():
         conn = MagicMock()
         conn.fetchval = AsyncMock(return_value="enforce")
+        # get_effective_plan_slug awaits fetchrow; None → non-starter path
+        conn.fetchrow = AsyncMock(return_value=None)
         conn.fetch = AsyncMock(return_value=[])
         yield conn
     return _ctx
@@ -115,28 +112,37 @@ def test_cashier_role_denied_integraciones_endpoint_under_enforce():
 
 
 def test_api_key_request_bypasses_gate_under_enforce():
-    """API-key request (no SessionContext) reaches /v1/cart handler under enforce.
+    """Valid API-key context bypasses staff INTEGRACIONES gate under enforce.
 
-    Mimics the production API-key flow: the api-key middleware sets
-    `request.state.tenant_context` only — never `request.state.session_context`.
-    `get_session_context()` therefore returns an empty `SessionContext()` with
-    `is_valid=False`, and `require_module()` short-circuits via the early-return
-    documented in permissions.py:339-343.
-
-    This test guards against accidental future changes to the early-return —
-    if anyone tightens the gate to deny invalid sessions instead of bypassing,
-    every API-key caller in production would 403. This test catches it before
-    merge.
+    Matches production middleware: API keys get a role-less pseudo-session
+    (`is_valid=True`, `role=None`) plus `ApiKeyContext(is_valid=True)`.
+    Without the API-key early-return, require_module would deny no-membership
+    and every /v1/* caller would 403 on enforce tenants (#819).
     """
-    invalid_session = SessionContext()  # empty / is_valid=False — mimics no-session API-key request
+    tenant_id = uuid4()
+    pseudo_session = SessionContext({
+        "user_id": None,
+        "tenant_id": tenant_id,
+        "email": None,
+        "name": "API Key (waro_sk_test...)",
+        "expires_at": None,
+        "is_active": True,
+        # role intentionally omitted — middleware does not plumb staff roles
+    })
+    api_key_ctx = ApiKeyContext({
+        "token_id": str(uuid4()),
+        "tenant_id": str(tenant_id),
+        "scopes": ["read", "write"],
+    })
     app = FastAPI()
     app.include_router(v1_cart_router)
 
-    with patch("app.core.middleware.get_session_context", return_value=invalid_session), \
+    with patch("app.core.middleware.get_session_context", return_value=pseudo_session), \
+         patch("app.core.middleware.get_api_key_context", return_value=api_key_ctx), \
          patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
          patch(
              "app.routers.v1_ordering.validate_api_key_auth",
-             return_value=(str(uuid4()), {"scopes": ["read"]}),
+             return_value=(str(tenant_id), {"scopes": ["read"]}),
          ), \
          patch(
              "app.routers.v1_ordering.online_cart_service.create_cart_with_batch_items",
@@ -148,7 +154,4 @@ def test_api_key_request_bypasses_gate_under_enforce():
             json={"items": [], "order_type": "delivery"},
         )
 
-    # No 403 — handler reached because the gate early-returns on invalid sessions.
-    # If this asserts != 200, the early-return behavior is broken and every
-    # API-key caller in prod would 403.
     assert response.status_code == 200

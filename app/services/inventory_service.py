@@ -9,6 +9,8 @@ from fastapi import Request, Response, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
+from app.services.billing_service import check_plan_quota_period
+from app.services.operation_events_service import DOMAIN_ABASTECIMIENTO, record_module_event
 import logging
 
 logger = logging.getLogger(__name__)
@@ -40,7 +42,7 @@ async def _get_inventory_stock_for_tenant(
     limit: int = 250,
     offset: int = 0,
     search: Optional[str] = None,
-    status_filter: Optional[str] = None,  # 'low', 'critical', 'ok', 'all'
+    status_filter: Optional[str] = None,  # 'low', 'critical'/'negative', 'ok', 'zero', 'all'
     category: Optional[str] = None,
     unit: Optional[str] = None,
     sort_field: str = "current_stock",
@@ -54,7 +56,7 @@ async def _get_inventory_stock_for_tenant(
         limit: Number of records to return
         offset: Number of records to skip
         search: Search term for ingredient name
-        status_filter: Filter by stock status (low, critical, ok, all)
+        status_filter: Filter by stock status (low, critical/negative, ok, zero, all)
         category: Filter by ingredient category
         unit: Filter by ingredient unit
         sort_field: Field to sort by
@@ -98,6 +100,7 @@ async def _get_inventory_stock_for_tenant(
                     ti.fecha_vencimiento,
                     CASE
                         WHEN ti.current_stock < 0 THEN 'negative'
+                        WHEN ti.current_stock = 0 THEN 'zero'
                         WHEN ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock THEN 'low'
                         ELSE 'ok'
                     END as status,
@@ -111,14 +114,14 @@ async def _get_inventory_stock_for_tenant(
                 FROM tenant_inventory ti
                 JOIN ingredients i ON ti.ingredient_id = i.id
                 LEFT JOIN latest_costs lc ON lc.ingredient_id = ti.ingredient_id
-                WHERE ti.tenant_id = $1 AND ti.current_stock != 0
+                WHERE ti.tenant_id = $1
             """
 
             count_query = """
                 SELECT COUNT(*) as total
                 FROM tenant_inventory ti
                 JOIN ingredients i ON ti.ingredient_id = i.id
-                WHERE ti.tenant_id = $1 AND ti.current_stock != 0
+                WHERE ti.tenant_id = $1
             """
 
             params = [tenant_id]
@@ -133,9 +136,12 @@ async def _get_inventory_stock_for_tenant(
 
             # Add status filter
             if status_filter and status_filter != 'all':
-                if status_filter == 'negative':
+                if status_filter in ('negative', 'critical'):
                     base_query += " AND ti.current_stock < 0"
                     count_query += " AND ti.current_stock < 0"
+                elif status_filter == 'zero':
+                    base_query += " AND ti.current_stock = 0"
+                    count_query += " AND ti.current_stock = 0"
                 elif status_filter == 'low':
                     base_query += " AND ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock"
                     count_query += " AND ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock"
@@ -179,8 +185,9 @@ async def _get_inventory_stock_for_tenant(
             # Get stats using CTE join (avoids correlated subquery per row)
             stats_query = cost_cte + """
                 SELECT
-                    COUNT(*) FILTER (WHERE ti.current_stock != 0) as total_ingredients,
+                    COUNT(*) as total_ingredients,
                     COUNT(*) FILTER (WHERE ti.current_stock < 0) as critical_count,
+                    COUNT(*) FILTER (WHERE ti.current_stock = 0) as zero_count,
                     COUNT(*) FILTER (WHERE ti.current_stock > 0 AND ti.current_stock <= ti.minimum_stock) as low_stock_count,
                     COUNT(*) FILTER (WHERE ti.current_stock > ti.minimum_stock) as ok_count,
                     SUM(ti.current_stock * COALESCE(lc.cost_per_unit, 0)) as total_inventory_value
@@ -199,7 +206,6 @@ async def _get_inventory_stock_for_tenant(
                             FROM tenant_inventory ti
                             JOIN ingredients i ON ti.ingredient_id = i.id
                             WHERE ti.tenant_id = $1
-                              AND ti.current_stock != 0
                               AND i.category IS NOT NULL
                         ) categories
                     ), ARRAY[]::text[]) AS categories,
@@ -210,7 +216,6 @@ async def _get_inventory_stock_for_tenant(
                             FROM tenant_inventory ti
                             JOIN ingredients i ON ti.ingredient_id = i.id
                             WHERE ti.tenant_id = $1
-                              AND ti.current_stock != 0
                               AND i.unit IS NOT NULL
                         ) units
                     ), ARRAY[]::text[]) AS units
@@ -248,6 +253,7 @@ async def _get_inventory_stock_for_tenant(
                 "stats": {
                     "total_ingredients": stats['total_ingredients'],
                     "critical_count": stats['critical_count'],
+                    "zero_count": stats['zero_count'],
                     "low_stock_count": stats['low_stock_count'],
                     "ok_count": stats['ok_count'],
                     "total_inventory_value": _json_decimal(stats['total_inventory_value'], _MONEY_JSON_SCALE, 0)
@@ -271,7 +277,7 @@ async def get_inventory_stock(
     limit: int = 250,
     offset: int = 0,
     search: Optional[str] = None,
-    status_filter: Optional[str] = None,  # 'low', 'critical', 'ok', 'all'
+    status_filter: Optional[str] = None,  # 'low', 'critical'/'negative', 'ok', 'zero', 'all'
     category: Optional[str] = None,
     unit: Optional[str] = None,
     sort_field: str = "current_stock",
@@ -305,7 +311,10 @@ async def _get_inventory_movements_for_tenant(
     movement_type: Optional[str] = None,  # 'purchase', 'consumption', 'adjustment', etc.
     quantity_direction: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_field: str = "created_at",
+    sort_direction: str = "desc",
 ) -> Dict[str, Any]:
     """
     Get inventory movements history for a tenant.
@@ -319,6 +328,9 @@ async def _get_inventory_movements_for_tenant(
         quantity_direction: Filter by quantity sign ('positive' or 'negative')
         start_date: Filter by start date
         end_date: Filter by end date
+        search: Search by ingredient name or reference number
+        sort_field: Field to sort by
+        sort_direction: Sort direction ('asc' or 'desc')
 
     Returns:
         Dictionary with movements data
@@ -327,9 +339,19 @@ async def _get_inventory_movements_for_tenant(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
+        reference_number_expr = """
+            CASE
+                WHEN tim.reference_table = 'tenant_purchases' THEN
+                    (SELECT purchase_number FROM tenant_purchases WHERE id = tim.reference_id)
+                WHEN tim.reference_table = 'orders' THEN
+                    (SELECT order_number::text FROM orders WHERE id = tim.reference_id)
+                ELSE NULL
+            END
+        """
+
         async with get_db_connection() as conn:
             # Build query
-            base_query = """
+            base_query = f"""
                 SELECT
                     tim.id,
                     tim.ingredient_id,
@@ -347,14 +369,7 @@ async def _get_inventory_movements_for_tenant(
                     tim.created_by,
                     tim.created_at,
                     p.name as created_by_name,
-                    -- Get reference details if it's a purchase
-                    CASE
-                        WHEN tim.reference_table = 'tenant_purchases' THEN
-                            (SELECT purchase_number FROM tenant_purchases WHERE id = tim.reference_id)
-                        WHEN tim.reference_table = 'orders' THEN
-                            (SELECT order_number::text FROM orders WHERE id = tim.reference_id)
-                        ELSE NULL
-                    END as reference_number
+                    {reference_number_expr} as reference_number
                 FROM tenant_ingredient_movements tim
                 JOIN ingredients i ON tim.ingredient_id = i.id
                 LEFT JOIN profile p ON tim.created_by = p.id
@@ -364,6 +379,7 @@ async def _get_inventory_movements_for_tenant(
             count_query = """
                 SELECT COUNT(*) as total
                 FROM tenant_ingredient_movements tim
+                JOIN ingredients i ON tim.ingredient_id = i.id
                 WHERE tim.tenant_id = $1
             """
 
@@ -402,8 +418,34 @@ async def _get_inventory_movements_for_tenant(
                 params.append(end_date)
                 param_count += 1
 
+            if search:
+                search_clause = (
+                    f" AND (i.name ILIKE ${param_count}"
+                    f" OR COALESCE(({reference_number_expr}), '') ILIKE ${param_count})"
+                )
+                base_query += search_clause
+                count_query += search_clause
+                params.append(f"%{search}%")
+                param_count += 1
+
+            valid_sort_fields = {
+                "created_at": "tim.created_at",
+                "ingredient_name": "i.name",
+                "movement_type": "tim.movement_type",
+                "quantity_change": "tim.quantity_change",
+                "previous_stock": "tim.previous_stock",
+                "new_stock": "tim.new_stock",
+                "reference_number": "reference_number",
+                "created_by_name": "p.name",
+            }
+            sort_column = valid_sort_fields.get(sort_field, "tim.created_at")
+            direction = "ASC" if str(sort_direction).lower() == "asc" else "DESC"
+
             # Add sorting and pagination
-            base_query += f" ORDER BY tim.created_at DESC LIMIT ${param_count} OFFSET ${param_count + 1}"
+            base_query += (
+                f" ORDER BY {sort_column} {direction}"
+                f" LIMIT ${param_count} OFFSET ${param_count + 1}"
+            )
             params.extend([limit, offset])
 
             # Execute queries
@@ -457,7 +499,10 @@ async def get_inventory_movements(
     movement_type: Optional[str] = None,  # 'purchase', 'consumption', 'adjustment', etc.
     quantity_direction: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_field: str = "created_at",
+    sort_direction: str = "desc",
 ) -> Dict[str, Any]:
     """
     Get inventory movements history for the current session tenant.
@@ -473,7 +518,10 @@ async def get_inventory_movements(
         movement_type=movement_type,
         quantity_direction=quantity_direction,
         start_date=start_date,
-        end_date=end_date
+        end_date=end_date,
+        search=search,
+        sort_field=sort_field,
+        sort_direction=sort_direction,
     )
 
 
@@ -599,7 +647,11 @@ async def create_adjustment(
         body = await request.json()
         ingredient_id = UUID(body.get('ingredient_id'))
         quantity_change = _decimal_value(body.get('quantity_change'))
-        reason = body.get('reason', 'Manual adjustment')
+        # warocol.com#980 — reason is required (Bitácora audit); no silent default.
+        raw_reason = body.get('reason')
+        reason = raw_reason.strip() if isinstance(raw_reason, str) else ''
+        if not reason:
+            raise HTTPException(status_code=422, detail="reason is required")
         source = body.get('source', 'manual_adjustment')
         # New fields for enhanced adjustments
         purchase_unit = body.get('unit')  # Optional: unit selected by user
@@ -611,6 +663,9 @@ async def create_adjustment(
         async with get_db_connection() as conn:
             # Start transaction
             async with conn.transaction():
+                await check_plan_quota_period(
+                    conn, tenant_id, "stock_adjustments_per_period"
+                )
                 # Get ingredient base unit
                 ingredient_query = """
                     SELECT unit
@@ -742,6 +797,18 @@ async def create_adjustment(
                     f"Adjustment created: {ingredient_id} - "
                     f"{quantity_change}{unit_for_movement} ({quantity_in_base_unit}{base_unit}) "
                     f"@ ${cost_per_unit}/{unit_for_movement if cost_per_unit else 'N/A'}"
+                )
+
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_ABASTECIMIENTO,
+                    action="stock_adjusted",
+                    actor_user_id=user_id,
+                    entity_type="ingredient",
+                    entity_id=ingredient_id,
+                    reason=reason,
+                    extra={"quantity_change": float(quantity_in_base_unit)},
                 )
 
                 return {

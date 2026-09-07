@@ -10,6 +10,7 @@ from app.core.tenant_prefs import (
     SUPPORTED_CURRENCY_MINOR_UNITS,
     validate_country_currency_pair,
 )
+from app.core.timezones import seed_tenant_timezone_from_country
 from app.database import get_db_connection
 from app.models.tenant_financial_profile import (
     CountryCurrencyOption,
@@ -20,9 +21,16 @@ from app.models.tenant_financial_profile import (
     TenantFinancialProfileResponse,
     TenantFinancialProfileUpdate,
 )
+from app.services.hospitality_tax_jurisdictions import (
+    JURISDICTION_COUNTRIES,
+    apply_jurisdiction_pack,
+    normalize_jurisdiction_code,
+)
+from app.services.operation_events_service import DOMAIN_MI_NEGOCIO, record_module_event
 
 PERMANENT_REASON = "PERMANENT_FINANCIAL_ACTIVITY"
 TEMPORARY_REASON = "TEMPORARY_OPERATIONAL_ACTIVITY"
+CONFIGURED_REASON = "FINANCIAL_PROFILE_CONFIGURED"
 
 _DEFAULT_PROFILE_INSERT = """
     INSERT INTO tenant_financial_profiles (
@@ -84,7 +92,8 @@ def _capabilities(country_code: str) -> FinancialCapabilities:
         colombia_payroll=colombia,
         matias_dian=colombia,
         cop_wallet=colombia,
-        wompi=colombia,
+        # Wompi pay capability retired; Paddle-only checkout (#798)
+        wompi=False,
         fixed_cop_discounts=colombia,
     )
 
@@ -132,6 +141,11 @@ def _response(profile_row: Any, blockers: Any) -> TenantFinancialProfileResponse
     )
 
 
+async def seed_tenant_accounts(conn, tenant_id) -> None:
+    """Idempotent chart seed from tenant_financial_profiles.accounting_localization."""
+    await conn.execute("SELECT seed_tenant_accounts($1)", tenant_id)
+
+
 async def build_financial_response(
     conn, tenant_id, *, lock_tenant: bool = False
 ) -> TenantFinancialProfileResponse:
@@ -143,7 +157,9 @@ async def build_financial_response(
         if not tenant:
             raise HTTPException(status_code=404, detail="Tenant not found")
 
-    await conn.execute(_DEFAULT_PROFILE_INSERT, tenant_id)
+    insert_status = await conn.execute(_DEFAULT_PROFILE_INSERT, tenant_id)
+    if insert_status == "INSERT 0 1":
+        await seed_tenant_accounts(conn, tenant_id)
     suffix = " FOR UPDATE" if lock_tenant else ""
     profile = await conn.fetchrow(
         """
@@ -180,7 +196,6 @@ async def update_financial_profile(
     country_code, currency_code = validate_country_currency_pair(
         data.country_code, data.base_currency_code
     )
-    accounting_localization, document_mode, fiscal_provider = _financial_mode(country_code)
 
     async with get_db_connection() as conn:
         async with conn.transaction():
@@ -190,37 +205,58 @@ async def update_financial_profile(
                 and current.profile.base_currency_code == currency_code
             )
             if same_pair:
+                jurisdiction = data.tax_jurisdiction_code
+                if country_code in JURISDICTION_COUNTRIES and jurisdiction:
+                    try:
+                        jurisdiction = normalize_jurisdiction_code(
+                            country_code, jurisdiction
+                        )
+                    except ValueError as exc:
+                        raise HTTPException(status_code=422, detail=str(exc)) from exc
+                    applied, _ = await apply_jurisdiction_pack(
+                        conn, tenant_id, country_code, jurisdiction
+                    )
+                    if not applied:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"Unsupported jurisdiction {jurisdiction} "
+                                f"for {country_code}"
+                            ),
+                        )
+                    await seed_tenant_timezone_from_country(
+                        conn, tenant_id, country_code
+                    )
+                    await record_module_event(
+                        conn,
+                        tenant_id,
+                        domain=DOMAIN_MI_NEGOCIO,
+                        action="financial_profile_updated",
+                        actor_user_id=getattr(session, "user_id", None),
+                        entity_type="financial_profile",
+                        entity_id=tenant_id,
+                        label=country_code,
+                    )
+                    return await build_financial_response(conn, tenant_id)
                 return current
-            if not current.eligibility.eligible:
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "code": "FINANCIAL_PROFILE_LOCKED",
-                        "lock_type": current.eligibility.lock_type,
-                        "reason_codes": current.eligibility.reason_codes,
-                    },
-                )
 
-            row = await conn.fetchrow(
-                """
-                UPDATE tenant_financial_profiles
-                SET country_code = $2,
-                    base_currency_code = $3,
-                    accounting_localization = $4,
-                    document_mode = $5,
-                    fiscal_provider = $6,
-                    selection_revision = selection_revision + 1,
-                    updated_at = NOW()
-                WHERE tenant_id = $1
-                RETURNING tenant_id, country_code, base_currency_code,
-                          accounting_localization, document_mode, fiscal_provider,
-                          selection_revision, created_at, updated_at
-                """,
-                tenant_id,
-                country_code,
-                currency_code,
-                accounting_localization,
-                document_mode,
-                fiscal_provider,
+            # Country/currency are immutable after first configure (onboarding /
+            # default profile). Stronger than activity-only eligibility locks.
+            lock_type = (
+                current.eligibility.lock_type
+                if not current.eligibility.eligible
+                else "configured"
             )
-            return _response(row, {"permanent_activity": False, "temporary_activity": False})
+            reason_codes = (
+                current.eligibility.reason_codes
+                if not current.eligibility.eligible
+                else [CONFIGURED_REASON]
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "FINANCIAL_PROFILE_LOCKED",
+                    "lock_type": lock_type,
+                    "reason_codes": reason_codes,
+                },
+            )

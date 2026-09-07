@@ -245,47 +245,29 @@ operations consumed by `pages/equipo/miembros.vue`.
 A regression test in `tests/test_equipo_permissions.py::test_cashier_passes_user_tenants_exclusion_under_enforce`
 guards against accidental future gating of `/user-tenants`.
 
-## §10. API-key callers bypass `require_module` via early-return (#197)
+## §10. API-key callers bypass `require_module` via early-return (#197 / #819)
 
 `public_api.py` (25 endpoints) and `v1_ordering.py` (17 endpoints across 5
 sub-routers) are authenticated via API keys (`Authorization: Bearer waro_sk_...`
-or `X-API-Key` header). The middleware at `app/core/middleware.py:163-194`
-validates the key and sets `request.state.tenant_context` — **but never sets
-`request.state.session_context`**.
+or `X-API-Key` header). Middleware validates the key, sets
+`request.state.api_key_context`, and builds a **role-less pseudo-session**
+(`session.is_valid=True`, `role=None`) so existing tenant plumbing works.
 
-`get_session_context(request)` (middleware.py:528-532) returns an empty
-`SessionContext()` for API-key requests, which has `is_valid=False`.
-`require_module()` short-circuits on that condition (permissions.py:339-343):
-
-> "Sessions that aren't valid at all return early so `require_valid_session`
-> (still called inside handlers) can raise 401 with its own message."
-
-**Effect**: gating `/api-tokens`, `/v1/*` endpoints under INTEGRACIONES is
-safe — the gate is a complete no-op for API-key calls, which pass through
-to the handler. The handler then runs `validate_api_key_auth(request, scope)`
-which enforces scope-based authorization at the token level (`read`, `write`,
-`orders:read`, `products:write`, etc.).
+`require_module()` / `require_any_module()` therefore early-return when
+`get_api_key_context(request).is_valid` (#819). Staff-module enforcement does
+not apply to API-key callers; handlers then run `validate_api_key_auth`
+(token scopes: `read`, `write`, `orders:read`, …).
 
 **Defense in depth**:
-- Outer gate (`require_module`) — gates session-authenticated callers
+- Outer gate (`require_module`) — gates session-authenticated callers; no-op for valid API keys
 - Inner check (`validate_api_key_auth`) — enforces scopes on API-key callers
-- Both coexist without conflict. The gate is a no-op for API-key flow; the
-  scope check is a no-op for session flow.
+- Both coexist without conflict
 
-This pattern is **forward-prep**: if any of these endpoints is ever called
-by an operator session (instead of API key), the gate enforces INTEGRACIONES
-correctly without needing a second-pass PR.
-
-**Test guarding the early-return**:
+**Test guarding the bypass**:
 \`tests/test_integraciones_permissions.py::test_api_key_request_bypasses_gate_under_enforce\`
-asserts that a request with no SessionContext reaches `/v1/cart/batch` under
-enforce mode. If anyone later tightens the gate to deny invalid sessions
-instead of bypassing them, every API-key caller in production would 403;
-this test catches it before merge.
-
-The audit doc's earlier "Open questions" entry asking whether to plumb a role
-into API keys or skip those routers is **resolved by this finding**: neither
-is necessary.
+asserts a valid `ApiKeyContext` + role-less pseudo-session reaches
+`/v1/cart/batch` under enforce. Without that early-return, enforce tenants
+403 every `/v1/*` API-key call with "Sin permiso para el módulo integraciones".
 
 ## §6. `auth.py` and `webhooks.py` — explicit skips
 

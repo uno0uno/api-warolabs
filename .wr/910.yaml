@@ -1,0 +1,29 @@
+issue: 910
+title: "Modifier group delete should soft-delete (archive) when used in orders, preserve history and hide from sale"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-910-modifier-soft-delete
+paths:
+  - app/services/modifiers_service.py
+  - app/routers/modifiers.py
+ac:
+  - If has_orders (order_item_modifiers) → soft-delete: unlink from products, set modifiers is_available=false/removed_at, keep group, return {archived:true}
+  - If no history → hard delete as before, return {archived:false}
+  - No 500 FK, reason mandatory 422, recorded in Bitácora
+  - Front handles archived true (follow-up PR)
+out_of_scope:
+  - schema migration (reuse is_available/removed_at)
+  - other menu entities
+hints:
+  entry: "app/services/modifiers_service.py:783 delete_modifier_group"
+  pattern: "app/services/products_service.py:1387 delete_product soft-delete when has_sales"
+  tests: "pytest tests/test_modifiers* -q  (if exists) + manual DELETE with/without history"
+risk:
+  sensitive: false
+  areas: [modifiers, orders]
+skip:
+  audits: []
+next:
+  after_pr: "front PR for archived handling"

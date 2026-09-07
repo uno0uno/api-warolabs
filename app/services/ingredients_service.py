@@ -11,6 +11,7 @@ from app.services.warehouse_categories_service import (
     list_warehouse_categories,
     resolve_assignable_warehouse_category,
 )
+from app.services.billing_service import check_plan_quota_growth
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,7 @@ async def resolve_ingredients_by_warehouse_categories(
     tenant_id: UUID,
     category_ids: List[UUID],
     exclude_ingredient_ids: Optional[List[UUID]] = None,
+    exclude_resale: bool = False,
 ) -> Dict[str, Any]:
     """Resolve visible active ingredients for ordered warehouse categories."""
     ordered_category_ids = list(dict.fromkeys(category_ids))
@@ -119,12 +121,14 @@ async def resolve_ingredients_by_warehouse_categories(
          AND ingredient.is_active = TRUE
          AND (ingredient.tenant_id IS NULL OR ingredient.tenant_id = $1)
          AND NOT (ingredient.id = ANY($3::uuid[]))
+         AND ($4::boolean IS FALSE OR COALESCE(ingredient.is_resale, FALSE) = FALSE)
         ORDER BY category.position, LOWER(ingredient.name) NULLS LAST,
                  ingredient.name NULLS LAST, ingredient.id
         """,
         tenant_id,
         ordered_category_ids,
         excluded_ids,
+        exclude_resale,
     )
 
     ingredients: List[Dict[str, Any]] = []
@@ -184,6 +188,38 @@ def resolve_purchase_units(purchase_units: list, base_unit: str) -> list:
         })
     return resolved
 
+
+async def _copy_parent_purchase_units(conn, parent_id: UUID, ingredient_id: UUID) -> None:
+    """Seed a new variant ingredient with independent copies of the parent's purchase units."""
+    parent_units = await conn.fetch(
+        """
+        SELECT purchase_unit, purchase_unit_label, conversion_factor, unit_cost,
+               is_default, is_active, notes
+        FROM ingredient_purchase_units
+        WHERE ingredient_id = $1
+        ORDER BY is_default DESC, purchase_unit_label
+        """,
+        parent_id,
+    )
+    for pu in parent_units:
+        await conn.execute(
+            """
+            INSERT INTO ingredient_purchase_units
+                (ingredient_id, purchase_unit, purchase_unit_label, conversion_factor,
+                 unit_cost, is_default, is_active, notes)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            ingredient_id,
+            pu["purchase_unit"],
+            pu["purchase_unit_label"],
+            pu["conversion_factor"],
+            pu["unit_cost"],
+            pu["is_default"],
+            pu["is_active"],
+            pu["notes"],
+        )
+
+
 async def get_ingredients_list(
     request: Request,
     response: Response,
@@ -197,6 +233,9 @@ async def get_ingredients_list(
     base_only: Optional[bool] = None,
     tenant_only: Optional[bool] = None,
     show_archived: Optional[bool] = None,
+    unit: Optional[str] = None,
+    has_cost: Optional[bool] = None,
+    has_unit_weight: Optional[bool] = None,
 ) -> IngredientsListResponse:
     """
     Fetches a list of ingredients from the database with tenant isolation,
@@ -226,6 +265,7 @@ async def get_ingredients_list(
                     CAST(i.unit_weight_gr AS float) as unit_weight_gr,
                     i.unit_weight_unit,
                     i.is_resale,
+                    CAST(i.costo_unitario AS float) as costo_unitario,
                     i.created_at,
                     i.updated_at,
                     CAST(COALESCE(tsp.unit_price, tim.cost_per_unit) AS float) as price,
@@ -338,6 +378,28 @@ async def get_ingredients_list(
                 # Override the is_active=TRUE filter added in the base WHERE clause
                 base_query = base_query.replace("AND i.is_active = TRUE", "AND i.is_active = FALSE")
                 count_query = count_query.replace("AND is_active = TRUE", "AND is_active = FALSE")
+
+            if unit:
+                base_query += f" AND LOWER(i.unit) = LOWER(${base_param_count})"
+                count_query += f" AND LOWER(unit) = LOWER(${count_param_count})"
+                base_params.append(unit)
+                count_params.append(unit)
+                base_param_count += 1
+                count_param_count += 1
+
+            if has_cost is True:
+                base_query += " AND i.costo_unitario IS NOT NULL AND i.costo_unitario > 0"
+                count_query += " AND costo_unitario IS NOT NULL AND costo_unitario > 0"
+            elif has_cost is False:
+                base_query += " AND (i.costo_unitario IS NULL OR i.costo_unitario <= 0)"
+                count_query += " AND (costo_unitario IS NULL OR costo_unitario <= 0)"
+
+            if has_unit_weight is True:
+                base_query += " AND i.unit_weight_gr IS NOT NULL AND i.unit_weight_gr > 0"
+                count_query += " AND unit_weight_gr IS NOT NULL AND unit_weight_gr > 0"
+            elif has_unit_weight is False:
+                base_query += " AND (i.unit_weight_gr IS NULL OR i.unit_weight_gr <= 0)"
+                count_query += " AND (unit_weight_gr IS NULL OR unit_weight_gr <= 0)"
 
             # Add pagination
             offset = (page - 1) * limit
@@ -486,6 +548,8 @@ async def create_tenant_ingredient(
         data.category,
     )
 
+    await check_plan_quota_growth(conn, tenant_id, "tenant_ingredients")
+
     try:
         row = await conn.fetchrow(
             """
@@ -522,9 +586,10 @@ async def create_tenant_ingredient(
         result["parent_name"] = parent_name
 
     # Insert purchase units within the same transaction
+    from uuid import UUID as _UUID
+    ingredient_uuid = _UUID(ingredient_id_text)
+
     if data.purchase_units:
-        from uuid import UUID as _UUID
-        ingredient_uuid = _UUID(ingredient_id_text)
         resolved = resolve_purchase_units(data.purchase_units, data.unit)
         for pu in resolved:
             await conn.execute(
@@ -539,6 +604,19 @@ async def create_tenant_ingredient(
                 pu['conversion_factor'],
                 pu['is_default'],
             )
+    elif parent_uuid:
+        await _copy_parent_purchase_units(conn, parent_uuid, ingredient_uuid)
+
+    # Ensure the article appears on stock list at 0 before any movement/adjustment.
+    await conn.execute(
+        """
+        INSERT INTO tenant_inventory (tenant_id, ingredient_id, current_stock, minimum_stock)
+        VALUES ($1, $2, 0, 0)
+        ON CONFLICT (tenant_id, ingredient_id) DO NOTHING
+        """,
+        tenant_id,
+        ingredient_uuid,
+    )
 
     return result
 

@@ -1,0 +1,37 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 904
+title: "Aprovisionar warocol-openbao en prod + secrets a .env"
+repo: api-warolabs
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-904-openbao-provision
+
+paths:
+  - warocol-openbao/README.md
+  - api_warocol.com/app/config.py
+
+ac:
+  - ~/warocol-openbao en prod con bao_file y transit key (pull+up -d)
+  - OPENBAO_ADDR=http://openbao:8200 en .env (no 127.0.0.1) + ROLE/SECRET
+  - Unseal key/root token fuera de git, root revocado, curl /sys/health ok
+
+out_of_scope:
+  - Paddle LIVE (siguiente issue)
+
+hints:
+  entry: "warocol-openbao/README.md"
+  pattern: "api_warocol.com/app/config.py:103 OPENBAO_ADDR"
+  tests: "curl http://openbao:8200/v1/sys/health desde api container"
+
+risk:
+  sensitive: true
+  areas:
+    - unseal keys, root token
+
+skip:
+  audits:
+    - no Paddle
+
+next:
+  after_pr: "warocol.com#2417 Paddle LIVE"

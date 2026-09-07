@@ -25,9 +25,9 @@ class TestRoleEnum:
 
 
 class TestModuleEnum:
-    def test_thirteen_modules_exposed(self):
-        # Eventos lives in warotickets.com, so API exposes 13 WARO modules.
-        assert len(list(Module)) == 13
+    def test_fourteen_modules_exposed(self):
+        # Eventos lives in warotickets.com; CRM added for customers/Waros (#1931).
+        assert len(list(Module)) == 14
 
     def test_no_duplicate_values(self):
         values = [m.value for m in Module]
@@ -36,7 +36,7 @@ class TestModuleEnum:
     def test_epic_2_contract_modules_present(self):
         expected = {
             "pos", "ventas", "despacho", "menu", "operaciones",
-            "abastecimiento", "analitica", "finanzas", "facturacion",
+            "abastecimiento", "analitica", "crm", "finanzas", "facturacion",
             "equipo", "integraciones", "mi_plan", "mi_negocio",
         }
         assert {m.value for m in Module} == expected

@@ -7,6 +7,7 @@ from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import APIError, AuthenticationError, AuthorizationError, ValidationError
+from app.services.operation_events_service import DOMAIN_FINANZAS, record_operation_event
 from app.models.accounting import (
     TenantAccount,
     TenantAccountCreate,
@@ -42,8 +43,12 @@ from app.services.account_role_service import (
     resolve_account,
     set_role_override,
 )
+from app.services.billing_service import check_plan_quota_period
 
 logger = logging.getLogger(__name__)
+
+# Public POST /journal-entries only; auto GL uses other insert paths.
+MANUAL_JOURNAL_SOURCE_MODULES = frozenset({"manual", "manual_balance_adjustment"})
 
 VALID_ACCOUNT_TYPES = ['asset', 'liability', 'equity', 'income', 'expense', 'cogs']
 VALID_NORMAL_BALANCES = ['debit', 'credit']
@@ -215,7 +220,15 @@ async def create_account(request: Request, body: TenantAccountCreate) -> TenantA
                 "SELECT accounting_localization FROM tenant_financial_profiles WHERE tenant_id = $1",
                 tenant_id,
             )
-            level = _derive_level(code) if localization == "WARO_CO_PUC_V1" else body.level
+            # CO always derives from PUC code length. GLOBAL hospitality codes use the same
+            # 1/2/4/6 ladder; clients often send parent.level+1 (e.g. 5 under Bank 1010),
+            # which is not in the allowed set — prefer code-derived level when body is invalid.
+            if localization == "WARO_CO_PUC_V1":
+                level = _derive_level(code)
+            elif body.level in (1, 2, 4, 6, 8):
+                level = body.level
+            else:
+                level = _derive_level(code)
             if level not in (1, 2, 4, 6, 8):
                 raise ValidationError("Nivel contable invalido")
 
@@ -596,12 +609,21 @@ async def create_journal_entry(request: Request, body: JournalEntryCreate) -> Jo
                 raise ValidationError("Una o más cuentas no pertenecen al tenant actual")
 
             async with conn.transaction():
-                # Issue #531 — accept caller-supplied source_module/source_id
-                # (e.g. 'manual_balance_adjustment' for the "Actualizar saldo
-                # real" flow) and the pending_review annotation flag.
+                # Public create path is manual-only. Auto GL posts use other
+                # service helpers and must not come through this endpoint with
+                # a forged source_module (warocol.com#1835 review).
                 source_module = body.source_module or 'manual'
+                if source_module not in MANUAL_JOURNAL_SOURCE_MODULES:
+                    raise ValidationError(
+                        "Los asientos creados desde esta API solo admiten "
+                        "source_module 'manual' o 'manual_balance_adjustment'."
+                    )
                 source_id = body.source_id
                 pending_review = bool(body.pending_review)
+
+                await check_plan_quota_period(
+                    conn, tenant_id, "manual_journal_entries_per_period"
+                )
 
                 entry_row = await conn.fetchrow(
                     """INSERT INTO tenant_journal_entries
@@ -633,6 +655,20 @@ async def create_journal_entry(request: Request, body: JournalEntryCreate) -> Jo
                         line.description, line.line_order if line.line_order else i,
                     )
                     line_rows.append(lr)
+
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_FINANZAS,
+                    channel=None,
+                    action="journal_entry_created",
+                    actor_user_id=user_id,
+                    payload={
+                        "entity_type": "journal_entry",
+                        "entity_id": str(entry_id),
+                        "label": body.description,
+                    },
+                )
 
         entry = _row_to_journal_entry(entry_row)
         lines = [_row_to_journal_line(r) for r in line_rows]
@@ -887,6 +923,19 @@ async def post_journal_entry(request: Request, entry_id: UUID) -> JournalEntryRe
                 entry_id,
             )
 
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="journal_entry_posted",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "journal_entry",
+                    "entity_id": str(entry_id),
+                },
+            )
+
         entry = _row_to_journal_entry(updated)
         lines = [_row_to_journal_line(r) for r in full_lines]
         entry_with_lines = JournalEntryWithLines(**entry.dict(), lines=lines)
@@ -1001,6 +1050,21 @@ async def void_journal_entry(
                         line['line_order'],
                     )
                     rev_line_rows.append(rl)
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_FINANZAS,
+                channel=None,
+                action="journal_entry_voided",
+                actor_user_id=user_id,
+                reason=reason.strip(),
+                payload={
+                    "entity_type": "journal_entry",
+                    "entity_id": str(entry_id),
+                    "reversing_entry_id": str(rev_entry_id),
+                },
+            )
 
         rev_entry = _row_to_journal_entry(rev_row)
         rev_lines = [_row_to_journal_line(r) for r in rev_line_rows]

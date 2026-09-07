@@ -67,7 +67,10 @@ class ExpenseBase(BaseModel):
     recurring_end_date: Optional[date] = Field(None, alias='recurringEndDate')
     payment_method: Optional[str] = Field('cash', alias='paymentMethod')
     payment_method_id: Optional[str] = Field(None, alias='paymentMethodId')
+    payment_type: Optional[str] = Field('contado', alias='paymentType')  # contado | credito
     expense_type: Optional[ExpenseType] = Field(None, alias='expenseType')
+    # Drawer control only (#786): false = cash did not leave the till (exclude from arqueo).
+    from_cash_drawer: bool = Field(True, alias='fromCashDrawer')
 
     class Config:
         populate_by_name = True
@@ -86,7 +89,9 @@ class ExpenseUpdate(BaseModel):
     recurring_end_date: Optional[date] = Field(None, alias='recurringEndDate')
     payment_method: Optional[str] = Field(None, alias='paymentMethod')
     payment_method_id: Optional[str] = Field(None, alias='paymentMethodId')
+    payment_type: Optional[str] = Field(None, alias='paymentType')
     expense_type: Optional[ExpenseType] = Field(None, alias='expenseType')
+    from_cash_drawer: Optional[bool] = Field(None, alias='fromCashDrawer')
 
     class Config:
         populate_by_name = True
@@ -99,6 +104,7 @@ class Expense(ExpenseBase):
     source_system: Optional[str] = Field(None, alias='sourceSystem')
     expense_number: Optional[str] = Field(None, alias='expenseNumber')
     created_at: datetime = Field(alias='createdAt')
+    paid_at: Optional[datetime] = Field(None, alias='paidAt')
     category: Optional[ExpenseCategory] = None
     attachments: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
 

@@ -577,3 +577,283 @@ class TestAutoComplete:
                 f"/online/orders/{order_id}/status",
                 json={"new_status": "cancelled", "reason": "test rollback"},
             )
+
+
+class _AsyncContext:
+    def __init__(self, value=None):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def _unit_session(tenant_id, user_id):
+    from types import SimpleNamespace
+    return SimpleNamespace(tenant_id=tenant_id, user_id=user_id)
+
+
+@pytest.mark.asyncio
+async def test_online_accept_deducts_when_flag_on():
+    """warocol.com#2568 — pending→confirmed with flag on calls deduct once."""
+    from fastapi import Request
+
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": order_id,
+                "status": "pending",
+                "customer_id": None,
+                "payment_method": None,
+                "payment_method_id": None,
+                "order_number": 101,
+            },
+            {"change_date": datetime.now()},
+        ]
+    )
+    conn.execute = AsyncMock()
+    deduct = AsyncMock()
+
+    with patch(
+        "app.services.online_orders_service.require_valid_session",
+        return_value=_unit_session(tenant_id, user_id),
+    ), patch(
+        "app.services.online_orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.online_orders_service.resolve_tenant_timezone",
+        new=AsyncMock(return_value="America/Bogota"),
+    ), patch(
+        "app.services.online_orders_service._deduct_inventory_on_command_enabled",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "app.services.online_orders_service._deduct_stock_for_order",
+        new=deduct,
+    ), patch(
+        "app.services.online_orders_service.record_operation_event",
+        new=AsyncMock(),
+    ):
+        result = await online_orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "confirmed",
+        )
+
+    assert result["data"]["new_status"] == "confirmed"
+    deduct.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_online_accept_skips_deduct_when_flag_off():
+    from fastapi import Request
+
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": order_id,
+                "status": "pending",
+                "customer_id": None,
+                "payment_method": None,
+                "payment_method_id": None,
+                "order_number": 102,
+            },
+            {"change_date": datetime.now()},
+        ]
+    )
+    conn.execute = AsyncMock()
+    deduct = AsyncMock()
+
+    with patch(
+        "app.services.online_orders_service.require_valid_session",
+        return_value=_unit_session(tenant_id, user_id),
+    ), patch(
+        "app.services.online_orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.online_orders_service.resolve_tenant_timezone",
+        new=AsyncMock(return_value="America/Bogota"),
+    ), patch(
+        "app.services.online_orders_service._deduct_inventory_on_command_enabled",
+        new=AsyncMock(return_value=False),
+    ), patch(
+        "app.services.online_orders_service._deduct_stock_for_order",
+        new=deduct,
+    ), patch(
+        "app.services.online_orders_service.record_operation_event",
+        new=AsyncMock(),
+    ):
+        result = await online_orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "confirmed",
+        )
+
+    assert result["data"]["new_status"] == "confirmed"
+    deduct.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_online_auto_complete_skips_second_deduct_when_already_consumed():
+    from fastapi import Request
+
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": order_id,
+                "status": "pending",
+                "customer_id": None,
+                "payment_method": "cash",
+                "payment_method_id": None,
+                "order_number": 103,
+            },
+            {"change_date": datetime.now()},
+            {"comandas_enabled": False},
+            {"change_date": datetime.now()},
+            {
+                "order_number": 103,
+                "total_amount": Decimal("10.00"),
+                "payment_method": "cash",
+                "payment_method_id": None,
+                "order_date": datetime.now(),
+                "tip_amount": 0,
+                "tip_tax_amount": 0,
+            },
+            None,
+        ]
+    )
+    conn.fetch = AsyncMock(return_value=[])
+    conn.execute = AsyncMock()
+    deduct = AsyncMock()
+
+    with patch(
+        "app.services.online_orders_service.require_valid_session",
+        return_value=_unit_session(tenant_id, user_id),
+    ), patch(
+        "app.services.online_orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.online_orders_service.resolve_tenant_timezone",
+        new=AsyncMock(return_value="America/Bogota"),
+    ), patch(
+        "app.services.online_orders_service._deduct_inventory_on_command_enabled",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "app.services.online_orders_service._deduct_stock_for_order",
+        new=deduct,
+    ), patch(
+        "app.services.online_orders_service._order_has_consumption_movements",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "app.services.online_orders_service._get_tenant_tax_config",
+        new=AsyncMock(return_value={}),
+    ), patch(
+        "app.services.online_orders_service._post_order_gl_entry",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.online_orders_service._post_order_cogs_gl_entry",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.online_orders_service.record_operation_event",
+        new=AsyncMock(),
+    ):
+        result = await online_orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "confirmed",
+            auto_complete=True,
+        )
+
+    assert result["data"]["new_status"] == "completed"
+    assert result["data"]["auto_completed"] is True
+    deduct.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_online_cancel_restores_stock():
+    from fastapi import Request
+
+    tenant_id = uuid4()
+    user_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": order_id,
+                "status": "confirmed",
+                "customer_id": None,
+                "payment_method": None,
+                "payment_method_id": None,
+                "order_number": 104,
+            },
+            {"change_date": datetime.now()},
+        ]
+    )
+    conn.execute = AsyncMock()
+    restore = AsyncMock()
+
+    with patch(
+        "app.services.online_orders_service.require_valid_session",
+        return_value=_unit_session(tenant_id, user_id),
+    ), patch(
+        "app.services.online_orders_service.get_db_connection",
+        return_value=_AsyncContext(conn),
+    ), patch(
+        "app.services.online_orders_service.resolve_tenant_timezone",
+        new=AsyncMock(return_value="America/Bogota"),
+    ), patch(
+        "app.services.orders_service._return_stock_for_order_cancellation",
+        new=restore,
+    ), patch(
+        "app.services.online_orders_service.record_operation_event",
+        new=AsyncMock(),
+    ):
+        result = await online_orders_service.update_order_status(
+            Request({"type": "http"}),
+            order_id,
+            "cancelled",
+            reason="customer cancel",
+        )
+
+    assert result["data"]["new_status"] == "cancelled"
+    restore.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_order_inventory_helper_detects_online_cart_consumption():
+    from app.services import orders_service
+
+    tenant_id = uuid4()
+    order_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=True)
+    row = {
+        "pos_cart_id": None,
+        "table_session_id": None,
+        "online_cart_id": uuid4(),
+    }
+
+    already = await orders_service._order_inventory_already_consumed_before_completion(
+        conn,
+        row=row,
+        order_id=order_id,
+        tenant_id=tenant_id,
+        old_status="confirmed",
+    )
+
+    assert already is True
+    conn.fetchval.assert_awaited_once()

@@ -1,0 +1,28 @@
+issue: 2035
+title: "POS mesa close: liquor tax missing from receipt detail under INC"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2035-mesa-close-liquor-tax-breakdown
+risk: low
+
+paths:
+  - app/services/tables_service.py
+  - tests/test_hospitality_tax_engine.py
+
+ac:
+  - close_session tax rows include category_id / tax_resolution / tax_line_key per item
+  - menu-mapped liquor not collapsed into primary INC/IVA when tax_category=standard
+  - regression test documents buggy GROUP BY shape vs item-level fix
+
+out_of_scope:
+  - Front receipt changes
+  - Counter/cart complete (already item-level)
+
+hints:
+  entry: "tables_service.close_session tax_rows fetch ~2159"
+  tests: "pytest tests/test_hospitality_tax_engine.py::test_menu_mapped_liquor_not_lost_when_legacy_tax_category_standard -q"
+
+skip:
+  audits: [ux, color, typography]

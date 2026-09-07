@@ -1,0 +1,34 @@
+issue: 2375
+title: "feat(despacho): log table-QR accept/reject in Bitácora with reject reason"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-2375-table-qr-bitacora
+risk: low
+
+paths:
+  - app/services/operation_events_service.py
+  - app/services/table_qr_requests_service.py
+  - app/routers/table_qr_requests.py
+  - tests/test_table_qr_requests.py
+  - tests/test_operation_events.py
+
+ac:
+  - Accepting a pending table-QR request writes Despacho Bitácora with actor, table, order/request
+  - Rejecting writes Despacho Bitácora with actor, table, and reason
+  - Reject blocked until non-empty reason (API)
+  - Viewing a request does not write Bitácora
+
+out_of_scope:
+  - Domicilios and Comandas
+  - Auditing view request
+  - tab_item_added on accept
+
+hints:
+  entry: "table_qr_requests_service.reject_request / accept_requests"
+  pattern: "orders_service update_order_status cancel_reason_required + record_operation_event"
+  tests: "pytest tests/test_table_qr_requests.py tests/test_operation_events.py -q --tb=short"
+
+skip:
+  audits: [ux, color, typography]

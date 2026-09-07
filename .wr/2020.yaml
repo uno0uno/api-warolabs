@@ -1,0 +1,36 @@
+issue: 2020
+title: "fix(pos): split wallet apply + credit on customer CRM"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2020-split-wallet-credit-crm
+issue_url: https://github.com/uno0uno/warocol.com/issues/2020
+
+paths:
+  - app/services/credit_service.py
+  - app/services/pos_cart_service.py
+  - app/services/tables_service.py
+  - app/services/orders_service.py
+  - tests/test_split_credit_wallet_crm.py
+
+ac:
+  - Split with customer_wallet posts apply movement per tender (counter + mesa)
+  - Split with credit leaves payment_status credit/partial + credit_paid_amount for Cartera
+  - CRM can show wallet debit and Cartera row after reproduction sale
+
+out_of_scope:
+  - Wallet COP table UI (#2021)
+  - Sale-completed email/FEV UX
+
+hints:
+  entry: "sync_order_split_credit_status; add_order_payment; add_session_payment; close_session split"
+  pattern: "credit_service.sync_order_split_credit_status"
+  tests: "./venv/bin/pytest tests/test_split_credit_wallet_crm.py -q"
+
+risk:
+  sensitive: true
+  areas: [payments, wallet, credit, cartera]
+
+next:
+  after_pr: "merge API PR, then /wr-fast #2021"

@@ -1,4 +1,4 @@
-"""Append-only POS operation audit events (warocol.com#782)."""
+"""Append-only operation audit events for Bitácora (warocol.com#782 / #2323)."""
 import json
 import logging
 from datetime import date, datetime
@@ -16,17 +16,116 @@ from app.database import get_db_connection
 logger = logging.getLogger(__name__)
 
 DOMAIN_POS = "pos"
+DOMAIN_VENTAS = "ventas"
+DOMAIN_DESPACHO = "despacho"
+DOMAIN_CRM = "crm"
+DOMAIN_FINANZAS = "finanzas"
+DOMAIN_FACTURACION = "facturacion"
+DOMAIN_MENU = "menu"
+DOMAIN_ABASTECIMIENTO = "abastecimiento"
+DOMAIN_EQUIPO = "equipo"
+DOMAIN_INTEGRACIONES = "integraciones"
+DOMAIN_MI_NEGOCIO = "mi_negocio"
+DOMAINS: FrozenSet[str] = frozenset({
+    "pos",
+    "ventas",
+    "despacho",
+    "crm",
+    "finanzas",
+    "facturacion",
+    "menu",
+    "abastecimiento",
+    "equipo",
+    "integraciones",
+    "mi_negocio",
+})
 CHANNELS: FrozenSet[str] = frozenset({"mesa", "barra", "mostrador"})
 ACTIONS: FrozenSet[str] = frozenset({
     "tab_item_added",
     "tab_item_removed",
     "tab_item_qty_changed",
+    "tab_item_edited",
+    "tab_item_edit_blocked",
     "tab_cleared",
     "cart_line_removed",
     "cart_cleared",
     "payment_voided",
     "comanda_line_cancelled",
     "promotion_deleted",
+    "order_status_changed",
+    "order_customer_changed",
+    "order_email_sent",
+    "order_item_deleted",
+    "order_item_modifier_deleted",
+    "comanda_status_changed",
+    "comanda_recalled",
+    "table_qr_accepted",
+    "table_qr_rejected",
+    "customer_created",
+    "customer_updated",
+    "expense_created",
+    "expense_updated",
+    "expense_deleted",
+    "expense_paid",
+    "expense_instance_created",
+    "expense_instance_updated",
+    "shift_opened",
+    "cierre_created",
+    "cierre_deleted",
+    "shift_deleted",
+    "period_closed",
+    "credit_payment_registered",
+    "journal_entry_created",
+    "journal_entry_posted",
+    "journal_entry_voided",
+    "invoice_emitted",
+    "product_created",
+    "product_updated",
+    "product_deleted",
+    "category_created",
+    "category_updated",
+    "category_deleted",
+    "modifier_group_created",
+    "modifier_group_updated",
+    "modifier_group_deleted",
+    "recipe_created",
+    "recipe_updated",
+    "recipe_deleted",
+    "menu_reordered",
+    "purchase_created",
+    "purchase_updated",
+    "purchase_confirmed",
+    "purchase_shipped",
+    "purchase_received",
+    "purchase_invoiced",
+    "purchase_paid",
+    "purchase_cancelled",
+    "direct_purchase_created",
+    "direct_purchase_updated",
+    "direct_purchase_deleted",
+    "supplier_created",
+    "supplier_updated",
+    "supplier_deleted",
+    "payment_agreement_created",
+    "payment_agreement_updated",
+    "payment_agreement_deleted",
+    "stock_adjusted",
+    "warehouse_category_created",
+    "warehouse_category_updated",
+    "warehouse_category_archived",
+    "member_deleted",
+    "member_role_updated",
+    "invitation_sent",
+    "invitation_cancelled",
+    "role_override_updated",
+    "role_override_deleted",
+    "api_token_created",
+    "api_token_updated",
+    "api_token_revoked",
+    "api_token_deleted",
+    "public_profile_updated",
+    "tax_config_updated",
+    "financial_profile_updated",
 })
 
 
@@ -73,7 +172,7 @@ async def record_operation_event(
     tenant_id: UUID,
     *,
     domain: str,
-    channel: str,
+    channel: Optional[str] = None,
     action: str,
     actor_user_id: Optional[UUID] = None,
     actor_member_id: Optional[UUID] = None,
@@ -87,15 +186,17 @@ async def record_operation_event(
     reason: Optional[str] = None,
 ) -> None:
     """Append one event in the caller's transaction. Never raises to the caller."""
-    if domain not in (DOMAIN_POS,):
+    if domain not in DOMAINS:
         logger.error("record_operation_event: invalid domain %s", domain)
         return
-    if channel not in CHANNELS:
+    if channel is not None and channel not in CHANNELS:
         logger.error("record_operation_event: invalid channel %s", channel)
         return
     if action not in ACTIONS:
         logger.error("record_operation_event: invalid action %s", action)
         return
+
+    payload = await _snapshot_order_number(conn, tenant_id, order_id, payload)
 
     try:
         await conn.execute(
@@ -133,7 +234,80 @@ async def record_operation_event(
         logger.error("record_operation_event failed: %s", exc)
 
 
+async def _snapshot_order_number(
+    conn,
+    tenant_id: UUID,
+    order_id: Optional[UUID],
+    payload: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Copy orders.order_number into payload so Bitácora keeps #N after the sale is gone."""
+    data = dict(payload) if isinstance(payload, dict) else ({} if payload is None else payload)
+    if order_id is None or not isinstance(data, dict):
+        return payload
+    if data.get("order_number") is not None:
+        return data
+    try:
+        number = await conn.fetchval(
+            """
+            SELECT order_number
+            FROM orders
+            WHERE id = $1 AND tenant_id = $2
+            """,
+            order_id,
+            tenant_id,
+        )
+    except Exception:
+        return data
+    if number is None:
+        return data
+    try:
+        data["order_number"] = int(number)
+    except (TypeError, ValueError):
+        data["order_number"] = number
+    return data
+
+
+async def record_module_event(
+    conn,
+    tenant_id: UUID,
+    *,
+    domain: str,
+    action: str,
+    actor_user_id: Optional[UUID] = None,
+    entity_type: str,
+    entity_id: Any = None,
+    label: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    reason: Optional[str] = None,
+) -> None:
+    """CUD helper: channel=None, payload entity_type/entity_id/label. Never raises."""
+    payload: Dict[str, Any] = {
+        "entity_type": entity_type,
+        "entity_id": str(entity_id) if entity_id is not None else None,
+        "label": label,
+    }
+    if extra:
+        payload.update(extra)
+    await record_operation_event(
+        conn,
+        tenant_id,
+        domain=domain,
+        channel=None,
+        action=action,
+        actor_user_id=actor_user_id,
+        payload=payload,
+        reason=reason,
+    )
+
+
 def _row_to_event(row) -> Dict[str, Any]:
+    payload = _parse_payload(row["payload"])
+    live_number = row["live_order_number"] if "live_order_number" in row.keys() else None
+    if payload.get("order_number") is None and live_number is not None:
+        try:
+            payload["order_number"] = int(live_number)
+        except (TypeError, ValueError):
+            payload["order_number"] = live_number
     return {
         "id": str(row["id"]),
         "tenant_id": str(row["tenant_id"]),
@@ -151,7 +325,7 @@ def _row_to_event(row) -> Dict[str, Any]:
         "order_id": str(row["order_id"]) if row["order_id"] else None,
         "order_item_id": str(row["order_item_id"]) if row["order_item_id"] else None,
         "comanda_item_id": str(row["comanda_item_id"]) if row["comanda_item_id"] else None,
-        "payload": _parse_payload(row["payload"]),
+        "payload": payload,
         "reason": row["reason"],
     }
 
@@ -159,7 +333,7 @@ def _row_to_event(row) -> Dict[str, Any]:
 async def list_operation_events(
     request: Request,
     *,
-    domain: str = DOMAIN_POS,
+    domain: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     channel: Optional[str] = None,
@@ -174,21 +348,14 @@ async def list_operation_events(
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
 
-    if domain != DOMAIN_POS:
-        return {
-            "success": True,
-            "data": [],
-            "pagination": {
-                "total": 0,
-                "limit": limit,
-                "offset": offset,
-                "has_more": False,
-            },
-        }
+    where_conditions = ["e.tenant_id = $1"]
+    params: List[Any] = [tenant_id]
+    param_count = 1
 
-    where_conditions = ["e.tenant_id = $1", "e.domain = $2"]
-    params: List[Any] = [tenant_id, domain]
-    param_count = 2
+    if domain:
+        param_count += 1
+        where_conditions.append(f"e.domain = ${param_count}")
+        params.append(domain)
 
     parsed_date_from = _parse_date(date_from)
     parsed_date_to = _parse_date(date_to)
@@ -257,9 +424,11 @@ async def list_operation_events(
                 e.table_id, e.table_session_id, e.pos_cart_id,
                 e.order_id, e.order_item_id, e.comanda_item_id,
                 e.payload, e.reason,
+                o.order_number AS live_order_number,
                 pu.name AS actor_user_name,
                 pm.name AS actor_member_name
             FROM tenant_operation_events e
+            LEFT JOIN orders o ON o.id = e.order_id AND o.tenant_id = e.tenant_id
             LEFT JOIN profile pu ON pu.id = e.actor_user_id
             LEFT JOIN tenant_members tm ON tm.id = e.actor_member_id
             LEFT JOIN profile pm ON pm.id = tm.user_id

@@ -3,13 +3,14 @@ Orders Router
 Endpoints for listing and managing orders
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from datetime import date
 from typing import Optional, List
 from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field
 from app.core.dependencies import require_invoicing_ready
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
-from app.services import orders_service, facturacion_service, invoice_email_tracking_service
+from app.services import orders_service, facturacion_service, invoice_email_tracking_service, pos_cart_service
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
@@ -18,7 +19,8 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
 async def get_orders_dashboard(
     request: Request,
     payment_method: Optional[str] = Query(None),
-    status: Optional[str] = Query(None)
+    status: Optional[str] = Query(None),
+    category_id: Optional[str] = Query(None),
 ):
     """
     Returns all /ventas dashboard metrics in a single DB query:
@@ -32,7 +34,8 @@ async def get_orders_dashboard(
     return await orders_service.get_orders_dashboard(
         request,
         payment_method=payment_method,
-        status=status
+        status=status,
+        category_id=category_id,
     )
 
 
@@ -43,12 +46,14 @@ async def get_orders_metrics(
     date_to: Optional[str] = Query(None),
     payment_method: Optional[str] = Query(None),
     payment_method_id: Optional[str] = Query(None),
-    status: Optional[str] = Query(None)
+    status: Optional[str] = Query(None),
+    category_id: Optional[str] = Query(None),
 ):
     return await orders_service.get_orders_metrics(
         request, date_from=date_from, date_to=date_to,
         payment_method=payment_method, payment_method_id=payment_method_id,
-        status=status
+        status=status,
+        category_id=category_id,
     )
 
 
@@ -58,7 +63,8 @@ async def get_sales_flow(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     payment_method: Optional[str] = Query(None),
-    status: Optional[str] = Query(None)
+    status: Optional[str] = Query(None),
+    category_id: Optional[str] = Query(None),
 ):
     """
     Get sales flow data with intelligent comparison period
@@ -78,7 +84,8 @@ async def get_sales_flow(
         date_from=date_from,
         date_to=date_to,
         payment_method=payment_method,
-        status=status
+        status=status,
+        category_id=category_id,
     )
 
 
@@ -94,6 +101,9 @@ async def export_orders(
     sort_direction: str = Query("desc"),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    delivery_only: Optional[bool] = Query(None),
+    source: Optional[str] = Query(None, description="Origin: pos | mesa | barra | delivery"),
+    payment_status: Optional[str] = Query(None, description="Payment status: paid | credit | partial | unpaid"),
     # warocol.com#640 — tips-only export mode
     tips_only: bool = Query(False, description="When true, restrict to orders with tip_amount > 0 and emit tip-specific CSV columns."),
     member_id: Optional[str] = Query(None, description="Filter by served_by_member_id (tips-only flow)."),
@@ -110,6 +120,9 @@ async def export_orders(
         sort_direction=sort_direction,
         date_from=date_from,
         date_to=date_to,
+        delivery_only=delivery_only,
+        source=source,
+        payment_status=payment_status,
         tips_only=tips_only,
         member_id=member_id,
         channel=channel,
@@ -131,6 +144,8 @@ async def get_orders(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     delivery_only: Optional[bool] = Query(None, description="When true, narrow results to orders with delivery_address_id IS NOT NULL"),
+    source: Optional[str] = Query(None, description="Origin: pos | mesa | barra | delivery"),
+    payment_status: Optional[str] = Query(None, description="Payment status: paid | credit | partial | unpaid"),
 ):
     return await orders_service.get_orders_list(
         request,
@@ -146,6 +161,8 @@ async def get_orders(
         date_from=date_from,
         date_to=date_to,
         delivery_only=delivery_only,
+        source=source,
+        payment_status=payment_status,
     )
 
 
@@ -246,6 +263,7 @@ class CreateManualOrderRequest(BaseModel):
     discount_value: Optional[float] = None
     payments: Optional[List[ManualOrderPayment]] = None
     items: List[ManualOrderItem] = Field(min_length=1)
+    wompi_collection: bool = False
 
 
 @router.post("/manual", dependencies=[Depends(require_module(Module.VENTAS))])
@@ -267,6 +285,7 @@ async def create_manual_order(
         discount_type=data.discount_type,
         discount_value=data.discount_value,
         payments=[payment.model_dump() for payment in data.payments] if data.payments else None,
+        wompi_collection=data.wompi_collection,
     )
 
 
@@ -279,6 +298,8 @@ async def get_products_sold(
     sort: Optional[str] = Query("qty_desc"),
     search: Optional[str] = Query(None, description="Filter by product name (partial match)"),
     channel: Optional[str] = Query(None, description="Filter by channel: 'pos' | 'mesa' | 'online'"),
+    limit: int = Query(25, ge=1, le=250),
+    offset: int = Query(0, ge=0),
 ):
     """
     Get products sold report aggregated by product.
@@ -290,6 +311,7 @@ async def get_products_sold(
     - sort: qty_desc | revenue_desc | name_asc
     - search: Product name (ILIKE)
     - channel: pos | mesa | online
+    - limit / offset: page product rows (totals stay full-filter)
     """
     return await orders_service.get_products_sold(
         request,
@@ -299,6 +321,8 @@ async def get_products_sold(
         sort=sort or "qty_desc",
         search=search,
         channel=channel,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -354,6 +378,22 @@ class UpdateOrderStatusRequest(BaseModel):
     payment_method: Optional[str] = Field(None, description="Payment method group slug")
     payment_method_id: Optional[str] = Field(None, description="UUID of the selected payment_methods row")
     customer_id: Optional[str] = Field(None, description="UUID of customer to associate when required by payment method")
+    reason: Optional[str] = Field(None, description="Required when cancelling")
+    cash_received: Optional[float] = Field(None, ge=0, description="Cash handed over when completing with cash")
+    credit_due_date: Optional[date] = Field(None, description="Due date when completing with credit")
+    served_by_member_id: Optional[UUID] = Field(None, description="Waiter member UUID at complete")
+    discount_type: Optional[str] = Field(None, description="'percent' | 'fixed'")
+    discount_value: Optional[float] = Field(None, description="10 for 10%, 5000 for $5,000 COP")
+    tip_amount: Optional[float] = Field(None, ge=0, description="Tip in COP when completing a pending sale")
+    tip_source: Optional[str] = Field(None, description="'preset' | 'custom' | 'none'")
+    tip_taxable: Optional[bool] = Field(None, description="Apply consumption tax to tip when true")
+    payments: Optional[List[ManualOrderPayment]] = Field(None, description="One-shot split tenders; sum must equal amount due")
+    split_mode: bool = Field(False, description="Sequential split: first tender only, payment_status=partial")
+    split_first_amount: float = Field(0.0, ge=0, description="First sequential tender amount when split_mode=True")
+    split_first_cash_received: Optional[float] = Field(None, ge=0, description="Cash handed over for the first sequential tender")
+    waros_to_redeem: Optional[int] = Field(None, ge=0, description="B1 WaRos to redeem after manual discount")
+    waro_reward_id: Optional[UUID] = Field(None, description="B2 reward catalog UUID")
+    wompi_collection: bool = Field(False, description="Leave pending and unpaid until Wompi collection")
 
 
 class AssociateOrderCustomerRequest(BaseModel):
@@ -400,6 +440,66 @@ async def update_order_status(
         body.payment_method,
         body.payment_method_id,
         body.customer_id,
+        body.reason,
+        cash_received=body.cash_received,
+        credit_due_date=body.credit_due_date,
+        served_by_member_id=body.served_by_member_id,
+        discount_type=body.discount_type,
+        discount_value=body.discount_value,
+        tip_amount=body.tip_amount,
+        tip_source=body.tip_source,
+        tip_taxable=body.tip_taxable,
+        payments=[payment.model_dump() for payment in body.payments] if body.payments else None,
+        split_mode=body.split_mode,
+        split_first_amount=body.split_first_amount,
+        split_first_cash_received=body.split_first_cash_received,
+        waros_to_redeem=body.waros_to_redeem,
+        waro_reward_id=body.waro_reward_id,
+        wompi_collection=body.wompi_collection,
+    )
+
+
+class AddOrderTenderRequest(BaseModel):
+    amount: float = Field(..., gt=0, description="Amount for this sequential tender")
+    payment_method: str = Field(..., description="cash | card | digital | credit | customer_wallet")
+    payment_method_id: Optional[str] = Field(None, description="UUID of the selected payment_methods row")
+    cash_received: Optional[float] = Field(None, ge=0, description="Cash handed over when payment_method is cash")
+
+
+class VoidOrderTenderRequest(BaseModel):
+    reason: Optional[str] = Field(None, description="Optional void reason for audit")
+
+
+@router.post("/{order_id}/tenders", dependencies=[Depends(require_module(Module.VENTAS))])
+async def add_order_tender(
+    request: Request,
+    order_id: UUID,
+    body: AddOrderTenderRequest,
+):
+    """Add a sequential tender to a partially paid completed sale (mostrador or mesa)."""
+    return await pos_cart_service.add_order_payment(
+        request=request,
+        amount=body.amount,
+        payment_method=body.payment_method,
+        payment_method_id=body.payment_method_id,
+        cash_received=body.cash_received,
+        order_id=str(order_id),
+    )
+
+
+@router.delete("/{order_id}/tenders/{payment_id}", dependencies=[Depends(require_module(Module.VENTAS))])
+async def void_order_tender(
+    request: Request,
+    order_id: UUID,
+    payment_id: UUID,
+    body: VoidOrderTenderRequest = VoidOrderTenderRequest(),
+):
+    """Void one sequential tender and realign remaining (mirror POS void)."""
+    return await pos_cart_service.void_order_payment(
+        request=request,
+        payment_id=str(payment_id),
+        reason=body.reason,
+        order_id=str(order_id),
     )
 
 

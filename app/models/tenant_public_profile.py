@@ -200,6 +200,36 @@ class TenantPublicProfileBase(BaseModel):
                     "checkout. NULL = nothing pre-selected (Ley 1935 voluntariness).",
     )
 
+    # POS catalog presentation defaults (warocol.com#2495)
+    pos_catalog_layout_default: str = Field(
+        "grid",
+        description="Default POS catalog layout: grid | list.",
+    )
+    pos_show_product_image: bool = Field(
+        True,
+        description="When true, POS catalog shows product images.",
+    )
+    pos_show_search: bool = Field(
+        True,
+        description="When true, POS catalog shows the search bar.",
+    )
+    deduct_inventory_on_command: bool = Field(
+        False,
+        description=(
+            "When true, inventory qty is deducted when items are sent to kitchen "
+            "(mesa/tab command) or on QR/delivery accept. COGS GL still posts at checkout. "
+            "Default false (opt-in)."
+        ),
+    )
+    hide_products_without_stock: bool = Field(
+        False,
+        description=(
+            "When true, selling catalogs hide products that have a recipe but cannot "
+            "make qty>=1 from current tenant_inventory. Products without recipes stay "
+            "visible. Default false (opt-in). warocol.com#2574"
+        ),
+    )
+
     @field_validator('timezone')
     @classmethod
     def _validate_timezone(cls, v):
@@ -317,6 +347,15 @@ class TenantPublicProfileUpdate(BaseModel):
     tip_taxable_default: Optional[bool] = None
     tip_default_percentages: Optional[list[Decimal]] = None
     tip_preselect_index: Optional[int] = None
+
+    # POS catalog presentation defaults (warocol.com#2495)
+    pos_catalog_layout_default: Optional[str] = None
+    pos_show_product_image: Optional[bool] = None
+    pos_show_search: Optional[bool] = None
+    # warocol.com#2566
+    deduct_inventory_on_command: Optional[bool] = None
+    # warocol.com#2574
+    hide_products_without_stock: Optional[bool] = None
 
     @field_validator('timezone')
     @classmethod

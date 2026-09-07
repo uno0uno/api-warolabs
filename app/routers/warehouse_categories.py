@@ -1,7 +1,7 @@
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from app.core.middleware import require_valid_session
 from app.core.permissions import Module, require_module
@@ -94,9 +94,13 @@ async def patch_warehouse_category(
 async def patch_archive_warehouse_category(
     request: Request,
     category_id: UUID,
+    body: dict = Body(default={}),
 ):
     tenant_id = _tenant_id(request)
+    reason = (body or {}).get("reason", "").strip() if isinstance(body, dict) else ""
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason is required")
     async with get_db_connection() as conn:
         async with conn.transaction():
-            row = await archive_warehouse_category(conn, tenant_id, category_id)
+            row = await archive_warehouse_category(conn, tenant_id, category_id, reason=reason)
     return {"success": True, "data": row}

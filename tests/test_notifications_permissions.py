@@ -80,7 +80,13 @@ def test_kitchen_role_denied_notifications_under_enforce():
         response = client.get("/notifications/stream")
 
     assert response.status_code == 403
-    assert "pos" in response.json()["detail"].lower()
+    detail = response.json()["detail"].lower()
+    assert "pos" in detail or "ventas" in detail
+
+
+def test_stream_dependency_allows_ventas_without_pos():
+    src = __import__("pathlib").Path("app/routers/notifications.py").read_text()
+    assert "require_any_module(Module.POS, Module.VENTAS)" in src
 
 
 def test_cashier_role_passes_mark_all_notifications_under_enforce():

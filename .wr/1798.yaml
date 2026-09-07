@@ -1,0 +1,43 @@
+issue: 1798
+title: "Add menu_categories quota and raise Starter modifier groups"
+repo: both
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-1798-menu-categories-quota
+
+paths:
+  - app/services/billing_service.py
+  - app/routers/categories.py
+  - sql/20260724_starter_menu_categories_quota.sql
+  - tests/test_quota_enforcement.py
+  - tests/test_billing_remaining_usage.py
+  - tests/test_billing_plan_quotas.py
+  - .wr/1798.yaml
+
+ac:
+  - "Starter menu_categories limit is 5 and category CREATE enforces it"
+  - "Starter modifier_groups limit is 4"
+  - "remaining-usage exposes menu_categories"
+  - "Paid plans retain effectively unlimited catalog quotas"
+  - "Migration only merges the two Starter quota values"
+
+out_of_scope:
+  - "Change menu_products or modifier_options_per_group"
+  - "Add a recipe count quota"
+
+hints:
+  entry: "billing_service.check_plan_quota_growth; categories.create_category_endpoint"
+  pattern: "Existing menu_products and modifier_groups growth quotas"
+  tests: "./venv/bin/pytest tests/test_quota_enforcement.py tests/test_billing_remaining_usage.py tests/test_billing_plan_quotas.py -q"
+
+risk:
+  sensitive: false
+  areas:
+    - "API/front quota contract"
+
+skip:
+  audits: []
+
+next:
+  after_pr: "Merge API before companion front PR"

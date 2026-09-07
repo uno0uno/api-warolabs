@@ -1,0 +1,45 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 706
+title: "Keep founding tenant member as superuser on starter/paid activation"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-706-keep-founding-owner
+
+paths:
+  - app/services/onboarding_service.py
+  - app/services/magic_link_service.py
+  - migrations/116_keep_onboarding_founding_owner.sql
+  - tests/test_onboarding_country_terms.py
+  - tests/test_onboarding_billing.py
+  - tests/test_onboarding_founding_owner.py
+  - tests/test_onboarding_registration.py
+
+ac:
+  - Registration inserts pending founding member as superuser
+  - _promote_onboarding_identity activates founding member as superuser (never demote to admin)
+  - activate_paid_onboarding_identity keeps/sets founding member as superuser
+  - Magic-link pending resume accepts owner or superuser
+  - Trigger blocks demotion to admin; founding admin/owner backfilled to superuser
+  - Invited staff can still be admin
+
+out_of_scope:
+  - Plan-based module gating
+  - Front role labels
+  - Rewriting historical migrations 110/112
+
+hints:
+  entry: "onboarding_service insert/activate; magic_link pending role IN (owner, superuser)"
+  pattern: "legacy tenants use superuser; permissions normalize_role maps superuser→OWNER"
+  tests: "pytest tests/test_onboarding_country_terms.py tests/test_onboarding_billing.py tests/test_onboarding_founding_owner.py tests/test_onboarding_registration.py tests/test_magic_link_cross_tenant.py -q"
+
+risk:
+  sensitive: true
+  areas: [auth, roles, onboarding]
+
+skip:
+  audits: []
+
+next:
+  after_pr: "Suggest human /wr-review in new chat (roles/auth)."

@@ -11,10 +11,18 @@ from app.core.tenant_prefs import validate_country_currency_pair
 class TenantFinancialProfileUpdate(BaseModel):
     country_code: str
     base_currency_code: str
+    tax_jurisdiction_code: Optional[str] = None
 
     @field_validator("country_code", "base_currency_code")
     @classmethod
     def _normalize_codes(cls, value: str) -> str:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("tax_jurisdiction_code", mode="before")
+    @classmethod
+    def _normalize_jurisdiction(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
         return value.strip().upper() if isinstance(value, str) else value
 
     @model_validator(mode="after")

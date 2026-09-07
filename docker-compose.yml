@@ -2,7 +2,10 @@ version: '3.8'
 
 services:
   web:
-    build: .
+    build:
+      context: .
+      ssh:
+        - default
     ports:
       - "127.0.0.1:5001:80"
     env_file:

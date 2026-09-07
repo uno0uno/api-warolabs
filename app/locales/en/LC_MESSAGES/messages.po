@@ -310,3 +310,74 @@ msgstr "Could not send the email. Please try again."
 
 msgid "Report sent to {email}"
 msgstr "Report sent to {email}"
+
+# --- Auth emails (magic link + invitation) — batch api-warolabs#929 ---
+
+msgid "You requested access to your account on {brand_name}. Click the link below to sign in securely:"
+msgstr "You requested access to your account on {brand_name}. Click the link below to sign in securely:"
+
+msgid "You started your registration on {brand_name}. Click the link below to complete it securely:"
+msgstr "You started your registration on {brand_name}. Click the link below to complete it securely:"
+
+msgid "🔑 Access my account"
+msgstr "🔑 Access my account"
+
+msgid "✨ Complete my registration"
+msgstr "✨ Complete my registration"
+
+msgid "Or use this verification code:"
+msgstr "Or use this verification code:"
+
+msgid "This link is valid for 15 minutes and can only be used once."
+msgstr "This link is valid for 15 minutes and can only be used once."
+
+msgid "If you did not request this link, you can safely ignore this email."
+msgstr "If you did not request this link, you can safely ignore this email."
+
+msgid "Hello!"
+msgstr "Hello!"
+
+msgid "Greetings from {tenant_name}'s ship."
+msgstr "Greetings from {tenant_name}'s ship."
+
+msgid "Founder of {tenant_name}"
+msgstr "Founder of {tenant_name}"
+
+msgid "🔑 Your access to {brand_name} is ready"
+msgstr "🔑 Your access to {brand_name} is ready"
+
+msgid "✨ Complete your registration on {brand_name}"
+msgstr "✨ Complete your registration on {brand_name}"
+
+msgid "Hello {invitee_name}!"
+msgstr "Hello {invitee_name}!"
+
+msgid "<strong>{inviter_name}</strong> has invited you to join the <strong>{tenant_name}</strong> team as <strong>{role}</strong>."
+msgstr "<strong>{inviter_name}</strong> has invited you to join the <strong>{tenant_name}</strong> team as <strong>{role}</strong>."
+
+msgid "Click the link below to accept the invitation and get started:"
+msgstr "Click the link below to accept the invitation and get started:"
+
+msgid "Accept invitation"
+msgstr "Accept invitation"
+
+msgid "This link is valid for 7 days."
+msgstr "This link is valid for 7 days."
+
+msgid "If you were not expecting this invitation, you can safely ignore this email."
+msgstr "If you were not expecting this invitation, you can safely ignore this email."
+
+msgid "{tenant_name} team"
+msgstr "{tenant_name} team"
+
+msgid "You have been invited to join {brand_name}"
+msgstr "You have been invited to join {brand_name}"
+
+msgid "Administrator"
+msgstr "Administrator"
+
+msgid "Super User"
+msgstr "Super User"
+
+msgid "(admin)"
+msgstr "(admin)"

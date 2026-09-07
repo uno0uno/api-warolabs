@@ -24,9 +24,41 @@ from app.services import onboarding_service
 logger = logging.getLogger(__name__)
 
 ELECTRONIC_INVOICE_PLAN_SLUG = "facturacion-electronica"
+STARTER_PLAN_SLUG = "starter"
+STARTER_SCAN_LIMIT = 10
 ELECTRONIC_INVOICE_PERIOD_LIMIT = 200
 ELECTRONIC_INVOICE_LIMIT_FEATURE = "electronic_invoice_limit"
 QUOTAS_FEATURE = "quotas"
+STARTER_OPERATIONAL_QUOTAS = {
+    "admin_users": 1,
+    "active_sessions_per_admin_user": 1,
+    "active_kitchens": 0,
+    "active_tables_including_bar": 0,
+    "active_qr_tables": 0,
+    "completed_online_orders_per_month": 30,
+    "electronic_invoices_per_period": 0,
+    "menu_products": 10,
+    "menu_categories": 5,
+    "tenant_ingredients": 5,
+    "tenant_suppliers": 3,
+    "direct_purchases_per_period": 15,
+    "stock_adjustments_per_period": 20,
+    "cash_closes_per_period": 30,
+    "active_open_cash_shifts": 1,
+    "expenses_per_period": 30,
+    "supplier_payments_per_period": 30,
+    "expense_payments_per_period": 30,
+    "payment_methods": 5,
+    "api_tokens": 0,
+    "tenant_promotions": 1,
+    "accounting_period_closes_per_period": 3,
+    "manual_journal_entries_per_period": 30,
+    "modifier_groups": 4,
+    "recipe_bases": 5,
+    "recipe_lines_per_product": 4,
+    "modifier_options_per_group": 6,
+    "recipe_base_template_lines": 4,
+}
 QUOTA_KEYS = (
     "admin_users",
     "active_sessions_per_admin_user",
@@ -35,7 +67,29 @@ QUOTA_KEYS = (
     "active_qr_tables",
     "completed_online_orders_per_month",
     "electronic_invoices_per_period",
+    "menu_products",
+    "menu_categories",
+    "tenant_ingredients",
+    "tenant_suppliers",
+    "direct_purchases_per_period",
+    "stock_adjustments_per_period",
+    "cash_closes_per_period",
+    "active_open_cash_shifts",
+    "expenses_per_period",
+    "supplier_payments_per_period",
+    "expense_payments_per_period",
+    "payment_methods",
+    "api_tokens",
+    "tenant_promotions",
+    "accounting_period_closes_per_period",
+    "manual_journal_entries_per_period",
+    "modifier_groups",
+    "recipe_bases",
+    "recipe_lines_per_product",
+    "modifier_options_per_group",
+    "recipe_base_template_lines",
 )
+CATALOG_UNLIMITED = 1_000_000
 BASE_OPERATIONAL_QUOTAS = {
     "admin_users": 6,
     "active_sessions_per_admin_user": 1,
@@ -43,8 +97,32 @@ BASE_OPERATIONAL_QUOTAS = {
     "active_tables_including_bar": 20,
     "active_qr_tables": 20,
     "completed_online_orders_per_month": 300,
+    "menu_products": CATALOG_UNLIMITED,
+    "menu_categories": CATALOG_UNLIMITED,
+    "tenant_ingredients": CATALOG_UNLIMITED,
+    "tenant_suppliers": CATALOG_UNLIMITED,
+    "direct_purchases_per_period": CATALOG_UNLIMITED,
+    "stock_adjustments_per_period": CATALOG_UNLIMITED,
+    "cash_closes_per_period": CATALOG_UNLIMITED,
+    "active_open_cash_shifts": CATALOG_UNLIMITED,
+    "expenses_per_period": CATALOG_UNLIMITED,
+    "supplier_payments_per_period": CATALOG_UNLIMITED,
+    "expense_payments_per_period": CATALOG_UNLIMITED,
+    "payment_methods": CATALOG_UNLIMITED,
+    "api_tokens": CATALOG_UNLIMITED,
+    "tenant_promotions": CATALOG_UNLIMITED,
+    "accounting_period_closes_per_period": CATALOG_UNLIMITED,
+    "manual_journal_entries_per_period": CATALOG_UNLIMITED,
+    "modifier_groups": CATALOG_UNLIMITED,
+    "recipe_bases": CATALOG_UNLIMITED,
+    "recipe_lines_per_product": 100,
+    "modifier_options_per_group": 50,
+    "recipe_base_template_lines": 75,
 }
 PLAN_QUOTA_DEFAULTS = {
+    STARTER_PLAN_SLUG: {
+        **STARTER_OPERATIONAL_QUOTAS,
+    },
     "pro": {
         **BASE_OPERATIONAL_QUOTAS,
         "electronic_invoices_per_period": 0,
@@ -67,6 +145,31 @@ ENFORCEABLE_QUOTA_RESOURCES = {
     "active_kitchens",
     "active_tables_including_bar",
     "active_qr_tables",
+    "menu_products",
+    "menu_categories",
+    "tenant_ingredients",
+    "tenant_suppliers",
+    "active_open_cash_shifts",
+    "payment_methods",
+    "api_tokens",
+    "tenant_promotions",
+    "modifier_groups",
+    "recipe_bases",
+}
+PERIOD_QUOTA_RESOURCES = {
+    "direct_purchases_per_period",
+    "stock_adjustments_per_period",
+    "cash_closes_per_period",
+    "expenses_per_period",
+    "supplier_payments_per_period",
+    "expense_payments_per_period",
+    "accounting_period_closes_per_period",
+    "manual_journal_entries_per_period",
+}
+SCOPED_QUOTA_RESOURCES = {
+    "recipe_lines_per_product",
+    "modifier_options_per_group",
+    "recipe_base_template_lines",
 }
 
 
@@ -86,6 +189,15 @@ class EffectiveQuota:
 
 @dataclass(frozen=True)
 class OnlineOrderQuotaState:
+    plan_slug: str
+    quota: EffectiveQuota
+    period_start: datetime
+    period_end: datetime
+    used: int
+
+
+@dataclass(frozen=True)
+class PeriodQuotaState:
     plan_slug: str
     quota: EffectiveQuota
     period_start: datetime
@@ -164,22 +276,133 @@ async def check_scan_quota(tenant_id: UUID, conn) -> None:
     await _upsert_monthly_log(tenant_id, conn)
 
 
-async def check_plan_quota_growth(
-    conn,
-    tenant_id: UUID,
-    resource: str,
-    *,
-    exclude_pending_invitation_id: Optional[UUID] = None,
-) -> None:
+async def get_effective_plan_slug(conn, tenant_id: UUID) -> Optional[str]:
     """
-    Block active resource growth once the tenant reaches the plan quota.
-
-    This is intentionally non-destructive: it never modifies existing rows and
-    should be called only before create/reactivate/enable transitions.
+    Paid subscription wins. Otherwise Starter applies unless onboarding is still
+    waiting on payment (legacy paid-first path).
     """
-    if resource not in ENFORCEABLE_QUOTA_RESOURCES:
-        raise ValueError(f"Unsupported quota resource: {resource}")
+    paid = await conn.fetchrow(
+        """
+        SELECT sp.slug AS plan_slug
+        FROM tenant_subscriptions ts
+        JOIN subscription_plans sp ON sp.id = ts.plan_id
+        WHERE ts.tenant_id = $1
+          AND ts.status IN ('active', 'past_due')
+          AND ts.current_period_end > now()
+        ORDER BY ts.current_period_end DESC
+        LIMIT 1
+        """,
+        tenant_id,
+    )
+    if paid:
+        return paid["plan_slug"]
 
+    onboarding_state = await conn.fetchval(
+        "SELECT state FROM tenant_onboarding WHERE tenant_id = $1",
+        tenant_id,
+    )
+    if onboarding_state == "payment_pending":
+        return None
+
+    return STARTER_PLAN_SLUG
+
+
+async def get_effective_plan_quotas(conn, tenant_id: UUID) -> Dict[str, int]:
+    plan_slug = await get_effective_plan_slug(conn, tenant_id)
+    if not plan_slug:
+        plan_slug = STARTER_PLAN_SLUG
+    row = await conn.fetchrow(
+        """
+        SELECT features
+        FROM subscription_plans
+        WHERE slug = $1
+          AND is_active = true
+        LIMIT 1
+        """,
+        plan_slug,
+    )
+    features = row["features"] if row else {}
+    return _normalize_plan_quotas(plan_slug, features)
+
+
+STARTER_PLAN_MODULE_VALUES = frozenset({
+    "pos",
+    "ventas",
+    "despacho",
+    "menu",
+    "operaciones",
+    "abastecimiento",
+    "analitica",
+    "crm",
+    "finanzas",
+    "integraciones",
+    "equipo",
+    "facturacion",
+    "mi_negocio",
+    "mi_plan",
+})
+STARTER_LOCKED_OPERATION_TOGGLES = frozenset({
+    "tables_enabled",
+    "comandas_enabled",
+    "kds_enabled",
+})
+
+
+async def is_starter_plan(conn, tenant_id: UUID) -> bool:
+    return await get_effective_plan_slug(conn, tenant_id) == STARTER_PLAN_SLUG
+
+
+async def assert_starter_toggle_allowed(conn, tenant_id: UUID, column_name: str, enabled: bool) -> None:
+    if not enabled or column_name not in STARTER_LOCKED_OPERATION_TOGGLES:
+        return
+    if await is_starter_plan(conn, tenant_id):
+        raise APIError(
+            "Función no disponible en el plan Starter",
+            status_code=403,
+            details={
+                "code": "starter_plan_restriction",
+                "toggle": column_name,
+                "upgrade_url": QUOTA_UPGRADE_URL,
+                "message": QUOTA_CONTACT_MESSAGE,
+            },
+        )
+
+
+async def assert_starter_shift_template_growth_allowed(conn, tenant_id: UUID) -> None:
+    """Block Starter create/reactivate of Operaciones shift templates (warocol.com#1916)."""
+    if await is_starter_plan(conn, tenant_id):
+        raise APIError(
+            "Función no disponible en el plan Starter",
+            status_code=403,
+            details={
+                "code": "starter_plan_restriction",
+                "feature": "shift_templates",
+                "upgrade_url": QUOTA_UPGRADE_URL,
+                "message": QUOTA_CONTACT_MESSAGE,
+            },
+        )
+
+
+async def _default_scan_limit_for_tenant(conn, tenant_id: UUID) -> int:
+    plan_slug = await get_effective_plan_slug(conn, tenant_id)
+    if plan_slug == STARTER_PLAN_SLUG:
+        row = await conn.fetchrow(
+            """
+            SELECT scan_limit
+            FROM subscription_plans
+            WHERE slug = $1
+              AND is_active = true
+            LIMIT 1
+            """,
+            STARTER_PLAN_SLUG,
+        )
+        if row and row["scan_limit"] is not None:
+            return int(row["scan_limit"])
+        return STARTER_SCAN_LIMIT
+    return 1000
+
+
+async def _fetch_plan_quota_context(conn, tenant_id: UUID, resource: str):
     plan = await conn.fetchrow(
         """
         SELECT
@@ -203,6 +426,102 @@ async def check_plan_quota_growth(
         tenant_id,
         resource,
     )
+    if plan:
+        return plan
+
+    effective_slug = await get_effective_plan_slug(conn, tenant_id)
+    if effective_slug != STARTER_PLAN_SLUG:
+        return None
+
+    return await conn.fetchrow(
+        """
+        SELECT
+            sp.slug AS plan_slug,
+            sp.features AS plan_features,
+            tq.id AS override_id,
+            tq.limit_override,
+            COALESCE(tq.disabled, false) AS override_disabled,
+            tq.reason AS override_reason
+        FROM subscription_plans sp
+        LEFT JOIN tenant_quota_overrides tq
+          ON tq.tenant_id = $1
+         AND tq.resource = $2
+        WHERE sp.slug = $3
+          AND sp.is_active = true
+        LIMIT 1
+        """,
+        tenant_id,
+        resource,
+        STARTER_PLAN_SLUG,
+    )
+
+
+async def preview_plan_quota_growth(
+    conn,
+    tenant_id: UUID,
+    resource: str,
+    additional: int,
+    *,
+    exclude_pending_invitation_id: Optional[UUID] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Project whether adding `additional` resources would exceed the plan quota.
+
+    Returns None when unlimited / under limit / additional <= 0.
+    Otherwise returns a dict with used, limit, additional, projected.
+    """
+    if additional <= 0:
+        return None
+    if resource not in ENFORCEABLE_QUOTA_RESOURCES:
+        raise ValueError(f"Unsupported quota resource: {resource}")
+
+    plan = await _fetch_plan_quota_context(conn, tenant_id, resource)
+    if not plan:
+        return None
+
+    quotas = _normalize_plan_quotas(plan["plan_slug"], plan["plan_features"])
+    quota = _effective_quota_from_row(resource, quotas.get(resource, 0), plan)
+    if quota.limit is None:
+        return None
+
+    used = await _count_quota_resource_usage(
+        conn,
+        tenant_id,
+        resource,
+        exclude_pending_invitation_id=exclude_pending_invitation_id,
+    )
+    projected = used + additional
+    if projected <= quota.limit:
+        return None
+
+    return {
+        "resource": resource,
+        "used": used,
+        "limit": quota.limit,
+        "additional": additional,
+        "projected": projected,
+        "plan_slug": plan["plan_slug"],
+        "remaining": max(quota.limit - used, 0),
+    }
+
+
+async def check_plan_quota_growth(
+    conn,
+    tenant_id: UUID,
+    resource: str,
+    *,
+    exclude_pending_invitation_id: Optional[UUID] = None,
+) -> None:
+    """
+    Block active resource growth once the tenant reaches the plan quota.
+
+    This is intentionally non-destructive: it never modifies existing rows and
+    should be called only before create/reactivate/enable transitions.
+    """
+    if resource not in ENFORCEABLE_QUOTA_RESOURCES:
+        raise ValueError(f"Unsupported quota resource: {resource}")
+
+    plan = await _fetch_plan_quota_context(conn, tenant_id, resource)
     if not plan:
         return
 
@@ -245,6 +564,332 @@ async def check_plan_quota_growth(
     )
 
 
+async def check_plan_quota_scoped(
+    conn,
+    tenant_id: UUID,
+    resource: str,
+    scope_id: UUID,
+    *,
+    projected_count: Optional[int] = None,
+) -> None:
+    """Block scoped resource growth (per product/group/template)."""
+    if resource not in SCOPED_QUOTA_RESOURCES:
+        raise ValueError(f"Unsupported scoped quota resource: {resource}")
+
+    plan = await _fetch_plan_quota_context(conn, tenant_id, resource)
+    if not plan:
+        return
+
+    quotas = _normalize_plan_quotas(plan["plan_slug"], plan["plan_features"])
+    quota = _effective_quota_from_row(resource, quotas.get(resource, 0), plan)
+    if quota.limit is None:
+        return
+
+    if projected_count is not None:
+        used = projected_count
+    else:
+        used = await _count_scoped_quota_usage(conn, resource, scope_id) + 1
+
+    if used <= quota.limit:
+        return
+
+    _log_quota_block(
+        tenant_id=tenant_id,
+        resource=resource,
+        used=used,
+        quota=quota,
+        plan_slug=plan["plan_slug"],
+    )
+    raise APIError(
+        "Límite del plan alcanzado",
+        status_code=429,
+        details={
+            "code": "quota_exceeded",
+            "error": "quota_exceeded",
+            "resource": resource,
+            "scope_id": str(scope_id),
+            "used": used,
+            "limit": quota.limit,
+            "plan_limit": quota.plan_limit,
+            "plan_slug": plan["plan_slug"],
+            "override": _quota_override_payload(quota),
+            "upgrade_url": QUOTA_UPGRADE_URL,
+            "message": QUOTA_CONTACT_MESSAGE,
+        },
+    )
+
+
+async def _fetch_period_quota_context(conn, tenant_id: UUID, resource: str):
+    """Plan + billing-period window for period-based operational quotas."""
+    plan = await conn.fetchrow(
+        """
+        SELECT
+            sp.slug AS plan_slug,
+            sp.features AS plan_features,
+            ts.current_period_start,
+            ts.current_period_end,
+            tq.id AS override_id,
+            tq.limit_override,
+            COALESCE(tq.disabled, false) AS override_disabled,
+            tq.reason AS override_reason
+        FROM tenant_subscriptions ts
+        JOIN subscription_plans sp ON sp.id = ts.plan_id
+        LEFT JOIN tenant_quota_overrides tq
+          ON tq.tenant_id = ts.tenant_id
+         AND tq.resource = $2
+        WHERE ts.tenant_id = $1
+          AND ts.status IN ('active', 'past_due')
+          AND ts.current_period_end > now()
+        ORDER BY ts.current_period_end DESC
+        LIMIT 1
+        """,
+        tenant_id,
+        resource,
+    )
+    if plan:
+        return plan
+
+    effective_slug = await get_effective_plan_slug(conn, tenant_id)
+    if effective_slug != STARTER_PLAN_SLUG:
+        return None
+
+    return await conn.fetchrow(
+        """
+        SELECT
+            sp.slug AS plan_slug,
+            sp.features AS plan_features,
+            date_trunc('month', now()) AS current_period_start,
+            date_trunc('month', now()) + interval '1 month' AS current_period_end,
+            tq.id AS override_id,
+            tq.limit_override,
+            COALESCE(tq.disabled, false) AS override_disabled,
+            tq.reason AS override_reason
+        FROM subscription_plans sp
+        LEFT JOIN tenant_quota_overrides tq
+          ON tq.tenant_id = $1
+         AND tq.resource = $2
+        WHERE sp.slug = $3
+          AND sp.is_active = true
+        LIMIT 1
+        """,
+        tenant_id,
+        resource,
+        STARTER_PLAN_SLUG,
+    )
+
+
+async def _count_period_quota_usage(
+    conn,
+    tenant_id: UUID,
+    resource: str,
+    period_start: datetime,
+    period_end: datetime,
+) -> int:
+    if resource == "direct_purchases_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_purchases
+            WHERE tenant_id = $1
+              AND is_direct_entry = TRUE
+              AND created_at >= $2
+              AND created_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "stock_adjustments_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_ingredient_movements
+            WHERE tenant_id = $1
+              AND movement_type = 'adjustment'
+              AND COALESCE(reference_table, '') <> 'tenant_purchases'
+              AND created_at >= $2
+              AND created_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "cash_closes_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM accounting_period
+            WHERE tenant_id = $1
+              AND closed_at >= $2
+              AND closed_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "expenses_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT
+                (
+                    SELECT COUNT(*)
+                    FROM tenant_expenses
+                    WHERE tenant_id = $1
+                      AND created_at >= $2
+                      AND created_at < $3
+                )
+                +
+                (
+                    SELECT COUNT(*)
+                    FROM recurring_expense_instances
+                    WHERE tenant_id = $1
+                      AND created_at >= $2
+                      AND created_at < $3
+                )
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "supplier_payments_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_purchases
+            WHERE tenant_id = $1
+              AND paid_at IS NOT NULL
+              AND paid_at >= $2
+              AND paid_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "expense_payments_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_expenses
+            WHERE tenant_id = $1
+              AND paid_at IS NOT NULL
+              AND lower(COALESCE(payment_type, '')) = 'credito'
+              AND paid_at >= $2
+              AND paid_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "accounting_period_closes_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_monthly_periods
+            WHERE tenant_id = $1
+              AND status = 'closed'
+              AND closed_at >= $2
+              AND closed_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    elif resource == "manual_journal_entries_per_period":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_journal_entries
+            WHERE tenant_id = $1
+              AND source_module IN ('manual', 'manual_balance_adjustment')
+              AND created_at >= $2
+              AND created_at < $3
+            """,
+            tenant_id,
+            period_start,
+            period_end,
+        )
+    else:
+        raise ValueError(f"Unsupported period quota resource: {resource}")
+
+    return int(value or 0)
+
+
+async def _get_period_quota_state(
+    conn,
+    tenant_id: UUID,
+    resource: str,
+) -> Optional[PeriodQuotaState]:
+    if resource not in PERIOD_QUOTA_RESOURCES:
+        raise ValueError(f"Unsupported period quota resource: {resource}")
+
+    plan = await _fetch_period_quota_context(conn, tenant_id, resource)
+    if not plan:
+        return None
+
+    quotas = _normalize_plan_quotas(plan["plan_slug"], plan["plan_features"])
+    quota = _effective_quota_from_row(resource, quotas.get(resource, 0), plan)
+    if quota.limit is None:
+        return None
+
+    period_start = plan["current_period_start"]
+    period_end = plan["current_period_end"]
+    used = await _count_period_quota_usage(
+        conn,
+        tenant_id,
+        resource,
+        period_start,
+        period_end,
+    )
+    return PeriodQuotaState(
+        plan_slug=plan["plan_slug"],
+        quota=quota,
+        period_start=period_start,
+        period_end=period_end,
+        used=used,
+    )
+
+
+async def check_plan_quota_period(conn, tenant_id: UUID, resource: str) -> None:
+    """
+    Block create once the tenant reaches a period-based operational quota.
+
+    Usage window = current subscription period (calendar month for starter
+    without a subscription row). Same 429 quota_exceeded payload as growth.
+    """
+    state = await _get_period_quota_state(conn, tenant_id, resource)
+    if state is None:
+        return
+
+    if state.used < state.quota.limit:
+        return
+
+    _log_quota_block(
+        tenant_id=tenant_id,
+        resource=resource,
+        used=state.used,
+        quota=state.quota,
+        plan_slug=state.plan_slug,
+    )
+    raise APIError(
+        "Límite del plan alcanzado",
+        status_code=429,
+        details={
+            "code": "quota_exceeded",
+            "error": "quota_exceeded",
+            "resource": resource,
+            "used": state.used,
+            "limit": state.quota.limit,
+            "plan_limit": state.quota.plan_limit,
+            "plan_slug": state.plan_slug,
+            "override": _quota_override_payload(state.quota),
+            "period_start": state.period_start.isoformat(),
+            "period_end": state.period_end.isoformat(),
+            "upgrade_url": QUOTA_UPGRADE_URL,
+            "message": QUOTA_CONTACT_MESSAGE,
+        },
+    )
+
+
 async def _get_completed_online_order_quota_state(conn, tenant_id: UUID) -> Optional[OnlineOrderQuotaState]:
     """
     Read current online-order quota state.
@@ -278,7 +923,34 @@ async def _get_completed_online_order_quota_state(conn, tenant_id: UUID) -> Opti
         ONLINE_ORDER_QUOTA_RESOURCE,
     )
     if not plan:
-        return None
+        effective_slug = await get_effective_plan_slug(conn, tenant_id)
+        if effective_slug != STARTER_PLAN_SLUG:
+            return None
+        plan = await conn.fetchrow(
+            """
+            SELECT
+                sp.slug AS plan_slug,
+                sp.features AS plan_features,
+                date_trunc('month', now()) AS current_period_start,
+                date_trunc('month', now()) + interval '1 month' AS current_period_end,
+                tq.id AS override_id,
+                tq.limit_override,
+                COALESCE(tq.disabled, false) AS override_disabled,
+                tq.reason AS override_reason
+            FROM subscription_plans sp
+            LEFT JOIN tenant_quota_overrides tq
+              ON tq.tenant_id = $1
+             AND tq.resource = $2
+            WHERE sp.slug = $3
+              AND sp.is_active = true
+            LIMIT 1
+            """,
+            tenant_id,
+            ONLINE_ORDER_QUOTA_RESOURCE,
+            STARTER_PLAN_SLUG,
+        )
+        if not plan:
+            return None
 
     quotas = _normalize_plan_quotas(plan["plan_slug"], plan["plan_features"])
     quota = _effective_quota_from_row(
@@ -535,15 +1207,23 @@ async def _count_quota_resource_usage(
     exclude_pending_invitation_id: Optional[UUID] = None,
 ) -> int:
     if resource == "admin_users":
+        from app.core.platform_superusers import platform_superuser_email_list
+
+        allowlist = platform_superuser_email_list()
         value = await conn.fetchval(
             """
             SELECT
                 (
                     SELECT COUNT(DISTINCT tm.id)
                     FROM tenant_members tm
+                    INNER JOIN profile p ON p.id = tm.user_id
                     WHERE tm.tenant_id = $1
                       AND tm.is_active
                       AND tm.role = ANY($2::text[])
+                      AND (
+                        cardinality($4::text[]) = 0
+                        OR lower(trim(p.email)) <> ALL($4::text[])
+                      )
                 )
                 +
                 (
@@ -553,11 +1233,16 @@ async def _count_quota_resource_usage(
                       AND ti.status = 'pending'
                       AND ti.role = ANY($2::text[])
                       AND NOT ($3::uuid IS NOT NULL AND ti.id = $3)
+                      AND (
+                        cardinality($4::text[]) = 0
+                        OR lower(trim(ti.email)) <> ALL($4::text[])
+                      )
                 )
             """,
             tenant_id,
             list(LEGACY_INTERNAL_TEAM_ROLES),
             exclude_pending_invitation_id,
+            allowlist,
         )
     elif resource == "active_kitchens":
         value = await conn.fetchval(
@@ -592,8 +1277,140 @@ async def _count_quota_resource_usage(
             """,
             tenant_id,
         )
+    elif resource == "menu_products":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM product
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+    elif resource == "menu_categories":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM categories
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+    elif resource == "tenant_ingredients":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM ingredients
+            WHERE tenant_id = $1
+              AND is_active = TRUE
+            """,
+            tenant_id,
+        )
+    elif resource == "tenant_suppliers":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_suppliers
+            WHERE tenant_id = $1
+              AND is_active = TRUE
+            """,
+            tenant_id,
+        )
+    elif resource == "active_open_cash_shifts":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM cash_shift_openings
+            WHERE tenant_id = $1
+              AND status = 'open'
+            """,
+            tenant_id,
+        )
+    elif resource == "payment_methods":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM payment_methods
+            WHERE tenant_id = $1
+              AND is_active = TRUE
+            """,
+            tenant_id,
+        )
+    elif resource == "api_tokens":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM api_tokens
+            WHERE tenant_id = $1
+              AND is_active = TRUE
+            """,
+            tenant_id,
+        )
+    elif resource == "tenant_promotions":
+        # Count all promotion rows (hard delete frees a slot; is_active toggle does not).
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM tenant_promotions
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+    elif resource == "modifier_groups":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM modifier_groups
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+    elif resource == "recipe_bases":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM product_base_types
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
     else:
         raise ValueError(f"Unsupported quota resource: {resource}")
+
+    return int(value or 0)
+
+
+async def _count_scoped_quota_usage(conn, resource: str, scope_id: UUID) -> int:
+    if resource == "recipe_lines_per_product":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM product_recipes
+            WHERE product_id = $1
+            """,
+            scope_id,
+        )
+    elif resource == "modifier_options_per_group":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM modifiers
+            WHERE modifier_group_id = $1
+              AND is_available = TRUE
+              AND removed_at IS NULL
+            """,
+            scope_id,
+        )
+    elif resource == "recipe_base_template_lines":
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM base_recipe_templates
+            WHERE product_base_type_id = $1
+            """,
+            scope_id,
+        )
+    else:
+        raise ValueError(f"Unsupported scoped quota resource: {resource}")
 
     return int(value or 0)
 
@@ -617,7 +1434,7 @@ async def _create_period_usage(tenant_id: UUID, conn) -> None:
     """, tenant_id)
 
     subscription_id: Optional[UUID] = sub["subscription_id"] if sub else None
-    scan_limit: int = sub["scan_limit"] if sub else 1000
+    scan_limit: int = sub["scan_limit"] if sub else await _default_scan_limit_for_tenant(conn, tenant_id)
 
     await conn.execute("""
         INSERT INTO scan_usage
@@ -701,9 +1518,10 @@ async def get_scan_usage(tenant_id: UUID, conn) -> Dict[str, Any]:
     """, tenant_id)
 
     if row is None:
+        scans_limit = await _default_scan_limit_for_tenant(conn, tenant_id)
         return {
             "scans_used": 0,
-            "scans_limit": 1000,
+            "scans_limit": scans_limit,
             "period_start": None,
             "period_end": None,
             "percentage": 0.0,
@@ -735,6 +1553,32 @@ async def list_plans(conn) -> List[Dict[str, Any]]:
         ORDER BY price_monthly ASC
     """)
     return [_serialize_plan(r) for r in rows]
+
+
+def is_colombia_country(country_code: Optional[str]) -> bool:
+    return (country_code or "").strip().upper() == "CO"
+
+
+def filter_plans_for_country(
+    plans: List[Dict[str, Any]],
+    country_code: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Hide Colombia-only electronic invoicing plan outside CO (#2201)."""
+    if is_colombia_country(country_code):
+        return plans
+    return [p for p in plans if p.get("slug") != ELECTRONIC_INVOICE_PLAN_SLUG]
+
+
+def assert_plan_available_for_country(
+    plan_slug: str,
+    country_code: Optional[str],
+) -> None:
+    """Raise 422 when a country-restricted plan is requested outside CO."""
+    if plan_slug == ELECTRONIC_INVOICE_PLAN_SLUG and not is_colombia_country(country_code):
+        raise HTTPException(
+            status_code=422,
+            detail="El plan de Facturación electrónica solo está disponible para Colombia.",
+        )
 
 
 def _serialize_billing_events(rows, total: int, limit: int, offset: int) -> Dict[str, Any]:
@@ -950,18 +1794,56 @@ async def create_onboarding_payment_attempt(
     plan_id: UUID,
     amount_in_cents: int,
     provider_environment: str = "prod",
+    currency: str = "COP",
+    provider: str = "lemon_squeezy",
 ) -> UUID:
-    """Create immutable attempt evidence before requesting a Wompi link."""
+    """Create immutable attempt evidence before requesting a checkout link."""
     if provider_environment not in ("prod", "test"):
-        raise HTTPException(status_code=422, detail="Invalid Wompi environment")
+        raise HTTPException(status_code=422, detail="Invalid payment provider environment")
+    currency_norm = str(currency or "COP").strip().upper()
+    provider_norm = str(provider or "lemon_squeezy").strip().lower()
+    if provider_norm == "wompi":
+        raise HTTPException(
+            status_code=422,
+            detail="Wompi is deprecated for new billing payments; use Lemon Squeezy",
+        )
+    if provider_norm not in ("lemon_squeezy",):
+        raise HTTPException(status_code=422, detail="Invalid payment provider")
+    if currency_norm not in ("COP", "USD", "EUR"):
+        raise HTTPException(status_code=422, detail="Invalid payment currency")
+    # Best-effort attribution: copy last visitor_key/lead_id seen for this tenant's owner email
+    attempt_visitor_key = None
+    attempt_lead_id = None
+    try:
+        tenant_email = await conn.fetchval("SELECT email FROM tenants WHERE id = $1", tenant_id)
+        if tenant_email:
+            owner = await conn.fetchrow("SELECT id FROM profile WHERE lower(trim(email)) = lower(trim($1))", tenant_email)
+            if owner:
+                li = await conn.fetchrow(
+                    """
+                    SELECT li.visitor_key, li.lead_id
+                    FROM lead_interactions li
+                    JOIN leads l ON l.id = li.lead_id
+                    WHERE l.profile_id = $1 AND li.visitor_key IS NOT NULL
+                    ORDER BY li.created_at DESC
+                    LIMIT 1
+                    """,
+                    owner["id"],
+                )
+                if li:
+                    attempt_visitor_key = li["visitor_key"]
+                    attempt_lead_id = li["lead_id"]
+    except Exception:
+        pass
     row = await conn.fetchrow("""
         INSERT INTO billing_payment_attempts (
-            tenant_id, plan_id, expected_amount_in_cents,
-            currency, billing_cycle, status, provider_environment
+            tenant_id, plan_id, provider, expected_amount_in_cents,
+            currency, billing_cycle, status, provider_environment,
+            visitor_key, lead_id
         )
-        VALUES ($1, $2, $3, 'COP', 'annual', 'created', $4)
+        VALUES ($1, $2, $3, $4, $5, 'monthly', 'created', $6, $7, $8)
         RETURNING id
-    """, tenant_id, plan_id, amount_in_cents, provider_environment)
+    """, tenant_id, plan_id, provider_norm, amount_in_cents, currency_norm, provider_environment, attempt_visitor_key, attempt_lead_id)
     return row["id"]
 
 
@@ -1051,6 +1933,36 @@ async def payment_reference_belongs_to_tenant(
     return row is not None
 
 
+async def ensure_subscribe_allowed(conn, tenant_id: UUID) -> None:
+    """Block mid-period rebill for active annuals still inside current_period_end (#797)."""
+    from app.core.billing_pricing import is_grandfathered_annual
+
+    row = await conn.fetchrow(
+        """
+        SELECT status, billing_cycle, current_period_end
+        FROM tenant_subscriptions
+        WHERE tenant_id = $1
+        """,
+        tenant_id,
+    )
+    if row is None:
+        return
+    if is_grandfathered_annual(
+        status=row["status"],
+        billing_cycle=row["billing_cycle"],
+        current_period_end=row["current_period_end"],
+    ):
+        period_end = row["current_period_end"]
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "grandfather_active_period",
+                "message": "Active annual subscription is already paid through the current period.",
+                "current_period_end": period_end.isoformat() if period_end else None,
+            },
+        )
+
+
 async def subscribe_tenant(
     conn,
     tenant_id: UUID,
@@ -1058,15 +1970,18 @@ async def subscribe_tenant(
     billing_cycle: str,
     checkout_url: str,
     gateway_reference: str,
+    *,
+    provider: str = "lemon_squeezy",
 ) -> Dict[str, Any]:
     """
     Update (or insert) the tenant's subscription row with the new plan and
-    MP preapproval ID, setting status='pending' until the webhook confirms.
-    Also inserts a billing_events row for auditability.
+    checkout reference, setting status='pending' until the webhook confirms.
 
-    Uses INSERT ... ON CONFLICT (tenant_id) DO UPDATE to handle both
-    first-time tenants (no seed row) and existing ones.
+    Defense in depth: refuses to overwrite a grandfathered active annual (#797).
     """
+    await ensure_subscribe_allowed(conn, tenant_id)
+    provider_norm = str(provider or "lemon_squeezy").strip().lower()
+
     row = await conn.fetchrow("""
         INSERT INTO tenant_subscriptions
             (tenant_id, plan_id, billing_cycle, status,
@@ -1087,9 +2002,20 @@ async def subscribe_tenant(
             current_period_end   = EXCLUDED.current_period_end,
             cancelled_at         = NULL,
             updated_at           = now()
+        WHERE NOT (
+            tenant_subscriptions.status = 'active'
+            AND tenant_subscriptions.billing_cycle = 'annual'
+            AND tenant_subscriptions.current_period_end IS NOT NULL
+            AND tenant_subscriptions.current_period_end > now()
+        )
         RETURNING id, tenant_id, plan_id, billing_cycle, status,
                   gateway_reference, current_period_start, current_period_end
     """, tenant_id, plan_id, billing_cycle, gateway_reference)
+
+    if row is None:
+        # Concurrent race: still grandfathered after ensure_subscribe_allowed.
+        await ensure_subscribe_allowed(conn, tenant_id)
+        raise HTTPException(status_code=409, detail="Unable to start subscription checkout")
 
     sub_id = row["id"]
 
@@ -1097,10 +2023,14 @@ async def subscribe_tenant(
         INSERT INTO billing_events
             (tenant_id, subscription_id, event_type, metadata)
         VALUES ($1, $2, 'subscribe_initiated', $3)
-    """, tenant_id, sub_id, json.dumps({"checkout_url": checkout_url, "plan_id": str(plan_id)}))
+    """, tenant_id, sub_id, json.dumps({
+        "checkout_url": checkout_url,
+        "plan_id": str(plan_id),
+        "provider": provider_norm,
+    }))
 
     logger.info(
-        "subscribe_initiated: tenant=%s plan=%s cycle=%s preapproval=%s",
+        "subscribe_initiated: tenant=%s plan=%s cycle=%s gateway_ref=%s",
         tenant_id, plan_id, billing_cycle, gateway_reference,
     )
 
@@ -1112,11 +2042,13 @@ async def subscribe_tenant(
     }
 
 
-_ACTIVATABLE_STATUSES = frozenset({"pending", "past_due"})
+_ACTIVATABLE_STATUSES = frozenset({"pending", "past_due", "expired"})
+_RENEWABLE_STATUSES = frozenset({"pending", "past_due", "expired", "active"})
 
 # Tenant-facing Mi Plan history (GET /billing/events) — excludes cron/ops noise.
 CUSTOMER_VISIBLE_BILLING_EVENT_TYPES = (
     "subscribe_initiated",
+    "checkout_abandoned",
     "payment_approved",
     "payment_rejected",
     "payment_failed",
@@ -1150,9 +2082,78 @@ def parse_wompi_period_anchor(transaction: Dict[str, Any]) -> datetime:
 async def payment_approved_exists(
     conn,
     subscription_id: UUID,
-    wompi_transaction_id: str,
+    wompi_transaction_id: str = "",
+    *,
+    paddle_transaction_id: Optional[str] = None,
+    ls_order_id: Optional[str] = None,
+    ls_subscription_id: Optional[str] = None,
+    ls_invoice_id: Optional[str] = None,
 ) -> bool:
-    """True if this Wompi transaction already recorded as payment_approved."""
+    """True if this provider transaction already recorded as payment_approved."""
+    if paddle_transaction_id:
+        row = await conn.fetchval(
+            """
+            SELECT 1 FROM billing_events
+            WHERE subscription_id = $1
+              AND event_type = 'payment_approved'
+              AND metadata->>'paddle_transaction_id' = $2
+            LIMIT 1
+            """,
+            subscription_id,
+            paddle_transaction_id,
+        )
+        return row is not None
+    if ls_invoice_id:
+        row = await conn.fetchval(
+            """
+            SELECT 1 FROM billing_events
+            WHERE subscription_id = $1
+              AND event_type = 'payment_approved'
+              AND (
+                metadata->>'ls_invoice_id' = $2
+                OR metadata->>'gateway_reference' = $3
+              )
+            LIMIT 1
+            """,
+            subscription_id,
+            ls_invoice_id,
+            f"ls_inv_{ls_invoice_id}",
+        )
+        return row is not None
+    if ls_order_id:
+        row = await conn.fetchval(
+            """
+            SELECT 1 FROM billing_events
+            WHERE subscription_id = $1
+              AND event_type = 'payment_approved'
+              AND (
+                metadata->>'ls_order_id' = $2
+                OR metadata->>'gateway_reference' = $3
+              )
+            LIMIT 1
+            """,
+            subscription_id,
+            ls_order_id,
+            f"ls_ord_{ls_order_id}",
+        )
+        return row is not None
+    if ls_subscription_id:
+        row = await conn.fetchval(
+            """
+            SELECT 1 FROM billing_events
+            WHERE subscription_id = $1
+              AND event_type = 'payment_approved'
+              AND (
+                metadata->>'ls_subscription_id' = $2
+                OR metadata->>'gateway_reference' = $3
+              )
+            LIMIT 1
+            """,
+            subscription_id,
+            ls_subscription_id,
+            f"ls_sub_{ls_subscription_id}",
+        )
+        return row is not None
     if not wompi_transaction_id:
         return False
     row = await conn.fetchval(
@@ -1180,15 +2181,16 @@ async def _activate_subscription_with_period(
     metadata: Dict[str, Any],
     period_anchor: Optional[datetime] = None,
 ) -> Optional[datetime]:
-    """Set subscription active, extend billing period, record payment_approved."""
+    """Set subscription active, persist billing_cycle, extend period, record payment_approved."""
     # Interval literals stay in SQL — asyncpg cannot bind '1 year' strings as interval.
-    cycle = billing_cycle if billing_cycle in ("monthly", "annual") else "annual"
+    cycle = billing_cycle if billing_cycle in ("monthly", "annual") else "monthly"
     anchor = period_anchor or datetime.now(timezone.utc)
     if anchor.tzinfo is None:
         anchor = anchor.replace(tzinfo=timezone.utc)
     updated = await conn.fetchrow("""
         UPDATE tenant_subscriptions
         SET status               = 'active',
+            billing_cycle        = $2::text,
             current_period_start = $3::timestamptz,
             current_period_end   = $3::timestamptz + CASE
                 WHEN $2::text = 'monthly' THEN interval '1 month'
@@ -1214,65 +2216,220 @@ async def activate_subscription_by_gateway_ref(
     conn,
     tenant_id: UUID,
     gateway_reference: str,
-    wompi_transaction_id: str,
-    amount: float,
+    wompi_transaction_id: str = "",
+    amount: float = 0.0,
     period_anchor: Optional[datetime] = None,
-) -> None:
+    *,
+    currency: str = "COP",
+    paddle_transaction_id: Optional[str] = None,
+    paddle_subscription_id: Optional[str] = None,
+    ls_order_id: Optional[str] = None,
+    ls_subscription_id: Optional[str] = None,
+    ls_invoice_id: Optional[str] = None,
+    provider: str = "lemon_squeezy",
+    provider_environment: Optional[str] = None,
+) -> bool:
     """
-    Activa la suscripción del tenant cuando Wompi confirma el pago (verify-payment).
-    Extiende el período según billing_cycle para filas pending o past_due.
+    Activate or renew tenant subscription when payment provider confirms payment.
+
+    Lookup order (#797 / #942):
+      1) tenant_id + gateway_reference (pending checkout / past_due)
+      2) tenant_id only for MoR renew when gateway_ref rotated (Paddle txn / LS order)
+
+    Skips grandfathered active annuals (mid-period). Returns True only when a
+    payment_approved event was written.
     """
+    from app.core.billing_pricing import is_grandfathered_annual
+
     row = await conn.fetchrow(
-        """SELECT id, status, billing_cycle
+        """SELECT id, status, billing_cycle, current_period_end, gateway_reference
            FROM tenant_subscriptions
            WHERE tenant_id = $1 AND gateway_reference = $2""",
         tenant_id, gateway_reference,
     )
+    matched_gateway = row is not None
+
+    if row is None and provider == "lemon_squeezy":
+        row = await conn.fetchrow(
+            """SELECT id, status, billing_cycle, current_period_end, gateway_reference
+               FROM tenant_subscriptions
+               WHERE tenant_id = $1""",
+            tenant_id,
+        )
+
     if not row:
         logger.warning(
             "activate_subscription: no subscription found for tenant=%s gateway_ref=%s",
             tenant_id, gateway_reference,
         )
-        return
+        return False
 
-    if row["status"] == "active":
-        logger.info("activate_subscription: already active tenant=%s", tenant_id)
-        return
-
-    if row["status"] not in _ACTIVATABLE_STATUSES:
-        logger.warning(
-            "activate_subscription: status=%s not activatable tenant=%s gateway_ref=%s",
-            row["status"], tenant_id, gateway_reference,
-        )
-        return
-
-    if await payment_approved_exists(conn, row["id"], wompi_transaction_id):
+    if is_grandfathered_annual(
+        status=row["status"],
+        billing_cycle=row["billing_cycle"],
+        current_period_end=row.get("current_period_end"),
+    ):
         logger.info(
-            "activate_subscription: duplicate wompi_transaction_id=%s tenant=%s — skipped",
-            wompi_transaction_id,
+            "activate_subscription: grandfathered active annual tenant=%s — skipped",
             tenant_id,
         )
-        return
+        return False
+
+    if row["status"] not in _RENEWABLE_STATUSES:
+        logger.warning(
+            "activate_subscription: status=%s not renewable tenant=%s gateway_ref=%s",
+            row["status"], tenant_id, gateway_reference,
+        )
+        return False
+
+    # Same gateway_ref on already-active row: duplicate webhook / no-op.
+    if row["status"] == "active" and matched_gateway:
+        logger.info("activate_subscription: already active tenant=%s", tenant_id)
+        return False
+
+    if await payment_approved_exists(
+        conn,
+        row["id"],
+        wompi_transaction_id,
+        paddle_transaction_id=paddle_transaction_id,
+        ls_order_id=ls_order_id,
+        ls_subscription_id=ls_subscription_id,
+        ls_invoice_id=ls_invoice_id,
+    ):
+        logger.info(
+            "activate_subscription: duplicate provider txn tenant=%s — skipped",
+            tenant_id,
+        )
+        return False
+
+    metadata: Dict[str, Any] = {
+        "gateway_reference": gateway_reference,
+        "provider": provider,
+    }
+    if wompi_transaction_id:
+        metadata["wompi_transaction_id"] = wompi_transaction_id
+    if paddle_transaction_id:
+        metadata["paddle_transaction_id"] = paddle_transaction_id
+    if paddle_subscription_id:
+        metadata["paddle_subscription_id"] = paddle_subscription_id
+    if ls_order_id:
+        metadata["ls_order_id"] = ls_order_id
+    if ls_subscription_id:
+        metadata["ls_subscription_id"] = ls_subscription_id
+    if ls_invoice_id:
+        metadata["ls_invoice_id"] = ls_invoice_id
+    if provider_environment:
+        metadata["provider_environment"] = provider_environment
+    if not matched_gateway:
+        metadata["renewal"] = True
+        metadata["previous_gateway_reference"] = row.get("gateway_reference")
+        if row.get("gateway_reference") != gateway_reference:
+            await conn.execute(
+                """
+                UPDATE tenant_subscriptions
+                SET gateway_reference = $2, updated_at = now()
+                WHERE id = $1
+                """,
+                row["id"],
+                gateway_reference,
+            )
+
+    # Post-grandfather renew (#809): non-grandfathered annual → monthly period + catalog.
+    cycle = str(row["billing_cycle"] or "monthly").lower()
+    if cycle == "annual":
+        cycle = "monthly"
+        metadata["converted_from_annual"] = True
+    elif cycle not in ("monthly", "annual"):
+        cycle = "monthly"
 
     period_end = await _activate_subscription_with_period(
         conn,
         subscription_id=row["id"],
         tenant_id=tenant_id,
-        billing_cycle=row["billing_cycle"],
+        billing_cycle=cycle,
         amount=amount,
-        currency="COP",
-        metadata={
-            "wompi_transaction_id": wompi_transaction_id,
-            "gateway_reference": gateway_reference,
-        },
+        currency=currency,
+        metadata=metadata,
         period_anchor=period_anchor,
     )
     await onboarding_service.activate_paid_onboarding_identity(conn, tenant_id)
 
     logger.info(
-        "Subscription activated: tenant=%s transaction=%s amount=%s period_end=%s",
-        tenant_id, wompi_transaction_id, amount, period_end,
+        "Subscription activated/renewed: tenant=%s provider=%s txn=%s amount=%s period_end=%s",
+        tenant_id,
+        provider,
+        paddle_transaction_id or ls_order_id or ls_subscription_id or wompi_transaction_id,
+        amount,
+        period_end,
     )
+    return True
+
+
+async def get_tenant_notify_info_after_activate(
+    conn,
+    *,
+    tenant_id: UUID,
+) -> Optional[Dict[str, Any]]:
+    """Tenant + plan fields for renewal email / outbound webhook after Paddle activate."""
+    row = await conn.fetchrow(
+        """
+        SELECT ts.id AS subscription_id,
+               ts.current_period_end,
+               t.name AS tenant_name,
+               t.email AS tenant_email,
+               sp.name AS plan_name
+        FROM tenant_subscriptions ts
+        JOIN tenants t ON t.id = ts.tenant_id
+        JOIN subscription_plans sp ON sp.id = ts.plan_id
+        WHERE ts.tenant_id = $1
+        """,
+        tenant_id,
+    )
+    if row is None:
+        return None
+    period_end = row["current_period_end"]
+    return {
+        "tenant_id": str(tenant_id),
+        "subscription_id": str(row["subscription_id"]),
+        "tenant_name": row["tenant_name"] or "",
+        "tenant_email": row["tenant_email"],
+        "plan_name": row["plan_name"] or "",
+        "next_period_end": period_end.isoformat() if period_end else "",
+    }
+
+
+async def get_tenant_billing_context(conn, tenant_id: UUID) -> Dict[str, Any]:
+    """Country + slug for Paddle pricing/env resolution."""
+    row = await conn.fetchrow(
+        """
+        SELECT t.slug,
+               COALESCE(tfp.country_code, 'CO') AS country_code
+        FROM tenants t
+        LEFT JOIN tenant_financial_profiles tfp ON tfp.tenant_id = t.id
+        WHERE t.id = $1
+        """,
+        tenant_id,
+    )
+    if not row:
+        return {"slug": None, "country_code": "CO"}
+    return {"slug": row["slug"], "country_code": row["country_code"] or "CO"}
+
+
+async def get_tenant_billing_context(conn, tenant_id: UUID) -> Dict[str, Any]:
+    """Country + slug for Paddle pricing/env resolution (#794/#796)."""
+    row = await conn.fetchrow(
+        """
+        SELECT t.slug,
+               COALESCE(tfp.country_code, 'CO') AS country_code
+        FROM tenants t
+        LEFT JOIN tenant_financial_profiles tfp ON tfp.tenant_id = t.id
+        WHERE t.id = $1
+        """,
+        tenant_id,
+    )
+    if not row:
+        return {"slug": None, "country_code": "CO"}
+    return {"slug": row["slug"], "country_code": row["country_code"] or "CO"}
 
 
 async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
@@ -1348,11 +2505,13 @@ async def get_tenant_subscription(conn, tenant_id: UUID) -> Dict[str, Any]:
 
 async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
     """
-    Return current-period remaining usage for scans and electronic invoices.
+    Return current-period remaining usage for scans, electronic invoices, and
+    operational/catalog quotas.
 
-    The measurement window is the tenant subscription period. Electronic invoice
-    quota is only exposed for the paid FE plan; other plans intentionally report
-    0/0/0 to avoid implying an included entitlement.
+    Paid tenants use the subscription period. Starter tenants without a
+    subscription row use the calendar month and the active `starter` plan
+    catalog (warocol.com#1796). Electronic invoice quota is only exposed for
+    the paid FE plan; other plans intentionally report 0/0/0.
     """
     row = await conn.fetchrow("""
         SELECT
@@ -1372,7 +2531,33 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
         WHERE ts.tenant_id = $1
     """, tenant_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Subscription not found")
+        effective_slug = await get_effective_plan_slug(conn, tenant_id)
+        if effective_slug != STARTER_PLAN_SLUG:
+            raise HTTPException(status_code=404, detail="Subscription not found")
+        row = await conn.fetchrow(
+            """
+            SELECT
+                date_trunc('month', now()) AS current_period_start,
+                date_trunc('month', now()) + interval '1 month' AS current_period_end,
+                sp.slug AS plan_slug,
+                sp.features AS plan_features,
+                sp.scan_limit AS plan_scan_limit,
+                COALESCE(su.scans_used, 0) AS scans_used,
+                COALESCE(su.scans_limit, sp.scan_limit) AS scans_limit
+            FROM subscription_plans sp
+            LEFT JOIN scan_usage su
+                ON su.tenant_id = $1
+               AND su.period_start <= now()
+               AND su.period_end > now()
+            WHERE sp.slug = $2
+              AND sp.is_active = true
+            LIMIT 1
+            """,
+            tenant_id,
+            STARTER_PLAN_SLUG,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Subscription not found")
 
     period_start = row["current_period_start"]
     period_end = row["current_period_end"]
@@ -1468,7 +2653,137 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
                   AND o.status = 'completed'
                   AND o.order_date >= $2
                   AND o.order_date < $3
-            ) AS completed_online_orders_per_month
+            ) AS completed_online_orders_per_month,
+            (
+                SELECT COUNT(*)
+                FROM product p
+                WHERE p.tenant_id = $1
+            ) AS menu_products,
+            (
+                SELECT COUNT(*)
+                FROM categories c
+                WHERE c.tenant_id = $1
+            ) AS menu_categories,
+            (
+                SELECT COUNT(*)
+                FROM ingredients i
+                WHERE i.tenant_id = $1
+                  AND i.is_active = TRUE
+            ) AS tenant_ingredients,
+            (
+                SELECT COUNT(*)
+                FROM tenant_suppliers ts
+                WHERE ts.tenant_id = $1
+                  AND ts.is_active = TRUE
+            ) AS tenant_suppliers,
+            (
+                SELECT COUNT(*)
+                FROM tenant_purchases tp
+                WHERE tp.tenant_id = $1
+                  AND tp.is_direct_entry = TRUE
+                  AND tp.created_at >= $2
+                  AND tp.created_at < $3
+            ) AS direct_purchases_per_period,
+            (
+                SELECT COUNT(*)
+                FROM tenant_ingredient_movements tim
+                WHERE tim.tenant_id = $1
+                  AND tim.movement_type = 'adjustment'
+                  AND COALESCE(tim.reference_table, '') <> 'tenant_purchases'
+                  AND tim.created_at >= $2
+                  AND tim.created_at < $3
+            ) AS stock_adjustments_per_period,
+            (
+                SELECT COUNT(*)
+                FROM accounting_period ap
+                WHERE ap.tenant_id = $1
+                  AND ap.closed_at >= $2
+                  AND ap.closed_at < $3
+            ) AS cash_closes_per_period,
+            (
+                SELECT COUNT(*)
+                FROM cash_shift_openings cso
+                WHERE cso.tenant_id = $1
+                  AND cso.status = 'open'
+            ) AS active_open_cash_shifts,
+            (
+                SELECT
+                    (
+                        SELECT COUNT(*)
+                        FROM tenant_expenses te
+                        WHERE te.tenant_id = $1
+                          AND te.created_at >= $2
+                          AND te.created_at < $3
+                    )
+                    +
+                    (
+                        SELECT COUNT(*)
+                        FROM recurring_expense_instances rei
+                        WHERE rei.tenant_id = $1
+                          AND rei.created_at >= $2
+                          AND rei.created_at < $3
+                    )
+            ) AS expenses_per_period,
+            (
+                SELECT COUNT(*)
+                FROM tenant_purchases tp_paid
+                WHERE tp_paid.tenant_id = $1
+                  AND tp_paid.paid_at IS NOT NULL
+                  AND tp_paid.paid_at >= $2
+                  AND tp_paid.paid_at < $3
+            ) AS supplier_payments_per_period,
+            (
+                SELECT COUNT(*)
+                FROM tenant_expenses te_paid
+                WHERE te_paid.tenant_id = $1
+                  AND te_paid.paid_at IS NOT NULL
+                  AND lower(COALESCE(te_paid.payment_type, '')) = 'credito'
+                  AND te_paid.paid_at >= $2
+                  AND te_paid.paid_at < $3
+            ) AS expense_payments_per_period,
+            (
+                SELECT COUNT(*)
+                FROM payment_methods pm
+                WHERE pm.tenant_id = $1
+                  AND pm.is_active = TRUE
+            ) AS payment_methods,
+            (
+                SELECT COUNT(*)
+                FROM api_tokens atok
+                WHERE atok.tenant_id = $1
+                  AND atok.is_active = TRUE
+            ) AS api_tokens,
+            (
+                SELECT COUNT(*)
+                FROM tenant_promotions tpromo
+                WHERE tpromo.tenant_id = $1
+            ) AS tenant_promotions,
+            (
+                SELECT COUNT(*)
+                FROM tenant_monthly_periods tmp
+                WHERE tmp.tenant_id = $1
+                  AND tmp.status = 'closed'
+                  AND tmp.closed_at >= $2
+                  AND tmp.closed_at < $3
+            ) AS accounting_period_closes_per_period,
+            (
+                SELECT COUNT(*)
+                FROM tenant_journal_entries tje
+                WHERE tje.tenant_id = $1
+                  AND tje.source_module IN ('manual', 'manual_balance_adjustment')
+                  AND tje.created_at >= $2
+                  AND tje.created_at < $3
+            ) AS manual_journal_entries_per_period,
+            (
+                SELECT COUNT(*)
+                FROM modifier_groups mg
+                WHERE mg.tenant_id = $1
+            ) AS modifier_groups,
+            (
+                SELECT COUNT(*)
+                FROM product_base_types pbt
+                WHERE pbt.tenant_id = $1
+            ) AS recipe_bases
     """, tenant_id, period_start, period_end, list(LEGACY_INTERNAL_TEAM_ROLES))
 
     def metric(used: int, quota: EffectiveQuota) -> Dict[str, Any]:
@@ -1530,6 +2845,88 @@ async def get_remaining_billing_usage(conn, tenant_id: UUID) -> Dict[str, Any]:
                 invoice_used,
                 effective_quotas["electronic_invoices_per_period"],
             ),
+            "menu_products": metric(
+                int(quota_counts["menu_products"] or 0),
+                effective_quotas["menu_products"],
+            ),
+            "menu_categories": metric(
+                int(quota_counts["menu_categories"] or 0),
+                effective_quotas["menu_categories"],
+            ),
+            "tenant_ingredients": metric(
+                int(quota_counts["tenant_ingredients"] or 0),
+                effective_quotas["tenant_ingredients"],
+            ),
+            "tenant_suppliers": metric(
+                int(quota_counts["tenant_suppliers"] or 0),
+                effective_quotas["tenant_suppliers"],
+            ),
+            "direct_purchases_per_period": metric(
+                int(quota_counts["direct_purchases_per_period"] or 0),
+                effective_quotas["direct_purchases_per_period"],
+            ),
+            "stock_adjustments_per_period": metric(
+                int(quota_counts["stock_adjustments_per_period"] or 0),
+                effective_quotas["stock_adjustments_per_period"],
+            ),
+            "cash_closes_per_period": metric(
+                int(quota_counts["cash_closes_per_period"] or 0),
+                effective_quotas["cash_closes_per_period"],
+            ),
+            "active_open_cash_shifts": metric(
+                int(quota_counts["active_open_cash_shifts"] or 0),
+                effective_quotas["active_open_cash_shifts"],
+            ),
+            "expenses_per_period": metric(
+                int(quota_counts["expenses_per_period"] or 0),
+                effective_quotas["expenses_per_period"],
+            ),
+            "supplier_payments_per_period": metric(
+                int(quota_counts["supplier_payments_per_period"] or 0),
+                effective_quotas["supplier_payments_per_period"],
+            ),
+            "expense_payments_per_period": metric(
+                int(quota_counts.get("expense_payments_per_period") or 0),
+                effective_quotas["expense_payments_per_period"],
+            ),
+            "payment_methods": metric(
+                int(quota_counts["payment_methods"] or 0),
+                effective_quotas["payment_methods"],
+            ),
+            "api_tokens": metric(
+                int(quota_counts.get("api_tokens") or 0),
+                effective_quotas["api_tokens"],
+            ),
+            "tenant_promotions": metric(
+                int(quota_counts.get("tenant_promotions") or 0),
+                effective_quotas["tenant_promotions"],
+            ),
+            "accounting_period_closes_per_period": metric(
+                int(quota_counts["accounting_period_closes_per_period"] or 0),
+                effective_quotas["accounting_period_closes_per_period"],
+            ),
+            "manual_journal_entries_per_period": metric(
+                int(quota_counts["manual_journal_entries_per_period"] or 0),
+                effective_quotas["manual_journal_entries_per_period"],
+            ),
+            "modifier_groups": metric(
+                int(quota_counts["modifier_groups"] or 0),
+                effective_quotas["modifier_groups"],
+            ),
+            "recipe_bases": metric(
+                int(quota_counts["recipe_bases"] or 0),
+                effective_quotas["recipe_bases"],
+            ),
+            # Scoped caps: limit is plan-level; used is always 0 here (count is
+            # per product/group). Front compares local editor counts to limit.
+            "recipe_lines_per_product": metric(
+                0,
+                effective_quotas["recipe_lines_per_product"],
+            ),
+            "modifier_options_per_group": metric(
+                0,
+                effective_quotas["modifier_options_per_group"],
+            ),
         },
     }
 
@@ -1566,6 +2963,76 @@ async def cancel_tenant_subscription(conn, tenant_id: UUID) -> str:
     logger.info("subscription_cancelled: tenant=%s preapproval=%s", tenant_id, gateway_reference)
 
     return gateway_reference or ""
+
+
+async def abandon_pending_checkout(conn, tenant_id: UUID) -> Dict[str, Any]:
+    """
+    Drop a pending checkout attempt so the tenant returns to Starter (#2210).
+
+    Only ``status='pending'`` is allowed. Deletes the subscription row (billing_events
+    keep history via ON DELETE SET NULL). Stale Paddle webhooks then no-op when no row.
+    """
+    status_row = await conn.fetchrow(
+        """
+        SELECT id, status, gateway_reference, plan_id
+        FROM tenant_subscriptions
+        WHERE tenant_id = $1
+        """,
+        tenant_id,
+    )
+    if status_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay suscripción pendiente para abandonar",
+        )
+    if status_row["status"] != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail="Solo se puede abandonar un checkout pendiente",
+        )
+
+    sub_id = status_row["id"]
+    gateway_reference = status_row["gateway_reference"] or ""
+    plan_id = status_row["plan_id"]
+
+    await conn.execute(
+        """
+        INSERT INTO billing_events
+            (tenant_id, subscription_id, event_type, metadata)
+        VALUES ($1, $2, 'checkout_abandoned', $3)
+        """,
+        tenant_id,
+        sub_id,
+        json.dumps({
+            "gateway_reference": gateway_reference,
+            "plan_id": str(plan_id) if plan_id else None,
+            "provider": "lemon_squeezy",
+        }),
+    )
+
+    deleted = await conn.fetchrow(
+        """
+        DELETE FROM tenant_subscriptions
+        WHERE tenant_id = $1 AND status = 'pending'
+        RETURNING id
+        """,
+        tenant_id,
+    )
+    if deleted is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Solo se puede abandonar un checkout pendiente",
+        )
+
+    logger.info(
+        "checkout_abandoned: tenant=%s gateway_ref=%s",
+        tenant_id,
+        gateway_reference,
+    )
+    return {
+        "status": "abandoned",
+        "gateway_reference": gateway_reference or None,
+    }
 
 
 def _webhook_amount_in_cents(value: Any) -> int:
@@ -1815,6 +3282,243 @@ async def process_onboarding_payment_transaction(
     }
 
 
+def lemon_squeezy_payment_matches_expected(
+    *,
+    expected_amount: int,
+    charged: int,
+    subtotal: Optional[int],
+) -> bool:
+    """Validate LS webhook amounts for tax-exclusive and tax-inclusive store pricing (#949).
+
+    Tax-exclusive (LS setting OFF): subtotal equals list price; total may include MoR tax.
+    Tax-inclusive (LS setting ON): total equals list price; subtotal is the net portion.
+    """
+    if charged < expected_amount:
+        return False
+    if subtotal is None:
+        return True
+    if subtotal > expected_amount:
+        return False
+    if subtotal == expected_amount:
+        return True
+    return charged == expected_amount
+
+
+async def process_mo_r_onboarding_payment(
+    conn,
+    *,
+    attempt_id: UUID,
+    transaction_id: str,
+    amount_minor: int,
+    currency: str,
+    period_anchor: Optional[datetime] = None,
+    provider_environment: str = "prod",
+    provider: str = "lemon_squeezy",
+    paddle_subscription_id: Optional[str] = None,
+    ls_subscription_id: Optional[str] = None,
+    ls_order_id: Optional[str] = None,
+    ls_invoice_id: Optional[str] = None,
+    amount_subtotal_minor: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Activate paid onboarding from a verified MoR transaction (#795 / #942).
+
+    Looks up billing_payment_attempts by attempt_id + provider.
+    Lemon Squeezy tax-exclusive: subtotal == list, total may be higher.
+    Tax-inclusive: total == list, subtotal may be lower (#949).
+    """
+    provider_norm = str(provider or "lemon_squeezy").strip().lower()
+    if provider_norm not in ("lemon_squeezy",):
+        return {"handled": False, "activated": False, "reason": "invalid_provider"}
+
+    txn_id = str(transaction_id or "").strip()
+    if not txn_id:
+        return {"handled": False, "activated": False, "reason": "missing_txn"}
+
+    attempt = await conn.fetchrow(
+        """
+        SELECT a.id, a.tenant_id, a.plan_id, a.provider_reference,
+               a.expected_amount_in_cents, a.currency, a.status,
+               a.provider_transaction_id, a.provider_environment,
+               p.name AS plan_name, p.is_active AS plan_is_active
+        FROM billing_payment_attempts a
+        JOIN subscription_plans p ON p.id = a.plan_id
+        WHERE a.id = $1
+          AND a.provider = $2
+        FOR UPDATE OF a
+        """,
+        attempt_id,
+        provider_norm,
+    )
+    if attempt is None:
+        return {"handled": False, "activated": False, "reason": "attempt_not_found"}
+    if attempt["provider_environment"] != provider_environment:
+        raise HTTPException(status_code=409, detail="Payment provider environment mismatch")
+
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", txn_id)
+    duplicate_attempt_id = await conn.fetchval(
+        """
+        SELECT id
+        FROM billing_payment_attempts
+        WHERE provider_transaction_id = $1
+          AND provider_environment = $2
+          AND id <> $3
+        LIMIT 1
+        """,
+        txn_id,
+        provider_environment,
+        attempt["id"],
+    )
+    if duplicate_attempt_id is not None:
+        raise HTTPException(status_code=409, detail="Payment transaction ID mismatch")
+
+    if attempt["status"] == "approved":
+        if attempt["provider_transaction_id"] != txn_id:
+            raise HTTPException(status_code=409, detail="Payment transaction ID mismatch")
+        return {"handled": True, "activated": False, "reason": "already_approved"}
+
+    expected_currency = str(attempt["currency"]).strip().upper()
+    currency_norm = str(currency or "").strip().upper()
+    expected_amount = int(attempt["expected_amount_in_cents"])
+    charged = int(amount_minor)
+    subtotal = int(amount_subtotal_minor) if amount_subtotal_minor is not None else None
+
+    if currency_norm != expected_currency or not attempt["plan_is_active"]:
+        raise HTTPException(status_code=409, detail="Payment evidence mismatch")
+
+    if provider_norm == "lemon_squeezy":
+        if not lemon_squeezy_payment_matches_expected(
+            expected_amount=expected_amount,
+            charged=charged,
+            subtotal=subtotal,
+        ):
+            raise HTTPException(status_code=409, detail="Payment evidence mismatch")
+    elif charged != expected_amount:
+        raise HTTPException(status_code=409, detail="Payment evidence mismatch")
+
+    existing_subscription = await conn.fetchrow(
+        """
+        SELECT id, status
+        FROM tenant_subscriptions
+        WHERE tenant_id = $1
+        FOR UPDATE
+        """,
+        attempt["tenant_id"],
+    )
+    identity = await onboarding_service.activate_paid_onboarding_identity(
+        conn, attempt["tenant_id"]
+    )
+    if identity is None:
+        await conn.execute(
+            """
+            UPDATE billing_payment_attempts
+            SET status = 'approved', provider_transaction_id = $2,
+                resolved_at = now(), updated_at = now()
+            WHERE id = $1
+            """,
+            attempt["id"],
+            txn_id,
+        )
+        logger.error(
+            "MoR onboarding payment requires reconciliation: tenant=%s attempt=%s txn=%s",
+            attempt["tenant_id"],
+            attempt["id"],
+            txn_id,
+        )
+        return {"handled": True, "activated": False, "reason": "reconciliation_required"}
+
+    if existing_subscription is not None and existing_subscription["status"] != "pending":
+        raise HTTPException(status_code=409, detail="Tenant subscription activation conflict")
+
+    anchor = period_anchor or datetime.now(timezone.utc)
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+    gateway_reference = str(attempt["provider_reference"] or txn_id)
+
+    subscription = await conn.fetchrow(
+        """
+        INSERT INTO tenant_subscriptions (
+            tenant_id, plan_id, billing_cycle, status, gateway_reference,
+            current_period_start, current_period_end
+        )
+        VALUES ($1, $2, 'monthly', 'active', $3, $4, $4 + interval '1 month')
+        ON CONFLICT (tenant_id) DO UPDATE SET
+            plan_id = EXCLUDED.plan_id,
+            billing_cycle = 'monthly',
+            status = 'active',
+            gateway_reference = EXCLUDED.gateway_reference,
+            current_period_start = EXCLUDED.current_period_start,
+            current_period_end = EXCLUDED.current_period_end,
+            cancelled_at = NULL,
+            updated_at = now()
+        WHERE tenant_subscriptions.status = 'pending'
+        RETURNING id, current_period_end
+        """,
+        attempt["tenant_id"],
+        attempt["plan_id"],
+        gateway_reference,
+        anchor,
+    )
+    if subscription is None:
+        raise HTTPException(status_code=409, detail="Tenant subscription activation conflict")
+
+    metadata = {
+        "payment_attempt_id": str(attempt["id"]),
+        "gateway_reference": gateway_reference,
+        "plan_id": str(attempt["plan_id"]),
+        "provider": provider_norm,
+        "provider_environment": provider_environment,
+        "expected_amount_in_cents": expected_amount,
+        "charged_amount_in_cents": charged,
+    }
+    if subtotal is not None:
+        metadata["subtotal_amount_in_cents"] = subtotal
+    if ls_order_id:
+        metadata["ls_order_id"] = ls_order_id
+    if ls_subscription_id:
+        metadata["ls_subscription_id"] = ls_subscription_id
+    if ls_invoice_id:
+        metadata["ls_invoice_id"] = ls_invoice_id
+    metadata["ls_transaction_id"] = txn_id
+
+    await conn.execute(
+        """
+        INSERT INTO billing_events (
+            tenant_id, subscription_id, event_type, amount, currency, metadata
+        )
+        VALUES ($1, $2, 'payment_approved', $3, $4, $5)
+        """,
+        attempt["tenant_id"],
+        subscription["id"],
+        Decimal(charged) / Decimal("100"),
+        expected_currency,
+        json.dumps(metadata),
+    )
+    await conn.execute(
+        """
+        UPDATE billing_payment_attempts
+        SET status = 'approved', provider_transaction_id = $2,
+            resolved_at = now(), updated_at = now()
+        WHERE id = $1
+        """,
+        attempt["id"],
+        txn_id,
+    )
+
+    return {
+        "handled": True,
+        "activated": True,
+        "tenant_info": {
+            "tenant_id": str(attempt["tenant_id"]),
+            "subscription_id": str(subscription["id"]),
+            "tenant_name": identity["tenant_name"],
+            "tenant_email": identity["tenant_email"],
+            "plan_name": attempt["plan_name"],
+            "next_period_end": subscription["current_period_end"].isoformat(),
+        },
+    }
+
+
 async def activate_tenant_subscription(
     conn,
     gateway_reference: str,
@@ -1913,7 +3617,8 @@ class SubscriptionAccess:
     Represents the access level for a tenant based on subscription status.
 
     Levels:
-      free             — no subscription row; default 1000 scans/month
+      starter          — no paid subscription; permanent free Starter plan
+      free             — legacy alias; treated as starter for access
       full             — active subscription
       full_with_warning — past_due, < 3 days overdue — access OK but banner shown
       read_only        — past_due, 3-7 days overdue — IA scanner blocked
@@ -1930,6 +3635,9 @@ async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
     """
     Returns the access level for a tenant based on their subscription status
     and how many days past_due they are.
+
+    Pending checkout without a prior payment_approved keeps Starter access
+    (first upgrade). Pending after a prior paid period stays blocked.
 
     Uses timezone.utc (Python 3.9 safe — NOT datetime.UTC which requires 3.11+).
     """
@@ -1956,11 +3664,11 @@ async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
                 ),
             )
         return SubscriptionAccess(
-            level="free",
+            level="starter",
             grace_days_remaining=0,
             subscription_status=None,
             next_payment_date=None,
-            message="Estás en el plan gratuito con 1000 escaneos al mes.",
+            message="Estás en el plan Starter con límites operativos gratuitos.",
         )
 
     status = sub["status"]
@@ -1976,12 +3684,34 @@ async def get_subscription_access(tenant_id: UUID, conn) -> SubscriptionAccess:
         )
 
     if status == "pending":
+        # First Pro checkout (trial/Starter → pending): keep Starter access until paid.
+        # Renew / re-checkout after a prior successful payment: stay blocked.
+        prior_paid = await conn.fetchval(
+            """
+            SELECT 1 FROM billing_events
+            WHERE tenant_id = $1
+              AND event_type = 'payment_approved'
+            LIMIT 1
+            """,
+            tenant_id,
+        )
+        if prior_paid:
+            return SubscriptionAccess(
+                level="blocked",
+                grace_days_remaining=0,
+                subscription_status=status,
+                next_payment_date=None,
+                message="Completa el pago pendiente para reactivar tu suscripción.",
+            )
         return SubscriptionAccess(
-            level="blocked",
+            level="starter",
             grace_days_remaining=0,
             subscription_status=status,
             next_payment_date=None,
-            message="Completa el pago pendiente para activar tu suscripción.",
+            message=(
+                "Completa el pago pendiente para activar Pro. "
+                "Mientras tanto sigues en el plan Starter."
+            ),
         )
 
     if status == "past_due":
@@ -2124,6 +3854,75 @@ async def mark_subscription_past_due(
         )
         return None
 
+    return await _apply_past_due_from_row(
+        conn,
+        row,
+        event_type=event_type,
+        metadata={"gateway_reference": gateway_reference},
+    )
+
+
+async def mark_subscription_past_due_by_tenant(
+    conn,
+    tenant_id: UUID,
+    event_type: str,
+    *,
+    provider: str = "lemon_squeezy",
+    paddle_transaction_id: Optional[str] = None,
+    paddle_subscription_id: Optional[str] = None,
+    ls_order_id: Optional[str] = None,
+    ls_subscription_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    MoR failure path (#798 / #942): resolve subscription by tenant_id.
+
+    Failed provider txns often use a new id that is not yet stored as
+    gateway_reference, so lookup-by-txn would always miss.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT ts.id AS subscription_id, ts.tenant_id, ts.status,
+               ts.current_period_end
+        FROM tenant_subscriptions ts
+        WHERE ts.tenant_id = $1
+        """,
+        tenant_id,
+    )
+    if row is None:
+        logger.warning(
+            "mark_subscription_past_due_by_tenant: no subscription tenant=%s",
+            tenant_id,
+        )
+        return None
+
+    metadata: Dict[str, Any] = {
+        "provider": provider,
+        "tenant_id": str(tenant_id),
+    }
+    if paddle_transaction_id:
+        metadata["paddle_transaction_id"] = paddle_transaction_id
+    if paddle_subscription_id:
+        metadata["paddle_subscription_id"] = paddle_subscription_id
+    if ls_order_id:
+        metadata["ls_order_id"] = ls_order_id
+    if ls_subscription_id:
+        metadata["ls_subscription_id"] = ls_subscription_id
+
+    return await _apply_past_due_from_row(
+        conn,
+        row,
+        event_type=event_type,
+        metadata=metadata,
+    )
+
+
+async def _apply_past_due_from_row(
+    conn,
+    row,
+    *,
+    event_type: str,
+    metadata: Dict[str, Any],
+) -> Dict[str, Any]:
     sub_id = row["subscription_id"]
     tenant_id = row["tenant_id"]
     status = row["status"]
@@ -2142,13 +3941,12 @@ async def mark_subscription_past_due(
         """, sub_id)
     else:
         logger.info(
-            "mark_subscription_past_due: skipped past_due status=%s period_end=%s ref=%s",
+            "mark_subscription_past_due: skipped past_due status=%s period_end=%s tenant=%s",
             status,
             period_end,
-            gateway_reference,
+            tenant_id,
         )
 
-    # Fetch tenant info for email
     tenant = await conn.fetchrow(
         "SELECT name, email FROM tenants WHERE id = $1", tenant_id
     )
@@ -2156,12 +3954,9 @@ async def mark_subscription_past_due(
     await conn.execute("""
         INSERT INTO billing_events (tenant_id, subscription_id, event_type, metadata)
         VALUES ($1, $2, $3, $4)
-    """, tenant_id, sub_id, event_type, {"gateway_reference": gateway_reference})
+    """, tenant_id, sub_id, event_type, metadata)
 
-    logger.info(
-        "%s: tenant=%s preapproval=%s",
-        event_type, tenant_id, gateway_reference,
-    )
+    logger.info("%s: tenant=%s metadata=%s", event_type, tenant_id, metadata)
 
     return {
         "tenant_id": str(tenant_id),

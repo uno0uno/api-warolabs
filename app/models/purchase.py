@@ -478,6 +478,8 @@ class DirectPurchaseCreate(BaseModel):
     payment_reference: Optional[str] = None
     payment_amount: Optional[Decimal] = None
     payment_date: Optional[str] = None
+    # Drawer control only (#786): false = cash did not leave the till (exclude from arqueo).
+    from_cash_drawer: bool = Field(True, alias='fromCashDrawer')
 
     class Config:
         populate_by_name = True
@@ -488,11 +490,13 @@ class DirectPurchaseUpdate(BaseModel):
     purchase_date: Optional[str] = None
     notes: Optional[str] = None
     invoice_number: Optional[str] = None
+    payment_type: Optional[str] = Field(None, description="Payment type: contado, credito, contraentrega")
     payment_method: Optional[str] = None
     payment_method_id: Optional[str] = None
     payment_reference: Optional[str] = None
     payment_amount: Optional[Decimal] = None
     payment_date: Optional[str] = None
+    from_cash_drawer: Optional[bool] = Field(None, alias='fromCashDrawer')
 
     class Config:
         populate_by_name = True

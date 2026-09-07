@@ -4,13 +4,27 @@ Requires authentication - these are admin endpoints
 """
 import asyncio
 import json
-from typing import Optional, Literal
+from decimal import Decimal
+from typing import Any, Dict, List, Mapping, Optional, Literal
+from uuid import UUID
 from fastapi import Request, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
 from app.core.sales_tax_profile import settings_for_sales_tax_profile
-from app.core.timezones import DEFAULT_TENANT_TIMEZONE, normalize_timezone, validate_timezone
+from app.core.timezones import (
+    COUNTRY_DEFAULT_TIMEZONES,
+    DEFAULT_TENANT_TIMEZONE,
+    normalize_timezone,
+    validate_timezone,
+)
+from app.services.hospitality_tax_packs import ensure_wave1_tax_pack
+from app.services.hospitality_tax_jurisdictions import (
+    JURISDICTION_COUNTRIES,
+    apply_jurisdiction_pack,
+    list_jurisdictions,
+    normalize_jurisdiction_code,
+)
 from app.core.tenant_prefs import (
     DEFAULT_CURRENCY_CODE,
     DEFAULT_TENANT_LOCALE,
@@ -29,9 +43,43 @@ from app.models.tenant_public_profile import (
 from app.services import public_restaurant_service
 from app.services import tenant_financial_profile_service
 from app.services.aws_s3_service import AWSS3Service
+from app.services.operation_events_service import DOMAIN_MI_NEGOCIO, record_module_event
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+async def _tenant_financial_country_code(conn, tenant_id) -> str:
+    row = await conn.fetchrow(
+        "SELECT country_code FROM tenant_financial_profiles WHERE tenant_id = $1",
+        tenant_id,
+    )
+    return str((row["country_code"] if row else "") or "").strip().upper()
+
+
+CITY_CATALOG_COUNTRIES = frozenset(COUNTRY_DEFAULT_TIMEZONES)
+
+
+async def apply_city_slug_policy(country_code: str, data_dict: dict) -> None:
+    """Keep city_slug only when it belongs to the tenant's catalog country."""
+    slug = data_dict.get("city_slug")
+    code = str(country_code or "").strip().upper() or "CO"
+    if not slug:
+        return
+    if code not in CITY_CATALOG_COUNTRIES:
+        data_dict["city_slug"] = None
+        return
+    known = await public_restaurant_service.is_city_slug_known(slug, country_code=code)
+    if known:
+        return
+    if code != "CO":
+        data_dict["city_slug"] = None
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=f"city_slug '{slug}' is not in the catalog. "
+               "Pick a city from /public/cities.",
+    )
 
 
 def _profile_from_row(row) -> TenantPublicProfile:
@@ -236,18 +284,8 @@ async def update_public_profile(
                 data_dict = profile_data.model_dump(exclude_unset=True)
                 display_name = data_dict.get('display_name') or tenant_row['name']
 
-                # Validate city_slug against the curated catalog before INSERT
-                # (warocol.com#615). Same gate as the UPDATE path below.
-                if data_dict.get('city_slug'):
-                    known = await public_restaurant_service.is_city_slug_known(
-                        data_dict['city_slug']
-                    )
-                    if not known:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"city_slug '{data_dict['city_slug']}' is not in the catalog. "
-                                   "Pick a city from /public/cities.",
-                        )
+                country_code = await _tenant_financial_country_code(conn, tenant_id)
+                await apply_city_slug_policy(country_code, data_dict)
 
                 insert_query = """
                     INSERT INTO tenant_public_profiles (
@@ -307,6 +345,16 @@ async def update_public_profile(
 
                 profile = _profile_from_row(result)
                 logger.info(f"Created new public profile for tenant {tenant_id} via PATCH upsert")
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MI_NEGOCIO,
+                    action="public_profile_updated",
+                    actor_user_id=getattr(session_context, "user_id", None),
+                    entity_type="public_profile",
+                    entity_id=tenant_id,
+                    label=profile.display_name if hasattr(profile, "display_name") else None,
+                )
                 return TenantPublicProfileResponse(success=True, data=profile)
 
             # Build dynamic update query
@@ -349,19 +397,8 @@ async def update_public_profile(
                         detail=f"Slug '{data_dict['slug']}' is already taken"
                     )
 
-            # Validate city_slug against the curated catalog (warocol.com#615).
-            # Operators can only pick from public_cities — free text is rejected
-            # at the API boundary so the directory routing stays consistent.
-            if data_dict.get('city_slug'):
-                known = await public_restaurant_service.is_city_slug_known(
-                    data_dict['city_slug']
-                )
-                if not known:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"city_slug '{data_dict['city_slug']}' is not in the catalog. "
-                               "Pick a city from /public/cities.",
-                    )
+            country_code = await _tenant_financial_country_code(conn, tenant_id)
+            await apply_city_slug_policy(country_code, data_dict)
 
             if 'timezone' in data_dict:
                 data_dict['timezone'] = validate_timezone(data_dict['timezone'])
@@ -415,6 +452,17 @@ async def update_public_profile(
             profile = _profile_from_row(result)
 
             logger.info(f"Updated public profile for tenant {tenant_id}")
+
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_MI_NEGOCIO,
+                action="public_profile_updated",
+                actor_user_id=getattr(session_context, "user_id", None),
+                entity_type="public_profile",
+                entity_id=tenant_id,
+                label=profile.display_name if hasattr(profile, "display_name") else None,
+            )
 
             return TenantPublicProfileResponse(
                 success=True,
@@ -616,6 +664,183 @@ async def upload_tenant_image(
     return public_url
 
 
+def decode_tax_config_jsonb(data: Mapping[str, Any]) -> Dict[str, Any]:
+    """Decode asyncpg jsonb strings so clients get objects, not raw JSON text."""
+    out = dict(data)
+    for key in ("tax_lines", "category_map", "menu_category_line_map"):
+        val = out.get(key)
+        if isinstance(val, str):
+            try:
+                out[key] = json.loads(val)
+            except (TypeError, ValueError):
+                pass
+    exempt = out.get("exempt_menu_category_ids")
+    if isinstance(exempt, str):
+        try:
+            exempt = json.loads(exempt)
+        except (TypeError, ValueError):
+            exempt = None
+    if isinstance(exempt, (list, tuple)):
+        out["exempt_menu_category_ids"] = [str(x) for x in exempt if x is not None]
+    elif exempt is None:
+        out.setdefault("exempt_menu_category_ids", [])
+    return out
+
+
+_TAX_LINE_MODES = frozenset({"primary", "alternate", "stack"})
+
+
+def validate_tax_matrix_payload(
+    tax_lines: Optional[List[Any]],
+    category_map: Optional[Mapping[str, Any]],
+    menu_category_line_map: Optional[Mapping[str, Any]] = None,
+    exempt_menu_category_ids: Optional[List[Any]] = None,
+) -> None:
+    """Validate commercial matrix rates and category/menu map line references."""
+    line_keys: set[str] = set()
+    if tax_lines is not None:
+        if not isinstance(tax_lines, list):
+            raise HTTPException(status_code=400, detail="tax_lines must be a list")
+        for item in tax_lines:
+            if not isinstance(item, Mapping):
+                raise HTTPException(status_code=400, detail="each tax line must be an object")
+            key = str(item.get("key") or "").strip()
+            if not key:
+                raise HTTPException(status_code=400, detail="each tax line requires a key")
+            try:
+                rate = float(item.get("rate") if item.get("rate") is not None else 0)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"invalid rate for tax line '{key}'"
+                ) from exc
+            if rate < 0:
+                raise HTTPException(
+                    status_code=400, detail=f"tax line '{key}' rate must be >= 0"
+                )
+            mode_raw = item.get("mode", "primary")
+            mode = str(mode_raw or "primary").strip().lower()
+            if mode not in _TAX_LINE_MODES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"tax line '{key}' mode must be one of "
+                        f"primary|alternate|stack"
+                    ),
+                )
+            group_raw = item.get("exclusive_group")
+            if (
+                mode == "stack"
+                and group_raw is not None
+                and str(group_raw).strip()
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"tax line '{key}' cannot use mode=stack inside "
+                        f"exclusive_group '{str(group_raw).strip()}'"
+                    ),
+                )
+            line_keys.add(key)
+
+    if category_map is not None:
+        if not isinstance(category_map, Mapping):
+            raise HTTPException(status_code=400, detail="category_map must be an object")
+        if tax_lines is not None:
+            for cat, ref in category_map.items():
+                if ref in (None, "", "null"):
+                    continue
+                ref_key = str(ref)
+                if ref_key not in line_keys:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"category_map['{cat}'] references unknown tax line key "
+                            f"'{ref_key}'"
+                        ),
+                    )
+
+    if menu_category_line_map is not None:
+        if not isinstance(menu_category_line_map, Mapping):
+            raise HTTPException(
+                status_code=400, detail="menu_category_line_map must be an object"
+            )
+        for cat_id, ref in menu_category_line_map.items():
+            cat_str = str(cat_id).strip()
+            if not cat_str:
+                raise HTTPException(
+                    status_code=400,
+                    detail="menu_category_line_map keys must be category UUIDs",
+                )
+            try:
+                UUID(cat_str)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"menu_category_line_map key '{cat_str}' is not a valid UUID",
+                ) from exc
+            if ref in (None, "", "null"):
+                continue
+            if tax_lines is not None:
+                ref_key = str(ref)
+                if ref_key not in line_keys:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"menu_category_line_map['{cat_str}'] references unknown "
+                            f"tax line key '{ref_key}'"
+                        ),
+                    )
+
+    if exempt_menu_category_ids is not None:
+        if not isinstance(exempt_menu_category_ids, list):
+            raise HTTPException(
+                status_code=400, detail="exempt_menu_category_ids must be a list"
+            )
+        for item in exempt_menu_category_ids:
+            try:
+                UUID(str(item))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"exempt_menu_category_ids entry '{item}' is not a valid UUID",
+                ) from exc
+
+
+def _encode_menu_category_line_map(raw: Optional[Mapping[str, Any]]) -> Optional[str]:
+    if raw is None:
+        return None
+    out: Dict[str, Optional[str]] = {}
+    for key, value in raw.items():
+        out[str(key)] = None if value in (None, "", "null") else str(value)
+    return json.dumps(out)
+
+
+def _encode_exempt_menu_category_ids(raw: Optional[List[Any]]) -> Optional[List[UUID]]:
+    if raw is None:
+        return None
+    return [UUID(str(x)) for x in raw]
+
+def validate_co_rate_fields(data: Any) -> None:
+    """Validate optional CO column rates when present on TaxConfigUpdate."""
+    for field in ("iva_rate", "inc_rate", "liquor_tax_rate"):
+        raw = getattr(data, field, None)
+        if raw is None:
+            continue
+        try:
+            rate = Decimal(str(raw))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400, detail=f"{field} must be a number >= 0"
+            ) from exc
+        if rate < 0:
+            raise HTTPException(status_code=400, detail=f"{field} must be >= 0")
+
+
+def _optional_co_rate(data: Any, field: str):
+    raw = getattr(data, field, None)
+    return None if raw is None else Decimal(str(raw))
+
+
 async def get_tax_config(request: Request) -> dict:
     """
     Return the tax configuration for the active tenant.
@@ -643,13 +868,50 @@ async def get_tax_config(request: Request) -> dict:
                     tenant_id,
                 )
 
-            return {"success": True, "data": dict(row)}
+            profile = await conn.fetchrow(
+                "SELECT country_code FROM tenant_financial_profiles WHERE tenant_id = $1",
+                tenant_id,
+            )
+            if profile and profile.get("country_code"):
+                applied = await ensure_wave1_tax_pack(
+                    conn, tenant_id, profile["country_code"]
+                )
+                if applied:
+                    row = await conn.fetchrow(
+                        "SELECT * FROM tenant_tax_config WHERE tenant_id = $1",
+                        tenant_id,
+                    )
+
+            return {"success": True, "data": decode_tax_config_jsonb(dict(row))}
 
     except AuthenticationError as e:
         raise e
     except Exception as e:
         logger.error(f"Error fetching tax config: {e}")
         raise HTTPException(status_code=500, detail=f"Error fetching tax config: {str(e)}")
+
+
+async def get_tax_jurisdictions(request: Request, country: str) -> dict:
+    """Return static US state or CA province tax jurisdiction catalog."""
+    try:
+        require_valid_session(request)
+        code = (country or "").strip().upper()
+        if code not in JURISDICTION_COUNTRIES:
+            raise HTTPException(
+                status_code=400,
+                detail="country must be US or CA",
+            )
+        return {"success": True, "data": list_jurisdictions(code)}
+    except AuthenticationError as e:
+        raise e
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing tax jurisdictions: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error listing tax jurisdictions: {str(e)}",
+        )
 
 
 async def update_tax_config(request: Request, data) -> dict:
@@ -666,6 +928,24 @@ async def update_tax_config(request: Request, data) -> dict:
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
+
+        tax_lines = getattr(data, "tax_lines", None)
+        category_map = getattr(data, "category_map", None)
+        menu_category_line_map = getattr(data, "menu_category_line_map", None)
+        exempt_menu_category_ids = getattr(data, "exempt_menu_category_ids", None)
+        validate_tax_matrix_payload(
+            tax_lines,
+            category_map,
+            menu_category_line_map,
+            exempt_menu_category_ids,
+        )
+        validate_co_rate_fields(data)
+        iva_rate = _optional_co_rate(data, "iva_rate")
+        inc_rate = _optional_co_rate(data, "inc_rate")
+        liquor_tax_rate = _optional_co_rate(data, "liquor_tax_rate")
+        liquor_included = getattr(data, "liquor_tax_included_in_price", None)
+        menu_map_json = _encode_menu_category_line_map(menu_category_line_map)
+        exempt_ids_pg = _encode_exempt_menu_category_ids(exempt_menu_category_ids)
 
         async with get_db_connection() as conn:
             fiscal_row = await conn.fetchrow(
@@ -701,25 +981,133 @@ async def update_tax_config(request: Request, data) -> dict:
                     ),
                 )
 
+            profile = await conn.fetchrow(
+                "SELECT country_code FROM tenant_financial_profiles WHERE tenant_id = $1",
+                tenant_id,
+            )
+            country_code = (profile["country_code"] if profile else None) or ""
+            jurisdiction_raw = getattr(data, "tax_jurisdiction_code", None)
+            if (
+                jurisdiction_raw is not None
+                and str(jurisdiction_raw).strip() != ""
+                and country_code.upper() in JURISDICTION_COUNTRIES
+            ):
+                try:
+                    jurisdiction = normalize_jurisdiction_code(
+                        country_code, jurisdiction_raw
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                applied, row = await apply_jurisdiction_pack(
+                    conn, tenant_id, country_code, jurisdiction
+                )
+                if not applied or not row:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Could not apply tax jurisdiction pack",
+                    )
+                # Allow commercial rate override on top of jurisdiction seed.
+                if tax_lines is not None or menu_map_json is not None or exempt_ids_pg is not None:
+                    commercial_flag = getattr(data, "commercial_tax_applicable", None)
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE tenant_tax_config
+                        SET tax_lines = COALESCE($2::jsonb, tax_lines),
+                            category_map = COALESCE($3::jsonb, category_map),
+                            commercial_tax_applicable = COALESCE($4, commercial_tax_applicable),
+                            menu_category_line_map = COALESCE($5::jsonb, menu_category_line_map),
+                            exempt_menu_category_ids = COALESCE($6::uuid[], exempt_menu_category_ids),
+                            updated_at = NOW()
+                        WHERE tenant_id = $1
+                        RETURNING *
+                        """,
+                        tenant_id,
+                        json.dumps(tax_lines) if tax_lines is not None else None,
+                        json.dumps(category_map) if category_map is not None else None,
+                        commercial_flag,
+                        menu_map_json,
+                        exempt_ids_pg,
+                    )
+                elif getattr(data, "commercial_tax_applicable", None) is not None:
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE tenant_tax_config
+                        SET commercial_tax_applicable = $2,
+                            updated_at = NOW()
+                        WHERE tenant_id = $1
+                        RETURNING *
+                        """,
+                        tenant_id,
+                        data.commercial_tax_applicable,
+                    )
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MI_NEGOCIO,
+                    action="tax_config_updated",
+                    actor_user_id=getattr(session, "user_id", None),
+                    entity_type="tax_config",
+                    entity_id=tenant_id,
+                )
+                return {"success": True, "data": decode_tax_config_jsonb(dict(row))}
+
+            commercial_flag = getattr(data, "commercial_tax_applicable", None)
             row = await conn.fetchrow(
                 """
                 INSERT INTO tenant_tax_config (
                     tenant_id,
                     inc_applicable, inc_included_in_price,
                     iva_applicable, iva_included_in_price,
-                    liquor_tax_applicable,
-                    inc_gl_account_id, iva_gl_account_id, liquor_tax_gl_account_id
+                    liquor_tax_applicable, liquor_tax_included_in_price,
+                    inc_gl_account_id, iva_gl_account_id, liquor_tax_gl_account_id,
+                    tax_lines, category_map, tax_jurisdiction_code,
+                    commercial_tax_applicable,
+                    iva_rate, inc_rate, liquor_tax_rate,
+                    menu_category_line_map, exempt_menu_category_ids
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, COALESCE($7, false),
+                    $8, $9, $10, $11::jsonb, $12::jsonb, $13,
+                    COALESCE($14, false),
+                    COALESCE($15, 0.19), COALESCE($16, 0.08), COALESCE($17, 0.05),
+                    COALESCE($18::jsonb, '{}'::jsonb),
+                    COALESCE($19::uuid[], '{}'::uuid[])
+                )
                 ON CONFLICT (tenant_id) DO UPDATE SET
                     inc_applicable        = EXCLUDED.inc_applicable,
                     inc_included_in_price = EXCLUDED.inc_included_in_price,
                     iva_applicable        = EXCLUDED.iva_applicable,
                     iva_included_in_price = EXCLUDED.iva_included_in_price,
                     liquor_tax_applicable = EXCLUDED.liquor_tax_applicable,
+                    liquor_tax_included_in_price = COALESCE(
+                        $7, tenant_tax_config.liquor_tax_included_in_price
+                    ),
                     inc_gl_account_id = COALESCE(EXCLUDED.inc_gl_account_id, tenant_tax_config.inc_gl_account_id),
                     iva_gl_account_id = COALESCE(EXCLUDED.iva_gl_account_id, tenant_tax_config.iva_gl_account_id),
                     liquor_tax_gl_account_id = COALESCE(EXCLUDED.liquor_tax_gl_account_id, tenant_tax_config.liquor_tax_gl_account_id),
+                    tax_lines = COALESCE(EXCLUDED.tax_lines, tenant_tax_config.tax_lines),
+                    category_map = COALESCE(EXCLUDED.category_map, tenant_tax_config.category_map),
+                    tax_jurisdiction_code = COALESCE(
+                        EXCLUDED.tax_jurisdiction_code,
+                        tenant_tax_config.tax_jurisdiction_code
+                    ),
+                    -- Use $14 (not EXCLUDED): VALUES COALESCE($14,false) would turn
+                    -- omitted flag into false and wipe commercial-on tenants (#773).
+                    commercial_tax_applicable = COALESCE(
+                        $14,
+                        tenant_tax_config.commercial_tax_applicable
+                    ),
+                    iva_rate = COALESCE($15, tenant_tax_config.iva_rate),
+                    inc_rate = COALESCE($16, tenant_tax_config.inc_rate),
+                    liquor_tax_rate = COALESCE($17, tenant_tax_config.liquor_tax_rate),
+                    menu_category_line_map = COALESCE(
+                        $18::jsonb,
+                        tenant_tax_config.menu_category_line_map
+                    ),
+                    exempt_menu_category_ids = COALESCE(
+                        $19::uuid[],
+                        tenant_tax_config.exempt_menu_category_ids
+                    ),
                     updated_at            = NOW()
                 RETURNING *
                 """,
@@ -729,12 +1117,31 @@ async def update_tax_config(request: Request, data) -> dict:
                 data.iva_applicable,
                 data.iva_included_in_price,
                 data.liquor_tax_applicable,
+                liquor_included,
                 data.inc_gl_account_id,
                 data.iva_gl_account_id,
                 data.liquor_tax_gl_account_id,
+                json.dumps(tax_lines) if tax_lines is not None else None,
+                json.dumps(category_map) if category_map is not None else None,
+                None,
+                commercial_flag,
+                iva_rate,
+                inc_rate,
+                liquor_tax_rate,
+                menu_map_json,
+                exempt_ids_pg,
             )
 
-            return {"success": True, "data": dict(row)}
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_MI_NEGOCIO,
+                action="tax_config_updated",
+                actor_user_id=getattr(session, "user_id", None),
+                entity_type="tax_config",
+                entity_id=tenant_id,
+            )
+            return {"success": True, "data": decode_tax_config_jsonb(dict(row))}
 
     except AuthenticationError as e:
         raise e

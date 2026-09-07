@@ -28,16 +28,27 @@ from app.services.pos_cart_service import (
     _order_payment_splits_for_gl,
     _PAYMENT_VOID_ROLES,
     _tax_rows_from_evaluated_lines,
+    add_order_payment,
+    void_order_payment,
 )
-from app.services.orders_service import _return_ingredient_to_stock
+from app.services.orders_service import (
+    _compute_tax_breakdown,
+    _deduct_stock_for_status_update,
+    _order_inventory_already_consumed_before_completion,
+    _return_ingredient_to_stock,
+    _return_stock_for_order_cancellation,
+    get_order_by_id,
+    get_order_items,
+    update_order_status,
+)
 from app.utils.table_code import infer_table_code, normalize_table_code, resolve_unique_code
+from app.services.table_session_guests import guest_snapshot_from_capacity
 from app.services.tip_tax_service import (
     compute_tip_tax_amount,
     normalize_tip_payload,
     split_settlement_amount_due,
     tip_settlement_total,
 )
-from app.services.orders_service import _compute_tax_breakdown
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import _parse_item_row, fire_comandas
 from app.services.billing_service import check_plan_quota_growth
@@ -82,6 +93,171 @@ def _completed_session_orders_payload(order_rows: List[Any]) -> Dict[str, Any]:
         payload["order_id"] = order_ids[0]
         payload["order_number"] = order_numbers[0]
     return payload
+
+
+async def _recalc_order_total_from_items(conn, order_id: UUID) -> None:
+    """Recompute orders.total_amount from line net/subtotal after a merge."""
+    await conn.execute(
+        """
+        UPDATE orders
+        SET total_amount = COALESCE((
+            SELECT SUM(COALESCE(oi.net_total, oi.subtotal))
+            FROM order_items oi
+            WHERE oi.order_id = $1
+        ), 0)
+        WHERE id = $1
+        """,
+        order_id,
+    )
+
+
+async def _merge_order_into_primary(
+    conn,
+    primary_order_id: UUID,
+    secondary_order_id: UUID,
+) -> None:
+    """Move checkout lines and payments onto the primary order, then drop the shell."""
+    if primary_order_id == secondary_order_id:
+        return
+
+    collisions = await conn.fetch(
+        """
+        SELECT sec.id AS secondary_item_id,
+               pri.id AS primary_item_id,
+               sec.quantity AS sec_qty,
+               sec.subtotal AS sec_subtotal,
+               COALESCE(sec.net_total, sec.subtotal) AS sec_net,
+               COALESCE(sec.discount_allocated, 0) AS sec_discount
+        FROM order_items sec
+        JOIN order_items pri
+          ON pri.order_id = $1
+         AND sec.order_id = $2
+         AND sec.variant_id IS NOT NULL
+         AND pri.variant_id = sec.variant_id
+        """,
+        primary_order_id,
+        secondary_order_id,
+    )
+    for row in collisions:
+        await conn.execute(
+            """
+            UPDATE order_items
+            SET quantity = quantity + $2,
+                subtotal = subtotal + $3,
+                net_total = COALESCE(net_total, subtotal) + $4,
+                discount_allocated = COALESCE(discount_allocated, 0) + $5,
+                updated_at = now()
+            WHERE id = $1
+            """,
+            row["primary_item_id"],
+            row["sec_qty"],
+            row["sec_subtotal"],
+            row["sec_net"],
+            row["sec_discount"],
+        )
+        await conn.execute(
+            "UPDATE comanda_items SET order_item_id = $1 WHERE order_item_id = $2",
+            row["primary_item_id"],
+            row["secondary_item_id"],
+        )
+        await conn.execute("DELETE FROM order_items WHERE id = $1", row["secondary_item_id"])
+
+    await conn.execute(
+        "UPDATE order_items SET order_id = $1, updated_at = now() WHERE order_id = $2",
+        primary_order_id,
+        secondary_order_id,
+    )
+    await conn.execute(
+        "UPDATE order_payments SET order_id = $1 WHERE order_id = $2",
+        primary_order_id,
+        secondary_order_id,
+    )
+    await conn.execute(
+        "UPDATE comandas SET order_id = $1, updated_at = now() WHERE order_id = $2",
+        primary_order_id,
+        secondary_order_id,
+    )
+    await conn.execute("DELETE FROM orders WHERE id = $1", secondary_order_id)
+
+
+async def _merge_duplicate_pending_orders_for_session(conn, session_id: UUID) -> None:
+    pending_rows = await conn.fetch(
+        """
+        SELECT id FROM orders
+        WHERE table_session_id = $1 AND status = 'pending'
+        ORDER BY created_at, id
+        """,
+        session_id,
+    )
+    if len(pending_rows) <= 1:
+        return
+    primary_id = pending_rows[0]["id"]
+    for row in pending_rows[1:]:
+        await _merge_order_into_primary(conn, primary_id, row["id"])
+    await _recalc_order_total_from_items(conn, primary_id)
+
+
+async def _fold_pending_orders_into_completed_for_session(conn, session_id: UUID) -> None:
+    pending_rows = await conn.fetch(
+        """
+        SELECT id FROM orders
+        WHERE table_session_id = $1 AND status = 'pending'
+        ORDER BY created_at, id
+        """,
+        session_id,
+    )
+    completed_rows = await conn.fetch(
+        """
+        SELECT id FROM orders
+        WHERE table_session_id = $1 AND status = 'completed'
+        ORDER BY created_at, id
+        """,
+        session_id,
+    )
+    if not pending_rows or not completed_rows:
+        return
+    primary_id = completed_rows[0]["id"]
+    for row in pending_rows:
+        await _merge_order_into_primary(conn, primary_id, row["id"])
+    await _recalc_order_total_from_items(conn, primary_id)
+
+
+async def _merge_duplicate_completed_orders_for_session(conn, session_id: UUID) -> None:
+    completed_rows = await conn.fetch(
+        """
+        SELECT id FROM orders
+        WHERE table_session_id = $1 AND status = 'completed'
+        ORDER BY created_at, id
+        """,
+        session_id,
+    )
+    if len(completed_rows) <= 1:
+        return
+    primary_id = completed_rows[0]["id"]
+    for row in completed_rows[1:]:
+        await _merge_order_into_primary(conn, primary_id, row["id"])
+    await _recalc_order_total_from_items(conn, primary_id)
+
+
+async def _consolidate_session_orders_for_checkout(
+    conn,
+    session_id: UUID,
+    *,
+    fold_pending_into_completed: bool = True,
+) -> None:
+    """
+    Ensure a table session checkout produces a single order where possible.
+
+    - Multiple pending orders → oldest pending absorbs the rest.
+    - Pending + completed/partial → pending lines fold into oldest completed (optional).
+    - Multiple completed/partial → oldest completed absorbs siblings (split legacy).
+
+    close_session defers fold_pending_into_completed until after pending settlement.
+    """
+    await _merge_duplicate_pending_orders_for_session(conn, session_id)
+    if fold_pending_into_completed:
+        await _fold_pending_orders_into_completed_for_session(conn, session_id)
+    await _merge_duplicate_completed_orders_for_session(conn, session_id)
 
 
 def _modifier_unit_total(mod: dict) -> float:
@@ -392,6 +568,9 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                     ts.opened_at,
                     ts.opened_by_user_id,
                     ts.attended_by_member_id AS session_attended_by_member_id,
+                    ts.custom_label AS session_custom_label,
+                    ts.covers AS session_covers,
+                    ts.capacity_snapshot AS session_capacity_snapshot,
                     ts.minimum_consumption_enabled_snapshot,
                     ts.minimum_consumption_amount_snapshot,
                     ts.minimum_consumption_restrictive_snapshot,
@@ -1058,7 +1237,7 @@ async def open_session(
             async with conn.transaction():
                 # Lock the table row to prevent concurrent opens
                 table_row = await conn.fetchrow(
-                    "SELECT id, status FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
+                    "SELECT id, status, capacity FROM tables WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
                     table_id,
                     tenant_id,
                 )
@@ -1075,6 +1254,7 @@ async def open_session(
                     raise APIError("Table already has an open session", status_code=409)
 
                 minimum_snapshot = await _get_minimum_consumption_snapshot(conn, tenant_id)
+                covers, capacity_snapshot = guest_snapshot_from_capacity(table_row["capacity"])
 
                 # Create session
                 session_row = await conn.fetchrow(
@@ -1086,9 +1266,11 @@ async def open_session(
                         attended_by_member_id,
                         minimum_consumption_enabled_snapshot,
                         minimum_consumption_amount_snapshot,
-                        minimum_consumption_restrictive_snapshot
+                        minimum_consumption_restrictive_snapshot,
+                        covers,
+                        capacity_snapshot
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     RETURNING id, opened_at
                     """,
                     table_id,
@@ -1098,6 +1280,8 @@ async def open_session(
                     minimum_snapshot["enabled"],
                     minimum_snapshot["amount"],
                     minimum_snapshot["restrictive"],
+                    covers,
+                    capacity_snapshot,
                 )
 
                 # Update table status
@@ -1227,6 +1411,11 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
 
                 # Mark pending orders as completed if payment_method provided
                 if payment_method:
+                    await _consolidate_session_orders_for_checkout(
+                        conn,
+                        session_row["id"],
+                        fold_pending_into_completed=False,
+                    )
                     # Backend guard: credit / wallet require an identified (non-anonymous) customer
                     if payment_method in ('credit', 'customer_wallet') and customer_id:
                         cust_row = await conn.fetchrow(
@@ -1428,7 +1617,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 payment_method_id = $6,
                                 discount_type = $7,
                                 discount_value = $8,
-                                discount_amount = $9
+                                discount_amount = $9,
+                                order_date = now()
                             WHERE table_session_id = $1 AND status = 'pending'
                             """,
                             session_row["id"],
@@ -1450,7 +1640,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 payment_status = $3,
                                 credit_due_date = $4,
                                 customer_id = COALESCE($5::uuid, customer_id),
-                                payment_method_id = $6
+                                payment_method_id = $6,
+                                order_date = now()
                             WHERE table_session_id = $1 AND status = 'pending'
                             """,
                             session_row["id"],
@@ -1465,6 +1656,32 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                         f"(payment_method={payment_method}, payment_status={payment_status}, "
                         f"discount_amount={_discount_amount}) for session {session_row['id']}"
                     )
+
+                    await _merge_duplicate_completed_orders_for_session(conn, session_row["id"])
+
+                    # warocol.com#2566 — if send skipped stock (flag off), deduct at mesa close
+                    # before COGS so snapshots + kardex match checkout-time behavior.
+                    just_completed = await conn.fetch(
+                        """
+                        SELECT id, order_number, table_session_id, pos_cart_id
+                        FROM orders
+                        WHERE table_session_id = $1 AND status = 'completed'
+                        """,
+                        session_row["id"],
+                    )
+                    for ord_row in just_completed:
+                        try:
+                            await _ensure_tab_order_inventory_at_close(
+                                conn,
+                                tenant_id=tenant_id,
+                                user_id=user_id,
+                                order_row=ord_row,
+                            )
+                        except Exception as _inv_close_exc:
+                            logger.error(
+                                f"[close_session] inventory deduct failed for order "
+                                f"{ord_row['id']}: {_inv_close_exc}"
+                            )
 
                     # warocol.com#663 — checkout waiter attribution on all completed session orders
                     if resolved_served_by is not None:
@@ -1563,7 +1780,9 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             float(_mesa_tip_tax_amount),
                         )
 
-                    if payment_method == 'customer_wallet' and customer_id:
+                    # Full-session wallet debit only for non-split closes.
+                    # In split_mode each order_payments row applies its portion (#2020).
+                    if payment_method == 'customer_wallet' and customer_id and not split_mode:
                         from app.services.customer_wallet_service import (
                             apply_wallet_for_session_orders,
                         )
@@ -1579,7 +1798,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             session_row["id"],
                         )
                         _tip_settlement = _Dec("0")
-                        if not split_mode and float(tip_amount or 0) > 0:
+                        if float(tip_amount or 0) > 0:
                             _tip_settlement = _Dec(str(tip_settlement_total(
                                 float(tip_amount), float(_mesa_tip_tax_amount),
                             )))
@@ -1741,6 +1960,25 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 )
                                 if i == 0:
                                     _split_first_payment_id_mesa = str(inserted_row["id"])
+                                if (
+                                    payment_method == "customer_wallet"
+                                    and customer_id
+                                    and float(portion) > 0
+                                ):
+                                    from app.services.customer_wallet_service import (
+                                        apply_wallet_for_order,
+                                    )
+                                    from decimal import Decimal as _Dec
+
+                                    await apply_wallet_for_order(
+                                        conn,
+                                        UUID(str(customer_id)),
+                                        UUID(str(tenant_id)),
+                                        _Dec(str(portion)),
+                                        ord_row["id"],
+                                        UUID(str(user_id)) if user_id else None,
+                                        inserted_row["id"],
+                                    )
 
                         # Split GL when first payment completes the session.
                         first_tip_order = await conn.fetchrow(
@@ -1767,6 +2005,14 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                             split_tip_amount,
                             split_tip_tax_amount,
                         )
+                        from app.services.credit_service import sync_order_split_credit_status
+                        _first_split_complete = (split_amount_due - split_paid_total) <= 0.01
+                        for _sync_ord in order_rows:
+                            await sync_order_split_credit_status(
+                                conn,
+                                _sync_ord["id"],
+                                settlement_complete=_first_split_complete,
+                            )
                         if split_amount_due - split_paid_total <= 0.01:
                             try:
                                 split_tax_config = await _get_tenant_tax_config(conn, tenant_id)
@@ -1781,6 +2027,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                     session_row["id"],
                                 )
                                 for split_ord in split_completed_orders:
+                                    # Tip credits come from tender excess per order (exact splits).
+                                    # Full session tip is not forced onto one order (avoids DR≠CR).
                                     await _post_order_gl_entry(
                                         conn=conn,
                                         tenant_id=tenant_id,
@@ -1907,7 +2155,8 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                                 tenant_id=tenant_id,
                                 source_type='table',
                                 table_display_name=table_row["name"],
-                                conn=conn
+                                conn=conn,
+                                notify_print=False,
                             )
 
                         # Mesa: auto-deliver open comandas on payment. Barra: kitchen closes
@@ -1996,18 +2245,28 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
             _std_tax = 0.0
             _liq_tax = 0.0
             _tax_label = "Impuesto"
+            _liq_label = "IVA licores 5%"
             try:
+                from app.services.hospitality_tax_engine import liquor_tax_label_for_config
+
                 tax_config = await _get_tenant_tax_config(conn_ids, tenant_id)
+                _liq_label = liquor_tax_label_for_config(tax_config)
+                # Item-level rows (keep category_id / overrides). GROUP BY
+                # tax_category alone collapses menu-mapped liquor into INC/IVA
+                # when products still have legacy tax_category=standard
+                # (warocol.com#2035).
                 tax_rows = await conn_ids.fetch(
                     """
                     SELECT
                         COALESCE(p.tax_category, 'standard') AS tax_category,
-                        COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)), 0) AS subtotal
+                        COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                        p.tax_line_key AS tax_line_key,
+                        p.category_id::text AS category_id,
+                        COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal
                     FROM order_items oi
                     JOIN orders o ON o.id = oi.order_id
                     JOIN product p ON p.id = oi.product_id
                     WHERE o.id = ANY($1::uuid[])
-                    GROUP BY COALESCE(p.tax_category, 'standard')
                     """,
                     [r["id"] for r in order_rows],
                 )
@@ -2047,6 +2306,7 @@ async def close_session(request: Request, table_id: UUID, payment_method: Option
                 "standard_tax": float(_std_tax),
                 "liquor_tax": float(_liq_tax),
                 "standard_tax_label": _tax_label,
+                "liquor_tax_label": _liq_label,
                 "promo_savings": float(_promo_savings),
                 "promo_breakdown": _promo_breakdown,
                 "payment_method": payment_method,
@@ -2122,11 +2382,13 @@ async def add_session_payment(
                 if not session_row:
                     raise NotFoundError("No open session found for this table")
 
+                await _consolidate_session_orders_for_checkout(conn, session_row["id"])
+
                 # Get all completed (partial) orders for this session
                 order_rows = await conn.fetch(
                     """
                     SELECT id, order_number, total_amount, payment_method,
-                           payment_method_id, order_date
+                           payment_method_id, order_date, customer_id
                     FROM orders
                     WHERE table_session_id = $1 AND status = 'completed'
                     ORDER BY created_at
@@ -2135,6 +2397,15 @@ async def add_session_payment(
                 )
                 if not order_rows:
                     raise APIError("No split payment orders found for this session — call close with split_mode=True first", status_code=400)
+                session_customer_id = next(
+                    (r["customer_id"] for r in order_rows if r["customer_id"]),
+                    None,
+                )
+                if payment_method == "customer_wallet" and not session_customer_id:
+                    raise APIError(
+                        "La billetera requiere un cliente en la mesa",
+                        status_code=400,
+                    )
 
                 session_total = sum(float(r["total_amount"]) for r in order_rows)
                 order_ids = [r["id"] for r in order_rows]
@@ -2225,6 +2496,23 @@ async def add_session_payment(
                     )
                     if i == 0:
                         first_payment_id = str(inserted_row["id"])
+                    if (
+                        payment_method == "customer_wallet"
+                        and session_customer_id
+                        and float(portion) > 0
+                    ):
+                        from app.services.customer_wallet_service import apply_wallet_for_order
+                        from decimal import Decimal as _Dec
+
+                        await apply_wallet_for_order(
+                            conn,
+                            UUID(str(session_customer_id)),
+                            UUID(str(tenant_id)),
+                            _Dec(str(portion)),
+                            ord_row["id"],
+                            UUID(str(user_id)) if user_id else None,
+                            inserted_row["id"],
+                        )
 
                 # Recompute paid total
                 paid_row = await conn.fetchrow(
@@ -2241,15 +2529,31 @@ async def add_session_payment(
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
 
+                from app.services.credit_service import sync_order_split_credit_status
+                for _sync_ord in order_rows:
+                    await sync_order_split_credit_status(
+                        conn,
+                        _sync_ord["id"],
+                        settlement_complete=is_complete,
+                    )
+
                 if is_complete:
-                    # Mark all orders as fully paid
+                    # Session settlement complete — credit tenders stay partial/credit via sync above (#2020).
                     await conn.execute(
-                        "UPDATE orders SET payment_status = 'paid' WHERE table_session_id = $1 AND status = 'completed' AND payment_status = 'partial'",
+                        """
+                        UPDATE orders
+                        SET payment_method = $2,
+                            payment_method_id = $3::uuid
+                        WHERE table_session_id = $1 AND status = 'completed'
+                        """,
                         session_row["id"],
+                        payment_method,
+                        payment_method_id,
                     )
                     try:
                         split_tax_config = await _get_tenant_tax_config(conn, tenant_id)
                         for ord_row in order_rows:
+                            # Tip from tender excess per order; deferred tip below is idempotent.
                             await _post_order_gl_entry(
                                 conn=conn,
                                 tenant_id=tenant_id,
@@ -2472,6 +2776,435 @@ async def defer_tab_delivery_payment(
     }
 
 
+_PENDING_DELIVERY_PAYMENT_STATUSES = {None, "unpaid", "pending"}
+
+# completed+paid in DB but zero order_payments — inconsistent legacy rows, not POS-collectible
+_PENDING_DELIVERY_ZOMBIE_SQL = """
+              AND NOT (
+                  o.status = 'completed'
+                  AND o.payment_status = 'paid'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM order_payments op
+                      WHERE op.order_id = o.id AND op.voided_at IS NULL
+                  )
+              )
+"""
+
+
+def _is_pending_delivery_zombie(order: dict, *, payment_count: int) -> bool:
+    return (
+        order.get("status") == "completed"
+        and order.get("payment_status") == "paid"
+        and payment_count <= 0
+    )
+
+
+def _pending_delivery_amount_due(order: dict) -> float:
+    return round(
+        float(order.get("total_amount") or 0)
+        + float(order.get("tip_amount") or 0)
+        + float(order.get("tip_tax_amount") or 0),
+        2,
+    )
+
+
+def _is_pending_delivery_candidate(order: dict) -> bool:
+    """Bar delivery order that may appear in the POS domicilios queue."""
+    if order.get("source") != "barra":
+        return False
+    if not (order.get("is_delivery") or order.get("delivery_address_id")):
+        return False
+    return order.get("status") not in ("cancelled", "refunded")
+
+
+def _is_collectible_pending_delivery(order: dict, *, outstanding: float | None = None) -> bool:
+    """Pending bar delivery still owed at POS (split in progress or not yet started).
+
+    Credit-mixed splits keep ``payment_status='partial'`` for Cartera even when
+    the cashier has collected every tender; use outstanding balance, not status.
+    """
+    if not _is_pending_delivery_candidate(order):
+        return False
+    if outstanding is not None:
+        return outstanding > 0.01
+    if order.get("status") == "pending":
+        return order.get("payment_status") in _PENDING_DELIVERY_PAYMENT_STATUSES
+    if order.get("status") == "completed":
+        return order.get("payment_status") == "partial"
+    return False
+
+
+async def _pending_delivery_outstanding(conn, order_id: UUID, order: dict) -> float:
+    paid_row = await conn.fetchrow(
+        """
+        SELECT COALESCE(SUM(amount), 0) AS paid_total
+        FROM order_payments
+        WHERE order_id = $1 AND voided_at IS NULL
+        """,
+        order_id,
+    )
+    paid_total = round(float(paid_row["paid_total"] or 0), 2)
+    amount_due = _pending_delivery_amount_due(order)
+    return max(0.0, round(amount_due - paid_total, 2))
+
+
+def _is_unpaid_pending_delivery(order: dict) -> bool:
+    return _is_collectible_pending_delivery(order)
+
+
+def _serialize_pending_delivery_row(row) -> dict:
+    address_parts = [row["address_line1"], row["address_line2"], row["city"]]
+    address_label = ", ".join(part for part in address_parts if part)
+    return {
+        "id": str(row["id"]),
+        "order_number": int(row["order_number"]),
+        "order_date": row["order_date"].isoformat() if row["order_date"] else None,
+        "total_amount": float(row["total_amount"] or 0),
+        "status": row["status"],
+        "payment_status": row["payment_status"],
+        "delivery_instructions": row["delivery_instructions"],
+        "customer": {
+            "id": str(row["customer_id"]) if row["customer_id"] else None,
+            "name": row["customer_name"],
+            "phone_number": row["customer_phone"],
+        },
+        "address_label": address_label or None,
+        "delivery_address_id": str(row["delivery_address_id"]) if row["delivery_address_id"] else None,
+    }
+
+
+async def list_pending_deliveries(request: Request) -> dict:
+    """POS queue of unpaid pending delivery orders deferred from barra."""
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    if not tenant_id:
+        raise AuthenticationError("Tenant ID is required")
+
+    zombie_sql = _PENDING_DELIVERY_ZOMBIE_SQL.strip()
+    async with get_db_connection() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT
+                o.id,
+                o.order_number,
+                o.order_date,
+                o.total_amount,
+                o.status,
+                o.payment_status,
+                o.delivery_instructions,
+                o.delivery_address_id,
+                p.id AS customer_id,
+                p.name AS customer_name,
+                p.phone_number AS customer_phone,
+                ap.address_line1,
+                ap.address_line2,
+                ap.city
+            FROM orders o
+            INNER JOIN table_sessions ts ON ts.id = o.table_session_id
+            INNER JOIN tables t ON t.id = ts.table_id AND t.is_bar = TRUE
+            LEFT JOIN profile p ON p.id = o.customer_id
+            LEFT JOIN addresses_profile ap
+              ON ap.id = o.delivery_address_id AND ap.deleted_at IS NULL
+            WHERE o.tenant_id = $1
+              AND o.delivery_address_id IS NOT NULL
+              AND o.status NOT IN ('cancelled', 'refunded')
+              AND (
+                  SELECT COALESCE(SUM(op.amount), 0)
+                  FROM order_payments op
+                  WHERE op.order_id = o.id AND op.voided_at IS NULL
+              ) < (
+                  o.total_amount
+                  + COALESCE(o.tip_amount, 0)
+                  + COALESCE(o.tip_tax_amount, 0)
+                  - 0.01
+              )
+            {zombie_sql}
+            ORDER BY o.order_date DESC
+            """,
+            tenant_id,
+        )
+
+    return {
+        "success": True,
+        "data": [_serialize_pending_delivery_row(row) for row in rows],
+    }
+
+
+async def get_pending_delivery(request: Request, order_id: UUID) -> dict:
+    """Load a pending unpaid delivery for POS checkout."""
+    order_payload = await get_order_by_id(request, order_id)
+    order = order_payload.get("data") or {}
+    if not _is_pending_delivery_candidate(order):
+        raise APIError("Este domicilio ya no está pendiente de cobro", status_code=409)
+
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    async with get_db_connection(use_transaction=False) as conn:
+        payment_facts = await conn.fetchrow(
+            """
+            SELECT COUNT(*)::int AS payment_count
+            FROM order_payments
+            WHERE order_id = $1 AND voided_at IS NULL
+            """,
+            order_id,
+        )
+        payment_count = int(payment_facts["payment_count"] or 0)
+        if _is_pending_delivery_zombie(order, payment_count=payment_count):
+            raise APIError(
+                "Esta venta figura como cobrada pero no tiene pagos registrados. Revísala en Ventas.",
+                status_code=409,
+                details={"code": "pending_delivery_zombie"},
+            )
+        outstanding = await _pending_delivery_outstanding(conn, order_id, order)
+    if outstanding <= 0.01:
+        raise APIError("Este domicilio ya no está pendiente de cobro", status_code=409)
+
+    items_payload = await get_order_items(request, order_id)
+    partial_payments: list[dict] = []
+    if tenant_id:
+        async with get_db_connection(use_transaction=False) as conn:
+            partial_rows = await conn.fetch(
+                """
+                SELECT op.id, op.amount, op.payment_method, op.payment_method_id,
+                       pm.name AS payment_method_name
+                FROM order_payments op
+                LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
+                WHERE op.order_id = $1
+                  AND op.tenant_id = $2
+                  AND op.voided_at IS NULL
+                ORDER BY op.paid_at, op.id
+                """,
+                order_id,
+                tenant_id,
+            )
+            partial_payments = [
+                {
+                    "id": str(row["id"]),
+                    "amount": float(row["amount"]),
+                    "payment_method": row["payment_method"],
+                    "payment_method_id": str(row["payment_method_id"]) if row["payment_method_id"] else None,
+                    "payment_method_name": row["payment_method_name"],
+                }
+                for row in partial_rows
+            ]
+    return {
+        "success": True,
+        "data": {
+            **order,
+            "items": items_payload.get("data") or [],
+            "partial_payments": partial_payments,
+        },
+    }
+
+
+async def complete_pending_delivery(
+    request: Request,
+    order_id: UUID,
+    *,
+    payment_method: Optional[str] = None,
+    payment_method_id: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    cash_received: Optional[float] = None,
+    credit_due_date: Optional[date] = None,
+    served_by_member_id: Optional[UUID] = None,
+    discount_type: Optional[str] = None,
+    discount_value: Optional[float] = None,
+    tip_amount: Optional[float] = None,
+    tip_source: Optional[str] = None,
+    tip_taxable: Optional[bool] = None,
+    waros_to_redeem: Optional[int] = None,
+    waro_reward_id: Optional[UUID] = None,
+    wompi_collection: bool = False,
+    split_mode: bool = False,
+    split_first_amount: float = 0.0,
+    split_first_cash_received: Optional[float] = None,
+) -> dict:
+    """Collect payment on a pending delivery from POS checkout."""
+    detail = await get_pending_delivery(request, order_id)
+    order = detail["data"]
+    if split_mode and wompi_collection:
+        raise APIError("Wompi no admite cobro dividido", status_code=400)
+    await update_order_status(
+        request,
+        order_id,
+        "completed",
+        payment_method,
+        payment_method_id,
+        customer_id or (order.get("customer") or {}).get("id"),
+        None,
+        cash_received=cash_received,
+        credit_due_date=credit_due_date,
+        served_by_member_id=served_by_member_id,
+        discount_type=discount_type,
+        discount_value=discount_value,
+        tip_amount=tip_amount,
+        tip_source=tip_source,
+        tip_taxable=tip_taxable,
+        waros_to_redeem=waros_to_redeem,
+        waro_reward_id=waro_reward_id,
+        wompi_collection=wompi_collection,
+        split_mode=split_mode,
+        split_first_amount=split_first_amount,
+        split_first_cash_received=split_first_cash_received,
+    )
+    session_context = require_valid_session(request)
+    tenant_id = session_context.tenant_id
+    paid_total = 0.0
+    remaining = 0.0
+    is_complete = not split_mode
+    payment_id: Optional[str] = None
+    if tenant_id:
+        async with get_db_connection(use_transaction=False) as conn:
+            order_row = await conn.fetchrow(
+                """
+                SELECT total_amount, tip_amount, tip_tax_amount, status, payment_status
+                FROM orders
+                WHERE id = $1 AND tenant_id = $2
+                """,
+                order_id,
+                tenant_id,
+            )
+            paid_row = await conn.fetchrow(
+                """
+                SELECT COALESCE(SUM(amount), 0) AS paid
+                FROM order_payments
+                WHERE order_id = $1 AND voided_at IS NULL
+                """,
+                order_id,
+            )
+            last_payment = await conn.fetchrow(
+                """
+                SELECT id
+                FROM order_payments
+                WHERE order_id = $1 AND voided_at IS NULL
+                ORDER BY paid_at DESC, id DESC
+                LIMIT 1
+                """,
+                order_id,
+            )
+            if order_row and paid_row:
+                amount_due = split_settlement_amount_due(
+                    float(order_row["total_amount"] or 0),
+                    float(order_row["tip_amount"] or 0),
+                    float(order_row["tip_tax_amount"] or 0),
+                )
+                paid_total = float(paid_row["paid"])
+                remaining = max(0.0, amount_due - paid_total)
+                is_complete = remaining <= 0.01 or order_row["payment_status"] == "paid"
+            if last_payment:
+                payment_id = str(last_payment["id"])
+            if is_complete and not wompi_collection:
+                await conn.execute(
+                    """
+                    UPDATE tables t
+                       SET status = 'open'
+                     WHERE t.tenant_id = $1
+                       AND t.is_bar = TRUE
+                       AND EXISTS (
+                           SELECT 1
+                             FROM table_sessions ts
+                            WHERE ts.table_id = t.id
+                              AND ts.closed_at IS NULL
+                       )
+                    """,
+                    tenant_id,
+                )
+    return {
+        "success": True,
+        "message": "Domicilio cobrado",
+        "data": {
+            "order_id": order["id"],
+            "order_number": order.get("order_number"),
+            "total_amount": order.get("total_amount"),
+            "status": "completed" if not wompi_collection else order.get("status"),
+            "payment_status": None if wompi_collection else ("paid" if is_complete else "partial"),
+            "payment_method": payment_method,
+            "customer_id": (order.get("customer") or {}).get("id"),
+            "standard_tax": order.get("standard_tax"),
+            "liquor_tax": order.get("liquor_tax"),
+            "standard_tax_label": order.get("standard_tax_label"),
+            "liquor_tax_label": order.get("liquor_tax_label"),
+            **(
+                {
+                    "paid_total": paid_total,
+                    "remaining": remaining,
+                    "is_complete": is_complete,
+                    "payment_id": payment_id,
+                }
+                if split_mode
+                else {}
+            ),
+        },
+    }
+
+
+async def add_pending_delivery_payment(
+    request: Request,
+    order_id: UUID,
+    *,
+    amount: float,
+    payment_method: str,
+    payment_method_id: Optional[str] = None,
+    cash_received: Optional[float] = None,
+) -> dict:
+    """Add a follow-up tender while collecting a deferred bar delivery."""
+    detail = await get_pending_delivery(request, order_id)
+    order = detail["data"]
+    if order.get("status") == "pending" and not detail["data"].get("partial_payments"):
+        raise APIError(
+            "Registra el primer pago con cobro parcial activo",
+            status_code=400,
+            details={"code": "pending_delivery_split_first_required"},
+        )
+    result = await add_order_payment(
+        request=request,
+        order_id=str(order_id),
+        amount=amount,
+        payment_method=payment_method,
+        payment_method_id=payment_method_id,
+        cash_received=cash_received,
+    )
+    if result.get("data", {}).get("is_complete"):
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if tenant_id:
+            async with get_db_connection() as conn:
+                await conn.execute(
+                    """
+                    UPDATE tables t
+                       SET status = 'open'
+                     WHERE t.tenant_id = $1
+                       AND t.is_bar = TRUE
+                       AND EXISTS (
+                           SELECT 1
+                             FROM table_sessions ts
+                            WHERE ts.table_id = t.id
+                              AND ts.closed_at IS NULL
+                       )
+                    """,
+                    tenant_id,
+                )
+    return result
+
+
+async def void_pending_delivery_payment(
+    request: Request,
+    order_id: UUID,
+    payment_id: UUID,
+    *,
+    reason: Optional[str] = None,
+) -> dict:
+    """Void a partial tender on a deferred bar delivery checkout."""
+    await get_pending_delivery(request, order_id)
+    return await void_order_payment(
+        request=request,
+        order_id=str(order_id),
+        payment_id=str(payment_id),
+        reason=reason,
+    )
+
+
 async def get_current_session(request: Request, table_id: UUID) -> dict:
     """
     Get the open session for a table with all linked orders and running total.
@@ -2499,6 +3232,9 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     ts.opened_at,
                     ts.opened_by_user_id,
                     ts.attended_by_member_id,
+                    ts.covers,
+                    ts.capacity_snapshot,
+                    ts.custom_label,
                     ts.minimum_consumption_enabled_snapshot,
                     ts.minimum_consumption_amount_snapshot,
                     ts.minimum_consumption_restrictive_snapshot,
@@ -2556,11 +3292,16 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
             _std_tax = 0.0
             _liq_tax = 0.0
             _tax_label = "Impuesto"
+            _liq_label = "IVA licores 5%"
             _promo_savings = 0.0
             _subtotal_after_promos = float(session_row["running_total"])
             _promo_breakdown: List[dict] = []
             _promo_lines_by_id: Dict[str, dict] = {}
             try:
+                from app.services.hospitality_tax_engine import (
+                    annotate_line_tax_amounts,
+                    liquor_tax_label_for_config,
+                )
                 from app.services.orders_service import _compute_tax_breakdown
                 from app.services.promotions_service import (
                     enrich_order_item_rows_with_promo_basis,
@@ -2569,6 +3310,7 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                 )
 
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                _liq_label = liquor_tax_label_for_config(tax_config)
                 order_ids = [o["id"] for o in orders]
                 if order_ids:
                     eval_rows = await conn.fetch(
@@ -2585,7 +3327,9 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                             tp.promo_type AS locked_promo_type,
                             oi.promo_savings_allocated AS locked_promo_savings,
                             p.category_id,
-                            COALESCE(p.tax_category, 'standard') AS tax_category
+                            COALESCE(p.tax_category, 'standard') AS tax_category,
+                            COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                            p.tax_line_key
                         FROM order_items oi
                         JOIN orders o ON o.id = oi.order_id
                         JOIN product p ON p.id = oi.product_id
@@ -2605,14 +3349,32 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     _promo_savings = float(checkout_eval.get("promo_savings") or 0)
                     _subtotal_after_promos = float(checkout_eval.get("subtotal_after_promos") or 0)
                     _promo_breakdown = checkout_eval.get("promo_breakdown") or []
+                    tax_fields_by_id = {
+                        str(row["id"]): {
+                            "tax_category": row.get("tax_category") or "standard",
+                            "category_id": (
+                                str(row["category_id"]) if row.get("category_id") else None
+                            ),
+                            "tax_resolution": row.get("tax_resolution") or "inherit",
+                            "tax_line_key": row.get("tax_line_key"),
+                        }
+                        for row in eval_rows
+                    }
                     for line in checkout_eval["lines"]:
-                        line["tax_category"] = next(
-                            (pl["tax_category"] for pl in promo_lines if pl["id"] == line["id"]),
-                            "standard",
-                        )
-                        _promo_lines_by_id[line["id"]] = line
+                        fields = tax_fields_by_id.get(str(line["id"]), {})
+                        line["tax_category"] = fields.get("tax_category", "standard")
+                        line["category_id"] = fields.get("category_id")
+                        line["tax_resolution"] = fields.get("tax_resolution", "inherit")
+                        line["tax_line_key"] = fields.get("tax_line_key")
                     tax_rows = _tax_rows_from_evaluated_lines(checkout_eval["lines"])
                     _std_tax, _liq_tax, _tax_label = _compute_tax_breakdown(tax_rows, tax_config)
+                    annotate_line_tax_amounts(
+                        checkout_eval["lines"],
+                        tax_config,
+                        reconcile_to=(float(_std_tax), float(_liq_tax)),
+                    )
+                    for line in checkout_eval["lines"]:
+                        _promo_lines_by_id[str(line["id"])] = line
             except Exception as _e:
                 logger.warning(f"Tax breakdown failed for mesa current session (table {table_id}): {_e}")
 
@@ -2724,6 +3486,9 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     "standard_tax": float(_std_tax),
                     "liquor_tax": float(_liq_tax),
                     "standard_tax_label": _tax_label,
+                    "liquor_tax_label": _liq_label,
+                    # Per-line tax for POS Orden / prefactura cues (#2007 mesa gap)
+                    "lines": list(_promo_lines_by_id.values()),
                     "minimum_consumption": _minimum_consumption_state(
                         session_row,
                         partial_paid_total,
@@ -2738,6 +3503,9 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                     "effective_waiter_member_id": str(session_row["effective_waiter_member_id"]) if session_row.get("effective_waiter_member_id") else None,
                     "effective_waiter_member_name": session_row.get("effective_waiter_member_name"),
                     "effective_waiter_member_role": session_row.get("effective_waiter_member_role"),
+                    "covers": int(session_row["covers"]) if session_row.get("covers") is not None else None,
+                    "capacity_snapshot": int(session_row["capacity_snapshot"]) if session_row.get("capacity_snapshot") is not None else None,
+                    "custom_label": session_row.get("custom_label"),
                     # Issue warocol.com#656 — rehydration source for checkout's Pagos registrados
                     "partial_payments": [
                         {
@@ -2789,6 +3557,18 @@ async def get_current_session(request: Request, table_id: UUID) -> dict:
                             or r["promo_type"]
                         ),
                         "promoOptOut": bool(r.get("promo_opt_out")),
+                        "taxCategory": (
+                            _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("tax_category")
+                        ),
+                        "taxLabel": (
+                            _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("tax_label")
+                        ),
+                        "taxAmount": (
+                            _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("tax_amount")
+                        ),
+                        "includedInPrice": (
+                            _promo_lines_by_id.get(str(r["order_item_id"]), {}).get("included_in_price")
+                        ),
                         "modifiers": [
                             {
                                 "id": mod["id"],
@@ -3486,6 +4266,114 @@ async def _record_tab_cleared_pending_lines(
     return len(pending_lines)
 
 
+async def _restore_pending_session_orders_inventory(
+    conn,
+    *,
+    tenant_id: UUID,
+    user_id: UUID,
+    session_id: UUID,
+) -> None:
+    """Restore stock for pending session orders that already consumed (warocol.com#2567).
+
+    Fail-closed: any restore error propagates so discard/clear do not DELETE unrestored stock.
+    """
+    pending_orders = await conn.fetch(
+        """
+        SELECT id, order_number
+        FROM orders
+        WHERE table_session_id = $1
+          AND tenant_id = $2
+          AND status = 'pending'
+        """,
+        session_id,
+        tenant_id,
+    )
+    for ord_row in pending_orders:
+        await _return_stock_for_order_cancellation(
+            conn,
+            ord_row["id"],
+            tenant_id,
+            user_id,
+            int(ord_row["order_number"]),
+        )
+
+
+async def _order_has_consumption_movements(conn, *, tenant_id: UUID, order_id: UUID) -> bool:
+    return bool(await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM tenant_ingredient_movements
+            WHERE tenant_id = $1
+              AND reference_table = 'orders'
+              AND reference_id = $2
+              AND movement_type = 'consumption'
+              AND quantity_change < 0
+        )
+        """,
+        tenant_id,
+        order_id,
+    ))
+
+
+async def _ensure_tab_order_inventory_at_close(
+    conn,
+    *,
+    tenant_id: UUID,
+    user_id: UUID,
+    order_row,
+) -> None:
+    """Deduct recipe + modifier stock at mesa close when send did not (flag off)."""
+    order_id = order_row["id"]
+    order_number = int(order_row["order_number"])
+    already = await _order_inventory_already_consumed_before_completion(
+        conn,
+        row=order_row,
+        order_id=order_id,
+        tenant_id=tenant_id,
+        old_status="pending",
+    )
+    if already:
+        return
+
+    await _deduct_stock_for_status_update(conn, order_id, tenant_id, user_id, order_number)
+
+    items = await conn.fetch(
+        """
+        SELECT id, product_id, quantity
+        FROM order_items
+        WHERE order_id = $1
+        """,
+        order_id,
+    )
+    for item in items:
+        mods = await conn.fetch(
+            """
+            SELECT modifier_id, modifier_name, quantity
+            FROM order_item_modifiers
+            WHERE order_item_id = $1
+            """,
+            item["id"],
+        )
+        for mod in mods:
+            if not mod["modifier_id"]:
+                continue
+            await _deduct_modifier_inventory_for_order_item(
+                conn,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                order_id=order_id,
+                order_item_id=item["id"],
+                order_number=order_number,
+                item_quantity=float(item["quantity"]),
+                modifier={
+                    "id": str(mod["modifier_id"]),
+                    "name": mod["modifier_name"],
+                },
+                modifier_qty=float(mod["quantity"] or 1),
+            )
+
+
 async def _return_tab_item_inventory_from_snapshots(
     conn,
     *,
@@ -3660,15 +4548,19 @@ async def remove_tab_item(
             )
 
             try:
-                await _return_tab_item_inventory_from_snapshots(
-                    conn,
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    order_id=row["order_id"],
-                    order_number=row["order_number"],
-                    order_item_id=order_item_id,
-                    product_name=row["product_name"],
-                )
+                # warocol.com#2566 — only restore qty that was actually deducted on send
+                if await _order_has_consumption_movements(
+                    conn, tenant_id=tenant_id, order_id=row["order_id"]
+                ):
+                    await _return_tab_item_inventory_from_snapshots(
+                        conn,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        order_id=row["order_id"],
+                        order_number=row["order_number"],
+                        order_item_id=order_item_id,
+                        product_name=row["product_name"],
+                    )
             except Exception as _ret_exc:
                 logger.error(
                     f"[tab] inventory return failed for item {order_item_id}: {_ret_exc}"
@@ -3937,6 +4829,26 @@ async def _add_tab_items_core(
     if not session_row:
         raise NotFoundError("No open session found for this table")
 
+    deduct_flag = False
+    try:
+        deduct_flag = await conn.fetchval(
+            """
+            SELECT deduct_inventory_on_command
+            FROM tenant_public_profiles
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+    except Exception as _flag_exc:
+        # Column missing until migration — opt-in off (warocol.com#2572).
+        if "deduct_inventory_on_command" not in str(_flag_exc):
+            raise
+        logger.warning(
+            "[tab] deduct_inventory_on_command missing; defaulting false until migration"
+        )
+        deduct_flag = False
+    deduct_on_command = False if deduct_flag is None else bool(deduct_flag)
+
     session_id = session_row["session_id"]
     tab_ctx = {
         "channel": "barra" if session_row["is_bar"] else "mesa",
@@ -4061,46 +4973,24 @@ async def _add_tab_items_core(
             )
 
         try:
-            for mod in item.get("modifiers") or []:
-                modifier_qty = float(mod.get("quantity", 1))
-                await _deduct_modifier_inventory_for_order_item(
-                    conn,
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    order_id=order_id,
-                    order_item_id=order_item_id,
-                    order_number=order_number,
-                    item_quantity=float(item["quantity"]),
-                    modifier=mod,
-                    modifier_qty=modifier_qty,
-                )
+            if deduct_on_command:
+                for mod in item.get("modifiers") or []:
+                    modifier_qty = float(mod.get("quantity", 1))
+                    await _deduct_modifier_inventory_for_order_item(
+                        conn,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        order_id=order_id,
+                        order_item_id=order_item_id,
+                        order_number=order_number,
+                        item_quantity=float(item["quantity"]),
+                        modifier=mod,
+                        modifier_qty=modifier_qty,
+                    )
         except Exception as _mod_inv_exc:
             logger.error(
                 f"[tab] modifier inventory deduction failed for item {order_item_id}: {_mod_inv_exc}"
             )
-
-        await _record_tab_operation_event(
-            conn,
-            tenant_id,
-            user_id=user_id,
-            table_id=table_id,
-            tab_ctx=tab_ctx,
-            action="tab_item_added",
-            order_id=order_id,
-            order_item_id=order_item_id,
-            payload=_build_tab_item_payload(
-                product_id=item["product_id"],
-                product_name=product_names.get(str(item["product_id"])),
-                quantity=item["quantity"],
-                unit_price=item["unit_price"],
-                subtotal=subtotal,
-                modifiers=_modifiers_from_request_item(item),
-                notes=item_notes,
-                table_id=table_id,
-                table_name=tab_ctx["table_name"],
-                order_number=order_number,
-            ),
-        )
 
         try:
             await _capture_order_item_ingredients(
@@ -4109,6 +4999,9 @@ async def _add_tab_items_core(
             )
         except Exception as _snap_exc:
             logger.error(f"[tab] ingredient snapshot failed for item {order_item_id}: {_snap_exc}")
+
+        if not deduct_on_command:
+            continue
 
         try:
             ingredients = await conn.fetch(
@@ -4321,6 +5214,7 @@ async def discard_table_session(request: Request, table_id: UUID) -> dict:
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
@@ -4357,6 +5251,14 @@ async def discard_table_session(request: Request, table_id: UUID) -> dict:
                         "No se puede descartar una sesión con órdenes completadas",
                         status_code=409,
                     )
+
+                # warocol.com#2567 — restore stock before hard-delete when commanded early
+                await _restore_pending_session_orders_inventory(
+                    conn,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
 
                 # Hard-delete pending orders (cascade: modifiers → items → orders)
                 await conn.execute(
@@ -4553,7 +5455,9 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
                         id,
                         minimum_consumption_enabled_snapshot,
                         minimum_consumption_amount_snapshot,
-                        minimum_consumption_restrictive_snapshot
+                        minimum_consumption_restrictive_snapshot,
+                        covers,
+                        custom_label
                     FROM table_sessions
                     WHERE table_id = $1 AND tenant_id = $2 AND closed_at IS NULL
                     LIMIT 1
@@ -4565,7 +5469,7 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
 
                 # 3. Lock + validate target table
                 target = await conn.fetchrow(
-                    "SELECT id, name, status, is_bar FROM tables "
+                    "SELECT id, name, status, is_bar, capacity FROM tables "
                     "WHERE id = $1 AND tenant_id = $2 AND is_active = true FOR UPDATE",
                     target_table_id, tenant_id,
                 )
@@ -4584,6 +5488,9 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
                     raise APIError("target table is occupied", status_code=409)
 
                 # 5. Create new session on target
+                _covers, _cap_snap = guest_snapshot_from_capacity(target["capacity"])
+                if source_session["covers"] is not None:
+                    _covers = int(source_session["covers"])
                 new_session = await conn.fetchrow(
                     """
                     INSERT INTO table_sessions (
@@ -4592,9 +5499,12 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
                         opened_by_user_id,
                         minimum_consumption_enabled_snapshot,
                         minimum_consumption_amount_snapshot,
-                        minimum_consumption_restrictive_snapshot
+                        minimum_consumption_restrictive_snapshot,
+                        covers,
+                        capacity_snapshot,
+                        custom_label
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     RETURNING id
                     """,
                     target_table_id,
@@ -4603,6 +5513,9 @@ async def move_table_session(request: Request, source_table_id: UUID, target_tab
                     source_session["minimum_consumption_enabled_snapshot"],
                     source_session["minimum_consumption_amount_snapshot"],
                     source_session["minimum_consumption_restrictive_snapshot"],
+                    _covers,
+                    _cap_snap,
+                    source_session["custom_label"],
                 )
                 new_session_id = new_session["id"]
 
@@ -4791,6 +5704,9 @@ def _format_table_row(row: dict) -> dict:
             "attended_by_member_id": str(row["session_attended_by_member_id"]) if row.get("session_attended_by_member_id") else None,
             "attended_by_member_name": row.get("session_attended_by_member_name"),
             "attended_by_member_role": row.get("session_attended_by_member_role"),
+            "custom_label": row.get("session_custom_label"),
+            "covers": int(row["session_covers"]) if row.get("session_covers") is not None else None,
+            "capacity_snapshot": int(row["session_capacity_snapshot"]) if row.get("session_capacity_snapshot") is not None else None,
         }
     return result
 
@@ -4839,6 +5755,14 @@ async def clear_tab(request: Request, table_id: UUID, reason: Optional[str] = No
                         session_id=session_row["id"],
                         reason=reason,
                     )
+
+                # warocol.com#2567 — restore stock before deleting pending lines
+                await _restore_pending_session_orders_inventory(
+                    conn,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    session_id=session_row["id"],
+                )
 
                 # Cancel comanda_items that point at the order_items we're
                 # about to delete. Two reasons:
@@ -5087,7 +6011,7 @@ async def void_table_payment(
                 # same method, same paid_at, not voided. Lock them all.
                 sibling_rows = await conn.fetch(
                     """
-                    SELECT op.id, op.order_id, op.amount
+                    SELECT op.id, op.order_id, op.amount, o.customer_id
                     FROM order_payments op
                     JOIN orders o ON o.id = op.order_id
                     WHERE o.table_session_id = $1
@@ -5111,6 +6035,27 @@ async def void_table_payment(
                     [r["id"] for r in sibling_rows],
                     normalized_reason,
                 )
+
+                # 5b. Restore wallet for each voided wallet tender portion (#2020).
+                if target["payment_method"] == "customer_wallet":
+                    from app.services.customer_wallet_service import (
+                        restore_wallet_for_order_payment_void,
+                    )
+                    from decimal import Decimal as _Dec
+
+                    for sib in sibling_rows:
+                        if not sib["customer_id"] or float(sib["amount"] or 0) <= 0:
+                            continue
+                        await restore_wallet_for_order_payment_void(
+                            conn,
+                            UUID(str(sib["customer_id"])),
+                            UUID(str(tenant_id)),
+                            _Dec(str(sib["amount"])),
+                            sib["order_id"],
+                            UUID(str(sib["id"])),
+                            UUID(str(user_id)) if user_id else None,
+                            notes=f"Anulación pago mesa: {normalized_reason}",
+                        )
 
                 # 6. Recompute session-wide paid_total / remaining.
                 session_orders = await conn.fetch(
@@ -5143,14 +6088,16 @@ async def void_table_payment(
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
 
-                # 7. Reopen if voiding flipped the session out of fully-paid.
+                # 7. Reopen if voiding flipped the session out of fully settled.
+                # Credit splits close with payment_status partial/credit (#2020).
+                from app.services.credit_service import sync_order_split_credit_status
                 was_closed = session_row["closed_at"] is not None
                 reopened = was_closed and not is_complete
-                if reopened:
-                    await conn.execute(
-                        "UPDATE orders SET payment_status = 'partial' WHERE table_session_id = $1 AND status = 'completed' AND payment_status = 'paid'",
-                        session_row["id"],
+                for oid in order_ids:
+                    await sync_order_split_credit_status(
+                        conn, oid, settlement_complete=is_complete and not reopened,
                     )
+                if reopened:
                     await conn.execute(
                         "UPDATE table_sessions SET closed_at = NULL WHERE id = $1",
                         session_row["id"],

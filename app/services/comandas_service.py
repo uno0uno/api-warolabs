@@ -20,6 +20,7 @@ from app.services.stations_service import get_effective_station
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, APIError, NotFoundError, ValidationError
 from app.core.timezones import local_day_utc_range, resolve_tenant_timezone, tenant_today
+from app.services.operation_events_service import DOMAIN_DESPACHO, record_operation_event
 from fastapi import Request
 
 logger = logging.getLogger(__name__)
@@ -172,7 +173,7 @@ _UNFIRED_ORDER_ITEMS_SELECT = """
     LEFT JOIN tenant_promotions tp ON tp.id = oi.applied_promotion_id
 """
 
-# Allowed status transitions — any move not in this map is rejected with 422.
+# Allowed status transitions — illegal moves raise ValidationError (HTTP 400).
 # 'recall' (delivered → ready) is handled by recall_comanda() separately.
 ALLOWED_TRANSITIONS: Dict[str, List[str]] = {
     'pending':   ['preparing', 'ready', 'cancelled'],
@@ -181,6 +182,28 @@ ALLOWED_TRANSITIONS: Dict[str, List[str]] = {
     'delivered': [],
     'cancelled': [],
 }
+
+# Happy-path rank for stale/duplicate KDS PATCHes (#2037). Same status or
+# already further along → soft success (no-op). cancelled is terminal-only.
+STATUS_RANK: Dict[str, int] = {
+    'pending': 0,
+    'preparing': 1,
+    'ready': 2,
+    'delivered': 3,
+}
+
+
+def _is_stale_status_request(current_status: str, new_status: str) -> bool:
+    """True when KDS asks for a status the comanda already has or has passed."""
+    if current_status == new_status:
+        return True
+    if current_status == 'cancelled' or new_status == 'cancelled':
+        return False
+    cur = STATUS_RANK.get(current_status)
+    nxt = STATUS_RANK.get(new_status)
+    if cur is None or nxt is None:
+        return False
+    return cur >= nxt
 
 
 async def _notify_comanda_ready(conn, tenant_id: UUID, comanda_id: UUID) -> None:
@@ -262,6 +285,8 @@ async def fire_comandas(
     table_display_name: str,
     item_ids: Optional[List[UUID]] = None,
     conn=None,
+    *,
+    notify_print: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Core KDS engine — delta-send pattern.
@@ -284,16 +309,19 @@ async def fire_comandas(
         item_ids: if provided, only fire these specific order_item UUIDs
         conn: optional asyncpg connection — pass when already inside a transaction
               to avoid nested BEGIN errors; if None a new connection+transaction is created
+        notify_print: when False, skip SSE comanda_fired auto-print (checkout autofire)
     """
     if conn is not None:
         return await _fire_with_conn(
-            conn, order_id, tenant_id, source_type, table_display_name, item_ids
+            conn, order_id, tenant_id, source_type, table_display_name, item_ids,
+            notify_print=notify_print,
         )
 
     async with get_db_connection() as new_conn:
         async with new_conn.transaction():
             return await _fire_with_conn(
-                new_conn, order_id, tenant_id, source_type, table_display_name, item_ids
+                new_conn, order_id, tenant_id, source_type, table_display_name, item_ids,
+                notify_print=notify_print,
             )
 
 
@@ -304,6 +332,8 @@ async def _fire_with_conn(
     source_type: str,
     table_display_name: str,
     item_ids: Optional[List[UUID]],
+    *,
+    notify_print: bool = True,
 ) -> List[Dict[str, Any]]:
     """Internal implementation — always called with an active connection."""
 
@@ -499,6 +529,41 @@ async def _fire_with_conn(
         f"fired={fired_count} skipped={skipped} "
         f"comandas={len(created_comandas)}"
     )
+    if created_comandas:
+        from app.services.notifications_service import (
+            build_comanda_fired_print_payload,
+            notify_comanda_fired,
+        )
+
+        # Only mesa / barra / mostrador — not delivery/pickup auto-fire (#1971)
+        # Checkout/pay autofire sets notify_print=False so kitchen tickets are not
+        # reprinted when closing the sale (#1983).
+        if notify_print and source_type in ("table", "pos"):
+            label = (table_display_name or "").strip().lower()
+            # Mesa → caja; Barra (also source_type=table) + mostrador/pos → user printer
+            if source_type == "table" and label not in ("barra", "bar"):
+                auto_print_target = "caja"
+            else:
+                auto_print_target = "user"
+
+            # Never fail the fire transaction because of SSE/print notify
+            try:
+                await notify_comanda_fired(
+                    conn,
+                    tenant_id,
+                    {
+                        "order_id": str(order_id),
+                        "source_type": source_type,
+                        "table_display_name": table_display_name,
+                        "auto_print_target": auto_print_target,
+                        "comandas": build_comanda_fired_print_payload(created_comandas),
+                    },
+                )
+            except Exception as notify_err:
+                logger.error(
+                    "notify_comanda_fired failed after fire "
+                    f"(order={order_id}, tenant={tenant_id}): {notify_err}"
+                )
     return created_comandas
 
 
@@ -741,7 +806,8 @@ async def update_comanda_status(
 ) -> dict:
     """
     Updates comanda status and sets appropriate timestamps.
-    Enforces allowed-transition map — raises 422 for illegal transitions.
+    Enforces allowed-transition map — raises ValidationError (400) for illegal
+    transitions. Same-status or already-past requests are idempotent no-ops (#2037).
     """
     try:
         session = require_valid_session(request)
@@ -753,7 +819,7 @@ async def update_comanda_status(
             # Fetch current comanda (verify ownership)
             row = await conn.fetchrow(
                 """
-                SELECT c.id, c.status, c.source_type, COALESCE(t.is_bar, false) AS is_bar
+                SELECT c.id, c.status, c.source_type, c.order_id, COALESCE(t.is_bar, false) AS is_bar
                   FROM comandas c
                   LEFT JOIN orders o ON o.id = c.order_id
                   LEFT JOIN table_sessions ts ON ts.id = o.table_session_id
@@ -766,6 +832,21 @@ async def update_comanda_status(
                 raise NotFoundError(f"Comanda {comanda_id} no encontrada")
 
             current_status = row['status']
+
+            # Mostrador POS only: skip 'ready' — barra uses table-like lifecycle (#799)
+            # Resolve before stale check so delivered POS cards accept ready retries.
+            effective_requested = new_status
+            if new_status == 'ready' and row['source_type'] == 'pos' and not row['is_bar']:
+                effective_requested = 'delivered'
+
+            if _is_stale_status_request(current_status, effective_requested):
+                return {
+                    "success": True,
+                    "noop": True,
+                    "message": f"Comanda ya en {current_status}",
+                    "status": current_status,
+                }
+
             allowed_next = ALLOWED_TRANSITIONS.get(current_status, [])
 
             if new_status not in allowed_next:
@@ -774,9 +855,7 @@ async def update_comanda_status(
                     f"Transiciones permitidas desde '{current_status}': {allowed_next}"
                 )
 
-            # Mostrador POS only: skip 'ready' — barra uses table-like lifecycle (#799)
-            if new_status == 'ready' and row['source_type'] == 'pos' and not row['is_bar']:
-                new_status = 'delivered'
+            new_status = effective_requested
 
             sql_updates = ["status = $1", "updated_at = NOW()"]
             params: List[Any] = [new_status, comanda_id, tenant_id]
@@ -813,6 +892,22 @@ async def update_comanda_status(
             if new_status == "ready":
                 await _notify_comanda_ready(conn, tenant_id, comanda_id)
 
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_DESPACHO,
+                channel=None,
+                action="comanda_status_changed",
+                actor_user_id=getattr(session, "user_id", None),
+                order_id=row["order_id"],
+                payload={
+                    "entity_type": "comanda",
+                    "entity_id": str(comanda_id),
+                    "old_status": current_status,
+                    "new_status": new_status,
+                },
+            )
+
             return {"success": True, "message": f"Comanda actualizada a {new_status}"}
 
     except (AuthenticationError, NotFoundError, ValidationError, APIError) as e:
@@ -842,7 +937,7 @@ async def bulk_update_comanda_status(
 
             rows = await conn.fetch(
                 """
-                SELECT c.id, c.status, c.source_type, COALESCE(t.is_bar, false) AS is_bar
+                SELECT c.id, c.status, c.source_type, c.order_id, COALESCE(t.is_bar, false) AS is_bar
                   FROM comandas c
                   LEFT JOIN orders o ON o.id = c.order_id
                   LEFT JOIN table_sessions ts ON ts.id = o.table_session_id
@@ -858,15 +953,19 @@ async def bulk_update_comanda_status(
 
             for row in rows:
                 current_status = row['status']
-                allowed_next = ALLOWED_TRANSITIONS.get(current_status, [])
-                if new_status not in allowed_next:
-                    skipped += 1
-                    continue
-
                 # Mostrador POS only — barra keeps ready until expedited (#799)
                 effective_status = new_status
                 if new_status == 'ready' and row['source_type'] == 'pos' and not row['is_bar']:
                     effective_status = 'delivered'
+
+                if _is_stale_status_request(current_status, effective_status):
+                    updated += 1
+                    continue
+
+                allowed_next = ALLOWED_TRANSITIONS.get(current_status, [])
+                if new_status not in allowed_next:
+                    skipped += 1
+                    continue
 
                 sql_updates = ["status = $1", "updated_at = NOW()"]
                 params: List[Any] = [effective_status, row['id'], tenant_id]
@@ -898,6 +997,22 @@ async def bulk_update_comanda_status(
 
                 if effective_status == "ready":
                     ready_notify_ids.append(row["id"])
+
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_DESPACHO,
+                    channel=None,
+                    action="comanda_status_changed",
+                    actor_user_id=getattr(session, "user_id", None),
+                    order_id=row["order_id"],
+                    payload={
+                        "entity_type": "comanda",
+                        "entity_id": str(row["id"]),
+                        "old_status": current_status,
+                        "new_status": effective_status,
+                    },
+                )
 
                 updated += 1
 
@@ -933,7 +1048,7 @@ async def recall_comanda(
             await _check_comandas_enabled(conn, tenant_id)
 
             row = await conn.fetchrow("""
-                SELECT id, status, delivered_at
+                SELECT id, status, delivered_at, order_id
                 FROM comandas
                 WHERE id = $1 AND tenant_id = $2
             """, comanda_id, tenant_id)
@@ -952,6 +1067,22 @@ async def recall_comanda(
                 SET status = 'ready', delivered_at = NULL, updated_at = NOW()
                 WHERE id = $1 AND tenant_id = $2
             """, comanda_id, tenant_id)
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_DESPACHO,
+                channel=None,
+                action="comanda_recalled",
+                actor_user_id=getattr(session, "user_id", None),
+                order_id=row["order_id"],
+                payload={
+                    "entity_type": "comanda",
+                    "entity_id": str(comanda_id),
+                    "old_status": "delivered",
+                    "new_status": "ready",
+                },
+            )
 
             return {"success": True, "message": "Comanda recuperada y marcada como lista"}
 
@@ -1000,7 +1131,8 @@ async def update_comanda_item_status(
 
             # Verify item belongs to this comanda and tenant owns it
             item_row = await conn.fetchrow("""
-                SELECT ci.id, ci.comanda_id, ci.order_item_id, ci.status AS current_status
+                SELECT ci.id, ci.comanda_id, ci.order_item_id, ci.status AS current_status,
+                       c.order_id
                 FROM comanda_items ci
                 JOIN comandas c ON c.id = ci.comanda_id
                 WHERE ci.id = $1
@@ -1089,6 +1221,24 @@ async def update_comanda_item_status(
                             f"update_comanda_item_status: all items cancelled — "
                             f"auto-cancelled comanda {comanda_id}"
                         )
+
+                    await record_operation_event(
+                        conn,
+                        tenant_id,
+                        domain=DOMAIN_DESPACHO,
+                        channel=None,
+                        action="comanda_line_cancelled",
+                        actor_user_id=getattr(session, "user_id", None),
+                        order_id=item_row["order_id"],
+                        order_item_id=order_item_id,
+                        comanda_item_id=item_id,
+                        payload={
+                            "entity_type": "comanda_item",
+                            "entity_id": str(item_id),
+                            "old_status": item_row["current_status"],
+                            "new_status": "cancelled",
+                        },
+                    )
 
             return {
                 "success": True,

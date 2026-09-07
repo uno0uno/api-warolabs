@@ -13,6 +13,7 @@ from app.core.exceptions import AuthenticationError, APIError, NotFoundError, Va
 from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
 from app.services.email_helpers import send_order_accepted_email
 from app.services.waros_service import evaluate_and_award
+from app.services.operation_events_service import DOMAIN_DESPACHO, record_operation_event
 from app.services.cierre_service import _get_tenant_tax_config, _post_order_gl_entry, _post_order_cogs_gl_entry
 from app.services.ingredient_purchase_units_service import resolve_recipe_quantity_to_base_unit
 from app.services.comandas_service import fire_comandas
@@ -27,6 +28,45 @@ from app.services.pos_cart_service import (
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+async def _deduct_inventory_on_command_enabled(conn, tenant_id) -> bool:
+    """Shared tenant flag (warocol.com#2566 / #2568 / #2572). Default false if missing/null."""
+    try:
+        flag = await conn.fetchval(
+            """
+            SELECT deduct_inventory_on_command
+            FROM tenant_public_profiles
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+    except Exception as exc:
+        if "deduct_inventory_on_command" not in str(exc):
+            raise
+        logger.warning(
+            "[online] deduct_inventory_on_command missing; defaulting false until migration"
+        )
+        return False
+    return False if flag is None else bool(flag)
+
+
+async def _order_has_consumption_movements(conn, *, tenant_id, order_id: UUID) -> bool:
+    return bool(await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM tenant_ingredient_movements
+            WHERE tenant_id = $1
+              AND reference_table = 'orders'
+              AND reference_id = $2
+              AND movement_type = 'consumption'
+              AND quantity_change < 0
+        )
+        """,
+        tenant_id,
+        order_id,
+    ))
 
 
 async def _deduct_stock_for_order(conn, order_id: UUID, tenant_id, changed_by) -> None:
@@ -443,7 +483,7 @@ async def update_order_status(
             # 1. Fetch current order (tenant-scoped, online orders only)
             row = await conn.fetchrow(
                 """
-                SELECT id, status, customer_id, payment_method, payment_method_id
+                SELECT id, status, customer_id, payment_method, payment_method_id, order_number
                 FROM orders
                 WHERE id = $1
                   AND tenant_id = $2
@@ -544,6 +584,29 @@ async def update_order_status(
                 order_id, old_status, new_status, changed_by, reason,
             )
 
+            # warocol.com#2568 — operational stock on accept (pending → confirmed)
+            if old_status == "pending" and new_status == "confirmed":
+                if await _deduct_inventory_on_command_enabled(conn, tenant_id):
+                    try:
+                        await _deduct_stock_for_order(conn, order_id, tenant_id, changed_by)
+                    except Exception as _stock_err:
+                        logger.error(
+                            f"Stock deduction failed on accept for order {order_id}: {_stock_err}"
+                        )
+                        raise
+
+            # warocol.com#2568 — restore when cancelling after early accept deduct
+            if new_status == "cancelled":
+                from app.services.orders_service import _return_stock_for_order_cancellation
+
+                await _return_stock_for_order_cancellation(
+                    conn,
+                    order_id,
+                    tenant_id,
+                    changed_by,
+                    int(row["order_number"]),
+                )
+
             # 5. Auto-complete: if requested and this was a pending → confirmed transition,
             #    immediately execute a second confirmed → completed transition in the same conn.
             if auto_complete and old_status == "pending" and new_status == "confirmed":
@@ -590,9 +653,12 @@ async def update_order_status(
                     order_id, "confirmed", "completed", changed_by, None,
                 )
 
-                # Deduct stock for completed order
+                # Deduct at complete only when accept did not (flag off)
                 try:
-                    await _deduct_stock_for_order(conn, order_id, tenant_id, changed_by)
+                    if not await _order_has_consumption_movements(
+                        conn, tenant_id=tenant_id, order_id=order_id
+                    ):
+                        await _deduct_stock_for_order(conn, order_id, tenant_id, changed_by)
                 except Exception as _stock_err:
                     logger.error(f"Stock deduction failed for order {order_id}: {_stock_err}")
 
@@ -687,6 +753,25 @@ async def update_order_status(
                     except Exception as _waros_err:
                         logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
 
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_DESPACHO,
+                    channel=None,
+                    action="order_status_changed",
+                    actor_user_id=changed_by,
+                    order_id=order_id,
+                    reason=reason,
+                    payload={
+                        "entity_type": "order",
+                        "entity_id": str(order_id),
+                        "order_number": int(row["order_number"]) if row["order_number"] is not None else None,
+                        "old_status": old_status,
+                        "new_status": "completed",
+                        "auto_completed": True,
+                    },
+                )
+
                 # Override the return payload to reflect the final completed state
                 return {
                     "success": True,
@@ -712,10 +797,13 @@ async def update_order_status(
                     },
                 }
 
-            # Deduct stock for direct completed transition
+            # Deduct stock for direct completed transition (skip if already consumed at accept)
             if new_status == "completed":
                 try:
-                    await _deduct_stock_for_order(conn, order_id, tenant_id, changed_by)
+                    if not await _order_has_consumption_movements(
+                        conn, tenant_id=tenant_id, order_id=order_id
+                    ):
+                        await _deduct_stock_for_order(conn, order_id, tenant_id, changed_by)
                 except Exception as _stock_err:
                     logger.error(f"Stock deduction failed for order {order_id}: {_stock_err}")
 
@@ -789,6 +877,24 @@ async def update_order_status(
                         )
                 except Exception as _fe:
                     logger.error(f"Auto-fire failed for online order {order_id} (preparing): {_fe}")
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_DESPACHO,
+                channel=None,
+                action="order_status_changed",
+                actor_user_id=changed_by,
+                order_id=order_id,
+                reason=reason,
+                payload={
+                    "entity_type": "order",
+                    "entity_id": str(order_id),
+                    "order_number": int(row["order_number"]) if row["order_number"] is not None else None,
+                    "old_status": old_status,
+                    "new_status": new_status,
+                },
+            )
 
             return {
                 "success": True,

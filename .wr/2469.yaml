@@ -1,0 +1,35 @@
+issue: 2469
+title: "feat(sales): snapshot table occupancy and custom table label on orders"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-2469-table-covers-label
+risk: low
+
+paths:
+  - sql/20260828_table_session_covers_label.sql
+  - app/services/table_session_guests.py
+  - app/services/tables_service.py
+  - app/services/table_assignments_service.py
+  - app/services/orders_service.py
+  - app/routers/pos_context.py
+  - app/models/table_member_assignment.py
+
+ac:
+  - ADD covers, capacity_snapshot, custom_label on table_sessions
+  - Default covers from tables.capacity on open; PATCH while session open
+  - Expose snapshot on orders list and detail; do not change tables.capacity waiter metrics
+
+out_of_scope:
+  - Floor plan redesign
+  - Waiter KPI formula
+  - Renaming order_number
+
+hints:
+  entry: "open_session + PATCH /pos/tables/{id}/session-guests"
+  pattern: "session-waiter PATCH + minimum_consumption snapshot columns"
+  tests: "pytest tests/test_table_session_guests.py -v"
+
+skip:
+  audits: [ux, color, typography]

@@ -55,6 +55,20 @@ class SetSessionWaiterRequest(BaseModel):
     )
 
 
+class SetSessionGuestsRequest(BaseModel):
+    """PATCH /api/pos/tables/{id}/session-guests (warocol.com#2469)."""
+    covers: Optional[int] = Field(
+        None,
+        ge=1,
+        description="Guest/covers count for this open session. Independent of tables.capacity.",
+    )
+    custom_label: Optional[str] = Field(
+        None,
+        max_length=80,
+        description="Optional alias (room/table name). Empty string clears. Does not replace order_number.",
+    )
+
+
 class OpenTableRequest(BaseModel):
     """POST /tables/{id}/open body (warocol.com#574 extension — optional).
 

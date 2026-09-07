@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import HTTPException
 
 from app.routers import billing
 from app.services import billing_service, wompi_service
@@ -108,6 +108,7 @@ async def test_each_retry_inserts_a_new_payment_attempt():
     first_id = uuid4()
     second_id = uuid4()
     conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=None)
     conn.fetchrow = AsyncMock(side_effect=[{"id": first_id}, {"id": second_id}])
     tenant_id = uuid4()
     plan_id = uuid4()
@@ -124,7 +125,24 @@ async def test_each_retry_inserts_a_new_payment_attempt():
     for call in conn.fetchrow.await_args_list:
         assert "INSERT INTO billing_payment_attempts" in call.args[0]
         assert "ON CONFLICT" not in call.args[0]
-        assert call.args[4] == "prod"
+        assert call.args[3] == "lemon_squeezy"
+        assert call.args[5] == "COP"
+        assert call.args[6] == "prod"
+
+
+@pytest.mark.asyncio
+async def test_create_onboarding_payment_attempt_rejects_wompi():
+    conn = AsyncMock()
+    with pytest.raises(HTTPException) as exc:
+        await billing_service.create_onboarding_payment_attempt(
+            conn,
+            tenant_id=uuid4(),
+            plan_id=uuid4(),
+            amount_in_cents=9000,
+            provider="wompi",
+        )
+    assert exc.value.status_code == 422
+    conn.fetchrow.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -380,98 +398,44 @@ async def test_paid_identity_activation_accepts_promoted_admin_and_updates_once(
 
     assert activated["tenant_id"] == tenant_id
     identity_query = " ".join(conn.fetchrow.await_args.args[0].split())
-    assert "tm.role IN ('owner', 'admin')" in identity_query
+    assert "tm.role IN ('owner', 'admin', 'superuser')" in identity_query
     assert conn.execute.await_count == 3
     statements = [" ".join(call.args[0].split()) for call in conn.execute.await_args_list]
-    assert "SET is_active = true, role = 'admin'" in statements[0]
-    assert "role IN ('owner', 'admin')" in statements[0]
+    assert "SET is_active = true, role = 'superuser'" in statements[0]
+    assert "role IN ('owner', 'admin', 'superuser')" in statements[0]
     assert "SET state = 'active'" in statements[1]
     assert "SET lifecycle_status = 'active'" in statements[2]
 
 
 @pytest.mark.asyncio
-async def test_declined_onboarding_attempt_never_calls_legacy_past_due():
-    transaction = {
-        "id": "tx-declined",
-        "status": "DECLINED",
-        "payment_link_id": "link-onboarding",
-    }
-    background_tasks = MagicMock()
-    handled = {"handled": True, "tenant_info": None}
-
-    @asynccontextmanager
-    async def db_context():
-        yield AsyncMock()
+async def test_colombia_wompi_handler_is_noop(caplog):
+    """#798 — verified Colombia events must not activate/renew."""
+    import logging
 
     from app.services import wompi_colombia_webhook_service
 
-    with patch.object(
-        wompi_colombia_webhook_service,
-        "get_db_connection",
-        side_effect=db_context,
-    ), patch.object(
-        wompi_colombia_webhook_service.billing_service,
-        "process_onboarding_payment_transaction",
-        new=AsyncMock(return_value=handled),
-    ), patch.object(
-        wompi_colombia_webhook_service.billing_service,
-        "mark_subscription_past_due",
-        new=AsyncMock(),
-    ) as legacy_past_due:
+    with caplog.at_level(logging.WARNING):
         await wompi_colombia_webhook_service.handle_transaction_updated(
-            {"data": {"transaction": transaction}}, background_tasks
+            {
+                "data": {
+                    "transaction": {
+                        "id": "tx-approved",
+                        "status": "APPROVED",
+                        "payment_link_id": "link-onboarding",
+                    }
+                }
+            },
+            MagicMock(),
         )
 
-    legacy_past_due.assert_not_awaited()
+    assert any("deprecated (#798)" in r.message for r in caplog.records)
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
 @pytest.mark.asyncio
-async def test_unmatched_sandbox_event_never_calls_legacy_subscription_handlers():
-    transaction = {
-        "id": "tx-sandbox",
-        "status": "APPROVED",
-        "payment_link_id": "sandbox-link",
-    }
-    background_tasks = MagicMock()
-
-    @asynccontextmanager
-    async def db_context():
-        yield AsyncMock()
-
-    from app.services import wompi_colombia_webhook_service
-
-    with patch.object(
-        wompi_colombia_webhook_service,
-        "get_db_connection",
-        side_effect=db_context,
-    ), patch.object(
-        wompi_colombia_webhook_service.billing_service,
-        "process_onboarding_payment_transaction",
-        new=AsyncMock(return_value={"handled": False, "tenant_info": None}),
-    ), patch.object(
-        wompi_colombia_webhook_service.billing_service,
-        "activate_tenant_subscription",
-        new=AsyncMock(),
-    ) as legacy_activate, patch.object(
-        wompi_colombia_webhook_service.billing_service,
-        "mark_subscription_past_due",
-        new=AsyncMock(),
-    ) as legacy_past_due:
-        await wompi_colombia_webhook_service.handle_transaction_updated(
-            {"data": {"transaction": transaction}},
-            background_tasks,
-            provider_environment="test",
-        )
-
-    legacy_activate.assert_not_awaited()
-    legacy_past_due.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_browser_verify_payment_reconciles_owned_approved_subscription():
+async def test_browser_verify_payment_is_read_only_for_approved_transaction():
     tenant_id = uuid4()
     session = SimpleNamespace(tenant_id=tenant_id)
-    background_tasks = BackgroundTasks()
     transaction = {
         "id": "tx-approved",
         "status": "APPROVED",
@@ -479,14 +443,6 @@ async def test_browser_verify_payment_reconciles_owned_approved_subscription():
         "amount_in_cents": 9590000,
         "currency": "COP",
         "finalized_at": "2026-07-16T18:32:25.077Z",
-    }
-    tenant_info = {
-        "tenant_id": str(tenant_id),
-        "subscription_id": str(uuid4()),
-        "tenant_name": "Test tenant",
-        "tenant_email": "test@example.com",
-        "plan_name": "Pro",
-        "next_period_end": "2027-07-16T18:32:25.077+00:00",
     }
 
     @asynccontextmanager
@@ -502,23 +458,16 @@ async def test_browser_verify_payment_reconciles_owned_approved_subscription():
     ), patch.object(
         billing.billing_service,
         "activate_tenant_subscription",
-        new=AsyncMock(return_value=tenant_info),
+        new=AsyncMock(),
     ) as activate:
         result = await billing.verify_payment(
             object(),
-            background_tasks,
             transaction_id="tx-approved",
         )
 
     assert result["status"] == "active"
-    activate.assert_awaited_once()
-    kwargs = activate.await_args.kwargs
-    assert kwargs["gateway_reference"] == "link-onboarding"
-    assert kwargs["payment_id"] == "tx-approved"
-    assert kwargs["expected_tenant_id"] == tenant_id
-    assert kwargs["amount_in_cents"] == 9590000
-    assert kwargs["currency"] == "COP"
-    assert len(background_tasks.tasks) == 2
+    assert result["activation"] == "deprecated"
+    activate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -550,9 +499,9 @@ async def test_browser_verify_payment_does_not_activate_pending_transaction():
     ) as activate:
         result = await billing.verify_payment(
             object(),
-            BackgroundTasks(),
             transaction_id="tx-pending",
         )
 
     assert result["status"] == "pending"
+    assert result["activation"] == "deprecated"
     activate.assert_not_awaited()

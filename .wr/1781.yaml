@@ -1,0 +1,36 @@
+# Machine contract for wr-fast — keep ≤80 lines.
+issue: 1781
+title: "feat(billing): show all modules on Starter/trial plan"
+github_issue: uno0uno/warocol.com#1781
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-1781-starter-all-modules
+
+paths:
+  - app/services/billing_service.py
+  - tests/test_me_access.py
+
+ac:
+  - Starter owner /me/access includes pos ventas menu operaciones abastecimiento analitica finanzas integraciones equipo facturacion mi_negocio mi_plan
+  - Role intersection unchanged (cashier POS-only)
+  - Starter toggles/quotas unchanged
+  - #1772 country gates unchanged (no edits to payroll/matias middleware)
+  - pytest test_me_access green
+
+out_of_scope:
+  - Front nav changes
+  - Unlocking Starter operation toggles
+  - MX Matias/DIAN or payroll localization
+  - Reversing #1773–#1776
+
+hints:
+  entry: "STARTER_PLAN_MODULE_VALUES billing_service.py:257-265 — add analitica finanzas integraciones equipo facturacion"
+  pattern: "me.py:_intersect_plan_modules and permissions.py:372 already consume the frozenset — no duplicate lists"
+  tests: "./venv/bin/pytest tests/test_me_access.py -q"
+  update_test: "test_starter_owner_excludes_finanzas_and_facturacion → assert modules present; rename accordingly"
+  risks: "permissions require_module also uses STARTER_PLAN_MODULE_VALUES — expanding allow-list opens API routes for those modules on starter (intended)"
+
+skip:
+  audits: [ux, color, typography]

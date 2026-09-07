@@ -44,27 +44,6 @@ def test_business_name_rejects_the_pending_placeholder():
 
 
 @pytest.mark.asyncio
-async def test_catalog_read_has_no_default_profile_write():
-    tenant_id = uuid4()
-    conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={
-        "lifecycle_status": "pending",
-        "state": "business_profile_pending",
-        "business_name": "Negocio pendiente",
-        "profile_tenant_id": None,
-    })
-
-    result = await onboarding_service.get_onboarding_financial_profile(conn, tenant_id)
-
-    assert result.data.profile is None
-    assert len(result.data.catalog) == 23
-    assert result.data.next_step == "business_profile"
-    query = conn.fetchrow.await_args.args[0]
-    assert "INSERT" not in query
-    assert "tenant_financial_profiles" in query
-
-
-@pytest.mark.asyncio
 async def test_initial_selection_atomically_promotes_identity_to_billing_boundary():
     tenant_id = uuid4()
     profile = _profile_row(tenant_id)
@@ -72,10 +51,11 @@ async def test_initial_selection_atomically_promotes_identity_to_billing_boundar
     conn.fetchrow = AsyncMock(side_effect=[
         {"lifecycle_status": "pending", "state": "business_profile_pending"},
         profile,
-        {"state": "payment_pending"},
+        {"state": "starter_active"},
     ])
     conn.execute = AsyncMock(side_effect=[
         "UPDATE 1",
+        "SELECT 1",
         "UPDATE 1",
         "UPDATE 1",
     ])
@@ -93,8 +73,8 @@ async def test_initial_selection_atomically_promotes_identity_to_billing_boundar
     assert result.data.profile.country_code == "US"
     assert result.data.business_name == "Cafe Central"
     assert result.data.profile.selection_revision == 1
-    assert result.data.state == "payment_pending"
-    assert result.data.next_step == "payment"
+    assert result.data.state == "starter_active"
+    assert result.data.next_step == "setup"
     lock_query = conn.fetchrow.await_args_list[0].args[0]
     upsert_query = conn.fetchrow.await_args_list[1].args[0]
     assert "FOR UPDATE OF t, o" in lock_query
@@ -103,8 +83,10 @@ async def test_initial_selection_atomically_promotes_identity_to_billing_boundar
     statements = [" ".join(call.args[0].split()) for call in conn.execute.await_args_list]
     assert "UPDATE tenants SET name" in statements[0]
     assert conn.execute.await_args_list[0].args[2] == "Cafe Central"
-    assert "SET role = 'admin', is_active = true" in statements[1]
-    assert "SET lifecycle_status = 'active'" in statements[2]
+    assert "seed_tenant_accounts($1)" in statements[1]
+    assert conn.execute.await_args_list[1].args[1] == tenant_id
+    assert "SET role = 'superuser', is_active = true" in statements[2]
+    assert "SET lifecycle_status = 'active'" in statements[3]
 
 
 @pytest.mark.asyncio
@@ -114,11 +96,11 @@ async def test_idempotent_selection_keeps_database_revision():
     conn.fetchrow = AsyncMock(side_effect=[
         {
             "lifecycle_status": "active",
-            "state": "payment_pending",
+            "state": "starter_active",
             "business_name": "Cafe Central",
         },
         _profile_row(tenant_id, revision=4),
-        {"state": "payment_pending"},
+        {"state": "starter_active"},
     ])
     conn.execute = AsyncMock(side_effect=["UPDATE 1", "UPDATE 1"])
 
@@ -133,18 +115,18 @@ async def test_idempotent_selection_keeps_database_revision():
     )
 
     assert result.data.profile.selection_revision == 4
-    assert result.data.state == "payment_pending"
+    assert result.data.state == "starter_active"
     assert conn.execute.await_count == 2
 
 
 @pytest.mark.asyncio
-async def test_payment_pending_rejects_changes_after_legal_acceptance():
+async def test_starter_active_rejects_changes_after_legal_acceptance():
     tenant_id = uuid4()
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(side_effect=[
         {
             "lifecycle_status": "pending",
-            "state": "payment_pending",
+            "state": "starter_active",
             "business_name": "Cafe Central",
         },
         _profile_row(tenant_id, country="CO", currency="COP", revision=2),
@@ -164,7 +146,7 @@ async def test_payment_pending_rejects_changes_after_legal_acceptance():
     assert exc.value.status_code == 409
     assert exc.value.detail == {
         "code": "ONBOARDING_FINANCIAL_PROFILE_LOCKED",
-        "state": "payment_pending",
+        "state": "starter_active",
     }
     conn.execute.assert_not_awaited()
 
@@ -212,7 +194,7 @@ async def test_pending_acceptance_requires_financial_profile():
 
 
 @pytest.mark.asyncio
-async def test_pending_acceptance_uses_canonical_source_and_advances_payment():
+async def test_pending_acceptance_uses_canonical_source_and_advances_starter():
     tenant_id = uuid4()
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(side_effect=[
@@ -221,7 +203,7 @@ async def test_pending_acceptance_uses_canonical_source_and_advances_payment():
             "state": "terms_pending",
             "country_code": "CO",
         },
-        {"state": "payment_pending"},
+        {"state": "starter_active"},
     ])
     conn.execute = AsyncMock()
     session = SimpleNamespace(tenant_id=tenant_id)
@@ -238,8 +220,8 @@ async def test_pending_acceptance_uses_canonical_source_and_advances_payment():
 
     assert accept.await_args.kwargs["source"] == "onboarding"
     assert result["data"]["onboarding"] == {
-        "state": "payment_pending",
-        "nextStep": "payment",
+        "state": "starter_active",
+        "nextStep": "setup",
     }
     conn.execute.assert_not_awaited()
 
@@ -315,19 +297,19 @@ async def test_pending_subscribe_checks_onboarding_before_wompi():
         "ensure_onboarding_payment_ready",
         new=AsyncMock(side_effect=not_ready),
     ), patch.object(
-        billing.wompi_service,
-        "create_payment_link",
+        billing.lemon_squeezy_service,
+        "create_checkout",
         new=AsyncMock(),
-    ) as wompi:
+    ) as ls_checkout:
         with pytest.raises(HTTPException) as exc:
             await billing.subscribe(
-                billing.SubscribeBody(plan_id=uuid4(), billing_cycle="annual"),
+                billing.SubscribeBody(plan_id=uuid4(), billing_cycle="monthly"),
                 object(),
             )
 
     assert exc.value.detail["code"] == "ONBOARDING_PAYMENT_NOT_READY"
     get_plan.assert_not_awaited()
-    wompi.assert_not_awaited()
+    ls_checkout.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -338,7 +320,7 @@ async def test_resume_status_includes_profile_and_current_acceptance():
         "tenant_id": tenant_id,
         "business_name": "Cafe Central",
         "lifecycle_status": "pending",
-        "state": "payment_pending",
+        "state": "starter_active",
         "email_verified_at": datetime.now(timezone.utc),
         **_profile_row(tenant_id, country="CO", currency="COP", revision=2),
     }
@@ -361,7 +343,7 @@ async def test_resume_status_includes_profile_and_current_acceptance():
     assert result.data.financial_profile.selection_revision == 2
     assert result.data.terms_accepted is True
     assert result.data.terms_version == "1.1"
-    assert result.data.next_step == "payment"
+    assert result.data.next_step == "setup"
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,39 @@
+# Compact plan — wr-fast #700. Keep <=80 lines.
+issue: 700
+title: "fix(menu): sync resale mi costo to warehouse cost when no purchases"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-700-resale-mi-costo-sync
+
+paths:
+  - app/services/products_service.py
+  - app/services/cost_resolution_service.py
+  - tests/test_product_resale_mi_costo_sync.py
+  - tests/test_product_perceived_cost.py
+  - .wr/700.yaml
+
+ac:
+  - Resale edit of costo_percibido with no purchase unit_cost syncs ingredients.costo_unitario and recalculates costo_calculado
+  - With purchase unit_cost, do not overwrite warehouse/purchase-driven cost
+  - Create path unchanged; non-resale unchanged
+  - Tests cover both cases
+
+out_of_scope:
+  - FX/display currency, recipe products rewriting line costs, front copy
+
+hints:
+  entry: "update_product_with_recipe after product UPDATE, before persist_product_costo_calculado"
+  pattern: "create auto_resale copies costo_percibido → costo_unitario (~184); cost_resolution purchase priority"
+  tests: "pytest tests/test_product_resale_mi_costo_sync.py tests/test_product_perceived_cost.py -q"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "ready-for-review + wr-review"

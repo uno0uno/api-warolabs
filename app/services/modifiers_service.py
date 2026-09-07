@@ -16,6 +16,8 @@ from app.services.modifier_option_service import (
     calculated_modifier_option_unit_cost,
     validate_modifier_option_fields,
 )
+from app.services.billing_service import check_plan_quota_growth, check_plan_quota_scoped
+from app.services.operation_events_service import DOMAIN_MENU, record_module_event
 import logging
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,7 @@ _MODIFIER_SELECT_COLS = """
     i.unit as ingredient_base_unit,
     i.costo_unitario,
     i.controla_inventario,
+    i.is_resale as ingredient_is_resale,
     pbt.name as recipe_base_name,
     lp.name as linked_product_name
 """
@@ -81,7 +84,7 @@ async def _fetch_modifier_recipe_lines(conn, modifier_id: UUID) -> List[Modifier
         """
         SELECT mr.id, mr.ingredient_id, mr.quantity, mr.unit,
                i.name as ingredient_name, i.unit as ingredient_base_unit,
-               i.costo_unitario, i.controla_inventario
+               i.costo_unitario, i.controla_inventario, i.is_resale
         FROM modifier_recipes mr
         JOIN ingredients i ON mr.ingredient_id = i.id
         WHERE mr.modifier_id = $1
@@ -97,6 +100,7 @@ async def _fetch_modifier_recipe_lines(conn, modifier_id: UUID) -> List[Modifier
             unit=r["ingredient_base_unit"],
             costo_unitario=r["costo_unitario"],
             controla_inventario=r["controla_inventario"] or False,
+            is_resale=bool(r.get("is_resale")),
         )
         lines.append(
             ModifierRecipeLine(
@@ -145,6 +149,7 @@ async def _build_modifier(
             unit=row["ingredient_base_unit"],
             costo_unitario=row["costo_unitario"],
             controla_inventario=row["controla_inventario"] or False,
+            is_resale=bool(row.get("ingredient_is_resale")),
         )
     if row["recipe_base_type_id"] and row.get("recipe_base_name"):
         mod_dict["recipe_base"] = RecipeBaseInfo(
@@ -162,9 +167,22 @@ async def _build_modifier(
     return Modifier(**mod_dict)
 
 
-async def _insert_modifier(conn, group_id: UUID, modifier) -> UUID:
+async def _insert_modifier(conn, group_id: UUID, modifier, *, skip_quota_check: bool = False) -> UUID:
     validate_modifier_option_fields(modifier)
     option_type = (modifier.option_type or "INGREDIENT").upper()
+
+    if not skip_quota_check:
+        tenant_id = await conn.fetchval(
+            "SELECT tenant_id FROM modifier_groups WHERE id = $1",
+            group_id,
+        )
+        if tenant_id:
+            await check_plan_quota_scoped(
+                conn,
+                tenant_id,
+                "modifier_options_per_group",
+                group_id,
+            )
 
     ing_qty = modifier.ingredient_quantity
     ing_unit = modifier.ingredient_unit
@@ -211,6 +229,73 @@ async def _insert_modifier(conn, group_id: UUID, modifier) -> UUID:
         await _replace_modifier_recipes(conn, modifier_id, modifier.recipe_lines)
     return modifier_id
 
+
+async def create_modifier_group_on_conn(
+    conn,
+    tenant_id: UUID,
+    group_data: ModifierGroupCreate,
+    *,
+    user_id: Optional[UUID] = None,
+    record_history: bool = True,
+) -> UUID:
+    """
+    Shared create path for UI and CSV import. Caller owns the connection/transaction.
+    product_ids may be empty (import v1 — no product↔matrix).
+    """
+    await check_plan_quota_growth(conn, tenant_id, "modifier_groups")
+    group_result = await conn.fetchrow(
+        """
+        INSERT INTO modifier_groups (
+            tenant_id, name, min_qty, max_qty,
+            is_required, sort_order
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id
+        """,
+        tenant_id,
+        group_data.name,
+        group_data.min_qty,
+        group_data.max_qty,
+        group_data.is_required,
+        group_data.sort_order,
+    )
+    group_id = group_result["id"]
+
+    for product_id in group_data.product_ids or []:
+        await conn.execute(
+            """
+            INSERT INTO product_modifier_groups (
+                product_id, modifier_group_id, tenant_id
+            )
+            VALUES ($1, $2, $3)
+            """,
+            product_id,
+            group_id,
+            tenant_id,
+        )
+
+    if group_data.modifiers:
+        await check_plan_quota_scoped(
+            conn,
+            tenant_id,
+            "modifier_options_per_group",
+            group_id,
+            projected_count=len(group_data.modifiers),
+        )
+        for modifier in group_data.modifiers:
+            await _insert_modifier(conn, group_id, modifier, skip_quota_check=True)
+
+    if record_history:
+        group_snapshot = await menu_history_service.get_modifier_group_snapshot(
+            conn, group_id, tenant_id
+        )
+        if group_snapshot:
+            await menu_history_service.record_modifier_group_create(
+                conn, tenant_id, group_id, group_data.name, group_snapshot, user_id
+            )
+    return group_id
+
+
 async def create_modifier_group(
     request: Request,
     group_data: ModifierGroupCreate
@@ -228,63 +313,32 @@ async def create_modifier_group(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
-                # 1. Insert modifier group (without product_id)
-                group_query = """
-                    INSERT INTO modifier_groups (
-                        tenant_id, name, min_qty, max_qty,
-                        is_required, sort_order
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    RETURNING id, created_at, updated_at
-                """
-                group_result = await conn.fetchrow(
-                    group_query,
+                user_id = session_context.user_id if hasattr(session_context, "user_id") else None
+                group_id = await create_modifier_group_on_conn(
+                    conn,
                     tenant_id,
-                    group_data.name,
-                    group_data.min_qty,
-                    group_data.max_qty,
-                    group_data.is_required,
-                    group_data.sort_order
+                    group_data,
+                    user_id=user_id,
+                    record_history=True,
                 )
-
-                group_id = group_result['id']
-
-                # 2. Insert product associations in junction table
-                product_assoc_query = """
-                    INSERT INTO product_modifier_groups (
-                        product_id, modifier_group_id, tenant_id
-                    )
-                    VALUES ($1, $2, $3)
-                """
-                for product_id in group_data.product_ids:
-                    await conn.execute(
-                        product_assoc_query,
-                        product_id,
-                        group_id,
-                        tenant_id
-                    )
-
-                # 3. Insert modifiers (option types + optional modifier_recipes)
-                if group_data.modifiers:
-                    for modifier in group_data.modifiers:
-                        await _insert_modifier(conn, group_id, modifier)
-
-                # 4. Registrar en historial
-                user_id = session_context.user_id if hasattr(session_context, 'user_id') else None
-                group_snapshot = await menu_history_service.get_modifier_group_snapshot(conn, group_id, tenant_id)
-                if group_snapshot:
-                    await menu_history_service.record_modifier_group_create(
-                        conn, tenant_id, group_id, group_data.name,
-                        group_snapshot, user_id
-                    )
-
-                # 5. Get complete group with modifiers and products
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MENU,
+                    action="modifier_group_created",
+                    actor_user_id=user_id,
+                    entity_type="modifier_group",
+                    entity_id=group_id,
+                    label=group_data.name,
+                )
                 return await get_modifier_group_by_id(request, group_id, conn)
 
     except AuthenticationError as e:
         raise e
     except ValueError as e:
         raise APIError(str(e), status_code=400)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating modifier group: {str(e)}")
         raise APIError(f"Error creating modifier group: {str(e)}", status_code=500)
@@ -342,6 +396,7 @@ async def get_modifier_group_by_id(
                 LEFT JOIN product_base_types pbt ON m.recipe_base_type_id = pbt.id
                 LEFT JOIN product lp ON m.linked_product_id = lp.id
                 WHERE m.modifier_group_id = $1
+                  AND m.removed_at IS NULL
                 ORDER BY m.sort_order, m.name
             """
 
@@ -380,7 +435,8 @@ async def get_modifier_groups_list(
     limit: int = 50,
     search: Optional[str] = None,
     product_id: Optional[UUID] = None,
-    is_required: Optional[bool] = None
+    is_required: Optional[bool] = None,
+    estado: Optional[str] = None,
 ) -> ModifierGroupsListResponse:
     """Get list of modifier groups with filters. Now supports multiple products per group."""
     try:
@@ -401,6 +457,7 @@ async def get_modifier_groups_list(
                     mg.max_qty,
                     mg.is_required,
                     mg.sort_order,
+                    mg.is_active,
                     mg.created_at,
                     mg.updated_at
                 FROM modifier_groups mg
@@ -437,6 +494,13 @@ async def get_modifier_groups_list(
                 base_query += f" AND mg.is_required = ${param_count}"
                 count_query += f" AND mg.is_required = ${param_count}"
                 params.append(is_required)
+                param_count += 1
+
+            if estado in ("activo", "archivado"):
+                is_active_val = estado == "activo"
+                base_query += f" AND mg.is_active = ${param_count}"
+                count_query += f" AND mg.is_active = ${param_count}"
+                params.append(is_active_val)
                 param_count += 1
 
             # Add pagination
@@ -597,7 +661,12 @@ async def update_modifier_group(
                 if group_data.modifiers is not None:
                     # Get existing modifiers
                     existing_modifiers = await conn.fetch(
-                        "SELECT id, name, included_quantity FROM modifiers WHERE modifier_group_id = $1",
+                        """
+                        SELECT id, name, included_quantity
+                        FROM modifiers
+                        WHERE modifier_group_id = $1
+                          AND removed_at IS NULL
+                        """,
                         group_id
                     )
                     existing_names = {row['name']: row['id'] for row in existing_modifiers}
@@ -641,7 +710,8 @@ async def update_modifier_group(
                                     option_type = $8,
                                     ingredient_id = $9, ingredient_quantity = $10, ingredient_unit = $11,
                                     recipe_base_type_id = $12, recipe_base_quantity = $13,
-                                    linked_product_id = $14, linked_product_quantity = $15
+                                    linked_product_id = $14, linked_product_quantity = $15,
+                                    removed_at = NULL
                                 WHERE id = $1
                                 """,
                                 mod_id,
@@ -672,12 +742,17 @@ async def update_modifier_group(
                         else:
                             await _insert_modifier(conn, group_id, modifier)
 
-                    # Soft-delete removed modifiers (preserve order history)
-                    modifiers_to_disable = existing_ids - modifiers_to_keep
-                    if modifiers_to_disable:
+                    # Remove options omitted from PUT (preserve row for order history)
+                    modifiers_to_remove = existing_ids - modifiers_to_keep
+                    if modifiers_to_remove:
                         await conn.execute(
-                            "UPDATE modifiers SET is_available = false WHERE id = ANY($1::uuid[])",
-                            list(modifiers_to_disable)
+                            """
+                            UPDATE modifiers
+                            SET is_available = false,
+                                removed_at = NOW()
+                            WHERE id = ANY($1::uuid[])
+                            """,
+                            list(modifiers_to_remove)
                         )
 
                 # 4. Registrar cambios en historial
@@ -688,6 +763,17 @@ async def update_modifier_group(
                             conn, tenant_id, group_id, group_name,
                             old_snapshot, new_snapshot, user_id
                         )
+
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MENU,
+                    action="modifier_group_updated",
+                    actor_user_id=user_id,
+                    entity_type="modifier_group",
+                    entity_id=group_id,
+                    label=group_name,
+                )
 
                 # 5. Get complete updated group
                 return await get_modifier_group_by_id(request, group_id, conn)
@@ -705,7 +791,8 @@ async def update_modifier_group(
 
 async def delete_modifier_group(
     request: Request,
-    group_id: UUID
+    group_id: UUID,
+    reason: Optional[str] = None
 ) -> dict:
     """Deletes a modifier group and its modifiers."""
     try:
@@ -730,6 +817,69 @@ async def delete_modifier_group(
 
             # Start transaction
             async with conn.transaction():
+                # Check if any modifier in this group was used in orders (tenant-scoped via verify gate)
+                has_sales = await conn.fetchval(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1 FROM order_item_modifiers oim
+                        JOIN modifiers m ON m.id = oim.modifier_id
+                        JOIN modifier_groups mg ON mg.id = m.modifier_group_id
+                        WHERE m.modifier_group_id = $1 AND mg.tenant_id = $2
+                    )
+                    """,
+                    group_id, tenant_id,
+                )
+
+                if has_sales:
+                    # Soft-delete: preserve order history, hide from sale (idempotent via COALESCE)
+                    if group_snapshot:
+                        await menu_history_service.record_modifier_group_delete(
+                            conn, tenant_id, group_id, group_name,
+                            group_snapshot, user_id
+                        )
+                    # Tenant-scoped via subquery on modifier_groups
+                    await conn.execute(
+                        """
+                        DELETE FROM product_modifier_groups
+                         WHERE modifier_group_id = $1
+                           AND modifier_group_id IN (SELECT id FROM modifier_groups WHERE tenant_id = $2)
+                        """,
+                        group_id, tenant_id,
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE modifiers
+                           SET is_available = false,
+                               removed_at = COALESCE(removed_at, NOW()),
+                               updated_at = NOW()
+                         WHERE modifier_group_id = $1
+                           AND modifier_group_id IN (SELECT id FROM modifier_groups WHERE tenant_id = $2)
+                        """,
+                        group_id, tenant_id,
+                    )
+                    await conn.execute(
+                        "UPDATE modifier_groups SET is_active = FALSE, updated_at = NOW() WHERE id = $1 AND tenant_id = $2",
+                        group_id, tenant_id,
+                    )
+                    await record_module_event(
+                        conn,
+                        tenant_id,
+                        domain=DOMAIN_MENU,
+                        action="modifier_group_deleted",
+                        actor_user_id=user_id,
+                        entity_type="modifier_group",
+                        entity_id=group_id,
+                        label=group_name,
+                        reason=reason,
+                        extra={"archived": True},
+                    )
+                    return {
+                        "success": True,
+                        "archived": True,
+                        "message": "Modifier group archived. Hidden from sale, history preserved.",
+                    }
+
+                # Hard delete when no order history
                 # 1. Registrar eliminación en historial
                 if group_snapshot:
                     await menu_history_service.record_modifier_group_delete(
@@ -737,20 +887,46 @@ async def delete_modifier_group(
                         group_snapshot, user_id
                     )
 
-                # 2. Delete product associations first
-                delete_assoc_query = "DELETE FROM product_modifier_groups WHERE modifier_group_id = $1"
-                await conn.execute(delete_assoc_query, group_id)
+                # 2. Delete product associations first (tenant-scoped)
+                await conn.execute(
+                    """
+                    DELETE FROM product_modifier_groups
+                     WHERE modifier_group_id = $1
+                       AND modifier_group_id IN (SELECT id FROM modifier_groups WHERE tenant_id = $2)
+                    """,
+                    group_id, tenant_id,
+                )
 
-                # 3. Delete modifiers (foreign key constraint)
-                delete_modifiers_query = "DELETE FROM modifiers WHERE modifier_group_id = $1"
-                await conn.execute(delete_modifiers_query, group_id)
+                # 3. Delete modifiers (FK modifier_recipes ON DELETE CASCADE, tenant-scoped)
+                await conn.execute(
+                    """
+                    DELETE FROM modifiers
+                     WHERE modifier_group_id = $1
+                       AND modifier_group_id IN (SELECT id FROM modifier_groups WHERE tenant_id = $2)
+                    """,
+                    group_id, tenant_id,
+                )
 
                 # 4. Delete group
                 delete_group_query = "DELETE FROM modifier_groups WHERE id = $1 AND tenant_id = $2"
                 await conn.execute(delete_group_query, group_id, tenant_id)
 
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MENU,
+                    action="modifier_group_deleted",
+                    actor_user_id=user_id,
+                    entity_type="modifier_group",
+                    entity_id=group_id,
+                    label=group_name,
+                    reason=reason,
+                    extra={"archived": False},
+                )
+
                 return {
                     "success": True,
+                    "archived": False,
                     "message": "Modifier group deleted successfully"
                 }
 

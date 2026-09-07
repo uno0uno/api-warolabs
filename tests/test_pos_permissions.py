@@ -9,6 +9,7 @@ Sub-task E2.3 of Epic 2 (#188). Validates that:
 Pairs with `test_billing_permissions.py` (#185 / E2.14 reference impl).
 """
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -23,6 +24,9 @@ from app.routers.tables import router as tables_router
 from app.routers.comandas import router as comandas_router
 from app.routers.pos_context import router as pos_context_router
 from app.routers.pos_products import router as pos_products_router
+from app.routers.pos_customers import router as pos_customers_router
+from app.routers.pos_orders import router as pos_orders_router
+from app.models.product import Product, ProductResponse
 
 
 # ─── Fixtures ─────────────────────────────────────────────────────────
@@ -226,3 +230,171 @@ def test_kitchen_role_denied_pos_products_under_enforce():
     assert response.status_code == 403
     assert "pos" in response.json()["detail"].lower()
     get_products.assert_not_awaited()
+
+
+def _minimal_product_response(product_id):
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    now = datetime.now(timezone.utc)
+    return ProductResponse(
+        data=Product(
+            id=product_id,
+            tenant_id=uuid4(),
+            name="Test Product",
+            price=Decimal("10000"),
+            category_id=uuid4(),
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+
+def test_cashier_role_passes_pos_product_detail_under_enforce():
+    """Cashier reaches GET /pos/products/{id} under enforce without MENU."""
+    session = _build_session(role="cashier")
+    product_id = uuid4()
+    app = FastAPI()
+    app.include_router(pos_products_router)
+
+    cashier_modules = frozenset({Module.POS})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=cashier_modules),
+         ), \
+         patch(
+             "app.routers.pos_products.get_product_by_id",
+             new=AsyncMock(return_value=_minimal_product_response(product_id)),
+         ) as get_one:
+        client = TestClient(app)
+        response = client.get(f"/pos/products/{product_id}")
+
+    assert response.status_code == 200
+    get_one.assert_awaited_once()
+    assert response.json()["data"]["name"] == "Test Product"
+
+
+def test_kitchen_role_denied_pos_product_detail_under_enforce():
+    """Kitchen role hits 403 on POS product detail because it lacks POS."""
+    session = _build_session(role="kitchen")
+    product_id = uuid4()
+    app = FastAPI()
+    app.include_router(pos_products_router)
+
+    kitchen_modules = frozenset({Module.DESPACHO})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=kitchen_modules),
+         ), \
+         patch(
+             "app.routers.pos_products.get_product_by_id",
+             new=AsyncMock(return_value=_minimal_product_response(product_id)),
+         ) as get_one:
+        client = TestClient(app)
+        response = client.get(f"/pos/products/{product_id}")
+
+    assert response.status_code == 403
+    assert "pos" in response.json()["detail"].lower()
+    get_one.assert_not_awaited()
+
+
+def test_cashier_role_passes_pos_customer_search_or_create_under_enforce():
+    """Cashier reaches POST /pos/customers/search-or-create without VENTAS."""
+    session = _build_session(role="cashier")
+    app = FastAPI()
+    app.include_router(pos_customers_router)
+
+    cashier_modules = frozenset({Module.POS})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=cashier_modules),
+         ), \
+         patch(
+             "app.routers.pos_customers.search_or_create_customer",
+             new=AsyncMock(return_value={
+                 "success": True,
+                 "data": {
+                     "id": str(uuid4()),
+                     "phone_number": "3001234567",
+                     "created_at": datetime.now(timezone.utc).isoformat(),
+                 },
+                 "is_new": False,
+             }),
+         ) as search_or_create:
+        client = TestClient(app)
+        response = client.post(
+            "/pos/customers/search-or-create",
+            json={"phone_number": "3001234567", "name": "Test"},
+        )
+
+    assert response.status_code == 200
+    search_or_create.assert_awaited_once()
+
+
+def test_cashier_role_passes_pos_order_invoice_read_under_enforce():
+    """Cashier reaches GET /pos/orders/{id}/invoice without VENTAS."""
+    session = _build_session(role="cashier")
+    order_id = uuid4()
+    app = FastAPI()
+    app.include_router(pos_orders_router)
+
+    cashier_modules = frozenset({Module.POS})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.routers.pos_orders.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=cashier_modules),
+         ), \
+         patch(
+             "app.routers.pos_orders.facturacion_service.get_order_invoice",
+             new=AsyncMock(return_value={"status": "accepted", "prefix": "FE", "invoice_number": 1}),
+         ) as get_invoice:
+        client = TestClient(app)
+        response = client.get(f"/pos/orders/{order_id}/invoice")
+
+    assert response.status_code == 200
+    get_invoice.assert_awaited_once()
+
+
+def test_kitchen_role_denied_pos_customers_under_enforce():
+    """Kitchen role hits 403 on POS customer endpoints because it lacks POS."""
+    session = _build_session(role="kitchen")
+    app = FastAPI()
+    app.include_router(pos_customers_router)
+
+    kitchen_modules = frozenset({Module.DESPACHO})
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch("app.core.middleware.require_valid_session", return_value=session), \
+         patch("app.core.permissions.get_db_connection", side_effect=_enforce_db_ctx()), \
+         patch(
+             "app.core.permissions.get_role_modules",
+             new=AsyncMock(return_value=kitchen_modules),
+         ), \
+         patch(
+             "app.routers.pos_customers.search_or_create_customer",
+             new=AsyncMock(),
+         ) as search_or_create:
+        client = TestClient(app)
+        response = client.post(
+            "/pos/customers/search-or-create",
+            json={"phone_number": "3001234567"},
+        )
+
+    assert response.status_code == 403
+    assert "pos" in response.json()["detail"].lower()
+    search_or_create.assert_not_awaited()

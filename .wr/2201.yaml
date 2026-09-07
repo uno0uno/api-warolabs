@@ -1,0 +1,22 @@
+issue: 2201
+title: "fix(billing): filter intl plans + declutter plan picker UX"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2201-intl-plans-filter
+companion_front: wr-2201-intl-plans-declutter
+closes: "uno0uno/warocol.com#2201"
+
+paths:
+  - app/routers/billing.py
+  - app/services/billing_service.py
+  - tests/test_billing_plans_price_offer.py
+
+ac:
+  - Filter facturacion-electronica from plans list when country != CO
+  - Subscribe 422 if non-CO requests FE plan
+  - Tests cover CO vs non-CO list
+
+hints:
+  tests: "venv/bin/python -m pytest tests/test_billing_plans_price_offer.py -q"

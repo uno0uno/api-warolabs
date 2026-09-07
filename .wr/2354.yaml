@@ -1,0 +1,42 @@
+# Compact Codex plan. Keep <=80 lines.
+issue: 2354
+title: "Require a cancel note and persist the bitácora event"
+repo: both
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-2354-cancel-note-bitacora
+
+paths:
+  - app/routers/orders.py
+  - app/services/orders_service.py
+  - tests/test_orders_despacho_operation_events.py
+  - tests/test_order_gl_cancel_reversal.py
+
+ac:
+  - Cancel without reason is API 400 cancel_reason_required
+  - order_status_changed stores reason and a non-null channel (mesa if table_session else mostrador)
+  - pending/completed do not require a note
+  - Stock return and GL void unchanged
+
+out_of_scope:
+  - bulk Órdenes cancel note
+  - line-item delete notes
+  - GL void memo text
+  - FE lock
+  - applying sql/20260815_operation_events_relax_checks.sql via SSH
+
+hints:
+  entry: "update_order_status + record_operation_event"
+  pattern: "orders_service.py:1603 order_status_changed; operation_events_service.reason"
+  tests: "pytest tests/test_orders_despacho_operation_events.py tests/test_order_gl_cancel_reversal.py -q"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: []
+
+next:
+  after_pr: "Companion front PR Closes uno0uno/warocol.com#2354"

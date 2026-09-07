@@ -1,0 +1,39 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 1782
+title: "Improve abastecimiento stock list: show zero-stock items and named status badges"
+repo: both
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-1782-stock-zero-badges
+
+paths:
+  - app/services/inventory_service.py
+  - app/services/ingredients_service.py
+  - app/routers/inventory.py
+  - tests/test_inventory.py
+
+ac:
+  - Include current_stock = 0 in stock list
+  - Status zero + filter zero; critical alias for negative
+  - Create tenant ingredient seeds tenant_inventory at 0
+  - Stats include zero_count; total_ingredients counts all rows
+
+out_of_scope:
+  - Front badge/i18n (companion PR on warocol.com)
+  - Destructive migrations
+
+hints:
+  entry: "_get_inventory_stock_for_tenant + create_tenant_ingredient"
+  pattern: "inventory_service CASE/WHERE; ingredients_service INSERT tenant_inventory"
+  tests: "./venv/bin/pytest tests/test_inventory.py::test_inventory_stock_includes_zero_and_filters_zero_status tests/test_inventory.py::test_inventory_stock_core_uses_explicit_tenant_without_session -q"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: []
+
+next:
+  after_pr: "merge before or with front PR #1782"

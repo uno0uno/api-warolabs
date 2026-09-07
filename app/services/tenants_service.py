@@ -6,12 +6,17 @@ from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError, AuthorizationError, ValidationError
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
+from app.core.platform_superusers import (
+    is_platform_superuser_email,
+    platform_superuser_email_list,
+)
 from app.models.auth import Tenant, UserTenantsResponse
 from app.models.tenant import (
     TenantMembersResponse, TenantMemberDetail, TenantMemberProfile,
     DeleteMemberResponse, UpdateMemberRoleResponse, PendingInvitation,
 )
 from app.core.tenant_prefs import normalize_ui_locale
+from app.services.operation_events_service import DOMAIN_EQUIPO, record_module_event
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,27 @@ _USER_TENANTS_QUERY_WITHOUT_UI_LOCALE = _USER_TENANTS_QUERY.replace(
     "",
 )
 
+_PLATFORM_ALL_TENANTS_QUERY = """
+    SELECT DISTINCT
+      t.id,
+      t.name,
+      t.slug,
+      tpp.ui_locale
+    FROM tenants t
+    LEFT JOIN tenant_public_profiles tpp ON tpp.tenant_id = t.id
+    ORDER BY t.name
+"""
+
+_PLATFORM_ALL_TENANTS_QUERY_WITHOUT_UI_LOCALE = """
+    SELECT DISTINCT
+      t.id,
+      t.name,
+      t.slug,
+      NULL AS ui_locale
+    FROM tenants t
+    ORDER BY t.name
+"""
+
 async def get_user_tenants(request: Request) -> UserTenantsResponse:
     """
     Get tenants associated with the current user from session
@@ -49,25 +75,31 @@ async def get_user_tenants(request: Request) -> UserTenantsResponse:
         
         
         async with get_db_connection(use_transaction=False) as conn:
-            # Get tenants where the user has an ACTIVE membership (#201).
+            # Platform allowlist sees every tenant; others only ACTIVE memberships (#201).
             # Terminated members keep their row with the old role; without the
             # is_active filter, the sidebar tenant switcher shows tenants the
             # user can't actually access. See docs/permissions-router-mapping.md §9.
             try:
-                tenant_rows = await conn.fetch(
-                    _USER_TENANTS_QUERY,
-                    user_id,
-                    list(LEGACY_INTERNAL_TEAM_ROLES),
-                )
+                if is_platform_superuser_email(session_context.email):
+                    tenant_rows = await conn.fetch(_PLATFORM_ALL_TENANTS_QUERY)
+                else:
+                    tenant_rows = await conn.fetch(
+                        _USER_TENANTS_QUERY,
+                        user_id,
+                        list(LEGACY_INTERNAL_TEAM_ROLES),
+                    )
             except asyncpg.UndefinedColumnError:
                 logger.warning(
                     "tenant_public_profiles.ui_locale missing; returning es until migration 100"
                 )
-                tenant_rows = await conn.fetch(
-                    _USER_TENANTS_QUERY_WITHOUT_UI_LOCALE,
-                    user_id,
-                    list(LEGACY_INTERNAL_TEAM_ROLES),
-                )
+                if is_platform_superuser_email(session_context.email):
+                    tenant_rows = await conn.fetch(_PLATFORM_ALL_TENANTS_QUERY_WITHOUT_UI_LOCALE)
+                else:
+                    tenant_rows = await conn.fetch(
+                        _USER_TENANTS_QUERY_WITHOUT_UI_LOCALE,
+                        user_id,
+                        list(LEGACY_INTERNAL_TEAM_ROLES),
+                    )
             
             
             # Convert to Tenant models
@@ -109,6 +141,8 @@ async def get_tenant_members(request: Request) -> TenantMembersResponse:
         async with get_db_connection() as conn:
             # Get tenant members with their profile information
             # Exclude 'customer' role - those are POS clients, not team members
+            # Exclude PLATFORM_SUPERUSER_EMAILS so operators never appear in Equipo
+            allowlist = platform_superuser_email_list()
             query = """
                 SELECT
                     tm.id,
@@ -124,6 +158,10 @@ async def get_tenant_members(request: Request) -> TenantMembersResponse:
                 INNER JOIN profile p ON tm.user_id = p.id
                 WHERE tm.tenant_id = $1
                   AND tm.role IN ('superuser', 'admin', 'employee', 'member', 'promotor')
+                  AND (
+                    cardinality($2::text[]) = 0
+                    OR lower(trim(p.email)) <> ALL($2::text[])
+                  )
                 ORDER BY
                     CASE tm.role
                         WHEN 'superuser' THEN 1
@@ -136,7 +174,7 @@ async def get_tenant_members(request: Request) -> TenantMembersResponse:
                     p.name, p.user_name
             """
 
-            member_rows = await conn.fetch(query, current_tenant_id)
+            member_rows = await conn.fetch(query, current_tenant_id, allowlist)
 
             # Convert to TenantMemberDetail models
             members = []
@@ -168,9 +206,13 @@ async def get_tenant_members(request: Request) -> TenantMembersResponse:
                 LEFT JOIN profile p ON ti.user_id = p.id
                 LEFT JOIN profile inviter ON ti.invited_by = inviter.id
                 WHERE ti.tenant_id = $1 AND ti.status = 'pending'
+                  AND (
+                    cardinality($2::text[]) = 0
+                    OR lower(trim(ti.email)) <> ALL($2::text[])
+                  )
                 ORDER BY ti.expires_at DESC
             """
-            invitation_rows = await conn.fetch(invitations_query, current_tenant_id)
+            invitation_rows = await conn.fetch(invitations_query, current_tenant_id, allowlist)
 
             pending_invitations = [
                 PendingInvitation(
@@ -241,6 +283,16 @@ async def delete_tenant_member(request: Request, member_id: str) -> DeleteMember
             )
 
             member_name = member_info['name'] or member_info['email']
+            await record_module_event(
+                conn,
+                current_tenant_id,
+                domain=DOMAIN_EQUIPO,
+                action="member_deleted",
+                actor_user_id=current_user_id,
+                entity_type="member",
+                entity_id=member_id,
+                label=member_name,
+            )
             logger.info(f"🗑️ Member {member_name} removed from tenant {current_tenant_id}")
 
             return DeleteMemberResponse(
@@ -360,6 +412,17 @@ async def update_member_role(request: Request, member_id: str, new_role: str) ->
 
             member_name = member_info['name'] or member_info['email']
             old_role = member_info['role']
+            await record_module_event(
+                conn,
+                current_tenant_id,
+                domain=DOMAIN_EQUIPO,
+                action="member_role_updated",
+                actor_user_id=current_user_id,
+                entity_type="member",
+                entity_id=member_id,
+                label=member_name,
+                extra={"role": new_role, "previous_role": old_role},
+            )
             logger.info(f"🔄 Role updated for {member_name}: {old_role} → {new_role}")
 
             return UpdateMemberRoleResponse(

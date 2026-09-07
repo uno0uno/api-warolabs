@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request, Response, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, Query
 from typing import Optional
 from uuid import UUID
 from app.core.permissions import Module, require_module
@@ -39,11 +39,12 @@ async def get_modifier_groups(
     limit: int = Query(50, ge=1, le=250),
     search: Optional[str] = Query(None),
     product_id: Optional[UUID] = Query(None),
-    is_required: Optional[bool] = Query(None)
+    is_required: Optional[bool] = Query(None),
+    estado: Optional[str] = Query(None, description="Filter by estado: activo/archivado/todos"),
 ):
     """Get list of modifier groups with pagination and filters"""
     return await modifiers_service.get_modifier_groups_list(
-        request, response, page, limit, search, product_id, is_required
+        request, response, page, limit, search, product_id, is_required, estado
     )
 
 
@@ -66,7 +67,11 @@ async def update_modifier_group(
 @router.delete("/{group_id}", dependencies=[Depends(require_module(Module.MENU))])
 async def delete_modifier_group(
     request: Request,
-    group_id: UUID
+    group_id: UUID,
+    payload: dict = Body(default={}),
 ):
-    """Delete a modifier group and its modifiers"""
-    return await modifiers_service.delete_modifier_group(request, group_id)
+    """Delete a modifier group and its modifiers. Requires `reason` (Bitácora audit)."""
+    reason = (payload or {}).get("reason", "").strip() if isinstance(payload, dict) else ""
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason is required")
+    return await modifiers_service.delete_modifier_group(request, group_id, reason=reason)

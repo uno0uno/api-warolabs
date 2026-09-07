@@ -27,6 +27,7 @@
 | description | text |  | false |  |  |  |
 | updated_at | timestamp with time zone | now() | true |  |  |  |
 | tenant_id | uuid |  | true |  | [public.tenants](public.tenants.md) |  |
+| pillar | text |  | true |  |  | Editorial pillar id from content graph (e.g. software-para-restaurantes) |
 
 ## Constraints
 
@@ -46,6 +47,7 @@
 | articles_pkey | CREATE UNIQUE INDEX articles_pkey ON public.articles USING btree (id) |
 | articles_slug_key | CREATE UNIQUE INDEX articles_slug_key ON public.articles USING btree (slug) |
 | idx_articles_tenant_id | CREATE INDEX idx_articles_tenant_id ON public.articles USING btree (tenant_id) |
+| idx_articles_tenant_pillar | CREATE INDEX idx_articles_tenant_pillar ON public.articles USING btree (tenant_id, pillar) WHERE ((published = true) AND (is_active = true)) |
 
 ## Relations
 

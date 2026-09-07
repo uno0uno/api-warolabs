@@ -18,13 +18,21 @@ from app.core.localization import (
     resolve_tenant_locale_settings,
 )
 from app.services.aws_ses_service import ses_service
-from app.services.waros_service import evaluate_and_award
+from app.services.waros_service import evaluate_and_award, revoke_waros_awarded_for_order
+from app.services.customer_wallet_service import restore_wallet_for_cancelled_order
+from app.services.table_session_advances_service import (
+    apply_session_advances_for_close,
+    get_available_advance_total,
+)
+from app.services.operation_events_service import DOMAIN_VENTAS, record_operation_event
 from app.services.cierre_service import (
     assert_order_not_in_closed_monthly_period,
     _get_tenant_tax_config,
     _post_order_cogs_gl_entry,
     _post_order_gl_entry,
+    _void_order_gl_entries,
 )
+from app.services.tip_tax_service import compute_tip_tax_amount, normalize_tip_payload
 from app.services.account_role_service import (
     AccountRole,
     MissingAccountRoleError,
@@ -284,33 +292,9 @@ def _compute_tax_breakdown(
 
     Returns: (standard_tax: float, liquor_tax: float, standard_tax_label: str)
     """
-    std_subtotal = sum(float(r['subtotal']) for r in items_rows if r['tax_category'] == 'standard')
-    liq_subtotal = sum(float(r['subtotal']) for r in items_rows if r['tax_category'] == 'liquor')
+    from app.services.hospitality_tax_engine import compute_category_breakdown
 
-    standard_tax = 0.0
-    liquor_tax = 0.0
-    standard_tax_label = "Impuesto"
-
-    if tax_config.get('inc_applicable') and std_subtotal > 0:
-        rate = float(tax_config['inc_rate'])
-        if tax_config.get('inc_included_in_price'):
-            standard_tax = round(std_subtotal * rate / (1 + rate))
-        else:
-            standard_tax = round(std_subtotal * rate)
-        standard_tax_label = f"INC {round(rate * 100)}%"
-    elif tax_config.get('iva_applicable') and std_subtotal > 0:
-        rate = float(tax_config['iva_rate'])
-        if tax_config.get('iva_included_in_price'):
-            standard_tax = round(std_subtotal * rate / (1 + rate))
-        else:
-            standard_tax = round(std_subtotal * rate)
-        standard_tax_label = f"IVA {round(rate * 100)}%"
-
-    if tax_config.get('liquor_tax_applicable') and liq_subtotal > 0:
-        liq_rate = float(tax_config.get('liquor_tax_rate') or 0.05)
-        liquor_tax = round(liq_subtotal * liq_rate)
-
-    return float(standard_tax), float(liquor_tax), standard_tax_label
+    return compute_category_breakdown(items_rows, tax_config)
 
 
 def _row_get(row: Any, key: str, default: Any = None) -> Any:
@@ -344,14 +328,33 @@ def _tax_detail_rows(
     standard_tax: float,
     liquor_tax: float,
     standard_tax_label: str,
+    tax_config: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    std_base = sum(float(r["subtotal"]) for r in items_rows if r["tax_category"] == "standard")
-    liq_base = sum(float(r["subtotal"]) for r in items_rows if r["tax_category"] == "liquor")
+    from app.services.hospitality_tax_engine import resolve_effective_tax_category
+
+    def _effective(row: Any) -> str:
+        if tax_config is None:
+            return str(_row_get(row, "tax_category") or "standard")
+        return resolve_effective_tax_category(
+            tax_config,
+            category_id=_row_get(row, "category_id"),
+            tax_resolution=_row_get(row, "tax_resolution") or "inherit",
+            tax_line_key=_row_get(row, "tax_line_key"),
+            tax_category=_row_get(row, "tax_category") or "standard",
+        )
+
+    std_base = sum(float(r["subtotal"]) for r in items_rows if _effective(r) == "standard")
+    liq_base = sum(float(r["subtotal"]) for r in items_rows if _effective(r) == "liquor")
     rows: List[Dict[str, Any]] = []
     if standard_tax > 0:
         rows.append({"label": standard_tax_label, "base": std_base, "amount": standard_tax})
     if liquor_tax > 0:
-        rows.append({"label": "IVA licores 5%", "base": liq_base, "amount": liquor_tax})
+        liquor_label = "IVA licores 5%"
+        if tax_config is not None:
+            from app.services.hospitality_tax_engine import liquor_tax_label_for_config
+
+            liquor_label = liquor_tax_label_for_config(tax_config)
+        rows.append({"label": liquor_label, "base": liq_base, "amount": liquor_tax})
     return rows
 
 
@@ -383,6 +386,48 @@ def _build_invoice_presentation(
     )
 
 
+_ORDER_SOURCE_FILTERS = frozenset({"pos", "mesa", "barra", "delivery"})
+_ORDER_PAYMENT_STATUS_FILTERS = frozenset({"paid", "credit", "partial", "unpaid"})
+
+
+def _append_orders_source_payment_filters(
+    where_conditions: List[str],
+    params: List[Any],
+    param_count: int,
+    *,
+    source: Optional[str] = None,
+    delivery_only: Optional[bool] = None,
+    payment_status: Optional[str] = None,
+) -> int:
+    """Append origin + payment_status predicates. Requires t_meta join for mesa/barra."""
+    normalized_source = (source or "").strip().lower()
+    if normalized_source not in _ORDER_SOURCE_FILTERS and delivery_only:
+        normalized_source = "delivery"
+
+    if normalized_source == "delivery":
+        where_conditions.append("o.delivery_address_id IS NOT NULL")
+    elif normalized_source == "barra":
+        where_conditions.append("o.table_session_id IS NOT NULL AND COALESCE(t_meta.is_bar, FALSE) IS TRUE")
+    elif normalized_source == "mesa":
+        where_conditions.append(
+            "o.table_session_id IS NOT NULL AND COALESCE(t_meta.is_bar, FALSE) IS NOT TRUE"
+        )
+    elif normalized_source == "pos":
+        where_conditions.append("o.table_session_id IS NULL AND o.delivery_address_id IS NULL")
+
+    normalized_payment = (payment_status or "").strip().lower()
+    if normalized_payment == "unpaid":
+        where_conditions.append(
+            "(o.payment_status IS NULL OR o.payment_status IN ('unpaid', 'pending'))"
+        )
+    elif normalized_payment in _ORDER_PAYMENT_STATUS_FILTERS:
+        param_count += 1
+        where_conditions.append(f"o.payment_status = ${param_count}")
+        params.append(normalized_payment)
+
+    return param_count
+
+
 async def get_orders_list(
     request: Request,
     limit: int = 50,
@@ -397,6 +442,8 @@ async def get_orders_list(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     delivery_only: Optional[bool] = None,
+    source: Optional[str] = None,
+    payment_status: Optional[str] = None,
 ) -> dict:
     """
     Get list of POS orders with filters and pagination
@@ -462,9 +509,14 @@ async def get_orders_list(
                 timezone_name,
             )
 
-            # Delivery-only filter: composes with POS_LIKE_FILTER, uses partial index idx_orders_delivery_address_id
-            if delivery_only:
-                where_conditions.append("o.delivery_address_id IS NOT NULL")
+            param_count = _append_orders_source_payment_filters(
+                where_conditions,
+                params,
+                param_count,
+                source=source,
+                delivery_only=delivery_only,
+                payment_status=payment_status,
+            )
 
             where_clause = " AND ".join(where_conditions)
 
@@ -512,6 +564,10 @@ async def get_orders_list(
                     o.scheduled_time,
                     o.delivery_instructions,
                     t_meta.is_bar as is_bar,
+                    t_meta.name as table_name,
+                    ts_meta.covers as table_covers,
+                    ts_meta.capacity_snapshot as table_capacity_snapshot,
+                    ts_meta.custom_label as table_custom_label,
                     p.id as customer_id,
                     p.name as customer_name,
                     p.phone_number as customer_phone,
@@ -582,7 +638,11 @@ async def get_orders_list(
                     "invoice_number": row['invoice_number'],
                     "invoice_status": row['invoice_status'],
                     "items_count": row['items_count'],
-                    "split_payments_count": int(row['split_payments_count'])
+                    "split_payments_count": int(row['split_payments_count']),
+                    "table_name": row.get("table_name"),
+                    "table_covers": int(row["table_covers"]) if row.get("table_covers") is not None else None,
+                    "table_capacity_snapshot": int(row["table_capacity_snapshot"]) if row.get("table_capacity_snapshot") is not None else None,
+                    "table_custom_label": row.get("table_custom_label"),
                 }
                 for row in orders_rows
             ]
@@ -832,12 +892,20 @@ async def get_order_by_id(
                     o.tip_source,
                     o.tip_tax_amount,
                     t_meta2.is_bar as is_bar,
+                    t_meta2.name as table_name,
+                    ts_meta2.covers as table_covers,
+                    ts_meta2.capacity_snapshot as table_capacity_snapshot,
+                    ts_meta2.custom_label as table_custom_label,
                     o.served_by_member_id,
                     p_served.name as served_by_member_name,
                     p.id as customer_id,
                     p.name as customer_name,
                     p.phone_number as customer_phone,
                     p.email as customer_email,
+                    p.fiscal_id_type as customer_fiscal_id_type,
+                    p.fiscal_id as customer_fiscal_id,
+                    p.fiscal_business_name as customer_fiscal_business_name,
+                    p.fiscal_email as customer_fiscal_email,
                     -- Hydrated delivery address (NULL if not a delivery, or address was soft-deleted)
                     ap.address_line1   AS addr_line1,
                     ap.address_line2   AS addr_line2,
@@ -876,7 +944,7 @@ async def get_order_by_id(
                 """
                 SELECT id, amount, payment_method, payment_method_id, paid_at
                 FROM order_payments
-                WHERE order_id = $1
+                WHERE order_id = $1 AND voided_at IS NULL
                 ORDER BY paid_at ASC
                 """,
                 order_id
@@ -896,10 +964,17 @@ async def get_order_by_id(
             _std_tax = 0.0
             _liq_tax = 0.0
             _tax_label = "Impuesto"
+            _liq_label = "IVA licores 5%"
             try:
+                from app.services.hospitality_tax_engine import liquor_tax_label_for_config
+
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                _liq_label = liquor_tax_label_for_config(tax_config)
                 items_rows = await conn.fetch(
                     """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
+                              COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                              p.tax_line_key AS tax_line_key,
+                              p.category_id::text AS category_id,
                               COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal
                        FROM order_items oi
                        JOIN product p ON p.id = oi.product_id
@@ -960,6 +1035,15 @@ async def get_order_by_id(
                     if advance_direct_row else 0.0
                 )
             _advance_applied = min(_settlement_amount, _advance_applied)
+            _available_advance = 0.0
+            if order_row["table_session_id"] and order_row["status"] != "completed":
+                _available_advance = float(
+                    await get_available_advance_total(
+                        conn,
+                        tenant_id,
+                        order_row["table_session_id"],
+                    )
+                )
             _charged_amount = None
             if _tip_amount > 0 or _advance_applied > 0:
                 _charged_amount = max(
@@ -1001,6 +1085,7 @@ async def get_order_by_id(
                     "discount_type": order_row['discount_type'],
                     "discount_value": float(order_row['discount_value']) if order_row['discount_value'] is not None else None,
                     "pos_cart_id": str(order_row['pos_cart_id']) if order_row['pos_cart_id'] else None,
+                    "table_session_id": str(order_row['table_session_id']) if order_row['table_session_id'] else None,
                     "source": (
                         "barra" if order_row['table_session_id'] and order_row['is_bar'] else
                         "mesa" if order_row['table_session_id'] else
@@ -1016,19 +1101,29 @@ async def get_order_by_id(
                         "name": order_row['customer_name'],
                         "phone": order_row['customer_phone'],
                         "email": order_row['customer_email'],
+                        "fiscal_id_type": order_row.get('customer_fiscal_id_type'),
+                        "fiscal_id": order_row.get('customer_fiscal_id'),
+                        "fiscal_business_name": order_row.get('customer_fiscal_business_name'),
+                        "fiscal_email": order_row.get('customer_fiscal_email'),
                     },
                     "served_by_member_id": str(order_row['served_by_member_id']) if order_row['served_by_member_id'] else None,
                     "served_by_member_name": order_row['served_by_member_name'],
+                    "table_name": order_row.get("table_name"),
+                    "table_covers": int(order_row["table_covers"]) if order_row.get("table_covers") is not None else None,
+                    "table_capacity_snapshot": int(order_row["table_capacity_snapshot"]) if order_row.get("table_capacity_snapshot") is not None else None,
+                    "table_custom_label": order_row.get("table_custom_label"),
                     "tip_amount": _tip_amount,
                     "tip_source": order_row['tip_source'] or 'none',
                     "tip_tax_amount": _tip_tax_amount,
                     "advance_applied": _advance_applied,
+                    "available_advance": _available_advance,
                     "charged_amount": _charged_amount,
                     "items_count": order_row['items_count'],
                     "split_payments": split_payments,
                     "standard_tax": _std_tax,
                     "liquor_tax": _liq_tax,
                     "standard_tax_label": _tax_label,
+                    "liquor_tax_label": _liq_label,
                     "promo_savings": _promo_summary["promo_savings"],
                     "promo_breakdown": _promo_summary["promo_breakdown"],
                     "waro_redemption_summary": _waro_summary,
@@ -1091,18 +1186,24 @@ async def bulk_update_order_status(
             # Fetch current state of all orders before updating
             order_rows = await conn.fetch(
                 """SELECT id, status, order_number, table_session_id, pos_cart_id,
-                          payment_status, total_amount
+                          online_cart_id, payment_status, total_amount
                    FROM orders WHERE id = ANY($1) AND tenant_id = $2""",
                 ids, tenant_id
             )
 
-            # Block completed → pending for POS orders in bulk
+            if status == "cancelled":
+                for row in order_rows:
+                    await assert_order_invoice_allows_mutation(conn, tenant_id, row["id"])
+                    if row["status"] == "completed":
+                        await assert_order_has_no_credit_payments(conn, row["id"])
+
             if status == 'pending':
-                blocked = [str(r['id']) for r in order_rows if r['status'] == 'completed' and r['pos_cart_id']]
+                blocked = [str(r['id']) for r in order_rows if r['status'] == 'completed']
                 if blocked:
                     raise APIError(
-                        "Las órdenes completadas del POS no pueden volver a pendiente. Use 'Cancelar' en su lugar.",
-                        status_code=400
+                        "Las órdenes completadas no pueden volver a pendiente. Use 'Cancelar' en su lugar.",
+                        status_code=400,
+                        details={"code": "completed_cannot_return_to_pending"},
                     )
 
             from uuid import UUID as _UUID2
@@ -1198,11 +1299,50 @@ async def bulk_update_order_status(
 
                 # Stock
                 if old_status != 'completed' and status == 'completed':
-                    if not (row['pos_cart_id'] and old_status == 'pending'):
+                    inventory_already_consumed = await _order_inventory_already_consumed_before_completion(
+                        conn,
+                        row=row,
+                        order_id=order_id_row,
+                        tenant_id=tenant_id,
+                        old_status=old_status,
+                    )
+                    if not inventory_already_consumed:
                         await _deduct_stock_for_status_update(conn, order_id_row, tenant_id, user_id, order_number)
                     newly_completed_order_ids.append(order_id_row)
                 elif old_status == 'completed' and status in ('cancelled', 'pending'):
+                    if status == 'cancelled':
+                        await restore_wallet_for_cancelled_order(
+                            conn,
+                            tenant_id,
+                            order_id_row,
+                            user_id,
+                            notes=f"Cancelación venta #{order_number}",
+                        )
+                        await revoke_waros_awarded_for_order(conn, order_id_row, tenant_id)
                     await _return_stock_for_order_cancellation(conn, order_id_row, tenant_id, user_id, order_number)
+                    if status == 'cancelled':
+                        try:
+                            await _void_order_gl_entries(
+                                conn,
+                                tenant_id,
+                                order_id_row,
+                                reason=f"Cancelación venta #{order_number}",
+                            )
+                        except APIError:
+                            raise
+                        except Exception as gl_exc:
+                            logger.error(f"GL void failed for bulk order cancel {order_id_row}: {gl_exc}")
+                            raise APIError(
+                                "No se pudo reversar el asiento contable de la venta. "
+                                "Intenta de nuevo o contacta a soporte.",
+                                status_code=500,
+                                details={"code": "sale_gl_void_failed"},
+                            )
+                elif old_status != 'completed' and status == 'cancelled':
+                    # warocol.com#2567 — pending/preparing cancel after on-command deduct
+                    await _return_stock_for_order_cancellation(
+                        conn, order_id_row, tenant_id, user_id, order_number
+                    )
 
                 # If cancelling a credit order, clear payment_status so it leaves cartera
                 if status == 'cancelled' and row['payment_status'] in ('credit', 'partial'):
@@ -1275,6 +1415,330 @@ async def bulk_update_order_status(
         raise APIError(f"Error al actualizar órdenes: {str(e)}", status_code=500)
 
 
+async def assert_order_invoice_allows_mutation(conn, tenant_id, order_id) -> None:
+    """Raise 409 when the latest electronic invoice is pending or accepted."""
+    status = await conn.fetchval(
+        """
+        SELECT status
+        FROM electronic_invoices
+        WHERE order_id = $1 AND tenant_id = $2
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        order_id,
+        tenant_id,
+    )
+    if status in ("pending", "accepted"):
+        raise APIError(
+            "No se puede modificar una venta con factura electrónica pendiente o aceptada. "
+            "Use una nota crédito.",
+            status_code=409,
+            details={"code": "electronic_invoice_blocks_mutation"},
+        )
+
+
+async def order_has_outstanding_deferred_bar_delivery(
+    conn,
+    tenant_id,
+    order_id,
+) -> bool:
+    """True when a bar delivery order still owes payment at POS checkout."""
+    row = await conn.fetchrow(
+        """
+        SELECT
+            o.total_amount,
+            o.tip_amount,
+            o.tip_tax_amount,
+            (
+                SELECT COALESCE(SUM(op.amount), 0)
+                FROM order_payments op
+                WHERE op.order_id = o.id AND op.voided_at IS NULL
+            ) AS paid_total
+        FROM orders o
+        INNER JOIN table_sessions ts ON ts.id = o.table_session_id
+        INNER JOIN tables t ON t.id = ts.table_id AND t.is_bar = TRUE
+        WHERE o.id = $1
+          AND o.tenant_id = $2
+          AND o.delivery_address_id IS NOT NULL
+        """,
+        order_id,
+        tenant_id,
+    )
+    if not row:
+        return False
+    amount_due = round(
+        float(row["total_amount"] or 0)
+        + float(row["tip_amount"] or 0)
+        + float(row["tip_tax_amount"] or 0),
+        2,
+    )
+    paid_total = round(float(row["paid_total"] or 0), 2)
+    return paid_total < amount_due - 0.01
+
+
+async def assert_order_has_no_credit_payments(conn, order_id) -> None:
+    """Raise 409 when the sale already has cartera abonos."""
+    count = await conn.fetchval(
+        "SELECT COUNT(*) FROM credit_payments WHERE order_id = $1",
+        order_id,
+    )
+    if count:
+        raise APIError(
+            "No se puede cancelar una venta con abonos en cartera. "
+            "El cobro ya está registrado.",
+            status_code=409,
+            details={"code": "sale_has_credit_payments"},
+        )
+
+
+def _assert_not_completed_to_pending(old_status: str, new_status: str) -> None:
+    if old_status == "completed" and new_status == "pending":
+        raise APIError(
+            "Las órdenes completadas no pueden volver a pendiente. Use 'Cancelar' en su lugar.",
+            status_code=400,
+            details={"code": "completed_cannot_return_to_pending"},
+        )
+
+
+def _assert_order_status_allows_line_edit(_status: Optional[str]) -> None:
+    raise APIError(
+        "Las líneas de una venta no se editan en Ventas. Usa el punto de venta.",
+        status_code=409,
+        details={"code": "sale_not_editable"},
+    )
+
+
+def _ventas_event_channel(row) -> str:
+    """Bitácora channel. Never null while prod still has NOT NULL on tenant_operation_events.channel."""
+    if row.get("table_session_id"):
+        return "mesa"
+    return "mostrador"
+
+
+def _row_numeric(row, key: str) -> float:
+    try:
+        value = row[key]
+    except (KeyError, IndexError):
+        return 0.0
+    return float(value or 0)
+
+
+def _complete_manual_discount(
+    *,
+    current_total: float,
+    current_discount_amount: float,
+    discount_type: Optional[str],
+    discount_value: Optional[float],
+) -> tuple[Optional[str], Optional[float], Optional[float], Optional[float]]:
+    """Resolve order-level discount for pending complete.
+
+    Omit / zero returns Nones (leave columns unchanged). Integer COP like POS
+    `_manual_discount_amount`. Base is current total plus any existing order-level
+    discount so a new discount replaces rather than stacking.
+    """
+    if not discount_type or discount_value is None or discount_value <= 0:
+        return None, None, None, None
+    if discount_type not in ("percent", "fixed"):
+        raise APIError(
+            "discount_type debe ser 'percent' o 'fixed'",
+            status_code=400,
+            details={"code": "discount_type_invalid"},
+        )
+    if discount_type == "percent" and discount_value > 100:
+        raise APIError(
+            "El descuento porcentual no puede superar el 100%",
+            status_code=400,
+            details={"code": "discount_percent_max"},
+        )
+    base = float(current_total or 0) + float(current_discount_amount or 0)
+    if discount_type == "percent":
+        amount = float(round(base * discount_value / 100))
+    else:
+        if round(discount_value) > round(base):
+            raise APIError(
+                "El descuento no puede superar el subtotal",
+                status_code=400,
+                details={"code": "discount_exceeds_total"},
+            )
+        amount = float(min(round(discount_value), round(base)))
+    new_total = float(max(0, round(base) - round(amount)))
+    return discount_type, float(discount_value), amount, new_total
+
+
+async def _payment_splits_for_gl(conn, order_id: UUID) -> List[Dict[str, Any]]:
+    rows = await conn.fetch(
+        """
+        SELECT amount, payment_method, payment_method_id
+        FROM order_payments
+        WHERE order_id = $1 AND voided_at IS NULL
+        ORDER BY paid_at ASC, id ASC
+        """,
+        order_id,
+    )
+    return [
+        {
+            "amount": Decimal(str(row["amount"])),
+            "payment_method": row["payment_method"],
+            "payment_method_id": row["payment_method_id"],
+        }
+        for row in rows
+    ]
+
+
+async def _insert_complete_tenders(
+    conn,
+    *,
+    order_id: UUID,
+    tenant_id: UUID,
+    user_id,
+    customer_id,
+    payments: List[dict],
+) -> None:
+    from app.services.customer_wallet_service import apply_wallet_for_order
+
+    for payment in payments:
+        method = payment["payment_method"]
+        amount = round(float(payment["amount"]), 2)
+        if amount <= 0:
+            raise APIError("Cada pago debe ser mayor a 0", status_code=400)
+        pmid = payment.get("payment_method_id")
+        cash = payment.get("cash_received")
+        if cash is not None and method != "cash":
+            raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
+        if method == "cash" and cash is not None and Decimal(str(cash)) < Decimal(str(amount)):
+            raise APIError(
+                f"Efectivo recibido ({cash}) debe ser mayor o igual al monto a cobrar ({amount})",
+                status_code=400,
+            )
+        if method == "customer_wallet" and not customer_id:
+            raise APIError(
+                "La billetera requiere un cliente identificado",
+                status_code=400,
+                details={"code": "customer_required"},
+            )
+        if method == "customer_wallet":
+            from app.services.customer_wallet_service import assert_wallet_customer_identified
+            await assert_wallet_customer_identified(conn, customer_id)
+        payment_row = await conn.fetchrow(
+            """
+            INSERT INTO order_payments
+                (order_id, tenant_id, amount, payment_method, payment_method_id, created_by_user_id, cash_received)
+            VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, $7)
+            RETURNING id
+            """,
+            order_id,
+            tenant_id,
+            amount,
+            method,
+            str(pmid) if pmid else None,
+            str(user_id) if user_id else None,
+            cash,
+        )
+        if method == "customer_wallet":
+            await apply_wallet_for_order(
+                conn,
+                customer_id,
+                tenant_id,
+                Decimal(str(amount)),
+                order_id,
+                user_id,
+                payment_row["id"],
+            )
+
+
+async def _apply_complete_waro_redemption(
+    conn,
+    *,
+    tenant_id,
+    customer_id,
+    order_id: UUID,
+    product_total: float,
+    discount_amount: float,
+    waros_to_redeem: Optional[int],
+    waro_reward_id: Optional[UUID],
+) -> float:
+    if not waros_to_redeem and not waro_reward_id:
+        return product_total
+    from fastapi import HTTPException as FastAPIHTTPException
+    from app.services.waros_service import (
+        apply_checkout_waro_redemption,
+        settle_waro_redemption,
+    )
+
+    item_rows = await conn.fetch(
+        """
+        SELECT id, product_id, quantity,
+               COALESCE(net_total, subtotal, 0) AS net_total,
+               COALESCE(subtotal, 0) AS subtotal
+        FROM order_items
+        WHERE order_id = $1
+        """,
+        order_id,
+    )
+    base_after_promos = product_total + float(discount_amount or 0)
+    checkout_eval = {
+        "subtotal": base_after_promos,
+        "subtotal_after_promos": base_after_promos,
+        "manual_discount_amount": float(discount_amount or 0),
+        "promo_savings": 0,
+        "total_amount": float(product_total),
+        "lines": [
+            {
+                "id": str(item["id"]),
+                "product_id": str(item["product_id"]),
+                "quantity": float(item["quantity"] or 1),
+                "subtotal": float(item["subtotal"] or 0),
+                "net_total": float(item["net_total"] or 0),
+            }
+            for item in item_rows
+        ],
+    }
+    try:
+        checkout_eval = await apply_checkout_waro_redemption(
+            conn,
+            tenant_id,
+            customer_id,
+            checkout_eval,
+            waros_to_redeem=waros_to_redeem,
+            waro_reward_id=waro_reward_id,
+        )
+    except FastAPIHTTPException as waro_exc:
+        raise APIError(str(waro_exc.detail), status_code=waro_exc.status_code)
+    preview = checkout_eval.pop("_waro_redemption_preview", None)
+    new_total = float(checkout_eval.get("total_amount") or product_total)
+    if preview and customer_id:
+        try:
+            await settle_waro_redemption(conn, tenant_id, customer_id, order_id, preview)
+        except FastAPIHTTPException as waro_exc:
+            raise APIError(str(waro_exc.detail), status_code=waro_exc.status_code)
+    return new_total
+
+
+_WOMPI_METHOD_NAME = "wompi"
+
+
+def _looks_like_wompi_slug_or_name(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() == _WOMPI_METHOD_NAME
+
+
+async def _payment_tender_is_wompi(
+    conn,
+    tenant_id: UUID,
+    payment_method: Optional[str],
+    payment_method_id: Optional[UUID],
+) -> bool:
+    if _looks_like_wompi_slug_or_name(payment_method):
+        return True
+    if not payment_method_id:
+        return False
+    name = await conn.fetchval(
+        "SELECT name FROM payment_methods WHERE id = $1 AND tenant_id = $2",
+        payment_method_id,
+        tenant_id,
+    )
+    return _looks_like_wompi_slug_or_name(name)
+
+
 async def update_order_status(
     request: Request,
     order_id: UUID,
@@ -1282,6 +1746,22 @@ async def update_order_status(
     payment_method: Optional[str] = None,
     payment_method_id: Optional[str] = None,
     customer_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    cash_received: Optional[float] = None,
+    credit_due_date: Optional[date] = None,
+    served_by_member_id: Optional[UUID] = None,
+    discount_type: Optional[str] = None,
+    discount_value: Optional[float] = None,
+    tip_amount: Optional[float] = None,
+    tip_source: Optional[str] = None,
+    tip_taxable: Optional[bool] = None,
+    payments: Optional[List[dict]] = None,
+    split_mode: bool = False,
+    split_first_amount: float = 0.0,
+    split_first_cash_received: Optional[float] = None,
+    waros_to_redeem: Optional[int] = None,
+    waro_reward_id: Optional[UUID] = None,
+    wompi_collection: bool = False,
 ) -> dict:
     """Update the status of an order (mesa orders only)."""
     allowed = {"completed", "cancelled", "pending", "preparing"}
@@ -1302,7 +1782,8 @@ async def update_order_status(
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             row = await conn.fetchrow(
                 """SELECT id, status, order_number, table_session_id, pos_cart_id,
-                          payment_status, order_date, total_amount, customer_id
+                          online_cart_id, payment_status, order_date, total_amount,
+                          customer_id, discount_amount
                    FROM orders WHERE id = $1 AND tenant_id = $2""",
                 order_id, tenant_id
             )
@@ -1311,16 +1792,27 @@ async def update_order_status(
 
             # Guard: block mutation if order falls in a closed monthly accounting period (#362)
             await assert_order_not_in_closed_monthly_period(conn, tenant_id, row['order_date'])
+            skip_invoice_guard = (
+                status == "completed"
+                and await order_has_outstanding_deferred_bar_delivery(conn, tenant_id, order_id)
+            )
+            if not skip_invoice_guard:
+                await assert_order_invoice_allows_mutation(conn, tenant_id, order_id)
 
             old_status = row['status']
             order_number = int(row['order_number'])
 
-            # Block completed → pending for POS orders (no active table session to restore)
-            if old_status == 'completed' and status == 'pending' and row['pos_cart_id']:
+            _assert_not_completed_to_pending(old_status, status)
+
+            reason_text = (reason or "").strip()
+            if status == "cancelled" and not reason_text:
                 raise APIError(
-                    "Las órdenes completadas del POS no pueden volver a pendiente. Use 'Cancelar' en su lugar.",
-                    status_code=400
+                    "Indica el motivo de la cancelación.",
+                    status_code=400,
+                    details={"code": "cancel_reason_required"},
                 )
+            if status == "cancelled" and old_status == "completed":
+                await assert_order_has_no_credit_payments(conn, order_id)
 
             try:
                 pmid = UUID(payment_method_id) if payment_method_id else None
@@ -1345,6 +1837,159 @@ async def update_order_status(
                     status_code=400,
                     details={"code": "payment_method_required"},
                 )
+
+            discount_type_value = None
+            discount_value_value = None
+            discount_amount_value = None
+            discounted_total_value = None
+            amount_due = Decimal(str(row["total_amount"] or 0))
+            split_payments = [p for p in (payments or []) if p]
+            using_sequential_split = bool(split_mode) and not split_payments
+            using_one_shot_split = len(split_payments) > 0
+            using_split = using_one_shot_split or using_sequential_split
+            settlement_complete = True
+            is_wompi_collection = bool(wompi_collection)
+            if not is_wompi_collection:
+                is_wompi_collection = await _payment_tender_is_wompi(
+                    conn, tenant_id, payment_method, pmid
+                )
+            if not is_wompi_collection:
+                for split_payment in split_payments:
+                    split_pmid = None
+                    raw_split_pmid = split_payment.get("payment_method_id")
+                    if raw_split_pmid:
+                        try:
+                            split_pmid = UUID(str(raw_split_pmid))
+                        except ValueError:
+                            split_pmid = None
+                    if await _payment_tender_is_wompi(
+                        conn, tenant_id, split_payment.get("payment_method"), split_pmid
+                    ):
+                        is_wompi_collection = True
+                        break
+            if status == "completed":
+                (
+                    discount_type_value,
+                    discount_value_value,
+                    discount_amount_value,
+                    discounted_total_value,
+                ) = _complete_manual_discount(
+                    current_total=float(row["total_amount"] or 0),
+                    current_discount_amount=_row_numeric(row, "discount_amount"),
+                    discount_type=discount_type,
+                    discount_value=discount_value,
+                )
+                product_total = (
+                    float(discounted_total_value)
+                    if discounted_total_value is not None
+                    else float(row["total_amount"] or 0)
+                )
+                waro_discount_amount = float(discount_amount_value or 0)
+                if discount_amount_value is None:
+                    waro_discount_amount = _row_numeric(row, "discount_amount")
+                if waros_to_redeem or waro_reward_id:
+                    product_total = await _apply_complete_waro_redemption(
+                        conn,
+                        tenant_id=tenant_id,
+                        customer_id=cid,
+                        order_id=order_id,
+                        product_total=product_total,
+                        discount_amount=waro_discount_amount,
+                        waros_to_redeem=waros_to_redeem,
+                        waro_reward_id=waro_reward_id,
+                    )
+                    discounted_total_value = product_total
+                amount_due = Decimal(str(product_total))
+
+            tip_amount_value = None
+            tip_source_value = None
+            tip_taxable_value = None
+            tip_tax_amount_value = None
+            if status == "completed":
+                try:
+                    normalized_tip_amount, normalized_tip_source, normalized_tip_taxable = (
+                        normalize_tip_payload(
+                            tip_amount or 0,
+                            tip_source or "none",
+                            bool(tip_taxable),
+                        )
+                    )
+                except ValueError as exc:
+                    raise APIError(
+                        str(exc),
+                        status_code=400,
+                        details={"code": "tip_invalid"},
+                    )
+                if normalized_tip_amount > 0:
+                    tip_enabled = await conn.fetchval(
+                        "SELECT tip_enabled FROM tenant_public_profiles WHERE tenant_id = $1",
+                        tenant_id,
+                    )
+                    if not bool(tip_enabled):
+                        raise APIError(
+                            "Tipping is not enabled for this tenant",
+                            status_code=400,
+                            details={"code": "tip_disabled"},
+                        )
+                    tax_config_for_tip = await _get_tenant_tax_config(conn, tenant_id)
+                    tip_tax_amount_value = compute_tip_tax_amount(
+                        normalized_tip_amount,
+                        normalized_tip_taxable,
+                        tax_config_for_tip,
+                    )
+                else:
+                    tip_tax_amount_value = 0.0
+                tip_amount_value = normalized_tip_amount
+                tip_source_value = normalized_tip_source
+                tip_taxable_value = normalized_tip_taxable
+                amount_due = (
+                    amount_due
+                    + Decimal(str(tip_amount_value))
+                    + Decimal(str(tip_tax_amount_value or 0))
+                )
+
+            advance_applied_total = Decimal("0")
+            if (
+                status == "completed"
+                and not is_wompi_collection
+                and not using_split
+                and row["table_session_id"]
+            ):
+                available_advance_total = await get_available_advance_total(
+                    conn,
+                    tenant_id,
+                    row["table_session_id"],
+                )
+                session_min_row = await conn.fetchrow(
+                    """
+                    SELECT
+                        minimum_consumption_enabled_snapshot,
+                        minimum_consumption_amount_snapshot,
+                        minimum_consumption_restrictive_snapshot
+                    FROM table_sessions
+                    WHERE id = $1
+                    """,
+                    row["table_session_id"],
+                )
+                if session_min_row and bool(session_min_row.get("minimum_consumption_enabled_snapshot")):
+                    min_amount = Decimal(str(session_min_row["minimum_consumption_amount_snapshot"] or 0))
+                    covered = amount_due + available_advance_total
+                    missing = max(min_amount - covered, Decimal("0"))
+                    if bool(session_min_row["minimum_consumption_restrictive_snapshot"]) and missing > 0:
+                        raise APIError(
+                            f"Faltan ${round(missing):,} para cubrir el consumo mínimo",
+                            status_code=409,
+                            details={
+                                "code": "minimum_consumption_not_covered",
+                                "minimum_amount": float(min_amount),
+                                "missing": float(missing),
+                            },
+                        )
+                advance_applied_total = min(available_advance_total, amount_due)
+                amount_due = max(Decimal("0"), amount_due - advance_applied_total)
+
+            if is_wompi_collection and using_split:
+                raise APIError("Wompi no admite cobro dividido", status_code=400)
 
             if payment_method:
                 group_row = await conn.fetchrow(
@@ -1396,9 +2041,109 @@ async def update_order_status(
 
                     await assert_wallet_customer_identified(conn, cid)
 
+                if status == "completed" and payment_method == "credit" and not cid:
+                    raise APIError(
+                        "El pago a crédito requiere un cliente identificado",
+                        status_code=400,
+                        details={"code": "customer_required"},
+                    )
+
+                if status == "completed" and credit_due_date is not None and payment_method != "credit":
+                    raise APIError(
+                        "credit_due_date solo aplica al pago a crédito",
+                        status_code=400,
+                        details={"code": "credit_due_date_invalid"},
+                    )
+
+                if status == "completed" and cash_received is not None and payment_method != "cash":
+                    raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
+
+                if status == "completed" and payment_method == "cash" and not using_split:
+                    if cash_received is None:
+                        raise APIError(
+                            "Indica el efectivo recibido",
+                            status_code=400,
+                            details={"code": "cash_received_required"},
+                        )
+                    received = Decimal(str(cash_received))
+                    if received < amount_due:
+                        raise APIError(
+                            f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total a cobrar ({amount_due})",
+                            status_code=400,
+                            details={"code": "cash_received_short"},
+                        )
+
+            if status == "completed" and using_one_shot_split:
+                paid_total = round(sum(float(p["amount"]) for p in split_payments), 2)
+                if abs(paid_total - float(amount_due)) > 0.01:
+                    raise APIError(
+                        f"Los pagos divididos ({paid_total}) deben sumar el total ({amount_due})",
+                        status_code=400,
+                        details={"code": "split_sum_mismatch"},
+                    )
+                if is_wompi_collection:
+                    raise APIError("Wompi no admite cobro dividido", status_code=400)
+
+            if status == "completed" and using_sequential_split:
+                if split_first_amount <= 0:
+                    raise APIError(
+                        "Indica el monto del primer pago",
+                        status_code=400,
+                        details={"code": "split_first_amount_required"},
+                    )
+                if split_first_amount - float(amount_due) > 0.01:
+                    raise APIError(
+                        f"El pago excede el saldo pendiente ({amount_due})",
+                        status_code=400,
+                        details={"code": "split_exceeds_due"},
+                    )
+                if payment_method == "cash":
+                    first_cash = split_first_cash_received if split_first_cash_received is not None else cash_received
+                    if first_cash is None:
+                        raise APIError(
+                            "Indica el efectivo recibido",
+                            status_code=400,
+                            details={"code": "cash_received_required"},
+                        )
+                    if Decimal(str(first_cash)) < Decimal(str(split_first_amount)):
+                        raise APIError(
+                            f"Efectivo recibido ({first_cash}) debe ser mayor o igual al monto ({split_first_amount})",
+                            status_code=400,
+                            details={"code": "cash_received_short"},
+                        )
+                    split_first_cash_received = first_cash
+                settlement_complete = (float(amount_due) - split_first_amount) <= 0.01
+
+            if status == "completed" and served_by_member_id is not None:
+                member_check = await conn.fetchval(
+                    """
+                    SELECT id FROM tenant_members
+                    WHERE id = $1 AND tenant_id = $2 AND is_active = true AND terminated_at IS NULL
+                    """,
+                    served_by_member_id,
+                    tenant_id,
+                )
+                if member_check is None:
+                    raise APIError("Member not found", status_code=404)
+
+            write_status = "pending" if status == "completed" and is_wompi_collection else status
+            cash_received_value = None
+            if (
+                write_status == "completed"
+                and payment_method == "cash"
+                and cash_received is not None
+                and not using_split
+            ):
+                cash_received_value = Decimal(str(cash_received))
+            credit_due_value = credit_due_date if write_status == "completed" and payment_method == "credit" else None
+            served_by_value = served_by_member_id if write_status == "completed" else None
+
             payment_status_update = None
-            if status == "completed" and payment_method:
-                payment_status_update = "credit" if payment_method == "credit" else "paid"
+            if write_status == "completed" and payment_method:
+                if using_sequential_split and not settlement_complete:
+                    payment_status_update = "partial"
+                else:
+                    payment_status_update = "credit" if payment_method == "credit" else "paid"
 
             await conn.execute(
                 """UPDATE orders
@@ -1406,25 +2151,118 @@ async def update_order_status(
                        payment_method = COALESCE($2, payment_method),
                        payment_method_id = CASE WHEN $2::text IS NULL THEN payment_method_id ELSE $4::uuid END,
                        customer_id = COALESCE($5, customer_id),
-                       payment_status = COALESCE($6, payment_status)
+                       payment_status = COALESCE($6, payment_status),
+                       cash_received = CASE WHEN $7::numeric IS NULL THEN cash_received ELSE $7 END,
+                       credit_due_date = CASE WHEN $8::date IS NULL THEN credit_due_date ELSE $8 END,
+                       served_by_member_id = CASE WHEN $9::uuid IS NULL THEN served_by_member_id ELSE $9 END,
+                       discount_type = CASE WHEN $10::text IS NULL THEN discount_type ELSE $10 END,
+                       discount_value = CASE WHEN $10::text IS NULL THEN discount_value ELSE $11 END,
+                       discount_amount = CASE WHEN $10::text IS NULL THEN discount_amount ELSE $12 END,
+                       total_amount = CASE WHEN $13::numeric IS NULL THEN total_amount ELSE $13 END,
+                       tip_amount = CASE WHEN $14::numeric IS NULL THEN tip_amount ELSE $14 END,
+                       tip_source = CASE WHEN $14::numeric IS NULL THEN tip_source ELSE $15 END,
+                       tip_taxable = CASE WHEN $14::numeric IS NULL THEN tip_taxable ELSE $16 END,
+                       tip_tax_amount = CASE WHEN $14::numeric IS NULL THEN tip_tax_amount ELSE $17 END
                    WHERE id = $3""",
-                status, payment_method, order_id, pmid, cid, payment_status_update
+                write_status, payment_method, order_id, pmid, cid, payment_status_update,
+                cash_received_value, credit_due_value, served_by_value,
+                discount_type_value, discount_value_value, discount_amount_value,
+                discounted_total_value,
+                tip_amount_value, tip_source_value, tip_taxable_value, tip_tax_amount_value,
             )
+            if is_wompi_collection and status == "completed":
+                await conn.execute(
+                    """
+                    UPDATE orders
+                    SET payment_method = NULL,
+                        payment_method_id = NULL,
+                        payment_status = NULL
+                    WHERE id = $1
+                    """,
+                    order_id,
+                )
 
-            if status == "completed" and payment_method == "customer_wallet" and cid:
-                from app.services.customer_wallet_service import apply_wallet_for_order
+            if write_status == "completed" and using_one_shot_split:
+                await _insert_complete_tenders(
+                    conn,
+                    order_id=order_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    customer_id=cid,
+                    payments=split_payments,
+                )
+                from app.services.credit_service import sync_order_split_credit_status
+                payment_status_update = await sync_order_split_credit_status(
+                    conn, order_id, settlement_complete=True,
+                )
+                await conn.execute(
+                    "UPDATE orders SET payment_status = $2 WHERE id = $1",
+                    order_id,
+                    payment_status_update,
+                )
 
-                if old_status != "completed":
-                    amount_cop = Decimal(str(row["total_amount"]))
-                    if amount_cop > 0:
-                        await apply_wallet_for_order(
-                            conn,
-                            cid,
-                            tenant_id,
-                            amount_cop,
-                            order_id,
-                            user_id,
-                        )
+            if write_status == "completed" and using_sequential_split:
+                await _insert_complete_tenders(
+                    conn,
+                    order_id=order_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    customer_id=cid,
+                    payments=[{
+                        "amount": split_first_amount,
+                        "payment_method": payment_method,
+                        "payment_method_id": str(pmid) if pmid else None,
+                        "cash_received": split_first_cash_received,
+                    }],
+                )
+                if settlement_complete:
+                    from app.services.credit_service import sync_order_split_credit_status
+                    payment_status_update = await sync_order_split_credit_status(
+                        conn, order_id, settlement_complete=True,
+                    )
+                    await conn.execute(
+                        "UPDATE orders SET payment_status = $2 WHERE id = $1",
+                        order_id,
+                        payment_status_update,
+                    )
+
+            if (
+                write_status == "completed"
+                and settlement_complete
+                and not using_split
+                and not is_wompi_collection
+                and payment_method
+                and payment_method != "credit"
+            ):
+                has_active_payments = await conn.fetchval(
+                    """
+                    SELECT EXISTS(
+                        SELECT 1
+                        FROM order_payments
+                        WHERE order_id = $1 AND voided_at IS NULL
+                    )
+                    """,
+                    order_id,
+                )
+                if not has_active_payments:
+                    tender_cash_received = (
+                        cash_received
+                        if payment_method == "cash" and cash_received is not None
+                        else None
+                    )
+                    await _insert_complete_tenders(
+                        conn,
+                        order_id=order_id,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        customer_id=cid,
+                        payments=[{
+                            "amount": float(amount_due),
+                            "payment_method": payment_method,
+                            "payment_method_id": str(pmid) if pmid else None,
+                            "cash_received": tender_cash_received,
+                        }],
+                    )
 
             # If cancelling a credit order, clear payment_status so it leaves cartera
             if status == 'cancelled' and row['payment_status'] in ('credit', 'partial'):
@@ -1434,8 +2272,8 @@ async def update_order_status(
                 )
 
             # Stock adjustment based on transition
-            if old_status != status:
-                if old_status != 'completed' and status == 'completed':
+            if old_status != write_status:
+                if old_status != 'completed' and write_status == 'completed':
                     inventory_already_consumed = await _order_inventory_already_consumed_before_completion(
                         conn,
                         row=row,
@@ -1445,62 +2283,111 @@ async def update_order_status(
                     )
                     if not inventory_already_consumed:
                         await _deduct_stock_for_status_update(conn, order_id, tenant_id, user_id, order_number)
-                    try:
-                        completed_order = await conn.fetchrow(
-                            """
-                            SELECT id, order_number, total_amount, payment_method,
-                                   payment_method_id, order_date, tip_amount, tip_tax_amount
-                            FROM orders
-                            WHERE id = $1 AND tenant_id = $2 AND status = 'completed'
-                            """,
-                            order_id,
+                    if settlement_complete:
+                        try:
+                            completed_order = await conn.fetchrow(
+                                """
+                                SELECT id, order_number, total_amount, payment_method,
+                                       payment_method_id, order_date, tip_amount, tip_tax_amount
+                                FROM orders
+                                WHERE id = $1 AND tenant_id = $2 AND status = 'completed'
+                                """,
+                                order_id,
+                                tenant_id,
+                            )
+                            if completed_order:
+                                if cid:
+                                    waros_award_order_id = completed_order["id"]
+                                    waros_award_customer_id = cid
+                                gl_order_date = local_date_for_tenant(completed_order["order_date"], timezone_name)
+                                tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                                gl_splits = (
+                                    await _payment_splits_for_gl(conn, order_id)
+                                    if using_split
+                                    else None
+                                )
+                                if advance_applied_total > 0 and row["table_session_id"]:
+                                    advance_applied_total = await apply_session_advances_for_close(
+                                        conn,
+                                        tenant_id,
+                                        row["table_session_id"],
+                                        advance_applied_total,
+                                        [order_id],
+                                    )
+                                await _post_order_gl_entry(
+                                    conn=conn,
+                                    tenant_id=tenant_id,
+                                    order_id=completed_order["id"],
+                                    order_date=gl_order_date,
+                                    total_amount=Decimal(str(completed_order["total_amount"])),
+                                    payment_method=completed_order["payment_method"] or payment_method,
+                                    payment_method_id=completed_order["payment_method_id"],
+                                    tax_config=tax_config,
+                                    order_number=int(completed_order["order_number"]),
+                                    tip_amount=Decimal(str(completed_order["tip_amount"] or 0)),
+                                    tip_tax_amount=Decimal(str(completed_order["tip_tax_amount"] or 0)),
+                                    advance_amount=advance_applied_total,
+                                    payment_splits=gl_splits,
+                                )
+                                await _post_order_cogs_gl_entry(
+                                    conn=conn,
+                                    tenant_id=tenant_id,
+                                    order_id=completed_order["id"],
+                                    order_date=gl_order_date,
+                                    order_number=int(completed_order["order_number"]),
+                                )
+                        except MissingAccountRoleError:
+                            raise
+                        except Exception as gl_exc:
+                            logger.error(f"GL entries failed for order status update: {gl_exc}")
+                elif old_status == 'completed' and write_status in ('cancelled', 'pending'):
+                    if write_status == 'cancelled':
+                        await restore_wallet_for_cancelled_order(
+                            conn,
                             tenant_id,
+                            order_id,
+                            user_id,
+                            notes=f"Cancelación venta #{order_number}",
                         )
-                        if completed_order:
-                            if cid:
-                                waros_award_order_id = completed_order["id"]
-                                waros_award_customer_id = cid
-                            gl_order_date = local_date_for_tenant(completed_order["order_date"], timezone_name)
-                            tax_config = await _get_tenant_tax_config(conn, tenant_id)
-                            await _post_order_gl_entry(
-                                conn=conn,
-                                tenant_id=tenant_id,
-                                order_id=completed_order["id"],
-                                order_date=gl_order_date,
-                                total_amount=Decimal(str(completed_order["total_amount"])),
-                                payment_method=completed_order["payment_method"] or payment_method,
-                                payment_method_id=completed_order["payment_method_id"],
-                                tax_config=tax_config,
-                                order_number=int(completed_order["order_number"]),
-                                tip_amount=Decimal(str(completed_order["tip_amount"] or 0)),
-                                tip_tax_amount=Decimal(str(completed_order["tip_tax_amount"] or 0)),
-                            )
-                            await _post_order_cogs_gl_entry(
-                                conn=conn,
-                                tenant_id=tenant_id,
-                                order_id=completed_order["id"],
-                                order_date=gl_order_date,
-                                order_number=int(completed_order["order_number"]),
-                            )
-                    except MissingAccountRoleError:
-                        raise
-                    except Exception as gl_exc:
-                        logger.error(f"GL entries failed for order status update: {gl_exc}")
-                elif old_status == 'completed' and status in ('cancelled', 'pending'):
+                        await revoke_waros_awarded_for_order(conn, order_id, tenant_id)
                     await _return_stock_for_order_cancellation(conn, order_id, tenant_id, user_id, order_number)
+                    if write_status == 'cancelled':
+                        try:
+                            await _void_order_gl_entries(
+                                conn,
+                                tenant_id,
+                                order_id,
+                                reason=f"Cancelación venta #{order_number}",
+                            )
+                        except APIError:
+                            raise
+                        except Exception as gl_exc:
+                            logger.error(f"GL void failed for order cancel {order_id}: {gl_exc}")
+                            raise APIError(
+                                "No se pudo reversar el asiento contable de la venta. "
+                                "Intenta de nuevo o contacta a soporte.",
+                                status_code=500,
+                                details={"code": "sale_gl_void_failed"},
+                            )
+                elif old_status != 'completed' and write_status == 'cancelled':
+                    # warocol.com#2567 — pending/preparing cancel after on-command deduct
+                    await _return_stock_for_order_cancellation(
+                        conn, order_id, tenant_id, user_id, order_number
+                    )
 
             # Release the table session if this is a mesa order being closed
-            if status in ("completed", "cancelled") and row['table_session_id']:
-                await conn.execute(
-                    "UPDATE table_sessions SET closed_at = now() WHERE id = $1 AND closed_at IS NULL",
-                    row['table_session_id']
-                )
-                await conn.execute(
-                    """UPDATE tables SET status = 'free'
-                       WHERE id = (SELECT table_id FROM table_sessions WHERE id = $1)
-                         AND tenant_id = $2""",
-                    row['table_session_id'], tenant_id
-                )
+            if write_status in ("completed", "cancelled") and row['table_session_id']:
+                if write_status == "cancelled" or settlement_complete:
+                    await conn.execute(
+                        "UPDATE table_sessions SET closed_at = now() WHERE id = $1 AND closed_at IS NULL",
+                        row['table_session_id']
+                    )
+                    await conn.execute(
+                        """UPDATE tables SET status = 'free'
+                           WHERE id = (SELECT table_id FROM table_sessions WHERE id = $1)
+                             AND tenant_id = $2""",
+                        row['table_session_id'], tenant_id
+                    )
 
             # Auto-fire hook for manual orders transitioning to 'preparing'
             if status == "preparing":
@@ -1523,6 +2410,25 @@ async def update_order_status(
                 except Exception as _fe:
                     logger.error(f"Auto-fire failed for manual order {order_id} (preparing): {_fe}")
 
+            if old_status != write_status:
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_VENTAS,
+                    channel=_ventas_event_channel(row),
+                    action="order_status_changed",
+                    actor_user_id=user_id,
+                    order_id=order_id,
+                    payload={
+                        "entity_type": "order",
+                        "entity_id": str(order_id),
+                        "order_number": order_number,
+                        "old_status": old_status,
+                        "new_status": write_status,
+                    },
+                    reason=reason_text or None,
+                )
+
         if waros_award_order_id and waros_award_customer_id:
             try:
                 asyncio.create_task(
@@ -1531,7 +2437,7 @@ async def update_order_status(
             except Exception as _waros_err:
                 logger.warning(f"Could not schedule waros evaluation: {_waros_err}")
 
-        return {"success": True, "message": f"Estado actualizado a {status}"}
+        return {"success": True, "message": f"Estado actualizado a {write_status}"}
 
     except (AuthenticationError, APIError) as e:
         raise e
@@ -1549,6 +2455,7 @@ async def associate_order_customer(
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
+        user_id = getattr(session_context, "user_id", None)
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
@@ -1556,7 +2463,7 @@ async def associate_order_customer(
         async with get_db_connection() as conn:
             order_row = await conn.fetchrow(
                 """
-                SELECT id
+                SELECT id, customer_id, order_number, status
                 FROM orders
                 WHERE id = $1
                   AND tenant_id = $2
@@ -1567,6 +2474,13 @@ async def associate_order_customer(
             )
             if not order_row:
                 raise APIError("Order not found", status_code=404)
+
+            if order_row["status"] == "cancelled":
+                raise APIError(
+                    "No se puede asociar un cliente a una venta cancelada.",
+                    status_code=400,
+                    details={"code": "sale_cancelled"},
+                )
 
             invoice_row = await conn.fetchrow(
                 """
@@ -1614,6 +2528,24 @@ async def associate_order_customer(
                 tenant_id,
             )
 
+            old_customer_id = order_row["customer_id"]
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_VENTAS,
+                channel=None,
+                action="order_customer_changed",
+                actor_user_id=user_id,
+                order_id=order_id,
+                payload={
+                    "entity_type": "order",
+                    "entity_id": str(order_id),
+                    "order_number": int(order_row["order_number"]) if order_row["order_number"] is not None else None,
+                    "old_customer_id": str(old_customer_id) if old_customer_id else None,
+                    "new_customer_id": str(customer_id),
+                },
+            )
+
         return {
             "success": True,
             "message": "Cliente asociado a la venta",
@@ -1635,12 +2567,14 @@ async def _order_inventory_already_consumed_before_completion(
     tenant_id: UUID,
     old_status: str,
 ) -> bool:
-    """Return true when a pending order already consumed inventory at creation time."""
-    if old_status != "pending":
-        return False
-    if row["pos_cart_id"]:
+    """Return true when inventory was already consumed before this completion.
+
+    POS cart: pending completes after cart checkout already deducted.
+    Mesa / online: may have deducted on send/accept (warocol.com#2566/#2568).
+    """
+    if row.get("pos_cart_id") and old_status == "pending":
         return True
-    if not row["table_session_id"]:
+    if not (row.get("table_session_id") or row.get("online_cart_id")):
         return False
 
     return bool(await conn.fetchval(
@@ -1658,6 +2592,47 @@ async def _order_inventory_already_consumed_before_completion(
         tenant_id,
         order_id,
     ))
+
+
+def _attach_order_items_line_tax(
+    items: List[Dict[str, Any]],
+    tax_config: Dict[str, Any],
+    *,
+    reconcile_to: Optional[tuple] = None,
+) -> List[Dict[str, Any]]:
+    """Annotate order-item payloads with per-line tax_amount / tax_label (warocol.com#2044)."""
+    from app.services.hospitality_tax_engine import annotate_line_tax_amounts
+
+    if not items:
+        return items
+
+    tax_lines: List[Dict[str, Any]] = []
+    for item in items:
+        subtotal = float(item.get("subtotal") or 0)
+        net = item.get("net_total")
+        tax_lines.append({
+            "id": item["id"],
+            "subtotal": subtotal,
+            "net_total": float(net) if net is not None else subtotal,
+            "tax_category": item.get("tax_category") or "standard",
+            "tax_resolution": item.get("tax_resolution") or "inherit",
+            "tax_line_key": item.get("tax_line_key"),
+            "category_id": item.get("category_id"),
+        })
+
+    annotated = annotate_line_tax_amounts(
+        tax_lines,
+        tax_config,
+        reconcile_to=reconcile_to,
+    )
+    by_id = {str(row["id"]): row for row in annotated}
+    for item in items:
+        row = by_id.get(str(item["id"])) or {}
+        item["tax_amount"] = float(row.get("tax_amount") or 0)
+        item["tax_label"] = row.get("tax_label")
+        item["tax_rate"] = row.get("tax_rate")
+        item["included_in_price"] = row.get("included_in_price")
+    return items
 
 
 async def get_order_items(
@@ -1686,7 +2661,7 @@ async def get_order_items(
             if not order_exists:
                 raise APIError("Order not found", status_code=404)
 
-            # Get order items with product details
+            # Get order items with product details + tax classification (#2044)
             items_query = """
                 SELECT
                     oi.id,
@@ -1701,7 +2676,11 @@ async def get_order_items(
                     tp.promo_type AS promotion_type,
                     p.id as product_id,
                     p.name as product_name,
-                    p.description as product_description
+                    p.description as product_description,
+                    COALESCE(p.tax_category, 'standard') AS tax_category,
+                    COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                    p.tax_line_key AS tax_line_key,
+                    p.category_id::text AS category_id
                 FROM order_items oi
                 LEFT JOIN product p ON oi.product_id = p.id
                 LEFT JOIN tenant_promotions tp ON tp.id = oi.applied_promotion_id
@@ -1751,6 +2730,10 @@ async def get_order_items(
                     "promo_savings_allocated": float(item_row['promo_savings_allocated']) if item_row['promo_savings_allocated'] is not None else 0.0,
                     "promotion_name": item_row['promotion_name'],
                     "promotion_type": item_row['promotion_type'],
+                    "tax_category": item_row['tax_category'] or 'standard',
+                    "tax_resolution": item_row['tax_resolution'] or 'inherit',
+                    "tax_line_key": item_row['tax_line_key'],
+                    "category_id": item_row['category_id'],
                     "product": {
                         "id": str(item_row['product_id']) if item_row['product_id'] else None,
                         "name": item_row['product_name'],
@@ -1759,6 +2742,36 @@ async def get_order_items(
                     },
                     "modifiers": modifiers
                 })
+
+            try:
+                tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                tax_rows = [
+                    {
+                        "tax_category": item.get("tax_category") or "standard",
+                        "tax_resolution": item.get("tax_resolution") or "inherit",
+                        "tax_line_key": item.get("tax_line_key"),
+                        "category_id": item.get("category_id"),
+                        "subtotal": (
+                            float(item["net_total"])
+                            if item.get("net_total") is not None
+                            else float(item.get("subtotal") or 0)
+                        ),
+                    }
+                    for item in items
+                ]
+                std_tax, liq_tax, _ = _compute_tax_breakdown(tax_rows, tax_config)
+                _attach_order_items_line_tax(
+                    items,
+                    tax_config,
+                    reconcile_to=(float(std_tax), float(liq_tax)),
+                )
+            except Exception as tax_err:
+                logger.warning(f"Per-line tax annotate failed for order {order_id}: {tax_err}")
+                for item in items:
+                    item.setdefault("tax_amount", 0.0)
+                    item.setdefault("tax_label", None)
+                    item.setdefault("tax_rate", None)
+                    item.setdefault("included_in_price", None)
 
             return {
                 "success": True,
@@ -1857,7 +2870,11 @@ async def get_customers_list(
                     SELECT
                         p.id AS customer_id,
                         COALESCE(p.name, 'Sin identificar') AS name,
-                        p.phone_number AS phone
+                        p.phone_number AS phone,
+                        p.fiscal_id_type,
+                        p.fiscal_id,
+                        p.fiscal_business_name,
+                        p.fiscal_email
                     FROM profile p
                     INNER JOIN tenant_customers tc ON tc.profile_id = p.id
                     WHERE tc.tenant_id = $1
@@ -1878,6 +2895,10 @@ async def get_customers_list(
                     tcp.customer_id,
                     tcp.name,
                     tcp.phone,
+                    tcp.fiscal_id_type,
+                    tcp.fiscal_id,
+                    tcp.fiscal_business_name,
+                    tcp.fiscal_email,
                     COALESCE(oa.total_spent, 0)   AS total_spent,
                     COALESCE(oa.order_count, 0)   AS order_count,
                     COALESCE(oa.avg_ticket, 0)    AS avg_ticket,
@@ -1901,6 +2922,10 @@ async def get_customers_list(
                     "customer_id": str(row['customer_id']),
                     "name": row['name'],
                     "phone": row['phone'],
+                    "fiscal_id_type": row.get('fiscal_id_type'),
+                    "fiscal_id": row.get('fiscal_id'),
+                    "fiscal_business_name": row.get('fiscal_business_name'),
+                    "fiscal_email": row.get('fiscal_email'),
                     "total_spent": float(row['total_spent']),
                     "order_count": int(row['order_count']),
                     "avg_ticket": float(row['avg_ticket'] or 0),
@@ -1980,6 +3005,10 @@ async def get_customer_detail(
                     COALESCE(p.name, 'Sin identificar') AS name,
                     p.phone_number                       AS phone,
                     p.email                              AS email,
+                    p.fiscal_id_type,
+                    p.fiscal_id,
+                    p.fiscal_business_name,
+                    p.fiscal_email,
                     COUNT(o.id)                          AS total_orders,
                     SUM(o.total_amount)                  AS total_spent,
                     MIN(DATE(o.order_date AT TIME ZONE $3)) AS first_purchase,
@@ -1987,7 +3016,8 @@ async def get_customer_detail(
                 FROM orders o
                 LEFT JOIN profile p ON o.customer_id = p.id
                 WHERE {aggregate_where_clause}
-                GROUP BY o.customer_id, p.name, p.phone_number, p.email
+                GROUP BY o.customer_id, p.name, p.phone_number, p.email,
+                         p.fiscal_id_type, p.fiscal_id, p.fiscal_business_name, p.fiscal_email
                 """,
                 *aggregate_params,
             )
@@ -1999,7 +3029,11 @@ async def get_customer_detail(
                         p.id                                 AS customer_id,
                         COALESCE(p.name, 'Sin identificar') AS name,
                         p.phone_number                       AS phone,
-                        p.email                              AS email
+                        p.email                              AS email,
+                        p.fiscal_id_type,
+                        p.fiscal_id,
+                        p.fiscal_business_name,
+                        p.fiscal_email
                     FROM profile p
                     JOIN tenant_customers tc ON tc.profile_id = p.id
                     WHERE p.id = $1
@@ -2017,6 +3051,10 @@ async def get_customer_detail(
                     "name": profile_row["name"],
                     "phone": profile_row["phone"],
                     "email": profile_row["email"],
+                    "fiscal_id_type": profile_row.get("fiscal_id_type"),
+                    "fiscal_id": profile_row.get("fiscal_id"),
+                    "fiscal_business_name": profile_row.get("fiscal_business_name"),
+                    "fiscal_email": profile_row.get("fiscal_email"),
                     "total_orders": 0,
                     "total_spent": 0,
                     "first_purchase": None,
@@ -2156,6 +3194,10 @@ async def get_customer_detail(
                     "name": customer_row['name'],
                     "phone": customer_row['phone'],
                     "email": customer_row['email'],
+                    "fiscal_id_type": customer_row.get('fiscal_id_type'),
+                    "fiscal_id": customer_row.get('fiscal_id'),
+                    "fiscal_business_name": customer_row.get('fiscal_business_name'),
+                    "fiscal_email": customer_row.get('fiscal_email'),
                     "total_orders": int(customer_row['total_orders']),
                     "total_spent": float(customer_row['total_spent']),
                     "first_purchase": _date_iso(customer_row['first_purchase']),
@@ -2183,7 +3225,8 @@ async def get_orders_metrics(
     date_to: Optional[str] = None,
     payment_method: Optional[str] = None,
     payment_method_id: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    category_id: Optional[str] = None,
 ) -> dict:
     """
     Get sales metrics: total sales, average ticket, orders count by status
@@ -2197,53 +3240,110 @@ async def get_orders_metrics(
 
         async with get_db_connection() as conn:
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
-            # Build WHERE clause
-            where_conditions = ["tenant_id = $1", ANALYTICS_SALES_FILTER]
-            params = [tenant_id]
-            param_count = 1
-
             parsed_date_from = parse_date(date_from)
             parsed_date_to = parse_date(date_to)
-            param_count = _append_local_date_bounds(
-                where_conditions,
-                params,
-                param_count,
-                "order_date",
-                parsed_date_from,
-                parsed_date_to,
-                timezone_name,
-            )
 
-            if payment_method:
+            if category_id:
+                where_conditions = ["o.tenant_id = $1", ANALYTICS_SALES_FILTER_ALIAS_O]
+                params = [tenant_id]
+                param_count = 1
+
+                param_count = _append_local_date_bounds(
+                    where_conditions,
+                    params,
+                    param_count,
+                    "o.order_date",
+                    parsed_date_from,
+                    parsed_date_to,
+                    timezone_name,
+                )
+
+                if payment_method:
+                    param_count += 1
+                    where_conditions.append(f"o.payment_method = ${param_count}")
+                    params.append(payment_method)
+
+                if payment_method_id:
+                    param_count += 1
+                    where_conditions.append(f"o.payment_method_id = ${param_count}::uuid")
+                    params.append(payment_method_id)
+
+                if status:
+                    param_count += 1
+                    where_conditions.append(f"o.status = ${param_count}")
+                    params.append(status)
+
                 param_count += 1
-                where_conditions.append(f"payment_method = ${param_count}")
-                params.append(payment_method)
+                where_conditions.append(f"p.category_id = ${param_count}::uuid")
+                params.append(category_id)
 
-            if payment_method_id:
-                param_count += 1
-                where_conditions.append(f"payment_method_id = ${param_count}::uuid")
-                params.append(payment_method_id)
+                where_clause = " AND ".join(where_conditions)
 
-            if status:
-                param_count += 1
-                where_conditions.append(f"status = ${param_count}")
-                params.append(status)
+                metrics_query = f"""
+                    SELECT
+                        COUNT(DISTINCT o.id) as total_orders,
+                        COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed') as completed_orders,
+                        COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'cancelled') as cancelled_orders,
+                        COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'pending') as pending_orders,
+                        COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (WHERE o.status = 'completed'), 0) as total_sales,
+                        COALESCE(
+                            SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (WHERE o.status = 'completed')
+                            / NULLIF(COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed'), 0),
+                            0
+                        ) as avg_ticket,
+                        0 as discount_count,
+                        0 as total_discount_amount
+                    FROM orders o
+                    JOIN order_items oi ON oi.order_id = o.id
+                    JOIN product p ON p.id = oi.product_id
+                    WHERE {where_clause}
+                """
+            else:
+                # Build WHERE clause
+                where_conditions = ["tenant_id = $1", ANALYTICS_SALES_FILTER]
+                params = [tenant_id]
+                param_count = 1
 
-            where_clause = " AND ".join(where_conditions)
+                param_count = _append_local_date_bounds(
+                    where_conditions,
+                    params,
+                    param_count,
+                    "order_date",
+                    parsed_date_from,
+                    parsed_date_to,
+                    timezone_name,
+                )
 
-            metrics_query = f"""
-                SELECT
-                    COUNT(*) as total_orders,
-                    COUNT(*) FILTER (WHERE status = 'completed') as completed_orders,
-                    COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled_orders,
-                    COUNT(*) FILTER (WHERE status = 'pending') as pending_orders,
-                    COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) as total_sales,
-                    COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) as avg_ticket,
-                    COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0) as discount_count,
-                    COALESCE(SUM(discount_amount) FILTER (WHERE status = 'completed' AND discount_amount > 0), 0) as total_discount_amount
-                FROM orders
-                WHERE {where_clause}
-            """
+                if payment_method:
+                    param_count += 1
+                    where_conditions.append(f"payment_method = ${param_count}")
+                    params.append(payment_method)
+
+                if payment_method_id:
+                    param_count += 1
+                    where_conditions.append(f"payment_method_id = ${param_count}::uuid")
+                    params.append(payment_method_id)
+
+                if status:
+                    param_count += 1
+                    where_conditions.append(f"status = ${param_count}")
+                    params.append(status)
+
+                where_clause = " AND ".join(where_conditions)
+
+                metrics_query = f"""
+                    SELECT
+                        COUNT(*) as total_orders,
+                        COUNT(*) FILTER (WHERE status = 'completed') as completed_orders,
+                        COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled_orders,
+                        COUNT(*) FILTER (WHERE status = 'pending') as pending_orders,
+                        COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) as total_sales,
+                        COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) as avg_ticket,
+                        COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0) as discount_count,
+                        COALESCE(SUM(discount_amount) FILTER (WHERE status = 'completed' AND discount_amount > 0), 0) as total_discount_amount
+                    FROM orders
+                    WHERE {where_clause}
+                """
 
             row = await conn.fetchrow(metrics_query, *params)
 
@@ -2275,15 +3375,21 @@ async def get_orders_metrics(
                     tax_pc += 1
                     tax_where.append(f"o.payment_method_id = ${tax_pc}::uuid")
                     tax_params.append(payment_method_id)
+                if category_id:
+                    tax_pc += 1
+                    tax_where.append(f"p.category_id = ${tax_pc}::uuid")
+                    tax_params.append(category_id)
                 tax_where_sql = " AND ".join(tax_where)
                 tax_rows = await conn.fetch(
                     f"""SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
-                               COALESCE(SUM(oi.subtotal), 0) AS subtotal
+                               COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                               p.tax_line_key AS tax_line_key,
+                               p.category_id::text AS category_id,
+                               COALESCE(oi.subtotal, 0) AS subtotal
                         FROM order_items oi
                         JOIN product p ON p.id = oi.product_id
                         JOIN orders o ON o.id = oi.order_id
-                        WHERE {tax_where_sql}
-                        GROUP BY COALESCE(p.tax_category, 'standard')""",
+                        WHERE {tax_where_sql}""",
                     *tax_params
                 )
                 _total_std_tax, _total_liq_tax, _tax_label = _compute_tax_breakdown(tax_rows, tax_config)
@@ -2317,7 +3423,8 @@ async def get_orders_metrics(
 async def get_orders_dashboard(
     request: Request,
     payment_method: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    category_id: Optional[str] = None,
 ) -> dict:
     """
     Returns all metrics needed for the /ventas dashboard in a single DB query.
@@ -2338,66 +3445,136 @@ async def get_orders_dashboard(
 
         async with get_db_connection() as conn:
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
-            # Build optional filters for the main (all-time) metrics
-            main_filters = []
-            params = [tenant_id]
-            param_count = 1
 
-            if payment_method:
+            if category_id:
+                main_filters = []
+                params = [tenant_id]
+                param_count = 1
+
+                if payment_method:
+                    param_count += 1
+                    main_filters.append(f"o.payment_method = ${param_count}")
+                    params.append(payment_method)
+
+                if status:
+                    param_count += 1
+                    main_filters.append(f"o.status = ${param_count}")
+                    params.append(status)
+
                 param_count += 1
-                main_filters.append(f"payment_method = ${param_count}")
-                params.append(payment_method)
+                category_param = param_count
+                params.append(category_id)
 
-            if status:
                 param_count += 1
-                main_filters.append(f"status = ${param_count}")
-                params.append(status)
+                timezone_param = param_count
+                params.append(timezone_name)
 
-            # Build FILTER clause suffix for main metrics (e.g. "AND payment_method = $2")
-            main_filter_sql = ""
-            if main_filters:
-                main_filter_sql = " AND " + " AND ".join(main_filters)
+                main_filter_sql = ""
+                if main_filters:
+                    main_filter_sql = " AND " + " AND ".join(main_filters)
 
-            param_count += 1
-            timezone_param = param_count
-            params.append(timezone_name)
+                dashboard_query = f"""
+                    SELECT
+                        COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed'{main_filter_sql}) as main_completed,
+                        COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (WHERE o.status = 'completed'{main_filter_sql}), 0) as main_sales,
+                        COALESCE(
+                            SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (WHERE o.status = 'completed'{main_filter_sql})
+                            / NULLIF(COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed'{main_filter_sql}), 0),
+                            0
+                        ) as main_avg_ticket,
+                        0 as main_discount_count,
+                        0 as main_total_discount,
 
-            dashboard_query = f"""
-                SELECT
-                    -- Main: all-time (with optional payment/status filters)
-                    COUNT(*) FILTER (WHERE status = 'completed'{main_filter_sql}) as main_completed,
-                    COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_sales,
-                    COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_avg_ticket,
-                    COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0{main_filter_sql}) as main_discount_count,
-                    COALESCE(SUM(discount_amount) FILTER (WHERE status = 'completed' AND discount_amount > 0{main_filter_sql}), 0) as main_total_discount,
+                        COUNT(DISTINCT o.id) FILTER (
+                            WHERE o.status = 'completed'
+                            AND DATE(o.order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ) as month_completed,
+                        COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (
+                            WHERE o.status = 'completed'
+                            AND DATE(o.order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ), 0) as month_sales,
 
-                    -- Month-to-date (with optional payment/status filters)
-                    COUNT(*) FILTER (
-                        WHERE status = 'completed'
-                        AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
-                        {main_filter_sql}
-                    ) as month_completed,
-                    COALESCE(SUM(total_amount) FILTER (
-                        WHERE status = 'completed'
-                        AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
-                        {main_filter_sql}
-                    ), 0) as month_sales,
+                        COUNT(DISTINCT o.id) FILTER (
+                            WHERE o.status = 'completed'
+                            AND DATE(o.order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ) as year_completed,
+                        COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (
+                            WHERE o.status = 'completed'
+                            AND DATE(o.order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ), 0) as year_sales
 
-                    -- Year-to-date (with optional payment/status filters)
-                    COUNT(*) FILTER (
-                        WHERE status = 'completed'
-                        AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
-                        {main_filter_sql}
-                    ) as year_completed,
-                    COALESCE(SUM(total_amount) FILTER (
-                        WHERE status = 'completed'
-                        AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
-                        {main_filter_sql}
-                    ), 0) as year_sales
+                    FROM orders o
+                    JOIN order_items oi ON oi.order_id = o.id
+                    JOIN product p ON p.id = oi.product_id
+                    WHERE o.tenant_id = $1
+                      AND p.category_id = ${category_param}::uuid
+                      AND {ANALYTICS_SALES_FILTER_ALIAS_O}
+                """
+            else:
+                # Build optional filters for the main (all-time) metrics
+                main_filters = []
+                params = [tenant_id]
+                param_count = 1
 
-                FROM orders
-                WHERE tenant_id = $1 AND {ANALYTICS_SALES_FILTER}
-            """
+                if payment_method:
+                    param_count += 1
+                    main_filters.append(f"payment_method = ${param_count}")
+                    params.append(payment_method)
+
+                if status:
+                    param_count += 1
+                    main_filters.append(f"status = ${param_count}")
+                    params.append(status)
+
+                # Build FILTER clause suffix for main metrics (e.g. "AND payment_method = $2")
+                main_filter_sql = ""
+                if main_filters:
+                    main_filter_sql = " AND " + " AND ".join(main_filters)
+
+                param_count += 1
+                timezone_param = param_count
+                params.append(timezone_name)
+
+                dashboard_query = f"""
+                    SELECT
+                        -- Main: all-time (with optional payment/status filters)
+                        COUNT(*) FILTER (WHERE status = 'completed'{main_filter_sql}) as main_completed,
+                        COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_sales,
+                        COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_avg_ticket,
+                        COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0{main_filter_sql}) as main_discount_count,
+                        COALESCE(SUM(discount_amount) FILTER (WHERE status = 'completed' AND discount_amount > 0{main_filter_sql}), 0) as main_total_discount,
+
+                        -- Month-to-date (with optional payment/status filters)
+                        COUNT(*) FILTER (
+                            WHERE status = 'completed'
+                            AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ) as month_completed,
+                        COALESCE(SUM(total_amount) FILTER (
+                            WHERE status = 'completed'
+                            AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('month', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ), 0) as month_sales,
+
+                        -- Year-to-date (with optional payment/status filters)
+                        COUNT(*) FILTER (
+                            WHERE status = 'completed'
+                            AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ) as year_completed,
+                        COALESCE(SUM(total_amount) FILTER (
+                            WHERE status = 'completed'
+                            AND DATE(order_date AT TIME ZONE ${timezone_param}) >= DATE_TRUNC('year', NOW() AT TIME ZONE ${timezone_param})::date
+                            {main_filter_sql}
+                        ), 0) as year_sales
+
+                    FROM orders
+                    WHERE tenant_id = $1 AND {ANALYTICS_SALES_FILTER}
+                """
 
             row = await conn.fetchrow(dashboard_query, *params)
 
@@ -2412,60 +3589,94 @@ async def get_orders_dashboard(
             commission_savings = round(main_sales * (commission_rate / 100))
 
             # Payment breakdown — UNION ALL: order_payments (split) + legacy orders
-            breakdown_rows = await conn.fetch(
-                f"""
-                -- Split orders: amounts from order_payments
-                SELECT
-                    COALESCE(pmg.slug, op.payment_method)  AS group_slug,
-                    COALESCE(pmg.name, op.payment_method)  AS group_name,
-                    COALESCE(SUM(op.amount), 0)             AS total,
-                    COUNT(DISTINCT op.order_id)             AS order_count
-                FROM order_payments op
-                JOIN orders o ON o.id = op.order_id
-                LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
-                LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
-                WHERE o.tenant_id = $1
-                  AND o.status = 'completed'
-                  AND {ANALYTICS_SALES_FILTER_ALIAS_O}
-                GROUP BY COALESCE(pmg.slug, op.payment_method), COALESCE(pmg.name, op.payment_method)
-
-                UNION ALL
-
-                -- Legacy orders (no rows in order_payments): use orders.total_amount
-                SELECT
-                    COALESCE(pmg.slug, o.payment_method)  AS group_slug,
-                    COALESCE(pmg.name, o.payment_method)  AS group_name,
-                    COALESCE(SUM(o.total_amount), 0)       AS total,
-                    COUNT(*)                               AS order_count
-                FROM orders o
-                LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
-                LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
-                WHERE o.tenant_id = $1
-                  AND o.status = 'completed'
-                  AND {ANALYTICS_SALES_FILTER_ALIAS_O}
-                  AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = o.id)
-                GROUP BY COALESCE(pmg.slug, o.payment_method), COALESCE(pmg.name, o.payment_method)
-                """,
-                tenant_id,
-            )
-            # Aggregate across UNION ALL branches in Python to avoid double-counting
-            bd_agg: Dict[str, Any] = {}
-            for r in breakdown_rows:
-                slug = r["group_slug"]
-                if slug is None:
-                    continue
-                if slug not in bd_agg:
-                    bd_agg[slug] = {
-                        "group_slug":  slug,
-                        "group_name":  r["group_name"],
-                        "total":       float(r["total"]),
+            if category_id:
+                breakdown_rows = await conn.fetch(
+                    f"""
+                    SELECT
+                        COALESCE(pmg.slug, o.payment_method)  AS group_slug,
+                        COALESCE(pmg.name, o.payment_method)  AS group_name,
+                        COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)), 0) AS total,
+                        COUNT(DISTINCT o.id)                    AS order_count
+                    FROM orders o
+                    JOIN order_items oi ON oi.order_id = o.id
+                    JOIN product p ON p.id = oi.product_id
+                    LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
+                    LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+                    WHERE o.tenant_id = $1
+                      AND o.status = 'completed'
+                      AND {ANALYTICS_SALES_FILTER_ALIAS_O}
+                      AND p.category_id = $2::uuid
+                    GROUP BY COALESCE(pmg.slug, o.payment_method), COALESCE(pmg.name, o.payment_method)
+                    """,
+                    tenant_id,
+                    category_id,
+                )
+                payment_breakdown = [
+                    {
+                        "group_slug": r["group_slug"],
+                        "group_name": r["group_name"],
+                        "total": float(r["total"]),
                         "order_count": int(r["order_count"]),
                     }
-                else:
-                    entry = bd_agg[slug]
-                    entry["total"] = float(entry["total"]) + float(r["total"])
-                    entry["order_count"] = int(entry["order_count"]) + int(r["order_count"])
-            payment_breakdown = sorted(bd_agg.values(), key=lambda x: x["total"], reverse=True)
+                    for r in breakdown_rows
+                    if r["group_slug"] is not None
+                ]
+                payment_breakdown.sort(key=lambda x: x["total"], reverse=True)
+            else:
+                breakdown_rows = await conn.fetch(
+                    f"""
+                    -- Split orders: amounts from order_payments
+                    SELECT
+                        COALESCE(pmg.slug, op.payment_method)  AS group_slug,
+                        COALESCE(pmg.name, op.payment_method)  AS group_name,
+                        COALESCE(SUM(op.amount), 0)             AS total,
+                        COUNT(DISTINCT op.order_id)             AS order_count
+                    FROM order_payments op
+                    JOIN orders o ON o.id = op.order_id
+                    LEFT JOIN payment_methods pm ON pm.id = op.payment_method_id
+                    LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+                    WHERE o.tenant_id = $1
+                      AND o.status = 'completed'
+                      AND {ANALYTICS_SALES_FILTER_ALIAS_O}
+                    GROUP BY COALESCE(pmg.slug, op.payment_method), COALESCE(pmg.name, op.payment_method)
+
+                    UNION ALL
+
+                    -- Legacy orders (no rows in order_payments): use orders.total_amount
+                    SELECT
+                        COALESCE(pmg.slug, o.payment_method)  AS group_slug,
+                        COALESCE(pmg.name, o.payment_method)  AS group_name,
+                        COALESCE(SUM(o.total_amount), 0)       AS total,
+                        COUNT(*)                               AS order_count
+                    FROM orders o
+                    LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id
+                    LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id
+                    WHERE o.tenant_id = $1
+                      AND o.status = 'completed'
+                      AND {ANALYTICS_SALES_FILTER_ALIAS_O}
+                      AND NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.order_id = o.id)
+                    GROUP BY COALESCE(pmg.slug, o.payment_method), COALESCE(pmg.name, o.payment_method)
+                    """,
+                    tenant_id,
+                )
+                # Aggregate across UNION ALL branches in Python to avoid double-counting
+                bd_agg: Dict[str, Any] = {}
+                for r in breakdown_rows:
+                    slug = r["group_slug"]
+                    if slug is None:
+                        continue
+                    if slug not in bd_agg:
+                        bd_agg[slug] = {
+                            "group_slug":  slug,
+                            "group_name":  r["group_name"],
+                            "total":       float(r["total"]),
+                            "order_count": int(r["order_count"]),
+                        }
+                    else:
+                        entry = bd_agg[slug]
+                        entry["total"] = float(entry["total"]) + float(r["total"])
+                        entry["order_count"] = int(entry["order_count"]) + int(r["order_count"])
+                payment_breakdown = sorted(bd_agg.values(), key=lambda x: x["total"], reverse=True)
 
             # Tax aggregates — all-time, month-to-date, year-to-date
             _main_std = 0.0
@@ -2476,33 +3687,57 @@ async def get_orders_dashboard(
             _year_liq = 0.0
             _tax_label = "Impuesto"
             _base_filter = f"o.tenant_id = $1 AND o.status = 'completed' AND {ANALYTICS_SALES_FILTER_ALIAS_O}"
+            if category_id:
+                _base_filter += " AND p.category_id = $2::uuid"
             _tax_select = """
                 SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
-                       COALESCE(SUM(oi.subtotal), 0) AS subtotal
+                       COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                       p.tax_line_key AS tax_line_key,
+                       p.category_id::text AS category_id,
+                       COALESCE(oi.subtotal, 0) AS subtotal
                 FROM order_items oi
                 JOIN product p ON p.id = oi.product_id
                 JOIN orders o ON o.id = oi.order_id
             """
             try:
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
-                main_tax_rows = await conn.fetch(
-                    f"{_tax_select} WHERE {_base_filter} GROUP BY COALESCE(p.tax_category, 'standard')",
-                    tenant_id
-                )
-                month_tax_rows = await conn.fetch(
-                    f"""{_tax_select} WHERE {_base_filter}
-                        AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('month', NOW() AT TIME ZONE $2)::date
-                        GROUP BY COALESCE(p.tax_category, 'standard')""",
-                    tenant_id,
-                    timezone_name,
-                )
-                year_tax_rows = await conn.fetch(
-                    f"""{_tax_select} WHERE {_base_filter}
-                        AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('year', NOW() AT TIME ZONE $2)::date
-                        GROUP BY COALESCE(p.tax_category, 'standard')""",
-                    tenant_id,
-                    timezone_name,
-                )
+                if category_id:
+                    main_tax_rows = await conn.fetch(
+                        f"{_tax_select} WHERE {_base_filter}",
+                        tenant_id,
+                        category_id,
+                    )
+                    month_tax_rows = await conn.fetch(
+                        f"""{_tax_select} WHERE {_base_filter}
+                            AND DATE(o.order_date AT TIME ZONE $3) >= DATE_TRUNC('month', NOW() AT TIME ZONE $3)::date""",
+                        tenant_id,
+                        category_id,
+                        timezone_name,
+                    )
+                    year_tax_rows = await conn.fetch(
+                        f"""{_tax_select} WHERE {_base_filter}
+                            AND DATE(o.order_date AT TIME ZONE $3) >= DATE_TRUNC('year', NOW() AT TIME ZONE $3)::date""",
+                        tenant_id,
+                        category_id,
+                        timezone_name,
+                    )
+                else:
+                    main_tax_rows = await conn.fetch(
+                        f"{_tax_select} WHERE {_base_filter}",
+                        tenant_id
+                    )
+                    month_tax_rows = await conn.fetch(
+                        f"""{_tax_select} WHERE {_base_filter}
+                            AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('month', NOW() AT TIME ZONE $2)::date""",
+                        tenant_id,
+                        timezone_name,
+                    )
+                    year_tax_rows = await conn.fetch(
+                        f"""{_tax_select} WHERE {_base_filter}
+                            AND DATE(o.order_date AT TIME ZONE $2) >= DATE_TRUNC('year', NOW() AT TIME ZONE $2)::date""",
+                        tenant_id,
+                        timezone_name,
+                    )
                 _main_std, _main_liq, _tax_label = _compute_tax_breakdown(main_tax_rows, tax_config)
                 _month_std, _month_liq, _ = _compute_tax_breakdown(month_tax_rows, tax_config)
                 _year_std, _year_liq, _ = _compute_tax_breakdown(year_tax_rows, tax_config)
@@ -2558,6 +3793,9 @@ async def export_orders_to_email(
     sort_direction: str = "desc",
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    delivery_only: Optional[bool] = None,
+    source: Optional[str] = None,
+    payment_status: Optional[str] = None,
     tips_only: bool = False,
     member_id: Optional[str] = None,
     channel: Optional[str] = None,
@@ -2648,6 +3886,16 @@ async def export_orders_to_email(
                 timezone_name,
             )
 
+            if not tips_only:
+                param_count = _append_orders_source_payment_filters(
+                    where_conditions,
+                    params,
+                    param_count,
+                    source=source,
+                    delivery_only=delivery_only,
+                    payment_status=payment_status,
+                )
+
             # warocol.com#640 — tips-only filters (ignored when tips_only is False)
             if tips_only and member_id:
                 param_count += 1
@@ -2707,6 +3955,8 @@ async def export_orders_to_email(
                     LEFT JOIN profile p ON p.id = tm.user_id
                     LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id AND pm.tenant_id = $1
                     LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id AND pmg.tenant_id = $1
+                    LEFT JOIN table_sessions ts_meta ON ts_meta.id = o.table_session_id
+                    LEFT JOIN tables t_meta ON t_meta.id = ts_meta.table_id
                     WHERE {where_clause}
                     ORDER BY {sort_column} {sort_direction}
                 """
@@ -2731,6 +3981,8 @@ async def export_orders_to_email(
                     LEFT JOIN profile p ON o.customer_id = p.id
                     LEFT JOIN payment_methods pm ON pm.id = o.payment_method_id AND pm.tenant_id = $1
                     LEFT JOIN payment_method_groups pmg ON pmg.id = pm.group_id AND pmg.tenant_id = $1
+                    LEFT JOIN table_sessions ts_meta ON ts_meta.id = o.table_session_id
+                    LEFT JOIN tables t_meta ON t_meta.id = ts_meta.table_id
                     WHERE {where_clause}
                     ORDER BY {sort_column} {sort_direction}
                 """
@@ -2975,7 +4227,7 @@ async def delete_order_item(
             async with conn.transaction():
                 # Verify order exists and get order number
                 order_query = """
-                    SELECT id, order_number, order_date FROM orders
+                    SELECT id, order_number, order_date, status FROM orders
                     WHERE id = $1 AND tenant_id = $2 AND pos_cart_id IS NOT NULL
                 """
                 order_row = await conn.fetchrow(order_query, order_id, tenant_id)
@@ -2985,6 +4237,8 @@ async def delete_order_item(
 
                 # Guard: block mutation if order falls in a closed monthly accounting period (#362)
                 await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_row['order_date'])
+                await assert_order_invoice_allows_mutation(conn, tenant_id, order_id)
+                _assert_order_status_allows_line_edit(order_row['status'])
 
                 order_number = order_row['order_number']
 
@@ -3093,6 +4347,24 @@ async def delete_order_item(
 
                 logger.info(f"Order item deleted and inventory restored for Order #{order_number}")
 
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_VENTAS,
+                    channel=None,
+                    action="order_item_deleted",
+                    actor_user_id=user_id,
+                    order_id=order_id,
+                    order_item_id=item_id,
+                    payload={
+                        "entity_type": "order_item",
+                        "entity_id": str(item_id),
+                        "order_number": int(order_number),
+                        "product_name": product_name,
+                        "quantity": item_quantity,
+                    },
+                )
+
                 return {
                     "success": True,
                     "message": "Item eliminado y stock actualizado",
@@ -3166,24 +4438,104 @@ async def _deduct_stock_for_status_update(conn, order_id, tenant_id, user_id, or
 
 
 async def _return_stock_for_order_cancellation(conn, order_id, tenant_id, user_id, order_number: int) -> None:
-    """Return ingredient stock when a completed order is cancelled or rolled back to pending."""
+    """
+    Return ingredient stock when an order is cancelled or rolled back.
+
+    warocol.com#2567 — same contract as line-delete: snapshots when present
+    (includes modifier snapshot lines); recipe + live modifier return only when
+    snapshots are missing. Skip when no ingredient still has net consumption.
+    """
+    still_owes = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM tenant_ingredient_movements
+            WHERE tenant_id = $1
+              AND reference_table = 'orders'
+              AND reference_id = $2
+              AND movement_type IN ('consumption', 'return')
+            GROUP BY ingredient_id
+            HAVING SUM(quantity_change) < 0
+        )
+        """,
+        tenant_id,
+        order_id,
+    )
+    if not still_owes:
+        return
+
+    (
+        _,
+        return_modifier_inventory_for_order_item,
+        return_order_item_inventory_from_snapshots,
+    ) = _pos_modifier_inventory_helpers()
+
     items = await conn.fetch(
-        """SELECT oi.product_id, oi.quantity, p.name AS product_name
-           FROM order_items oi
-           JOIN product p ON p.id = oi.product_id
-           WHERE oi.order_id = $1""",
+        """
+        SELECT oi.id AS order_item_id, oi.product_id, oi.quantity, p.name AS product_name
+        FROM order_items oi
+        JOIN product p ON p.id = oi.product_id
+        WHERE oi.order_id = $1
+        """,
         order_id,
     )
     for item in items:
+        product_name = item["product_name"]
+        item_quantity = float(item["quantity"])
+        returned_from_snapshots = await return_order_item_inventory_from_snapshots(
+            conn,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            order_id=order_id,
+            order_number=order_number,
+            order_item_id=item["order_item_id"],
+            reason_detail=f"Cancelación: {item['quantity']}x {product_name}",
+        )
+        if returned_from_snapshots:
+            continue
+
         ingredients = await conn.fetch(_INGREDIENTS_QUERY, item["product_id"])
         for ing in ingredients:
-            qty = _inventory_quantity(Decimal(str(item["quantity"])) * Decimal(str(ing["quantity"])))
-            await _return_ingredient_to_stock(
-                conn, tenant_id, user_id, order_id, order_number,
-                ing["ingredient_id"], qty, ing["unit"], ing["ingredient_name"],
-                f"Cancelación: {item['quantity']}x {item['product_name']}"
+            qty = _inventory_quantity(
+                Decimal(str(item["quantity"])) * Decimal(str(ing["quantity"]))
             )
-            logger.info(f"Stock returned (cancellation): {ing['ingredient_name']} +{qty}{ing['unit']} (Orden #{order_number})")
+            await _return_ingredient_to_stock(
+                conn,
+                tenant_id,
+                user_id,
+                order_id,
+                order_number,
+                ing["ingredient_id"],
+                qty,
+                ing["unit"],
+                ing["ingredient_name"],
+                f"Cancelación: {item['quantity']}x {product_name}",
+            )
+
+        modifiers = await conn.fetch(
+            """
+            SELECT modifier_id, modifier_name, quantity
+            FROM order_item_modifiers
+            WHERE order_item_id = $1
+            """,
+            item["order_item_id"],
+        )
+        for mod in modifiers:
+            if not mod["modifier_id"]:
+                continue
+            await return_modifier_inventory_for_order_item(
+                conn,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                order_id=order_id,
+                order_number=order_number,
+                order_item_id=item["order_item_id"],
+                item_quantity=item_quantity,
+                modifier_id=mod["modifier_id"],
+                modifier_qty=float(mod["quantity"] or 1),
+                modifier_name=mod["modifier_name"] or "Modificador",
+                product_name=product_name,
+            )
 
 
 async def _return_ingredient_to_stock(
@@ -3273,7 +4625,7 @@ async def delete_order_item_modifier(
             async with conn.transaction():
                 # Verify order exists and get order number
                 order_query = """
-                    SELECT id, order_number, order_date FROM orders
+                    SELECT id, order_number, order_date, status FROM orders
                     WHERE id = $1 AND tenant_id = $2 AND pos_cart_id IS NOT NULL
                 """
                 order_row = await conn.fetchrow(order_query, order_id, tenant_id)
@@ -3283,6 +4635,8 @@ async def delete_order_item_modifier(
 
                 # Guard: block mutation if order falls in a closed monthly accounting period (#362)
                 await assert_order_not_in_closed_monthly_period(conn, tenant_id, order_row['order_date'])
+                await assert_order_invoice_allows_mutation(conn, tenant_id, order_id)
+                _assert_order_status_allows_line_edit(order_row['status'])
 
                 order_number = order_row['order_number']
 
@@ -3391,6 +4745,24 @@ async def delete_order_item_modifier(
 
                 logger.info(f"Modifier {modifier_name} deleted from Order #{order_number}")
 
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_VENTAS,
+                    channel=None,
+                    action="order_item_modifier_deleted",
+                    actor_user_id=user_id,
+                    order_id=order_id,
+                    order_item_id=item_id,
+                    payload={
+                        "entity_type": "order_item_modifier",
+                        "entity_id": str(modifier_id),
+                        "order_number": int(order_number),
+                        "product_name": product_name,
+                        "modifier_name": modifier_name,
+                    },
+                )
+
                 return {
                     "success": True,
                     "message": "Modificador eliminado y stock actualizado",
@@ -3412,7 +4784,8 @@ async def get_sales_flow(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     payment_method: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    category_id: Optional[str] = None,
 ) -> dict:
     """
     Get sales flow data with intelligent comparison and grouping
@@ -3461,25 +4834,56 @@ async def get_sales_flow(
             group_by = 'hour' if days_diff <= 3 else 'day'
 
             # Build WHERE conditions
-            where_conditions = ["tenant_id = $1", ANALYTICS_SALES_FILTER]
-            params = [tenant_id]
-            param_count = 1
+            if category_id:
+                where_conditions = ["o.tenant_id = $1", ANALYTICS_SALES_FILTER_ALIAS_O]
+                params = [tenant_id]
+                param_count = 1
 
-            # Add filters
-            if payment_method:
-                param_count += 1
-                where_conditions.append(f"payment_method = ${param_count}")
-                params.append(payment_method)
+                if payment_method:
+                    param_count += 1
+                    where_conditions.append(f"o.payment_method = ${param_count}")
+                    params.append(payment_method)
 
-            if status:
+                if status:
+                    param_count += 1
+                    where_conditions.append(f"o.status = ${param_count}")
+                    params.append(status)
+                else:
+                    where_conditions.append("o.status = 'completed'")
+
                 param_count += 1
-                where_conditions.append(f"status = ${param_count}")
-                params.append(status)
+                where_conditions.append(f"p.category_id = ${param_count}::uuid")
+                params.append(category_id)
+
+                where_clause = " AND ".join(where_conditions)
+                from_join = """
+                    FROM orders o
+                    JOIN order_items oi ON oi.order_id = o.id
+                    JOIN product p ON p.id = oi.product_id
+                """
+                sales_expr = "SUM(COALESCE(oi.net_total, oi.subtotal))"
+                order_date_col = "o.order_date"
             else:
-                # Default to completed if no status filter
-                where_conditions.append("status = 'completed'")
+                where_conditions = ["tenant_id = $1", ANALYTICS_SALES_FILTER]
+                params = [tenant_id]
+                param_count = 1
 
-            where_clause = " AND ".join(where_conditions)
+                if payment_method:
+                    param_count += 1
+                    where_conditions.append(f"payment_method = ${param_count}")
+                    params.append(payment_method)
+
+                if status:
+                    param_count += 1
+                    where_conditions.append(f"status = ${param_count}")
+                    params.append(status)
+                else:
+                    where_conditions.append("status = 'completed'")
+
+                where_clause = " AND ".join(where_conditions)
+                from_join = "FROM orders"
+                sales_expr = "SUM(total_amount)"
+                order_date_col = "order_date"
 
             # Build query based on grouping
             if group_by == 'hour':
@@ -3503,23 +4907,23 @@ async def get_sales_flow(
                     ),
                     current_period AS (
                         SELECT
-                            EXTRACT(HOUR FROM order_date AT TIME ZONE ${timezone_param_idx}) AS hour,
-                            SUM(total_amount) AS sales
-                        FROM orders
+                            EXTRACT(HOUR FROM {order_date_col} AT TIME ZONE ${timezone_param_idx}) AS hour,
+                            {sales_expr} AS sales
+                        {from_join}
                         WHERE {where_clause}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) >= ${date_from_param_idx}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) <= ${date_to_param_idx}
-                        GROUP BY EXTRACT(HOUR FROM order_date AT TIME ZONE ${timezone_param_idx})
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) >= ${date_from_param_idx}
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) <= ${date_to_param_idx}
+                        GROUP BY EXTRACT(HOUR FROM {order_date_col} AT TIME ZONE ${timezone_param_idx})
                     ),
                     comparison_period AS (
                         SELECT
-                            EXTRACT(HOUR FROM order_date AT TIME ZONE ${timezone_param_idx}) AS hour,
-                            SUM(total_amount) AS sales
-                        FROM orders
+                            EXTRACT(HOUR FROM {order_date_col} AT TIME ZONE ${timezone_param_idx}) AS hour,
+                            {sales_expr} AS sales
+                        {from_join}
                         WHERE {where_clause}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) >= ${comp_from_param_idx}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) <= ${comp_to_param_idx}
-                        GROUP BY EXTRACT(HOUR FROM order_date AT TIME ZONE ${timezone_param_idx})
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) >= ${comp_from_param_idx}
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) <= ${comp_to_param_idx}
+                        GROUP BY EXTRACT(HOUR FROM {order_date_col} AT TIME ZONE ${timezone_param_idx})
                     )
                     SELECT
                         h.hour,
@@ -3579,23 +4983,23 @@ async def get_sales_flow(
                     ),
                     current_period AS (
                         SELECT
-                            DATE(order_date AT TIME ZONE ${timezone_param_idx}) AS day,
-                            SUM(total_amount) AS sales
-                        FROM orders
+                            DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) AS day,
+                            {sales_expr} AS sales
+                        {from_join}
                         WHERE {where_clause}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) >= ${date_from_param_idx}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) <= ${date_to_param_idx}
-                        GROUP BY DATE(order_date AT TIME ZONE ${timezone_param_idx})
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) >= ${date_from_param_idx}
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) <= ${date_to_param_idx}
+                        GROUP BY DATE({order_date_col} AT TIME ZONE ${timezone_param_idx})
                     ),
                     comparison_period AS (
                         SELECT
-                            DATE(order_date AT TIME ZONE ${timezone_param_idx}) AS day,
-                            SUM(total_amount) AS sales
-                        FROM orders
+                            DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) AS day,
+                            {sales_expr} AS sales
+                        {from_join}
                         WHERE {where_clause}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) >= ${comp_from_param_idx}
-                          AND DATE(order_date AT TIME ZONE ${timezone_param_idx}) <= ${comp_to_param_idx}
-                        GROUP BY DATE(order_date AT TIME ZONE ${timezone_param_idx})
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) >= ${comp_from_param_idx}
+                          AND DATE({order_date_col} AT TIME ZONE ${timezone_param_idx}) <= ${comp_to_param_idx}
+                        GROUP BY DATE({order_date_col} AT TIME ZONE ${timezone_param_idx})
                     )
                     SELECT
                         ds.day,
@@ -3661,6 +5065,7 @@ async def create_manual_order(
     discount_type: Optional[str] = None,
     discount_value: Optional[float] = None,
     payments: Optional[List[dict]] = None,
+    wompi_collection: bool = False,
 ) -> dict:
     """
     Create an order manually with a custom date, bypassing the POS cart.
@@ -3804,11 +5209,19 @@ async def create_manual_order(
                             status_code=400,
                         )
 
+                if wompi_collection and split_payments:
+                    raise APIError("Wompi no admite cobro dividido", status_code=400)
+
                 payment_status = (
+                    None
+                    if wompi_collection
+                    else (
                     "paid"
                     if split_payments
                     else ("credit" if payment_method == "credit" else "paid")
+                    )
                 )
+                order_status = "pending" if wompi_collection else "completed"
 
                 order_row = await conn.fetchrow(
                     """
@@ -3817,20 +5230,21 @@ async def create_manual_order(
                         order_date, total_amount, status, payment_status,
                         discount_type, discount_value, discount_amount, extra_attributes
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8, $9, $10, $11)
+                    VALUES ($1, $2, $3, $4, $5, $6, $12, $7, $8, $9, $10, $11)
                     RETURNING id, order_number, order_date, created_at
                     """,
                     tenant_id,
                     customer_uuid,
-                    payment_method,
-                    payment_method_uuid,
+                    None if wompi_collection else payment_method,
+                    None if wompi_collection else payment_method_uuid,
                     order_datetime,
                     total_amount,
                     payment_status,
                     normalized_discount_type,
                     normalized_discount_value,
                     discount_amount or None,
-                    json.dumps({"source": "manual"})
+                    json.dumps({"source": "manual"}),
+                    order_status,
                 )
 
                 order_id = order_row["id"]
@@ -3966,7 +5380,7 @@ async def create_manual_order(
                         str(tenant_id),
                     )
 
-                if split_payments:
+                if not wompi_collection and split_payments:
                     from app.services.customer_wallet_service import apply_wallet_for_order
 
                     for payment in split_payments:
@@ -4001,7 +5415,11 @@ async def create_manual_order(
                                 user_id,
                                 payment_row["id"],
                             )
-                elif payment_method == "customer_wallet" and customer_uuid:
+                    from app.services.credit_service import sync_order_split_credit_status
+                    payment_status = await sync_order_split_credit_status(
+                        conn, order_id, settlement_complete=True,
+                    )
+                elif not wompi_collection and payment_method == "customer_wallet" and customer_uuid:
                     from app.services.customer_wallet_service import apply_wallet_for_order
 
                     await apply_wallet_for_order(
@@ -4016,40 +5434,41 @@ async def create_manual_order(
                 gl_order_date = local_date_for_tenant(order_datetime, timezone_name)
                 gl_payment_method_id = payment_method_uuid
 
-                try:
-                    tax_config = await _get_tenant_tax_config(conn, tenant_id)
-                    await _post_order_gl_entry(
-                        conn=conn,
-                        tenant_id=tenant_id,
-                        order_id=order_id,
-                        order_date=gl_order_date,
-                        total_amount=Decimal(str(total_amount)),
-                        payment_method=payment_method,
-                        payment_method_id=gl_payment_method_id,
-                        tax_config=tax_config,
-                        order_number=int(order_row["order_number"]),
-                        payment_splits=split_payments or None,
-                    )
-                except MissingAccountRoleError:
-                    raise
-                except Exception as e:
-                    logger.error(f"GL entry failed for manual order {order_id}: {e}")
+                if not wompi_collection:
+                    try:
+                        tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        await _post_order_gl_entry(
+                            conn=conn,
+                            tenant_id=tenant_id,
+                            order_id=order_id,
+                            order_date=gl_order_date,
+                            total_amount=Decimal(str(total_amount)),
+                            payment_method=payment_method,
+                            payment_method_id=gl_payment_method_id,
+                            tax_config=tax_config,
+                            order_number=int(order_row["order_number"]),
+                            payment_splits=split_payments or None,
+                        )
+                    except MissingAccountRoleError:
+                        raise
+                    except Exception as e:
+                        logger.error(f"GL entry failed for manual order {order_id}: {e}")
 
-                try:
-                    await _post_order_cogs_gl_entry(
-                        conn=conn,
-                        tenant_id=tenant_id,
-                        order_id=order_id,
-                        order_date=gl_order_date,
-                        order_number=int(order_row["order_number"]),
-                    )
-                except MissingAccountRoleError:
-                    raise
-                except Exception as e:
-                    logger.error(f"COGS GL entry failed for manual order {order_id}: {e}")
+                    try:
+                        await _post_order_cogs_gl_entry(
+                            conn=conn,
+                            tenant_id=tenant_id,
+                            order_id=order_id,
+                            order_date=gl_order_date,
+                            order_number=int(order_row["order_number"]),
+                        )
+                    except MissingAccountRoleError:
+                        raise
+                    except Exception as e:
+                        logger.error(f"COGS GL entry failed for manual order {order_id}: {e}")
 
         # Award waros for completed manual order (fire-and-forget — never blocks)
-        if customer_id:
+        if customer_id and not wompi_collection:
             try:
                 asyncio.create_task(
                     evaluate_and_award(order_row["id"], UUID(customer_id), tenant_id)
@@ -4064,9 +5483,9 @@ async def create_manual_order(
                 "order_number": int(order_row["order_number"]),
                 "order_date": order_row["order_date"].isoformat(),
                 "total_amount": float(total_amount),
-                "status": "completed",
-                "payment_method": payment_method,
-                "payment_method_id": str(payment_method_uuid) if payment_method_uuid else None,
+                "status": "pending" if wompi_collection else "completed",
+                "payment_method": None if wompi_collection else payment_method,
+                "payment_method_id": None if wompi_collection else (str(payment_method_uuid) if payment_method_uuid else None),
                 "payment_status": payment_status,
                 "discount_type": normalized_discount_type,
                 "discount_value": normalized_discount_value,
@@ -4089,10 +5508,15 @@ async def get_products_sold(
     sort: str = "qty_desc",
     search: Optional[str] = None,
     channel: Optional[str] = None,
+    limit: int = 25,
+    offset: int = 0,
 ) -> dict:
     """
     Get products sold aggregated by product, filtered by date range and category.
     Only includes orders with status = 'completed'.
+
+    Pagination (warocol.com#1943): `limit`/`offset` page the product rows.
+    `totals` and `pagination.total` always reflect the full filtered set.
     """
     try:
         session_context = require_valid_session(request)
@@ -4100,6 +5524,9 @@ async def get_products_sold(
 
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
+
+        limit = max(1, min(int(limit or 25), 250))
+        offset = max(0, int(offset or 0))
 
         async with get_db_connection() as conn:
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
@@ -4146,24 +5573,113 @@ async def get_products_sold(
             }
             order_by = sort_map.get(sort, "quantity_sold DESC")
 
+            # Categories for filter chips: same filters except category_id (stable while paging).
+            cat_where_conditions = ["o.tenant_id = $1", "o.status = 'completed'"]
+            cat_params: List = [tenant_id]
+            cat_param_count = _append_local_date_bounds(
+                cat_where_conditions,
+                cat_params,
+                1,
+                "o.order_date",
+                parsed_date_from,
+                parsed_date_to,
+                timezone_name,
+            )
+            if search and search.strip():
+                cat_param_count += 1
+                cat_where_conditions.append(f"p.name ILIKE ${cat_param_count}")
+                cat_params.append(f"%{search.strip()}%")
+            if channel == 'online':
+                cat_where_conditions.append("o.online_cart_id IS NOT NULL")
+            elif channel == 'mesa':
+                cat_where_conditions.append("o.table_session_id IS NOT NULL")
+            elif channel == 'pos':
+                cat_where_conditions.append("o.pos_cart_id IS NOT NULL AND o.table_session_id IS NULL")
+            cat_where_clause = " AND ".join(cat_where_conditions)
+
+            param_count += 1
+            limit_param = param_count
+            param_count += 1
+            offset_param = param_count
+            page_params = list(params) + [limit, offset]
+
             query = f"""
-                SELECT
-                    p.id::text AS product_id,
-                    p.name AS product_name,
+                WITH aggregated AS (
+                    SELECT
+                        p.id::text AS product_id,
+                        p.name AS product_name,
+                        p.category_id::text AS category_id,
+                        c.name AS category_name,
+                        SUM(oi.quantity)::int AS quantity_sold,
+                        SUM(oi.subtotal) AS total_revenue
+                    FROM order_items oi
+                    JOIN orders o ON o.id = oi.order_id
+                    JOIN product p ON p.id = oi.product_id
+                    LEFT JOIN categories c ON c.id = p.category_id
+                    WHERE {where_clause}
+                    GROUP BY p.id, p.name, p.category_id, c.name
+                ),
+                with_totals AS (
+                    SELECT
+                        product_id,
+                        product_name,
+                        category_id,
+                        category_name,
+                        quantity_sold,
+                        total_revenue,
+                        COUNT(*) OVER() AS total_products,
+                        COALESCE(SUM(quantity_sold) OVER(), 0)::int AS period_quantity_sold,
+                        COALESCE(SUM(total_revenue) OVER(), 0) AS period_total_revenue
+                    FROM aggregated
+                )
+                SELECT *
+                FROM with_totals
+                ORDER BY {order_by}
+                LIMIT ${limit_param} OFFSET ${offset_param}
+            """
+
+            rows = await conn.fetch(query, *page_params)
+
+            cat_query = f"""
+                SELECT DISTINCT
                     p.category_id::text AS category_id,
-                    c.name AS category_name,
-                    SUM(oi.quantity)::int AS quantity_sold,
-                    SUM(oi.subtotal) AS total_revenue
+                    c.name AS category_name
                 FROM order_items oi
                 JOIN orders o ON o.id = oi.order_id
                 JOIN product p ON p.id = oi.product_id
                 LEFT JOIN categories c ON c.id = p.category_id
-                WHERE {where_clause}
-                GROUP BY p.id, p.name, p.category_id, c.name
-                ORDER BY {order_by}
+                WHERE {cat_where_clause}
+                  AND p.category_id IS NOT NULL
+                ORDER BY c.name ASC NULLS LAST
             """
+            cat_rows = await conn.fetch(cat_query, *cat_params)
 
-            rows = await conn.fetch(query, *params)
+            if rows:
+                total_products = int(rows[0]["total_products"])
+                total_qty = int(rows[0]["period_quantity_sold"])
+                total_revenue = float(rows[0]["period_total_revenue"])
+            else:
+                totals_query = f"""
+                    SELECT
+                        COUNT(*)::int AS total_products,
+                        COALESCE(SUM(quantity_sold), 0)::int AS period_quantity_sold,
+                        COALESCE(SUM(total_revenue), 0) AS period_total_revenue
+                    FROM (
+                        SELECT
+                            SUM(oi.quantity)::int AS quantity_sold,
+                            SUM(oi.subtotal) AS total_revenue
+                        FROM order_items oi
+                        JOIN orders o ON o.id = oi.order_id
+                        JOIN product p ON p.id = oi.product_id
+                        LEFT JOIN categories c ON c.id = p.category_id
+                        WHERE {where_clause}
+                        GROUP BY p.id
+                    ) agg
+                """
+                totals_row = await conn.fetchrow(totals_query, *params)
+                total_products = int(totals_row["total_products"]) if totals_row else 0
+                total_qty = int(totals_row["period_quantity_sold"]) if totals_row else 0
+                total_revenue = float(totals_row["period_total_revenue"]) if totals_row else 0.0
 
             data = [
                 {
@@ -4177,8 +5693,11 @@ async def get_products_sold(
                 for row in rows
             ]
 
-            total_qty = sum(r["quantity_sold"] for r in data)
-            total_revenue = sum(r["total_revenue"] for r in data)
+            categories = [
+                {"id": row["category_id"], "name": row["category_name"]}
+                for row in cat_rows
+                if row["category_id"] and row["category_name"]
+            ]
 
             return {
                 "success": True,
@@ -4187,6 +5706,12 @@ async def get_products_sold(
                     "quantity_sold": total_qty,
                     "total_revenue": total_revenue,
                 },
+                "pagination": {
+                    "total": total_products,
+                    "limit": limit,
+                    "offset": offset,
+                },
+                "categories": categories,
             }
 
     except (AuthenticationError, APIError):
@@ -4202,20 +5727,22 @@ async def send_invoice_email(
     recipient_email: str,
 ) -> Dict[str, Any]:
     """
-    Send the WARO-branded receipt email for an order's accepted invoice (warocol.com#603).
+    Send the WARO-branded receipt/invoice email for an order (warocol.com#603, #1769).
 
-    Loads the order header + items + invoice + tenant business profile from DB
-    (single connection, sequential reads), validates the invoice is accepted,
-    then dispatches the existing `send_pos_receipt_email` helper which handles
-    SES + template + optional PDF/XML attachment.
+    Loads the order header + items + optional invoice + tenant business profile
+    from DB, then dispatches `send_pos_receipt_email` (SES + template).
+
+    When an accepted electronic invoice exists, includes invoice fields and
+    optional PDF/XML attachments. Otherwise sends a receipt-style email so
+    cashiers can resend from `/ventas/[id]` without DIAN acceptance.
 
     Raises:
         HTTPException 404 — order not found for the session tenant
-        HTTPException 422 — no invoice / invoice not accepted
         HTTPException 502 — SES rejected the send
     """
     session_context = require_valid_session(request)
     tenant_id = session_context.tenant_id
+    user_id = getattr(session_context, "user_id", None)
     if not tenant_id:
         raise AuthenticationError("Tenant ID is required")
 
@@ -4238,8 +5765,8 @@ async def send_invoice_email(
         if not order_row:
             raise HTTPException(status_code=404, detail="Order not found")
 
-        # 2. Invoice header — must exist and be accepted. PDF attachment is optional:
-        # accepted Matias invoices may exist before the local R2 PDF key is stored.
+        # 2. Invoice header — optional. Accepted invoices get FE attachments;
+        # missing / non-accepted still allow a receipt-style resend (#1769).
         invoice_row = await conn.fetchrow(
             """SELECT prefix, invoice_number, cufe, status, r2_pdf_key, r2_xml_key,
                       emitted_at, created_at
@@ -4249,21 +5776,15 @@ async def send_invoice_email(
                LIMIT 1""",
             order_id, tenant_id,
         )
-        if not invoice_row:
-            raise HTTPException(
-                status_code=422,
-                detail="Esta orden no tiene factura electrónica. Emitila antes de enviarla.",
-            )
-        if invoice_row['status'] != 'accepted':
-            raise HTTPException(
-                status_code=422,
-                detail="La factura debe estar aceptada por DIAN para poder enviarla por correo.",
-            )
+        include_invoice = bool(invoice_row and invoice_row['status'] == 'accepted')
 
         # 3. Tax breakdown — net line base matches GL / cierre_service.
         tax_config = await _get_tenant_tax_config(conn, tenant_id)
         items_for_tax = await conn.fetch(
             """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
+                      COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+                      p.tax_line_key AS tax_line_key,
+                      p.category_id::text AS category_id,
                       COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal
                FROM order_items oi
                JOIN product p ON p.id = oi.product_id
@@ -4317,17 +5838,19 @@ async def send_invoice_email(
             tenant_id,
         )
 
-        resolution_row = await conn.fetchrow(
-            """SELECT resolution_number, prefix, date_from, date_to,
-                      from_number, to_number
-               FROM dian_resolutions
-               WHERE tenant_id = $1
-                 AND prefix = $2
-                 AND is_active = true
-               ORDER BY created_at DESC
-               LIMIT 1""",
-            tenant_id, invoice_row['prefix'],
-        )
+        resolution_row = None
+        if include_invoice:
+            resolution_row = await conn.fetchrow(
+                """SELECT resolution_number, prefix, date_from, date_to,
+                          from_number, to_number
+                   FROM dian_resolutions
+                   WHERE tenant_id = $1
+                     AND prefix = $2
+                     AND is_active = true
+                   ORDER BY created_at DESC
+                   LIMIT 1""",
+                tenant_id, invoice_row['prefix'],
+            )
 
     discount_amount = float(order_row['discount_amount']) if order_row['discount_amount'] is not None else 0.0
     promo_savings = float(promo_summary["promo_savings"])
@@ -4340,36 +5863,38 @@ async def send_invoice_email(
         else 0.0
     )
 
-    tax_details = _tax_detail_rows(items_for_tax, std_tax, liq_tax, tax_label)
-    invoice_presentation = _build_invoice_presentation(
-        invoice_row,
-        order_row,
-        profile_row,
-        resolution_row,
-        tax_details,
-        serialize_datetimes=False,
-        provider="matias",
-    )
+    tax_details = _tax_detail_rows(items_for_tax, std_tax, liq_tax, tax_label, tax_config)
+    invoice_presentation = None
+    if include_invoice:
+        invoice_presentation = _build_invoice_presentation(
+            invoice_row,
+            order_row,
+            profile_row,
+            resolution_row,
+            tax_details,
+            serialize_datetimes=False,
+            provider="matias",
+        )
 
     # FE email: subject/header prefer tenant fiscal name (emisor), not product brand.
-    issuer_name = (invoice_presentation.get("issuer") or {}).get("name")
+    issuer_name = (invoice_presentation or {}).get("issuer", {}).get("name") if invoice_presentation else None
     email_business_name = commercial_header_name(
         fiscal_row=profile_row,
         public_profile=profile_row,
         prefer_fiscal=True,
-    ) or issuer_name
+    ) or issuer_name or (_row_get(profile_row, "display_name") if profile_row else None)
     email_address = (
-        (invoice_presentation.get("issuer") or {}).get("address")
-        or (_row_get(profile_row, "address") if profile_row else None)
-    )
+        ((invoice_presentation or {}).get("issuer") or {}).get("address")
+        if invoice_presentation else None
+    ) or (_row_get(profile_row, "address") if profile_row else None)
     email_city = (
-        (invoice_presentation.get("issuer") or {}).get("city")
-        or (_row_get(profile_row, "city") if profile_row else None)
-    )
+        ((invoice_presentation or {}).get("issuer") or {}).get("city")
+        if invoice_presentation else None
+    ) or (_row_get(profile_row, "city") if profile_row else None)
     email_phone = (
-        (invoice_presentation.get("issuer") or {}).get("phone")
-        or (_row_get(profile_row, "phone_number") if profile_row else None)
-    )
+        ((invoice_presentation or {}).get("issuer") or {}).get("phone")
+        if invoice_presentation else None
+    ) or (_row_get(profile_row, "phone_number") if profile_row else None)
 
     # api-warolabs#657: persist the attempt before SES. Raw token goes only
     # into the pixel URL; the DB stores its SHA-256 hash. Fail-open: when
@@ -4408,20 +5933,24 @@ async def send_invoice_email(
         promo_savings=promo_savings,
         promo_breakdown=promo_breakdown,
         waro_redemption_summary=waro_summary,
-        invoice_prefix=invoice_row['prefix'],
-        invoice_number=int(invoice_row['invoice_number']),
-        invoice_cufe=invoice_row['cufe'],
+        invoice_prefix=invoice_row['prefix'] if include_invoice else None,
+        invoice_number=int(invoice_row['invoice_number']) if include_invoice else None,
+        invoice_cufe=invoice_row['cufe'] if include_invoice else None,
         invoice_presentation=invoice_presentation,
         return_details=True,
         tracking_pixel_url=pixel_url,
     )
     if isinstance(send_result, dict):
         success = bool(send_result.get("success"))
-        attachment_status = send_result.get("attachments") or _invoice_attachment_flags(invoice_row)
+        attachment_status = send_result.get("attachments") or (
+            _invoice_attachment_flags(invoice_row) if include_invoice else {"pdf": False, "xml": False}
+        )
         attachment_warnings = send_result.get("attachment_warnings") or []
     else:
         success = bool(send_result)
-        attachment_status = _invoice_attachment_flags(invoice_row)
+        attachment_status = (
+            _invoice_attachment_flags(invoice_row) if include_invoice else {"pdf": False, "xml": False}
+        )
         attachment_warnings = []
 
     if not success:
@@ -4436,6 +5965,24 @@ async def send_invoice_email(
 
     if delivery_id is not None:
         await invoice_email_tracking_service.mark_delivery_sent(delivery_id)
+
+    async with get_db_connection() as conn:
+        await record_operation_event(
+            conn,
+            tenant_id,
+            domain=DOMAIN_VENTAS,
+            channel=None,
+            action="order_email_sent",
+            actor_user_id=user_id,
+            order_id=order_id,
+            payload={
+                "entity_type": "order",
+                "entity_id": str(order_id),
+                "order_number": int(order_row["order_number"]) if order_row["order_number"] is not None else None,
+                "recipient_email": recipient_email,
+                "email_kind": "invoice" if include_invoice else "receipt",
+            },
+        )
 
     return {
         'success': True,

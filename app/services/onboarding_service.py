@@ -10,15 +10,31 @@ from app.config import settings
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES
 from app.core.onboarding_access import next_step_for_state
 from app.models.onboarding import (
+    AdditionalTenantBootstrapData,
+    AdditionalTenantBootstrapResponse,
     OnboardingBusinessProfileUpdate,
     OnboardingFinancialData,
     OnboardingFinancialResponse,
     OnboardingStatus,
     OnboardingStatusResponse,
 )
+from app.core.exceptions import AuthorizationError
 from app.models.tenant_financial_profile import TenantFinancialProfile
 from app.services import legal_service
 from app.services import tenant_financial_profile_service as financial_service
+from app.services.hospitality_tax_jurisdictions import (
+    JURISDICTION_COUNTRIES,
+    apply_jurisdiction_pack,
+    normalize_jurisdiction_code,
+)
+from app.services.hospitality_tax_packs import ensure_wave1_tax_pack
+from app.core.country_locale import (
+    locale_from_country,
+    public_country_name,
+    resolve_public_currency,
+)
+from app.core.timezones import seed_tenant_timezone_from_country
+from app.services.public_slug_service import assign_name_based_storefront_slug
 
 MAX_EMAIL_REQUESTS = 5
 MAX_IP_REQUESTS = 20
@@ -26,8 +42,18 @@ MAX_VERIFY_ATTEMPTS = 5
 PRE_PAYMENT_FINANCIAL_STATES = frozenset({
     "business_profile_pending",
     "terms_pending",
+    "starter_active",
     "payment_pending",
 })
+# Mid-alta states that must be resumed instead of spawning another tenant.
+RESUME_PIPELINE_STATES = frozenset({
+    "email_verified",
+    "business_profile_pending",
+    "terms_pending",
+    "payment_pending",
+    "paid",
+})
+MAX_ADDITIONAL_TENANT_CREATES_PER_HOUR = 5
 
 
 def _credential_hash(email: str, kind: str, value: str) -> str:
@@ -54,10 +80,12 @@ async def store_registration_challenge(
     business_name: Optional[str] = None,
     country_code: Optional[str] = None,
     base_currency_code: Optional[str] = None,
+    tax_jurisdiction_code: Optional[str] = None,
     source: Optional[str] = None,
     content: Optional[str] = None,
     campaign: Optional[str] = None,
     variant: Optional[str] = None,
+    visitor_key: Optional[str] = None,
 ) -> bool:
     """Persist a pre-user challenge for an address without an active tenant."""
     if consent is not True:
@@ -107,35 +135,42 @@ async def store_registration_challenge(
             normalized_email, token_hash, code_hash, opaque_token_hash,
             purpose, request_ip, user_agent, expires_at,
             phone_country_code, phone_number, consent_at, consent_version,
-            business_name, country_code, base_currency_code,
+            business_name, country_code, base_currency_code, tax_jurisdiction_code,
             first_source, first_content, first_campaign, first_variant,
-            last_source, last_content, last_campaign, last_variant
+            last_source, last_content, last_campaign, last_variant,
+            first_visitor_key, last_visitor_key
         )
         VALUES (
             $1, $2, $3, $4, 'registration', $5::inet, $6,
             NOW() + INTERVAL '15 minutes', $7, $8, NOW(),
-            'self_service_registration_v1', $9, $10, $11,
+            'self_service_registration_v1', $9, $10, $11, $12,
             COALESCE((
                 SELECT first_source FROM onboarding_email_challenges
                 WHERE normalized_email = $1 AND purpose = 'registration'
                 ORDER BY created_at ASC LIMIT 1
-            ), $12),
+            ), $13),
             COALESCE((
                 SELECT first_content FROM onboarding_email_challenges
                 WHERE normalized_email = $1 AND purpose = 'registration'
                 ORDER BY created_at ASC LIMIT 1
-            ), $13),
+            ), $14),
             COALESCE((
                 SELECT first_campaign FROM onboarding_email_challenges
                 WHERE normalized_email = $1 AND purpose = 'registration'
                 ORDER BY created_at ASC LIMIT 1
-            ), $14),
+            ), $15),
             COALESCE((
                 SELECT first_variant FROM onboarding_email_challenges
                 WHERE normalized_email = $1 AND purpose = 'registration'
                 ORDER BY created_at ASC LIMIT 1
-            ), $15),
-            $12, $13, $14, $15
+            ), $16),
+            $13, $14, $15, $16,
+            COALESCE((
+                SELECT first_visitor_key FROM onboarding_email_challenges
+                WHERE normalized_email = $1 AND purpose = 'registration'
+                ORDER BY created_at ASC LIMIT 1
+            ), $17),
+            $17
         )
         """,
         email,
@@ -149,10 +184,12 @@ async def store_registration_challenge(
         business_name,
         country_code,
         base_currency_code,
+        tax_jurisdiction_code,
         source,
         content,
         campaign,
         variant,
+        (visitor_key or "").strip() or None,
     )
     await conn.execute(
         """
@@ -168,9 +205,10 @@ async def get_resumable_registration_draft(conn, email: str) -> Optional[dict[st
     row = await conn.fetchrow(
         """
         SELECT phone_country_code, phone_number,
-               business_name, country_code, base_currency_code,
+               business_name, country_code, base_currency_code, tax_jurisdiction_code,
                first_source, first_content, first_campaign, first_variant,
-               last_source, last_content, last_campaign, last_variant
+               last_source, last_content, last_campaign, last_variant,
+               first_visitor_key, last_visitor_key
         FROM onboarding_email_challenges
         WHERE normalized_email = $1
           AND purpose = 'registration'
@@ -230,9 +268,10 @@ async def complete_registration(
     challenge_fields = """
         id, normalized_email, consumed_at, completed_user_id, completed_tenant_id,
         phone_country_code, phone_number,
-        business_name, country_code, base_currency_code,
+        business_name, country_code, base_currency_code, tax_jurisdiction_code,
         first_source, first_content, first_campaign, first_variant,
-        last_source, last_content, last_campaign, last_variant
+        last_source, last_content, last_campaign, last_variant,
+        first_visitor_key, last_visitor_key
     """
     if opaque_token:
         if kind != "token":
@@ -337,7 +376,9 @@ async def complete_registration(
         identity = dict(active)
         identity["next_step"] = None
     else:
-        pending = await conn.fetchrow(
+        # Mid-alta first, else any non-cancelled owned tenant. Public /registro
+        # must not INSERT a second business; that is Crear only (#839).
+        owned = await conn.fetchrow(
             """
             SELECT p.id AS user_id, p.email, p.name,
                    p.created_at AS user_created_at,
@@ -348,14 +389,23 @@ async def complete_registration(
             JOIN tenant_onboarding o ON o.owner_user_id = p.id
             JOIN tenants t ON t.id = o.tenant_id
             WHERE lower(trim(p.email)) = $1
-              AND t.lifecycle_status = 'pending'
-              AND o.state NOT IN ('setup_complete', 'cancelled')
+              AND o.state <> 'cancelled'
+            ORDER BY
+              CASE WHEN o.state IN (
+                'email_verified',
+                'business_profile_pending',
+                'terms_pending',
+                'payment_pending',
+                'paid'
+              ) THEN 0 ELSE 1 END,
+              o.created_at DESC NULLS LAST,
+              t.created_at DESC NULLS LAST
             LIMIT 1
             """,
             email,
         )
-        if pending:
-            identity = dict(pending)
+        if owned:
+            identity = dict(owned)
             identity["next_step"] = next_step_for_state(identity.get("onboarding_state"))
         else:
             profile = await conn.fetchrow(
@@ -396,7 +446,7 @@ async def complete_registration(
             await conn.execute(
                 """
                 INSERT INTO tenant_members (id, tenant_id, user_id, role, is_active)
-                VALUES (gen_random_uuid(), $1, $2, 'owner', false)
+                VALUES (gen_random_uuid(), $1, $2, 'superuser', false)
                 """,
                 tenant_id,
                 profile["id"],
@@ -428,12 +478,27 @@ async def complete_registration(
                 businessName=challenge["business_name"],
                 country_code=challenge["country_code"],
                 base_currency_code=challenge["base_currency_code"],
+                tax_jurisdiction_code=challenge.get("tax_jurisdiction_code"),
             ),
         )
         identity["tenant_name"] = financial.data.business_name
         identity["onboarding_state"] = financial.data.state
         identity["next_step"] = financial.data.next_step
         identity["lifecycle_status"] = "active"
+        slug_row = await conn.fetchrow(
+            "SELECT slug FROM tenants WHERE id = $1",
+            identity["tenant_id"],
+        )
+        new_slug = None
+        if isinstance(slug_row, dict):
+            new_slug = slug_row.get("slug")
+        elif slug_row is not None:
+            try:
+                new_slug = slug_row["slug"]
+            except (KeyError, TypeError):
+                new_slug = None
+        if new_slug:
+            identity["tenant_slug"] = new_slug
 
     notification = None
     if is_self_service_onboarding:
@@ -482,14 +547,19 @@ async def complete_registration(
             "variant": challenge.get("last_variant"),
             "first_variant": challenge.get("first_variant"),
         })
+        stored_visitor_key = (
+            (challenge.get("last_visitor_key") or challenge.get("first_visitor_key") or "")
+            .strip()
+            or None
+        )
         event = await conn.fetchrow(
             """
             INSERT INTO lead_interactions (
                 lead_id, interaction_type, source, campaign, content,
-                metadata, interaction_context
+                metadata, interaction_context, visitor_key
             )
             VALUES ($1, 'registration_verified', $2, $3, $4, $5::jsonb,
-                    'self_service_registration')
+                    'self_service_registration', $6)
             ON CONFLICT (lead_id, interaction_type)
                 WHERE interaction_type = 'registration_verified'
             DO NOTHING
@@ -500,6 +570,7 @@ async def complete_registration(
             challenge.get("last_campaign"),
             challenge.get("last_content"),
             metadata,
+            stored_visitor_key,
         )
         if event:
             notification = {
@@ -562,7 +633,7 @@ def _ensure_pending_financial_state(row: Any) -> None:
     is_pending = row["lifecycle_status"] == "pending"
     is_promoted = (
         row["lifecycle_status"] == "active"
-        and row["state"] == "payment_pending"
+        and row["state"] in {"starter_active", "payment_pending"}
     )
     if not is_pending and not is_promoted:
         raise HTTPException(
@@ -593,41 +664,17 @@ def _financial_response(row: Any) -> OnboardingFinancialResponse:
     )
 
 
-async def get_onboarding_financial_profile(
-    conn, tenant_id: Optional[UUID]
-) -> OnboardingFinancialResponse:
-    tenant_id = _require_tenant_id(tenant_id)
-    row = await conn.fetchrow(
-        """
-        SELECT t.lifecycle_status, t.name AS business_name, o.state,
-               fp.tenant_id AS profile_tenant_id,
-               fp.country_code, fp.base_currency_code,
-               fp.accounting_localization, fp.document_mode, fp.fiscal_provider,
-               fp.selection_revision,
-               fp.created_at AS profile_created_at,
-               fp.updated_at AS profile_updated_at
-        FROM tenants t
-        JOIN tenant_onboarding o ON o.tenant_id = t.id
-        LEFT JOIN tenant_financial_profiles fp ON fp.tenant_id = t.id
-        WHERE t.id = $1
-        """,
-        tenant_id,
-    )
-    _ensure_pending_financial_state(row)
-    return _financial_response(row)
-
-
 async def _promote_onboarding_identity(conn, tenant_id: UUID) -> str:
     state_row = await conn.fetchrow(
         """
         UPDATE tenant_onboarding
-        SET state = 'payment_pending',
+        SET state = 'starter_active',
             updated_at = CASE
-                WHEN state IS DISTINCT FROM 'payment_pending' THEN NOW()
+                WHEN state IS DISTINCT FROM 'starter_active' THEN NOW()
                 ELSE updated_at
             END
         WHERE tenant_id = $1
-          AND state IN ('business_profile_pending', 'terms_pending', 'payment_pending')
+          AND state IN ('business_profile_pending', 'terms_pending', 'starter_active')
         RETURNING state
         """,
         tenant_id,
@@ -641,12 +688,12 @@ async def _promote_onboarding_identity(conn, tenant_id: UUID) -> str:
     member_update = await conn.execute(
         """
         UPDATE tenant_members tm
-        SET role = 'admin', is_active = true
+        SET role = 'superuser', is_active = true
         FROM tenant_onboarding o
         WHERE o.tenant_id = $1
           AND tm.tenant_id = o.tenant_id
           AND tm.user_id = o.owner_user_id
-          AND tm.role IN ('owner', 'admin')
+          AND tm.role IN ('owner', 'admin', 'superuser')
         """,
         tenant_id,
     )
@@ -666,6 +713,56 @@ async def _promote_onboarding_identity(conn, tenant_id: UUID) -> str:
     return state_row["state"]
 
 
+async def apply_onboarding_locales_from_country(
+    conn,
+    *,
+    tenant_id: UUID,
+    country_code: str,
+    currency_code: Optional[str] = None,
+    user_id: Optional[UUID] = None,
+) -> str:
+    """Persist locales + public country/currency from the selected business country."""
+    locale = locale_from_country(country_code)
+    # tenant_public_profiles.locale is es|en; clamp extended ui locales.
+    receipt_locale = locale if locale in {"es", "en"} else "es"
+    country_label = public_country_name(country_code)
+    public_currency = resolve_public_currency(country_code, currency_code)
+    if user_id is not None:
+        await conn.execute(
+            """
+            UPDATE profile
+            SET preferred_locale = $2, updated_at = NOW()
+            WHERE id = $1
+            """,
+            user_id,
+            locale,
+        )
+    await conn.execute(
+        """
+        INSERT INTO tenant_public_profiles (
+            tenant_id, slug, display_name, ui_locale, locale, country, currency_code
+        )
+        SELECT t.id, t.slug, t.name, $2, $3, $4, $5
+        FROM tenants t
+        WHERE t.id = $1
+        ON CONFLICT (tenant_id) DO UPDATE
+            SET ui_locale = EXCLUDED.ui_locale,
+                locale = EXCLUDED.locale,
+                country = EXCLUDED.country,
+                currency_code = EXCLUDED.currency_code,
+                slug = EXCLUDED.slug,
+                display_name = EXCLUDED.display_name,
+                updated_at = now()
+        """,
+        tenant_id,
+        locale,
+        receipt_locale,
+        country_label,
+        public_currency,
+    )
+    return locale
+
+
 async def update_onboarding_financial_profile(
     conn,
     tenant_id: Optional[UUID],
@@ -674,7 +771,7 @@ async def update_onboarding_financial_profile(
     tenant_id = _require_tenant_id(tenant_id)
     context = await conn.fetchrow(
         """
-        SELECT t.lifecycle_status, t.name AS business_name, o.state
+        SELECT t.lifecycle_status, t.name AS business_name, o.state, o.owner_user_id
         FROM tenants t
         JOIN tenant_onboarding o ON o.tenant_id = t.id
         WHERE t.id = $1
@@ -687,7 +784,7 @@ async def update_onboarding_financial_profile(
     country_code, currency_code = financial_service.validate_country_currency_pair(
         data.country_code, data.base_currency_code
     )
-    if context["state"] == "payment_pending":
+    if context["state"] == "starter_active":
         profile = await conn.fetchrow(
             """
             SELECT tenant_id AS profile_tenant_id,
@@ -715,21 +812,19 @@ async def update_onboarding_financial_profile(
                     "state": context["state"],
                 },
             )
+        # Locales are set on first financial apply only — do not overwrite on
+        # idempotent starter_active retries (avoids clobbering mid-onboarding edits).
         result = dict(profile)
         result["business_name"] = context["business_name"]
         result["lifecycle_status"] = "active"
         result["state"] = await _promote_onboarding_identity(conn, tenant_id)
         return _financial_response(result)
 
-    await conn.execute(
-        """
-        UPDATE tenants
-        SET name = $2
-        WHERE id = $1
-          AND name IS DISTINCT FROM $2
-        """,
-        tenant_id,
-        data.business_name,
+    # Name-based storefront slug (replaces provisional onboarding-{uuid}).
+    await assign_name_based_storefront_slug(
+        conn,
+        tenant_id=tenant_id,
+        business_name=data.business_name,
     )
     accounting_localization, document_mode, fiscal_provider = (
         financial_service._financial_mode(country_code)
@@ -773,6 +868,35 @@ async def update_onboarding_financial_profile(
         accounting_localization,
         document_mode,
         fiscal_provider,
+    )
+    await financial_service.seed_tenant_accounts(conn, tenant_id)
+    await ensure_wave1_tax_pack(conn, tenant_id, country_code)
+    jurisdiction = getattr(data, "tax_jurisdiction_code", None)
+    if country_code in JURISDICTION_COUNTRIES:
+        try:
+            jurisdiction = normalize_jurisdiction_code(country_code, jurisdiction)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if not jurisdiction:
+            raise HTTPException(
+                status_code=422,
+                detail="tax_jurisdiction_code is required for US and CA",
+            )
+        applied, _ = await apply_jurisdiction_pack(
+            conn, tenant_id, country_code, jurisdiction
+        )
+        if not applied:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unsupported jurisdiction {jurisdiction} for {country_code}",
+            )
+    await seed_tenant_timezone_from_country(conn, tenant_id, country_code)
+    await apply_onboarding_locales_from_country(
+        conn,
+        tenant_id=tenant_id,
+        country_code=country_code,
+        currency_code=currency_code,
+        user_id=context.get("owner_user_id"),
     )
     state = await _promote_onboarding_identity(conn, tenant_id)
     result = dict(profile)
@@ -825,7 +949,7 @@ async def accept_onboarding_terms(
         """
         UPDATE tenant_onboarding
         SET state = CASE
-                WHEN state = 'terms_pending' THEN 'payment_pending'
+                WHEN state = 'terms_pending' THEN 'starter_active'
                 ELSE state
             END,
             updated_at = CASE
@@ -897,7 +1021,7 @@ async def activate_paid_onboarding_identity(conn, tenant_id: UUID) -> Optional[d
         JOIN tenant_members tm
           ON tm.tenant_id = t.id
          AND tm.user_id = o.owner_user_id
-         AND tm.role IN ('owner', 'admin')
+         AND tm.role IN ('owner', 'admin', 'superuser')
         WHERE t.id = $1
         FOR UPDATE OF t, o, tm
         """,
@@ -912,8 +1036,8 @@ async def activate_paid_onboarding_identity(conn, tenant_id: UUID) -> Optional[d
     owner_update = await conn.execute(
         """
         UPDATE tenant_members
-        SET is_active = true, role = 'admin'
-        WHERE id = $1 AND role IN ('owner', 'admin')
+        SET is_active = true, role = 'superuser'
+        WHERE id = $1 AND role IN ('owner', 'admin', 'superuser')
         """,
         context["owner_member_id"],
     )
@@ -977,4 +1101,182 @@ async def get_status_for_tenant(conn, tenant_id: UUID) -> OnboardingStatusRespon
             termsAccepted=acceptance is not None,
             termsVersion=current["version"] if current else None,
         )
+    )
+
+
+def _bootstrap_response(
+    *,
+    tenant_id: UUID,
+    slug: str,
+    name: str,
+    resumed: bool,
+    lifecycle_status: str,
+    state: Optional[str],
+) -> AdditionalTenantBootstrapResponse:
+    return AdditionalTenantBootstrapResponse(
+        data=AdditionalTenantBootstrapData(
+            tenantId=tenant_id,
+            slug=slug,
+            name=name,
+            resumed=resumed,
+            lifecycleStatus=lifecycle_status,
+            state=state,
+            nextStep=next_step_for_state(state),
+        )
+    )
+
+
+async def _require_session_superuser(conn, session) -> None:
+    if getattr(session, "role", None) != "superuser":
+        raise AuthorizationError("Only superuser can create an additional business")
+    user_id = getattr(session, "user_id", None)
+    tenant_id = getattr(session, "tenant_id", None)
+    if not user_id or not tenant_id:
+        raise AuthorizationError("Only superuser can create an additional business")
+    role = await conn.fetchval(
+        """
+        SELECT role
+        FROM tenant_members
+        WHERE user_id = $1
+          AND tenant_id = $2
+          AND is_active = true
+        LIMIT 1
+        """,
+        user_id,
+        tenant_id,
+    )
+    if role != "superuser":
+        raise AuthorizationError("Only superuser can create an additional business")
+
+
+async def _find_incomplete_owned_onboarding(conn, owner_user_id: UUID):
+    """
+    Resume mid-alta tenants only (profile / terms / payment pending).
+
+    Starter and active tenants are complete enough to create another business,
+    even if terms are not accepted yet (api-warolabs#836).
+    """
+    rows = await conn.fetch(
+        """
+        SELECT t.id AS tenant_id, t.name, t.slug, t.lifecycle_status, o.state
+        FROM tenant_onboarding o
+        JOIN tenants t ON t.id = o.tenant_id
+        WHERE o.owner_user_id = $1
+          AND o.state NOT IN ('setup_complete', 'cancelled')
+        ORDER BY o.created_at DESC NULLS LAST, t.created_at DESC NULLS LAST
+        """,
+        owner_user_id,
+    )
+    for row in rows:
+        if row.get("state") in RESUME_PIPELINE_STATES:
+            return row
+    return None
+
+
+async def _lock_additional_tenant_owner(conn, owner_user_id: UUID) -> None:
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        f"additional-tenant:{owner_user_id}",
+    )
+
+
+async def _enforce_additional_tenant_rate_limit(conn, owner_user_id: UUID) -> None:
+    """Caller must hold the additional-tenant owner advisory lock."""
+    count = await conn.fetchval(
+        """
+        SELECT COUNT(*)
+        FROM tenant_onboarding
+        WHERE owner_user_id = $1
+          AND created_at > NOW() - INTERVAL '1 hour'
+        """,
+        owner_user_id,
+    )
+    if int(count or 0) >= MAX_ADDITIONAL_TENANT_CREATES_PER_HOUR:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "ADDITIONAL_TENANT_RATE_LIMITED",
+                "message": "Too many business create attempts. Try again later.",
+            },
+        )
+
+
+async def bootstrap_additional_tenant(
+    conn,
+    session,
+    data: OnboardingBusinessProfileUpdate,
+) -> AdditionalTenantBootstrapResponse:
+    """
+    Authenticated second (Nth) business for the same profile — no email OTP.
+
+    Atomically creates tenant/member/onboarding and applies financial+slug so
+    the membership is active and switch-tenant works (api-warolabs#834).
+    """
+    await _require_session_superuser(conn, session)
+    owner_user_id = session.user_id
+    email = (getattr(session, "email", None) or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="Session email is required")
+
+    # Serialize resume + create for one owner so concurrent POSTs cannot spawn
+    # parallel incomplete tenants (mirror complete_registration email lock).
+    await _lock_additional_tenant_owner(conn, owner_user_id)
+
+    incomplete = await _find_incomplete_owned_onboarding(conn, owner_user_id)
+    if incomplete:
+        return _bootstrap_response(
+            tenant_id=incomplete["tenant_id"],
+            slug=incomplete["slug"],
+            name=incomplete["name"],
+            resumed=True,
+            lifecycle_status=incomplete["lifecycle_status"],
+            state=incomplete.get("state"),
+        )
+
+    await _enforce_additional_tenant_rate_limit(conn, owner_user_id)
+
+    tenant_id = uuid4()
+    provisional_slug = f"onboarding-{tenant_id.hex[:16]}"
+    await conn.execute(
+        """
+        INSERT INTO tenants (id, name, slug, email, lifecycle_status, created_at)
+        VALUES ($1, 'Negocio pendiente', $2, $3, 'pending', NOW())
+        """,
+        tenant_id,
+        provisional_slug,
+        email,
+    )
+    await conn.execute(
+        """
+        INSERT INTO tenant_onboarding (
+            tenant_id, owner_user_id, verified_email, state,
+            email_verified_at, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, 'business_profile_pending', NOW(), NOW(), NOW())
+        """,
+        tenant_id,
+        owner_user_id,
+        email,
+    )
+    await conn.execute(
+        """
+        INSERT INTO tenant_members (id, tenant_id, user_id, role, is_active)
+        VALUES (gen_random_uuid(), $1, $2, 'superuser', false)
+        """,
+        tenant_id,
+        owner_user_id,
+    )
+
+    financial = await update_onboarding_financial_profile(conn, tenant_id, data)
+    slug_row = await conn.fetchrow(
+        "SELECT slug, name, lifecycle_status FROM tenants WHERE id = $1",
+        tenant_id,
+    )
+    return _bootstrap_response(
+        tenant_id=tenant_id,
+        slug=slug_row["slug"],
+        name=slug_row["name"] or financial.data.business_name,
+        resumed=False,
+        lifecycle_status=slug_row["lifecycle_status"] or "active",
+        state=financial.data.state,
     )

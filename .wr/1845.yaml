@@ -1,0 +1,45 @@
+# Machine contract for wr-exec — keep ≤80 lines.
+issue: 1845
+title: "Hospitality tax — API tax-line engine + product category map"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-1845-tax-line-engine
+parent: 1843
+
+paths:
+  - app/services/orders_service.py
+  - app/services/pos_cart_service.py
+  - app/services/cierre_service.py
+  - app/services/tip_tax_service.py
+  - app/services/account_role_service.py
+  - app/models/tax_config.py
+  - app/models/product.py
+  - app/routers/tenant_config.py
+  - tests/test_tip_tax_service.py
+
+ac:
+  - Shared engine: tax_lines[] (key, label, rate, included_in_price, gl) + category→line map
+  - CO adapter: existing tenant_tax_config INC/IVA/liquor columns → same numeric results
+  - POS cart + orders_service._compute_tax_breakdown + cierre GL use one path
+  - Resale/venta directa unchanged (same product.tax_category field)
+  - Non-CO commercial: resolve ≥1 standard line + exempt (0)
+  - Pytest evidence in PR; Closes #1845
+
+out_of_scope:
+  - Front Facturación/Menú presets UI (#1846)
+  - Wave-1 country pack seeds (#1847)
+  - US/CA jurisdiction table (#1848)
+  - FE / DIAN / CFDI
+  - DROP of INC/IVA columns (ADD-only; adapter/compat OK)
+
+hints:
+  entry: "orders_service._compute_tax_breakdown:274; cierre _post_order_gl_entry tax block:410-451; pos_cart complete ~2588; tip_tax_service.compute_tip_tax_amount"
+  pattern: "Extract shared hospitality_tax_engine; CO pack = map inc|iva|liquor columns → tax_lines; category standard→primary, liquor→liquor line, exempt→none. JSONB on tenant_tax_config OK for v1 (epic open #1)."
+  migrate: "Prefer ADD jsonb tax_lines/category_map columns or resolve-at-read adapter; never DROP/ALTER destructive"
+  tests: "./venv/bin/pytest tests/test_tip_tax_service.py tests/test_<new_tax_engine>.py -q — cover CO INC extractive, IVA additive, liquor additive, exempt, commercial 1-line"
+  risks: "Duplicated calc in pos_cart + orders + cierre + tip; keep GL resolve_tax_account (inc|iva|liquor) via line gl_role; API response shape for front may still expose CO fields until #1846"
+
+skip:
+  audits: [ux, color, typography]

@@ -1,0 +1,37 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 2344
+title: Hide sale mutations on order detail when electronic invoice exists
+repo: both
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2344-lock-fe-sale-mutations
+
+paths:
+  - app/services/orders_service.py
+  - tests/test_order_invoice_mutation_lock.py
+
+ac:
+  - API rejects status and line mutations when FE is pending or accepted
+  - Rejected FE or no FE still allows the same mutations
+  - Companion front PR hides change-status, edit-sale, finalize-pending
+
+out_of_scope:
+  - bulk_update_order_status
+  - Credit-note flow
+  - POS checkout
+
+hints:
+  entry: "assert_order_invoice_allows_mutation after closed-period guard"
+  pattern: "latest electronic_invoices.status pending|accepted → APIError 409"
+  tests: "pytest tests/test_order_invoice_mutation_lock.py tests/test_orders_despacho_operation_events.py -q"
+
+risk:
+  sensitive: true
+  areas: [fiscal, electronic-invoice]
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "Pair with warocol.com PR; Closes uno0uno/warocol.com#2344"

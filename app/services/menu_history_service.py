@@ -634,7 +634,9 @@ async def get_modifier_group_snapshot(conn, modifier_group_id: UUID, tenant_id: 
                    ingredient_id, ingredient_quantity, ingredient_unit,
                    recipe_base_type_id, recipe_base_quantity,
                    linked_product_id, linked_product_quantity
-            FROM modifiers WHERE modifier_group_id = $1
+            FROM modifiers
+            WHERE modifier_group_id = $1
+              AND removed_at IS NULL
         """, modifier_group_id)
         recipe_lines = await conn.fetch("""
             SELECT mr.modifier_id, mr.ingredient_id, mr.quantity, mr.unit

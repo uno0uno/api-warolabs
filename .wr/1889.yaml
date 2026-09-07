@@ -1,0 +1,36 @@
+# Compact plan for wr-fast #1889. Keep <=80 lines.
+issue: 1889
+title: "fix(tax): POS tax path ignores menu-category exempt map"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-1889-pos-tax-menu-category
+risk: low
+closes: "uno0uno/warocol.com#1889"
+
+paths:
+  - app/services/pos_cart_service.py
+  - app/services/orders_service.py
+  - tests/test_menu_category_tax_resolve.py
+
+ac:
+  - "tax-preview + order tax SELECTs pass category_id, tax_resolution, tax_line_key"
+  - "Exempt menu category + inherit → 0 tax"
+  - "Mapped menu category still applies mapped line"
+  - "Product override exempt/line still wins"
+  - "pytest covers exempt vs mapped vs missing-category regression"
+  - "PR Closes uno0uno/warocol.com#1889"
+
+out_of_scope:
+  - "Facturación UI; Menú inherit UX; CO matrix; POS summary redesign"
+
+hints:
+  entry: "pos_cart_service._tax_rows_from_evaluated_lines:251 drops category_id; get_cart_items SELECT lacks tax_resolution"
+  bug: "Without category_id, resolve falls through to primary line when maps/exempt exist"
+  fix: "Pass category_id/tax_resolution/tax_line_key on cart items + tax rows; fix orders_service tax SELECTs (~886, ~4242, complete path ~2580)"
+  tests: "./venv/bin/pytest tests/test_menu_category_tax_resolve.py -q"
+  pattern: "cierre_service already SELECTs tax_resolution + tax_line_key — mirror that"
+
+skip:
+  audits: [ux, color, typography, security]

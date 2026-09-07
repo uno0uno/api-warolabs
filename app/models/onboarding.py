@@ -17,6 +17,7 @@ OnboardingState = Literal[
     "email_verified",
     "business_profile_pending",
     "terms_pending",
+    "starter_active",
     "payment_pending",
     "paid",
     "active",
@@ -77,3 +78,23 @@ class OnboardingFinancialData(BaseModel):
 class OnboardingFinancialResponse(BaseModel):
     success: bool = True
     data: OnboardingFinancialData
+
+
+class AdditionalTenantBootstrapData(BaseModel):
+    """Authenticated second-business bootstrap (api-warolabs#834)."""
+
+    tenant_id: UUID = Field(alias="tenantId")
+    slug: str
+    name: str
+    resumed: bool
+    lifecycle_status: TenantLifecycle = Field(alias="lifecycleStatus")
+    state: Optional[OnboardingState] = None
+    next_step: Optional[str] = Field(alias="nextStep", default=None)
+
+    class Config:
+        populate_by_name = True
+
+
+class AdditionalTenantBootstrapResponse(BaseModel):
+    success: bool = True
+    data: AdditionalTenantBootstrapData

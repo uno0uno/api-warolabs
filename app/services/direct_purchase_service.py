@@ -13,6 +13,24 @@ _DIRECT_PURCHASE_DECIMAL_PRECISION = 42
 _DECIMAL_ZERO = Decimal("0")
 _DECIMAL_ONE = Decimal("1")
 
+_PAID_DIRECT_PURCHASE_EDIT_MSG = (
+    "No se puede editar una compra directa que ya está pagada"
+)
+_PAID_DIRECT_PURCHASE_DELETE_MSG = (
+    "No se puede eliminar una compra directa que ya está pagada"
+)
+
+
+def _assert_direct_purchase_not_paid(status: str, *, action: str = "edit") -> None:
+    if status != "paid":
+        return
+    detail = (
+        _PAID_DIRECT_PURCHASE_DELETE_MSG
+        if action == "delete"
+        else _PAID_DIRECT_PURCHASE_EDIT_MSG
+    )
+    raise HTTPException(status_code=409, detail=detail)
+
 # Catalog units matching backend PURCHASE_UNIT_CATALOG
 # Used to convert catalog keys (lt, kg, galon…) to base units (ml, gr)
 _CATALOG_TO_BASE: Dict[str, Any] = {
@@ -131,6 +149,7 @@ from app.services.purchase_tracking_service import (
     create_status_history_entry,
     upload_purchase_attachments
 )
+from app.services.billing_service import check_plan_quota_period
 from app.services.account_role_service import (
     AccountRole,
     MissingAccountRoleError,
@@ -140,8 +159,37 @@ from app.services.account_role_service import (
 import logging
 import json
 from uuid import uuid4
+from app.services.operation_events_service import DOMAIN_ABASTECIMIENTO, record_module_event
 
 logger = logging.getLogger(__name__)
+
+CONTADO_REQUIRES_PAYMENT_METHOD_DETAIL = (
+    "Contado requires a payment method. Use credito when payment is not registered yet."
+)
+
+
+def assert_contado_requires_payment_method(
+    payment_type: Optional[str],
+    payment_method: Optional[str],
+) -> None:
+    """Contado = paid now; unpaid purchases must use credito (or other deferred type)."""
+    if (payment_type or "").strip().lower() != "contado":
+        return
+    if payment_method and str(payment_method).strip():
+        return
+    raise HTTPException(status_code=400, detail=CONTADO_REQUIRES_PAYMENT_METHOD_DETAIL)
+
+
+def _resolve_from_cash_drawer(
+    payment_method_slug: Optional[str],
+    from_cash_drawer: Optional[bool],
+) -> bool:
+    """Non-cash always true; cash may opt out of arqueo drawer outflows (#786)."""
+    if (payment_method_slug or "").strip().lower() != "cash":
+        return True
+    if from_cash_drawer is None:
+        return True
+    return bool(from_cash_drawer)
 
 
 async def _normalize_direct_purchase_payment(
@@ -277,6 +325,110 @@ async def _post_purchase_gl_entry(
     )
 
 
+async def _void_direct_purchase_gl_entry(
+    conn,
+    tenant_id: UUID,
+    purchase_id: UUID,
+    reason: str = "Compra directa eliminada",
+) -> bool:
+    """
+    Void posted GL for a direct purchase:
+      - inventario entries (Dr inventory / Cr cash|AP)
+      - supplier-payment entries (system + "Pago proveedor%", same source_id)
+
+    Raises HTTP 400 if any entry sits in a closed monthly period.
+    Returns True if at least one entry was voided.
+    """
+    entries = await conn.fetch(
+        """SELECT id, entry_date, period_year, period_month, description,
+                  total_debit, total_credit, source_module
+           FROM tenant_journal_entries
+           WHERE tenant_id = $1
+             AND source_id = $2
+             AND status = 'posted'
+             AND (
+                   source_module = 'inventario'
+                   OR (
+                     source_module = 'system'
+                     AND description LIKE 'Pago proveedor%'
+                   )
+             )
+           ORDER BY created_at ASC""",
+        tenant_id,
+        purchase_id,
+    )
+    if not entries:
+        logger.info(f"[GL] No posted purchase/payment GL for purchase {purchase_id} — skip void")
+        return False
+
+    for entry in entries:
+        closed = await conn.fetchval(
+            """SELECT 1 FROM tenant_monthly_periods
+               WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+            tenant_id,
+            entry["period_year"],
+            entry["period_month"],
+        )
+        if closed:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"No se puede eliminar una compra directa de un período cerrado "
+                    f"({entry['period_year']}-{entry['period_month']:02d})"
+                ),
+            )
+
+        original_lines = await conn.fetch(
+            """SELECT account_id, debit, credit, description, line_order
+               FROM tenant_journal_lines
+               WHERE journal_entry_id = $1 ORDER BY line_order""",
+            entry["id"],
+        )
+
+        await conn.execute(
+            "UPDATE tenant_journal_entries SET status = 'voided', voided_at = NOW() WHERE id = $1",
+            entry["id"],
+        )
+
+        rev_row = await conn.fetchrow(
+            """INSERT INTO tenant_journal_entries
+                   (tenant_id, entry_date, period_year, period_month,
+                    description, source_module, source_id, status,
+                    total_debit, total_credit, posted_at)
+               VALUES ($1, $2, $3, $4, $5, 'system', $6, 'posted', $7, $8, NOW())
+               RETURNING id""",
+            tenant_id,
+            entry["entry_date"],
+            entry["period_year"],
+            entry["period_month"],
+            f"Reversión: {entry['description']} — {reason}",
+            entry["id"],
+            float(entry["total_debit"]),
+            float(entry["total_credit"]),
+        )
+        rev_id = rev_row["id"]
+
+        for line in original_lines:
+            await conn.execute(
+                """INSERT INTO tenant_journal_lines
+                       (journal_entry_id, account_id, debit, credit, description, line_order)
+                   VALUES ($1, $2, $3, $4, $5, $6)""",
+                rev_id,
+                line["account_id"],
+                float(line["credit"] or 0),
+                float(line["debit"] or 0),
+                line["description"],
+                line["line_order"],
+            )
+
+        logger.info(
+            f"[GL] ✅ Voided {entry['source_module']} entry {entry['id']} → reversing {rev_id} "
+            f"for purchase {purchase_id}"
+        )
+
+    return True
+
+
 def calculate_changes_summary(before: List[Dict], after: List[Dict]) -> Dict:
     """
     Genera resumen legible de cambios entre items antes y después de una edición.
@@ -384,7 +536,8 @@ async def create_direct_purchase(
     payment_reference: Optional[str] = None,
     payment_amount: Optional[float] = None,
     payment_date: Optional[str] = None,
-    purchase_date: Optional[str] = None
+    purchase_date: Optional[str] = None,
+    from_cash_drawer: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Create a direct purchase that immediately updates inventory.
@@ -413,9 +566,14 @@ async def create_direct_purchase(
         if not items or len(items) == 0:
             raise HTTPException(status_code=400, detail="At least one item is required")
 
+        assert_contado_requires_payment_method(payment_type, payment_method)
+
         async with get_db_connection() as conn:
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             async with conn.transaction():
+                await check_plan_quota_period(
+                    conn, tenant_id, "direct_purchases_per_period"
+                )
                 # 1. Generate purchase number with WR-CD prefix
                 purchase_number = await get_next_direct_purchase_number(conn, tenant_id)
 
@@ -424,6 +582,8 @@ async def create_direct_purchase(
                     payment_method,
                     payment_method_id,
                 )
+                assert_contado_requires_payment_method(payment_type, payment_method)
+                drawer_flag = _resolve_from_cash_drawer(payment_method, from_cash_drawer)
 
                 # 2. Calculate totals from items
                 total_amount = _calculate_direct_purchase_total(items)
@@ -460,11 +620,13 @@ async def create_direct_purchase(
                         is_direct_entry,
                         received_at,
                         received_by,
-                        paid_at
+                        paid_at,
+                        from_cash_drawer
                     ) VALUES (
                         $1, $2, $3, COALESCE($20, NOW()), $4, 0, $5, $6, $7, $8, $9, $10,
                         $11, $12, $13, $14::uuid, $15, $16, $17, TRUE, NOW(), $18,
-                        CASE WHEN $19 THEN NOW() ELSE NULL END
+                        CASE WHEN $19 THEN NOW() ELSE NULL END,
+                        $21
                     )
                     RETURNING id, purchase_date
                 """,
@@ -487,7 +649,8 @@ async def create_direct_purchase(
                     _parse_date(payment_date),
                     user_id,
                     bool(payment_method and payment_amount),
-                    _parse_date(purchase_date)
+                    _parse_date(purchase_date),
+                    drawer_flag,
                 )
 
                 purchase_id = purchase_row['id']
@@ -715,6 +878,17 @@ async def create_direct_purchase(
                 # 7. Attachments are now uploaded via separate endpoint
                 # POST /suppliers/purchases/{purchase_id}/attachments
 
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_ABASTECIMIENTO,
+                    action="direct_purchase_created",
+                    actor_user_id=user_id,
+                    entity_type="direct_purchase",
+                    entity_id=purchase_id,
+                    label=purchase_number,
+                )
+
                 return {
                     "success": True,
                     "message": "Compra directa creada exitosamente",
@@ -724,7 +898,8 @@ async def create_direct_purchase(
                         "status": final_status,
                         "total_amount": total_amount,
                         "items_count": len(items),
-                        "inventory_updated": True
+                        "inventory_updated": True,
+                        "fromCashDrawer": bool(drawer_flag),
                     }
                 }
 
@@ -1094,11 +1269,13 @@ async def update_direct_purchase(
     purchase_date: Optional[str] = None,
     notes: Optional[str] = None,
     invoice_number: Optional[str] = None,
+    payment_type: Optional[str] = None,
     payment_method: Optional[str] = None,
     payment_method_id: Optional[str] = None,
     payment_reference: Optional[str] = None,
     payment_amount: Optional[float] = None,
-    payment_date: Optional[str] = None
+    payment_date: Optional[str] = None,
+    from_cash_drawer: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Update a direct purchase.
@@ -1129,7 +1306,7 @@ async def update_direct_purchase(
             async with conn.transaction():
                 # 1. Get existing purchase and verify ownership
                 existing_purchase = await conn.fetchrow("""
-                    SELECT id, status, purchase_number, tenant_id
+                    SELECT id, status, purchase_number, tenant_id, payment_type
                     FROM tenant_purchases
                     WHERE id = $1 AND tenant_id = $2 AND is_direct_entry = TRUE
                 """, purchase_id, tenant_id)
@@ -1137,7 +1314,15 @@ async def update_direct_purchase(
                 if not existing_purchase:
                     raise HTTPException(status_code=404, detail="Compra directa no encontrada")
 
+                _assert_direct_purchase_not_paid(existing_purchase["status"], action="edit")
+
                 purchase_number = existing_purchase['purchase_number']
+                effective_payment_type = (
+                    payment_type
+                    if payment_type is not None
+                    else existing_purchase["payment_type"]
+                )
+                assert_contado_requires_payment_method(effective_payment_type, payment_method)
 
                 # 2. Get existing items WITH ingredient names for audit trail
                 existing_items = await conn.fetch("""
@@ -1451,14 +1636,16 @@ async def update_direct_purchase(
                     payment_method,
                     payment_method_id,
                 )
+                assert_contado_requires_payment_method(effective_payment_type, payment_method)
 
                 # 9. Update purchase record
-                await conn.execute("""
+                update_sql = """
                     UPDATE tenant_purchases
                     SET
                         total_amount = $1,
                         notes = $2,
                         invoice_number = $3,
+                        payment_type = COALESCE($13, payment_type),
                         payment_method = $4,
                         payment_method_id = $5::uuid,
                         payment_reference = $6,
@@ -1468,8 +1655,8 @@ async def update_direct_purchase(
                         updated_at = NOW(),
                         paid_at = CASE WHEN $10 THEN NOW() ELSE paid_at END,
                         purchase_date = COALESCE($12, purchase_date)
-                    WHERE id = $11
-                """,
+                """
+                update_params: list = [
                     total_amount,
                     notes,
                     invoice_number,
@@ -1481,8 +1668,27 @@ async def update_direct_purchase(
                     new_status,
                     bool(payment_method and payment_amount and current_status != 'paid'),
                     purchase_id,
-                    _parse_date(purchase_date)
-                )
+                    _parse_date(purchase_date),
+                    payment_type,
+                ]
+                drawer_flag = None
+                if from_cash_drawer is not None:
+                    drawer_flag = _resolve_from_cash_drawer(payment_method, from_cash_drawer)
+                    update_sql += ",\n                        from_cash_drawer = $14"
+                    update_params.append(drawer_flag)
+                elif payment_method and (payment_method or "").strip().lower() != "cash":
+                    # Non-cash payment forces drawer flag true (ignore stale false).
+                    drawer_flag = True
+                    update_sql += ",\n                        from_cash_drawer = $14"
+                    update_params.append(drawer_flag)
+                update_sql += "\n                    WHERE id = $11"
+                await conn.execute(update_sql, *update_params)
+
+                if drawer_flag is None:
+                    drawer_flag = await conn.fetchval(
+                        "SELECT COALESCE(from_cash_drawer, true) FROM tenant_purchases WHERE id = $1",
+                        purchase_id,
+                    )
 
                 # 10. Create status history if status changed
                 if new_status != current_status:
@@ -1496,6 +1702,17 @@ async def update_direct_purchase(
                 # 11. Attachments are now uploaded via separate endpoint
                 # POST /suppliers/purchases/{purchase_id}/attachments
 
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_ABASTECIMIENTO,
+                    action="direct_purchase_updated",
+                    actor_user_id=user_id,
+                    entity_type="direct_purchase",
+                    entity_id=purchase_id,
+                    label=purchase_number,
+                )
+
                 return {
                     "success": True,
                     "message": "Compra directa actualizada exitosamente",
@@ -1505,10 +1722,13 @@ async def update_direct_purchase(
                         "status": new_status,
                         "total_amount": total_amount,
                         "items_count": len(items),
-                        "inventory_updated": True
+                        "inventory_updated": True,
+                        "fromCashDrawer": bool(drawer_flag),
                     }
                 }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in update_direct_purchase: {str(e)}")
         logger.exception(e)
@@ -1596,3 +1816,200 @@ async def upload_direct_purchase_attachments(
         logger.error(f"Error in upload_direct_purchase_attachments: {str(e)}")
         logger.exception(e)
         raise HTTPException(status_code=500, detail="Error subiendo archivos")
+
+
+async def delete_direct_purchase(
+    request: Request,
+    response: Response,
+    purchase_id: UUID,
+) -> Dict[str, Any]:
+    """
+    Delete a direct purchase: reverse inventory with movement trail (stock may
+    go negative), void inventario + supplier-payment GL, then hard-delete the
+    purchase and child rows.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        user_id = session_context.user_id
+
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                purchase = await conn.fetchrow(
+                    """SELECT id, purchase_number, purchase_date, status
+                       FROM tenant_purchases
+                       WHERE id = $1 AND tenant_id = $2 AND is_direct_entry = TRUE
+                       FOR UPDATE""",
+                    purchase_id,
+                    tenant_id,
+                )
+                if not purchase:
+                    raise HTTPException(status_code=404, detail="Compra directa no encontrada")
+
+                _assert_direct_purchase_not_paid(purchase["status"], action="delete")
+
+                purchase_date = purchase["purchase_date"]
+                if hasattr(purchase_date, "year"):
+                    period_year = purchase_date.year
+                    period_month = purchase_date.month
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="La compra directa no tiene fecha válida para validar el período",
+                    )
+
+                closed = await conn.fetchval(
+                    """SELECT 1 FROM tenant_monthly_periods
+                       WHERE tenant_id = $1 AND year = $2 AND month = $3 AND status = 'closed'""",
+                    tenant_id,
+                    period_year,
+                    period_month,
+                )
+                if closed:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"No se puede eliminar una compra directa de un período cerrado "
+                            f"({period_year}-{period_month:02d})"
+                        ),
+                    )
+
+                items = await conn.fetch(
+                    """SELECT ingredient_id, quantity, unit
+                       FROM tenant_purchase_items
+                       WHERE purchase_id = $1""",
+                    purchase_id,
+                )
+
+                purchase_number = purchase["purchase_number"]
+                for item in items:
+                    ingredient_id = item["ingredient_id"]
+                    qty = _direct_purchase_decimal(item["quantity"])
+                    if qty <= 0:
+                        continue
+
+                    inventory_row = await conn.fetchrow(
+                        """SELECT id, current_stock
+                           FROM tenant_inventory
+                           WHERE tenant_id = $1 AND ingredient_id = $2
+                           FOR UPDATE""",
+                        tenant_id,
+                        ingredient_id,
+                    )
+                    if not inventory_row:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "No se puede eliminar: no hay inventario registrado para "
+                                "revertir uno o más artículos de la compra"
+                            ),
+                        )
+
+                    # Allow negative stock: sales may already have consumed part of
+                    # this purchase; tenant owns physical reconciliation (#791).
+                    current_stock = _direct_purchase_decimal(inventory_row["current_stock"])
+                    new_stock = current_stock - qty
+                    await conn.execute(
+                        """UPDATE tenant_inventory
+                           SET current_stock = $1, last_updated = NOW()
+                           WHERE tenant_id = $2 AND ingredient_id = $3""",
+                        new_stock,
+                        tenant_id,
+                        ingredient_id,
+                    )
+                    await conn.execute(
+                        """INSERT INTO tenant_ingredient_movements (
+                               tenant_id,
+                               ingredient_id,
+                               movement_type,
+                               quantity_change,
+                               unit,
+                               previous_stock,
+                               new_stock,
+                               reference_table,
+                               reference_id,
+                               notes,
+                               created_by
+                           ) VALUES ($1, $2, 'adjustment', $3, $4, $5, $6, 'tenant_purchases', $7, $8, $9)""",
+                        tenant_id,
+                        ingredient_id,
+                        -qty,
+                        item["unit"],
+                        current_stock,
+                        new_stock,
+                        purchase_id,
+                        f"Eliminación compra directa - {purchase_number}",
+                        user_id,
+                    )
+
+                gl_voided = await _void_direct_purchase_gl_entry(
+                    conn,
+                    tenant_id,
+                    purchase_id,
+                    reason="Compra directa eliminada",
+                )
+
+                await conn.execute(
+                    "DELETE FROM purchase_payments WHERE purchase_id = $1 AND tenant_id = $2",
+                    purchase_id,
+                    tenant_id,
+                )
+                await conn.execute(
+                    "DELETE FROM purchase_attachments WHERE purchase_id = $1 AND tenant_id = $2",
+                    purchase_id,
+                    tenant_id,
+                )
+                await conn.execute(
+                    "DELETE FROM purchase_status_history WHERE purchase_id = $1 AND tenant_id = $2",
+                    purchase_id,
+                    tenant_id,
+                )
+                await conn.execute(
+                    "DELETE FROM tenant_purchase_items WHERE purchase_id = $1",
+                    purchase_id,
+                )
+                result = await conn.execute(
+                    """DELETE FROM tenant_purchases
+                       WHERE id = $1 AND tenant_id = $2 AND is_direct_entry = TRUE""",
+                    purchase_id,
+                    tenant_id,
+                )
+                if result == "DELETE 0":
+                    raise HTTPException(status_code=404, detail="Compra directa no encontrada")
+
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_ABASTECIMIENTO,
+                    action="direct_purchase_deleted",
+                    actor_user_id=user_id,
+                    entity_type="direct_purchase",
+                    entity_id=purchase_id,
+                    label=purchase_number,
+                )
+
+                return {
+                    "success": True,
+                    "message": "Compra directa eliminada exitosamente",
+                    "data": {
+                        "id": str(purchase_id),
+                        "purchase_number": purchase_number,
+                        "inventory_reversed": True,
+                        "gl_voided": gl_voided,
+                    },
+                }
+
+    except AuthenticationError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in delete_direct_purchase: {str(e)}")
+        logger.exception(e)
+        raise HTTPException(
+            status_code=500,
+            detail="Error interno del servidor",
+        )

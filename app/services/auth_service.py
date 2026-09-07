@@ -3,13 +3,23 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Optional, Set
 from fastapi import HTTPException, Request, Response
+import asyncpg
 from app.config import settings
 from app.database import get_db_connection
-from app.core.security import collect_session_tokens, get_session_token, clear_session_cookie, set_session_cookie, get_client_ip
+from app.core.security import (
+    INTERNAL_SESSION_HOURS,
+    IDLE_SESSION_HOURS,
+    collect_session_tokens,
+    get_session_token,
+    clear_session_cookie,
+    set_session_cookie,
+    get_client_ip,
+)
 from app.core.exceptions import AuthenticationError
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES, is_legacy_internal_team_role
 from app.core.onboarding_access import next_step_for_state
 from app.core.middleware import require_valid_session
+from app.core.platform_superusers import is_platform_superuser_email
 from app.models.auth import (
     ProfileAvatarResponse,
     ProfileUser,
@@ -24,24 +34,66 @@ from app.services.aws_s3_service import AWSS3Service
 logger = logging.getLogger(__name__)
 
 
+async def session_cap_for_user(conn, user_id) -> int:
+    """Max concurrent active sessions: 2 for superuser (tenant or platform), else 1."""
+    email = await conn.fetchval("SELECT email FROM profile WHERE id = $1", user_id)
+    if is_platform_superuser_email(email):
+        return 2
+    has_superuser = await conn.fetchval(
+        """
+        SELECT 1
+        FROM tenant_members
+        WHERE user_id = $1
+          AND is_active = true
+          AND role = 'superuser'
+        LIMIT 1
+        """,
+        user_id,
+    )
+    return 2 if has_superuser else 1
+
+
 async def replace_active_admin_sessions(conn, user_id, keep_session_id=None) -> int:
+    """
+    Enforce concurrent session cap for this user.
+    Keeps keep_session_id plus up to (cap - 1) newest other active sessions.
+    """
+    max_sessions = await session_cap_for_user(conn, user_id)
+    # Other active sessions allowed besides keep_session_id
+    keep_others = max(max_sessions - 1, 0)
     result = await conn.execute(
         """
-        UPDATE sessions
+        WITH ranked AS (
+            SELECT id,
+                   ROW_NUMBER() OVER (ORDER BY created_at DESC) AS rn
+            FROM sessions
+            WHERE user_id = $1
+              AND is_active = true
+              AND expires_at > NOW()
+              AND last_activity_at > NOW() - ($4::int * INTERVAL '1 hour')
+              AND ($2::uuid IS NULL OR id <> $2::uuid)
+        )
+        UPDATE sessions s
         SET is_active = false,
             ended_at = NOW(),
             end_reason = 'replaced_by_new_login'
-        WHERE user_id = $1
-          AND is_active = true
-          AND expires_at > NOW()
-          AND ($2::uuid IS NULL OR id <> $2::uuid)
+        FROM ranked r
+        WHERE s.id = r.id
+          AND r.rn > $3
         """,
         user_id,
         keep_session_id,
+        keep_others,
+        IDLE_SESSION_HOURS,
     )
     count = int(result.split()[-1]) if result else 0
     if count:
-        logger.info("Ended %s previous active admin sessions for user %s", count, user_id)
+        logger.info(
+            "Ended %s previous active admin sessions for user %s (cap=%s)",
+            count,
+            user_id,
+            max_sessions,
+        )
     return count
 
 
@@ -58,15 +110,40 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
             session_query = """
                 SELECT s.*, p.id as user_id, p.email, p.name, p.user_name,
                        p.description, p.logo_avatar, p.preferred_locale,
+                       p.pos_catalog_layout_override,
                        p.created_at as user_created_at
                 FROM sessions s
                 JOIN profile p ON s.user_id = p.id
                 WHERE s.id = $1 
                   AND s.expires_at > NOW()
                   AND s.is_active = true
+                  AND s.last_activity_at > NOW() - ($2::int * INTERVAL '1 hour')
                 LIMIT 1
             """
-            session_result = await conn.fetchrow(session_query, session_token)
+            try:
+                session_result = await conn.fetchrow(
+                    session_query, session_token, IDLE_SESSION_HOURS
+                )
+            except asyncpg.UndefinedColumnError:
+                logger.warning(
+                    "profile.pos_catalog_layout_override missing; "
+                    "using null until warocol.com#2496 migration is applied."
+                )
+                session_query_legacy = """
+                    SELECT s.*, p.id as user_id, p.email, p.name, p.user_name,
+                           p.description, p.logo_avatar, p.preferred_locale,
+                           p.created_at as user_created_at
+                    FROM sessions s
+                    JOIN profile p ON s.user_id = p.id
+                    WHERE s.id = $1
+                      AND s.expires_at > NOW()
+                      AND s.is_active = true
+                      AND s.last_activity_at > NOW() - ($2::int * INTERVAL '1 hour')
+                    LIMIT 1
+                """
+                session_result = await conn.fetchrow(
+                    session_query_legacy, session_token, IDLE_SESSION_HOURS
+                )
             
             if not session_result:
                 logger.warning("Invalid or expired session")
@@ -119,24 +196,30 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                 )
                 if role_result:
                     user_role = role_result['role']
-                    if not is_legacy_internal_team_role(user_role):
-                        await conn.execute(
-                            """
-                            UPDATE sessions
-                            SET is_active = false,
-                                ended_at = NOW(),
-                                end_reason = 'customer_role_denied'
-                            WHERE id = $1 AND is_active = true
-                            """,
-                            session_token,
-                        )
-                        await clear_session_cookie(response, session_token)
-                        logger.warning(
-                            "Denied /auth/session for non-team role %s on session %s",
-                            user_role,
-                            session_token[:8],
-                        )
-                        raise AuthenticationError("Access denied")
+
+            if is_platform_superuser_email(session_result.get('email')):
+                user_role = 'superuser'
+            elif user_role is not None and not is_legacy_internal_team_role(user_role):
+                await conn.execute(
+                    """
+                    UPDATE sessions
+                    SET is_active = false,
+                        ended_at = NOW(),
+                        end_reason = 'customer_role_denied'
+                    WHERE id = $1 AND is_active = true
+                    """,
+                    session_token,
+                )
+                await clear_session_cookie(response, session_token)
+                logger.warning(
+                    "Denied /auth/session for non-team role %s on session %s",
+                    user_role,
+                    session_token[:8],
+                )
+                raise AuthenticationError("Access denied")
+
+            from app.core.security import touch_session_activity
+            await touch_session_activity(conn, session_token)
 
             # Build response models
             user = ProfileUser(
@@ -147,6 +230,7 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                 description=session_result.get('description'),
                 logo_avatar=session_result.get('logo_avatar'),
                 preferred_locale=session_result.get('preferred_locale'),
+                pos_catalog_layout_override=session_result.get('pos_catalog_layout_override'),
                 createdAt=session_result.get('user_created_at') or datetime.utcnow(),
                 role=user_role
             )
@@ -192,7 +276,8 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
         session_context = require_valid_session(request)
         current_session_token = await get_session_token(request)
         if not is_legacy_internal_team_role(session_context.role):
-            raise AuthenticationError("Access denied to this tenant")
+            if not is_platform_superuser_email(session_context.email):
+                raise AuthenticationError("Access denied to this tenant")
         
         # Get the target site from encrypted origin header
         target_site = None
@@ -255,28 +340,40 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
             # The `tm.is_active = true` filter is load-bearing: without it,
             # soft-deleted (terminated) members can switch back to a tenant
             # they were removed from. See docs/permissions-router-mapping.md §9.
-            tenant_access_query = """
-                SELECT t.id, t.name, t.slug, ts.site
-                FROM tenants t
-                INNER JOIN tenant_members tm ON t.id = tm.tenant_id
-                LEFT JOIN tenant_sites ts ON t.id = ts.tenant_id AND ts.is_active = true
-                WHERE t.slug = $1
-                  AND tm.user_id = $2
-                  AND tm.is_active = true
-                  AND tm.role = ANY($3::text[])
-                LIMIT 1
-            """
-            tenant_access_result = await conn.fetchrow(
-                tenant_access_query,
-                tenant_slug,
-                user_id,
-                list(LEGACY_INTERNAL_TEAM_ROLES),
-            )
-            
+            # Platform allowlist may switch without a membership row.
+            if is_platform_superuser_email(session_context.email):
+                tenant_access_result = await conn.fetchrow(
+                    """
+                    SELECT t.id, t.name, t.slug, ts.site
+                    FROM tenants t
+                    LEFT JOIN tenant_sites ts ON t.id = ts.tenant_id AND ts.is_active = true
+                    WHERE t.slug = $1
+                    LIMIT 1
+                    """,
+                    tenant_slug,
+                )
+            else:
+                tenant_access_result = await conn.fetchrow(
+                    """
+                    SELECT t.id, t.name, t.slug, ts.site
+                    FROM tenants t
+                    INNER JOIN tenant_members tm ON t.id = tm.tenant_id
+                    LEFT JOIN tenant_sites ts ON t.id = ts.tenant_id AND ts.is_active = true
+                    WHERE t.slug = $1
+                      AND tm.user_id = $2
+                      AND tm.is_active = true
+                      AND tm.role = ANY($3::text[])
+                    LIMIT 1
+                    """,
+                    tenant_slug,
+                    user_id,
+                    list(LEGACY_INTERNAL_TEAM_ROLES),
+                )
+
             if not tenant_access_result:
                 logger.warning(f"Access denied to tenant {tenant_slug} for user {user_id}")
                 raise AuthenticationError("Access denied to this tenant")
-            
+
             tenant_id = tenant_access_result['id']
             tenant_name = tenant_access_result['name']
             tenant_site = tenant_access_result['site']
@@ -290,7 +387,7 @@ async def switch_tenant(request: Request, response: Response, tenant_slug: str) 
 
             # Create new session with new tenant
             new_session_id = secrets.token_hex(16)
-            expires_at = datetime.utcnow() + timedelta(days=7)  # 7 days (1 week)
+            expires_at = datetime.utcnow() + timedelta(hours=INTERNAL_SESSION_HOURS)  # 24 hours
             
             # Use current client info for new session
             current_client_ip = get_client_ip(request)
@@ -345,6 +442,7 @@ async def update_profile(
     city: Optional[str] = None,
     description: Optional[str] = None,
     preferred_locale: Optional[str] = None,
+    pos_catalog_layout_override: Optional[str] = None,
     fields_set: Optional[Set[str]] = None,
 ) -> UpdateProfileResponse:
     """
@@ -370,6 +468,7 @@ async def update_profile(
                     'city': city,
                     'description': description,
                     'preferred_locale': preferred_locale,
+                    'pos_catalog_layout_override': pos_catalog_layout_override,
                 }.items()
                 if field_value is not None
             }
@@ -404,6 +503,11 @@ async def update_profile(
                 values.append(preferred_locale)
                 param_idx += 1
 
+            if 'pos_catalog_layout_override' in provided_fields:
+                updates.append(f"pos_catalog_layout_override = ${param_idx}")
+                values.append(pos_catalog_layout_override)
+                param_idx += 1
+
             if not updates:
                 raise AuthenticationError("No fields to update")
 
@@ -418,10 +522,17 @@ async def update_profile(
                 SET {', '.join(updates)}
                 WHERE id = ${param_idx}
                 RETURNING id, email, name, user_name, description, logo_avatar,
-                          preferred_locale, created_at
+                          preferred_locale, pos_catalog_layout_override, created_at
             """
 
-            result = await conn.fetchrow(update_query, *values)
+            try:
+                result = await conn.fetchrow(update_query, *values)
+            except asyncpg.UndefinedColumnError:
+                if 'pos_catalog_layout_override' not in provided_fields:
+                    raise
+                raise AuthenticationError(
+                    "POS catalog layout preference is not available yet"
+                ) from None
 
             if not result:
                 raise AuthenticationError("User not found")
@@ -434,6 +545,7 @@ async def update_profile(
                 description=result['description'],
                 logo_avatar=result['logo_avatar'],
                 preferred_locale=result['preferred_locale'],
+                pos_catalog_layout_override=result.get('pos_catalog_layout_override'),
                 createdAt=result['created_at']
             )
 

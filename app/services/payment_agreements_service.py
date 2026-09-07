@@ -5,6 +5,7 @@ from fastapi import Request, Response, HTTPException
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
 from app.core.exceptions import AuthenticationError
+from app.services.operation_events_service import DOMAIN_ABASTECIMIENTO, record_module_event
 from app.models.payment_agreement import (
     PaymentAgreement,
     PaymentAgreementCreate,
@@ -297,6 +298,18 @@ async def create_payment_agreement(
 
             logger.info(f"Created payment agreement {agreement.id} for supplier {supplier_id}")
 
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_ABASTECIMIENTO,
+                action="payment_agreement_created",
+                actor_user_id=user_id,
+                entity_type="payment_agreement",
+                entity_id=agreement.id,
+                label=agreement.name,
+                extra={"supplier_id": str(supplier_id)},
+            )
+
             return PaymentAgreementResponse(success=True, data=agreement)
 
     except AuthenticationError as e:
@@ -405,6 +418,18 @@ async def update_payment_agreement(
 
             logger.info(f"Updated payment agreement {agreement_id}")
 
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_ABASTECIMIENTO,
+                action="payment_agreement_updated",
+                actor_user_id=session_context.user_id,
+                entity_type="payment_agreement",
+                entity_id=agreement.id,
+                label=agreement.name,
+                extra={"supplier_id": str(supplier_id)},
+            )
+
             return PaymentAgreementResponse(success=True, data=agreement)
 
     except AuthenticationError as e:
@@ -421,10 +446,11 @@ async def delete_payment_agreement(
     request: Request,
     response: Response,
     supplier_id: UUID,
-    agreement_id: UUID
+    agreement_id: UUID,
+    reason: Optional[str] = None
 ):
     """
-    Delete a payment agreement with tenant isolation
+    Delete a payment agreement with tenant isolation. Requires `reason` (Bitácora audit).
     """
     try:
         session_context = require_valid_session(request)
@@ -434,7 +460,18 @@ async def delete_payment_agreement(
             raise AuthenticationError("Tenant ID is required")
 
         async with get_db_connection() as conn:
-            result = await conn.execute(
+            row = await conn.fetchrow(
+                """
+                SELECT id, name FROM supplier_payment_agreements
+                WHERE id = $1 AND supplier_id = $2 AND tenant_id = $3
+                """,
+                agreement_id, supplier_id, tenant_id
+            )
+
+            if not row:
+                raise HTTPException(status_code=404, detail="Payment agreement not found")
+
+            await conn.execute(
                 """
                 DELETE FROM supplier_payment_agreements
                 WHERE id = $1 AND supplier_id = $2 AND tenant_id = $3
@@ -442,8 +479,18 @@ async def delete_payment_agreement(
                 agreement_id, supplier_id, tenant_id
             )
 
-            if result == "DELETE 0":
-                raise HTTPException(status_code=404, detail="Payment agreement not found")
+            await record_module_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_ABASTECIMIENTO,
+                action="payment_agreement_deleted",
+                actor_user_id=session_context.user_id,
+                entity_type="payment_agreement",
+                entity_id=agreement_id,
+                label=row["name"],
+                extra={"supplier_id": str(supplier_id)},
+                reason=reason,
+            )
 
             logger.info(f"Deleted payment agreement {agreement_id}")
 

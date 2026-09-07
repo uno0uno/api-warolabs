@@ -7,6 +7,7 @@ from app.core.middleware import require_valid_session
 from app.core.exceptions import APIError
 from app.core.email_utils import normalize_email
 from app.services.customer_relationship_service import upsert_tenant_customer
+from app.services.operation_events_service import DOMAIN_CRM, record_operation_event
 from app.models.customer import (
     Customer,
     CustomerSearchOrCreate,
@@ -21,11 +22,42 @@ from app.models.customer import (
     CustomerInsightsResponse,
     normalize_fiscal_id,
 )
+from typing import Optional
 from uuid import UUID
 import json
 import logging
+import unicodedata
 
 logger = logging.getLogger(__name__)
+
+ANONYMOUS_PHONE = "0000000000"
+GENERIC_CUSTOMER_EMAIL = "generico@warocol.com"
+
+
+def _fold_ascii(value: str) -> str:
+    normalized = unicodedata.normalize("NFD", value.strip().lower())
+    return "".join(c for c in normalized if unicodedata.category(c) != "Mn")
+
+
+def rank_anonymous_phone_profile(name: Optional[str], email: Optional[str]) -> int:
+    """Lower rank wins. Prefer shared Genérico over other profiles with phone 0000000000."""
+    email_l = (email or "").strip().lower()
+    if email_l == GENERIC_CUSTOMER_EMAIL:
+        return 0
+    if _fold_ascii(name or "") == "generico":
+        return 1
+    return 2
+
+
+_PROFILE_PHONE_ORDER_SQL = """
+ORDER BY
+  CASE
+    WHEN lower(trim(coalesce(email, ''))) = 'generico@warocol.com' THEN 0
+    WHEN lower(trim(coalesce(name, ''))) IN ('genérico', 'generico') THEN 1
+    ELSE 2
+  END,
+  created_at ASC NULLS LAST
+"""
 
 
 async def get_customer_by_id(
@@ -142,6 +174,13 @@ async def search_or_create_customer(
             """
             if is_email_input:
                 search_query = base_select + " WHERE lower(trim(email)) = $1 LIMIT 1"
+            elif phone_number == ANONYMOUS_PHONE:
+                search_query = (
+                    base_select
+                    + " WHERE phone_number = $1 "
+                    + _PROFILE_PHONE_ORDER_SQL
+                    + " LIMIT 1"
+                )
             else:
                 search_query = base_select + " WHERE phone_number = $1 LIMIT 1"
 
@@ -252,6 +291,20 @@ async def search_or_create_customer(
 
                 logger.info(f"✅ Customer created and associated with tenant: {new_customer['id']}")
 
+                await record_operation_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_CRM,
+                    channel=None,
+                    action="customer_created",
+                    actor_user_id=session_context.user_id,
+                    payload={
+                        "entity_type": "customer",
+                        "entity_id": str(new_customer["id"]),
+                        "label": new_customer.get("name") or phone_number,
+                    },
+                )
+
                 customer = Customer(
                     id=new_customer['id'],
                     phone_number=new_customer['phone_number'],
@@ -301,7 +354,26 @@ async def search_customer_by_phone(
         phone_number = phone_number.strip().replace(' ', '').replace('-', '')
 
         async with get_db_connection() as conn:
-            query = """
+            if phone_number == ANONYMOUS_PHONE:
+                query = f"""
+                SELECT
+                    p.id,
+                    p.phone_number,
+                    p.name,
+                    p.email,
+                    p.fiscal_id_type,
+                    p.fiscal_id,
+                    p.fiscal_business_name,
+                    p.fiscal_email,
+                    p.created_at,
+                    p.updated_at
+                FROM profile p
+                WHERE p.phone_number = $1
+                {_PROFILE_PHONE_ORDER_SQL}
+                LIMIT 1
+                """
+            else:
+                query = """
                 SELECT
                     p.id,
                     p.phone_number,
@@ -316,7 +388,7 @@ async def search_customer_by_phone(
                 FROM profile p
                 WHERE p.phone_number = $1
                 LIMIT 1
-            """
+                """
 
             result = await conn.fetchrow(query, phone_number)
 
@@ -631,6 +703,21 @@ async def update_customer(
                           created_at, updated_at
             """
             row = await conn.fetchrow(query, customer_id, *values)
+
+            await record_operation_event(
+                conn,
+                tenant_id,
+                domain=DOMAIN_CRM,
+                channel=None,
+                action="customer_updated",
+                actor_user_id=session_context.user_id,
+                payload={
+                    "entity_type": "customer",
+                    "entity_id": str(customer_id),
+                    "label": row["name"] if row else None,
+                    "fields": list(fields.keys()),
+                },
+            )
 
         updated = Customer(
             id=row['id'],

@@ -283,6 +283,7 @@ async def test_evaluate_and_award_skips_when_wallet_payment_and_earn_disabled():
             }
         if "from orders" in q and "total_amount" in q:
             return {
+                "status": "completed",
                 "total_amount": 40_000.0,
                 "waro_redeemed_amount_cop": 0.0,
                 "payment_method": "customer_wallet",
@@ -323,6 +324,7 @@ async def test_evaluate_and_award_reduces_base_for_wallet_split_payment():
             }
         if "from orders" in q and "total_amount" in q:
             return {
+                "status": "completed",
                 "total_amount": 50_000.0,
                 "waro_redeemed_amount_cop": 0.0,
                 "payment_method": "cash",
@@ -388,6 +390,7 @@ async def test_evaluate_and_award_restores_waro_redemption_to_earn_base():
             }
         if "from orders" in q and "total_amount" in q:
             return {
+                "status": "completed",
                 "total_amount": 42_000.0,
                 "waro_redeemed_amount_cop": 8_000.0,
                 "payment_method": "cash",

@@ -27,8 +27,8 @@ from app.database import get_db_connection
 from app.services import (
     billing_service,
     billing_email_service,
-    billing_webhook_service,
     legal_service,
+    lemon_squeezy_service,
     onboarding_service,
     wompi_service,
     wompi_colombia_webhook_service,
@@ -45,7 +45,7 @@ tenant_router = APIRouter(prefix="/billing", tags=["Billing"])
 class SubscribeBody(BaseModel):
     """Body for POST /billing/subscribe"""
     plan_id: UUID
-    billing_cycle: str = "annual"  # new subscriptions: annual only (#877)
+    billing_cycle: str = "monthly"  # new subscriptions: monthly only (#807)
     payer_email: Optional[str] = None
 
 
@@ -57,13 +57,30 @@ class SubscribeBody(BaseModel):
     dependencies=[Depends(require_module(Module.MI_PLAN))],
 )
 async def tenant_list_plans(request: Request):
-    """List active subscription plans (tenant-facing, read-only)."""
+    """List active subscription plans plus regional MoR price_offer (#796 / #944)."""
     session = require_valid_session(request)
+    from app.core.billing_pricing import resolve_price_offer
+
     async with get_db_connection(use_transaction=False) as conn:
         if session.lifecycle_status == "pending":
             await onboarding_service.ensure_onboarding_payment_ready(conn, session)
         plans = await billing_service.list_plans(conn)
-        return [p for p in plans if p["is_active"]]
+        ctx = await billing_service.get_tenant_billing_context(conn, session.tenant_id)
+
+    country_code = ctx.get("country_code")
+    offer = resolve_price_offer(country_code)
+    active = [p for p in plans if p["is_active"]]
+    return {
+        "plans": billing_service.filter_plans_for_country(active, country_code),
+        "price_offer": {
+            "segment": offer.segment,
+            "currency": offer.currency,
+            "monthly_amount_minor": offer.monthly_amount_minor,
+            "annual_amount_minor": offer.annual_amount_minor,
+            "monthly_amount": offer.monthly_amount_minor / 100.0,
+            "annual_amount": offer.annual_amount_minor / 100.0,
+        },
+    }
 
 
 @tenant_router.post(
@@ -73,25 +90,29 @@ async def tenant_list_plans(request: Request):
 )
 async def subscribe(body: SubscribeBody, request: Request):
     """
-    Subscribe the authenticated tenant to a plan via Wompi Payment Link.
+    Subscribe the authenticated tenant to a plan via Lemon Squeezy checkout (#942).
 
-    1. Valida que el plan exista y esté activo
-    2. Crea un Payment Link en Wompi
-    3. Guarda wompi_link_id y status='pending' en DB
-    4. Retorna checkout_url para redirigir al checkout de Wompi
-
-    billing_cycle debe ser 'annual' para nuevas suscripciones (#877).
+    billing_cycle must be 'monthly' for new subscriptions.
+    Active annuals with a future period end are blocked mid-period (#797).
     """
-    if body.billing_cycle != "annual":
+    if body.billing_cycle != "monthly":
         from fastapi import HTTPException
         raise HTTPException(
             status_code=422,
-            detail="Las suscripciones nuevas solo están disponibles con ciclo anual (billing_cycle='annual').",
+            detail="Las suscripciones nuevas solo estan disponibles con ciclo mensual (billing_cycle='monthly').",
         )
 
     session = require_valid_session(request)
     tenant_id = session.tenant_id
     is_pending_onboarding = session.lifecycle_status == "pending"
+
+    from urllib.parse import urlparse
+    from app.core.billing_pricing import resolve_price_offer, resolve_provider_environment
+
+    # Return page after LS pay: hosted checkout redirect; activation still from webhooks.
+    parsed = urlparse(settings.frontend_url)
+    frontend_host = f"{parsed.scheme}://{parsed.netloc}"
+    redirect_url = f"{frontend_host}/billing/confirmacion"
 
     async with get_db_connection() as conn:
         if is_pending_onboarding:
@@ -99,67 +120,77 @@ async def subscribe(body: SubscribeBody, request: Request):
         plan = await billing_service.get_plan_for_subscribe(conn, body.plan_id)
         if not is_pending_onboarding:
             await legal_service.ensure_current_terms_accepted(conn, tenant_id)
+            await billing_service.ensure_subscribe_allowed(conn, tenant_id)
 
-        amount_in_cents = plan.get("amount_in_cents")
-        if amount_in_cents is None:
-            amount_in_cents = billing_service.annual_price_in_cents(plan["price_annual"])
-
-        # Strip any base path from frontend_url to get the root host
-        # e.g. "http://localhost:8080/waro-colombia" → "http://localhost:8080"
-        from urllib.parse import urlparse
-        parsed = urlparse(settings.frontend_url)
-        frontend_host = f"{parsed.scheme}://{parsed.netloc}"
-        redirect_url = f"{frontend_host}/billing/confirmacion"
+        ctx = await billing_service.get_tenant_billing_context(conn, tenant_id)
+        billing_service.assert_plan_available_for_country(
+            plan["slug"],
+            ctx.get("country_code"),
+        )
+        offer = resolve_price_offer(ctx["country_code"])
+        provider_environment = resolve_provider_environment(
+            tenant_slug=ctx.get("slug"),
+            tenant_id=str(tenant_id) if tenant_id else None,
+        )
 
         if is_pending_onboarding:
             attempt_id = await billing_service.create_onboarding_payment_attempt(
                 conn,
                 tenant_id=tenant_id,
                 plan_id=body.plan_id,
-                amount_in_cents=amount_in_cents,
-                provider_environment=wompi_service.configured_event_environment(),
+                amount_in_cents=offer.monthly_amount_minor,
+                provider_environment=provider_environment,
+                currency=offer.currency,
+                provider="lemon_squeezy",
             )
         else:
-            wompi_result = await wompi_service.create_payment_link(
-                plan_name=plan["name"],
-                amount_in_cents=amount_in_cents,
+            ls_result = await lemon_squeezy_service.create_checkout(
+                offer=offer,
+                environment=provider_environment,
+                tenant_id=tenant_id,
+                plan_id=body.plan_id,
                 billing_cycle=body.billing_cycle,
-                sku=tenant_id,
                 redirect_url=redirect_url,
+                customer_email=body.payer_email,
             )
             return await billing_service.subscribe_tenant(
                 conn,
                 tenant_id=tenant_id,
                 plan_id=body.plan_id,
                 billing_cycle=body.billing_cycle,
-                checkout_url=wompi_result["checkout_url"],
-                gateway_reference=wompi_result["wompi_link_id"],
+                checkout_url=ls_result["checkout_url"],
+                gateway_reference=ls_result["gateway_reference"],
+                provider="lemon_squeezy",
             )
 
-    wompi_result = await wompi_service.create_payment_link(
-        plan_name=plan["name"],
-        amount_in_cents=amount_in_cents,
+    ls_result = await lemon_squeezy_service.create_checkout(
+        offer=offer,
+        environment=provider_environment,
+        tenant_id=tenant_id,
+        plan_id=body.plan_id,
         billing_cycle=body.billing_cycle,
-        sku=attempt_id,
         redirect_url=redirect_url,
+        customer_email=body.payer_email,
+        attempt_id=attempt_id,
     )
     async with get_db_connection() as conn:
         await billing_service.attach_onboarding_payment_link(
             conn,
             attempt_id=attempt_id,
             tenant_id=tenant_id,
-            provider_reference=wompi_result["wompi_link_id"],
-            checkout_url=wompi_result["checkout_url"],
+            provider_reference=ls_result["gateway_reference"],
+            checkout_url=ls_result["checkout_url"],
         )
     return {
         "attempt_id": str(attempt_id),
         "plan_id": str(body.plan_id),
-        "checkout_url": wompi_result["checkout_url"],
-        "gateway_reference": wompi_result["wompi_link_id"],
-        "amount_in_cents": amount_in_cents,
-        "currency": "COP",
-        "billing_cycle": "annual",
+        "checkout_url": ls_result["checkout_url"],
+        "gateway_reference": ls_result["gateway_reference"],
+        "amount_in_cents": offer.monthly_amount_minor,
+        "currency": offer.currency,
+        "billing_cycle": "monthly",
         "status": "pending",
+        "provider": "lemon_squeezy",
     }
 
 
@@ -191,15 +222,13 @@ async def get_my_remaining_usage(request: Request):
 )
 async def verify_payment(
     request: Request,
-    background_tasks: BackgroundTasks,
     transaction_id: str = Query(...),
 ):
     """
-    Consulta el estado de una transacción al regresar del checkout de Wompi
-    y reconcilia una aprobación si el webhook todavía no fue procesado.
+    Read-only status for a legacy Wompi transaction (#798).
 
-    La activación usa exclusivamente el resultado consultado por el servidor
-    en Wompi y exige que la referencia pertenezca al tenant autenticado.
+    Does not activate or renew subscriptions — new billing is Lemon Squeezy-only.
+    Still requires the payment link to belong to the authenticated tenant.
     """
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -223,50 +252,33 @@ async def verify_payment(
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Payment transaction not found")
 
-    if wompi_status == "APPROVED":
-        amount_in_cents = billing_service._webhook_amount_in_cents(
-            transaction.get("amount_in_cents")
-        )
-        currency = str(transaction.get("currency") or "").strip().upper()
-        period_anchor = billing_service.parse_wompi_period_anchor(transaction)
-        async with get_db_connection() as conn:
-            tenant_info = await billing_service.activate_tenant_subscription(
-                conn,
-                gateway_reference=payment_link_id,
-                payment_id=transaction_id,
-                amount=amount_in_cents / 100,
-                currency=currency,
-                period_anchor=period_anchor,
-                expected_tenant_id=tenant_id,
-                amount_in_cents=amount_in_cents,
-            )
-        if tenant_info:
-            background_tasks.add_task(
-                billing_email_service.send_payment_renewed_email,
-                tenant_name=tenant_info["tenant_name"],
-                tenant_email=tenant_info["tenant_email"],
-                next_period_end=tenant_info["next_period_end"],
-            )
-            background_tasks.add_task(
-                billing_webhook_service.send_payment_approved_webhook,
-                tenant_id=tenant_info["tenant_id"],
-                subscription_id=tenant_info["subscription_id"],
-                tenant_name=tenant_info["tenant_name"],
-                tenant_email=tenant_info["tenant_email"],
-                plan_name=tenant_info["plan_name"],
-                amount=amount_in_cents / 100,
-                currency=currency,
-                next_period_end=tenant_info["next_period_end"],
-                gateway_reference=payment_link_id,
-                transaction_id=transaction_id,
-            )
-
+    logger.info(
+        "verify-payment read-only (#798): no Wompi activate tx=%s status=%s",
+        transaction_id,
+        wompi_status,
+    )
     return {
         "status": internal_status,
         "wompi_status": wompi_status,
         "transaction_id": transaction_id,
         "payment_link_id": payment_link_id,
+        "activation": "deprecated",
     }
+
+
+@tenant_router.get("/lemon-squeezy/checkout-status")
+async def lemon_squeezy_checkout_status(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    checkout_id: Optional[str] = Query(default=None),
+):
+    """Thank-you poll stub for Lemon Squeezy (#942) — local subscription state."""
+    session = require_valid_session(request)
+    return await lemon_squeezy_service.reconcile_checkout_status_for_tenant(
+        tenant_id=session.tenant_id,
+        checkout_id=checkout_id,
+        background_tasks=background_tasks,
+    )
 
 
 @tenant_router.get(
@@ -305,7 +317,7 @@ async def get_my_billing_events(
 async def cancel_my_subscription(request: Request):
     """
     Cancela la suscripción activa del tenant en la DB.
-    Wompi Payment Links no requieren cancelación en la API.
+    Provider cancel (Lemon Squeezy) is handled separately when wired; DB status is source of access.
     """
     session = require_valid_session(request)
 
@@ -317,26 +329,38 @@ async def cancel_my_subscription(request: Request):
     return {"status": "cancelled", "gateway_reference": gateway_reference or None}
 
 
+@tenant_router.post(
+    "/subscription/abandon-checkout",
+    dependencies=[Depends(require_module(Module.MI_PLAN))],
+)
+async def abandon_pending_checkout(request: Request):
+    """
+    Abandon a pending checkout so the tenant returns to Starter (#2210).
+
+    Distinct from DELETE /subscription (active/pending → cancelled + blocked).
+    """
+    session = require_valid_session(request)
+
+    async with get_db_connection() as conn:
+        return await billing_service.abandon_pending_checkout(conn, session.tenant_id)
+
+
 # NOTE: Authenticated by Wompi signature verification, not session.
-# Do NOT add require_module() here — it would break payment confirmations.
+# Do NOT add require_module() here — legacy URL still receives retries.
 @tenant_router.post("/webhook", status_code=200)
 async def wompi_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
 ):
     """
-    Wompi webhook endpoint — llamado por Wompi al completar una transacción.
+    Legacy Wompi webhook — signature verified, Colombia billing no-op (#798).
 
-    Evento: transaction.updated
-    - status APPROVED → activa la suscripción
-    - status DECLINED/VOIDED/ERROR → marca como cancelled + email
-
-    Verifica la firma incluida en el body del evento.
+    Prefer POST /payments/webhooks/wompi for central routing (Tickets forward).
     """
     body = await request.json()
     event = body.get("event", "")
 
-    logger.info("Wompi webhook received: event=%s", event)
+    logger.info("Wompi webhook received (deprecated billing): event=%s", event)
 
     if not wompi_service.verify_event_signature(body):
         logger.warning("Wompi webhook: firma inválida — rechazando")
@@ -349,7 +373,7 @@ async def wompi_webhook(
     await wompi_colombia_webhook_service.handle_transaction_updated(
         body, background_tasks
     )
-    return {"received": True}
+    return {"received": True, "deprecated": True}
 
 
 # ── Grace period & access control — issue #62 ────────────────────────────────
@@ -364,7 +388,7 @@ async def get_access_status(request: Request):
     Return the subscription access level for the authenticated tenant.
 
     Levels:
-      free             — no subscription; limited free plan
+      starter          — no paid subscription; permanent Starter plan
       full             — active subscription
       full_with_warning — past_due, ≤ 3 days overdue
       read_only        — past_due, 3-7 days overdue
@@ -373,12 +397,20 @@ async def get_access_status(request: Request):
     session = require_valid_session(request)
     async with get_db_connection(use_transaction=False) as conn:
         access = await billing_service.get_subscription_access(session.tenant_id, conn)
+        plan_slug = await billing_service.get_effective_plan_slug(conn, session.tenant_id)
+        quotas = (
+            await billing_service.get_effective_plan_quotas(conn, session.tenant_id)
+            if plan_slug
+            else {}
+        )
         return {
             "level": access.level,
             "grace_days_remaining": access.grace_days_remaining,
             "subscription_status": access.subscription_status,
             "next_payment_date": access.next_payment_date,
             "message": access.message,
+            "plan_slug": plan_slug,
+            "quotas": quotas,
         }
 
 

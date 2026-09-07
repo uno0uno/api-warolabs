@@ -1,0 +1,42 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 1921
+title: "Starter: growth quota for Operaciones Promociones (tenant_promotions)"
+repo: both
+repo_remote: uno0uno/api-warolabs + uno0uno/warocol.com
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-1921-promotions-quota
+
+paths:
+  - app/services/billing_service.py
+  - app/services/promotions_service.py
+  - tests/test_quota_enforcement.py
+  - composables/useBilling.ts
+  - pages/operaciones/promociones/index.vue
+  - components/promociones/PromocionPanel.vue
+  - pages/gestion/billing/uso.vue
+
+ac:
+  - "tenant_promotions Starter=1 Pro unlimited"
+  - "Count all tenant_promotions rows (delete frees slot)"
+  - "create enforces check_plan_quota_growth 429"
+  - "Front CTA + panel catch → Mi Plan modal"
+  - "Mi Plan uso shows metric"
+  - "pytest at/below/unlimited"
+
+out_of_scope:
+  - Bitácora/Personalizar/Propinas
+  - Promo checkout evaluation
+
+hints:
+  entry: "check_plan_quota_growth tenant_promotions + useOperationalQuotaGate"
+  pattern: "api_tokens quota (#1908)"
+  tests: "./venv/bin/pytest tests/test_quota_enforcement.py -k tenant_promotions -q"
+
+risk: low
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "merge API then front; smoke Starter create 2nd promo"

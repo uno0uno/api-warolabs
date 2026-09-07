@@ -359,6 +359,129 @@ async def get_customer_cartera(
         raise APIError(f"Error in get_customer_cartera: {exc}", status_code=500)
 
 
+async def list_customer_credit_payments(
+    request: Request,
+    customer_id: UUID,
+    page: int = 1,
+    per_page: int = 10,
+) -> dict:
+    """
+    Paginated list of all credit payments (abonos) for a customer.
+    Includes order_number and remaining_amount_after at payment time.
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        page = max(1, page)
+        per_page = min(max(1, per_page), 100)
+        offset = (page - 1) * per_page
+
+        async with get_db_connection(use_transaction=False) as conn:
+            customer_row = await conn.fetchrow(
+                "SELECT id FROM profile WHERE id = $1",
+                customer_id,
+            )
+            if not customer_row:
+                raise APIError("Cliente no encontrado", status_code=404)
+
+            total = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM credit_payments cp
+                WHERE cp.customer_id = $1
+                  AND cp.tenant_id = $2
+                """,
+                customer_id,
+                tenant_id,
+            )
+            total = int(total or 0)
+
+            rows = await conn.fetch(
+                """
+                WITH ranked AS (
+                    SELECT
+                        cp.id,
+                        cp.order_id,
+                        cp.amount,
+                        cp.payment_method,
+                        cp.payment_method_id,
+                        cp.payment_date,
+                        cp.notes,
+                        cp.created_at,
+                        o.order_number,
+                        o.total_amount AS order_total_amount,
+                        SUM(cp.amount) OVER (
+                            PARTITION BY cp.order_id
+                            ORDER BY cp.payment_date, cp.created_at, cp.id
+                        ) AS cumulative_paid
+                    FROM credit_payments cp
+                    INNER JOIN orders o
+                        ON o.id = cp.order_id
+                       AND o.tenant_id = cp.tenant_id
+                    WHERE cp.customer_id = $1
+                      AND cp.tenant_id = $2
+                )
+                SELECT
+                    id,
+                    order_id,
+                    amount,
+                    payment_method,
+                    payment_method_id,
+                    payment_date,
+                    notes,
+                    created_at,
+                    order_number,
+                    order_total_amount,
+                    (order_total_amount - cumulative_paid) AS remaining_amount_after
+                FROM ranked
+                ORDER BY payment_date DESC, created_at DESC, id DESC
+                LIMIT $3 OFFSET $4
+                """,
+                customer_id,
+                tenant_id,
+                per_page,
+                offset,
+            )
+
+        items = [
+            {
+                "payment_id": str(row["id"]),
+                "order_id": str(row["order_id"]),
+                "order_number": int(row["order_number"]),
+                "amount": float(row["amount"]),
+                "payment_method": row["payment_method"],
+                "payment_method_id": (
+                    str(row["payment_method_id"]) if row["payment_method_id"] else None
+                ),
+                "payment_date": row["payment_date"].isoformat(),
+                "notes": row["notes"],
+                "created_at": row["created_at"].isoformat(),
+                "order_total_amount": float(row["order_total_amount"]),
+                "remaining_amount_after": float(row["remaining_amount_after"]),
+            }
+            for row in rows
+        ]
+
+        return {
+            "success": True,
+            "data": {
+                "items": items,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+            },
+        }
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as exc:
+        logger.error(f"Error in list_customer_credit_payments: {exc}")
+        raise APIError(f"Error in list_customer_credit_payments: {exc}", status_code=500)
+
+
 async def get_cartera_aging(request: Request) -> dict:
     """
     Aging buckets computed at query time (no caching).

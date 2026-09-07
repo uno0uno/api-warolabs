@@ -1,0 +1,39 @@
+# Machine contract for wr-fast / wr-ship — keep ≤80 lines.
+issue: 2358
+title: "On cancel: restore wallet and Waros, block if the sale has abonos"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2358-cancel-wallet-waros-abonos
+risk: low
+
+paths:
+  - app/services/orders_service.py
+  - app/services/customer_wallet_service.py
+  - app/services/waros_service.py
+  - tests/test_order_cancel_wallet_waros_abonos.py
+  - tests/test_order_gl_cancel_reversal.py
+
+ac:
+  - completed→cancelled with credit_payments returns 409; no stock/GL/wallet/Waros changes
+  - credit with $0 abonos still cancels and leaves cartera
+  - cancel without FE/abonos restores wallet apply (incl. split) via void_apply
+  - Waros earned for that order are deducted from that customer
+  - inventory + orden/orden_cogs void unchanged
+  - FE pending/accepted still 409 first
+
+out_of_scope:
+  - reverse/refund credit_payments
+  - FIFO redistribution to other orders
+  - bank/card refunds
+  - cancelling despite FE
+  - front copy unless API 409 is invisible
+
+hints:
+  entry: "update_order_status + bulk_update_order_status — completed→cancelled"
+  pattern: "assert_order_invoice_allows_mutation 409; restore_wallet_for_order_payment_void; evaluate_and_award related_entity_type=order"
+  tests: "pytest tests/test_order_cancel_wallet_waros_abonos.py tests/test_order_gl_cancel_reversal.py tests/test_waro_wallet_checkout.py tests/test_orders_despacho_operation_events.py tests/test_order_invoice_mutation_lock.py -v"
+
+skip:
+  audits: [ux, color, typography]

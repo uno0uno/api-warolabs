@@ -88,3 +88,72 @@ async def test_customers_list_includes_zero_order_customer():
   assert "o.online_cart_id IS NOT NULL" in query
   assert "tenant_members" not in query
   assert "role = 'customer'" not in query
+  assert "p.fiscal_id_type" in query
+  assert "p.fiscal_id" in query
+  assert "p.fiscal_business_name" in query
+  assert "p.fiscal_email" in query
+  for row in result['data']:
+      assert 'fiscal_id_type' in row
+      assert 'fiscal_id' in row
+      assert 'fiscal_business_name' in row
+      assert 'fiscal_email' in row
+
+
+@pytest.mark.asyncio
+async def test_customers_list_includes_fiscal_fields_when_present():
+  rows = [
+      {
+          'customer_id': _CUSTOMER_WITH_ORDERS,
+          'name': 'Buyer SA',
+          'phone': '3001111111',
+          'fiscal_id_type': 'NIT',
+          'fiscal_id': '900123456',
+          'fiscal_business_name': 'Buyer SA',
+          'fiscal_email': 'factura@buyer.com',
+          'total_spent': 50000.0,
+          'order_count': 2,
+          'avg_ticket': 25000.0,
+          'last_order_date': None,
+          'total_count': 1,
+          'total_revenue': 50000.0,
+      },
+  ]
+
+  with _patch_session(), _patch_conn(rows):
+      result = await orders_service.get_customers_list(Request({'type': 'http'}))
+
+  row = result['data'][0]
+  assert row['fiscal_id_type'] == 'NIT'
+  assert row['fiscal_id'] == '900123456'
+  assert row['fiscal_business_name'] == 'Buyer SA'
+  assert row['fiscal_email'] == 'factura@buyer.com'
+
+
+@pytest.mark.asyncio
+async def test_customers_list_fiscal_fields_null_when_absent():
+  rows = [
+      {
+          'customer_id': _CUSTOMER_NO_ORDERS,
+          'name': 'Walk-in',
+          'phone': '3002222222',
+          'fiscal_id_type': None,
+          'fiscal_id': None,
+          'fiscal_business_name': None,
+          'fiscal_email': None,
+          'total_spent': 0.0,
+          'order_count': 0,
+          'avg_ticket': 0.0,
+          'last_order_date': None,
+          'total_count': 1,
+          'total_revenue': 0.0,
+      },
+  ]
+
+  with _patch_session(), _patch_conn(rows):
+      result = await orders_service.get_customers_list(Request({'type': 'http'}))
+
+  row = result['data'][0]
+  assert row['fiscal_id_type'] is None
+  assert row['fiscal_id'] is None
+  assert row['fiscal_business_name'] is None
+  assert row['fiscal_email'] is None

@@ -10,12 +10,43 @@ from app.services.billing_service import (
     ONLINE_ORDER_QUOTA_CUSTOMER_MESSAGE,
     get_public_online_order_quota_availability,
 )
+from app.services import categories_service
+from app.services.recipe_stock_availability_service import (
+    apply_hide_products_without_stock_filter,
+)
 from app.core.timezones import get_zoneinfo, normalize_timezone
 from app.database import get_db_connection
 import json
 import logging
 
 logger = logging.getLogger(__name__)
+
+_PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL = """
+(
+  EXISTS (
+    SELECT 1
+    FROM tenant_subscriptions ts
+    WHERE ts.tenant_id = tpp.tenant_id
+      AND ts.status IN ('active', 'past_due')
+      AND ts.current_period_end > now()
+  )
+  OR (
+    NOT EXISTS (
+      SELECT 1
+      FROM tenant_subscriptions ts
+      WHERE ts.tenant_id = tpp.tenant_id
+        AND ts.status IN ('active', 'past_due')
+        AND ts.current_period_end > now()
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM tenant_onboarding tob
+      WHERE tob.tenant_id = tpp.tenant_id
+        AND tob.state = 'payment_pending'
+    )
+  )
+)
+"""
 
 
 async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
@@ -30,13 +61,8 @@ async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
     """
     try:
         async with get_db_connection() as conn:
-            # JOIN tenant_subscriptions to gate out tenants without an active
-            # paid subscription. INNER JOIN drops tenants with no row at all
-            # (the "free / never paid" case). Visible statuses follow the
-            # canonical predicate used elsewhere in billing_service: 'active'
-            # plus 'past_due' (any age — only flips dark when billing actually
-            # marks the row as 'cancelled').
-            query = """
+            # Paid subscription or permanent Starter plan (no payment_pending).
+            query = f"""
                 SELECT
                     tpp.id, tpp.tenant_id, tpp.slug, tpp.is_active,
                     tpp.display_name, tpp.description, tpp.logo_url, tpp.banner_url,
@@ -50,10 +76,9 @@ async def get_profile_by_slug(slug: str) -> Optional[Dict[str, Any]]:
                     tpp.tip_enabled, tpp.tip_default_percentages, tpp.tip_preselect_index,
                     tpp.created_at, tpp.updated_at
                 FROM tenant_public_profiles tpp
-                JOIN tenant_subscriptions ts ON ts.tenant_id = tpp.tenant_id
                 WHERE tpp.slug = $1
                   AND tpp.is_active = true
-                  AND ts.status IN ('active', 'past_due')
+                  AND {_PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL}
             """
 
             row = await conn.fetchrow(query, slug)
@@ -128,13 +153,12 @@ async def get_menu_by_slug(
             # 1. Get tenant_id from profile (gated by billing subscription —
             # mirror the predicate from get_profile_by_slug so a hidden tenant
             # cannot leak menu data either).
-            profile_query = """
+            profile_query = f"""
                 SELECT tpp.tenant_id, tpp.display_name
                 FROM tenant_public_profiles tpp
-                JOIN tenant_subscriptions ts ON ts.tenant_id = tpp.tenant_id
                 WHERE tpp.slug = $1
                   AND tpp.is_active = true
-                  AND ts.status IN ('active', 'past_due')
+                  AND {_PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL}
             """
             profile = await conn.fetchrow(profile_query, slug)
 
@@ -148,18 +172,12 @@ async def get_menu_by_slug(
             restaurant_name = profile['display_name']
 
             # 2. Get categories for this tenant
-            categories_query = """
-                SELECT DISTINCT c.id, c.name, c.description
-                FROM categories c
-                JOIN product p ON p.category_id = c.id
-                WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
-                ORDER BY c.name
-            """
+            categories_query = categories_service.online_menu_categories_select_sql()
             categories_rows = await conn.fetch(categories_query, tenant_id)
             categories = [dict(row) for row in categories_rows]
 
             # 3. Get products
-            products_query = """
+            products_query = f"""
                 SELECT
                     p.id, p.name, p.description, p.price, p.image_url,
                     p.category_id, c.name as category_name,
@@ -172,6 +190,9 @@ async def get_menu_by_slug(
                     ) as has_modifiers
                 FROM product p
                 JOIN categories c ON p.category_id = c.id
+                LEFT JOIN tenant_online_menu_category_orders o
+                    ON o.category_id = c.id AND o.tenant_id = $1
+                {categories_service.online_menu_product_order_join_sql()}
                 WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
             """
 
@@ -182,7 +203,11 @@ async def get_menu_by_slug(
                 products_query += " AND p.category_id = $2"
                 params.append(category_id)
 
-            products_query += " ORDER BY c.name, p.name"
+            products_query, params = await apply_hide_products_without_stock_filter(
+                conn, tenant_id, products_query, params
+            )
+
+            products_query += f" ORDER BY {categories_service.online_menu_products_order_by_sql()}"
 
             products_rows = await conn.fetch(products_query, *params)
             products = [dict(row) for row in products_rows]
@@ -324,17 +349,11 @@ async def get_menu_by_tenant_id(
 
             restaurant_name = profile['display_name']
 
-            categories_query = """
-                SELECT DISTINCT c.id, c.name, c.description
-                FROM categories c
-                JOIN product p ON p.category_id = c.id
-                WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
-                ORDER BY c.name
-            """
+            categories_query = categories_service.online_menu_categories_select_sql()
             categories_rows = await conn.fetch(categories_query, tenant_id)
             categories = [dict(row) for row in categories_rows]
 
-            products_query = """
+            products_query = f"""
                 SELECT
                     p.id, p.name, p.description, p.price, p.image_url,
                     p.category_id, c.name as category_name,
@@ -347,6 +366,9 @@ async def get_menu_by_tenant_id(
                     ) as has_modifiers
                 FROM product p
                 JOIN categories c ON p.category_id = c.id
+                LEFT JOIN tenant_online_menu_category_orders o
+                    ON o.category_id = c.id AND o.tenant_id = $1
+                {categories_service.online_menu_product_order_join_sql()}
                 WHERE p.tenant_id = $1 AND p.is_available = true AND p.is_available_online = true
             """
 
@@ -356,7 +378,11 @@ async def get_menu_by_tenant_id(
                 products_query += " AND p.category_id = $2"
                 params.append(category_id)
 
-            products_query += " ORDER BY c.name, p.name"
+            products_query, params = await apply_hide_products_without_stock_filter(
+                conn, tenant_id, products_query, params
+            )
+
+            products_query += f" ORDER BY {categories_service.online_menu_products_order_by_sql()}"
 
             products_rows = await conn.fetch(products_query, *params)
             products = [dict(row) for row in products_rows]
@@ -658,15 +684,36 @@ async def validate_slug_available(slug: str, exclude_tenant_id: Optional[UUID] =
     try:
         async with get_db_connection() as conn:
             query = "SELECT id FROM tenant_public_profiles WHERE slug = $1"
-            params = [slug]
+            params: list = [slug]
 
             if exclude_tenant_id:
                 query += " AND tenant_id != $2"
                 params.append(exclude_tenant_id)
 
             result = await conn.fetchrow(query, *params)
+            if result is not None:
+                return False
 
-            return result is None  # Available if not found
+            tenant_q = "SELECT id FROM tenants WHERE slug = $1"
+            tenant_params: list = [slug]
+            if exclude_tenant_id:
+                tenant_q += " AND id != $2"
+                tenant_params.append(exclude_tenant_id)
+            if await conn.fetchrow(tenant_q, *tenant_params):
+                return False
+
+            try:
+                alias_q = "SELECT tenant_id FROM tenant_public_slug_aliases WHERE alias_slug = $1"
+                alias_params: list = [slug]
+                if exclude_tenant_id:
+                    alias_q += " AND tenant_id != $2"
+                    alias_params.append(exclude_tenant_id)
+                if await conn.fetchrow(alias_q, *alias_params):
+                    return False
+            except Exception:
+                pass
+
+            return True
 
     except Exception as e:
         logger.error(f"Error validating slug '{slug}': {e}")
@@ -676,6 +723,7 @@ async def validate_slug_available(slug: str, exclude_tenant_id: Optional[UUID] =
 async def list_restaurants(
     city: Optional[str] = None,
     city_slug: Optional[str] = None,
+    country_code: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     List all active public restaurant profiles.
@@ -686,16 +734,25 @@ async def list_restaurants(
         city_slug: Preferred filter (warocol.com#615). Matches the
               normalized slug stored on tenant_public_profiles.city_slug,
               which mirrors public_cities.city_slug.
+        country_code: Optional ISO code on tenant_financial_profiles
+              (warocol.com#2296). Omit for CO slug-only directories and
+              unfiltered sitemap restaurant URLs. When set, JOIN financial
+              profiles so an AR magazine cannot list a CO tenant.
 
     Returns:
         List of restaurant profiles with basic information.
     """
+    list_country = str(country_code or "").strip().upper() or None
     try:
         async with get_db_connection() as conn:
-            # Gate by billing: only tenants with an active or past_due
-            # subscription appear in the public directory. INNER JOIN drops
-            # tenants with no subscription row (free / never paid).
-            query = """
+            from_sql = "FROM tenant_public_profiles tpp"
+            if list_country:
+                from_sql += (
+                    "\n                JOIN tenant_financial_profiles tfp"
+                    " ON tfp.tenant_id = tpp.tenant_id"
+                )
+            # Paid subscription or permanent Starter (same predicate as profile/menu).
+            query = f"""
                 SELECT
                     tpp.id, tpp.tenant_id, tpp.slug, tpp.is_active,
                     tpp.display_name, tpp.description, tpp.logo_url, tpp.banner_url,
@@ -705,10 +762,9 @@ async def list_restaurants(
                     tpp.is_manually_open, tpp.business_hours,
                     tpp.accepts_online_orders,
                     tpp.created_at, tpp.updated_at
-                FROM tenant_public_profiles tpp
-                JOIN tenant_subscriptions ts ON ts.tenant_id = tpp.tenant_id
+                {from_sql}
                 WHERE tpp.is_active = true
-                  AND ts.status IN ('active', 'past_due')
+                  AND {_PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL}
             """
             params: List[Any] = []
 
@@ -724,6 +780,10 @@ async def list_restaurants(
                     "list_restaurants: deprecated 'city' param used "
                     "(value=%r). Migrate caller to 'city_slug'.", city,
                 )
+
+            if list_country:
+                params.append(list_country)
+                query += f" AND tfp.country_code = ${len(params)}"
 
             query += " ORDER BY display_name ASC"
 
@@ -775,8 +835,8 @@ async def list_restaurants(
 
     except Exception as e:
         logger.error(
-            "Error listing restaurants (city=%r, city_slug=%r): %s",
-            city, city_slug, e,
+            "Error listing restaurants (city=%r, city_slug=%r, country_code=%r): %s",
+            city, city_slug, list_country, e,
         )
         raise HTTPException(
             status_code=500,
@@ -784,9 +844,18 @@ async def list_restaurants(
         )
 
 
-async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
+def _normalize_city_country_code(country_code: Optional[str]) -> str:
+    """Omitted/blank country_code defaults to CO so SSR dispatch stays Colombia-only."""
+    code = str(country_code or "").strip().upper()
+    return code or "CO"
+
+
+async def list_cities(
+    include_empty: bool = False,
+    country_code: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
-    Return the curated city catalog (warocol.com#615).
+    Return the curated city catalog (warocol.com#615, #2295).
 
     Used by the `/negocio` city selector (include_empty=True so operators
     see every city even before someone in that city signs up) and by the
@@ -796,17 +865,21 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
     Args:
         include_empty: When False (default), filter out cities with zero
             active tenants. When True, return every active catalog entry.
+        country_code: ISO country filter. Omitted/blank → CO (SSR /ciudades
+            must not receive AR/MX/US rows).
 
     Returns:
-        List of dicts with country, city, city_slug, DIVIPOLA metadata, and tenant_count.
-        Sorted by sort_order then city name.
+        List of dicts with country, country_code, city, city_slug, DIVIPOLA
+        metadata, and tenant_count. Sorted by sort_order then city name.
     """
+    code = _normalize_city_country_code(country_code)
     try:
         async with get_db_connection() as conn:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT
                     pc.country,
+                    pc.country_code,
                     pc.city,
                     pc.city_slug,
                     pc.department_code,
@@ -818,16 +891,16 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
                     pc.sort_order,
                     COUNT(tpp.id) FILTER (
                         WHERE tpp.is_active = true
-                          AND ts.status IN ('active', 'past_due')
+                          AND {_PUBLIC_TENANT_BILLING_ELIGIBILITY_SQL}
                     ) AS tenant_count
                 FROM public_cities pc
                 LEFT JOIN tenant_public_profiles tpp
                        ON tpp.city_slug = pc.city_slug
-                LEFT JOIN tenant_subscriptions ts
-                       ON ts.tenant_id = tpp.tenant_id
                 WHERE pc.is_active = true
+                  AND pc.country_code = $1
                 GROUP BY
                     pc.country,
+                    pc.country_code,
                     pc.city,
                     pc.city_slug,
                     pc.department_code,
@@ -839,10 +912,12 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
                     pc.sort_order
                 ORDER BY pc.sort_order ASC, pc.city ASC
                 """,
+                code,
             )
             cities = [
                 {
                     "country": r["country"],
+                    "country_code": r["country_code"],
                     "city": r["city"],
                     "city_slug": r["city_slug"],
                     "department_code": r["department_code"],
@@ -865,20 +940,31 @@ async def list_cities(include_empty: bool = False) -> List[Dict[str, Any]]:
         )
 
 
-async def is_city_slug_known(city_slug: str) -> bool:
+async def is_city_slug_known(
+    city_slug: str,
+    country_code: Optional[str] = None,
+) -> bool:
     """
     Check whether `city_slug` is a recognised active entry in the
-    public_cities catalog (warocol.com#615).
+    public_cities catalog (warocol.com#615, #2295).
 
-    Used by the profile update endpoint to validate operator input and by
-    the tenant slug generator to avoid collisions.
+    When country_code is set, the slug must belong to that country so an
+    AR tenant cannot store a CO directory slug.
     """
     try:
         async with get_db_connection() as conn:
-            hit = await conn.fetchval(
-                "SELECT 1 FROM public_cities WHERE city_slug = $1 AND is_active = true",
-                city_slug,
-            )
+            if country_code:
+                hit = await conn.fetchval(
+                    "SELECT 1 FROM public_cities "
+                    "WHERE city_slug = $1 AND is_active = true AND country_code = $2",
+                    city_slug,
+                    str(country_code).strip().upper(),
+                )
+            else:
+                hit = await conn.fetchval(
+                    "SELECT 1 FROM public_cities WHERE city_slug = $1 AND is_active = true",
+                    city_slug,
+                )
             return hit is not None
     except Exception as e:
         logger.error("Error checking city slug %r: %s", city_slug, e)

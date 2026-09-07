@@ -86,6 +86,7 @@ class Ingredient(IngredientBase):
     has_variants: Optional[int] = None  # count of variants via ingredient_global_hierarchy
     is_custom: Optional[bool] = None
     is_resale: Optional[bool] = None
+    costo_unitario: Optional[float] = None
     parent_name: Optional[str] = None
     default_purchase_unit_label: Optional[str] = None
     default_purchase_unit_factor: Optional[float] = None
@@ -126,6 +127,7 @@ class IngredientCategoriesResponse(BaseModel):
 class IngredientCategoryResolutionRequest(BaseModel):
     category_ids: List[UUID] = Field(..., min_length=1, max_length=100)
     exclude_ingredient_ids: List[UUID] = Field(default_factory=list, max_length=10000)
+    exclude_resale: bool = Field(default=False, description="When true, omit resale warehouse items")
 
 
 class IngredientCategoryCandidate(BaseModel):
@@ -203,3 +205,12 @@ class IngredientPurchaseUnitsListResponse(BaseModel):
     success: bool = True
     total: int
     data: List[IngredientPurchaseUnit]
+
+
+class IngredientPurchaseUnitsBatchRequest(BaseModel):
+    ingredient_ids: List[UUID] = Field(..., min_length=1, max_length=250, description="Ingredient IDs to fetch purchase units for")
+
+
+class IngredientPurchaseUnitsBatchResponse(BaseModel):
+    success: bool = True
+    data: dict

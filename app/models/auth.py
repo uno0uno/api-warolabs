@@ -12,8 +12,13 @@ from app.core.tenant_prefs import (
 )
 from app.models.onboarding import OnboardingStatus, OnboardingState, TenantLifecycle
 from app.models.tenant_financial_profile import CountryCurrencyOption
+from app.services.hospitality_tax_jurisdictions import (
+    JURISDICTION_COUNTRIES,
+    normalize_jurisdiction_code,
+)
 
 PreferredLocale = Literal['es', 'en', 'pt', 'fr', 'de', 'ar', 'hi', 'zh']
+PosCatalogLayoutOverride = Literal['grid', 'list']
 
 
 class User(BaseModel):
@@ -32,6 +37,7 @@ class ProfileUser(User):
     description: Optional[str] = None
     logo_avatar: Optional[str] = None
     preferred_locale: Optional[PreferredLocale] = None
+    pos_catalog_layout_override: Optional[PosCatalogLayoutOverride] = None
 
 
 class Session(BaseModel):
@@ -97,10 +103,12 @@ class RegistrationMagicLinkRequest(BaseModel):
     business_name: str = Field(min_length=2, max_length=120)
     country_code: str
     base_currency_code: str
+    tax_jurisdiction_code: Optional[str] = None
     source: Optional[str] = None
     content: Optional[str] = None
     campaign: Optional[str] = None
     variant: Optional[str] = None
+    visitor_key: Optional[str] = Field(default=None, max_length=128)
 
     @field_validator("email", mode="before")
     @classmethod
@@ -130,11 +138,29 @@ class RegistrationMagicLinkRequest(BaseModel):
             raise ValueError("Business name is required")
         return normalized
 
+    @field_validator("tax_jurisdiction_code", mode="before")
+    @classmethod
+    def _normalize_jurisdiction(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return value.strip().upper() if isinstance(value, str) else value
+
     @model_validator(mode="after")
     def _validate_business_country_currency(self):
         self.country_code, self.base_currency_code = validate_country_currency_pair(
             self.country_code, self.base_currency_code
         )
+        if self.country_code in JURISDICTION_COUNTRIES:
+            if not self.tax_jurisdiction_code:
+                raise ValueError("tax_jurisdiction_code is required for US and CA")
+            try:
+                self.tax_jurisdiction_code = normalize_jurisdiction_code(
+                    self.country_code, self.tax_jurisdiction_code
+                )
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+        else:
+            self.tax_jurisdiction_code = None
         return self
 
     @field_validator("source", "content", "campaign", "variant")
@@ -146,6 +172,16 @@ class RegistrationMagicLinkRequest(BaseModel):
         if not _ATTRIBUTION_PATTERN.fullmatch(normalized):
             raise ValueError("Attribution values must be slug-like and at most 100 characters")
         return normalized
+
+    @field_validator("visitor_key", mode="before")
+    @classmethod
+    def _strip_visitor_key(cls, value: object) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        return None
 
 
 class RegistrationVerifyTokenRequest(BaseModel):
@@ -159,9 +195,19 @@ class PhoneCountryOption(BaseModel):
     calling_code: int
 
 
+class RegistrationTaxJurisdictionOption(BaseModel):
+    code: str
+    label: str
+    regime: str = ""
+    rate: float = 0
+
+
 class RegistrationOptionsResponse(BaseModel):
     catalog: list[CountryCurrencyOption]
     phone_countries: list[PhoneCountryOption]
+    tax_jurisdictions: Dict[str, list[RegistrationTaxJurisdictionOption]] = Field(
+        default_factory=dict
+    )
 
 
 class RegistrationVerifyCodeRequest(BaseModel):
@@ -239,6 +285,7 @@ class UpdateProfileRequest(BaseModel):
     city: Optional[str] = None
     description: Optional[str] = Field(default=None, max_length=500)
     preferred_locale: Optional[PreferredLocale] = None
+    pos_catalog_layout_override: Optional[PosCatalogLayoutOverride] = None
 
     @field_validator('name', mode='before')
     @classmethod
@@ -257,6 +304,20 @@ class UpdateProfileRequest(BaseModel):
             return None
         normalized = value.strip()
         return normalized or None
+
+    @field_validator('pos_catalog_layout_override', mode='before')
+    @classmethod
+    def _normalize_pos_layout_override(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if not normalized:
+                return None
+            if normalized not in ('grid', 'list'):
+                raise ValueError('pos_catalog_layout_override must be one of: grid, list')
+            return normalized
+        return value
 
 
 class UpdateProfileResponse(BaseModel):

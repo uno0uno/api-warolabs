@@ -179,12 +179,13 @@ async def dispatch_verified_event(
             return {"status": "received"}
 
         if route == WompiRoute.COLOMBIA:
+            # Billing activate/renew via Wompi removed (#798); keep Tickets path.
             await wompi_colombia_webhook_service.handle_transaction_updated(
                 body,
                 background_tasks,
                 provider_environment=expected_environment,
             )
-            return {"received": True}
+            return {"received": True, "deprecated": True}
 
         logger.warning(
             "Wompi ingress: unknown classification — tx=%s ref=%s link=%s redirect=%s sku=%s amount=%s",

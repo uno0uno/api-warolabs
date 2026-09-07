@@ -69,14 +69,77 @@ async def test_get_customer_detail_profile_without_orders_returns_zeroed_stats()
     assert result['customer']['total_spent'] == 0.0
     assert result['customer']['first_purchase'] is None
     assert result['customer']['last_purchase'] is None
+    assert result['customer']['fiscal_id_type'] is None
+    assert result['customer']['fiscal_id'] is None
+    assert result['customer']['fiscal_business_name'] is None
+    assert result['customer']['fiscal_email'] is None
     assert result['orders']['items'] == []
     assert result['orders']['total'] == 0
     fallback_query = _SeqConnCtx.latest_conn.fetchrow.await_args_list[1].args[0]
     assert "tenant_customers tc" in fallback_query
     assert "tc.profile_id" in fallback_query
     assert "tc.is_active = true" in fallback_query
+    assert "p.fiscal_id_type" in fallback_query
+    assert "p.fiscal_id" in fallback_query
     assert "tenant_members" not in fallback_query
     assert "role = 'customer'" not in fallback_query
+
+
+@pytest.mark.asyncio
+async def test_get_customer_detail_includes_fiscal_fields_when_present():
+    profile_row = {
+        'customer_id': _CUSTOMER_ID,
+        'name': 'Fiscal Customer',
+        'phone': '3001234567',
+        'email': '3001234567@customer.temp',
+        'fiscal_id_type': 'CC',
+        'fiscal_id': '1234567890',
+        'fiscal_business_name': 'Juan Perez',
+        'fiscal_email': 'juan@example.com',
+    }
+
+    with _patch_session(), _patch_conn([None, profile_row, None], [[], []]):
+        result = await orders_service.get_customer_detail(
+            Request({'type': 'http'}),
+            customer_id=_CUSTOMER_ID,
+        )
+
+    customer = result['customer']
+    assert customer['fiscal_id_type'] == 'CC'
+    assert customer['fiscal_id'] == '1234567890'
+    assert customer['fiscal_business_name'] == 'Juan Perez'
+    assert customer['fiscal_email'] == 'juan@example.com'
+
+
+@pytest.mark.asyncio
+async def test_get_customer_detail_with_orders_includes_fiscal_fields():
+    order_agg = {
+        'customer_id': _CUSTOMER_ID,
+        'name': 'Returning Customer',
+        'phone': '3009876543',
+        'email': 'buyer@example.com',
+        'fiscal_id_type': 'NIT',
+        'fiscal_id': '900111222',
+        'fiscal_business_name': 'Returning SAS',
+        'fiscal_email': None,
+        'total_orders': 2,
+        'total_spent': 50000.0,
+        'first_purchase': datetime(2026, 1, 10, tzinfo=timezone.utc),
+        'last_purchase': datetime(2026, 5, 1, tzinfo=timezone.utc),
+    }
+
+    with _patch_session(), _patch_conn([order_agg, None], [[], []]):
+        result = await orders_service.get_customer_detail(
+            Request({'type': 'http'}),
+            customer_id=_CUSTOMER_ID,
+        )
+
+    assert result['customer']['fiscal_id_type'] == 'NIT'
+    assert result['customer']['fiscal_id'] == '900111222'
+    assert result['customer']['fiscal_business_name'] == 'Returning SAS'
+    aggregate_query = _SeqConnCtx.latest_conn.fetchrow.await_args_list[0].args[0]
+    assert "p.fiscal_id_type" in aggregate_query
+    assert "p.fiscal_business_name" in aggregate_query
 
 
 @pytest.mark.asyncio

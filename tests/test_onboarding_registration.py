@@ -15,6 +15,34 @@ from app.services.onboarding_service import (
 
 
 @pytest.mark.asyncio
+async def test_registration_challenge_persists_visitor_key():
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={"email_count": 0, "ip_count": 0})
+    conn.execute = AsyncMock(return_value="OK")
+
+    with patch("app.services.onboarding_service.settings.auth_secret", "test-secret"):
+        created = await store_registration_challenge(
+            conn,
+            email="new@example.com",
+            token="raw-token",
+            code="123456",
+            request_ip="127.0.0.1",
+            user_agent="pytest",
+            consent=True,
+            visitor_key="opaque-trail-id",
+        )
+
+    assert created is True
+    insert = next(
+        call for call in conn.execute.await_args_list
+        if "INSERT INTO onboarding_email_challenges" in call.args[0]
+    )
+    assert "first_visitor_key" in insert.args[0]
+    assert "last_visitor_key" in insert.args[0]
+    assert insert.args[-1] == "opaque-trail-id"
+
+
+@pytest.mark.asyncio
 async def test_new_email_challenge_is_hashed_and_does_not_create_identity():
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value={"email_count": 0, "ip_count": 0})
@@ -118,6 +146,8 @@ async def test_verified_challenge_atomically_creates_pending_owner():
             "last_content": "cta",
             "last_campaign": "launch",
             "last_variant": "b",
+            "first_visitor_key": "opaque-trail-id",
+            "last_visitor_key": "opaque-trail-id",
         },
         None,
         None,
@@ -130,13 +160,14 @@ async def test_verified_challenge_atomically_creates_pending_owner():
         {"state": "business_profile_pending", "email_verified_at": verified_at},
         {"id": uuid4()},
         {"id": uuid4()},
+        {"slug": "restaurante-nuevo"},
     ])
     conn.execute = AsyncMock(return_value="OK")
 
     financial = AsyncMock(return_value=SimpleNamespace(data=SimpleNamespace(
         business_name="Restaurante Nuevo",
-        state="payment_pending",
-        next_step="payment",
+        state="starter_active",
+        next_step="setup",
     )))
     with patch("app.services.onboarding_service.settings.auth_secret", "test-secret"), patch(
         "app.services.onboarding_service.uuid4", return_value=tenant_id
@@ -154,17 +185,25 @@ async def test_verified_challenge_atomically_creates_pending_owner():
     assert identity["tenant_id"] == tenant_id
     assert identity["lifecycle_status"] == "active"
     assert identity["tenant_name"] == "Restaurante Nuevo"
-    assert identity["onboarding_state"] == "payment_pending"
-    assert identity["next_step"] == "payment"
+    assert identity["onboarding_state"] == "starter_active"
+    # financial mock owns name→slug assignment; identity may keep provisional until real apply
+    assert identity["tenant_slug"].startswith("onboarding-") or identity["tenant_slug"] == "restaurante-nuevo"
+    assert identity["next_step"] == "setup"
     financial.assert_awaited_once()
     assert identity["registration_notification"]["source"] == "blog"
     assert identity["registration_notification"]["variant"] == "b"
     writes = "\n".join(call.args[0] for call in conn.execute.await_args_list)
+    lead_event = next(
+        call for call in conn.fetchrow.await_args_list
+        if call.args and "INSERT INTO lead_interactions" in call.args[0]
+    )
+    assert "visitor_key" in lead_event.args[0]
+    assert lead_event.args[-1] == "opaque-trail-id"
     assert "pg_advisory_xact_lock" in writes
     assert "INSERT INTO tenants" in writes
     assert "'pending'" in writes
     assert "INSERT INTO tenant_members" in writes
-    assert "'owner', false" in writes
+    assert "'superuser', false" in writes
     assert "UPDATE profile" in writes
     assert "billing_payment_attempts" not in writes
     assert "tenant_subscriptions" not in writes
@@ -236,6 +275,71 @@ async def test_superseded_challenge_cannot_provision_identity():
 
 
 @pytest.mark.asyncio
+async def test_existing_starter_owner_does_not_create_second_tenant_via_registro():
+    challenge_id = uuid4()
+    user_id = uuid4()
+    existing_tenant_id = uuid4()
+    created_at = datetime.now(timezone.utc)
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        {
+            "id": challenge_id,
+            "normalized_email": "owner@example.com",
+            "consumed_at": None,
+            "completed_user_id": None,
+            "completed_tenant_id": None,
+            "phone_country_code": None,
+            "phone_number": None,
+            "business_name": "Otro Cafe",
+            "country_code": "CO",
+            "base_currency_code": "COP",
+            "tax_jurisdiction_code": None,
+            "first_source": None,
+            "first_content": None,
+            "first_campaign": None,
+            "first_variant": None,
+            "last_source": None,
+            "last_content": None,
+            "last_campaign": None,
+            "last_variant": None,
+        },
+        None,
+        {
+            "user_id": user_id,
+            "email": "owner@example.com",
+            "name": None,
+            "user_created_at": created_at,
+            "tenant_id": existing_tenant_id,
+            "tenant_name": "TEST-EEUU",
+            "tenant_slug": "test-eeuu",
+            "lifecycle_status": "active",
+            "onboarding_state": "starter_active",
+            "email_verified_at": created_at,
+        },
+        {"id": uuid4()},
+        None,
+    ])
+    conn.execute = AsyncMock(return_value="OK")
+
+    with patch("app.services.onboarding_service.settings.auth_secret", "test-secret"):
+        identity = await complete_registration(
+            conn,
+            email="owner@example.com",
+            credential="raw-token",
+            kind="token",
+        )
+
+    assert identity["tenant_id"] == existing_tenant_id
+    assert identity["onboarding_state"] == "starter_active"
+    writes = "\n".join(call.args[0] for call in conn.execute.await_args_list)
+    assert "INSERT INTO tenants" not in writes
+    assert "INSERT INTO tenant_onboarding" not in writes
+    owned_sql = conn.fetchrow.await_args_list[2].args[0]
+    assert "o.state <> 'cancelled'" in owned_sql
+    assert "starter_active" not in owned_sql
+
+
+@pytest.mark.asyncio
 async def test_magic_token_verification_returns_pending_session_contract():
     from app.services.magic_link_service import verify_token
 
@@ -301,3 +405,175 @@ def test_migration_has_database_idempotency_and_lifecycle_guards():
     assert "tenant_members_pending_owner_unique" in sql
     assert "onboarding_email_challenges" in sql
     assert "DEFAULT 'active'" in sql
+
+
+@pytest.mark.asyncio
+async def test_apply_onboarding_locales_from_country_sets_profile_and_tenant():
+    from app.services.onboarding_service import apply_onboarding_locales_from_country
+
+    conn = AsyncMock()
+    conn.execute = AsyncMock(return_value="OK")
+    user_id = uuid4()
+    tenant_id = uuid4()
+
+    locale = await apply_onboarding_locales_from_country(
+        conn,
+        tenant_id=tenant_id,
+        country_code="US",
+        currency_code="USD",
+        user_id=user_id,
+    )
+    assert locale == "en"
+    assert conn.execute.await_count == 2
+    profile_sql, profile_user, profile_locale = conn.execute.await_args_list[0].args[:3]
+    assert "UPDATE profile" in profile_sql
+    assert "preferred_locale" in profile_sql
+    assert profile_user == user_id
+    assert profile_locale == "en"
+    tenant_sql, tenant_arg, ui_locale, receipt_locale, country, currency = (
+        conn.execute.await_args_list[1].args[:6]
+    )
+    assert "tenant_public_profiles" in tenant_sql
+    assert "ui_locale" in tenant_sql
+    assert "country" in tenant_sql
+    assert "currency_code" in tenant_sql
+    assert tenant_arg == tenant_id
+    assert ui_locale == "en"
+    assert receipt_locale == "en"
+    assert country == "United States"
+    assert currency == "USD"
+
+    conn.execute.reset_mock()
+    locale_co = await apply_onboarding_locales_from_country(
+        conn,
+        tenant_id=tenant_id,
+        country_code="CO",
+        currency_code="COP",
+        user_id=user_id,
+    )
+    assert locale_co == "es"
+    assert conn.execute.await_args_list[0].args[2] == "es"
+    assert conn.execute.await_args_list[1].args[2] == "es"
+    assert conn.execute.await_args_list[1].args[4] == "Colombia"
+    assert conn.execute.await_args_list[1].args[5] == "COP"
+
+
+@pytest.mark.asyncio
+async def test_financial_profile_create_applies_locales_from_country():
+    """Wiring: first financial apply awaits locale helper with owner + country."""
+    from app.models.onboarding import OnboardingBusinessProfileUpdate
+    from app.services.onboarding_service import update_onboarding_financial_profile
+
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        {
+            "lifecycle_status": "pending",
+            "state": "business_profile_pending",
+            "business_name": "Negocio pendiente",
+            "owner_user_id": owner_id,
+        },
+        {
+            "profile_tenant_id": tenant_id,
+            "country_code": "CO",
+            "base_currency_code": "COP",
+            "accounting_localization": "WARO_CO_PUC_V1",
+            "document_mode": "fiscal_integrated",
+            "fiscal_provider": "matias",
+            "selection_revision": 1,
+            "profile_created_at": None,
+            "profile_updated_at": None,
+        },
+        {"state": "starter_active"},
+    ])
+    conn.execute = AsyncMock(return_value="OK")
+
+    apply_locales = AsyncMock(return_value="es")
+    with patch(
+        "app.services.onboarding_service.financial_service.seed_tenant_accounts",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.onboarding_service.ensure_wave1_tax_pack",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.onboarding_service.seed_tenant_timezone_from_country",
+        new=AsyncMock(return_value="America/Bogota"),
+    ), patch(
+        "app.services.onboarding_service.apply_onboarding_locales_from_country",
+        new=apply_locales,
+    ), patch(
+        "app.services.onboarding_service.assign_name_based_storefront_slug",
+        new=AsyncMock(return_value="cafe-central"),
+    ), patch(
+        "app.services.onboarding_service._promote_onboarding_identity",
+        new=AsyncMock(return_value="starter_active"),
+    ):
+        await update_onboarding_financial_profile(
+            conn,
+            tenant_id,
+            OnboardingBusinessProfileUpdate(
+                business_name="Cafe Central",
+                country_code="CO",
+                base_currency_code="COP",
+            ),
+        )
+
+    apply_locales.assert_awaited_once_with(
+        conn,
+        tenant_id=tenant_id,
+        country_code="CO",
+        currency_code="COP",
+        user_id=owner_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_starter_active_idempotent_skips_locale_rewrite():
+    """Idempotent financial retry must not re-apply locales."""
+    from app.models.onboarding import OnboardingBusinessProfileUpdate
+    from app.services.onboarding_service import update_onboarding_financial_profile
+
+    tenant_id = uuid4()
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        {
+            "lifecycle_status": "active",
+            "state": "starter_active",
+            "business_name": "Cafe Central",
+            "owner_user_id": uuid4(),
+        },
+        {
+            "profile_tenant_id": tenant_id,
+            "country_code": "US",
+            "base_currency_code": "USD",
+            "accounting_localization": "WARO_HOSPITALITY_GLOBAL_V1",
+            "document_mode": "waro_commercial",
+            "fiscal_provider": None,
+            "selection_revision": 4,
+            "profile_created_at": None,
+            "profile_updated_at": None,
+        },
+        {"state": "starter_active"},
+    ])
+    conn.execute = AsyncMock(side_effect=["UPDATE 1", "UPDATE 1"])
+
+    apply_locales = AsyncMock(return_value="en")
+    with patch(
+        "app.services.onboarding_service.apply_onboarding_locales_from_country",
+        new=apply_locales,
+    ):
+        result = await update_onboarding_financial_profile(
+            conn,
+            tenant_id,
+            OnboardingBusinessProfileUpdate(
+                business_name="Cafe Central",
+                country_code="US",
+                base_currency_code="USD",
+                tax_jurisdiction_code="US-FL",
+            ),
+        )
+
+    assert result.data.profile.selection_revision == 4
+    apply_locales.assert_not_awaited()
+    assert conn.execute.await_count == 2

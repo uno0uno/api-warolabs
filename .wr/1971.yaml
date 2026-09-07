@@ -1,0 +1,47 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 1971
+title: "Auto-print comandas to caja / user printer on add-to-table and counter-bar send"
+repo: both
+repo_remote: uno0uno/warocol.com
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/front_nuxt
+stack: both
+branch: wr-1971-auto-print-comandas
+
+paths:
+  - app/services/notifications_service.py
+  - app/services/comandas_service.py
+  - tests/test_comanda_fired_notification.py
+  - composables/useAutoComandaPrint.ts
+  - composables/useAutoComandaPrint.test.ts
+  - composables/useUserPrinterPreference.ts
+  - composables/useNotifications.ts
+  - pages/operaciones/impresoras.vue
+
+ac:
+  - Agregar a mesa auto-prints to caja when PrintBridge + caja configured
+  - Mostrador/barra send auto-prints when user has one printer + PrintBridge
+  - At most one printer per user (localStorage)
+  - No PrintBridge → no print attempt (silent)
+  - Dedupe by comanda id across SSE duplicates
+  - Focused API + front tests
+
+out_of_scope:
+  - Multi-station kitchen routing for auto-print
+  - Multiple printers per user
+  - Remote/cloud print queue
+  - Factura/prefactura auto-print
+
+hints:
+  entry: "fire_comandas → notify_comanda_fired SSE; useNotifications onmessage gate"
+  pattern: "SSE-only (no notifications row); mesa→caja; barra/pos→user printer"
+  tests: "API: ./venv/bin/pytest tests/test_comanda_fired_notification.py -q | Front: bunx vitest run composables/useAutoComandaPrint.test.ts"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "merge API before front if deploy order matters; both needed for E2E"

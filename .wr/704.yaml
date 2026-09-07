@@ -1,0 +1,39 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 704
+title: "Recipe bases: convert ml/gr to und for line cost"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-704-recipe-base-line-cost
+
+paths:
+  - app/models/recipe_base.py
+  - app/services/recipe_bases_service.py
+  - tests/test_recipe_base_costs.py
+
+ac:
+  - Recipe-base ingredients expose stock_unit, unit_weight_*, and costo_linea
+  - costo_linea uses recipe_qty_to_stock_units × unit cost (45 ml / 750 @ 350 → ~21)
+  - Same-unit lines unchanged
+  - List/get/update/create responses include converted line cost
+  - Companion front: warocol.com#1748
+
+out_of_scope:
+  - Front /menu/recetas display
+  - Resale 1:1 model changes
+
+hints:
+  entry: "recipe_bases_service._recipe_base_ingredient_from_row + _RECIPE_BASE_INGREDIENT_SELECT"
+  pattern: "cost_resolution_service.recipe_qty_to_stock_units"
+  tests: "pytest tests/test_recipe_base_costs.py -q"
+
+risk:
+  sensitive: false
+  areas: [costing]
+
+skip:
+  audits: [ux, color, typography]
+
+next:
+  after_pr: "ready-for-review + wr-review; then /wr-fast #1748"

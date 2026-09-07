@@ -21,6 +21,7 @@ from app.models.tenant_promotion import (
     PromotionUpdate,
     ScopeType,
 )
+from app.services.billing_service import check_plan_quota_growth
 from app.services.operation_events_service import DOMAIN_POS, record_operation_event
 
 logger = logging.getLogger(__name__)
@@ -915,6 +916,7 @@ async def create_promotion(request: Request, body: PromotionCreate) -> dict:
 
     try:
         async with get_db_connection() as conn:
+            await check_plan_quota_growth(conn, tenant_id, "tenant_promotions")
             overlap_warnings = await detect_promotion_overlaps(
                 conn,
                 tenant_id,

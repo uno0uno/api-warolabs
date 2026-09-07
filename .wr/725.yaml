@@ -1,0 +1,41 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 725
+title: "fix(gates): type Request on matias_dian + colombia_payroll deps to stop 422"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-725-request-type-gates
+
+paths:
+  - app/services/account_role_service.py
+  - tests/test_account_role_resolution.py
+  - .wr/725.yaml
+
+ac:
+  - Annotate request: Request on require_matias_dian_capability and require_colombia_payroll_capability
+  - DIAN GETs no longer 422 for missing ?request=
+  - /api/salaries/employees, /pila, /pila/pending no longer 422 for missing ?request=
+  - CO tenants reach handlers (or 409 when capability off)
+  - Regression test: untyped dep → 422; typed Request → 200
+
+out_of_scope:
+  - Front changes
+  - Quota/limit gates
+  - Changing 409 capability semantics
+  - GTM/setTimeout Chrome violations
+
+hints:
+  entry: "require_matias_dian_capability / require_colombia_payroll_capability"
+  pattern: "app/core/permissions.py require_module uses request: Request"
+  tests: "./venv/bin/pytest tests/test_account_role_resolution.py -q"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: []
+
+next:
+  after_pr: "deploy API; verify Facturación + Equipo/Salarios in browser"

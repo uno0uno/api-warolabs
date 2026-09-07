@@ -1,4 +1,4 @@
-"""POST /billing/subscribe — annual-only for new subscriptions (#877)."""
+"""POST /billing/subscribe — monthly-only for new subscriptions (#807)."""
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -39,7 +39,7 @@ def _build_app():
     return app, session
 
 
-def test_subscribe_rejects_monthly_billing_cycle():
+def test_subscribe_rejects_annual_billing_cycle():
     app, session = _build_app()
     plan_id = uuid4()
 
@@ -58,14 +58,14 @@ def test_subscribe_rejects_monthly_billing_cycle():
         client = TestClient(app)
         res = client.post(
             "/billing/subscribe",
-            json={"plan_id": str(plan_id), "billing_cycle": "monthly"},
+            json={"plan_id": str(plan_id), "billing_cycle": "annual"},
         )
 
     assert res.status_code == 422
-    assert "anual" in res.json()["detail"].lower()
+    assert "mensual" in res.json()["detail"].lower()
 
 
-def test_subscribe_requires_current_terms_before_wompi_link():
+def test_subscribe_requires_current_terms_before_lemon_squeezy_checkout():
     app, session = _build_app()
     plan_id = uuid4()
 
@@ -100,19 +100,20 @@ def test_subscribe_requires_current_terms_before_wompi_link():
          patch("app.routers.billing.billing_service.get_plan_for_subscribe", new=AsyncMock(return_value={
              "id": str(plan_id),
              "name": "Plan Pro",
+             "slug": "pro",
              "price_annual": 1200000.0,
          })), \
          patch("app.routers.billing.legal_service.ensure_current_terms_accepted", new=AsyncMock(side_effect=terms_error)), \
-         patch("app.routers.billing.wompi_service.create_payment_link", new=AsyncMock()) as wompi_mock:
+         patch("app.routers.billing.lemon_squeezy_service.create_checkout", new=AsyncMock()) as ls_mock:
         client = TestClient(app)
         res = client.post(
             "/billing/subscribe",
-            json={"plan_id": str(plan_id), "billing_cycle": "annual"},
+            json={"plan_id": str(plan_id), "billing_cycle": "monthly"},
         )
 
     assert res.status_code == 409
     assert res.json()["detail"]["code"] == "terms_acceptance_required"
-    wompi_mock.assert_not_awaited()
+    ls_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -140,12 +141,13 @@ async def test_active_promoted_tenant_uses_normal_subscription_flow():
     plan = {
         "id": plan_id,
         "name": "Plan Pro",
+        "slug": "pro",
         "price_annual": 1200000,
         "amount_in_cents": 120000000,
     }
     checkout = {
         "checkout_url": "https://checkout.example.test",
-        "wompi_link_id": "link-normal",
+        "gateway_reference": "ls_chk_normal",
     }
     subscribed = {"status": "pending", "checkout_url": checkout["checkout_url"]}
 
@@ -160,10 +162,22 @@ async def test_active_promoted_tenant_uses_normal_subscription_flow():
         "ensure_current_terms_accepted",
         new=AsyncMock(),
     ) as terms, patch.object(
-        billing.wompi_service,
-        "create_payment_link",
-        new=AsyncMock(return_value=checkout),
+        billing.billing_service,
+        "ensure_subscribe_allowed",
+        new=AsyncMock(),
     ), patch.object(
+        billing.billing_service,
+        "get_tenant_billing_context",
+        new=AsyncMock(return_value={"slug": "demo", "country_code": "CO"}),
+    ), patch.object(
+        billing.billing_service,
+        "assert_plan_available_for_country",
+        return_value=None,
+    ), patch.object(
+        billing.lemon_squeezy_service,
+        "create_checkout",
+        new=AsyncMock(return_value=checkout),
+    ) as ls_checkout, patch.object(
         billing.billing_service,
         "subscribe_tenant",
         new=AsyncMock(return_value=subscribed),
@@ -173,11 +187,13 @@ async def test_active_promoted_tenant_uses_normal_subscription_flow():
         new=AsyncMock(),
     ) as onboarding_attempt:
         result = await billing.subscribe(
-            billing.SubscribeBody(plan_id=plan_id, billing_cycle="annual"),
+            billing.SubscribeBody(plan_id=plan_id, billing_cycle="monthly"),
             MagicMock(),
         )
 
     assert result == subscribed
     terms.assert_awaited_once_with(conn, tenant_id)
     subscribe.assert_awaited_once()
+    assert subscribe.await_args.kwargs["billing_cycle"] == "monthly"
+    assert ls_checkout.await_args.kwargs["billing_cycle"] == "monthly"
     onboarding_attempt.assert_not_awaited()

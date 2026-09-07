@@ -26,6 +26,7 @@ from app.services.purchase_tracking_service import (
 )
 from app.services.direct_purchase_service import (
     create_direct_purchase,
+    delete_direct_purchase,
     get_direct_purchases_list,
     get_direct_purchase_by_id,
     get_supplier_catalog_prices,
@@ -200,7 +201,8 @@ async def create_direct_purchase_endpoint(
         payment_reference=purchase_data.payment_reference,
         payment_amount=purchase_data.payment_amount,
         payment_date=purchase_data.payment_date,
-        purchase_date=purchase_data.purchase_date
+        purchase_date=purchase_data.purchase_date,
+        from_cash_drawer=purchase_data.from_cash_drawer,
     )
 
     # Schedule anomaly check after the purchase transaction has committed
@@ -298,11 +300,13 @@ async def update_direct_purchase_endpoint(
         purchase_date=purchase_data.purchase_date,
         notes=purchase_data.notes,
         invoice_number=purchase_data.invoice_number,
+        payment_type=purchase_data.payment_type,
         payment_method=purchase_data.payment_method,
         payment_method_id=purchase_data.payment_method_id,
         payment_reference=purchase_data.payment_reference,
         payment_amount=purchase_data.payment_amount,
-        payment_date=purchase_data.payment_date
+        payment_date=purchase_data.payment_date,
+        from_cash_drawer=purchase_data.from_cash_drawer,
     )
 
     try:
@@ -316,6 +320,23 @@ async def update_direct_purchase_endpoint(
         pass
 
     return result
+
+
+@router.delete("/direct/{purchase_id}", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
+async def delete_direct_purchase_endpoint(
+    purchase_id: UUID,
+    request: Request,
+    response: Response,
+):
+    """
+    Delete a direct purchase: reverse inventory (with movement trail), void GL,
+    then remove the purchase row.
+    """
+    return await delete_direct_purchase(
+        request=request,
+        response=response,
+        purchase_id=purchase_id,
+    )
 
 
 @router.post("/direct/{purchase_id}/attachments", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
@@ -379,14 +400,28 @@ async def get_purchases_endpoint(
     status: Optional[str] = Query(default=None, description="Filter by status"),
     supplier_id: Optional[UUID] = Query(default=None, description="Filter by supplier ID"),
     payment_status: Optional[str] = Query(default=None, description="Filter by payment status (pending, overdue, due_this_week)"),
-    date_filter: Optional[str] = Query(default=None, description="Filter by date range (today, yesterday, last_week, 15_days, 1_month, 3_months)")
+    date_filter: Optional[str] = Query(default=None, description="Filter by date range (today, yesterday, last_week, 15_days, 1_month, 3_months)"),
+    include_direct_payables: bool = Query(
+        default=False,
+        description="When true, also return direct credit purchases for Pagos (unpaid received + paid settlements; excludes contado)",
+    ),
 ):
     """
     Get purchases list with tenant isolation
     Requires valid session with tenant context
     """
     return await get_purchases_list(
-        request, response, page, limit, search, search_field, status, supplier_id, payment_status, date_filter
+        request,
+        response,
+        page,
+        limit,
+        search,
+        search_field,
+        status,
+        supplier_id,
+        payment_status,
+        date_filter,
+        include_direct_payables=include_direct_payables,
     )
 
 @router.get("/{purchase_id}", response_model=PurchaseResponse, dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])
@@ -544,12 +579,14 @@ async def pay_purchase_endpoint(
     payment_amount: float = Form(...),
     payment_date: str = Form(...),
     notes: Optional[str] = Form(None),
+    from_cash_drawer: Optional[bool] = Form(None),
     files: List[UploadFile] = File(None)
 ):
     """
     Transition purchase to PAID state
     Records payment method and reference
     Accepts file attachments (payment proofs, receipts, etc.)
+    Cash payments may set from_cash_drawer=false so arqueo ignores the outflow.
     """
     return await transition_to_paid(
         request=request,
@@ -561,7 +598,8 @@ async def pay_purchase_endpoint(
         payment_amount=payment_amount,
         payment_date=payment_date,
         notes=notes,
-        files=files
+        files=files,
+        from_cash_drawer=from_cash_drawer,
     )
 
 @router.post("/{purchase_id}/cancel", dependencies=[Depends(require_module(Module.ABASTECIMIENTO))])

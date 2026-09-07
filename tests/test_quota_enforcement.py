@@ -9,7 +9,15 @@ import pytest
 from fastapi import HTTPException
 
 from app.core.exceptions import APIError
-from app.services import billing_service, invitation_service, online_cart_service, public_restaurant_service, stations_service, tables_service
+from app.services import (
+    api_tokens_service,
+    billing_service,
+    invitation_service,
+    online_cart_service,
+    public_restaurant_service,
+    stations_service,
+    tables_service,
+)
 
 
 def _db_context(conn):
@@ -195,7 +203,12 @@ async def test_check_plan_quota_growth_without_active_subscription_is_noop():
     conn.fetchrow = AsyncMock(return_value=None)
     conn.fetchval = AsyncMock()
 
-    await billing_service.check_plan_quota_growth(conn, uuid4(), "active_tables_including_bar")
+    with patch.object(
+        billing_service,
+        "get_effective_plan_slug",
+        new=AsyncMock(return_value=None),
+    ):
+        await billing_service.check_plan_quota_growth(conn, uuid4(), "active_tables_including_bar")
 
     conn.fetchval.assert_not_awaited()
 
@@ -215,6 +228,52 @@ async def test_table_quota_count_includes_bar_by_not_filtering_is_bar():
     query = conn.fetchval.await_args.args[0]
     assert "deleted_at IS NULL" in query
     assert "is_bar" not in query
+
+
+@pytest.mark.asyncio
+async def test_send_invitation_quota_block_reraises_api_error():
+    tenant_id = uuid4()
+    quota_error = APIError(
+        "Límite del plan alcanzado",
+        status_code=429,
+        details={"code": "quota_exceeded", "resource": "admin_users", "used": 2, "limit": 1},
+    )
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=[
+        {
+            "id": tenant_id,
+            "name": "Tenant",
+            "slug": "tenant",
+            "tenant_email": "tenant@example.com",
+            "brand_name": "Tenant",
+        },
+        None,
+    ])
+    conn.fetchval = AsyncMock(return_value="superuser")
+
+    payload = SimpleNamespace(
+        email="new@example.com",
+        phone="3001234567",
+        name="New",
+        role=SimpleNamespace(value="admin"),
+    )
+
+    with (
+        patch("app.services.invitation_service.require_valid_session", return_value=_session(tenant_id)),
+        patch(
+            "app.services.invitation_service.require_valid_tenant",
+            return_value=SimpleNamespace(site="tenant.example.com", tenant_email="tenant@example.com"),
+        ),
+        patch("app.services.invitation_service.get_db_connection", side_effect=_db_context(conn)),
+        patch("app.services.invitation_service.check_plan_quota_growth", new=AsyncMock(side_effect=quota_error)),
+    ):
+        with pytest.raises(APIError) as raised:
+            await invitation_service.send_invitation(_request(), payload)
+
+    assert raised.value.status_code == 429
+    assert raised.value.details["code"] == "quota_exceeded"
+    assert raised.value.details["resource"] == "admin_users"
+    assert "Failed to send invitation" not in str(raised.value)
 
 
 @pytest.mark.asyncio
@@ -437,7 +496,12 @@ async def test_completed_online_order_quota_without_active_subscription_is_noop(
     conn.fetchrow = AsyncMock(return_value=None)
     conn.fetchval = AsyncMock()
 
-    await billing_service.check_completed_online_order_quota(conn, uuid4())
+    with patch.object(
+        billing_service,
+        "get_effective_plan_slug",
+        new=AsyncMock(return_value=None),
+    ):
+        await billing_service.check_completed_online_order_quota(conn, uuid4())
 
     conn.fetchval.assert_not_awaited()
 
@@ -699,3 +763,790 @@ async def test_checkout_checked_out_cart_without_order_stays_conflict():
             await online_cart_service.checkout_cart(cart_id)
 
     assert exc.value.status_code == 409
+
+
+def _starter_plan_row(resource: str, limit: int):
+    return {
+        "plan_slug": "starter",
+        "plan_features": {"quotas": {resource: limit}},
+        "override_id": None,
+        "limit_override": None,
+        "override_disabled": False,
+        "override_reason": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_starter_menu_products_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("menu_products", 10))
+    conn.fetchval = AsyncMock(return_value=10)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(conn, tenant_id, "menu_products")
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["resource"] == "menu_products"
+
+
+@pytest.mark.asyncio
+async def test_starter_menu_categories_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("menu_categories", 5))
+    conn.fetchval = AsyncMock(return_value=4)
+
+    await billing_service.check_plan_quota_growth(
+        conn, tenant_id, "menu_categories"
+    )
+
+
+@pytest.mark.asyncio
+async def test_starter_menu_categories_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("menu_categories", 5))
+    conn.fetchval = AsyncMock(return_value=5)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(
+            conn, tenant_id, "menu_categories"
+        )
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["resource"] == "menu_categories"
+
+
+@pytest.mark.asyncio
+async def test_starter_tenant_ingredients_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("tenant_ingredients", 5))
+    conn.fetchval = AsyncMock(return_value=5)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(conn, tenant_id, "tenant_ingredients")
+
+    assert exc.value.details["resource"] == "tenant_ingredients"
+
+
+@pytest.mark.asyncio
+async def test_scoped_recipe_lines_quota_blocks_over_limit():
+    tenant_id = uuid4()
+    product_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("recipe_lines_per_product", 4))
+    conn.fetchval = AsyncMock(return_value=0)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_scoped(
+            conn,
+            tenant_id,
+            "recipe_lines_per_product",
+            product_id,
+            projected_count=5,
+        )
+
+    assert exc.value.details["resource"] == "recipe_lines_per_product"
+    assert exc.value.details["used"] == 5
+
+
+@pytest.mark.asyncio
+async def test_scoped_modifier_options_quota_blocks_over_limit():
+    tenant_id = uuid4()
+    group_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("modifier_options_per_group", 6))
+    conn.fetchval = AsyncMock(return_value=0)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_scoped(
+            conn,
+            tenant_id,
+            "modifier_options_per_group",
+            group_id,
+            projected_count=7,
+        )
+
+    assert exc.value.details["resource"] == "modifier_options_per_group"
+
+
+@pytest.mark.asyncio
+async def test_starter_online_order_quota_enforced_without_paid_subscription():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+
+    async def fetchrow(query, *args):
+        if "FROM tenant_subscriptions ts" in query and "date_trunc('month'" not in query:
+            return None
+        if "FROM subscription_plans sp" in query and "date_trunc('month'" in query:
+            return {
+                "plan_slug": "starter",
+                "plan_features": {"quotas": {"completed_online_orders_per_month": 30}},
+                "current_period_start": period_start,
+                "current_period_end": period_end,
+                "override_id": None,
+                "limit_override": None,
+                "override_disabled": False,
+                "override_reason": None,
+            }
+        return None
+
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    conn.fetchval = AsyncMock(return_value=30)
+
+    with patch.object(
+        billing_service,
+        "get_effective_plan_slug",
+        new=AsyncMock(return_value="starter"),
+    ):
+        with pytest.raises(APIError) as exc:
+            await billing_service.check_completed_online_order_quota(conn, tenant_id)
+
+    assert exc.value.details["code"] == "online_order_quota_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_assert_starter_toggle_rejects_tables_enabled():
+    tenant_id = uuid4()
+    conn = MagicMock()
+
+    with patch.object(
+        billing_service,
+        "get_effective_plan_slug",
+        new=AsyncMock(return_value="starter"),
+    ):
+        with pytest.raises(APIError) as exc:
+            await billing_service.assert_starter_toggle_allowed(
+                conn, tenant_id, "tables_enabled", True
+            )
+
+    assert exc.value.status_code == 403
+    assert exc.value.details["code"] == "starter_plan_restriction"
+
+
+@pytest.mark.asyncio
+async def test_starter_modifier_groups_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("modifier_groups", 4))
+    conn.fetchval = AsyncMock(return_value=4)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(conn, tenant_id, "modifier_groups")
+
+    assert exc.value.details["resource"] == "modifier_groups"
+
+
+@pytest.mark.asyncio
+async def test_starter_recipe_bases_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("recipe_bases", 5))
+    conn.fetchval = AsyncMock(return_value=4)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "recipe_bases")
+
+
+@pytest.mark.asyncio
+async def test_starter_recipe_bases_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("recipe_bases", 5))
+    conn.fetchval = AsyncMock(return_value=5)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(conn, tenant_id, "recipe_bases")
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["resource"] == "recipe_bases"
+
+
+@pytest.mark.asyncio
+async def test_starter_modifier_groups_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("modifier_groups", 4))
+    conn.fetchval = AsyncMock(return_value=3)
+
+    await billing_service.check_plan_quota_growth(
+        conn, tenant_id, "modifier_groups"
+    )
+
+
+@pytest.mark.asyncio
+async def test_scoped_recipe_base_template_lines_quota_blocks_over_limit():
+    tenant_id = uuid4()
+    base_type_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("recipe_base_template_lines", 4))
+    conn.fetchval = AsyncMock(return_value=0)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_scoped(
+            conn,
+            tenant_id,
+            "recipe_base_template_lines",
+            base_type_id,
+            projected_count=5,
+        )
+
+    assert exc.value.details["resource"] == "recipe_base_template_lines"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("toggle", ["comandas_enabled", "kds_enabled"])
+async def test_assert_starter_toggle_rejects_locked_operaciones_toggles(toggle):
+    tenant_id = uuid4()
+    conn = MagicMock()
+
+    with patch.object(
+        billing_service,
+        "get_effective_plan_slug",
+        new=AsyncMock(return_value="starter"),
+    ):
+        with pytest.raises(APIError) as exc:
+            await billing_service.assert_starter_toggle_allowed(conn, tenant_id, toggle, True)
+
+    assert exc.value.details["code"] == "starter_plan_restriction"
+
+
+@pytest.mark.asyncio
+async def test_assert_starter_shift_template_growth_rejects_starter():
+    tenant_id = uuid4()
+    conn = MagicMock()
+
+    with patch.object(
+        billing_service,
+        "get_effective_plan_slug",
+        new=AsyncMock(return_value="starter"),
+    ):
+        with pytest.raises(APIError) as exc:
+            await billing_service.assert_starter_shift_template_growth_allowed(
+                conn, tenant_id
+            )
+
+    assert exc.value.status_code == 403
+    assert exc.value.details["code"] == "starter_plan_restriction"
+    assert exc.value.details["feature"] == "shift_templates"
+
+
+@pytest.mark.asyncio
+async def test_assert_starter_shift_template_growth_allows_non_starter():
+    tenant_id = uuid4()
+    conn = MagicMock()
+
+    with patch.object(
+        billing_service,
+        "get_effective_plan_slug",
+        new=AsyncMock(return_value="pro"),
+    ):
+        await billing_service.assert_starter_shift_template_growth_allowed(
+            conn, tenant_id
+        )
+
+
+@pytest.mark.asyncio
+async def test_default_scan_limit_for_starter_is_ten():
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"scan_limit": 10})
+
+    with patch.object(
+        billing_service,
+        "get_effective_plan_slug",
+        new=AsyncMock(return_value="starter"),
+    ):
+        limit = await billing_service._default_scan_limit_for_tenant(conn, uuid4())
+
+    assert limit == 10
+
+
+@pytest.mark.asyncio
+async def test_require_module_allows_finanzas_for_starter_plan():
+    from app.core.permissions import Module, require_module
+
+    session = SimpleNamespace(
+        is_valid=True,
+        tenant_id=uuid4(),
+        user_id=uuid4(),
+        role="owner",
+    )
+    dep = require_module(Module.FINANZAS)
+    request = MagicMock()
+    request.url.path = "/financiero/tir-metrics"
+
+    with patch("app.core.middleware.get_session_context", return_value=session), \
+         patch(
+             "app.services.billing_service.get_effective_plan_slug",
+             new=AsyncMock(return_value="starter"),
+         ), \
+         patch(
+             "app.core.permissions.get_enforcement_mode",
+             new=AsyncMock(return_value="disabled"),
+         ), \
+         patch("app.core.permissions.get_db_connection") as db_ctx:
+        db_ctx.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+        db_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+        await dep(request)
+
+
+
+def _period_plan_row(resource: str, limit: int, *, period_start=None, period_end=None):
+    return {
+        "plan_slug": "starter",
+        "plan_features": {"quotas": {resource: limit}},
+        "current_period_start": period_start or datetime(2026, 7, 1, tzinfo=timezone.utc),
+        "current_period_end": period_end or datetime(2026, 8, 1, tzinfo=timezone.utc),
+        "override_id": None,
+        "limit_override": None,
+        "override_disabled": False,
+        "override_reason": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_starter_tenant_suppliers_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("tenant_suppliers", 3))
+    conn.fetchval = AsyncMock(return_value=3)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(conn, tenant_id, "tenant_suppliers")
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["resource"] == "tenant_suppliers"
+    assert exc.value.details["used"] == 3
+    assert exc.value.details["limit"] == 3
+    count_sql = conn.fetchval.await_args.args[0]
+    assert "FROM tenant_suppliers" in count_sql
+    assert "is_active = TRUE" in count_sql
+
+
+@pytest.mark.asyncio
+async def test_starter_tenant_suppliers_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("tenant_suppliers", 3))
+    conn.fetchval = AsyncMock(return_value=2)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "tenant_suppliers")
+
+
+@pytest.mark.asyncio
+async def test_direct_purchases_period_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "direct_purchases_per_period", 15, period_start=period_start, period_end=period_end
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=15)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_period(
+            conn, tenant_id, "direct_purchases_per_period"
+        )
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["resource"] == "direct_purchases_per_period"
+    assert exc.value.details["used"] == 15
+    assert exc.value.details["limit"] == 15
+    assert exc.value.details["period_start"] == period_start.isoformat()
+    assert exc.value.details["period_end"] == period_end.isoformat()
+    count_args = conn.fetchval.await_args.args
+    assert "FROM tenant_purchases" in count_args[0]
+    assert "is_direct_entry = TRUE" in count_args[0]
+    assert "created_at >= $2" in count_args[0]
+    assert count_args[1:] == (tenant_id, period_start, period_end)
+
+
+@pytest.mark.asyncio
+async def test_direct_purchases_period_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_period_plan_row("direct_purchases_per_period", 15))
+    conn.fetchval = AsyncMock(return_value=14)
+
+    await billing_service.check_plan_quota_period(
+        conn, tenant_id, "direct_purchases_per_period"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stock_adjustments_period_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "stock_adjustments_per_period", 20, period_start=period_start, period_end=period_end
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=20)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_period(
+            conn, tenant_id, "stock_adjustments_per_period"
+        )
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["resource"] == "stock_adjustments_per_period"
+    assert exc.value.details["used"] == 20
+    assert exc.value.details["limit"] == 20
+    count_args = conn.fetchval.await_args.args
+    assert "FROM tenant_ingredient_movements" in count_args[0]
+    assert "movement_type = 'adjustment'" in count_args[0]
+    assert "COALESCE(reference_table, '') <> 'tenant_purchases'" in count_args[0]
+    assert count_args[1:] == (tenant_id, period_start, period_end)
+
+
+@pytest.mark.asyncio
+async def test_stock_adjustments_period_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_period_plan_row("stock_adjustments_per_period", 20))
+    conn.fetchval = AsyncMock(return_value=19)
+
+    await billing_service.check_plan_quota_period(
+        conn, tenant_id, "stock_adjustments_per_period"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cash_closes_period_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "cash_closes_per_period", 30, period_start=period_start, period_end=period_end
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=30)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_period(
+            conn, tenant_id, "cash_closes_per_period"
+        )
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["resource"] == "cash_closes_per_period"
+    assert "FROM accounting_period" in conn.fetchval.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_manual_journal_entries_period_quota_filters_source_module():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "manual_journal_entries_per_period",
+            30,
+            period_start=period_start,
+            period_end=period_end,
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=30)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_period(
+            conn, tenant_id, "manual_journal_entries_per_period"
+        )
+
+    assert exc.value.status_code == 429
+    sql = conn.fetchval.await_args.args[0]
+    assert "FROM tenant_journal_entries" in sql
+    assert "manual_balance_adjustment" in sql
+    assert "source_module IN" in sql
+
+
+@pytest.mark.asyncio
+async def test_expenses_period_quota_counts_expenses_and_instances():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "expenses_per_period", 30, period_start=period_start, period_end=period_end
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=30)
+
+    with pytest.raises(APIError):
+        await billing_service.check_plan_quota_period(
+            conn, tenant_id, "expenses_per_period"
+        )
+
+    sql = conn.fetchval.await_args.args[0]
+    assert "FROM tenant_expenses" in sql
+    assert "FROM recurring_expense_instances" in sql
+
+
+@pytest.mark.asyncio
+async def test_active_open_cash_shifts_growth_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("active_open_cash_shifts", 1))
+    conn.fetchval = AsyncMock(return_value=1)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(
+            conn, tenant_id, "active_open_cash_shifts"
+        )
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["resource"] == "active_open_cash_shifts"
+    assert "FROM cash_shift_openings" in conn.fetchval.await_args.args[0]
+    assert "status = 'open'" in conn.fetchval.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_payment_methods_growth_quota_allows_below_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("payment_methods", 5))
+    conn.fetchval = AsyncMock(return_value=4)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "payment_methods")
+
+
+@pytest.mark.asyncio
+async def test_api_tokens_growth_quota_blocks_at_starter_zero():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("api_tokens", 0))
+    conn.fetchval = AsyncMock(return_value=0)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(conn, tenant_id, "api_tokens")
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["resource"] == "api_tokens"
+    assert exc.value.details["limit"] == 0
+    assert "FROM api_tokens" in conn.fetchval.await_args.args[0]
+    assert "is_active = TRUE" in conn.fetchval.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_tenant_promotions_growth_quota_blocks_at_starter_one():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("tenant_promotions", 1))
+    conn.fetchval = AsyncMock(return_value=1)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_growth(
+            conn, tenant_id, "tenant_promotions"
+        )
+
+    assert exc.value.status_code == 429
+    assert exc.value.details["code"] == "quota_exceeded"
+    assert exc.value.details["resource"] == "tenant_promotions"
+    assert exc.value.details["limit"] == 1
+    assert "FROM tenant_promotions" in conn.fetchval.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_tenant_promotions_growth_quota_allows_below_starter_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_starter_plan_row("tenant_promotions", 1))
+    conn.fetchval = AsyncMock(return_value=0)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "tenant_promotions")
+
+
+@pytest.mark.asyncio
+async def test_tenant_promotions_growth_quota_allows_unlimited_pro():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "plan_slug": "pro",
+            "plan_features": {
+                "quotas": {"tenant_promotions": billing_service.CATALOG_UNLIMITED}
+            },
+            "override_limit": None,
+            "override_expires_at": None,
+        }
+    )
+    conn.fetchval = AsyncMock(return_value=50)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "tenant_promotions")
+
+
+@pytest.mark.asyncio
+async def test_api_tokens_growth_quota_allows_below_paid_limit():
+    tenant_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "plan_slug": "pro",
+            "plan_features": {"quotas": {"api_tokens": billing_service.CATALOG_UNLIMITED}},
+            "override_id": None,
+            "limit_override": None,
+            "override_disabled": False,
+            "override_reason": None,
+        }
+    )
+    conn.fetchval = AsyncMock(return_value=2)
+
+    await billing_service.check_plan_quota_growth(conn, tenant_id, "api_tokens")
+
+
+@pytest.mark.asyncio
+async def test_api_token_reactivate_checks_growth_quota():
+    tenant_id = uuid4()
+    user_id = uuid4()
+    token_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"role": "admin"},
+            {"is_active": False},
+        ]
+    )
+    quota_error = APIError("Límite del plan alcanzado", status_code=429)
+    session = {"user_id": str(user_id), "tenant_id": str(tenant_id)}
+
+    with (
+        patch(
+            "app.services.api_tokens_service.get_session_from_request",
+            new=AsyncMock(return_value=session),
+        ),
+        patch(
+            "app.services.api_tokens_service.get_db_connection",
+            side_effect=_db_context(conn),
+        ),
+        patch(
+            "app.services.api_tokens_service.check_plan_quota_growth",
+            new=AsyncMock(side_effect=quota_error),
+        ) as quota_check,
+    ):
+        with pytest.raises(APIError) as exc:
+            await api_tokens_service.update_api_token(
+                _request(),
+                str(token_id),
+                is_active=True,
+            )
+
+    assert exc.value.status_code == 429
+    quota_check.assert_awaited_once()
+    assert quota_check.await_args.args[2] == "api_tokens"
+    assert conn.fetchrow.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_supplier_payments_period_quota_uses_paid_at():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "supplier_payments_per_period",
+            30,
+            period_start=period_start,
+            period_end=period_end,
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=29)
+
+    await billing_service.check_plan_quota_period(
+        conn, tenant_id, "supplier_payments_per_period"
+    )
+    sql = conn.fetchval.await_args.args[0]
+    assert "paid_at" in sql
+    assert "FROM tenant_purchases" in sql
+
+
+@pytest.mark.asyncio
+async def test_accounting_period_closes_period_quota_blocks_at_limit():
+    tenant_id = uuid4()
+    period_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    period_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_period_plan_row(
+            "accounting_period_closes_per_period",
+            3,
+            period_start=period_start,
+            period_end=period_end,
+        )
+    )
+    conn.fetchval = AsyncMock(return_value=3)
+
+    with pytest.raises(APIError) as exc:
+        await billing_service.check_plan_quota_period(
+            conn, tenant_id, "accounting_period_closes_per_period"
+        )
+
+    assert exc.value.details["resource"] == "accounting_period_closes_per_period"
+    assert "FROM tenant_monthly_periods" in conn.fetchval.await_args.args[0]
+
+
+def test_manual_journal_allowed_source_modules_match_count_filter():
+    """Public JE create whitelist must stay aligned with period count SQL."""
+    from app.services.accounting_service import MANUAL_JOURNAL_SOURCE_MODULES
+
+    assert MANUAL_JOURNAL_SOURCE_MODULES == frozenset(
+        {"manual", "manual_balance_adjustment"}
+    )
+    assert "system" not in MANUAL_JOURNAL_SOURCE_MODULES
+    assert "orden" not in MANUAL_JOURNAL_SOURCE_MODULES
+
+
+# ── CRM unlimited-by-design (#1932) ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_crm_waros_rules_quota_resource_is_rejected():
+    """Waros rule growth must not be enforceable via plan quota helpers."""
+    conn = MagicMock()
+    with pytest.raises(ValueError, match="Unsupported quota resource"):
+        await billing_service.check_plan_quota_growth(conn, uuid4(), "waros_rules")
+
+
+@pytest.mark.asyncio
+async def test_crm_wallet_recharge_period_quota_resource_is_rejected():
+    conn = MagicMock()
+    with pytest.raises(ValueError, match="Unsupported period quota resource"):
+        await billing_service.check_plan_quota_period(conn, uuid4(), "wallet_recharges")
+
+
+@pytest.mark.asyncio
+async def test_crm_cartera_credit_payment_period_quota_resource_is_rejected():
+    conn = MagicMock()
+    with pytest.raises(ValueError, match="Unsupported period quota resource"):
+        await billing_service.check_plan_quota_period(conn, uuid4(), "cartera_payments")
+
+
+def test_crm_service_modules_do_not_call_plan_quota_helpers():
+    """Wallet / credit / waros services must stay off billing quota enforcement."""
+    import inspect
+
+    from app.services import credit_service, customer_wallet_service, waros_service
+
+    for mod in (customer_wallet_service, credit_service, waros_service):
+        src = inspect.getsource(mod)
+        assert "check_plan_quota_growth" not in src, mod.__name__
+        assert "check_plan_quota_period" not in src, mod.__name__
+        assert "check_plan_quota_scoped" not in src, mod.__name__
+        assert "ENFORCEABLE_QUOTA_RESOURCES" not in src, mod.__name__

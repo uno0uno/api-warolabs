@@ -15,6 +15,7 @@ from app.core.timezones import get_zoneinfo, local_date_for_tenant, resolve_tena
 from app.services.waros_service import evaluate_and_award
 from app.services.orders_service import _get_order_waro_redemption_summary
 from app.services.email_helpers import send_pos_receipt_email
+from app.services import invoice_email_tracking_service
 from app.services.cierre_service import (
     _get_tenant_tax_config,
     _post_order_gl_entry,
@@ -82,6 +83,38 @@ async def _order_payment_splits_for_gl(conn, order_id: UUID) -> List[Dict[str, A
     ]
 
 
+async def _release_table_session(conn, table_session_id, tenant_id) -> None:
+    if not table_session_id:
+        return
+    await conn.execute(
+        "UPDATE table_sessions SET closed_at = now() WHERE id = $1 AND closed_at IS NULL",
+        table_session_id,
+    )
+    await conn.execute(
+        """UPDATE tables SET status = 'free'
+           WHERE id = (SELECT table_id FROM table_sessions WHERE id = $1)
+             AND tenant_id = $2""",
+        table_session_id,
+        tenant_id,
+    )
+
+
+async def _reopen_table_session(conn, table_session_id, tenant_id) -> None:
+    if not table_session_id:
+        return
+    await conn.execute(
+        "UPDATE table_sessions SET closed_at = NULL WHERE id = $1",
+        table_session_id,
+    )
+    await conn.execute(
+        """UPDATE tables SET status = 'open'
+           WHERE id = (SELECT table_id FROM table_sessions WHERE id = $1)
+             AND tenant_id = $2""",
+        table_session_id,
+        tenant_id,
+    )
+
+
 def _distribute_discount(items: List[dict], discount_amount: float) -> List[dict]:
     """
     Distribute a discount proportionally across cart items based on each item's
@@ -137,6 +170,8 @@ def _cart_items_to_promo_lines(items: List[dict]) -> List[dict]:
             "quantity": quantity,
             "subtotal": float(item["subtotal"]),
             "tax_category": item.get("tax_category") or "standard",
+            "tax_resolution": item.get("tax_resolution") or "inherit",
+            "tax_line_key": item.get("tax_line_key"),
             "promo_opt_out": bool(item.get("promo_opt_out")),
         }
         if raw_unit_price is not None:
@@ -248,13 +283,92 @@ def _manual_discount_amount(
 
 
 def _tax_rows_from_evaluated_lines(lines: Sequence[dict]) -> List[dict]:
-    grouped: Dict[str, float] = {}
+    """Item-level rows for hospitality resolve (menu category + override).
+
+    Do not collapse by legacy tax_category — that drops category_id and makes
+    exempt/mapped menu categories fall through to the primary line (#1889).
+    """
+    rows: List[dict] = []
     for line in lines:
-        category = line.get("tax_category") or "standard"
-        grouped[category] = grouped.get(category, 0.0) + float(
-            line.get("net_total", line.get("subtotal_after_promo", line["subtotal"]))
-        )
-    return [{"tax_category": k, "subtotal": v} for k, v in grouped.items()]
+        rows.append({
+            "tax_category": line.get("tax_category") or "standard",
+            "tax_resolution": line.get("tax_resolution") or "inherit",
+            "tax_line_key": line.get("tax_line_key"),
+            "category_id": line.get("category_id"),
+            "subtotal": float(
+                line.get("net_total", line.get("subtotal_after_promo", line["subtotal"]))
+            ),
+        })
+    return rows
+
+
+def _reinject_tax_fields_on_eval_lines(
+    promo_lines: Sequence[dict],
+    eval_lines: Sequence[dict],
+) -> None:
+    """Copy product tax classification onto promotion-evaluated lines."""
+    tax_fields_by_id = {
+        line["id"]: {
+            "tax_category": line.get("tax_category") or "standard",
+            "category_id": line.get("category_id"),
+            "tax_resolution": line.get("tax_resolution") or "inherit",
+            "tax_line_key": line.get("tax_line_key"),
+        }
+        for line in promo_lines
+    }
+    for line in eval_lines:
+        fields = tax_fields_by_id.get(line["id"], {})
+        line["tax_category"] = fields.get("tax_category", "standard")
+        line["category_id"] = fields.get("category_id")
+        line["tax_resolution"] = fields.get("tax_resolution", "inherit")
+        line["tax_line_key"] = fields.get("tax_line_key")
+
+
+def _settlement_taxes_from_eval_lines(
+    eval_lines: Sequence[dict],
+    tax_config: dict,
+) -> tuple[float, float, str, str, float]:
+    """Return standard_tax, liquor_tax, std_label, liq_label, additive_tax for POS settlement."""
+    from app.services.hospitality_tax_engine import (
+        additive_order_tax_total,
+        liquor_tax_label_for_config,
+    )
+    from app.services.orders_service import _compute_tax_breakdown
+
+    std, liq, label = _compute_tax_breakdown(
+        _tax_rows_from_evaluated_lines(eval_lines),
+        tax_config,
+    )
+    additive = additive_order_tax_total(float(std), float(liq), tax_config)
+    return (
+        float(std),
+        float(liq),
+        label,
+        liquor_tax_label_for_config(tax_config),
+        float(additive),
+    )
+
+
+async def _additive_tax_for_order(conn, order_id, tax_config: dict) -> float:
+    """Additive tax on an existing order (net_total base — matches cierre)."""
+    from app.services.hospitality_tax_engine import additive_order_tax_total
+    from app.services.orders_service import _compute_tax_breakdown
+
+    rows = await conn.fetch(
+        """
+        SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
+               COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+               p.tax_line_key AS tax_line_key,
+               p.category_id::text AS category_id,
+               COALESCE(oi.net_total, oi.subtotal, 0) AS subtotal
+        FROM order_items oi
+        JOIN product p ON p.id = oi.product_id
+        WHERE oi.order_id = $1
+        """,
+        order_id,
+    )
+    std, liq, _ = _compute_tax_breakdown(rows, tax_config)
+    return float(additive_order_tax_total(float(std), float(liq), tax_config))
 
 
 async def get_or_create_active_cart(
@@ -522,6 +636,8 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
             p.name as product_name,
             p.category_id as category_id,
             COALESCE(p.tax_category, 'standard') AS tax_category,
+            COALESCE(p.tax_resolution, 'inherit') AS tax_resolution,
+            p.tax_line_key AS tax_line_key,
             p.is_resale as product_is_resale,
             COALESCE(
                 json_agg(
@@ -547,7 +663,8 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
                  ci.notes, ci.promo_opt_out, ci.locked_promotion_id, ci.promotion_locked_at,
                  ci.locked_promo_eligible_subtotal, ci.locked_promo_eligible_unit_price,
                  ci.locked_promotion_name, ci.locked_promo_type, ci.locked_promo_savings,
-                 ci.created_at, p.name, p.category_id, p.tax_category, p.is_resale
+                 ci.created_at, p.name, p.category_id, p.tax_category, p.tax_resolution,
+                 p.tax_line_key, p.is_resale
         ORDER BY ci.created_at
     """
     items_rows = await conn.fetch(items_query, cart_id)
@@ -564,6 +681,8 @@ async def get_cart_items(conn, cart_id: UUID) -> List[dict]:
             "product_id": str(item_row['product_id']),
             "category_id": str(item_row['category_id']) if item_row['category_id'] else None,
             "tax_category": item_row['tax_category'] or 'standard',
+            "tax_resolution": item_row['tax_resolution'] or 'inherit',
+            "tax_line_key": item_row['tax_line_key'],
             "product": {
                 "id": str(item_row['product_id']),
                 "name": item_row['product_name'],
@@ -1208,6 +1327,7 @@ async def get_cart_tax_preview(
     Issue #982 — evaluates tenant promotions first, then applies optional
     manual discount_amount on the promo-adjusted subtotal.
     """
+    from app.services.hospitality_tax_engine import annotate_line_tax_amounts
     from app.services.orders_service import _compute_tax_breakdown
     from app.services.promotions_service import evaluate_checkout_promotions
 
@@ -1231,6 +1351,7 @@ async def get_cart_tax_preview(
                 "standard_tax": 0.0,
                 "liquor_tax": 0.0,
                 "standard_tax_label": "Impuesto",
+                "liquor_tax_label": "IVA licores 5%",
                 "subtotal": 0,
                 "promo_savings": 0,
                 "subtotal_after_promos": 0,
@@ -1245,18 +1366,39 @@ async def get_cart_tax_preview(
             promo_lines,
             manual_discount_amount=float(discount_amount or 0),
         )
-        tax_category_by_id = {line["id"]: line["tax_category"] for line in promo_lines}
+        tax_fields_by_id = {
+            line["id"]: {
+                "tax_category": line.get("tax_category") or "standard",
+                "category_id": line.get("category_id"),
+                "tax_resolution": line.get("tax_resolution") or "inherit",
+                "tax_line_key": line.get("tax_line_key"),
+            }
+            for line in promo_lines
+        }
         for line in checkout_eval["lines"]:
-            line["tax_category"] = tax_category_by_id.get(line["id"], "standard")
+            fields = tax_fields_by_id.get(line["id"], {})
+            line["tax_category"] = fields.get("tax_category", "standard")
+            line["category_id"] = fields.get("category_id")
+            line["tax_resolution"] = fields.get("tax_resolution", "inherit")
+            line["tax_line_key"] = fields.get("tax_line_key")
 
         tax_config = await _get_tenant_tax_config(conn, tenant_id)
         tax_rows = _tax_rows_from_evaluated_lines(checkout_eval["lines"])
         std_tax, liq_tax, tax_label = _compute_tax_breakdown(tax_rows, tax_config)
+        from app.services.hospitality_tax_engine import liquor_tax_label_for_config
+
+        liq_label = liquor_tax_label_for_config(tax_config)
+        annotate_line_tax_amounts(
+            checkout_eval["lines"],
+            tax_config,
+            reconcile_to=(float(std_tax), float(liq_tax)),
+        )
 
     return {
         "standard_tax": float(std_tax),
         "liquor_tax": float(liq_tax),
         "standard_tax_label": tax_label,
+        "liquor_tax_label": liq_label,
         "subtotal": checkout_eval["subtotal"],
         "promo_savings": checkout_eval["promo_savings"],
         "subtotal_after_promos": checkout_eval["subtotal_after_promos"],
@@ -1269,14 +1411,15 @@ async def get_cart_tax_preview(
 
 async def add_order_payment(
     request: Request,
-    cart_id: str,
-    amount: float,
-    payment_method: str,
+    cart_id: Optional[str] = None,
+    amount: float = 0,
+    payment_method: str = "",
     payment_method_id: Optional[str] = None,
     cash_received: Optional[float] = None,
     tip_amount: Optional[float] = None,
     tip_source: Optional[str] = None,
     tip_taxable: Optional[bool] = None,
+    order_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Add a partial payment to a POS cart's underlying order.
@@ -1309,54 +1452,68 @@ async def add_order_payment(
         paid_total = 0.0
         remaining = 0.0
         is_complete = False
+        lookup_order_id = order_id
+        lookup_by_order = bool(lookup_order_id)
         order_id = None
         award_customer_id = None
+        table_session_id = None
+
+        if not cart_id and not lookup_order_id:
+            raise APIError("cart_id or order_id is required", status_code=400)
 
         async with get_db_connection() as conn:
             timezone_name = await resolve_tenant_timezone(conn, tenant_id)
             async with conn.transaction():
-                # 1. Lock cart row
-                cart_row = await conn.fetchrow(
-                    """
-                    SELECT id, tenant_id
-                    FROM pos_carts
-                    WHERE id = $1 AND tenant_id = $2
-                    FOR UPDATE
-                    """,
-                    cart_id, tenant_id
-                )
+                if lookup_by_order:
+                    order_row = await conn.fetchrow(
+                        """
+                        SELECT id, total_amount, tip_amount, tip_source, tip_taxable,
+                               tip_tax_amount, status, payment_status, customer_id,
+                               order_number, table_session_id
+                        FROM orders
+                        WHERE id = $1::uuid AND tenant_id = $2
+                        FOR UPDATE
+                        """,
+                        lookup_order_id, tenant_id
+                    )
+                    if not order_row:
+                        raise APIError("Orden no encontrada", status_code=404)
+                else:
+                    cart_row = await conn.fetchrow(
+                        """
+                        SELECT id, tenant_id
+                        FROM pos_carts
+                        WHERE id = $1 AND tenant_id = $2
+                        FOR UPDATE
+                        """,
+                        cart_id, tenant_id
+                    )
 
-                if not cart_row:
-                    raise APIError("Cart not found", status_code=404)
+                    if not cart_row:
+                        raise APIError("Cart not found", status_code=404)
 
-                # 2. Fetch + lock the order linked to this cart via pos_cart_id
-                order_row = await conn.fetchrow(
-                    """
-                    SELECT id, total_amount, tip_amount, tip_source, tip_taxable,
-                           tip_tax_amount, status, payment_status, customer_id,
-                           order_number
-                    FROM orders
-                    WHERE pos_cart_id = $1 AND tenant_id = $2
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                    FOR UPDATE
-                    """,
-                    cart_id, tenant_id
-                )
+                    order_row = await conn.fetchrow(
+                        """
+                        SELECT id, total_amount, tip_amount, tip_source, tip_taxable,
+                               tip_tax_amount, status, payment_status, customer_id,
+                               order_number, table_session_id
+                        FROM orders
+                        WHERE pos_cart_id = $1 AND tenant_id = $2
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        FOR UPDATE
+                        """,
+                        cart_id, tenant_id
+                    )
 
-                if not order_row:
-                    raise APIError("No order found for this cart — complete the order first", status_code=400)
+                    if not order_row:
+                        raise APIError("No order found for this cart — complete the order first", status_code=400)
 
                 order_id = order_row["id"]
-
-                if not order_row:
-                    raise APIError("Order not found", status_code=404)
+                table_session_id = order_row["table_session_id"]
 
                 if order_row["status"] == "cancelled":
                     raise APIError("Cannot add payment to a cancelled order", status_code=409)
-
-                if order_row["status"] == "completed" and order_row["payment_status"] == "paid":
-                    raise APIError("Order is already fully paid", status_code=409)
 
                 total_amount = float(order_row["total_amount"])
                 resolved_tip_amount = float(order_row["tip_amount"] or 0)
@@ -1408,6 +1565,11 @@ async def add_order_payment(
                     total_amount,
                     resolved_tip_amount,
                     resolved_tip_tax_amount,
+                    await _additive_tax_for_order(
+                        conn,
+                        order_id,
+                        await _get_tenant_tax_config(conn, tenant_id),
+                    ),
                 )
                 paid_before_row = await conn.fetchrow(
                     """
@@ -1470,6 +1632,7 @@ async def add_order_payment(
                 is_complete = remaining <= 0.01  # tolerance for rounding
 
                 # 5. Update order status
+                final_payment_status = "partial"
                 if is_complete:
                     award_customer_id = await conn.fetchval(
                         "SELECT customer_id FROM orders WHERE id = $1",
@@ -1481,12 +1644,21 @@ async def add_order_payment(
                         SET status = 'completed',
                             payment_method = $2,
                             payment_method_id = $3::uuid,
-                            payment_status = 'paid',
-                            order_date = COALESCE(order_date, now())
+                            order_date = now()
                         WHERE id = $1
                         """,
                         order_id, payment_method,
                         payment_method_id,
+                    )
+                    # Keep credit receivable when a split tender is credit (#2020).
+                    from app.services.credit_service import sync_order_split_credit_status
+                    final_payment_status = await sync_order_split_credit_status(
+                        conn, order_id, settlement_complete=True,
+                    )
+                    await conn.execute(
+                        "UPDATE orders SET payment_status = $2 WHERE id = $1",
+                        order_id,
+                        final_payment_status,
                     )
                     # Mostrador: auto-deliver; barra: keep comandas open (#799).
                     _bar_order = await conn.fetchval(
@@ -1511,6 +1683,36 @@ async def add_order_payment(
                         order_id
                     )
 
+                if is_complete:
+                    try:
+                        order_meta = await conn.fetchrow(
+                            """
+                            SELECT order_number, order_date, total_amount
+                            FROM orders
+                            WHERE id = $1
+                            """,
+                            order_id,
+                        )
+                        tax_config = await _get_tenant_tax_config(conn, tenant_id)
+                        # Include tip here so each tender debits its exact collected amount
+                        # (no proration). Deferred tip below is idempotent if tip lines exist.
+                        await _post_order_gl_entry(
+                            conn=conn,
+                            tenant_id=tenant_id,
+                            order_id=order_id,
+                            order_date=local_date_for_tenant(order_meta["order_date"], timezone_name),
+                            total_amount=Decimal(str(order_meta["total_amount"])),
+                            payment_method=payment_method,
+                            payment_method_id=UUID(payment_method_id) if payment_method_id else None,
+                            tax_config=tax_config,
+                            order_number=int(order_meta["order_number"]) if order_meta else None,
+                            tip_amount=Decimal(str(resolved_tip_amount)),
+                            tip_tax_amount=Decimal(str(resolved_tip_tax_amount)),
+                            payment_splits=await _order_payment_splits_for_gl(conn, order_id),
+                        )
+                    except Exception as _gl_err:
+                        logger.error(f"Split payment GL failed for POS order {order_id}: {_gl_err}")
+
                 if is_complete and resolved_tip_amount > 0:
                     try:
                         order_meta = await conn.fetchrow(
@@ -1534,31 +1736,23 @@ async def add_order_payment(
                             f"Deferred tip GL failed for POS order {order_id}: {_tip_gl_err}"
                         )
 
-                if is_complete:
-                    try:
-                        order_meta = await conn.fetchrow(
+                if is_complete and (lookup_by_order or table_session_id):
+                    if table_session_id and not lookup_by_order:
+                        # warocol.com#976 — cart-flow charge on a mesa order:
+                        # only release when no other open orders remain in
+                        # the session (bar tabs serve several orders over time).
+                        open_orders = await conn.fetchval(
                             """
-                            SELECT order_number, order_date, total_amount
-                            FROM orders
-                            WHERE id = $1
+                            SELECT COUNT(*) FROM orders
+                            WHERE table_session_id = $1 AND tenant_id = $2
+                              AND status NOT IN ('completed', 'cancelled')
                             """,
-                            order_id,
+                            table_session_id, tenant_id,
                         )
-                        tax_config = await _get_tenant_tax_config(conn, tenant_id)
-                        await _post_order_gl_entry(
-                            conn=conn,
-                            tenant_id=tenant_id,
-                            order_id=order_id,
-                            order_date=local_date_for_tenant(order_meta["order_date"], timezone_name),
-                            total_amount=Decimal(str(order_meta["total_amount"])),
-                            payment_method=payment_method,
-                            payment_method_id=UUID(payment_method_id) if payment_method_id else None,
-                            tax_config=tax_config,
-                            order_number=int(order_meta["order_number"]) if order_meta else None,
-                            payment_splits=await _order_payment_splits_for_gl(conn, order_id),
-                        )
-                    except Exception as _gl_err:
-                        logger.error(f"Split payment GL failed for POS order {order_id}: {_gl_err}")
+                        if not open_orders:
+                            await _release_table_session(conn, table_session_id, tenant_id)
+                    else:
+                        await _release_table_session(conn, table_session_id, tenant_id)
 
         # 6. Fire-and-forget side effects OUTSIDE transaction (only on completion)
         if is_complete and award_customer_id:
@@ -1585,7 +1779,7 @@ async def add_order_payment(
                 "total_amount": total_amount,
                 "charged_amount": amount_due,
                 "payment_method": payment_method,
-                "payment_status": "paid" if is_complete else "partial",
+                "payment_status": final_payment_status if is_complete else "partial",
                 "status": "completed" if is_complete else order_row["status"],
             }
         }
@@ -1604,10 +1798,11 @@ _PAYMENT_VOID_ROLES = {'admin', 'superuser'}
 
 async def void_order_payment(
     request: Request,
-    cart_id: str,
-    payment_id: str,
+    cart_id: Optional[str] = None,
+    payment_id: str = "",
     reason: Optional[str] = None,
     channel: Optional[str] = None,
+    order_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Issue warocol.com#649 — soft-delete a partial payment on a POS cart's order.
@@ -1640,7 +1835,8 @@ async def void_order_payment(
                            op.cash_received, op.created_by_user_id, op.voided_at,
                            op.payment_method_id,
                            o.pos_cart_id, o.total_amount, o.tip_amount, o.tip_tax_amount,
-                           o.payment_status, o.status AS order_status, o.customer_id
+                           o.payment_status, o.status AS order_status, o.customer_id,
+                           o.table_session_id
                     FROM order_payments op
                     JOIN orders o ON o.id = op.order_id
                     WHERE op.id = $1::uuid AND op.tenant_id = $2
@@ -1652,15 +1848,20 @@ async def void_order_payment(
                     raise APIError("Pago no encontrado", status_code=404)
                 if payment_row["voided_at"] is not None:
                     raise APIError("Este pago ya fue anulado", status_code=409)
-                # pos_cart_id is NULL on mesa orders — flag the wrong endpoint
-                # instead of returning the generic mismatch error.
-                if payment_row["pos_cart_id"] is None:
-                    raise APIError(
-                        "Este pago pertenece a una sesión de mesa — usa el endpoint /api/tables/{table_id}/payments/{payment_id}",
-                        status_code=400,
-                    )
-                if str(payment_row["pos_cart_id"]) != str(cart_id):
-                    raise APIError("El pago no pertenece a este carrito", status_code=400)
+                lookup_order_id = order_id
+                if lookup_order_id:
+                    if str(payment_row["order_id"]) != str(lookup_order_id):
+                        raise APIError("El pago no pertenece a esta orden", status_code=400)
+                else:
+                    # pos_cart_id is NULL on mesa orders — flag the wrong endpoint
+                    # instead of returning the generic mismatch error.
+                    if payment_row["pos_cart_id"] is None:
+                        raise APIError(
+                            "Este pago pertenece a una sesión de mesa — usa el endpoint /api/tables/{table_id}/payments/{payment_id}",
+                            status_code=400,
+                        )
+                    if str(payment_row["pos_cart_id"]) != str(cart_id):
+                        raise APIError("El pago no pertenece a este carrito", status_code=400)
 
                 order_id = payment_row["order_id"]
 
@@ -1675,7 +1876,24 @@ async def void_order_payment(
                 # 3. Lock the parent order to coordinate concurrent voids.
                 await conn.execute("SELECT 1 FROM orders WHERE id = $1 FOR UPDATE", order_id)
 
-                was_paid = payment_row["payment_status"] == "paid"
+                total_amount = float(payment_row["total_amount"])
+                amount_due = split_settlement_amount_due(
+                    total_amount,
+                    float(payment_row["tip_amount"] or 0),
+                    float(payment_row["tip_tax_amount"] or 0),
+                    await _additive_tax_for_order(
+                        conn,
+                        order_id,
+                        await _get_tenant_tax_config(conn, tenant_id),
+                    ),
+                )
+                paid_before_row = await conn.fetchrow(
+                    "SELECT COALESCE(SUM(amount), 0) AS paid FROM order_payments WHERE order_id = $1 AND voided_at IS NULL",
+                    order_id,
+                )
+                paid_before = float(paid_before_row["paid"])
+                # Settled includes credit splits that stay payment_status=partial (#2020).
+                was_settled = (amount_due - paid_before) <= 0.01
 
                 # 4. Mark payment as voided (soft delete).
                 await conn.execute(
@@ -1707,29 +1925,32 @@ async def void_order_payment(
                     order_id,
                 )
                 paid_total = float(paid_row["paid"])
-                total_amount = float(payment_row["total_amount"])
-                amount_due = split_settlement_amount_due(
-                    total_amount,
-                    float(payment_row["tip_amount"] or 0),
-                    float(payment_row["tip_tax_amount"] or 0),
-                )
                 remaining = max(0.0, amount_due - paid_total)
                 is_complete = remaining <= 0.01
 
-                # 6. If voiding flipped the order out of fully-paid, reopen.
-                reopened = was_paid and not is_complete
+                # 6. If voiding flipped the order out of fully settled, reopen.
+                from app.services.credit_service import sync_order_split_credit_status
+                reopened = was_settled and not is_complete
                 if reopened:
-                    await conn.execute(
-                        "UPDATE orders SET payment_status = 'partial' WHERE id = $1",
-                        order_id,
+                    await sync_order_split_credit_status(
+                        conn, order_id, settlement_complete=False,
                     )
-                    await conn.execute(
-                        "UPDATE pos_carts SET status = 'active', updated_at = NOW() WHERE id = $1",
-                        payment_row["pos_cart_id"],
-                    )
+                    if payment_row["pos_cart_id"] is not None:
+                        await conn.execute(
+                            "UPDATE pos_carts SET status = 'active', updated_at = NOW() WHERE id = $1",
+                            payment_row["pos_cart_id"],
+                        )
+                    if lookup_order_id:
+                        await _reopen_table_session(
+                            conn, payment_row["table_session_id"], tenant_id,
+                        )
                     # Reverse the posted GL entry — same transaction, atomic.
                     await void_order_journal_entry_in_txn(
                         conn, tenant_id, order_id, user_id, normalized_reason,
+                    )
+                else:
+                    await sync_order_split_credit_status(
+                        conn, order_id, settlement_complete=is_complete,
                     )
 
                 await record_operation_event(
@@ -1787,6 +2008,81 @@ async def void_order_payment(
         raise APIError(f"Error al anular el pago: {e}", status_code=500)
 
 
+async def _send_tracked_pos_receipt_email(
+    *,
+    customer_email: str,
+    order_id: UUID,
+    tenant_id: UUID,
+    order_number: int,
+    total_amount: float,
+    payment_method: str,
+    items: List[dict],
+    order_date: Any,
+    business_name: Optional[str],
+    business_address: Optional[str],
+    business_city: Optional[str],
+    business_phone: Optional[str],
+    discount_amount: float,
+    subtotal: float,
+    promo_savings: float,
+    promo_breakdown: List[dict],
+    waro_redemption_summary: Optional[Dict[str, Any]],
+    tip_amount: float,
+) -> bool:
+    """Fire-and-forget receipt send with optional delivery tracking (#1769). Fail-open."""
+    delivery_id = None
+    pixel_url = None
+    try:
+        tracking_token = invoice_email_tracking_service.generate_tracking_token()
+        tracking_token_hash = invoice_email_tracking_service.hash_tracking_token(tracking_token)
+        delivery_id = await invoice_email_tracking_service.create_pending_delivery(
+            tenant_id=tenant_id,
+            order_id=order_id,
+            recipient_email=customer_email,
+            tracking_token_hash=tracking_token_hash,
+        )
+        if delivery_id is not None:
+            pixel_url = invoice_email_tracking_service.build_pixel_url(tracking_token)
+    except Exception as track_err:
+        logger.warning(f"POS receipt tracking skipped for order {order_id}: {track_err}")
+        delivery_id = None
+        pixel_url = None
+
+    success = await send_pos_receipt_email(
+        customer_email=customer_email,
+        order_number=order_number,
+        total_amount=total_amount,
+        payment_method=payment_method,
+        items=items,
+        order_date=order_date,
+        tenant_id=str(tenant_id),
+        business_name=business_name,
+        business_address=business_address,
+        business_city=business_city,
+        business_phone=business_phone,
+        discount_amount=discount_amount,
+        subtotal=subtotal,
+        promo_savings=promo_savings,
+        promo_breakdown=promo_breakdown,
+        waro_redemption_summary=waro_redemption_summary,
+        tip_amount=tip_amount,
+        tracking_pixel_url=pixel_url,
+    )
+
+    if delivery_id is not None:
+        try:
+            if success:
+                await invoice_email_tracking_service.mark_delivery_sent(delivery_id)
+            else:
+                await invoice_email_tracking_service.mark_delivery_failed(
+                    delivery_id, failure_code="ses_rejected"
+                )
+        except Exception as mark_err:
+            logger.warning(f"POS receipt delivery status update failed: {mark_err}")
+
+    return bool(success)
+
+
 async def complete_pos_order(
     request: Request,
     cart_id: UUID,
@@ -1812,6 +2108,7 @@ async def complete_pos_order(
     tip_taxable: bool = False,
     waros_to_redeem: Optional[int] = None,
     waro_reward_id: Optional[UUID] = None,
+    wompi_collection: bool = False,
 ) -> dict:
     """
     Complete a POS order.
@@ -1883,9 +2180,12 @@ async def complete_pos_order(
 
         async with get_db_connection() as conn:
             async with conn.transaction():
-                pending_without_payment = payment_method is None
+                pending_without_payment = payment_method is None or wompi_collection
+                if wompi_collection:
+                    payment_method = None
+                    payment_method_id = None
                 if pending_without_payment:
-                    if delivery_address_id is None:
+                    if delivery_address_id is None and not wompi_collection:
                         raise APIError("payment_method es requerido para ventas que no son domicilio", status_code=400)
                     if split_mode:
                         raise APIError("El cobro dividido requiere método de pago", status_code=400)
@@ -2017,22 +2317,35 @@ async def complete_pos_order(
                 _promo_breakdown = checkout_eval.get("promo_breakdown") or []
                 _eval_by_id = {line["id"]: line for line in checkout_eval["lines"]}
 
+                _reinject_tax_fields_on_eval_lines(promo_lines, checkout_eval["lines"])
+                (
+                    _standard_tax,
+                    _liquor_tax,
+                    _standard_tax_label,
+                    _liquor_tax_label,
+                    _additive_tax,
+                ) = _settlement_taxes_from_eval_lines(checkout_eval["lines"], tax_config)
+                _settlement_due = split_settlement_amount_due(
+                    float(_discounted_total),
+                    float(tip_amount),
+                    _tip_tax_amount,
+                    _additive_tax,
+                )
+
                 # Issue #524 — single-payment cash flow stores cash_received on the orders row.
                 # Split mode keeps it NULL here and stores per-line on order_payments below (step 7a).
                 # warocol.com#637 — when tipping is in effect, cash_received must cover
-                # total + tip (the customer must hand over enough physical cash for both).
+                # total + additive tax + tip (the customer must hand over enough physical cash).
                 _orders_cash_received: Optional[float] = None
                 if not split_mode and cash_received is not None:
                     if payment_method != 'cash':
                         raise APIError("cash_received solo aplica a pagos en efectivo", status_code=400)
-                    _required_cash = float(_discounted_total) + tip_settlement_total(
-                        float(tip_amount), _tip_tax_amount,
-                    )
+                    _required_cash = _settlement_due
                     if cash_received < _required_cash:
-                        if tip_amount > 0:
+                        if tip_amount > 0 or _additive_tax > 0:
                             raise APIError(
-                                f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total + propina"
-                                f" (+ IVA propina si aplica) ({_required_cash})",
+                                f"Efectivo recibido ({cash_received}) debe ser mayor o igual al total a pagar"
+                                f" ({_required_cash})",
                                 status_code=400,
                             )
                         raise APIError(
@@ -2100,11 +2413,7 @@ async def complete_pos_order(
                 logger.info(f"Created order #{order_number} from cart {cart_id}")
 
                 if not split_mode and payment_method == WALLET_PAYMENT_SLUG:
-                    wallet_due = Decimal(str(split_settlement_amount_due(
-                        float(_discounted_total),
-                        float(tip_amount),
-                        float(_tip_tax_amount),
-                    )))
+                    wallet_due = Decimal(str(_settlement_due))
                     await apply_wallet_for_order(
                         conn,
                         customer_id,
@@ -2373,7 +2682,8 @@ async def complete_pos_order(
                             tenant_id=tenant_id,
                             source_type=_fire_source,
                             table_display_name=_fire_label,
-                            conn=conn
+                            conn=conn,
+                            notify_print=False,
                         )
                 except Exception as _fe:
                     logger.error(f"Auto-fire failed for POS order {order_id}: {_fe}")
@@ -2381,7 +2691,7 @@ async def complete_pos_order(
                 # 7a. In split mode: record first payment; cart stays active.
                 # Issue #524: split_first_cash_received is captured when the first split is cash.
                 _split_paid_total = 0.0
-                _split_remaining = float(_discounted_total)
+                _split_remaining = float(_settlement_due)
                 _split_is_complete = False
                 _split_first_payment_id: Optional[str] = None
                 if split_mode and split_first_amount > 0:
@@ -2393,9 +2703,7 @@ async def complete_pos_order(
                                 f"Efectivo recibido ({split_first_cash_received}) debe ser mayor o igual al monto ({split_first_amount})",
                                 status_code=400,
                             )
-                    _amount_due = split_settlement_amount_due(
-                        float(_discounted_total), float(tip_amount), _tip_tax_amount,
-                    )
+                    _amount_due = _settlement_due
                     if split_first_amount - _amount_due > 0.01:
                         raise APIError(
                             f"El pago excede el saldo pendiente ({_amount_due})",
@@ -2437,9 +2745,9 @@ async def complete_pos_order(
                         cart_id
                     )
                     if _split_is_complete:
-                        await conn.execute(
-                            "UPDATE orders SET payment_status = 'paid' WHERE id = $1",
-                            order_id
+                        from app.services.credit_service import sync_order_split_credit_status
+                        await sync_order_split_credit_status(
+                            conn, order_id, settlement_complete=True,
                         )
                     # Mostrador/delivery: auto-deliver after checkout. Barra: kitchen
                     # closes comandas manually (warocol.com#799).
@@ -2448,6 +2756,21 @@ async def complete_pos_order(
                             await finalize_open_comandas(conn, order_id, tenant_id)
                         except Exception as _ce:
                             logger.warning(f"Could not finalize comandas for order {order_id}: {_ce}")
+                        # warocol.com#976 — mesa order completed via cart flow:
+                        # release the session or /pos keeps showing the table
+                        # as active. Bar rotates its own session above; split
+                        # partials that don't complete never reach this branch.
+                        if table_session_id and (not split_mode or _split_is_complete):
+                            open_orders = await conn.fetchval(
+                                """
+                                SELECT COUNT(*) FROM orders
+                                WHERE table_session_id = $1 AND tenant_id = $2
+                                  AND status NOT IN ('completed', 'cancelled')
+                                """,
+                                table_session_id, tenant_id,
+                            )
+                            if not open_orders:
+                                await _release_table_session(conn, table_session_id, tenant_id)
 
                 logger.info(f"Order #{order_number} created (split_mode={split_mode})")
 
@@ -2493,45 +2816,7 @@ async def complete_pos_order(
                     except Exception as e:
                         logger.error(f"COGS GL entry failed for POS order {order_id}: {e}")
 
-                # Compute tax breakdown for receipt display
-                _standard_tax = 0.0
-                _liquor_tax = 0.0
-                _standard_tax_label = "Impuesto"
-                try:
-                    items_tax_rows = await conn.fetch(
-                        """SELECT COALESCE(p.tax_category, 'standard') AS tax_category,
-                                  COALESCE(oi.subtotal, 0) AS subtotal
-                           FROM order_items oi
-                           JOIN product p ON p.id = oi.product_id
-                           WHERE oi.order_id = $1""",
-                        order_id
-                    )
-                    std_subtotal = sum(float(r['subtotal']) for r in items_tax_rows if r['tax_category'] == 'standard')
-                    liq_subtotal = sum(float(r['subtotal']) for r in items_tax_rows if r['tax_category'] == 'liquor')
-
-                    if tax_config.get('inc_applicable') and std_subtotal > 0:
-                        rate = float(tax_config['inc_rate'])
-                        if tax_config.get('inc_included_in_price'):
-                            _standard_tax = round(std_subtotal * rate / (1 + rate))
-                        else:
-                            _standard_tax = round(std_subtotal * rate)
-                        pct = round(rate * 100)
-                        _standard_tax_label = f"INC {pct}%"
-                    elif tax_config.get('iva_applicable') and std_subtotal > 0:
-                        rate = float(tax_config['iva_rate'])
-                        if tax_config.get('iva_included_in_price'):
-                            _standard_tax = round(std_subtotal * rate / (1 + rate))
-                        else:
-                            _standard_tax = round(std_subtotal * rate)
-                        pct = round(rate * 100)
-                        _standard_tax_label = f"IVA {pct}%"
-
-                    if tax_config.get('liquor_tax_applicable') and liq_subtotal > 0:
-                        liq_rate = float(tax_config.get('liquor_tax_rate') or 0.05)
-                        _liquor_tax = round(liq_subtotal * liq_rate)
-                except Exception as e:
-                    logger.warning(f"Tax breakdown computation failed for order {order_id}: {e}")
-
+                # Tax already computed pre-insert for settlement (additive IVA etc.).
                 _waro_redemption_summary = await _get_order_waro_redemption_summary(conn, order_id)
 
                 # Capture values needed after the transaction closes
@@ -2554,9 +2839,7 @@ async def complete_pos_order(
                         "tip_source": tip_source,
                         "tip_taxable": _tip_taxable,
                         "tip_tax_amount": float(_tip_tax_amount),
-                        "charged_amount": float(_discounted_total) + tip_settlement_total(
-                            float(tip_amount), _tip_tax_amount,
-                        ),
+                        "charged_amount": float(_settlement_due),
                         "payment_method": payment_method,
                         "payment_status": payment_status,
                         "status": order_status,
@@ -2566,6 +2849,7 @@ async def complete_pos_order(
                         "standard_tax": _standard_tax,
                         "liquor_tax": _liquor_tax,
                         "standard_tax_label": _standard_tax_label,
+                        "liquor_tax_label": _liquor_tax_label,
                         "next_table_session_id": str(new_table_session_id) if new_table_session_id else None,
                         "subtotal": cart_subtotal,
                         "promo_savings": _promo_savings,
@@ -2625,14 +2909,15 @@ async def complete_pos_order(
                     else 0.0
                 )
                 asyncio.create_task(
-                    send_pos_receipt_email(
+                    _send_tracked_pos_receipt_email(
                         customer_email=receipt_email,
+                        order_id=_order_id,
+                        tenant_id=_tenant_id,
                         order_number=_order_number,
                         total_amount=_total_amount,
                         payment_method=payment_method,
                         items=_items,
                         order_date=_order_date,
-                        tenant_id=str(_tenant_id),
                         business_name=_business_name,
                         business_address=_business_address,
                         business_city=_business_city,

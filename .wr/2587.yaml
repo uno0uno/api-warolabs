@@ -1,0 +1,34 @@
+# Machine contract for wr-fast / wr-ship — keep ≤80 lines.
+issue: 2587
+title: "feat(despacho): show accepted/rejected Table QR requests with pagination"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2587-table-qr-historial
+risk: low
+split: api-first
+
+paths:
+  - app/routers/table_qr_requests.py
+  - app/services/table_qr_requests_service.py
+  - tests/test_table_qr_requests.py
+
+ac:
+  - GET supports status pending|accepted|rejected|all
+  - limit/offset pagination.total on flat list
+  - pending default remains grouped for backward compat; grouped=false for flat
+  - get_request works for any status
+  - accept/reject unchanged
+
+out_of_scope:
+  - front (companion PR)
+  - reject reason column on table_qr_requests
+
+hints:
+  entry: "list_requests — table_qr_requests_service.py"
+  pattern: "online_orders list pagination"
+  tests: "pytest tests/test_table_qr_requests.py -v"
+
+skip:
+  audits: [ux, color, typography]

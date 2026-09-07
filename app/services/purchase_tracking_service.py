@@ -10,7 +10,7 @@ from decimal import Decimal
 from fastapi import Request, Response, HTTPException, UploadFile
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
-from app.core.exceptions import AuthenticationError
+from app.core.exceptions import AuthenticationError, APIError
 from app.services.aws_s3_service import AWSS3Service
 from app.core.timezones import local_date_for_tenant, resolve_tenant_timezone
 from app.services.account_role_service import (
@@ -19,9 +19,9 @@ from app.services.account_role_service import (
     resolve_account,
     resolve_payment_account,
 )
+from app.services.billing_service import check_plan_quota_period
 import logging
 
-logger = logging.getLogger(__name__)
 from app.models.purchase import (
     PurchaseStatusHistory,
     PurchaseStatusHistoryCreate,
@@ -38,6 +38,34 @@ from app.models.purchase import (
     AttachmentsResponse,
 )
 from app.services.discord_service import discord_purchase_actions_service
+from app.services.operation_events_service import DOMAIN_ABASTECIMIENTO, record_module_event
+
+logger = logging.getLogger(__name__)
+
+
+async def _record_purchase_transition(conn, tenant_id, *, action, actor_user_id, purchase_id, label=None):
+    await record_module_event(
+        conn,
+        tenant_id,
+        domain=DOMAIN_ABASTECIMIENTO,
+        action=action,
+        actor_user_id=actor_user_id,
+        entity_type="purchase",
+        entity_id=purchase_id,
+        label=label,
+    )
+
+
+def _resolve_from_cash_drawer(
+    payment_method_slug: Optional[str],
+    from_cash_drawer: Optional[bool],
+) -> bool:
+    """Non-cash always true; cash may opt out of arqueo drawer outflows (#2141)."""
+    if (payment_method_slug or "").strip().lower() != "cash":
+        return True
+    if from_cash_drawer is None:
+        return True
+    return bool(from_cash_drawer)
 
 # =============================================================================
 # STATE TRANSITION RULES
@@ -765,6 +793,12 @@ async def transition_to_confirmed(
                     except Exception as discord_error:
                         logger.error(f"Failed to send Discord notification for purchase confirmation: {discord_error}")
 
+                await _record_purchase_transition(
+                    conn, tenant_id,
+                    action="purchase_confirmed",
+                    actor_user_id=user_id,
+                    purchase_id=purchase_id,
+                )
                 return {"success": True, "message": "Purchase confirmed successfully"}
 
     except AuthenticationError:
@@ -902,6 +936,10 @@ async def transition_to_shipped(
                     except Exception as discord_error:
                         logger.error(f"Failed to send Discord notification for purchase shipment: {discord_error}")
 
+                await _record_purchase_transition(
+                    conn, tenant_id, action="purchase_shipped",
+                    actor_user_id=user_id, purchase_id=purchase_id,
+                )
                 return {"success": True, "message": "Purchase marked as shipped"}
 
     except AuthenticationError:
@@ -1198,6 +1236,10 @@ async def transition_to_received(
                         f"[GL] purchase GL post failed for {purchase_id}: {_gl_err}"
                     )
 
+                await _record_purchase_transition(
+                    conn, tenant_id, action="purchase_received",
+                    actor_user_id=user_id, purchase_id=purchase_id,
+                )
                 return {"success": True, "message": f"Purchase {target_status}"}
 
     except MissingAccountRoleError:
@@ -1362,6 +1404,10 @@ async def transition_to_invoiced(
                     except Exception as discord_error:
                         logger.error(f"Failed to send Discord notification for purchase invoice: {discord_error}")
 
+                await _record_purchase_transition(
+                    conn, tenant_id, action="purchase_invoiced",
+                    actor_user_id=user_id, purchase_id=purchase_id,
+                )
                 return {"success": True, "message": "Invoice registered successfully"}
 
     except AuthenticationError:
@@ -1382,7 +1428,8 @@ async def transition_to_paid(
     payment_amount: float,
     payment_date: str,
     notes: Optional[str] = None,
-    files: List[UploadFile] = []
+    files: List[UploadFile] = [],
+    from_cash_drawer: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Transition purchase to paid state with optional file attachments"""
     try:
@@ -1424,6 +1471,11 @@ async def transition_to_paid(
                     payment_method,
                     payment_method_id,
                 )
+                drawer_flag = _resolve_from_cash_drawer(payment_method, from_cash_drawer)
+
+                await check_plan_quota_period(
+                    conn, tenant_id, "supplier_payments_per_period"
+                )
 
                 # Update purchase
                 await conn.execute("""
@@ -1435,10 +1487,11 @@ async def transition_to_paid(
                         payment_reference = $3,
                         payment_amount = $4,
                         payment_date = $5,
+                        from_cash_drawer = $6,
                         paid_at = NOW(),
                         updated_at = NOW()
-                    WHERE id = $6
-                """, payment_method, payment_method_id, payment_reference, payment_amount, payment_dt, purchase_id)
+                    WHERE id = $7
+                """, payment_method, payment_method_id, payment_reference, payment_amount, payment_dt, drawer_flag, purchase_id)
 
                 # Create history entry
                 await create_status_history_entry(
@@ -1448,7 +1501,8 @@ async def transition_to_paid(
                         "payment_method": payment_method,
                         "payment_method_id": str(payment_method_id) if payment_method_id else None,
                         "payment_amount": str(payment_amount),
-                        "payment_date": payment_dt.isoformat()
+                        "payment_date": payment_dt.isoformat(),
+                        "from_cash_drawer": drawer_flag,
                     },
                     notes
                 )
@@ -1514,11 +1568,17 @@ async def transition_to_paid(
                     except Exception as discord_error:
                         logger.error(f"Failed to send Discord notification for purchase payment: {discord_error}")
 
+                await _record_purchase_transition(
+                    conn, tenant_id, action="purchase_paid",
+                    actor_user_id=user_id, purchase_id=purchase_id,
+                )
                 return {"success": True, "message": "Payment registered successfully"}
 
     except MissingAccountRoleError:
         raise
     except AuthenticationError:
+        raise
+    except APIError:
         raise
     except HTTPException:
         raise
@@ -1619,6 +1679,10 @@ async def cancel_purchase(
                     except Exception as discord_error:
                         logger.error(f"Failed to send Discord notification for purchase cancellation: {discord_error}")
 
+                await _record_purchase_transition(
+                    conn, tenant_id, action="purchase_cancelled",
+                    actor_user_id=user_id, purchase_id=purchase_id,
+                )
                 return {"success": True, "message": "Purchase cancelled successfully"}
 
     except AuthenticationError:

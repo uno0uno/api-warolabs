@@ -90,8 +90,9 @@ async def test_update_perceived_still_recalcs_real_not_perceived():
     update_sql = []
 
     conn = MagicMock()
-    conn.fetchrow = AsyncMock(return_value={"id": product_id, "name": "Test"})
+    conn.fetchrow = AsyncMock(return_value={"id": product_id, "name": "Test", "is_resale": False})
     conn.execute = AsyncMock(side_effect=lambda q, *a: update_sql.append(q))
+    conn.fetchval = AsyncMock(return_value=None)
     @asynccontextmanager
     async def _txn():
         yield

@@ -6,13 +6,14 @@ Endpoints tested:
 - type×unit validation (create_tenant_ingredient)
 """
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from fastapi import HTTPException
 from httpx import AsyncClient
 
 from app.models.ingredient import TenantIngredientCreate
+from app.models.ingredient import PurchaseUnitInput
 from app.services.ingredients_service import (
     _validate_unit_for_type,
     create_tenant_ingredient,
@@ -172,6 +173,191 @@ class TestIngredientUnitTypeValidation:
         assert result["unit"] == "hr"
 
 
+class TestVariantPurchaseUnitInheritance:
+    """Issue #68 — copy parent purchase units when creating a variant ingredient."""
+
+    @pytest.mark.asyncio
+    async def test_create_variant_copies_parent_purchase_units(self):
+        tenant_id = uuid4()
+        parent_id = uuid4()
+        ingredient_id = uuid4()
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(
+            side_effect=[
+                {"id": parent_id, "name": "Tomate"},
+                {
+                    "id": str(ingredient_id),
+                    "name": "Tomate pack x12",
+                    "unit": "gr",
+                    "type": "food",
+                    "category": None,
+                    "warehouse_category_id": None,
+                    "costo_unitario": None,
+                    "parent_id": str(parent_id),
+                    "tenant_id": str(tenant_id),
+                    "is_resale": False,
+                    "unit_weight_gr": None,
+                    "unit_weight_unit": "gr",
+                    "created_at": None,
+                },
+            ]
+        )
+        conn.fetch = AsyncMock(return_value=[
+            {
+                "purchase_unit": "kg",
+                "purchase_unit_label": "Kilogramo",
+                "conversion_factor": 1000,
+                "unit_cost": None,
+                "is_default": True,
+                "is_active": True,
+                "notes": None,
+            },
+        ])
+        data = TenantIngredientCreate(
+            name="Tomate pack x12",
+            unit="gr",
+            type="food",
+            parent_id=str(parent_id),
+        )
+
+        with patch("app.services.ingredients_service.check_plan_quota_growth", new_callable=AsyncMock):
+            result = await create_tenant_ingredient(conn, tenant_id, data)
+
+        assert result["parent_id"] == str(parent_id)
+        conn.fetch.assert_awaited_once()
+        assert conn.fetch.await_args.args[1] == parent_id
+        execute_sqls = [call.args[0] for call in conn.execute.await_args_list]
+        assert any("ingredient_purchase_units" in sql for sql in execute_sqls)
+        assert any("tenant_inventory" in sql for sql in execute_sqls)
+        purchase_call = next(
+            call for call in conn.execute.await_args_list
+            if "ingredient_purchase_units" in call.args[0]
+        )
+        assert purchase_call.args[1] == ingredient_id
+        assert purchase_call.args[2] == "kg"
+
+    @pytest.mark.asyncio
+    async def test_create_variant_parent_without_purchase_units(self):
+        tenant_id = uuid4()
+        parent_id = uuid4()
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(
+            side_effect=[
+                {"id": parent_id, "name": "Tomate"},
+                {
+                    "id": str(uuid4()),
+                    "name": "Tomate pack x12",
+                    "unit": "gr",
+                    "type": "food",
+                    "category": None,
+                    "warehouse_category_id": None,
+                    "costo_unitario": None,
+                    "parent_id": str(parent_id),
+                    "tenant_id": str(tenant_id),
+                    "is_resale": False,
+                    "unit_weight_gr": None,
+                    "unit_weight_unit": "gr",
+                    "created_at": None,
+                },
+            ]
+        )
+        conn.fetch = AsyncMock(return_value=[])
+        data = TenantIngredientCreate(
+            name="Tomate pack x12",
+            unit="gr",
+            type="food",
+            parent_id=str(parent_id),
+        )
+
+        with patch("app.services.ingredients_service.check_plan_quota_growth", new_callable=AsyncMock):
+            await create_tenant_ingredient(conn, tenant_id, data)
+
+        conn.fetch.assert_awaited_once()
+        execute_sqls = [call.args[0] for call in conn.execute.await_args_list]
+        assert not any("ingredient_purchase_units" in sql for sql in execute_sqls)
+        assert any("tenant_inventory" in sql for sql in execute_sqls)
+
+    @pytest.mark.asyncio
+    async def test_create_variant_explicit_purchase_units_skip_inheritance(self):
+        tenant_id = uuid4()
+        parent_id = uuid4()
+        ingredient_id = uuid4()
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(
+            side_effect=[
+                {"id": parent_id, "name": "Tomate"},
+                {
+                    "id": str(ingredient_id),
+                    "name": "Tomate pack x12",
+                    "unit": "gr",
+                    "type": "food",
+                    "category": None,
+                    "warehouse_category_id": None,
+                    "costo_unitario": None,
+                    "parent_id": str(parent_id),
+                    "tenant_id": str(tenant_id),
+                    "is_resale": False,
+                    "unit_weight_gr": None,
+                    "unit_weight_unit": "gr",
+                    "created_at": None,
+                },
+            ]
+        )
+        data = TenantIngredientCreate(
+            name="Tomate pack x12",
+            unit="gr",
+            type="food",
+            parent_id=str(parent_id),
+            purchase_units=[PurchaseUnitInput(purchase_unit="libra", is_default=True)],
+        )
+
+        with patch("app.services.ingredients_service.check_plan_quota_growth", new_callable=AsyncMock):
+            await create_tenant_ingredient(conn, tenant_id, data)
+
+        conn.fetch.assert_not_awaited()
+        execute_sqls = [call.args[0] for call in conn.execute.await_args_list]
+        assert any("tenant_inventory" in sql for sql in execute_sqls)
+        purchase_call = next(
+            call for call in conn.execute.await_args_list
+            if "ingredient_purchase_units" in call.args[0]
+        )
+        assert purchase_call.args[2] == "libra"
+
+    @pytest.mark.asyncio
+    async def test_create_tenant_ingredient_seeds_zero_inventory(self):
+        tenant_id = uuid4()
+        ingredient_id = uuid4()
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(
+            return_value={
+                "id": str(ingredient_id),
+                "name": "Sal",
+                "unit": "gr",
+                "type": "food",
+                "category": None,
+                "warehouse_category_id": None,
+                "costo_unitario": None,
+                "parent_id": None,
+                "tenant_id": str(tenant_id),
+                "is_resale": False,
+                "unit_weight_gr": None,
+                "unit_weight_unit": "gr",
+                "created_at": None,
+            }
+        )
+        data = TenantIngredientCreate(name="Sal", unit="gr", type="food")
+
+        with patch("app.services.ingredients_service.check_plan_quota_growth", new_callable=AsyncMock):
+            await create_tenant_ingredient(conn, tenant_id, data)
+
+        inventory_call = next(
+            call for call in conn.execute.await_args_list
+            if "tenant_inventory" in call.args[0]
+        )
+        assert inventory_call.args[1] == tenant_id
+        assert inventory_call.args[2] == ingredient_id
+
+
 class TestIngredientCategorySearch:
     @pytest.mark.asyncio
     async def test_lists_tenant_visible_categories_with_partial_search(self):
@@ -283,6 +469,7 @@ class TestIngredientCategoryResolution:
             tenant_id,
             [first_category_id, second_category_id],
             [excluded_ingredient_id],
+            False,
         ]
         conn.fetch.assert_awaited_once()
 

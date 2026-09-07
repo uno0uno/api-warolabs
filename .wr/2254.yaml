@@ -1,0 +1,38 @@
+# Mirror of front_nuxt/.wr/2254.yaml for API-side exec (same contract).
+issue: 2254
+title: "Batch: Menu import foundation — jobs, R2, dry-run, bodega (+ resale)"
+repo: both
+repo_remote: uno0uno/api-warolabs
+parent_epic: uno0uno/warocol.com#2253
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2254-menu-import-foundation
+
+paths:
+  - sql/YYYYMMDD_menu_import_jobs.sql
+  - app/routers/menu_import.py
+  - app/services/menu_import_service.py
+  - app/services/products_service.py
+  - app/services/ingredients_service.py
+  - tests/test_menu_import_warehouse.py
+  - .wr/2254.yaml
+
+ac:
+  - menu_import_jobs + R2 menu/imports/ + dry-run/commit warehouse CSV
+  - Decision A incomplete resale; create_resale_pair when sell fields present
+  - Companion front PR on warocol.com same branch name
+
+decisions:
+  incomplete_resale: A_ingredient_only_until_sell_fields
+
+hints:
+  entry: "menu_import_service"
+  pattern: "purchase_tracking_service.py:211; products_service.py:165"
+  tests: "pytest tests/test_menu_import_warehouse.py -q"
+
+risk:
+  sensitive: false
+  areas: [billing-quotas, inventory-create, r2]
+
+next:
+  after_pr: "open companion front PR; /wr-next uno0uno/warocol.com#2253"

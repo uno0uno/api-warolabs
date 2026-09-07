@@ -5,7 +5,7 @@ from typing import Optional, List
 from uuid import uuid4
 from fastapi import Request, Response
 from app.database import get_db_connection
-from app.core.security import set_session_cookie, get_client_ip, get_current_user_id
+from app.core.security import INTERNAL_SESSION_HOURS, set_session_cookie, get_client_ip, get_current_user_id
 from app.core.middleware import require_valid_tenant, require_valid_session
 from app.core.exceptions import APIError, AuthenticationError, ValidationError, AuthorizationError
 from app.core.email_utils import normalize_email
@@ -21,6 +21,7 @@ from app.models.invitation import (
     InvitationData,
     InvitationUser
 )
+from app.services.operation_events_service import DOMAIN_EQUIPO, record_module_event
 
 logger = logging.getLogger(__name__)
 
@@ -196,18 +197,23 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
                 current_user_id
             )
 
-            # Prepare template context
+            # Resolve tenant locale for localized email copy
+            from app.core.localization import resolve_tenant_locale_settings
+            locale_settings = await resolve_tenant_locale_settings(conn, tenant_context.tenant_id)
+            invite_locale = locale_settings.locale
+
+            # Prepare template context (role as localization key, not display string)
             template_context = {
                 'brand_name': brand_name,
                 'tenant_name': tenant_name,
-                'inviter_name': inviter_name or 'Un administrador',
+                'inviter_name': inviter_name or '',
                 'invitee_name': payload.name,
-                'role': 'Administrador' if payload.role.value == 'admin' else 'Super Usuario',
+                'role': payload.role.value,
             }
 
             # Generate email content
-            html_template = get_invitation_template(invitation_url, template_context)
-            subject = get_invitation_subject(brand_name)
+            html_template = get_invitation_template(invitation_url, template_context, locale=invite_locale)
+            subject = get_invitation_subject(brand_name, locale=invite_locale)
 
             from_name = f"{inviter_name or 'Equipo'} - {brand_name}"
 
@@ -226,6 +232,17 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
                 logger.error(f"❌ Failed to send invitation email to {payload.email}")
                 logger.info(f"🔗 FALLBACK: Invitation URL: {invitation_url}")
 
+            await record_module_event(
+                conn,
+                session_tenant_id,
+                domain=DOMAIN_EQUIPO,
+                action="invitation_sent",
+                actor_user_id=current_user_id,
+                entity_type="invitation",
+                entity_id=invitation["id"],
+                label=payload.email,
+            )
+
             return SendInvitationResponse(
                 success=True,
                 message="Invitación enviada exitosamente",
@@ -239,7 +256,7 @@ async def send_invitation(request: Request, payload: SendInvitationRequest) -> S
                 )
             )
 
-    except (ValidationError, AuthenticationError, AuthorizationError):
+    except (ValidationError, AuthenticationError, AuthorizationError, APIError):
         raise
     except Exception as e:
         logger.error(f"❌ Send invitation error: {e}", exc_info=True)
@@ -325,7 +342,7 @@ async def accept_invitation(request: Request, response: Response, token: str) ->
 
             # Create session (same as magic link flow)
             session_id = secrets.token_hex(16)
-            expires_at = datetime.utcnow() + timedelta(days=7)
+            expires_at = datetime.utcnow() + timedelta(hours=INTERNAL_SESSION_HOURS)  # 24 hours
             client_ip = get_client_ip(request)
             user_agent = request.headers.get('user-agent')
 
@@ -506,6 +523,16 @@ async def cancel_invitation(request: Request, invitation_id: str) -> CancelInvit
                 raise ValidationError("Invitation not found or already processed")
 
             logger.info(f"🚫 Invitation cancelled: {invitation_id}")
+
+            await record_module_event(
+                conn,
+                session_tenant_id,
+                domain=DOMAIN_EQUIPO,
+                action="invitation_cancelled",
+                actor_user_id=current_user_id,
+                entity_type="invitation",
+                entity_id=invitation_id,
+            )
 
             return CancelInvitationResponse(
                 success=True,

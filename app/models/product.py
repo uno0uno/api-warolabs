@@ -5,15 +5,26 @@ from uuid import UUID
 from datetime import datetime
 from decimal import Decimal
 
+from app.models.modifier import ModifierOptionType
+
 class Modifier(BaseModel):
     """Modifier option within a modifier group"""
     id: UUID
     name: str
     price: Decimal
     max_limit: int = Field(default=1, ge=1, description="Max times this option can be added")
+    included_quantity: int = Field(
+        default=0,
+        ge=0,
+        description="Units included before the additional price applies",
+    )
     is_available: Optional[bool] = True
     is_default: Optional[bool] = False
     sort_order: Optional[int] = None
+    option_type: ModifierOptionType = Field(
+        default="INGREDIENT",
+        description="INGREDIENT | RECIPE | PRODUCT | NONE",
+    )
 
     class Config:
         from_attributes = True
@@ -78,7 +89,20 @@ class ProductBase(BaseModel):
         description="When true, POS may send a custom unit_price (venta libre); at most one per tenant",
     )
     allow_modifiers: bool = Field(True, description="Whether product allows modifiers")
-    tax_category: Literal['standard', 'liquor', 'exempt'] = Field("standard", description="Tax classification: standard (INC/IVA), liquor (IVA licores 5%), exempt (no tax)")
+    tax_category: Literal['standard', 'liquor', 'exempt'] = Field(
+        "standard",
+        description="Tax classification mapped via tenant category_map → tax_lines "
+        "(CO default: standard→INC/IVA, liquor→liquor line, exempt→none). "
+        "Same field for POS and venta directa. Kept for CO/legacy dual-read.",
+    )
+    tax_resolution: Literal['inherit', 'exempt', 'line'] = Field(
+        "inherit",
+        description="Commercial override: inherit from menu category map, force exempt, or force a tax line",
+    )
+    tax_line_key: Optional[str] = Field(
+        None,
+        description="Tax line key when tax_resolution=line; ignored otherwise",
+    )
     station_id: Optional[UUID] = None
     kitchen_name: Optional[str] = Field(None, max_length=100)
     image_url: Optional[str] = Field(None, max_length=500, description="Public URL of the product hero image (Cloudflare R2)")
@@ -193,6 +217,14 @@ class ProductUpdate(BaseModel):
     open_priced: Optional[bool] = None
     allow_modifiers: Optional[bool] = None
     tax_category: Optional[Literal['standard', 'liquor', 'exempt']] = Field(None, description="Tax classification: standard, liquor, exempt")
+    tax_resolution: Optional[Literal['inherit', 'exempt', 'line']] = Field(
+        None,
+        description="Commercial override mode; omit to leave unchanged",
+    )
+    tax_line_key: Optional[str] = Field(
+        None,
+        description="Tax line key when tax_resolution=line; null clears when resolution set",
+    )
     ingredients: Optional[List[RecipeIngredientBase]] = Field(None, description="Updated recipe ingredients")
     station_id: Optional[UUID] = None
     kitchen_name: Optional[str] = Field(None, max_length=100)
@@ -222,6 +254,10 @@ class Product(ProductBase):
 
     # Related data
     category_name: Optional[str] = None
+    category_color: Optional[str] = Field(
+        None,
+        description="Category POS card color #RRGGBB when set; null = client keyword fallback",
+    )
     ingredients: List[RecipeIngredient] = []
     recipe_base_ids: List[UUID] = Field(default=[], description="DEPRECATED: associated recipe base IDs (sourced from recipe_bases for backwards compat).")
     recipe_bases: List[RecipeBaseLink] = Field(default=[], description="Recipe bases with per-product quantity multiplier (Issue #517).")

@@ -53,8 +53,8 @@ class Module(str, Enum):
 
     Grouped by business area as defined in Epic 2 (#164). 14 modules in
     Spanish to match the language operators use to talk about their own
-    business. Each module corresponds to a router group that Epic 2 will
-    decorate with `require_module()`.
+    business (CRM added in #1931). Each module corresponds to a router group
+    that Epic 2 will decorate with `require_module()`.
     """
     POS = "pos"                          # pos_cart, tables, comandas, online_orders
     VENTAS = "ventas"                    # orders, online_cart
@@ -63,6 +63,7 @@ class Module(str, Enum):
     OPERACIONES = "operaciones"          # tenant_config, stations
     ABASTECIMIENTO = "abastecimiento"    # purchases, suppliers, inventory, admin_ingredients, ingredient_purchase_units
     ANALITICA = "analitica"              # analytics, articles
+    CRM = "crm"                          # customers, Waros loyalty (moved from analitica)
     FINANZAS = "finanzas"                # accounting, expenses, salaries, cierre, cartera, credit, payment_methods, financial
     FACTURACION = "facturacion"          # facturacion, invoices, support_documents
     EQUIPO = "equipo"                    # tenants, invitations
@@ -87,6 +88,7 @@ DEFAULT_ROLE_MODULES: Dict[Role, FrozenSet[Module]] = {
         Module.OPERACIONES,
         Module.ABASTECIMIENTO,
         Module.ANALITICA,
+        Module.CRM,
         Module.FINANZAS,
         Module.FACTURACION,
         Module.INTEGRACIONES,
@@ -103,6 +105,7 @@ DEFAULT_ROLE_MODULES: Dict[Role, FrozenSet[Module]] = {
         Module.OPERACIONES,
         Module.ABASTECIMIENTO,
         Module.ANALITICA,
+        Module.CRM,
         # No MI_NEGOCIO — owner-only
     }),
     Role.CASHIER: frozenset({
@@ -336,11 +339,15 @@ def require_module(module: Module) -> Callable[[Request], Awaitable[None]]:
       * `enforce`  → if the user lacks the module, raise 403.
 
     Owner short-circuit happens inside `get_role_modules`. Sessions without
-    a valid role (no membership row, KDS tokens, API keys without role
-    plumbing) are treated as "no staff modules" — denied or shadow-logged.
+    a valid role (no membership row, KDS tokens) are treated as "no staff
+    modules" — denied or shadow-logged.
     Sessions that aren't valid at all return early so `require_valid_session`
     (still called inside handlers) can raise 401 with its own message —
     keeps responsibilities split.
+
+    Valid API-key callers bypass this staff-module gate entirely. Middleware
+    builds a role-less pseudo-session for API keys; authorization for those
+    requests stays in `validate_api_key_auth` / token scopes.
 
     Usage:
         from fastapi import Depends
@@ -351,7 +358,12 @@ def require_module(module: Module) -> Callable[[Request], Awaitable[None]]:
             ...
     """
     async def dependency(request: Request) -> None:
-        from app.core.middleware import get_session_context  # local import to avoid cycle
+        # local import to avoid cycle
+        from app.core.middleware import get_api_key_context, get_session_context
+
+        # API keys authenticate via token scopes in handlers — not staff modules.
+        if get_api_key_context(request).is_valid:
+            return
 
         session = get_session_context(request)
         if not session.is_valid:
@@ -360,6 +372,20 @@ def require_module(module: Module) -> Callable[[Request], Awaitable[None]]:
         tenant_id = session.tenant_id
         if not tenant_id:
             return  # no tenant resolved → cannot gate; let handler decide
+
+        from app.services.billing_service import (
+            STARTER_PLAN_MODULE_VALUES,
+            STARTER_PLAN_SLUG,
+            get_effective_plan_slug,
+        )
+
+        async with get_db_connection() as conn:
+            plan_slug = await get_effective_plan_slug(conn, tenant_id)
+        if plan_slug == STARTER_PLAN_SLUG and module.value not in STARTER_PLAN_MODULE_VALUES:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Módulo no disponible en el plan Starter: {module.value}",
+            )
 
         mode = await get_enforcement_mode(tenant_id)
         if mode == "disabled":
@@ -389,6 +415,83 @@ def require_module(module: Module) -> Callable[[Request], Awaitable[None]]:
 
         _shadow_or_deny(
             mode, tenant_id, session.user_id, normalized.value, module,
+            reason="not-in-matrix", path=path,
+        )
+
+    return dependency
+
+
+def require_any_module(*modules: Module) -> Callable[[Request], Awaitable[None]]:
+    """Like ``require_module`` but allows access when the role has *any* module.
+
+    Used for read endpoints shared across POS / Ventas / Despacho / Operaciones
+    (e.g. printer assignment GET for ticket routing).
+    """
+    if not modules:
+        raise ValueError("require_any_module needs at least one Module")
+
+    async def dependency(request: Request) -> None:
+        # local import to avoid cycle
+        from app.core.middleware import get_api_key_context, get_session_context
+
+        if get_api_key_context(request).is_valid:
+            return
+
+        session = get_session_context(request)
+        if not session.is_valid:
+            return
+
+        tenant_id = session.tenant_id
+        if not tenant_id:
+            return
+
+        from app.services.billing_service import (
+            STARTER_PLAN_MODULE_VALUES,
+            STARTER_PLAN_SLUG,
+            get_effective_plan_slug,
+        )
+
+        async with get_db_connection() as conn:
+            plan_slug = await get_effective_plan_slug(conn, tenant_id)
+        if plan_slug == STARTER_PLAN_SLUG:
+            if not any(m.value in STARTER_PLAN_MODULE_VALUES for m in modules):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        "Módulo no disponible en el plan Starter: "
+                        + ", ".join(m.value for m in modules)
+                    ),
+                )
+
+        mode = await get_enforcement_mode(tenant_id)
+        if mode == "disabled":
+            return
+
+        path = request.url.path
+        raw_role = session.role
+        primary = modules[0]
+        if not raw_role:
+            _shadow_or_deny(
+                mode, tenant_id, session.user_id, None, primary,
+                reason="no-membership", path=path,
+            )
+            return
+
+        try:
+            normalized = normalize_role(raw_role)
+        except ValueError:
+            _shadow_or_deny(
+                mode, tenant_id, session.user_id, raw_role, primary,
+                reason="unknown-role", path=path,
+            )
+            return
+
+        allowed = await get_role_modules(tenant_id, normalized)
+        if any(module in allowed for module in modules):
+            return
+
+        _shadow_or_deny(
+            mode, tenant_id, session.user_id, normalized.value, primary,
             reason="not-in-matrix", path=path,
         )
 

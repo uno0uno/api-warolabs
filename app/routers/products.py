@@ -212,17 +212,21 @@ async def update_product_endpoint(
 @router.delete("/{product_id}", dependencies=[Depends(require_module(Module.MENU))])
 async def delete_product_endpoint(
     request: Request,
-    product_id: UUID
+    product_id: UUID,
+    payload: dict = Body(default={}),
 ):
     """
-    Delete or archive a product.
+    Delete or archive a product. Requires `reason` in body (Bitácora audit).
 
     Products with sales history (order_items) are archived (is_available=false) to
     preserve orders and KDS links. Products never sold are permanently deleted.
 
     Requires valid session with tenant context.
     """
-    return await delete_product(request, product_id)
+    reason = (payload or {}).get("reason", "").strip() if isinstance(payload, dict) else ""
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason is required")
+    return await delete_product(request, product_id, reason=reason)
 
 
 @router.post("/upload-image", dependencies=[Depends(require_module(Module.MENU))])

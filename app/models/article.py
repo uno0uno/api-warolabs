@@ -28,6 +28,7 @@ class ArticleCreate(ArticleBase):
     lang: str = Field(default="es", max_length=10, description="Language code")
     planet: str = Field(default="earth", description="Planet (for multi-site)")
     country: str = Field(default="Colombia", description="Country")
+    country_code: Optional[str] = Field(default=None, max_length=2, description="ISO 3166-1 alpha-2")
     city: str = Field(default="", description="City")
 
 
@@ -70,9 +71,11 @@ class Article(ArticleBase):
     draft: bool
     is_active: bool
     views: Optional[int] = 0
+    pillar: Optional[str] = None
     lang: str
     planet: str
     country: str
+    country_code: Optional[str] = None
     city: str
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -96,11 +99,14 @@ class ArticleSummary(BaseModel):
     cover: str
     tags: str
     views: Optional[int] = 0
+    pillar: Optional[str] = None
     published: bool
     created_at: datetime
     updated_at: Optional[datetime] = None
     author_name: Optional[str] = None
     author_avatar: Optional[str] = None
+    lang: Optional[str] = None
+    country_code: Optional[str] = None
 
     class Config:
         from_attributes = True

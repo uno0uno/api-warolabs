@@ -43,16 +43,23 @@ def _patch_db(ctx):
     )
 
 
+def _patch_event(new=None):
+    return patch(
+        "app.services.orders_service.record_operation_event",
+        new=new or AsyncMock(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_associate_order_customer_updates_when_no_invoice_exists():
     request = MagicMock()
     ctx = _ConnCtx([
-        {"id": _ORDER_ID},
+        {"id": _ORDER_ID, "customer_id": None, "order_number": 18401, "status": "completed"},
         None,
         {"id": _CUSTOMER_ID},
     ])
 
-    with _patch_session(), _patch_db(ctx):
+    with _patch_session(), _patch_db(ctx), _patch_event():
         result = await orders_service.associate_order_customer(
             request,
             _ORDER_ID,
@@ -72,7 +79,7 @@ async def test_associate_order_customer_updates_when_no_invoice_exists():
 async def test_associate_order_customer_blocks_when_invoice_exists():
     request = MagicMock()
     ctx = _ConnCtx([
-        {"id": _ORDER_ID},
+        {"id": _ORDER_ID, "status": "completed"},
         {"id": uuid4()},
     ])
 
@@ -93,12 +100,12 @@ async def test_associate_order_customer_blocks_when_invoice_exists():
 async def test_associate_order_customer_requires_tenant_customer():
     request = MagicMock()
     ctx = _ConnCtx([
-        {"id": _ORDER_ID},
+        {"id": _ORDER_ID, "status": "pending"},
         None,
         None,
     ])
 
-    with _patch_session(), _patch_db(ctx):
+    with _patch_session(), _patch_db(ctx), _patch_event():
         with pytest.raises(APIError) as exc_info:
             await orders_service.associate_order_customer(
                 request,
@@ -108,4 +115,60 @@ async def test_associate_order_customer_requires_tenant_customer():
 
     assert exc_info.value.status_code == 404
     assert "Customer not found" in str(exc_info.value)
+    ctx.conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_associate_order_customer_records_ventas_event():
+    request = MagicMock()
+    user_id = uuid4()
+    previous_customer = uuid4()
+    recorded = []
+
+    async def capture_record(conn, tid, **kwargs):
+        recorded.append({"tenant_id": tid, **kwargs})
+
+    ctx = _ConnCtx([
+        {"id": _ORDER_ID, "customer_id": previous_customer, "order_number": 18401, "status": "pending"},
+        None,
+        {"id": _CUSTOMER_ID},
+    ])
+    session = MagicMock()
+    session.tenant_id = _TENANT_ID
+    session.user_id = user_id
+
+    with patch("app.services.orders_service.require_valid_session", return_value=session), \
+         _patch_db(ctx), \
+         patch("app.services.orders_service.record_operation_event", new=capture_record):
+        await orders_service.associate_order_customer(request, _ORDER_ID, _CUSTOMER_ID)
+
+    assert len(recorded) == 1
+    event = recorded[0]
+    assert event["domain"] == "ventas"
+    assert event["channel"] is None
+    assert event["action"] == "order_customer_changed"
+    assert event["order_id"] == _ORDER_ID
+    assert event["actor_user_id"] == user_id
+    assert event["payload"]["old_customer_id"] == str(previous_customer)
+    assert event["payload"]["new_customer_id"] == str(_CUSTOMER_ID)
+    assert event["payload"]["order_number"] == 18401
+
+
+@pytest.mark.asyncio
+async def test_associate_order_customer_rejects_cancelled_sale():
+    request = MagicMock()
+    ctx = _ConnCtx([
+        {"id": _ORDER_ID, "customer_id": None, "order_number": 18401, "status": "cancelled"},
+    ])
+
+    with _patch_session(), _patch_db(ctx), _patch_event():
+        with pytest.raises(APIError) as exc_info:
+            await orders_service.associate_order_customer(
+                request,
+                _ORDER_ID,
+                _CUSTOMER_ID,
+            )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.details == {"code": "sale_cancelled"}
     ctx.conn.execute.assert_not_awaited()

@@ -14,8 +14,10 @@ from app.services.account_role_service import (
     AccountRole,
     MissingAccountRoleError,
     ensure_colombia_payroll,
+    ensure_matias_dian,
     resolve_account,
     resolve_payment_account,
+    resolve_tax_account,
 )
 
 
@@ -130,6 +132,60 @@ async def test_colombia_payroll_gate_rejects_global_profile():
 
 
 @pytest.mark.asyncio
+async def test_matias_dian_gate_rejects_global_profile():
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=False)
+
+    with pytest.raises(APIError) as exc:
+        await ensure_matias_dian(conn, uuid4())
+
+    assert exc.value.status_code == 409
+    assert exc.value.details["code"] == "MATIAS_DIAN_NOT_AVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_matias_dian_gate_allows_colombia_profile():
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=True)
+
+    await ensure_matias_dian(conn, uuid4())
+    conn.fetchval.assert_awaited_once()
+
+
+def test_capability_deps_request_annotation_avoids_fastapi_query_422():
+    """Bare `request` is treated as a required query param → 422 (#725)."""
+    from fastapi import Depends, FastAPI, Request
+    from fastapi.testclient import TestClient
+
+    async def untyped_request_dep(request):
+        return None
+
+    async def typed_request_dep(request: Request):
+        return None
+
+    app = FastAPI()
+
+    @app.get("/untyped", dependencies=[Depends(untyped_request_dep)])
+    async def untyped_route():
+        return {"ok": True}
+
+    @app.get("/typed", dependencies=[Depends(typed_request_dep)])
+    async def typed_route():
+        return {"ok": True}
+
+    client = TestClient(app)
+    bad = client.get("/untyped")
+    assert bad.status_code == 422
+    assert any(
+        err.get("loc") == ["query", "request"] for err in bad.json().get("detail", [])
+    )
+
+    good = client.get("/typed")
+    assert good.status_code == 200
+    assert good.json() == {"ok": True}
+
+
+@pytest.mark.asyncio
 async def test_global_pl_does_not_query_or_include_colombia_payroll():
     conn = MagicMock()
     conn.fetchrow = AsyncMock(side_effect=[
@@ -160,3 +216,64 @@ def test_migration_defines_scoped_uuid_bindings_and_compatibility_backfill():
     assert "ADD COLUMN IF NOT EXISTS gl_account_id UUID" in migration
     assert "methods.gl_account_id IS NULL" in migration
     assert "config.inc_gl_account_id IS NULL" in migration
+
+
+@pytest.mark.asyncio
+async def test_global_iva_falls_back_to_tax_payable_when_iva_role_missing():
+    """MX/global packs use gl_role=iva but chart only seeds TAX_PAYABLE (#1903)."""
+    tenant_id = uuid4()
+    tax_payable = AccountRef(
+        uuid4(), "2100", "Tax payable", AccountRole.TAX_PAYABLE, "localization_default"
+    )
+    conn = MagicMock()
+    tax_config = {
+        "iva_gl_account_id": None,
+        "iva_gl_account_code": "2408",  # stale CO code — must not block fallback
+    }
+
+    with patch(
+        "app.services.account_role_service.resolve_account_by_id",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "app.services.account_role_service.resolve_legacy_account",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "app.services.account_role_service.resolve_account",
+        new=AsyncMock(
+            side_effect=[
+                MissingAccountRoleError(tenant_id, AccountRole.IVA_PAYABLE, "iva_tax"),
+                tax_payable,
+            ]
+        ),
+    ) as resolve_role:
+        account = await resolve_tax_account(conn, tenant_id, tax_config, "iva")
+
+    assert account == tax_payable
+    assert resolve_role.await_args_list[0].args[2] == AccountRole.IVA_PAYABLE
+    assert resolve_role.await_args_list[1].args[2] == AccountRole.TAX_PAYABLE
+
+
+@pytest.mark.asyncio
+async def test_co_iva_uses_iva_payable_without_tax_payable_fallback():
+    tenant_id = uuid4()
+    iva_payable = AccountRef(
+        uuid4(), "2408", "IVA por pagar", AccountRole.IVA_PAYABLE, "localization_default"
+    )
+    conn = MagicMock()
+    tax_config = {"iva_gl_account_id": None, "iva_gl_account_code": None}
+
+    with patch(
+        "app.services.account_role_service.resolve_account_by_id",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "app.services.account_role_service.resolve_legacy_account",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "app.services.account_role_service.resolve_account",
+        new=AsyncMock(return_value=iva_payable),
+    ) as resolve_role:
+        account = await resolve_tax_account(conn, tenant_id, tax_config, "iva")
+
+    assert account == iva_payable
+    resolve_role.assert_awaited_once()
+    assert resolve_role.await_args.args[2] == AccountRole.IVA_PAYABLE

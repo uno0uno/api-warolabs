@@ -22,6 +22,7 @@ class IngredientInfo(BaseModel):
     unit: str
     costo_unitario: Optional[Decimal] = None
     controla_inventario: bool = False
+    is_resale: bool = False
 
 
 class RecipeBaseInfo(BaseModel):
@@ -133,9 +134,13 @@ class ModifierGroupBase(BaseModel):
 
 class ModifierGroupCreate(ModifierGroupBase):
     """Create modifier group with modifiers"""
-    product_ids: List[UUID] = Field(..., min_length=1, description="Product IDs to associate")
+    # Empty allowed for CSV import / unassigned groups (matrix attach is separate UX).
+    product_ids: List[UUID] = Field(
+        default_factory=list,
+        description="Product IDs to associate (optional; can be empty)",
+    )
     modifiers: List[ModifierCreate] = Field(default=[], description="Modifiers in this group")
-    tenant_id: UUID = Field(..., description="Tenant ID")
+    tenant_id: Optional[UUID] = Field(None, description="Tenant ID (session preferred)")
 
 
 class ModifierGroupUpdate(BaseModel):
@@ -153,6 +158,7 @@ class ModifierGroup(ModifierGroupBase):
     """Complete modifier group with modifiers"""
     id: UUID
     tenant_id: UUID
+    is_active: bool = Field(default=True, description="Activo/Archivado estado like warehouse_categories.is_active")
     created_at: datetime
     updated_at: datetime
 

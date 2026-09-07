@@ -15,6 +15,8 @@ from app.services.aws_s3_service import AWSS3Service
 from app.services.ingredient_purchase_units_service import resolve_to_base_unit
 from app.services.open_priced_service import assert_single_open_priced_per_tenant
 from app.services.ingredients_service import create_tenant_ingredient
+from app.services.billing_service import check_plan_quota_growth, check_plan_quota_scoped
+from app.services.operation_events_service import DOMAIN_MENU, record_module_event
 from app.models.ingredient import TenantIngredientCreate, PurchaseUnitInput
 import asyncpg
 import logging
@@ -168,6 +170,7 @@ async def create_product_with_recipe(
         async with get_db_connection() as conn:
             # Start transaction
             async with conn.transaction():
+                await check_plan_quota_growth(conn, tenant_id, "menu_products")
                 if product_data.open_priced:
                     await assert_single_open_priced_per_tenant(conn, tenant_id)
 
@@ -207,9 +210,10 @@ async def create_product_with_recipe(
                         name, description, price, category_id, product_base_type_id, preparation_time,
                         controla_stock, is_available, is_available_online, is_available_table_qr,
                         is_combo, is_resale, open_priced, allow_modifiers,
-                        tax_category, tenant_id, station_id, kitchen_name, image_url, costo_percibido
+                        tax_category, tax_resolution, tax_line_key,
+                        tenant_id, station_id, kitchen_name, image_url, costo_percibido
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
                     RETURNING id, created_at, updated_at
                 """
                 product_result = await conn.fetchrow(
@@ -229,6 +233,8 @@ async def create_product_with_recipe(
                     product_data.open_priced,
                     product_data.allow_modifiers,
                     product_data.tax_category,
+                    getattr(product_data, "tax_resolution", None) or "inherit",
+                    getattr(product_data, "tax_line_key", None),
                     tenant_id,
                     product_data.station_id,
                     product_data.kitchen_name,
@@ -237,6 +243,18 @@ async def create_product_with_recipe(
                 )
 
                 product_id = product_result['id']
+
+                recipe_line_count = len(product_data.ingredients or [])
+                if auto_resale_ingredient_id:
+                    recipe_line_count += 1
+                if recipe_line_count:
+                    await check_plan_quota_scoped(
+                        conn,
+                        tenant_id,
+                        "recipe_lines_per_product",
+                        product_id,
+                        projected_count=recipe_line_count,
+                    )
 
                 # 2. Insert recipe base associations (with per-product quantity, Issue #517)
                 if normalized_bases:
@@ -311,6 +329,17 @@ async def create_product_with_recipe(
                         product_snapshot, user_id
                     )
 
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MENU,
+                    action="product_created",
+                    actor_user_id=user_id,
+                    entity_type="product",
+                    entity_id=product_id,
+                    label=product_data.name,
+                )
+
                 # 6. Get complete product with recipe
                 response = await get_product_by_id(request, product_id, conn)
                 if auto_resale_ingredient_id:
@@ -352,6 +381,7 @@ async def get_product_by_id(
                     p.price,
                     p.category_id,
                     c.name as category_name,
+                    c.color as category_color,
                     p.preparation_time,
                     p.controla_stock,
                     p.is_available,
@@ -362,6 +392,8 @@ async def get_product_by_id(
                     p.open_priced,
                     p.allow_modifiers,
                     p.tax_category,
+                    p.tax_resolution,
+                    p.tax_line_key,
                     p.costo_calculado,
                     p.costo_percibido,
                     p.precio_sugerido,
@@ -610,6 +642,7 @@ async def get_products_list(
                     p.price,
                     p.category_id,
                     c.name as category_name,
+                    c.color as category_color,
                     p.preparation_time,
                     p.controla_stock,
                     p.is_available,
@@ -620,6 +653,8 @@ async def get_products_list(
                     p.open_priced,
                     p.allow_modifiers,
                     p.tax_category,
+                    p.tax_resolution,
+                    p.tax_line_key,
                     COALESCE(dc.direct_cost, 0) + COALESCE(bc.base_cost, 0) as costo_calculado,
                     p.costo_percibido,
                     p.precio_sugerido,
@@ -681,6 +716,25 @@ async def get_products_list(
                     inner_filters += f" AND {_HAS_RECIPE_SQL}"
                 else:
                     inner_filters += f" AND NOT {_HAS_RECIPE_SQL}"
+
+            # Selling catalogs (POS + venta manual use include_modifiers=true).
+            # Soft-hide only — never flips is_available* (warocol.com#2574).
+            if include_modifiers:
+                from app.services.recipe_stock_availability_service import (
+                    is_hide_products_without_stock_enabled,
+                    product_ids_insufficient_recipe_stock,
+                )
+
+                if await is_hide_products_without_stock_enabled(conn, tenant_id):
+                    hide_ids = await product_ids_insufficient_recipe_stock(
+                        conn, tenant_id
+                    )
+                    if hide_ids:
+                        inner_filters += (
+                            f" AND p.id <> ALL(${param_count}::uuid[])"
+                        )
+                        params.append(list(hide_ids))
+                        param_count += 1
 
             if inner_filters:
                 base_query = base_query.replace(
@@ -1139,7 +1193,7 @@ async def update_product_with_recipe(
 
         async with get_db_connection() as conn:
             # Verify product exists and belongs to tenant
-            verify_query = "SELECT id, name FROM product WHERE id = $1 AND tenant_id = $2"
+            verify_query = "SELECT id, name, is_resale FROM product WHERE id = $1 AND tenant_id = $2"
             product_exists = await conn.fetchrow(verify_query, product_id, tenant_id)
 
             if not product_exists:
@@ -1194,7 +1248,7 @@ async def update_product_with_recipe(
                 # Fields where None is a valid "clear this value" intent (#465).
                 # Without this, the loop below silently drops attempts to remove
                 # an image when the user clicks "Eliminar imagen" in the form.
-                NULLABLE_FIELDS = {'image_url', 'costo_percibido'}
+                NULLABLE_FIELDS = {'image_url', 'costo_percibido', 'tax_line_key'}
                 for field, value in product_data.dict(exclude={'ingredients', 'recipe_base_ids', 'recipe_bases', 'controla_stock'}, exclude_unset=True).items():
                     if value is None and field not in NULLABLE_FIELDS:
                         continue
@@ -1214,6 +1268,23 @@ async def update_product_with_recipe(
                     """
                     update_values.extend([product_id, tenant_id])
                     await conn.execute(update_query, *update_values)
+
+                # 1b. Resale: keep warehouse seed cost in sync with Mi costo when no purchases
+                # drive real cost yet (#700). Purchase unit_cost still wins in the resolver.
+                update_payload = product_data.dict(
+                    exclude={'ingredients', 'recipe_base_ids', 'recipe_bases', 'controla_stock'},
+                    exclude_unset=True,
+                )
+                if (
+                    product_exists.get("is_resale")
+                    and "costo_percibido" in update_payload
+                ):
+                    await cost_resolution_service.sync_resale_mi_costo_to_ingredient(
+                        conn,
+                        tenant_id=tenant_id,
+                        product_id=product_id,
+                        costo_percibido=update_payload.get("costo_percibido"),
+                    )
 
                 # 2. Update recipe base associations if provided (Issue #517 — with quantity).
                 # Either of the two fields (recipe_bases / recipe_base_ids) being set means
@@ -1252,6 +1323,14 @@ async def update_product_with_recipe(
                 # 3. Update recipe if ingredients provided.
                 # Empty list is now valid — product becomes "no inventory tracking".
                 if product_data.ingredients is not None:
+                    if product_data.ingredients:
+                        await check_plan_quota_scoped(
+                            conn,
+                            tenant_id,
+                            "recipe_lines_per_product",
+                            product_id,
+                            projected_count=len(product_data.ingredients),
+                        )
                     # Delete existing recipe
                     delete_recipe_query = "DELETE FROM product_recipes WHERE product_id = $1"
                     await conn.execute(delete_recipe_query, product_id)
@@ -1301,6 +1380,17 @@ async def update_product_with_recipe(
                             old_snapshot, new_snapshot, user_id
                         )
 
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MENU,
+                    action="product_updated",
+                    actor_user_id=user_id,
+                    entity_type="product",
+                    entity_id=product_id,
+                    label=product_name,
+                )
+
                 # 6. Get complete updated product
                 return await get_product_by_id(request, product_id, conn)
 
@@ -1317,7 +1407,8 @@ async def update_product_with_recipe(
 
 async def delete_product(
     request: Request,
-    product_id: UUID
+    product_id: UUID,
+    reason: Optional[str] = None
 ) -> dict:
     """
     Deletes a product when it has no sales history, or archives it when order_items exist.
@@ -1385,6 +1476,19 @@ async def delete_product(
                             user_id, archive_reason,
                         )
 
+                    await record_module_event(
+                        conn,
+                        tenant_id,
+                        domain=DOMAIN_MENU,
+                        action="product_deleted",
+                        actor_user_id=user_id,
+                        entity_type="product",
+                        entity_id=product_id,
+                        label=product_name,
+                        extra={"archived": True},
+                        reason=reason,
+                    )
+
                     return {
                         "success": True,
                         "archived": True,
@@ -1407,6 +1511,19 @@ async def delete_product(
                 await conn.execute(
                     "DELETE FROM product WHERE id = $1 AND tenant_id = $2",
                     product_id, tenant_id,
+                )
+
+                await record_module_event(
+                    conn,
+                    tenant_id,
+                    domain=DOMAIN_MENU,
+                    action="product_deleted",
+                    actor_user_id=user_id,
+                    entity_type="product",
+                    entity_id=product_id,
+                    label=product_name,
+                    extra={"archived": False},
+                    reason=reason,
                 )
 
                 return {

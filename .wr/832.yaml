@@ -1,0 +1,48 @@
+# Compact plan for wr-fast. Keep <=80 lines.
+issue: 832
+title: "feat(onboarding): name-based public slug + onboarding-* redirect contingency"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-832-name-based-slug
+
+paths:
+  - app/core/public_slug.py
+  - app/services/public_slug_service.py
+  - app/services/onboarding_service.py
+  - app/services/public_restaurant_service.py
+  - app/routers/public_restaurant.py
+  - sql/20260813_tenant_public_slug_aliases.sql
+  - tests/test_public_slug.py
+  - tests/test_onboarding_geo_defaults.py
+  - tests/test_onboarding_registration.py
+  - .wr/832.yaml
+
+ac:
+  - Slug from business name (lowercase, spaces→-)
+  - Opaque 409 if name/slug taken (no hints)
+  - tenants.slug + public slug aligned on financial apply
+  - Contingency aliases only for previous onboarding-* → 307 SLUG_MOVED
+  - User renames later do not create aliases
+  - Tests for slugify, opaque conflict, alias redirect
+
+out_of_scope:
+  - front /negocio editor (#2271)
+  - auto-run migrate_provisional on all tenants without ops confirm
+  - KDS/POS routing
+
+hints:
+  entry: "assign_name_based_storefront_slug"
+  pattern: "update_onboarding_financial_profile"
+  tests: "pytest tests/test_public_slug.py tests/test_onboarding_geo_defaults.py tests/test_onboarding_registration.py -q"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: []
+
+next:
+  after_pr: "companion front #2271; optional migrate_provisional_onboarding_slugs for legacy"

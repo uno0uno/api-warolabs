@@ -2,12 +2,14 @@
 Tenant configuration router - admin endpoints for managing public profiles
 Authentication required
 """
+import json
 from datetime import date as _date
 from uuid import UUID
 from asyncpg.exceptions import UniqueViolationError
-from fastapi import APIRouter, Depends, Request, Body, HTTPException
+from fastapi import APIRouter, Depends, Request, Body, HTTPException, Query
 from fastapi.responses import JSONResponse
 from app.core.permissions import Module, require_module
+from app.services.account_role_service import require_matias_dian_capability
 from app.services import tenant_config_service
 from app.models.tenant_public_profile import (
     TenantPublicProfileCreate,
@@ -176,6 +178,18 @@ async def get_tax_config_endpoint(request: Request):
     return await tenant_config_service.get_tax_config(request)
 
 
+@router.get(
+    "/tax-jurisdictions",
+    dependencies=[Depends(require_module(Module.MI_NEGOCIO))],
+)
+async def get_tax_jurisdictions_endpoint(
+    request: Request,
+    country: str = Query(..., min_length=2, max_length=2),
+):
+    """Static US state / CA province hospitality tax defaults (warocol.com#1848)."""
+    return await tenant_config_service.get_tax_jurisdictions(request, country)
+
+
 @router.put("/tax-config", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
 async def update_tax_config_endpoint(
     request: Request,
@@ -312,12 +326,14 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
     """
     Upsert fiscal data for the active tenant.
 
-    This endpoint intentionally does not mutate tenant_tax_config. A tenant can
-    update organization type or IVA responsibility without auto-enabling INC/IVA
-    on sale lines.
+    Optional body key `tax_config` (TaxConfigUpdate shape) persists Impuestos in
+    the same request (#2033). GET/PUT /tax-config remain for Menú and other
+    callers. Without `tax_config`, sales_tax_profile still syncs IVA/INC columns
+    + tax_lines (#2031).
     """
     from app.core.middleware import require_valid_session
     from app.database import get_db_connection
+    from pydantic import ValidationError
 
     session = require_valid_session(request)
     tenant_id = session.tenant_id
@@ -328,6 +344,9 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
     matias_company_id = _normalize_matias_company_id(data)
     electronic_invoicing_requested = bool(data.get('electronic_invoicing_requested', False))
     sales_tax_profile = _normalize_sales_tax_profile(data)
+    tax_raw = data.get('tax_config')
+    if tax_raw is not None and not isinstance(tax_raw, dict):
+        raise HTTPException(status_code=400, detail='tax_config must be an object')
 
     type_organization_id = data.get('type_organization_id', 1)
     tax_level_id = data.get('tax_level_id', 5)
@@ -398,25 +417,65 @@ async def update_fiscal_data(request: Request, data: dict = Body(...)):
             show_logo,
         )
 
-        if profile_settings:
+        # Profile-only sync when Facturación did not send a full tax_config payload.
+        if profile_settings and tax_raw is None:
+            from app.services.hospitality_tax_engine import sync_co_tax_lines_for_sales_profile
+
+            existing = await conn.fetchrow(
+                "SELECT * FROM tenant_tax_config WHERE tenant_id = $1",
+                tenant_id,
+            )
+            cfg = dict(existing) if existing else {}
+            tax_lines, category_map, menu_map = sync_co_tax_lines_for_sales_profile(
+                cfg,
+                iva_applicable=bool(profile_settings['iva_applicable']),
+                inc_applicable=bool(profile_settings['inc_applicable']),
+            )
             await conn.execute(
                 """INSERT INTO tenant_tax_config (
-                       tenant_id, inc_applicable, iva_applicable, updated_at
+                       tenant_id, inc_applicable, iva_applicable,
+                       tax_lines, category_map, menu_category_line_map, updated_at
                    )
-                   VALUES ($1, $2, $3, now())
+                   VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, now())
                    ON CONFLICT (tenant_id) DO UPDATE SET
                        inc_applicable = EXCLUDED.inc_applicable,
                        iva_applicable = EXCLUDED.iva_applicable,
+                       tax_lines = EXCLUDED.tax_lines,
+                       category_map = EXCLUDED.category_map,
+                       menu_category_line_map = EXCLUDED.menu_category_line_map,
                        updated_at = now()""",
                 tenant_id,
                 profile_settings['inc_applicable'],
                 profile_settings['iva_applicable'],
+                json.dumps(tax_lines),
+                json.dumps(category_map),
+                json.dumps(menu_map),
             )
+
+    if tax_raw is not None:
+        payload = dict(tax_raw)
+        if profile_settings:
+            payload['iva_applicable'] = bool(profile_settings['iva_applicable'])
+            payload['inc_applicable'] = bool(profile_settings['inc_applicable'])
+        try:
+            tax_model = TaxConfigUpdate(**payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f'Invalid tax_config: {exc.errors()[0].get("msg", "validation error")}',
+            ) from exc
+        await tenant_config_service.update_tax_config(request, tax_model)
 
     return {'success': True, 'message': 'Datos fiscales actualizados'}
 
 
-@router.get("/dian-resolutions", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+_dian_matias_deps = [
+    Depends(require_module(Module.MI_NEGOCIO)),
+    Depends(require_matias_dian_capability),
+]
+
+
+@router.get("/dian-resolutions", dependencies=_dian_matias_deps)
 async def get_dian_resolutions(request: Request):
     """
     Get all DIAN resolutions for the active tenant.
@@ -463,7 +522,7 @@ async def get_dian_resolutions(request: Request):
     return {'success': True, 'data': resolutions}
 
 
-@router.post("/dian-resolutions", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+@router.post("/dian-resolutions", dependencies=_dian_matias_deps)
 async def create_dian_resolution(request: Request, data: dict = Body(...)):
     """Create a new DIAN resolution for the active tenant."""
     from app.core.middleware import require_valid_session
@@ -548,7 +607,7 @@ async def create_dian_resolution(request: Request, data: dict = Body(...)):
     return {'success': True, 'data': {'id': str(row_id)}, 'message': 'Resolución creada'}
 
 
-@router.put("/dian-resolutions/{resolution_id}", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+@router.put("/dian-resolutions/{resolution_id}", dependencies=_dian_matias_deps)
 async def update_dian_resolution(request: Request, resolution_id: str, data: dict = Body(...)):
     """Update an existing DIAN resolution."""
     from app.core.middleware import require_valid_session
@@ -632,7 +691,7 @@ async def update_dian_resolution(request: Request, resolution_id: str, data: dic
     return {'success': True, 'message': 'Resolución actualizada'}
 
 
-@router.patch("/dian-resolutions/{resolution_id}/toggle", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+@router.patch("/dian-resolutions/{resolution_id}/toggle", dependencies=_dian_matias_deps)
 async def toggle_dian_resolution(request: Request, resolution_id: str):
     """Toggle is_active for a DIAN resolution."""
     from app.core.middleware import require_valid_session
@@ -659,7 +718,7 @@ async def toggle_dian_resolution(request: Request, resolution_id: str):
     return {'success': True, 'data': {'is_active': new_state}}
 
 
-@router.get("/dian-resolutions/gaps", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+@router.get("/dian-resolutions/gaps", dependencies=_dian_matias_deps)
 async def list_dian_sequence_gaps(
     request: Request,
     resolution_id: Optional[str] = None,
@@ -735,7 +794,7 @@ async def list_dian_sequence_gaps(
     }
 
 
-@router.get("/dian-resolutions/gaps-summary", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+@router.get("/dian-resolutions/gaps-summary", dependencies=_dian_matias_deps)
 async def dian_gaps_summary(request: Request):
     """Aggregate gap counts for the active tenant (warocol.com#592).
 
@@ -771,7 +830,7 @@ async def dian_gaps_summary(request: Request):
     }
 
 
-@router.get("/facturacion-status", dependencies=[Depends(require_module(Module.MI_NEGOCIO))])
+@router.get("/facturacion-status", dependencies=_dian_matias_deps)
 async def get_facturacion_status(request: Request):
     """
     Get Matias API connection status and last emitted document.

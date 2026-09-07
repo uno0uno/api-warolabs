@@ -1,0 +1,43 @@
+# Compact plan for wr-fast #2141. Keep <=80 lines.
+issue: 2141
+title: "feat(finanzas): from_cash_drawer en pago efectivo de compras"
+repo: both
+repo_remote: uno0uno/api-warolabs + uno0uno/warocol.com
+cwd_api: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+cwd_front: /Users/saifer/Documents/WEBS/WARO COLOMBIA/front_nuxt
+stack: both
+branch: wr-2141-purchase-pay-cash-drawer
+
+paths:
+  - app/routers/purchases.py
+  - app/services/purchase_tracking_service.py
+  - tests/test_direct_payables_list.py
+  - components/payments/PaymentForm.vue
+  - .wr/2141.yaml
+
+ac:
+  - PaymentForm shows de caja / fuera de caja for purchase cash pay
+  - POST /purchases/{id}/pay persists from_cash_drawer
+  - Arqueo already filters tp.from_cash_drawer=false
+  - Non-cash forces drawer true / no toggle
+  - GL mapping unchanged
+
+out_of_scope:
+  - POS checkout
+  - PUC redesign
+  - Plan quotas
+
+hints:
+  entry: "purchase_tracking_service.transition_to_paid + PaymentForm.appendDrawerFlag"
+  pattern: "expenses pay_expense + direct_purchase _resolve_from_cash_drawer"
+  tests: "cd api_warocol.com && python -m pytest tests/test_direct_payables_list.py -q"
+
+risk:
+  sensitive: false
+  areas: []
+
+skip:
+  audits: []
+
+next:
+  after_pr: "ready-for-review; wr-review both PRs"

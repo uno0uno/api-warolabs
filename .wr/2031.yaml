@@ -1,0 +1,32 @@
+# Machine contract for wr-fast — keep ≤80 lines.
+issue: 2031
+title: "Facturación: sync sales tax profile and Impuestos tax_lines in one save"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-2031-tax-profile-tax-lines-sync
+risk: low
+
+paths:
+  - app/services/hospitality_tax_engine.py
+  - app/routers/tenant_config.py
+  - tests/test_hospitality_tax_engine.py
+  - tests/test_tenant_fiscal_data.py
+
+ac:
+  - PUT fiscal-data with sales_tax_profile rewrites tax_lines + maps (no hybrid IVA flags + IVA lines)
+  - Liquor and custom tax_lines preserved on IVA↔INC flip
+  - Menu map keys iva↔inc remapped to active primary (cleared when non-responsible)
+
+out_of_scope:
+  - Commercial matrix / jurisdiction packs
+  - Matias emit / FEV changes
+
+hints:
+  entry: "put_fiscal_data profile_settings → sync_co_tax_lines_for_sales_profile"
+  pattern: "hospitality_tax_engine sync helper + UPSERT tax_lines jsonb"
+  tests: "pytest tests/test_hospitality_tax_engine.py tests/test_tenant_fiscal_data.py -q"
+
+skip:
+  audits: [ux, color, typography]

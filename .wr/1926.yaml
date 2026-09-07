@@ -1,0 +1,41 @@
+# Companion contract — API half of warocol.com#1926. Keep ≤80 lines.
+issue: 1926
+title: "Batch 1: Analítica category_id on orders + analytics endpoints"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+issue_ref: uno0uno/warocol.com#1926
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-1926-analitica-category-filters
+companion_repo: front_nuxt
+risk: low
+
+paths:
+  - app/routers/orders.py
+  - app/services/orders_service.py
+  - app/routers/analytics.py
+  - app/services/analytics_service.py
+  - tests/ (focused analytics/orders category_id)
+  - .wr/1926.yaml
+
+ac:
+  - GET /orders/dashboard|metrics|sales-flow accept optional category_id
+  - Category scopes order_items→product.category_id (item-attributed)
+  - GET /analytics/menu-analysis|food-cost accept optional category_id
+  - Omit category_id = all (unchanged behavior)
+  - Focused pytest for filter vs omit
+
+out_of_scope:
+  - /orders/tips category filter
+  - cost_resolution / costo_calculado (#1927)
+  - Front UI (companion PR)
+
+hints:
+  entry: "orders.py dashboard/metrics/sales-flow; analytics.py menu-analysis/food-cost"
+  pattern: "get_products_sold category_id filter orders_service.py:4128"
+  food_cost: "_get_food_cost_for_tenant JOIN product_costs; add product.category_id"
+  menu: "_get_menu_analysis_for_tenant already joins categories — add WHERE"
+  tests: "pytest tests/test_analytics_dual_cost.py -v; extend or new test_orders_category_filter"
+
+skip:
+  audits: [ux, color, typography]

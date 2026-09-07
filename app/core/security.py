@@ -1,5 +1,6 @@
 import jwt
 import logging
+import random
 from datetime import datetime, timedelta
 from urllib.parse import unquote
 from uuid import UUID
@@ -7,11 +8,16 @@ from fastapi import Request, HTTPException, Response
 from app.config import settings
 from app.core.internal_roles import LEGACY_INTERNAL_TEAM_ROLES, is_legacy_internal_team_role
 from app.core.onboarding_access import next_step_for_state
+from app.core.platform_superusers import is_platform_superuser_email
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
 SESSION_COOKIE_NAME = "session-token"
+INTERNAL_SESSION_HOURS = 24  # Absolute ceiling from login/creation
+IDLE_SESSION_HOURS = 4  # Invalidate after this long without platform activity
+# Avoid writing last_activity_at on every request (middleware is hot).
+IDLE_ACTIVITY_TOUCH_SECONDS = 60
 
 
 def _normalize_session_token(raw: str) -> Optional[str]:
@@ -94,10 +100,12 @@ async def get_session_token(request: Request) -> str:
             WHERE id = ANY($1::uuid[])
               AND expires_at > NOW()
               AND is_active = true
+              AND last_activity_at > NOW() - ($2::int * INTERVAL '1 hour')
             ORDER BY created_at DESC
             LIMIT 1
             """,
             session_uuids,
+            IDLE_SESSION_HOURS,
         )
 
         if session_result:
@@ -113,11 +121,14 @@ async def get_session_token(request: Request) -> str:
             SELECT id::text AS id,
                    is_active,
                    expires_at,
-                   (expires_at > NOW()) AS not_expired
+                   last_activity_at,
+                   (expires_at > NOW()) AS not_expired,
+                   (last_activity_at > NOW() - ($2::int * INTERVAL '1 hour')) AS not_idle
             FROM sessions
             WHERE id = ANY($1::uuid[])
             """,
             session_uuids,
+            IDLE_SESSION_HOURS,
         )
         if diag_rows:
             logger.info(
@@ -127,6 +138,7 @@ async def get_session_token(request: Request) -> str:
                         "id": r["id"][:8],
                         "is_active": r["is_active"],
                         "not_expired": r["not_expired"],
+                        "not_idle": r["not_idle"],
                     }
                     for r in diag_rows
                 ],
@@ -182,7 +194,7 @@ async def set_session_cookie(response: Response, session_token: str, tenant_site
         httponly=True,
         secure=not settings.is_development,
         samesite="lax",  # Use lax for better proxy compatibility across environments
-        max_age=7 * 24 * 60 * 60,  # 7 days (1 week)
+        max_age=INTERNAL_SESSION_HOURS * 60 * 60,  # 24 hours
         domain=cookie_domain,
         path="/"  # Ensure cookie is available for all paths
     )
@@ -286,22 +298,31 @@ def detect_tenant_from_headers(request: Request) -> dict:
 
 async def cleanup_zombie_sessions(conn, limit: int = 100) -> int:
     """
-    Clean up zombie sessions (expired but still marked as active).
+    Clean up zombie sessions (absolute-expired or idle) still marked active.
     Called opportunistically during session validation.
     Returns the number of sessions cleaned up.
     """
     try:
-        # Mark expired sessions as inactive with proper end reason
-        result = await conn.execute("""
+        result = await conn.execute(
+            """
             UPDATE sessions
             SET is_active = false,
                 ended_at = NOW(),
-                end_reason = 'expired_auto_cleanup'
+                end_reason = CASE
+                    WHEN expires_at < NOW() THEN 'expired_auto_cleanup'
+                    ELSE 'idle_timeout'
+                END
             WHERE is_active = true
-              AND expires_at < NOW()
               AND ended_at IS NULL
+              AND (
+                    expires_at < NOW()
+                    OR last_activity_at < NOW() - ($2::int * INTERVAL '1 hour')
+                  )
             LIMIT $1
-        """, limit)
+            """,
+            limit,
+            IDLE_SESSION_HOURS,
+        )
 
         # Extract count from result (format: "UPDATE N")
         count = int(result.split()[-1]) if result else 0
@@ -311,6 +332,21 @@ async def cleanup_zombie_sessions(conn, limit: int = 100) -> int:
     except Exception as e:
         logger.warning(f"Failed to cleanup zombie sessions: {e}")
         return 0
+
+
+async def touch_session_activity(conn, session_id) -> None:
+    """Bump last_activity_at when the session is used (throttled)."""
+    await conn.execute(
+        """
+        UPDATE sessions
+        SET last_activity_at = NOW()
+        WHERE id = $1::uuid
+          AND is_active = true
+          AND last_activity_at < NOW() - ($2::int * INTERVAL '1 second')
+        """,
+        session_id if isinstance(session_id, UUID) else UUID(str(session_id)),
+        IDLE_ACTIVITY_TOUCH_SECONDS,
+    )
 
 
 async def get_session_from_request(request: Request) -> Optional[dict]:
@@ -336,20 +372,27 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
         async with get_db_connection() as conn:
             # First, check if session exists at all
             session_check = await conn.fetchrow("""
-                SELECT id, expires_at, is_active, ended_at
+                SELECT id, expires_at, last_activity_at, is_active, ended_at
                 FROM sessions
                 WHERE id = $1
             """, session_token)
 
             if session_check:
-                # Session exists, check if it's expired or inactive
-                is_expired = session_check['expires_at'] < datetime.now(session_check['expires_at'].tzinfo)
+                now = datetime.now(session_check['expires_at'].tzinfo)
+                is_expired = session_check['expires_at'] < now
+                last_activity = session_check.get('last_activity_at') or session_check['expires_at']
+                is_idle = last_activity < (now - timedelta(hours=IDLE_SESSION_HOURS))
                 is_inactive = not session_check['is_active']
 
-                if is_expired or is_inactive:
+                if is_expired or is_idle or is_inactive:
                     # Mark session as ended if not already
                     if session_check['ended_at'] is None:
-                        end_reason = 'expired' if is_expired else 'invalidated'
+                        if is_expired:
+                            end_reason = 'expired'
+                        elif is_idle:
+                            end_reason = 'idle_timeout'
+                        else:
+                            end_reason = 'invalidated'
                         await conn.execute("""
                             UPDATE sessions
                             SET is_active = false,
@@ -360,7 +403,6 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
                         logger.info(f"🔒 Marked session {session_token[:8]}... as {end_reason}")
 
                     # Opportunistically clean up other zombie sessions (1 in 10 chance)
-                    import random
                     if random.random() < 0.1:
                         await cleanup_zombie_sessions(conn, limit=50)
 
@@ -396,19 +438,24 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
                 WHERE s.id = $1
                   AND s.expires_at > NOW()
                   AND s.is_active = true
+                  AND s.last_activity_at > NOW() - ($3::int * INTERVAL '1 hour')
                 LIMIT 1
             """
             session_result = await conn.fetchrow(
                 session_query,
                 session_token,
                 list(LEGACY_INTERNAL_TEAM_ROLES),
+                IDLE_SESSION_HOURS,
             )
 
             if not session_result:
                 return None
 
             resolved_role = session_result['role']
-            if resolved_role is not None and not is_legacy_internal_team_role(resolved_role):
+            if is_platform_superuser_email(session_result.get('email')):
+                # Env allowlist elevates without a tenant_members row.
+                resolved_role = 'superuser'
+            elif resolved_role is not None and not is_legacy_internal_team_role(resolved_role):
                 await conn.execute("""
                     UPDATE sessions
                     SET is_active = false,
@@ -422,6 +469,8 @@ async def get_session_from_request(request: Request) -> Optional[dict]:
                     resolved_role,
                 )
                 return None
+
+            await touch_session_activity(conn, session_token)
 
             return {
                 'user_id': session_result['user_id'],

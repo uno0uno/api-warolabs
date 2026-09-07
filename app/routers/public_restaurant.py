@@ -3,10 +3,12 @@ Public restaurant router - public endpoints for restaurant profiles and menus
 No authentication required
 """
 from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi.responses import JSONResponse
 from typing import Optional, Dict, Any
 from uuid import UUID
 from app.core.exceptions import NotFoundError
 from app.services import payment_method_service, public_restaurant_service
+from app.services.public_slug_service import get_canonical_slug_if_alias
 
 import logging
 
@@ -20,6 +22,27 @@ def _mark_dynamic_public_response(response: Response) -> None:
     response.headers["Pragma"] = "no-cache"
 
 
+async def _slug_moved_response(
+    requested_slug: str,
+    *,
+    suffix: str = "",
+) -> Optional[JSONResponse]:
+    """Contingency: onboarding-* alias → canonical storefront slug."""
+    canonical = await get_canonical_slug_if_alias(requested_slug)
+    if not canonical or canonical == requested_slug:
+        return None
+    location = f"/api/public/restaurant/{canonical}{suffix}"
+    return JSONResponse(
+        status_code=307,
+        content={
+            "success": False,
+            "code": "SLUG_MOVED",
+            "canonical_slug": canonical,
+        },
+        headers={"Location": location},
+    )
+
+
 @router.get("/list")
 async def list_public_restaurants(
     response: Response,
@@ -31,6 +54,11 @@ async def list_public_restaurants(
         default=None,
         description="Preferred: filter by normalized slug (e.g. 'bogota', 'mosquera')."
     ),
+    country_code: Optional[str] = Query(
+        default=None,
+        description="Optional ISO country on tenant_financial_profiles "
+                    "(e.g. 'AR'). Omit for CO slug-only directories.",
+    ),
 ) -> Dict[str, Any]:
     """
     List all active public restaurant profiles.
@@ -38,6 +66,8 @@ async def list_public_restaurants(
     Optional filters:
     - city_slug: preferred (matches `tenant_public_profiles.city_slug`)
     - city: deprecated alias kept for one release; logs a warning when used.
+    - country_code: financial-profile country (warocol.com#2296). Extra-country
+      magazines pass this so listings do not mix countries.
 
     Returns list of restaurants with basic info plus `country` and `city_slug`.
 
@@ -45,15 +75,16 @@ async def list_public_restaurants(
 
     Example: GET /api/public/restaurant/list
     Example: GET /api/public/restaurant/list?city_slug=bogota
+    Example: GET /api/public/restaurant/list?city_slug=buenos-aires&country_code=AR
     """
     logger.info(
-        "🔍 [list_public_restaurants] Request city=%r city_slug=%r",
-        city, city_slug,
+        "🔍 [list_public_restaurants] Request city=%r city_slug=%r country_code=%r",
+        city, city_slug, country_code,
     )
     _mark_dynamic_public_response(response)
 
     restaurants = await public_restaurant_service.list_restaurants(
-        city=city, city_slug=city_slug,
+        city=city, city_slug=city_slug, country_code=country_code,
     )
 
     logger.info(f"🔍 [list_public_restaurants] Found {len(restaurants)} restaurants")
@@ -72,9 +103,14 @@ async def list_public_cities(
                     "True for the operator selector on /negocio; "
                     "False (default) for the discovery section on /."
     ),
+    country_code: Optional[str] = Query(
+        default=None,
+        description="ISO country filter. Omitted/blank defaults to CO so "
+                    "SSR city dispatch and /ciudades stay Colombia-only."
+    ),
 ) -> Dict[str, Any]:
     """
-    Return the city/municipality catalog (warocol.com#615, #1477).
+    Return the city/municipality catalog (warocol.com#615, #1477, #2295).
 
     Public — no auth required. Used by the operator-facing city selector
     on /negocio and the customer-facing discovery section on the root
@@ -82,6 +118,7 @@ async def list_public_cities(
     """
     cities = await public_restaurant_service.list_cities(
         include_empty=include_empty,
+        country_code=country_code,
     )
     return {"success": True, "data": cities}
 
@@ -97,6 +134,9 @@ async def list_public_payment_methods(response: Response, tenant_slug: str) -> D
     groups (anonymous customers cannot accrue cartera).
     """
     _mark_dynamic_public_response(response)
+    moved = await _slug_moved_response(tenant_slug, suffix="/payment-methods")
+    if moved:
+        return moved  # type: ignore[return-value]
     try:
         return await payment_method_service.list_public_methods_by_tenant_slug(
             tenant_slug
@@ -115,6 +155,9 @@ async def get_public_profile(
 ) -> Dict[str, Any]:
     logger.info(f"🔍 [get_public_profile] Request for slug: {tenant_slug}")
     _mark_dynamic_public_response(response)
+    moved = await _slug_moved_response(tenant_slug)
+    if moved:
+        return moved  # type: ignore[return-value]
     """
     Get public restaurant profile by slug
 
@@ -159,23 +202,9 @@ async def get_public_menu(
 ) -> Dict[str, Any]:
     logger.info(f"🔍 [get_public_menu] Request for slug: {tenant_slug}, category: {category_id}")
     _mark_dynamic_public_response(response)
-    """
-    Get public menu for a restaurant
-
-    Returns:
-    - restaurant_name: Display name of the restaurant
-    - categories: List of available categories
-    - products: List of products with:
-      - id, name, description, price
-      - category_id, category_name
-      - is_available, preparation_time
-      - has_modifiers (boolean)
-
-    **Public endpoint - no authentication required**
-
-    Example: GET /api/public/restaurant/la-hamburgueseria/menu
-    Example with filter: GET /api/public/restaurant/la-hamburgueseria/menu?category_id=...
-    """
+    moved = await _slug_moved_response(tenant_slug, suffix="/menu")
+    if moved:
+        return moved  # type: ignore[return-value]
     menu = await public_restaurant_service.get_menu_by_slug(
         tenant_slug,
         category_id=category_id
@@ -210,6 +239,12 @@ async def get_public_product_detail(
     Example: GET /api/public/restaurant/la-hamburgueseria/product/uuid-here
     """
     _mark_dynamic_public_response(response)
+    moved = await _slug_moved_response(
+        tenant_slug,
+        suffix=f"/product/{product_id}",
+    )
+    if moved:
+        return moved  # type: ignore[return-value]
     product = await public_restaurant_service.get_product_detail(
         tenant_slug,
         product_id

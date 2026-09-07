@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     discord_purchase_actions_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_PURCHASE_ACTIONS_WEBHOOK_URL')
     discord_leads_webhook_url: Optional[str] = Field(default=None, alias='DISCORD_LEADS_WEBHOOK_URL')
 
-    # Wompi — pasarela de pagos Colombia (issue #60)
+    # Wompi — pasarela de pagos Colombia (issue #60); legacy until #798
     wompi_public_key: Optional[str] = Field(default=None, alias='WOMPI_PUBLIC_KEY')
     wompi_private_key: Optional[str] = Field(default=None, alias='WOMPI_PRIVATE_KEY')
     wompi_events_secret: Optional[str] = Field(default=None, alias='WOMPI_EVENTS_SECRET')
@@ -97,6 +97,51 @@ class Settings(BaseSettings):
     )
     wompi_webhook_forward_secret: Optional[str] = Field(
         default=None, alias='WOMPI_WEBHOOK_FORWARD_SECRET'
+    )
+
+    # OpenBao Transit — restaurant Wompi key envelope (#862). Secrets from env or files.
+    openbao_addr: str = Field(default='http://openbao:8200', alias='OPENBAO_ADDR')
+    openbao_role_id: Optional[str] = Field(default=None, alias='OPENBAO_ROLE_ID')
+    openbao_secret_id: Optional[str] = Field(default=None, alias='OPENBAO_SECRET_ID')
+    openbao_role_id_file: Optional[str] = Field(default=None, alias='OPENBAO_ROLE_ID_FILE')
+    openbao_secret_id_file: Optional[str] = Field(default=None, alias='OPENBAO_SECRET_ID_FILE')
+
+    # MoR sandbox tenant allowlist when LEMON_SQUEEZY_ENVIRONMENT=production (#813 / #944)
+    billing_sandbox_tenant_slugs: str = Field(default='', alias='BILLING_SANDBOX_TENANT_SLUGS')
+
+    # Lemon Squeezy — sole SaaS MoR checkout (#942 / epic #941)
+    lemon_squeezy_environment: str = Field(
+        default='sandbox', alias='LEMON_SQUEEZY_ENVIRONMENT'
+    )
+    lemon_squeezy_api_key: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_API_KEY'
+    )
+    lemon_squeezy_store_id: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_STORE_ID'
+    )
+    lemon_squeezy_webhook_secret_live: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_WEBHOOK_SECRET_LIVE'
+    )
+    lemon_squeezy_webhook_secret_sandbox: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_WEBHOOK_SECRET_SANDBOX'
+    )
+    lemon_squeezy_variant_usd_9_monthly_live: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_VARIANT_USD_9_MONTHLY_LIVE'
+    )
+    lemon_squeezy_variant_usd_9_monthly_test: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_VARIANT_USD_9_MONTHLY_TEST'
+    )
+    lemon_squeezy_variant_usd_30_monthly_live: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_VARIANT_USD_30_MONTHLY_LIVE'
+    )
+    lemon_squeezy_variant_usd_30_monthly_test: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_VARIANT_USD_30_MONTHLY_TEST'
+    )
+    lemon_squeezy_variant_eur_30_monthly_live: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_VARIANT_EUR_30_MONTHLY_LIVE'
+    )
+    lemon_squeezy_variant_eur_30_monthly_test: Optional[str] = Field(
+        default=None, alias='LEMON_SQUEEZY_VARIANT_EUR_30_MONTHLY_TEST'
     )
 
     # Cron secret — grace period reminders (issue #62)
@@ -160,6 +205,9 @@ class Settings(BaseSettings):
     )
     facturador_legal_city: str = Field(default='', alias='FACTURADOR_LEGAL_CITY')
     facturador_legal_support_email: str = Field(default='', alias='FACTURADOR_LEGAL_SUPPORT_EMAIL')
+
+    # Platform operators — effective superuser on all tenants without tenant_members
+    platform_superuser_emails: str = Field(default='', alias='PLATFORM_SUPERUSER_EMAILS')
 
     class Config:
         env_file = ".env"
